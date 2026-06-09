@@ -230,7 +230,7 @@ pub fn DashboardsListPage() -> impl IntoView {
             match result {
                 Ok(dashboard_id) => {
                     let url = format!("/dashboard/{dashboard_id}/edit");
-                    navigate_create.get_value()(&url, leptos_router::NavigateOptions::default());
+                    if let Some(nav) = navigate_create.try_get_value() { nav(&url, leptos_router::NavigateOptions::default()); }
                 }
                 Err(e) => {
                     leptos::logging::error!("Failed to create dashboard: {e}");

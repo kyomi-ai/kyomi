@@ -173,7 +173,7 @@ pub fn PasskeyRecoveryCompletePage() -> impl IntoView {
                     // in spawn_local.
                     #[cfg(target_arch = "wasm32")]
                     {
-                        let nav = navigate.get_value();
+                        let Some(nav) = navigate.try_get_value() else { return };
                         gloo_timers::future::TimeoutFuture::new(2000).await;
                         nav("/", Default::default());
                     }

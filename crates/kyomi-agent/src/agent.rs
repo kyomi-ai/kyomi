@@ -342,10 +342,16 @@ impl CustomAgent {
             }
 
             // Track token usage.
-            self.state.last_input_tokens = response.usage.input_tokens;
+            // Total input tokens = regular + cache-creation + cache-read.
+            // `input_tokens` alone excludes cached tokens, which makes the
+            // context display wildly wrong when prompt caching is active.
+            let total_input = response.usage.input_tokens
+                + response.usage.cache_creation_input_tokens
+                + response.usage.cache_read_input_tokens;
+            self.state.last_input_tokens = total_input;
             if let Some(ref cb) = self.callbacks.on_token_usage {
                 cb(
-                    response.usage.input_tokens,
+                    total_input,
                     response.usage.output_tokens,
                     response.cost,
                 );

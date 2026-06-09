@@ -723,8 +723,6 @@ async fn generate_title_inner(
         })?;
 
     {
-        use kyomi_auth::workspace_ai_config::WorkspaceAiProvider;
-
         // Check for an explicit title_model configured in workspace settings.
         // When set, it takes priority over the cheapest-model override below.
         let title_model = kyomi_auth::workspace_ai_config::load_title_model(db, workspace_id)
@@ -739,40 +737,12 @@ async fn generate_title_inner(
             .ok()
             .flatten();
 
-        let is_kyomi = ws_config.provider == WorkspaceAiProvider::Kyomi;
-
-        if is_kyomi {
-            // Kyomi mode: LLM_TITLE_MODEL > cheapest model.
-            if let Some(ref tm) = app_config.llm_title_model {
-                ws_config.model = Some(tm.clone());
-            }
-        } else if let Some(tm) = title_model {
-            // BYOK: workspace title_model > LLM_TITLE_MODEL > cheapest.
+        // Title model: use LLM_TITLE_MODEL if set, or workspace title_model.
+        // No hardcoded fallback — if neither is configured, the default model is used.
+        if let Some(tm) = title_model {
             ws_config.model = Some(tm);
         } else if let Some(ref tm) = app_config.llm_title_model {
             ws_config.model = Some(tm.clone());
-        }
-
-        // Fallback: cheapest model for the provider (when nothing above set it).
-        if !is_kyomi && ws_config.model.is_none() || (is_kyomi && app_config.llm_title_model.is_none()) {
-            let provider_kind = match ws_config.provider {
-                WorkspaceAiProvider::Kyomi => {
-                    resolve_provider_config(app_config)
-                        .map(|c| c.provider)
-                        .ok()
-                }
-                WorkspaceAiProvider::Anthropic => Some(ProviderKind::Anthropic),
-                WorkspaceAiProvider::OpenAI => Some(ProviderKind::OpenAI),
-                WorkspaceAiProvider::Gemini => Some(ProviderKind::Gemini),
-            };
-
-            let has_custom_base_url = ws_config.base_url.is_some()
-                || (ws_config.provider == WorkspaceAiProvider::Kyomi
-                    && app_config.llm_base_url.is_some());
-
-            if let Some(kind) = provider_kind && !has_custom_base_url {
-                ws_config.model = Some(kind.cheapest_model().to_string());
-            }
         }
     }
 
@@ -862,8 +832,6 @@ async fn generate_dashboard_summary_inner(
         ref workspace_id, ref title, ref content, ref app_config,
         ref doc_type,
     } = params;
-    use kyomi_auth::workspace_ai_config::WorkspaceAiProvider;
-
     if content.trim().is_empty() {
         return Ok(());
     }
@@ -881,33 +849,10 @@ async fn generate_dashboard_summary_inner(
         .ok()
         .flatten();
 
-    let is_kyomi = ws_config.provider == WorkspaceAiProvider::Kyomi;
-
-    if is_kyomi {
-        if let Some(ref tm) = app_config.llm_title_model {
-            ws_config.model = Some(tm.clone());
-        }
-    } else if let Some(tm) = title_model {
+    if let Some(tm) = title_model {
         ws_config.model = Some(tm);
     } else if let Some(ref tm) = app_config.llm_title_model {
         ws_config.model = Some(tm.clone());
-    }
-
-    if !is_kyomi && ws_config.model.is_none() || (is_kyomi && app_config.llm_title_model.is_none()) {
-        let provider_kind = match ws_config.provider {
-            WorkspaceAiProvider::Kyomi => {
-                resolve_provider_config(app_config).map(|c| c.provider).ok()
-            }
-            WorkspaceAiProvider::Anthropic => Some(ProviderKind::Anthropic),
-            WorkspaceAiProvider::OpenAI => Some(ProviderKind::OpenAI),
-            WorkspaceAiProvider::Gemini => Some(ProviderKind::Gemini),
-        };
-        let has_custom_base_url = ws_config.base_url.is_some()
-            || (ws_config.provider == WorkspaceAiProvider::Kyomi
-                && app_config.llm_base_url.is_some());
-        if let Some(kind) = provider_kind && !has_custom_base_url {
-            ws_config.model = Some(kind.cheapest_model().to_string());
-        }
     }
 
     let client = create_provider_from_workspace(&ws_config, app_config)?;

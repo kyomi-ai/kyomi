@@ -161,20 +161,17 @@ pub fn ChatMessage(
         // Matches React logic: show if we have thinking data OR this is the active streaming message.
         let message_id_for_show_thinking = message_id_for_thinking.clone();
         let should_show_thinking = move || {
-            let ts = thinking_state.get();
+            let Some(ts) = thinking_state.try_get() else { return false };
             let has_thinking_data = !ts.events.is_empty();
-            let is_active_message = is_streaming.get()
-                && active_message_id.get().as_deref() == Some(&message_id_for_show_thinking);
+            let is_active_message = is_streaming.try_get().unwrap_or(false)
+                && active_message_id.try_get().flatten().as_deref() == Some(&message_id_for_show_thinking);
             has_thinking_data || is_active_message
         };
 
-        // Build thinking events as a reactive Signal — live state takes priority
-        // (it may have more recent events). Created outside <Show> so no .get()
-        // calls happen inside the Show children block.
         let thinking_events_signal = Signal::derive({
             let stored = stored_thinking_events.clone();
             move || {
-                let live = thinking_state.get();
+                let Some(live) = thinking_state.try_get() else { return stored.clone() };
                 if !live.events.is_empty() {
                     live.events.clone()
                 } else {
@@ -183,26 +180,27 @@ pub fn ChatMessage(
             }
         });
 
-        let thinking_is_active_signal = Signal::derive(move || thinking_state.get().is_active);
+        let thinking_is_active_signal = Signal::derive(move || {
+            thinking_state.try_get().map(|ts| ts.is_active).unwrap_or(false)
+        });
 
         let thinking_token_usage = Signal::derive({
             let stored = stored_token_usage.clone();
             move || {
-                let live = thinking_state.get();
+                let Some(live) = thinking_state.try_get() else { return stored.clone() };
                 live.token_usage.clone().or_else(|| stored.clone())
             }
         });
 
-        // Content signal for MarkdownRenderer.
         let content_signal = Signal::derive({
             let content = message_content.clone();
             move || content.clone()
         });
 
-        // Streaming signal for this specific message.
         let msg_id_for_streaming = message.message_id.clone();
         let is_streaming_this_msg = Signal::derive(move || {
-            is_streaming.get() && active_message_id.get().as_deref() == Some(&msg_id_for_streaming)
+            is_streaming.try_get().unwrap_or(false)
+                && active_message_id.try_get().flatten().as_deref() == Some(&msg_id_for_streaming)
         });
 
         let ts_display_assistant = StoredValue::new(format_relative_time(&message_timestamp));
@@ -245,30 +243,30 @@ pub fn ChatMessage(
                 <Show when=move || !message_content_for_footer.is_empty()>
                     <div class="w-full flex items-center justify-between gap-2 mt-1 px-1">
                         <div class="text-xs text-muted-foreground">
-                            {sender_name_footer.get_value()}" \u{00B7} "{ts_display_assistant.get_value()}
+                            {sender_name_footer.try_get_value().unwrap_or_default()}" \u{00B7} "{ts_display_assistant.try_get_value().unwrap_or_default()}
                         </div>
                         <div class="flex items-center gap-3">
                             <Tooltip content="Pin / Unpin message">
                                 <button
                                     class=move || {
                                         let base = "text-xs transition-colors flex items-center gap-1 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded";
-                                        if is_pinned.get() {
+                                        if is_pinned.try_get().unwrap_or(false) {
                                             format!("{base} text-primary hover:text-primary/80")
                                         } else {
                                             format!("{base} text-muted-foreground hover:text-foreground")
                                         }
                                     }
-                                    aria-label=move || if is_pinned.get() { "Unpin message" } else { "Pin message" }
-                                    on:click=move |_| on_toggle_pin.run(message_id_for_pin.get_value())
+                                    aria-label=move || if is_pinned.try_get().unwrap_or(false) { "Unpin message" } else { "Pin message" }
+                                    on:click=move |_| { let Some(mid) = message_id_for_pin.try_get_value() else { return }; on_toggle_pin.run(mid) }
                                 >
-                                    <Icon icon=phosphor_leptos::STAR attr:class=move || if is_pinned.get() { "fill-current" } else { "" } size="16px" />
+                                    <Icon icon=phosphor_leptos::STAR attr:class=move || if is_pinned.try_get().unwrap_or(false) { "fill-current" } else { "" } size="16px" />
                                 </button>
                             </Tooltip>
                             <Tooltip content="Save to Dashboard">
                                 <button
                                     class="text-xs text-muted-foreground hover:text-primary transition-colors flex items-center gap-1 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded"
                                     aria-label="Save to Dashboard"
-                                    on:click=move |_| on_open_dashboard_modal.run(message_content_for_save.get_value())
+                                    on:click=move |_| { let Some(content) = message_content_for_save.try_get_value() else { return }; on_open_dashboard_modal.run(content) }
                                 >
                                     <Icon icon=phosphor_leptos::DOWNLOAD_SIMPLE size="16px" />
                                     <span>"Save to Dashboard"</span>

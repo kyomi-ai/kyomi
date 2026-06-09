@@ -1426,20 +1426,22 @@ pub fn ChatPage() -> impl IntoView {
     // into non-FnMut closures.
     let thinking_state_signal = engine.thinking().state();
 
-    // Cumulative cost across all messages
+    // Cumulative cost across all messages.
+    // try_get: these signals may be disposed during page navigation while the
+    // reactive graph is still re-evaluating (route signal triggers cascading
+    // updates through derived signals that reference page-scoped signals).
     let cumulative_cost = Signal::derive(move || {
-        thinking_state_signal
-            .get()
-            .values()
+        let Some(map) = thinking_state_signal.try_get() else { return 0.0 };
+        map.values()
             .filter_map(|ts| ts.token_usage.as_ref())
             .map(|tu| tu.cost)
             .sum::<f64>()
     });
 
-    // Latest context usage from the most recent assistant message
+    // Latest context usage from the most recent assistant message.
     let latest_context = Signal::derive(move || {
-        let msgs = messages.get();
-        let thinking_map = thinking_state_signal.get();
+        let msgs = messages.try_get()?;
+        let thinking_map = thinking_state_signal.try_get()?;
         msgs.iter()
             .rev()
             .filter(|m| m.message_type == "assistant")
@@ -1902,25 +1904,22 @@ pub fn ChatPage() -> impl IntoView {
                         // Matches React: Chat.jsx line 1718 — `{messages.length > 0 && (`
                         // When messages are empty (new chat), the input is rendered inline
                         // with the greeting above, not at the bottom.
-                        <Show when=move || !messages.get().is_empty()>
-                            // Chat input area — wired to send_message and cancel handlers.
-                            // Skip AI checkbox is built into ChatInput (show_skip_ai + skip_ai props).
-                            // Context usage + cost are shown inline above the textarea.
+                        <Show when=move || !messages.try_get().map(|m| m.is_empty()).unwrap_or(true)>
                             <ChatInput
                                 on_send=on_send
                                 on_cancel=on_cancel
                                 can_send=can_send_signal
                                 show_stop_button=show_stop_button_signal
                                 connection_state=connection_state_signal
-                                credits_exhausted=credits_exhausted.get()
-                                show_skip_ai=current_session_id.get().is_some()
+                                credits_exhausted=credits_exhausted.try_get().unwrap_or(false)
+                                show_skip_ai=current_session_id.try_get().flatten().is_some()
                                 skip_ai=skip_ai_response
                                 context_tokens=Signal::derive(move || {
-                                    latest_context.get().map(|tu| (tu.context_tokens, tu.context_window))
+                                    latest_context.try_get().flatten().map(|tu| (tu.context_tokens, tu.context_window))
                                 })
                                 context_cost=Signal::derive(move || {
-                                    if is_self_hosted.get() {
-                                        let cost = cumulative_cost.get();
+                                    if is_self_hosted.try_get().unwrap_or(false) {
+                                        let cost = cumulative_cost.try_get().unwrap_or(0.0);
                                         if cost > 0.0 { Some(format_footer_cost(cost)) } else { None }
                                     } else {
                                         None

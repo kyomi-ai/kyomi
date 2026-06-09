@@ -63,8 +63,24 @@ async fn serve() {
     kyomi_core::constants::load_with_fallback()
         .expect("failed to load shared constants");
 
-    let config = Config::from_env();
+    let mut config = Config::from_env();
     let port = config.port;
+
+    // Fetch context window size from the LLM provider's model list API.
+    // For OpenRouter-compatible providers, this queries /api/v1/models/{model}
+    // to get context_length. Runs once at startup — no per-request overhead.
+    if let (Some(base_url), Some(model)) = (&config.llm_base_url, &config.llm_model) {
+        match fetch_model_context_window(base_url, model).await {
+            Ok(ctx) if ctx > 0 => {
+                tracing::info!(model = %model, context_window = ctx, "LLM context window resolved from provider API");
+                config.llm_context_window = ctx;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to fetch LLM context window (non-fatal)");
+            }
+        }
+    }
 
     // Derive encryption key at startup (fail fast if misconfigured)
     let encryption_key = kyomi_auth::encryption::derive_key(&config.encryption_key)
@@ -586,4 +602,48 @@ async fn serve() {
     }
 
     tracing::info!("Kyomi Rust backend shutdown complete");
+}
+
+/// Fetch the context window size for a model from an OpenAI-compatible API.
+///
+/// Queries `{base_url}/models` and looks for a matching model entry with a
+/// `context_length` field. Works with OpenRouter and other providers that
+/// expose model metadata via the standard models endpoint.
+async fn fetch_model_context_window(base_url: &str, model: &str) -> kyomi_core::Result<u32> {
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let resp = reqwest::get(&url)
+        .await
+        .map_err(|e| kyomi_core::Error::Internal(format!("models API request failed: {e}")))?;
+
+    if !resp.status().is_success() {
+        return Err(kyomi_core::Error::Internal(format!(
+            "models API returned {}",
+            resp.status()
+        )));
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ModelEntry {
+        id: String,
+        #[serde(default)]
+        context_length: u32,
+    }
+    #[derive(serde::Deserialize)]
+    struct ModelsResponse {
+        data: Vec<ModelEntry>,
+    }
+
+    let body: ModelsResponse = resp
+        .json()
+        .await
+        .map_err(|e| kyomi_core::Error::Internal(format!("models API parse failed: {e}")))?;
+
+    let ctx = body
+        .data
+        .iter()
+        .find(|m| m.id == model)
+        .map(|m| m.context_length)
+        .unwrap_or(0);
+
+    Ok(ctx)
 }

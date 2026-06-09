@@ -157,7 +157,7 @@ impl ChatEngine {
                         has_sent_first.set(false);
                         is_creating.set(true);
 
-                        let ctx_type = ctx_type_stored.get_value();
+                        let Some(ctx_type) = ctx_type_stored.try_get_value() else { return };
                         let chat_state_err = chat_state_for_session.clone();
                         leptos::task::spawn_local(async move {
                             match create_copilot_session(ctx_type).await {
@@ -294,7 +294,7 @@ impl ChatEngine {
         // Build context prefix.
         let context_prefix = self.build_context_prefix();
 
-        let ctx_type = self.context_type.get_value();
+        let ctx_type = self.context_type.try_get_value().flatten();
         self.chat_state.start_sending(&sid);
 
         let chat_state_err = self.chat_state.clone();
@@ -369,7 +369,7 @@ impl ChatEngine {
             return None;
         }
 
-        let label = self.context_label.get_value().unwrap_or_default();
+        let label = self.context_label.try_get_value().flatten().unwrap_or_default();
         let is_first = !self.has_sent_first.get_untracked();
         self.has_sent_first.set(true);
 
@@ -443,7 +443,7 @@ impl ChatEngine {
         {
             Effect::new(move |_| {
                 // Track messages to trigger on change.
-                let _ = messages.get();
+                let _ = messages.try_get();
 
                 let container_guard = container_ref.try_read_untracked();
                 let Some(container_guard) = container_guard else {
@@ -533,6 +533,11 @@ fn setup_ws_subscriptions(
     let EngineSignals { session_id, messages, chat_state, thinking, context_type } = signals;
     use super::{ThinkingEvent, TokenUsage};
 
+    // Disposed guard: shared flag set by on_cleanup. Every WS callback
+    // checks this before touching any signal to prevent "already disposed"
+    // panics during the race between cleanup and async WS delivery.
+    let disposed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
     // Helper: check if an event belongs to this engine instance.
     // When context_type is Some, filter by both context_type AND session_id.
     // When context_type is None, filter by session_id only (allowing null
@@ -540,7 +545,7 @@ fn setup_ws_subscriptions(
     let should_handle = move |event_context_type: Option<&str>,
                               msg_session_id: Option<&str>|
           -> bool {
-        let ctx_type = context_type.get_value();
+        let ctx_type = context_type.try_get_value().flatten();
 
         // If we have a context_type filter, the event must match it.
         if let Some(ref expected_ctx) = ctx_type
@@ -551,7 +556,7 @@ fn setup_ws_subscriptions(
         // Session ID check: if we have a current session, the event must match.
         // If we don't have a session yet (new chat race condition in External mode),
         // allow the event through.
-        let current_sid = session_id.get_untracked();
+        let current_sid = session_id.try_get_untracked().flatten();
         if let Some(sid) = &current_sid
             && let Some(msg_sid) = msg_session_id
                 && msg_sid != sid.as_str() {
@@ -564,7 +569,9 @@ fn setup_ws_subscriptions(
     // ── agent_thinking ─────────────────────────────────────────────
     let chat_state_thinking = chat_state.clone();
     let thinking_for_thinking = thinking.clone();
+    let disposed_thinking = disposed.clone();
     let unsub_agent_thinking = ws.subscribe("agent_thinking", move |msg| {
+        if disposed_thinking.load(std::sync::atomic::Ordering::Relaxed) { return; }
         let data = match &msg.data {
             Some(d) => d,
             None => return,
@@ -599,7 +606,8 @@ fn setup_ws_subscriptions(
         };
 
         // Create assistant message placeholder if needed.
-        messages.update(|msgs| {
+        // try_update: signal may be disposed if user navigated away.
+        messages.try_update(|msgs| {
             if !msgs.iter().any(|m| m.message_id == msg_message_id) {
                 msgs.push(ChatMessageItem {
                     message_id: msg_message_id.clone(),
@@ -615,9 +623,9 @@ fn setup_ws_subscriptions(
         });
 
         // Transition to streaming state if still in Sending.
-        let state = chat_state_thinking.state().get_untracked();
-        if state == ChatState::Sending {
-            chat_state_thinking.start_streaming(&msg_message_id);
+        if let Some(state) = chat_state_thinking.state().try_get_untracked()
+            && state == ChatState::Sending {
+                chat_state_thinking.start_streaming(&msg_message_id);
         }
 
         // Process thinking event via ThinkingManager.
@@ -630,7 +638,9 @@ fn setup_ws_subscriptions(
 
     // ── chat_stream ────────────────────────────────────────────────
     let chat_state_stream = chat_state.clone();
+    let disposed_stream = disposed.clone();
     let unsub_chat_stream = ws.subscribe("chat_stream", move |msg| {
+        if disposed_stream.load(std::sync::atomic::Ordering::Relaxed) { return; }
         let event_context_type = msg
             .data
             .as_ref()
@@ -658,14 +668,12 @@ fn setup_ws_subscriptions(
         };
 
         // State recovery: if state is Idle, force start_streaming.
-        // Handles URL transitions during new chat creation where reactive
-        // effects may reset state to Idle before all WS events are processed.
-        let stream_state = chat_state_stream.state().get_untracked();
-        if stream_state == ChatState::Idle {
-            chat_state_stream.start_streaming(&msg_message_id);
+        if let Some(stream_state) = chat_state_stream.state().try_get_untracked()
+            && stream_state == ChatState::Idle {
+                chat_state_stream.start_streaming(&msg_message_id);
         }
 
-        messages.update(|msgs| {
+        messages.try_update(|msgs| {
             if let Some(existing) = msgs
                 .iter_mut()
                 .find(|m| m.message_id == msg_message_id && m.message_type == "assistant")
@@ -689,7 +697,9 @@ fn setup_ws_subscriptions(
     // ── chat_complete ──────────────────────────────────────────────
     let chat_state_complete = chat_state.clone();
     let thinking_for_complete = thinking.clone();
+    let disposed_complete = disposed.clone();
     let unsub_chat_complete = ws.subscribe("chat_complete", move |msg| {
+        if disposed_complete.load(std::sync::atomic::Ordering::Relaxed) { return; }
         let event_context_type = msg
             .data
             .as_ref()
@@ -705,10 +715,12 @@ fn setup_ws_subscriptions(
             None => return,
         };
 
-        let state = chat_state_complete.state().get_untracked();
+        let state = match chat_state_complete.state().try_get_untracked() {
+            Some(s) => s,
+            None => return,
+        };
 
         // Cancellation guard: skip if we're in Cancelling or Cancelled state.
-        // The error message from backend should not overwrite our cancellation.
         if state == ChatState::Cancelling || state == ChatState::Cancelled {
             return;
         }
@@ -721,7 +733,7 @@ fn setup_ws_subscriptions(
             .map(String::from);
 
         // Update message with full content.
-        messages.update(|msgs| {
+        messages.try_update(|msgs| {
             for m in msgs.iter_mut() {
                 if m.message_id == msg_message_id && m.message_type == "assistant"
                     && let Some(ref content) = full_content {
@@ -734,8 +746,6 @@ fn setup_ws_subscriptions(
         thinking_for_complete.complete_thinking(&msg_message_id);
 
         // Only transition state machine if we're actually in Sending or Streaming.
-        // Prevents stale chat_complete events from resetting state during a
-        // different interaction (matches chat_page.rs lines 972-977).
         if state == ChatState::Sending || state == ChatState::Streaming {
             chat_state_complete.complete();
         }
@@ -743,7 +753,9 @@ fn setup_ws_subscriptions(
 
     // ── token_usage_update ─────────────────────────────────────────
     let thinking_for_token = thinking.clone();
+    let disposed_token = disposed.clone();
     let unsub_token_usage = ws.subscribe("token_usage_update", move |msg| {
+        if disposed_token.load(std::sync::atomic::Ordering::Relaxed) { return; }
         let data = match &msg.data {
             Some(d) => d,
             None => return,
@@ -763,7 +775,7 @@ fn setup_ws_subscriptions(
         };
 
         // Filter by session_id (no context_type filter for token updates).
-        let current_sid = session_id.get_untracked();
+        let current_sid = session_id.try_get_untracked().flatten();
         if let Some(sid) = &current_sid
             && msg.session_id.as_deref() != Some(sid.as_str()) {
                 return;
@@ -774,9 +786,10 @@ fn setup_ws_subscriptions(
 
     // ── error ──────────────────────────────────────────────────────
     let chat_state_error = chat_state.clone();
+    let disposed_error = disposed.clone();
     let unsub_error = ws.subscribe("error", move |msg| {
-        // For error events, check context_type if we have one.
-        let ctx_type = context_type.get_value();
+        if disposed_error.load(std::sync::atomic::Ordering::Relaxed) { return; }
+        let ctx_type = context_type.try_get_value().flatten();
         if let Some(ref expected_ctx) = ctx_type {
             let event_context_type = msg
                 .data
@@ -803,7 +816,9 @@ fn setup_ws_subscriptions(
     // ── request_cancelled ──────────────────────────────────────────
     let chat_state_cancelled = chat_state.clone();
     let thinking_for_cancelled = thinking.clone();
+    let disposed_cancelled = disposed.clone();
     let unsub_request_cancelled = ws.subscribe("request_cancelled", move |msg| {
+        if disposed_cancelled.load(std::sync::atomic::Ordering::Relaxed) { return; }
         let msg_message_id = match &msg.message_id {
             Some(m) => m.clone(),
             None => return,
@@ -813,16 +828,16 @@ fn setup_ws_subscriptions(
         // when cancelling during Sending (no message_id set yet), if the event
         // session matches the active session.
         let is_ours = chat_state_cancelled.is_active_message(&msg_message_id)
-            || (chat_state_cancelled.active_message_id().get_untracked().is_none()
+            || (chat_state_cancelled.active_message_id().try_get_untracked().flatten().is_none()
                 && msg.session_id.as_deref()
-                    == session_id.get_untracked().as_deref());
+                    == session_id.try_get_untracked().flatten().as_deref());
 
         if is_ours {
             chat_state_cancelled.confirm_cancelled();
         }
 
         // Update the assistant message to show it was cancelled.
-        messages.update(|msgs| {
+        messages.try_update(|msgs| {
             for m in msgs.iter_mut() {
                 if m.message_id == msg_message_id && m.message_type == "assistant" {
                     m.content = "_Request cancelled by user._".to_string();
@@ -839,10 +854,11 @@ fn setup_ws_subscriptions(
 
     for event_name in custom_events {
         let event_name_clone = event_name.clone();
-
+        let disposed_custom = disposed.clone();
         let unsub = ws.subscribe(event_name, move |msg| {
+            if disposed_custom.load(std::sync::atomic::Ordering::Relaxed) { return; }
             // Apply the same filtering as other events.
-            let ctx_type = context_type.get_value();
+            let ctx_type = context_type.try_get_value().flatten();
             if let Some(ref expected_ctx) = ctx_type {
                 let event_context_type = msg
                     .data
@@ -856,7 +872,7 @@ fn setup_ws_subscriptions(
             }
 
             // Filter by session_id.
-            let current_sid = session_id.get_untracked();
+            let current_sid = session_id.try_get_untracked().flatten();
             if let Some(sid) = &current_sid
                 && msg.session_id.as_deref() != Some(sid.as_str()) {
                     return;
@@ -879,6 +895,7 @@ fn setup_ws_subscriptions(
     let unsub_request_cancelled = send_wrapper::SendWrapper::new(unsub_request_cancelled);
 
     on_cleanup(move || {
+        disposed.store(true, std::sync::atomic::Ordering::Relaxed);
         unsub_agent_thinking.take()();
         unsub_chat_stream.take()();
         unsub_chat_complete.take()();

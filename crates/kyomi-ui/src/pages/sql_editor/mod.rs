@@ -337,9 +337,9 @@ pub fn SqlEditorPage() -> impl IntoView {
 
             let on_move = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |e: web_sys::MouseEvent| {
                 let y = e.client_y() as f64;
-                let start_y = resize_start_y.get_value();
-                let start_pct = resize_start_pct.get_value();
-                let h = container_height.get_value();
+                let Some(start_y) = resize_start_y.try_get_value() else { return };
+                let Some(start_pct) = resize_start_pct.try_get_value() else { return };
+                let Some(h) = container_height.try_get_value() else { return };
                 if h > 0.0 {
                     let diff_pct = ((y - start_y) / h) * 100.0;
                     let new_pct = (start_pct + diff_pct).clamp(20.0, 80.0);

@@ -142,6 +142,11 @@ pub struct Config {
     /// Custom base URL for the LLM API (e.g., for proxies or OpenAI-compatible endpoints).
     pub llm_base_url: Option<String>,
 
+    /// Context window size for the configured LLM model (in tokens).
+    /// Populated at startup from the provider's model list API (e.g., OpenRouter).
+    /// 0 = unknown.
+    pub llm_context_window: u32,
+
     /// Model for lightweight tasks (title generation, dashboard summaries).
     /// Uses the cheapest model for the provider when absent.
     pub llm_title_model: Option<String>,
@@ -369,6 +374,7 @@ impl Config {
             llm_api_key: env::var("LLM_API_KEY").ok(),
             llm_model: env::var("LLM_MODEL").ok(),
             llm_base_url: env::var("LLM_BASE_URL").ok(),
+            llm_context_window: 0,
             llm_title_model: env::var("LLM_TITLE_MODEL").ok(),
             stripe_secret_key: env::var("STRIPE_SECRET_KEY").ok(),
             stripe_publishable_key: env::var("STRIPE_PUBLISHABLE_KEY").ok(),
@@ -447,6 +453,7 @@ impl Config {
             llm_api_key: None,
             llm_model: None,
             llm_base_url: None,
+            llm_context_window: 0,
             llm_title_model: None,
             stripe_secret_key: None,
             stripe_publishable_key: None,

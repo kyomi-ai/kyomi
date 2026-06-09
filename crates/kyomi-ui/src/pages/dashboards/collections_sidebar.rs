@@ -423,7 +423,7 @@ fn CollectionModal(
         let Some(color_val) = color.try_get_untracked() else { return };
         let Some(is_pub_val) = is_public.try_get_untracked() else { return };
         let editing_id_val = editing_id.try_get_untracked().flatten();
-        let dt = doc_type_stored.get_value();
+        let Some(dt) = doc_type_stored.try_get_value() else { return };
 
         save_action.dispatch((editing_id_val, name_val, desc_val, color_val, is_pub_val, dt));
     };
@@ -742,7 +742,7 @@ pub fn CollectionsSidebar(
             on_close=on_modal_close
             editing=Signal::derive(move || editing_collection.get())
             on_saved=on_modal_saved
-            doc_type=doc_type_for_modal.get_value().unwrap_or_else(|| "dashboard".to_string())
+            doc_type=doc_type_for_modal.try_get_value().flatten().unwrap_or_else(|| "dashboard".to_string())
             type_name_lower=type_name_lower.to_string()
         />
         <ConfirmDialog

@@ -706,7 +706,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                             {
                                 if is_exporting.get() { return; }
                                 set_is_exporting.set(true);
-                                let did = did_for_pdf.get_value();
+                                let Some(did) = did_for_pdf.try_get_value() else { return };
                                 let params = param_values.get();
                                 let title = title_signal.get();
 

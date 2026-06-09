@@ -1554,9 +1554,9 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "chartml-chart-cartesian"
-version = "5.0.7"
+version = "5.0.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6340ce5f0708872f7e7ca3dd4b40c7343dec9c0cc7fdfe0eb4412e980fdb37b3"
+checksum = "f92ad9b0d8bf340f4a945fc6d6b3330353fe070f9c4a20623394e2523d9938ad"
 dependencies = [
  "chartml-core",
  "indexmap 2.14.0",
@@ -1668,9 +1668,9 @@ dependencies = [
 
 [[package]]
 name = "chartml-leptos"
-version = "5.1.5"
+version = "5.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8018cbd3ec9ddb828663215f9a110441f9c78b2dbc032993bede3056e0118a3d"
+checksum = "861a1d49fc787226e19384a004cfea377889099f3bd5b51bfae40af22ff431f7"
 dependencies = [
  "chartml-core",
  "humantime",
@@ -7444,7 +7444,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 1.3.1",
+ "proc-macro-crate 3.5.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -13180,7 +13180,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
