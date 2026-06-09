@@ -77,7 +77,7 @@ pub fn hash_content(content: &str) -> String {
 ///
 /// `is_pg` controls boolean literal syntax: Postgres uses `TRUE`, SQLite
 /// uses `1` (via [`kyomi_core::sql_compat::bool_true`]).
-pub(crate) fn visibility_predicate(user_id_bind: u32, is_pg: bool) -> String {
+pub fn visibility_predicate(user_id_bind: u32, is_pg: bool) -> String {
     let bool_val = sql_compat::bool_true(is_pg);
     format!(
         r#" AND (
