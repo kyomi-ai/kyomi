@@ -65,6 +65,35 @@ pub fn hash_content(content: &str) -> String {
     hex::encode(&result[..8])
 }
 
+/// Build a SQL fragment that restricts dashboard rows to those the requesting
+/// user is allowed to see: either they own the dashboard, or it belongs to at
+/// least one public collection.
+///
+/// The fragment starts with ` AND` so it can be appended directly to an
+/// existing `WHERE` clause. Callers must alias the dashboards table as `d`.
+///
+/// `user_id_bind` is the positional bind-variable index ($1, $2, …) for the
+/// user_id parameter in the parent query.
+///
+/// `is_pg` controls boolean literal syntax: Postgres uses `TRUE`, SQLite
+/// uses `1` (via [`kyomi_core::sql_compat::bool_true`]).
+pub(crate) fn visibility_predicate(user_id_bind: u32, is_pg: bool) -> String {
+    let bool_val = sql_compat::bool_true(is_pg);
+    format!(
+        r#" AND (
+            d.user_id = ${uid}
+            OR EXISTS (
+                SELECT 1 FROM collection_dashboards cd
+                JOIN collections c ON cd.collection_id = c.id
+                WHERE cd.dashboard_id = d.dashboard_id
+                AND c.is_public = {bool_val}
+            )
+        )"#,
+        uid = user_id_bind,
+        bool_val = bool_val
+    )
+}
+
 // ─── Response types ──────────────────────────────────────────────────────────
 
 /// Sort order for dashboard search/listing.
@@ -2204,5 +2233,23 @@ visualize:
             extract_summary(content),
             Some("Revenue > $1M & growing".into())
         );
+    }
+
+    // ── visibility_predicate ─────────────────────────────────────────────
+
+    #[test]
+    fn visibility_predicate_postgres() {
+        let sql = visibility_predicate(3, true);
+        assert!(sql.contains("d.user_id = $3"));
+        assert!(sql.contains("c.is_public = TRUE"));
+        assert!(sql.contains("EXISTS"));
+        assert!(sql.contains("collection_dashboards cd"));
+    }
+
+    #[test]
+    fn visibility_predicate_sqlite() {
+        let sql = visibility_predicate(2, false);
+        assert!(sql.contains("d.user_id = $2"));
+        assert!(sql.contains("c.is_public = 1"));
     }
 }
