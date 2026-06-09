@@ -176,39 +176,54 @@ pub async fn create_collection(
 
 /// List all collections in a workspace with their dashboards.
 ///
+/// Only returns collections that the user can see: their own (`created_by =
+/// user_id`) or public (`is_public = true`).
+///
 /// When `doc_type` is `Some`, only collections whose own `doc_type` column
 /// matches are returned. When `None`, all collections are returned.
 pub async fn list_collections(
     db: &DbPool,
     workspace_id: &str,
+    user_id: &str,
     doc_type: Option<&str>,
 ) -> Result<Vec<CollectionWithDashboards>> {
+    let is_pg = db.is_postgres();
+    let bool_true = sql_compat::bool_true(is_pg);
+
     // Fetch collections — optionally filtered by their own doc_type column
     let collections = if let Some(dt) = doc_type {
-        db_fetch_all!(
-            db,
-            kyomi_core::models::Collection,
+        let sql = format!(
             r#"
             SELECT id, workspace_id, created_by, name, description, color, is_public, created_at, updated_at
             FROM collections
-            WHERE workspace_id = $1 AND doc_type = $2
+            WHERE workspace_id = $1 AND doc_type = $2 AND (created_by = $3 OR is_public = {bool_true})
             ORDER BY created_at DESC
-            "#,
+            "#
+        );
+        db_fetch_all!(
+            db,
+            kyomi_core::models::Collection,
+            &sql,
             workspace_id,
-            dt
+            dt,
+            user_id
         )
         .map_err(|e| kyomi_core::Error::Internal(format!("failed to list collections: {e}")))?
     } else {
-        db_fetch_all!(
-            db,
-            kyomi_core::models::Collection,
+        let sql = format!(
             r#"
             SELECT id, workspace_id, created_by, name, description, color, is_public, created_at, updated_at
             FROM collections
-            WHERE workspace_id = $1
+            WHERE workspace_id = $1 AND (created_by = $2 OR is_public = {bool_true})
             ORDER BY created_at DESC
-            "#,
-            workspace_id
+            "#
+        );
+        db_fetch_all!(
+            db,
+            kyomi_core::models::Collection,
+            &sql,
+            workspace_id,
+            user_id
         )
         .map_err(|e| kyomi_core::Error::Internal(format!("failed to list collections: {e}")))?
     };
@@ -272,25 +287,36 @@ pub async fn list_collections(
 // ─── Get collection ──────────────────────────────────────────────────────────
 
 /// Get a single collection with its dashboards.
+///
+/// Returns `None` if the collection does not exist in the workspace, or if the
+/// user cannot see it (not the owner and not public).
 pub async fn get_collection(
     db: &DbPool,
     collection_id: &str,
     workspace_id: &str,
+    user_id: &str,
 ) -> Result<Option<CollectionWithDashboards>> {
     // Validate UUID format
     uuid::Uuid::parse_str(collection_id)
         .map_err(|e| kyomi_core::Error::BadRequest(format!("Invalid collection_id: {e}")))?;
 
-    let collection: Option<kyomi_core::models::Collection> = db_fetch_optional!(
-        db,
-        kyomi_core::models::Collection,
+    let is_pg = db.is_postgres();
+    let bool_true = sql_compat::bool_true(is_pg);
+    let sql = format!(
         r#"
         SELECT id, workspace_id, created_by, name, description, color, is_public, created_at, updated_at
         FROM collections
-        WHERE id = $1 AND workspace_id = $2
-        "#,
+        WHERE id = $1 AND workspace_id = $2 AND (created_by = $3 OR is_public = {bool_true})
+        "#
+    );
+
+    let collection: Option<kyomi_core::models::Collection> = db_fetch_optional!(
+        db,
+        kyomi_core::models::Collection,
+        &sql,
         collection_id,
-        workspace_id
+        workspace_id,
+        user_id
     )
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to get collection: {e}")))?;
 
