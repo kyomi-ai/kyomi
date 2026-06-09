@@ -121,6 +121,8 @@ pub struct DashboardSearchResult {
     pub content_preview: Option<String>,
     pub view_count: i64,
     pub recent_views: i64,
+    /// `true` if the dashboard belongs to at least one public collection.
+    pub is_publicly_shared: bool,
 }
 
 /// A version summary for listing (without full content).
@@ -806,6 +808,8 @@ pub async fn search_dashboards(
     // SQLite doesn't need the cast (SUM already returns REAL).
     let float_cast = if is_pg { "::FLOAT8" } else { "" };
 
+    let bool_true = sql_compat::bool_true(is_pg);
+
     // Popularity sub-query with CASE expressions
     // Postgres uses FILTER (WHERE ...) but we use CASE for cross-db compat
     let popularity_sql = format!(
@@ -815,7 +819,13 @@ pub async fn search_dashboards(
             d.doc_type, d.last_change_summary, d.created_at, d.updated_at,
             COALESCE(v.popularity_score, 0.0) AS popularity_score,
             COALESCE(v.view_count, 0) AS view_count,
-            COALESCE(v.recent_views, 0) AS recent_views
+            COALESCE(v.recent_views, 0) AS recent_views,
+            CASE WHEN EXISTS (
+                SELECT 1 FROM collection_dashboards cd
+                JOIN collections c ON cd.collection_id = c.id
+                WHERE cd.dashboard_id = d.dashboard_id
+                AND c.is_public = {bool_true}
+            ) THEN 1 ELSE 0 END AS is_publicly_shared
         FROM dashboards d
         LEFT JOIN (
             SELECT
@@ -876,6 +886,7 @@ pub async fn search_dashboards(
                 content_preview: preview,
                 view_count: row.get::<Option<i64>, _>("view_count").unwrap_or(0),
                 recent_views: row.get::<Option<i64>, _>("recent_views").unwrap_or(0),
+                is_publicly_shared: row.get::<i32, _>("is_publicly_shared") != 0,
             }
         }).collect()
     });

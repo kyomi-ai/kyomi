@@ -194,6 +194,7 @@ fn DocumentCard(
     let summary = dashboard.summary.clone();
 
     let dashboard_id_for_badges = dashboard.dashboard_id.clone();
+    let is_publicly_shared = dashboard.is_publicly_shared;
 
     // Kebab menu state — must be set up before entering view! macro
     let kebab_trigger_ref = NodeRef::<leptos::html::Div>::new();
@@ -219,6 +220,25 @@ fn DocumentCard(
                     <h3 class="font-display text-xl line-clamp-2 group-hover:text-primary transition-colors mb-2">
                         {title}
                     </h3>
+
+                    // Visibility badge — lock for private, globe for public
+                    <div class="flex items-center gap-1 mb-2">
+                        {if is_publicly_shared {
+                            view! {
+                                <span class="inline-flex items-center gap-1 text-xs px-1.5 py-0.5 rounded-full bg-success/10 text-success-foreground">
+                                    <Icon icon=phosphor_leptos::GLOBE_SIMPLE size="12px" />
+                                    "Public"
+                                </span>
+                            }.into_any()
+                        } else {
+                            view! {
+                                <span class="inline-flex items-center gap-1 text-xs px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground">
+                                    <Icon icon=phosphor_leptos::LOCK_SIMPLE size="12px" />
+                                    "Private"
+                                </span>
+                            }.into_any()
+                        }}
+                    </div>
 
                     // Summary or empty-state placeholder
                     {match summary {
