@@ -1798,7 +1798,7 @@ mod tests {
 
     #[test]
     fn watch_tools_contains_expected_tools() {
-        assert_eq!(WATCH_TOOLS.len(), 8);
+        assert_eq!(WATCH_TOOLS.len(), 9);
         assert!(WATCH_TOOLS.contains(&"search_knowledge"));
         assert!(WATCH_TOOLS.contains(&"get_table_info"));
         assert!(WATCH_TOOLS.contains(&"browse_catalog"));
@@ -1807,6 +1807,7 @@ mod tests {
         assert!(WATCH_TOOLS.contains(&"forecast_data"));
         assert!(WATCH_TOOLS.contains(&"list_knowledge_files"));
         assert!(WATCH_TOOLS.contains(&"read_knowledge_file"));
+        assert!(WATCH_TOOLS.contains(&"validate_chartml"));
     }
 
     // -- Constants --

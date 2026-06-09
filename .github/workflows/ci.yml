@@ -6,7 +6,7 @@
 #   1. lint-policy (fast, ~5s) — rejects new #[allow(...)] suppressions AND
 #      runs the server_fn/REST divergence linter across the full tree
 #   2. trivy-scan (~30s) — Trivy filesystem vulnerability scanner (HIGH/CRITICAL)
-#   3. clippy (slow, ~2-5min) — full workspace clippy + compilation check
+#   3. clippy (slow, ~2-5min) — full workspace clippy + compilation check + unit tests
 # =============================================================================
 
 name: CI
@@ -163,6 +163,11 @@ jobs:
         env:
           RUSTC_WRAPPER: ${{ env.SCCACHE_AVAILABLE == 'true' && 'sccache' || '' }}
         run: cargo clippy --locked -p kyomi-ui --target wasm32-unknown-unknown --features hydrate -- -D warnings
+
+      - name: cargo test (workspace, excluding desktop)
+        env:
+          RUSTC_WRAPPER: ${{ env.SCCACHE_AVAILABLE == 'true' && 'sccache' || '' }}
+        run: cargo test --locked --workspace --exclude kyomi-desktop
 
       - name: sccache stats
         if: always()
