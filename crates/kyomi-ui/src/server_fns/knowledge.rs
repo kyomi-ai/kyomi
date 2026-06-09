@@ -37,6 +37,7 @@ pub async fn list_knowledge_docs(
     let results = kyomi_auth::dashboard_service::search_dashboards(
         ac.db(),
         &ac.ws_id,
+        &ac.auth.user_id,
         query.as_deref(),
         Some(kyomi_core::models::DocType::Knowledge),
         sort,
@@ -96,6 +97,7 @@ pub async fn create_knowledge_doc(
         kyomi_auth::websocket::helpers::broadcast_dashboard_sync(
             ac.db(), ws_manager, &dashboard_id, &ac.ws_id,
             kyomi_types::sync::SyncActionType::Insert,
+            &ac.auth.user_id,
         ).await;
     }
 

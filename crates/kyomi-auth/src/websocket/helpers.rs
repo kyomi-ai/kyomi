@@ -787,13 +787,14 @@ pub async fn broadcast_dashboard_sync(
     dashboard_id: &str,
     workspace_id: &str,
     action: kyomi_types::sync::SyncActionType,
+    user_id: &str,
 ) {
     use kyomi_types::sync::{SyncAction, SyncActionType, entity_types};
 
     let (entity_type, data) = if matches!(action, SyncActionType::Delete) {
         (entity_types::DASHBOARD.to_string(), None)
     } else {
-        let snapshot = crate::dashboard_service::fetch_dashboard_snapshot(db, dashboard_id).await;
+        let snapshot = crate::dashboard_service::fetch_dashboard_snapshot(db, dashboard_id, user_id).await;
         let et = snapshot
             .as_ref()
             .and_then(|s| s.get("doc_type"))

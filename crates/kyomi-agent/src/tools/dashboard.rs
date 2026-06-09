@@ -106,6 +106,7 @@ impl AgentTool for SearchDashboardsTool {
         let results = kyomi_auth::dashboard_service::search_dashboards(
             &ctx.db,
             &ctx.workspace_id,
+            &ctx.user_id,
             query,
             doc_type_filter,
             sort_by,
@@ -215,6 +216,7 @@ impl AgentTool for GetDashboardInfoTool {
             &ctx.db,
             dashboard_id,
             &ctx.workspace_id,
+            &ctx.user_id,
         )
         .await?;
 
@@ -424,6 +426,7 @@ impl AgentTool for CreateDashboardTool {
         ws_helpers::broadcast_dashboard_sync(
             &ctx.db, &ctx.ws_manager, &dashboard_id, &ctx.workspace_id,
             kyomi_types::sync::SyncActionType::Insert,
+            &ctx.user_id,
         )
         .await;
 
@@ -543,7 +546,7 @@ impl AgentTool for ModifyDashboardTool {
         // have content still proceed normally below.
         if content.is_none()
             && let Ok(Some(dash)) = kyomi_auth::dashboard_service::get_dashboard(
-                &ctx.db, dashboard_id, &ctx.workspace_id,
+                &ctx.db, dashboard_id, &ctx.workspace_id, &ctx.user_id,
             )
             .await
             && dash.content.trim().is_empty()
@@ -651,6 +654,7 @@ impl AgentTool for ModifyDashboardTool {
         ws_helpers::broadcast_dashboard_sync(
             &ctx.db, &ctx.ws_manager, dashboard_id, &ctx.workspace_id,
             kyomi_types::sync::SyncActionType::Update,
+            &ctx.user_id,
         )
         .await;
 

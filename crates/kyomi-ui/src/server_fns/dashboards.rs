@@ -147,6 +147,7 @@ pub async fn list_dashboards(
     let results = kyomi_auth::dashboard_service::search_dashboards(
         ac.db(),
         &ac.ws_id,
+        &ac.auth.user_id,
         query.as_deref(),
         Some(kyomi_core::models::DocType::Dashboard), // dashboard page only shows dashboards
         sort,
@@ -198,7 +199,7 @@ pub async fn get_dashboard(dashboard_id: String) -> Result<DashboardDetail, Serv
     let ac = AuthenticatedContext::extract().await?;
 
     let dashboard =
-        kyomi_auth::dashboard_service::get_dashboard(ac.db(), &dashboard_id, &ac.ws_id)
+        kyomi_auth::dashboard_service::get_dashboard(ac.db(), &dashboard_id, &ac.ws_id, &ac.auth.user_id)
             .await
             .into_sfn()?
             .ok_or_else(|| ServerFnError::new(format!("Dashboard {dashboard_id} not found")))?;
@@ -276,6 +277,7 @@ pub async fn create_dashboard(
         kyomi_auth::websocket::helpers::broadcast_dashboard_sync(
             ac.db(), ws_manager, &dashboard_id, &ac.ws_id,
             kyomi_types::sync::SyncActionType::Insert,
+            &ac.auth.user_id,
         ).await;
     }
 
@@ -324,7 +326,7 @@ pub async fn update_dashboard(
         let embedding_svc = ac.ctx.embedding.wait_ready().await
             .map_err(|e| ServerFnError::new(format!("Embedding service unavailable: {e}")))?;
         if let Ok(Some(d)) =
-            kyomi_auth::dashboard_service::get_dashboard(ac.db(), &dashboard_id, &ac.ws_id).await
+            kyomi_auth::dashboard_service::get_dashboard(ac.db(), &dashboard_id, &ac.ws_id, &ac.auth.user_id).await
         {
             kyomi_auth::dashboard_service::spawn_embedding_generation(
                 ac.ctx.db.clone(),
@@ -351,7 +353,7 @@ pub async fn update_dashboard(
         && let Some(ws_manager) = ac.ctx.ws_manager.clone()
     {
             let fetched = kyomi_auth::dashboard_service::get_dashboard(
-                ac.db(), &dashboard_id, &ac.ws_id,
+                ac.db(), &dashboard_id, &ac.ws_id, &ac.auth.user_id,
             )
             .await
             .map_err(|e| tracing::warn!(dashboard_id = %dashboard_id, error = %e, "failed to fetch dashboard for summary"))
@@ -385,6 +387,7 @@ pub async fn update_dashboard(
         kyomi_auth::websocket::helpers::broadcast_dashboard_sync(
             ac.db(), ws_manager, &dashboard_id, &ac.ws_id,
             kyomi_types::sync::SyncActionType::Update,
+            &ac.auth.user_id,
         ).await;
     }
 
@@ -431,7 +434,7 @@ pub async fn list_versions(dashboard_id: String) -> Result<VersionListResult, Se
     let ac = AuthenticatedContext::extract().await?;
 
     // Fetch the live dashboard (also verifies workspace ownership)
-    let dashboard = kyomi_auth::dashboard_service::get_dashboard(ac.db(), &dashboard_id, &ac.ws_id)
+    let dashboard = kyomi_auth::dashboard_service::get_dashboard(ac.db(), &dashboard_id, &ac.ws_id, &ac.auth.user_id)
         .await
         .into_sfn()?
         .ok_or_else(|| ServerFnError::new(format!("Dashboard {dashboard_id} not found")))?;
@@ -481,8 +484,8 @@ pub async fn get_version(
 ) -> Result<VersionDetail, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    // Verify dashboard belongs to workspace
-    kyomi_auth::dashboard_service::get_dashboard(ac.db(), &dashboard_id, &ac.ws_id)
+    // Verify dashboard belongs to workspace and is visible to user
+    kyomi_auth::dashboard_service::get_dashboard(ac.db(), &dashboard_id, &ac.ws_id, &ac.auth.user_id)
         .await
         .into_sfn()?
         .ok_or_else(|| ServerFnError::new(format!("Dashboard {dashboard_id} not found")))?;
@@ -526,6 +529,7 @@ pub async fn diff_versions(
         ac.db(),
         &dashboard_id,
         &ac.ws_id,
+        &ac.auth.user_id,
         from_version,
         to_version,
     )
@@ -573,7 +577,7 @@ pub async fn restore_version(
     let embedding_svc = ac.ctx.embedding.wait_ready().await
         .map_err(|e| ServerFnError::new(format!("Embedding service unavailable: {e}")))?;
     if let Ok(Some(d)) =
-        kyomi_auth::dashboard_service::get_dashboard(ac.db(), &dashboard_id, &ac.ws_id).await
+        kyomi_auth::dashboard_service::get_dashboard(ac.db(), &dashboard_id, &ac.ws_id, &ac.auth.user_id).await
     {
         kyomi_auth::dashboard_service::spawn_embedding_generation(
             ac.ctx.db.clone(),

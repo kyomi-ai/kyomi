@@ -257,7 +257,7 @@ pub fn generate_change_summary(old_content: &str, new_content: &str) -> String {
 /// Fetch a dashboard/knowledge row and build a JSON snapshot for the sync log.
 ///
 /// Returns `None` if the row no longer exists or if the query fails.
-pub(crate) async fn fetch_dashboard_snapshot(db: &DbPool, dashboard_id: &str) -> Option<serde_json::Value> {
+pub(crate) async fn fetch_dashboard_snapshot(db: &DbPool, dashboard_id: &str, user_id: &str) -> Option<serde_json::Value> {
     #[derive(sqlx::FromRow)]
     struct SnapshotRow {
         dashboard_id: String,
@@ -273,11 +273,11 @@ pub(crate) async fn fetch_dashboard_snapshot(db: &DbPool, dashboard_id: &str) ->
         recent_views: i64,
     }
 
+    let is_pg = db.is_postgres();
+    let vis = visibility_predicate(3, is_pg);
     let recent_cutoff = Utc::now() - Duration::days(30);
 
-    let row = db_fetch_optional!(
-        db,
-        SnapshotRow,
+    let sql = format!(
         r#"SELECT d.dashboard_id, d.user_id, d.workspace_id, d.title, d.content,
                   d.doc_type, d.last_change_summary,
                   CAST(d.updated_at AS TEXT) AS updated_at,
@@ -293,9 +293,16 @@ pub(crate) async fn fetch_dashboard_snapshot(db: &DbPool, dashboard_id: &str) ->
                WHERE dashboard_id = $1
                GROUP BY dashboard_id
            ) v ON d.dashboard_id = v.dashboard_id
-           WHERE d.dashboard_id = $1"#,
+           WHERE d.dashboard_id = $1{vis}"#
+    );
+
+    let row = db_fetch_optional!(
+        db,
+        SnapshotRow,
+        &sql,
         dashboard_id,
-        recent_cutoff
+        recent_cutoff,
+        user_id
     )
     .ok()?;
 
@@ -398,7 +405,7 @@ pub async fn create_dashboard(
         } else {
             entity_types::KNOWLEDGE
         };
-        let snapshot = fetch_dashboard_snapshot(db, &dashboard_id).await;
+        let snapshot = fetch_dashboard_snapshot(db, &dashboard_id, user_id).await;
         if let Err(e) = sync_log_service::write_sync_entry(
             db,
             entity_type,
@@ -431,8 +438,12 @@ pub async fn create_dashboard(
 
 // ─── Get dashboard ───────────────────────────────────────────────────────────
 
-/// Fetch a dashboard by ID within a workspace.
-pub async fn get_dashboard(
+/// Fetch a dashboard by ID within a workspace, bypassing visibility filtering.
+///
+/// Use this only for write operations (`update_dashboard`, `delete_dashboard`,
+/// `restore_version`) that need to check ownership regardless of collection
+/// visibility.  Read paths must use [`get_dashboard`] instead.
+pub(crate) async fn get_dashboard_unchecked(
     db: &DbPool,
     dashboard_id: &str,
     workspace_id: &str,
@@ -445,11 +456,47 @@ pub async fn get_dashboard(
                doc_type, content_hash, last_change_summary,
                created_by, updated_by,
                created_at, updated_at
-        FROM dashboards
-        WHERE dashboard_id = $1 AND workspace_id = $2
+        FROM dashboards d
+        WHERE d.dashboard_id = $1 AND d.workspace_id = $2
         "#,
         dashboard_id,
         workspace_id
+    )
+    .map_err(|e| kyomi_core::Error::Internal(format!("failed to get dashboard: {e}")))?;
+
+    Ok(row)
+}
+
+/// Fetch a dashboard by ID within a workspace, applying visibility filtering.
+///
+/// Visibility rules (owner OR in a public collection) are enforced via
+/// [`visibility_predicate`].  Write operations that need ownership checks
+/// without visibility filtering should call [`get_dashboard_unchecked`].
+pub async fn get_dashboard(
+    db: &DbPool,
+    dashboard_id: &str,
+    workspace_id: &str,
+    user_id: &str,
+) -> Result<Option<kyomi_core::models::Dashboard>> {
+    let is_pg = db.is_postgres();
+    let vis = visibility_predicate(3, is_pg);
+    let sql = format!(
+        r#"
+        SELECT dashboard_id, user_id, workspace_id, title, content,
+               doc_type, content_hash, last_change_summary,
+               created_by, updated_by,
+               created_at, updated_at
+        FROM dashboards d
+        WHERE d.dashboard_id = $1 AND d.workspace_id = $2{vis}
+        "#
+    );
+    let row = db_fetch_optional!(
+        db,
+        kyomi_core::models::Dashboard,
+        &sql,
+        dashboard_id,
+        workspace_id,
+        user_id
     )
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to get dashboard: {e}")))?;
 
@@ -496,7 +543,7 @@ pub async fn update_dashboard(
         expected_content_hash,
     } = params;
     // Fetch current dashboard for ownership check and version creation
-    let current = get_dashboard(db, dashboard_id, workspace_id).await?;
+    let current = get_dashboard_unchecked(db, dashboard_id, workspace_id).await?;
     let current = current.ok_or_else(|| {
         kyomi_core::Error::NotFound(format!("Dashboard {dashboard_id} not found"))
     })?;
@@ -629,7 +676,7 @@ pub async fn update_dashboard(
         } else {
             entity_types::KNOWLEDGE
         };
-        let snapshot = fetch_dashboard_snapshot(db, dashboard_id).await;
+        let snapshot = fetch_dashboard_snapshot(db, dashboard_id, user_id).await;
         if let Err(e) = sync_log_service::write_sync_entry(
             db,
             entity_type,
@@ -659,7 +706,7 @@ pub async fn delete_dashboard(
     user_id: &str,
 ) -> Result<bool> {
     // Ownership check
-    let current = get_dashboard(db, dashboard_id, workspace_id).await?;
+    let current = get_dashboard_unchecked(db, dashboard_id, workspace_id).await?;
     let current = current.ok_or_else(|| {
         kyomi_core::Error::NotFound(format!("Dashboard {dashboard_id} not found"))
     })?;
@@ -723,6 +770,7 @@ pub async fn delete_dashboard(
 pub async fn search_dashboards(
     db: &DbPool,
     workspace_id: &str,
+    user_id: &str,
     query: Option<&str>,
     doc_type_filter: Option<DocType>,
     sort_by: SearchSort,
@@ -739,7 +787,7 @@ pub async fn search_dashboards(
         .map(|q| q.trim());
     let doc_type_str: Option<&str> = doc_type_filter.map(|dt: DocType| dt.as_str());
 
-    // Build the text filter — $5 is query text, $6 is doc_type filter
+    // Build the text filter — $5 is query text, $6 is doc_type filter, $7 is user_id (visibility)
     let text_filter = if is_pg {
         "AND ($5::text IS NULL OR d.title ILIKE '%' || $5 || '%' OR d.content ILIKE '%' || $5 || '%')"
     } else {
@@ -751,6 +799,8 @@ pub async fn search_dashboards(
     } else {
         "AND ($6 IS NULL OR d.doc_type = $6)"
     };
+
+    let vis = visibility_predicate(7, is_pg);
 
     // Postgres SUM returns NUMERIC; cast to FLOAT8 so sqlx can decode as f64.
     // SQLite doesn't need the cast (SUM already returns REAL).
@@ -787,6 +837,7 @@ pub async fn search_dashboards(
         WHERE d.workspace_id = $1
         {text_filter}
         {doc_type_clause}
+        {vis}
         "#
     );
 
@@ -798,6 +849,7 @@ pub async fn search_dashboards(
             .bind(old_cutoff)
             .bind(query_param)
             .bind(doc_type_str)
+            .bind(user_id)
             .fetch_all(p)
             .await
             .map_err(|e| kyomi_core::Error::Internal(format!("failed to search dashboards: {e}")))?;
@@ -1392,10 +1444,11 @@ pub async fn diff_versions(
     pool: &DbPool,
     dashboard_id: &str,
     workspace_id: &str,
+    user_id: &str,
     from_version: i32,
     to_version: i32,
 ) -> Result<DashboardVersionDiff> {
-    let dashboard = get_dashboard(pool, dashboard_id, workspace_id)
+    let dashboard = get_dashboard(pool, dashboard_id, workspace_id, user_id)
         .await?
         .ok_or_else(|| {
             kyomi_core::Error::NotFound(format!("Dashboard {dashboard_id} not found"))
@@ -1461,7 +1514,7 @@ pub async fn restore_version(
     })?;
 
     // Fetch current dashboard for ownership check and version creation
-    let current = get_dashboard(db, dashboard_id, workspace_id).await?;
+    let current = get_dashboard_unchecked(db, dashboard_id, workspace_id).await?;
     let current = current.ok_or_else(|| {
         kyomi_core::Error::NotFound(format!("Dashboard {dashboard_id} not found"))
     })?;
