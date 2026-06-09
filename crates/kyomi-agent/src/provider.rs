@@ -306,14 +306,11 @@ pub fn create_provider_from_workspace(
 ) -> kyomi_core::Result<Box<dyn LLMProvider>> {
     use kyomi_auth::workspace_ai_config::WorkspaceAiProvider;
 
-    // SaaS mode: always use Kyomi-managed credentials regardless of any
-    // workspace-level BYOK configuration. Existing BYOK configs are
-    // preserved in the database but unused at runtime.
+    // SaaS mode: always use Kyomi-managed credentials and model.
+    // Workspace-level BYOK configs and default_model are preserved in the
+    // database but ignored at runtime — the server controls everything.
     if !fallback_config.self_hosted {
-        let mut config = resolve_provider_config(fallback_config)?;
-        if let Some(ref model) = ws_config.model {
-            config.model = Some(model.clone());
-        }
+        let config = resolve_provider_config(fallback_config)?;
         return create_provider(config);
     }
 
