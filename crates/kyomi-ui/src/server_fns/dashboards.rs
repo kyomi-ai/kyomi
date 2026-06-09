@@ -39,6 +39,8 @@ pub struct DashboardListItem {
     pub recent_views: i64,
     pub updated_at: String,
     pub created_at: String,
+    #[serde(default)]
+    pub is_publicly_shared: bool,
 }
 
 /// Full dashboard detail for viewing/editing.
@@ -185,6 +187,7 @@ pub(crate) fn map_search_result_to_list_item(
         recent_views: r.recent_views,
         updated_at: r.updated_at.to_rfc3339(),
         created_at: r.created_at.to_rfc3339(),
+        is_publicly_shared: r.is_publicly_shared,
     }
 }
 
