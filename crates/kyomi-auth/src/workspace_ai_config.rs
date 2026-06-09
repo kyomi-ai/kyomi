@@ -915,8 +915,9 @@ mod tests {
         assert_eq!(cfg.api_key, None);
         assert_eq!(cfg.base_url, None);
 
-        // 4. Verify the encrypted column itself was cleared at the DB level
-        //    (load() masks it in Kyomi mode regardless).
+        // 4. The encrypted column is intentionally preserved at the DB level
+        //    so switching back to BYOK doesn't require re-entering credentials.
+        //    load() masks it in Kyomi mode (verified above at line cfg.api_key == None).
         let sq = match &db {
             kyomi_core::db::DbPool::Sqlite(sq) => sq,
             _ => unreachable!(),
@@ -928,9 +929,9 @@ mod tests {
         .fetch_one(sq)
         .await
         .unwrap();
-        assert_eq!(
-            stored, None,
-            "encrypted key column must be NULL after switching to Kyomi"
+        assert!(
+            stored.is_some(),
+            "encrypted key preserved for seamless BYOK switch-back"
         );
     }
 
