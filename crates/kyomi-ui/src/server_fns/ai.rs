@@ -1288,10 +1288,10 @@ mod tests {
         assert_eq!(parsed.len(), 2);
         // Sorted alphabetically by id.
         assert_eq!(parsed[0].id, "anthropic/claude-sonnet-4-5");
-        assert_eq!(parsed[0].name, "Claude Sonnet 4.5");
-        assert!((parsed[0].prompt_cost_per_token - 0.000003).abs() < 1e-10);
-        assert!((parsed[0].completion_cost_per_token - 0.000015).abs() < 1e-10);
-        assert_eq!(parsed[0].context_length, 200000);
+        assert_eq!(parsed[0].label, "Claude Sonnet 4.5");
+        assert!((parsed[0].prompt_cost_per_token.unwrap() - 0.000003).abs() < 1e-10);
+        assert!((parsed[0].completion_cost_per_token.unwrap() - 0.000015).abs() < 1e-10);
+        assert_eq!(parsed[0].context_length, Some(200000));
         assert_eq!(parsed[1].id, "openai/gpt-4o");
     }
 
@@ -1307,10 +1307,10 @@ mod tests {
         }"#;
         let parsed = parse_openrouter_models(body).unwrap();
         assert_eq!(parsed.len(), 1);
-        // Name falls back to id when absent.
-        assert_eq!(parsed[0].name, "some/model");
-        assert_eq!(parsed[0].prompt_cost_per_token, 0.0);
-        assert_eq!(parsed[0].completion_cost_per_token, 0.0);
+        // Label falls back to id when absent.
+        assert_eq!(parsed[0].label, "some/model");
+        assert_eq!(parsed[0].prompt_cost_per_token, Some(0.0));
+        assert_eq!(parsed[0].completion_cost_per_token, Some(0.0));
     }
 
     #[test]
@@ -1328,7 +1328,7 @@ mod tests {
         }"#;
         let parsed = parse_openrouter_models(body).unwrap();
         assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].prompt_cost_per_token, 0.0);
+        assert_eq!(parsed[0].prompt_cost_per_token, Some(0.0));
     }
 
     #[test]
