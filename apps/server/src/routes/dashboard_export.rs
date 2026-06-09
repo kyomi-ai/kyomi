@@ -103,7 +103,7 @@ async fn export_pdf_inner(
 
     // 3. Fetch dashboard
     let dashboard =
-        dashboard_service::get_dashboard(&state.db, &dashboard_id, workspace_id).await?;
+        dashboard_service::get_dashboard(&state.db, &dashboard_id, workspace_id, &user.user_id).await?;
     let dashboard = dashboard.ok_or_else(|| {
         kyomi_core::Error::NotFound(format!("Dashboard {dashboard_id} not found"))
     })?;

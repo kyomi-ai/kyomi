@@ -76,6 +76,7 @@ pub async fn get_dashboards() -> Result<Vec<DashboardSummary>, ServerFnError> {
     let results = kyomi_auth::dashboard_service::search_dashboards(
         ac.db(),
         &ac.ws_id,
+        &ac.auth.user_id,
         None,
         Some(kyomi_core::models::DocType::Dashboard), // profile page only shows dashboards
         kyomi_auth::dashboard_service::SearchSort::Recent,

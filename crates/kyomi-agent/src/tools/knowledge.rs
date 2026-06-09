@@ -498,11 +498,13 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
 async fn find_document_by_title(
     db: &kyomi_core::DbPool,
     workspace_id: &str,
+    user_id: &str,
     title: &str,
 ) -> kyomi_core::Result<Option<kyomi_core::models::Dashboard>> {
     let results = kyomi_auth::dashboard_service::search_dashboards(
         db,
         workspace_id,
+        user_id,
         Some(title),
         None,
         kyomi_auth::dashboard_service::SearchSort::Recent,
@@ -514,7 +516,7 @@ async fn find_document_by_title(
     let matched = results.iter().find(|d| d.title == title);
 
     if let Some(m) = matched {
-        kyomi_auth::dashboard_service::get_dashboard(db, &m.dashboard_id, workspace_id).await
+        kyomi_auth::dashboard_service::get_dashboard(db, &m.dashboard_id, workspace_id, user_id).await
     } else {
         Ok(None)
     }
@@ -527,18 +529,19 @@ async fn find_document_by_title(
 async fn resolve_document(
     db: &kyomi_core::DbPool,
     workspace_id: &str,
+    user_id: &str,
     path: &str,
 ) -> kyomi_core::Result<Option<kyomi_core::models::Dashboard>> {
     // If it looks like a UUID, try direct lookup first
     if uuid::Uuid::parse_str(path).is_ok() {
-        let doc = kyomi_auth::dashboard_service::get_dashboard(db, path, workspace_id).await?;
+        let doc = kyomi_auth::dashboard_service::get_dashboard(db, path, workspace_id, user_id).await?;
         if doc.is_some() {
             return Ok(doc);
         }
     }
 
     // Try exact title match
-    let doc = find_document_by_title(db, workspace_id, path).await?;
+    let doc = find_document_by_title(db, workspace_id, user_id, path).await?;
     if doc.is_some() {
         return Ok(doc);
     }
@@ -547,7 +550,7 @@ async fn resolve_document(
     if let Some(slash_pos) = path.rfind('/') {
         let filename = &path[slash_pos + 1..];
         if !filename.is_empty() {
-            return find_document_by_title(db, workspace_id, filename).await;
+            return find_document_by_title(db, workspace_id, user_id, filename).await;
         }
     }
 
@@ -633,7 +636,7 @@ impl AgentTool for WriteDocumentTool {
         let embed = ctx.embedding.wait_ready().await?;
 
         // Look up existing document by title
-        let existing = find_document_by_title(&ctx.db, &ctx.workspace_id, title).await?;
+        let existing = find_document_by_title(&ctx.db, &ctx.workspace_id, &ctx.user_id, title).await?;
 
         if let Some(doc) = existing {
             // Update existing document
@@ -674,6 +677,7 @@ impl AgentTool for WriteDocumentTool {
                     ws_helpers::broadcast_dashboard_sync(
                         &ctx.db, &ctx.ws_manager, &doc.dashboard_id, &ctx.workspace_id,
                         kyomi_types::sync::SyncActionType::Update,
+                        &ctx.user_id,
                     )
                     .await;
 
@@ -722,6 +726,7 @@ impl AgentTool for WriteDocumentTool {
             ws_helpers::broadcast_dashboard_sync(
                 &ctx.db, &ctx.ws_manager, &dashboard_id, &ctx.workspace_id,
                 kyomi_types::sync::SyncActionType::Insert,
+                &ctx.user_id,
             )
             .await;
 
@@ -784,7 +789,7 @@ impl AgentTool for ReadDocumentTool {
             .as_str()
             .ok_or_else(|| kyomi_core::Error::BadRequest("path is required".into()))?;
 
-        let doc = resolve_document(&ctx.db, &ctx.workspace_id, path).await?;
+        let doc = resolve_document(&ctx.db, &ctx.workspace_id, &ctx.user_id, path).await?;
         match doc {
             Some(d) => Ok(serde_json::json!({
                 "id": d.dashboard_id,
@@ -855,6 +860,7 @@ impl AgentTool for ListDocumentsTool {
         let results = kyomi_auth::dashboard_service::search_dashboards(
             &ctx.db,
             &ctx.workspace_id,
+            &ctx.user_id,
             None,
             doc_type_filter,
             kyomi_auth::dashboard_service::SearchSort::Recent,
@@ -943,7 +949,7 @@ impl AgentTool for EditDocumentTool {
             .as_str()
             .ok_or_else(|| kyomi_core::Error::BadRequest("new_text is required".into()))?;
 
-        let doc = resolve_document(&ctx.db, &ctx.workspace_id, path)
+        let doc = resolve_document(&ctx.db, &ctx.workspace_id, &ctx.user_id, path)
             .await?
             .ok_or_else(|| kyomi_core::Error::NotFound(format!("Document not found: {path}")))?;
 
@@ -1008,6 +1014,7 @@ impl AgentTool for EditDocumentTool {
                 ws_helpers::broadcast_dashboard_sync(
                     &ctx.db, &ctx.ws_manager, &doc.dashboard_id, &ctx.workspace_id,
                     kyomi_types::sync::SyncActionType::Update,
+                    &ctx.user_id,
                 )
                 .await;
 

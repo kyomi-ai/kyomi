@@ -903,6 +903,7 @@ async fn generate_dashboard_summary_inner(
     ws_helpers::broadcast_dashboard_sync(
         db, ws_manager, dashboard_id, workspace_id,
         kyomi_types::sync::SyncActionType::Update,
+        user_id,
     ).await;
     info!(dashboard_id = %dashboard_id, summary = %summary, "Generated dashboard summary");
 

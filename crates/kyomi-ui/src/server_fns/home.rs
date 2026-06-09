@@ -77,6 +77,7 @@ pub async fn get_landing_config() -> Result<LandingConfig, ServerFnError> {
     let (user_default_dashboard_id, workspace_default_dashboard_id) =
         validate_default_dashboard_ids(
             &ctx.db,
+            &auth.user_id,
             user_default_dashboard_id,
             workspace_default_dashboard_id,
             auth.workspace.workspace_id.as_deref(),
@@ -105,13 +106,14 @@ use super::{extract_auth, extract_context, IntoServerFnError};
 #[cfg(feature = "ssr")]
 async fn validate_default_dashboard_ids(
     db: &kyomi_core::DbPool,
+    auth_user_id: &str,
     user_id: Option<String>,
     workspace_id_val: Option<String>,
     ws_id: Option<&str>,
 ) -> (Option<String>, Option<String>) {
     let user_id = match (&user_id, ws_id) {
         (Some(id), Some(ws)) => {
-            match kyomi_auth::dashboard_service::get_dashboard(db, id, ws).await {
+            match kyomi_auth::dashboard_service::get_dashboard(db, id, ws, auth_user_id).await {
                 Ok(Some(_)) => user_id,
                 Ok(None) => None,
                 Err(e) => {
@@ -129,7 +131,7 @@ async fn validate_default_dashboard_ids(
 
     let workspace_id_val = match (&workspace_id_val, ws_id) {
         (Some(id), Some(ws)) => {
-            match kyomi_auth::dashboard_service::get_dashboard(db, id, ws).await {
+            match kyomi_auth::dashboard_service::get_dashboard(db, id, ws, auth_user_id).await {
                 Ok(Some(_)) => workspace_id_val,
                 Ok(None) => None,
                 Err(e) => {
