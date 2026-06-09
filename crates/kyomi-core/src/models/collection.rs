@@ -18,6 +18,9 @@ pub struct Collection {
     /// FK to workspaces table — workspace isolation.
     pub workspace_id: String,
 
+    /// FK to users table — who created this collection.
+    pub created_by: String,
+
     /// Collection name (1–255 characters).
     pub name: String,
 
