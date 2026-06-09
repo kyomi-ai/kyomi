@@ -1143,12 +1143,22 @@ pub async fn rechunk_document(
 // ─── Record view ─────────────────────────────────────────────────────────────
 
 /// Record a dashboard view for popularity tracking.
+///
+/// Silently skips recording if the user does not have visibility access to the
+/// dashboard — reuses the same predicate as all other read paths so no orphan
+/// view rows are inserted for dashboards the user cannot actually see.
 pub async fn record_view(
     db: &DbPool,
     dashboard_id: &str,
     user_id: &str,
     workspace_id: &str,
 ) -> Result<()> {
+    // Skip recording if the user can't see this dashboard.
+    let visible = get_dashboard(db, dashboard_id, workspace_id, user_id).await?;
+    if visible.is_none() {
+        return Ok(());
+    }
+
     let is_pg = db.is_postgres();
     let now_expr = sql_compat::now(is_pg);
     let view_id = format!("view-{}", &uuid::Uuid::new_v4().to_string()[..20]);
