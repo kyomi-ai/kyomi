@@ -36,6 +36,7 @@ pub struct CollectionDashboardView {
 pub struct CollectionItem {
     pub collection_id: String,
     pub workspace_id: String,
+    pub created_by: String,
     pub name: String,
     pub description: Option<String>,
     pub color: Option<String>,
@@ -56,6 +57,7 @@ fn to_collection_item(
     CollectionItem {
         collection_id: coll.id.clone(),
         workspace_id: coll.workspace_id.clone(),
+        created_by: coll.created_by.clone(),
         name: coll.name.clone(),
         description: coll.description.clone(),
         color: coll.color.clone(),
@@ -82,6 +84,7 @@ fn bare_to_collection_item(coll: &kyomi_core::models::Collection) -> CollectionI
     CollectionItem {
         collection_id: coll.id.clone(),
         workspace_id: coll.workspace_id.clone(),
+        created_by: coll.created_by.clone(),
         name: coll.name.clone(),
         description: coll.description.clone(),
         color: coll.color.clone(),
@@ -130,13 +133,16 @@ pub async fn create_collection(
     let dt = doc_type.as_deref().unwrap_or("dashboard");
 
     let collection = kyomi_auth::collection_service::create_collection(
-        ac.db(),
-        &ac.ws_id,
-        &name,
-        description.as_deref(),
-        color.as_deref(),
-        is_public.unwrap_or(false),
-        dt,
+        kyomi_auth::collection_service::NewCollectionParams {
+            db: ac.db(),
+            workspace_id: &ac.ws_id,
+            name: &name,
+            description: description.as_deref(),
+            color: color.as_deref(),
+            is_public: is_public.unwrap_or(false),
+            doc_type: dt,
+            created_by: &ac.auth.user_id,
+        },
     )
     .await
     .into_sfn()?;

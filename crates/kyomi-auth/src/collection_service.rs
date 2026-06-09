@@ -32,6 +32,7 @@ pub struct DashboardInCollection {
 pub struct CollectionWithDashboards {
     pub id: String,
     pub workspace_id: String,
+    pub created_by: String,
     pub name: String,
     pub description: Option<String>,
     pub color: Option<String>,
@@ -107,16 +108,33 @@ async fn row_exists(db: &DbPool, sql: &str, binds: &[&str]) -> Result<bool> {
 
 // ─── Create collection ──────────────────────────────────────────────────────
 
+/// Parameters for creating a new collection.
+pub struct NewCollectionParams<'a> {
+    pub db: &'a DbPool,
+    pub workspace_id: &'a str,
+    pub name: &'a str,
+    pub description: Option<&'a str>,
+    pub color: Option<&'a str>,
+    pub is_public: bool,
+    pub doc_type: &'a str,
+    pub created_by: &'a str,
+}
+
 /// Create a new collection in a workspace.
 pub async fn create_collection(
-    db: &DbPool,
-    workspace_id: &str,
-    name: &str,
-    description: Option<&str>,
-    color: Option<&str>,
-    is_public: bool,
-    doc_type: &str,
+    params: NewCollectionParams<'_>,
 ) -> Result<kyomi_core::models::Collection> {
+    let NewCollectionParams {
+        db,
+        workspace_id,
+        name,
+        description,
+        color,
+        is_public,
+        doc_type,
+        created_by,
+    } = params;
+
     validate_name(name)?;
     if let Some(c) = color {
         validate_color(c)?;
@@ -133,19 +151,19 @@ pub async fn create_collection(
 
     let insert_sql = format!(
         r#"
-        INSERT INTO collections (id, workspace_id, name, description, color, is_public, doc_type, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, {bool_val}, $6, {now_expr}, {now_expr})
+        INSERT INTO collections (id, workspace_id, name, description, color, is_public, doc_type, created_by, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, $5, {bool_val}, $6, $7, {now_expr}, {now_expr})
         "#
     );
 
-    db_execute!(db, &insert_sql, &id, workspace_id, name.trim(), &description, &color, doc_type)
+    db_execute!(db, &insert_sql, &id, workspace_id, name.trim(), &description, &color, doc_type, created_by)
         .map_err(|e| kyomi_core::Error::Internal(format!("failed to create collection: {e}")))?;
 
     // Fetch the created row
     let row = db_fetch_one!(
         db,
         kyomi_core::models::Collection,
-        "SELECT id, workspace_id, name, description, color, is_public, created_at, updated_at FROM collections WHERE id = $1",
+        "SELECT id, workspace_id, created_by, name, description, color, is_public, created_at, updated_at FROM collections WHERE id = $1",
         &id
     )
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to fetch created collection: {e}")))?;
@@ -171,7 +189,7 @@ pub async fn list_collections(
             db,
             kyomi_core::models::Collection,
             r#"
-            SELECT id, workspace_id, name, description, color, is_public, created_at, updated_at
+            SELECT id, workspace_id, created_by, name, description, color, is_public, created_at, updated_at
             FROM collections
             WHERE workspace_id = $1 AND doc_type = $2
             ORDER BY created_at DESC
@@ -185,7 +203,7 @@ pub async fn list_collections(
             db,
             kyomi_core::models::Collection,
             r#"
-            SELECT id, workspace_id, name, description, color, is_public, created_at, updated_at
+            SELECT id, workspace_id, created_by, name, description, color, is_public, created_at, updated_at
             FROM collections
             WHERE workspace_id = $1
             ORDER BY created_at DESC
@@ -236,6 +254,7 @@ pub async fn list_collections(
             CollectionWithDashboards {
                 id: c.id,
                 workspace_id: c.workspace_id,
+                created_by: c.created_by,
                 name: c.name,
                 description: c.description,
                 color: c.color,
@@ -266,7 +285,7 @@ pub async fn get_collection(
         db,
         kyomi_core::models::Collection,
         r#"
-        SELECT id, workspace_id, name, description, color, is_public, created_at, updated_at
+        SELECT id, workspace_id, created_by, name, description, color, is_public, created_at, updated_at
         FROM collections
         WHERE id = $1 AND workspace_id = $2
         "#,
@@ -300,6 +319,7 @@ pub async fn get_collection(
     Ok(Some(CollectionWithDashboards {
         id: collection.id,
         workspace_id: collection.workspace_id,
+        created_by: collection.created_by,
         name: collection.name,
         description: collection.description,
         color: collection.color,
