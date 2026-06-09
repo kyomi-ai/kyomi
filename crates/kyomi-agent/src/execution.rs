@@ -784,8 +784,17 @@ async fn generate_title_inner(
     // Update DB.
     chat_service::update_session_title(db, session_id, &title).await?;
 
-    // Broadcast via WebSocket.
+    // Broadcast via WebSocket — both the legacy title_update (sidebar cache
+    // invalidation) and sync_action (SyncStore update for the chat list page).
     ws_helpers::send_title_update(ws_manager, user_id, session_id, &title).await;
+    ws_helpers::broadcast_chat_session_sync(
+        db,
+        ws_manager,
+        session_id,
+        workspace_id,
+        kyomi_types::sync::SyncActionType::Update,
+    )
+    .await;
 
     info!(
         session_id = %session_id,
