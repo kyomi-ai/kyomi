@@ -169,7 +169,7 @@ impl AgentTool for SearchKnowledgeTool {
         // Search knowledge file chunks (new knowledge system)
         let query_embedding = embed.embed_passage(query)?;
         let knowledge_file_results = search_knowledge_chunks(
-            &ctx.db, &ctx.workspace_id, &query_embedding, limit, doc_type_filter,
+            &ctx.db, &ctx.workspace_id, &ctx.user_id, &query_embedding, limit, doc_type_filter,
         ).await;
 
         // When doc_type filter is specified, exclude legacy table/metric entries —
@@ -348,6 +348,7 @@ struct KnowledgeChunkRow {
 async fn search_knowledge_chunks(
     db: &kyomi_core::DbPool,
     workspace_id: &str,
+    user_id: &str,
     query_embedding: &[f32],
     limit: usize,
     doc_type_filter: Option<DocType>,
@@ -364,8 +365,10 @@ async fn search_knowledge_chunks(
                     .collect::<Vec<_>>()
                     .join(",")
             );
+            // $1=workspace_id, $2=embedding, $3=limit, $4=user_id, $5=doc_type (optional)
+            let vis_pred = kyomi_auth::dashboard_service::visibility_predicate(4, true);
             let doc_type_clause = if doc_type_filter.is_some() {
-                "AND d.doc_type = $4 "
+                "AND d.doc_type = $5 "
             } else {
                 ""
             };
@@ -378,6 +381,7 @@ async fn search_knowledge_chunks(
                  FROM knowledge_chunks kc \
                  JOIN dashboards d ON d.dashboard_id = kc.dashboard_id \
                  WHERE kc.workspace_id = $1 \
+                 {vis_pred} \
                  {doc_type_clause}\
                  ORDER BY kc.embedding <=> $2::vector \
                  LIMIT $3"
@@ -385,7 +389,8 @@ async fn search_knowledge_chunks(
             let mut query = sqlx::query_as::<_, KnowledgeChunkRow>(&sql)
                 .bind(workspace_id)
                 .bind(&vec_str)
-                .bind(limit as i64);
+                .bind(limit as i64)
+                .bind(user_id);
             if let Some(dt) = doc_type_filter {
                 query = query.bind(dt.as_str());
             }
@@ -393,8 +398,10 @@ async fn search_knowledge_chunks(
         }
         kyomi_core::db::DbPool::Sqlite(sq) => {
             // SQLite path loads all matching chunks and computes similarity in Rust.
+            // $1=workspace_id, $2=user_id, $3=doc_type (optional)
+            let vis_pred = kyomi_auth::dashboard_service::visibility_predicate(2, false);
             let doc_type_clause = if doc_type_filter.is_some() {
-                "AND d.doc_type = $2 "
+                "AND d.doc_type = $3 "
             } else {
                 ""
             };
@@ -406,9 +413,12 @@ async fn search_knowledge_chunks(
                  FROM knowledge_chunks kc \
                  JOIN dashboards d ON d.dashboard_id = kc.dashboard_id \
                  WHERE kc.workspace_id = $1 \
+                 {vis_pred} \
                  {doc_type_clause}"
             );
-            let mut query = sqlx::query_as::<_, KnowledgeChunkRow>(&sql).bind(workspace_id);
+            let mut query = sqlx::query_as::<_, KnowledgeChunkRow>(&sql)
+                .bind(workspace_id)
+                .bind(user_id);
             if let Some(dt) = doc_type_filter {
                 query = query.bind(dt.as_str());
             }
