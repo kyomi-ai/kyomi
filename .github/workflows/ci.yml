@@ -167,7 +167,7 @@ jobs:
       - name: cargo test (workspace, excluding desktop)
         env:
           RUSTC_WRAPPER: ${{ env.SCCACHE_AVAILABLE == 'true' && 'sccache' || '' }}
-        run: cargo test --locked --workspace --exclude kyomi-desktop --exclude kyomi-datasource
+        run: cargo test --locked --workspace --exclude kyomi-desktop --exclude kyomi-datasource-server
 
       - name: sccache stats
         if: always()
