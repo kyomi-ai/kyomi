@@ -872,7 +872,7 @@ mod tests {
 
     #[test]
     fn existing_keys_filtered_at_root() {
-        let yaml = "type: chart\nversion: 1\n";
+        let yaml = "type: chart\nversion: 1\n\n";
         let items = provide_completions(CompletionContext {
             text: yaml.to_string(),
             cursor: kode_leptos::Position::new(2, 0),

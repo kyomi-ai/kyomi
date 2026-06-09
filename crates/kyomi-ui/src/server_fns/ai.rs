@@ -1157,7 +1157,7 @@ mod tests {
     // ---- parse_openai_models --------------------------------------------
 
     #[test]
-    fn parse_openai_models_excludes_embeddings_and_whisper() {
+    fn parse_openai_models_returns_all_models() {
         let body = r#"{
             "data": [
                 {"id":"gpt-4o","created":1715000000,"object":"model"},
@@ -1172,7 +1172,7 @@ mod tests {
             ]
         }"#;
         let parsed = parse_openai_models(body).unwrap();
-        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed.len(), 9);
         assert_eq!(parsed[0].id, "gpt-4o");
     }
 
@@ -1203,7 +1203,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_openai_models_excludes_audio_and_realtime_variants() {
+    fn parse_openai_models_includes_all_variants() {
         let body = r#"{
             "data": [
                 {"id":"gpt-4o-audio-preview","created":1720000000,"object":"model"},
@@ -1213,8 +1213,7 @@ mod tests {
             ]
         }"#;
         let parsed = parse_openai_models(body).unwrap();
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].id, "gpt-4o");
+        assert_eq!(parsed.len(), 4);
     }
 
     // ---- parse_gemini_models --------------------------------------------
