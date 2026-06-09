@@ -216,7 +216,10 @@ pub fn KyomiChart(
     // Driven by `ChartMLChart`'s `on_refreshed` callback after each
     // fetch + transform + render completes. On cache hits this reflects
     // when the data was originally fetched from the server, not "now".
-    let (last_refreshed, _set_last_refreshed) = signal(None::<f64>);
+    let (last_refreshed, set_last_refreshed) = signal(None::<f64>);
+    let on_refreshed_cb = Callback::new(move |ms: f64| {
+        set_last_refreshed.try_set(Some(ms));
+    });
 
     // ------------------------------------------------------------------
     // 7. Determine which header-bar features to show (parity fix #13)
@@ -374,8 +377,7 @@ pub fn KyomiChart(
                     spec=spec_signal
                     chartml=chartml
                     refresh_trigger=combined_refresh
-                    // on_refreshed omitted: Callback::run() panics on disposed StoredValue
-                    // when async chart render completes after component disposal
+                    on_refreshed=on_refreshed_cb
                 />
             </div>
         </div>
