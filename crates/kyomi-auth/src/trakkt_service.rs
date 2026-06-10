@@ -4,9 +4,8 @@
 //!
 //! Creates Trakkt issues via the REST API with full context from
 //! in-app feedback submissions. Supports screenshot upload via Trakkt's
-//! JSON attachment endpoint (`content_base64`).
+//! multipart attachment endpoint.
 
-use base64::Engine as _;
 use serde::Deserialize;
 
 // ── Hardcoded label IDs from the Kyomi workspace on Trakkt ────────────
@@ -125,23 +124,21 @@ async fn upload_screenshot(
     content_type: &str,
     issue_id: &str,
 ) -> Result<(), String> {
-    let b64 = base64::engine::general_purpose::STANDARD.encode(image_bytes);
+    let file_part = reqwest::multipart::Part::bytes(image_bytes.to_vec())
+        .file_name(filename.to_string())
+        .mime_str(content_type)
+        .map_err(|e| format!("Failed to build multipart part: {e}"))?;
 
-    let payload = serde_json::json!({
-        "content_base64": b64,
-        "filename": filename,
-        "content_type": content_type,
-        "issue_id": issue_id,
-    });
+    let form = reqwest::multipart::Form::new().part("file", file_part);
 
     let http = crate::http_client()
         .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
 
-    let url = format!("{api_url}/api/v1/attachments");
+    let url = format!("{api_url}/api/v1/attachments?issue_id={issue_id}");
     let response = http
         .post(&url)
         .bearer_auth(api_token)
-        .json(&payload)
+        .multipart(form)
         .timeout(std::time::Duration::from_secs(30))
         .send()
         .await

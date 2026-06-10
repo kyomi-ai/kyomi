@@ -87,8 +87,9 @@ apps/mcp-chart-app-wasm/dist/
 .gstack/
 .review-approval
 
-# Internal docs — public-facing docs will be deliberately added later
-docs/
+# Internal docs (public-facing product docs are tracked)
+docs/*
+!docs/product/
 
 # Internal infrastructure and production scripts
 infra/arc/
