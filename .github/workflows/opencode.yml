@@ -26,9 +26,80 @@ jobs:
               with:
                   model: openrouter/xiaomi/mimo-v2.5
                   prompt: |
-                      Review this pull request:
-                      - Check for code quality issues
-                      - Look for potential bugs
-                      - Suggest improvements
-                      - Do not repeat issues that have already been flagged in previous reviews
-                      - Do not comment with issues that are not critical or high priority
+                      You are reviewing a pull request for **Kyomi** — a Rust/Axum backend
+                      with a Leptos 0.8 WASM frontend (CSR + SSR hybrid), PostgreSQL,
+                      and Tailwind CSS. Production runs as a single self-contained binary.
+
+                      ## What to review
+
+                      Focus on CRITICAL and HIGH severity issues only. Do not comment on
+                      style nits, minor naming preferences, or low-priority suggestions.
+
+                      ### 1. Leptos signal disposal / WASM panics (most common bug class)
+                      - `spawn_local` for user-triggered mutations → must use `Action` instead
+                      - `.set()` / `.update()` inside `spawn_local`, `Closure::new`, or
+                        `set_timeout` → must use `.try_set()` / `.try_update()`
+                      - `Signal::derive` mixing Layout-scoped and page-scoped signals →
+                        page-scoped ones need `.try_get()` with fallback
+                      - `.get()` inside `<Show>` children or `ChildrenFn` closures that
+                        share scope with inputs → causes DOM rebuild and focus loss
+                      - Snapshotting a `Signal` prop into a local variable instead of
+                        deriving from it
+
+                      ### 2. SSR / Hydration safety
+                      - `Resource::new()` inside `#[cfg(target_arch = "wasm32")]` blocks →
+                        desyncs serialized resource IDs between server and client
+                      - DOM elements injected into `<body>` outside the `<App/>` tree →
+                        tachys hydration panic
+                      - Template splitting that doesn't search for `<body` after `</head>`
+
+                      ### 3. Error handling
+                      - `.ok()` or `.ok()?` discarding errors without logging → must have
+                        `.map_err(|e| warn!(...))` or `debug!(...)` before `.ok()`
+                      - Unwrap patterns (`unwrap()`, `expect()`) in non-test code
+
+                      ### 4. Server function anti-patterns
+                      - `use_context::<T>()` / `expect_context::<T>()` in server functions
+                        for types other than `ServerContext`, `AuthUser`, `ResponseOptions`
+                      - Server functions calling HTTP endpoints on localhost (loopback) →
+                        must call service-layer functions directly
+                      - Server functions with >3 service-layer callouts (orchestration
+                        divergence risk)
+
+                      ### 5. Security
+                      - Secrets, API keys, or credentials hardcoded or logged
+                      - SQL injection vectors (raw queries without parameterization)
+                      - Missing authentication/authorization checks on new endpoints
+                      - `unsafe` blocks without clear justification
+
+                      ### 6. Lint suppression policy
+                      - Any new `#[allow(...)]` in `.rs` files or `= "allow"` in Cargo.toml
+                        → this is a CI-blocking violation, flag as CRITICAL
+
+                      ### 7. String safety
+                      - Byte-slicing strings (`&str[..N]`) for truncation → must use
+                        `.chars().take(N).collect::<String>()` to avoid panics on non-ASCII
+
+                      ### 8. Concurrency / async
+                      - Missing `action.pending()` double-dispatch guard on user-triggered
+                        actions → double-click race conditions
+                      - `Effect::new` that re-fetches data but doesn't reset stale state
+                        before the new fetch completes
+
+                      ### 9. Dependency changes
+                      - New dependencies that duplicate existing ones (check Cargo.toml first)
+                      - Version bumps on critical crates (axum, leptos, sqlx, tokio) without
+                        noting breaking changes
+
+                      ## What NOT to flag
+                      - Formatting or style preferences (CI enforces clippy + rustfmt)
+                      - Low-priority suggestions that don't affect correctness or safety
+                      - Issues already present in unchanged code (review only the diff)
+                      - Missing tests unless the change is a bug fix that should have a
+                        regression test
+
+                      ## Output format
+                      - Use inline comments on the specific file and line
+                      - Prefix severity: `[CRITICAL]` for must-fix-before-merge,
+                        `[HIGH]` for should-fix
+                      - If no issues found, leave a brief approval comment
