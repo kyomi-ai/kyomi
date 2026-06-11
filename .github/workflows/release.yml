@@ -57,6 +57,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     env:
       SCCACHE_GHA_ENABLED: "true"
+      KYOMI_MODEL_BASE_URL: https://github.com/kyomi-ai/kyomi-models/releases/download/bge-small-en-v1.5
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -212,6 +213,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     env:
       SCCACHE_GHA_ENABLED: "true"
+      KYOMI_MODEL_BASE_URL: https://github.com/kyomi-ai/kyomi-models/releases/download/bge-small-en-v1.5
     steps:
       - name: Checkout code
         uses: actions/checkout@v4

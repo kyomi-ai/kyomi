@@ -8,7 +8,11 @@
 use std::path::Path;
 use std::process::Command;
 
-const BASE_URL: &str = "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main";
+const DEFAULT_BASE_URL: &str = "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main";
+
+fn base_url() -> String {
+    std::env::var("KYOMI_MODEL_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.into())
+}
 
 /// Files to download: (remote_path, local_filename)
 const MODEL_FILES: &[(&str, &str)] = &[
@@ -22,8 +26,10 @@ const MODEL_FILES: &[(&str, &str)] = &[
 fn main() {
     // Only re-run if build.rs itself changes — model files don't change
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=KYOMI_MODEL_BASE_URL");
 
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
+    let base = base_url();
 
     for &(remote_path, local_name) in MODEL_FILES {
         let dest = Path::new(&out_dir).join(local_name);
@@ -34,7 +40,7 @@ fn main() {
             continue;
         }
 
-        let url = format!("{BASE_URL}/{remote_path}");
+        let url = format!("{base}/{remote_path}");
         println!("cargo:warning=Downloading {local_name} from {url}");
 
         let status = Command::new("curl")
