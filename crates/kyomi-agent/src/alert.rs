@@ -368,9 +368,23 @@ async fn send_watch_alert_emails(
 /// Maximum number of charts to render for a single email.
 const MAX_EMAIL_CHARTS: usize = 3;
 
-/// Email chart render dimensions (px).
+/// Email chart render dimensions (CSS px). The `<img>` displays at this
+/// size; the bitmap is rendered at [`EMAIL_CHART_DENSITY`] for sharpness.
 const EMAIL_CHART_WIDTH: u32 = 600;
 const EMAIL_CHART_HEIGHT: u32 = 350;
+
+/// Render density in DPI. 144 = 2x the 72 DPI CSS-pixel baseline, so the
+/// PNG has double the pixels of its display size and stays crisp on
+/// high-DPI (retina) screens.
+const EMAIL_CHART_DENSITY: u32 = 144;
+
+/// Chart canvas fill for each color scheme. These MUST match the email
+/// template's `.content-card` background colors (light default and the
+/// `@media (prefers-color-scheme: dark)` override in
+/// [`build_watch_alert_email`]) — the chart PNG sits on that card and the
+/// canvas should disappear into it.
+const EMAIL_CARD_LIGHT_RGB: [u8; 3] = [0xFF, 0xFF, 0xFF]; // .content-card #ffffff
+const EMAIL_CARD_DARK_RGB: [u8; 3] = [0x24, 0x20, 0x1E]; // .content-card dark #24201E
 
 /// Regex to capture the *content* inside ` ```chartml ... ``` ` fenced blocks.
 static RE_CHARTML_CAPTURE: LazyLock<regex::Regex> = LazyLock::new(|| {
@@ -466,31 +480,48 @@ async fn process_message_for_email(
             };
 
             // Render the chart to PNG via chartml-rs (Rust-native, no HTTP).
-            match chartml_factory::render_chart_to_png(
+            // Two variants: light (shown by default) and dark (swapped in by
+            // the template's prefers-color-scheme media query). Each canvas
+            // matches the content-card surface it sits on.
+            match chartml_factory::render_chart_to_png_on_surface(
                 &resolved_yaml,
                 EMAIL_CHART_WIDTH,
                 EMAIL_CHART_HEIGHT,
-                72, // standard DPI for email
+                EMAIL_CHART_DENSITY,
                 Some(&user_palette),
+                false,
+                EMAIL_CARD_LIGHT_RGB,
             ).await {
-                Ok(png_bytes) => {
-                    let cid = format!(
-                        "chart_{}_{}", idx, &uuid::Uuid::new_v4().to_string()[..8]
-                    );
-                    let img_html = format!(
-                        concat!(
-                            r#"<div style="margin: 20px 0; text-align: center;">"#,
-                            r#"<img src="cid:{cid}" alt="{title}" "#,
-                            r#"style="max-width: 100%; height: auto; border-radius: 8px; "#,
-                            r#"box-shadow: 0 2px 8px rgba(0,0,0,0.1);">"#,
-                            r#"<p class="attribution" style="font-size: 12px; margin-top: 8px;">{title}</p>"#,
-                            r#"</div>"#,
-                        ),
-                        cid = cid,
-                        title = chart_title,
-                    );
+                Ok(light_png) => {
+                    let uid = &uuid::Uuid::new_v4().to_string()[..8];
+                    let cid_light = format!("chart_{idx}_light_{uid}");
+
+                    // The dark variant is an enhancement — if it fails, the
+                    // email still goes out with the light chart only.
+                    let cid_dark = match chartml_factory::render_chart_to_png_on_surface(
+                        &resolved_yaml,
+                        EMAIL_CHART_WIDTH,
+                        EMAIL_CHART_HEIGHT,
+                        EMAIL_CHART_DENSITY,
+                        Some(&user_palette),
+                        true,
+                        EMAIL_CARD_DARK_RGB,
+                    ).await {
+                        Ok(dark_png) => {
+                            let cid = format!("chart_{idx}_dark_{uid}");
+                            images.push((cid.clone(), dark_png));
+                            Some(cid)
+                        }
+                        Err(e) => {
+                            warn!(error = %e, chart_idx = idx, "Failed to render dark chart variant for email — sending light only");
+                            None
+                        }
+                    };
+
+                    let img_html =
+                        build_chart_img_html(&cid_light, cid_dark.as_deref(), chart_title);
                     processed.replace_range(range.clone(), &img_html);
-                    images.push((cid, png_bytes));
+                    images.push((cid_light, light_png));
                 }
                 Err(e) => {
                     warn!(error = %e, chart_idx = idx, "Failed to render chart for email");
@@ -512,6 +543,57 @@ async fn process_message_for_email(
     let html = markdown_to_simple_html(&processed);
 
     (html, images)
+}
+
+/// Build the inline HTML for a rendered email chart.
+///
+/// Emits a light `<img>` (shown by default) and, when a dark render is
+/// available, a hidden dark `<img>` that the template's
+/// `@media (prefers-color-scheme: dark)` block swaps in (`.chart-light` /
+/// `.chart-dark` rules in [`build_watch_alert_email`]). Clients without
+/// media-query support only ever show the light chart — matching the rest
+/// of the email, which also stays light there.
+///
+/// The dark variant is wrapped in `<!--[if !mso]><!-- -->` so classic
+/// Outlook (Word engine), which ignores `display: none` on images, never
+/// parses it. `mso-hide: all` plus `max-height: 0; overflow: hidden` cover
+/// the remaining clients that ignore `display: none` alone.
+///
+/// The whole block stays on ONE line — [`markdown_to_simple_html`] runs
+/// after injection and converts newlines to `<br>`/`</p><p>`.
+///
+/// `width="600"` pins the display size: the PNG is rendered at 2x density
+/// ([`EMAIL_CHART_DENSITY`]) and downsampling keeps it crisp on high-DPI
+/// screens.
+fn build_chart_img_html(cid_light: &str, cid_dark: Option<&str>, title: &str) -> String {
+    let title = escape_html(title);
+    let w = EMAIL_CHART_WIDTH;
+    let img_style =
+        format!("width: 100%; max-width: {w}px; height: auto; border-radius: 8px;");
+
+    let light_img = format!(
+        r#"<div class="chart-light"><img src="cid:{cid_light}" alt="{title}" width="{w}" style="{img_style} box-shadow: 0 2px 8px rgba(0,0,0,0.1);"></div>"#
+    );
+
+    let dark_img = match cid_dark {
+        Some(cid) => format!(
+            r#"<!--[if !mso]><!--><div class="chart-dark" style="display: none; max-height: 0; overflow: hidden; mso-hide: all;"><img src="cid:{cid}" alt="{title}" width="{w}" style="{img_style}"></div><!--<![endif]-->"#
+        ),
+        None => String::new(),
+    };
+
+    format!(
+        r#"<div style="margin: 20px 0; text-align: center;">{light_img}{dark_img}<p class="attribution" style="font-size: 12px; margin-top: 8px;">{title}</p></div>"#
+    )
+}
+
+/// Minimal HTML escape for text interpolated into the email body and
+/// attribute values (chart titles come from user-authored ChartML specs).
+fn escape_html(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 // ---------------------------------------------------------------------------
@@ -696,6 +778,11 @@ fn build_watch_alert_email(
             tbody tr {{ background-color: #1A1715 !important; }}
             .attribution {{ color: #78716C !important; }}
             .badge {{ background: #2E2925 !important; color: #F5F3EF !important; }}
+            /* Swap chart variants: images can't restyle themselves, so a
+               dark-canvas render replaces the light one. Built in
+               build_chart_img_html; canvas colors in EMAIL_CARD_*_RGB. */
+            .chart-light {{ display: none !important; }}
+            .chart-dark {{ display: block !important; max-height: none !important; overflow: visible !important; }}
         }}
     </style>
 </head>
@@ -1346,6 +1433,69 @@ mod tests {
     }
 
     #[test]
+    fn email_dark_mode_chart_swap_rules_present() {
+        let (_, html) = build_watch_alert_email(
+            "user@example.com",
+            "Watch",
+            "Alert",
+            "Message",
+            1,
+            "https://app.kyomi.ai",
+            None,
+            WatchMode::Alert,
+        );
+        // The chart variant swap rules live inside the dark media query so
+        // charts follow the same client support matrix as the rest of the
+        // email's dark styling.
+        let dark_block = html
+            .split("@media (prefers-color-scheme: dark)")
+            .nth(1)
+            .expect("dark media query present");
+        assert!(dark_block.contains(".chart-light { display: none !important; }"));
+        assert!(dark_block.contains(".chart-dark { display: block !important;"));
+    }
+
+    #[test]
+    fn chart_img_html_dual_variant() {
+        let html = build_chart_img_html("chart_0_light_abc123", Some("chart_0_dark_abc123"), "Revenue");
+        // Light variant visible by default, dark variant hidden until the
+        // media query swaps them.
+        assert!(html.contains(r#"<div class="chart-light"><img src="cid:chart_0_light_abc123""#));
+        assert!(html.contains(r#"<div class="chart-dark" style="display: none; max-height: 0; overflow: hidden; mso-hide: all;"#));
+        assert!(html.contains("cid:chart_0_dark_abc123"));
+        // Classic Outlook (Word engine) ignores display:none on images — the
+        // conditional comment hides the dark variant from it entirely.
+        assert!(html.contains("<!--[if !mso]><!-->"));
+        assert!(html.contains("<!--<![endif]-->"));
+        // 2x-density bitmap pinned to its CSS display size.
+        assert!(html.contains(r#"width="600""#));
+        assert!(html.contains("max-width: 600px"));
+        // markdown_to_simple_html converts newlines to <br> — the block must
+        // stay on one line to survive that pass.
+        assert!(!html.contains('\n'));
+        assert!(html.contains(">Revenue</p>"));
+    }
+
+    #[test]
+    fn chart_img_html_light_only_fallback() {
+        let html = build_chart_img_html("chart_1_light_def456", None, "Orders");
+        assert!(html.contains("cid:chart_1_light_def456"));
+        assert!(!html.contains("chart-dark"));
+        assert!(!html.contains("[if !mso]"));
+    }
+
+    #[test]
+    fn chart_img_html_escapes_title() {
+        let html = build_chart_img_html(
+            "chart_0_light_aaa",
+            None,
+            r#"Q1 "Revenue" <by> Region & Channel"#,
+        );
+        assert!(html.contains("Q1 &quot;Revenue&quot; &lt;by&gt; Region &amp; Channel"));
+        assert!(!html.contains(r#"alt="Q1 "Revenue""#));
+    }
+
+    #[test]
     fn email_color_scheme_meta_tag_includes_dark() {
         let (_, html) = build_watch_alert_email(
             "user@example.com",
@@ -1520,3 +1670,4 @@ mod tests {
         assert_eq!(MAX_EMAIL_CHARTS, 3);
     }
 }
+
