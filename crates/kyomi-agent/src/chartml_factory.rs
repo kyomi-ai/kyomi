@@ -47,9 +47,11 @@ fn ensure_fonts_registered() {
 /// snapshots, MCP chart app, watches alerts) should use this factory so
 /// chart chrome matches the dashboard viewer's browser rendering.
 ///
-/// PDF and email snapshots are always rendered in light mode — print
-/// media and email clients don't have a meaningful dark-mode preference
-/// we can read at render time, and light-on-light is the safe default.
+/// PDF snapshots are always rendered in light mode — print media has no
+/// dark-mode preference. Email renders BOTH variants (the recipient's
+/// preference is unknowable at render time) and the template's
+/// `prefers-color-scheme` CSS swaps them client-side — see
+/// [`render_chart_to_png_on_surface`] and `alert::build_chart_img_html`.
 pub fn create_chartml() -> ChartML {
     create_chartml_with_theme(kyomi_theme(false))
 }
@@ -103,6 +105,53 @@ pub async fn render_chart_to_png(
     density: u32,
     palette: Option<&[String]>,
 ) -> Result<Vec<u8>, String> {
+    render_async(
+        yaml,
+        width,
+        height,
+        density,
+        palette,
+        kyomi_theme(false),
+        [255, 255, 255],
+    )
+    .await
+}
+
+/// Render a ChartML spec to PNG for placement on a specific surface color.
+///
+/// Like [`render_chart_to_png`], but selects the light or dark Kyomi chart
+/// chrome and fills the canvas with `surface` instead of white. The theme's
+/// `bg` (used for separator strokes — dot halos, pie slice gaps, stacked bar
+/// segment borders) is overridden to the same color so those strokes
+/// visually disappear into the canvas.
+///
+/// Used by the email path to render a dark-mode chart variant that blends
+/// into the email's dark content card.
+pub async fn render_chart_to_png_on_surface(
+    yaml: &str,
+    width: u32,
+    height: u32,
+    density: u32,
+    palette: Option<&[String]>,
+    dark: bool,
+    surface: [u8; 3],
+) -> Result<Vec<u8>, String> {
+    let mut theme = kyomi_theme(dark);
+    theme.bg = format!("#{:02X}{:02X}{:02X}", surface[0], surface[1], surface[2]);
+    render_async(yaml, width, height, density, palette, theme, surface).await
+}
+
+/// Shared async render pipeline: palette injection, font registration, and
+/// spawn-blocking rasterization with an explicit theme + canvas background.
+async fn render_async(
+    yaml: &str,
+    width: u32,
+    height: u32,
+    density: u32,
+    palette: Option<&[String]>,
+    theme: Theme,
+    background: [u8; 3],
+) -> Result<Vec<u8>, String> {
     ensure_fonts_registered();
 
     // If a palette is provided, inject it into the spec's style.colors.
@@ -116,9 +165,11 @@ pub async fn render_chart_to_png(
     // Rasterization (SVG parse → tiny-skia → PNG encode) is CPU-bound and
     // synchronous — offload it to the blocking thread pool.
     tokio::task::spawn_blocking(move || {
-        let chartml = create_chartml();
-        chartml_render::render_to_png(&chartml, &final_yaml, width, height, density)
-            .map_err(|e| format!("Chart rendering failed: {e}"))
+        let chartml = create_chartml_with_theme(theme);
+        chartml_render::render_to_png_with_background(
+            &chartml, &final_yaml, width, height, density, background,
+        )
+        .map_err(|e| format!("Chart rendering failed: {e}"))
     })
     .await
     .map_err(|e| format!("Chart rendering panicked: {e}"))?
@@ -190,3 +241,4 @@ fn inject_palette(yaml: &str, palette: &[String]) -> String {
 
     serde_yaml::to_string(&value).unwrap_or_else(|_| yaml.to_string())
 }
+

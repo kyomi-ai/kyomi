@@ -143,7 +143,8 @@ kyomi-datasource-drivers = { version = "1.4", package = "kyomi-datasource" }
 # END_LOCAL_DEV_PATCHES). The Dockerfile strips that block before
 # `cargo build`, so production always resolves against the registry.
 chartml-core = { version = "5", features = ["wasm-indexeddb"] }
-chartml-render = "5"
+# 5.1 minimum: render_to_png_with_background (email dark-mode charts).
+chartml-render = "5.1"
 chartml-chart-cartesian = "5"
 chartml-chart-pie = "5"
 chartml-chart-scatter = "5"
