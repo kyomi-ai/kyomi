@@ -24,3 +24,10 @@ jobs:
                   OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
               with:
                   model: openrouter/xiaomi/mimo-v2.5
+                  prompt: |
+                      Review this pull request:
+                      - Check for code quality issues
+                      - Look for potential bugs
+                      - Suggest improvements
+                      - Do not repeat issues that have already been flagged in previous reviews
+                      - Do not comment with issues that are not critical or high priority
