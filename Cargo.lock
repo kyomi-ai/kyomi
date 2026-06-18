@@ -1554,9 +1554,9 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "chartml-chart-cartesian"
-version = "5.0.8"
+version = "5.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f92ad9b0d8bf340f4a945fc6d6b3330353fe070f9c4a20623394e2523d9938ad"
+checksum = "ee41090c888fde287fd5ed4ccf72786049b8789331c94321fdc68ab2f51800c9"
 dependencies = [
  "chartml-core",
  "indexmap 2.14.0",
@@ -1601,9 +1601,9 @@ dependencies = [
 
 [[package]]
 name = "chartml-core"
-version = "5.1.8"
+version = "5.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eb86240535b88e74e7b34423c97f661297b1d2d3c8522120b2d7197ff5c7ab7f"
+checksum = "036cd199bb037d7fce38bebf89aec57bd1f59260f2b9a469ed7f633f0117d714"
 dependencies = [
  "arrow",
  "async-trait",
@@ -5105,7 +5105,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -8543,7 +8543,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.40",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -8580,7 +8580,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.59.0",
 ]
@@ -13179,7 +13179,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
