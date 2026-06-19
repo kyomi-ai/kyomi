@@ -2,6 +2,7 @@
 
 //! Chat components — WebSocket client, state machine, thinking events, message rendering, input, etc.
 
+pub mod agent_message_body;
 pub mod agent_thinking;
 pub mod chat_engine;
 pub mod chat_input;
@@ -12,6 +13,7 @@ pub mod thinking;
 pub mod tool_schema_renderer;
 pub mod websocket_client;
 
+pub use agent_message_body::AgentMessageBody;
 pub use agent_thinking::AgentThinking;
 pub use chat_engine::{ChatEngine, ChatEngineConfig, SessionMode};
 pub use chat_input::ChatInput;

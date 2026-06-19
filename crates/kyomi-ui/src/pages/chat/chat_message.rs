@@ -12,8 +12,7 @@
 
 use leptos::prelude::*;
 use phosphor_leptos::Icon;
-use crate::components::chat::{AgentThinking, ThinkingState};
-use crate::components::dashboard::MarkdownRenderer;
+use crate::components::chat::{AgentMessageBody, ThinkingState};
 use crate::components::Tooltip;
 use crate::server_fns::chat::{ChatMessageItem, SessionDetail};
 
@@ -157,38 +156,28 @@ pub fn ChatMessage(
     } else {
         // ── Assistant message — full width ───────────────────────────────
 
-        // Determine whether to show the AgentThinking panel.
-        // Matches React logic: show if we have thinking data OR this is the active streaming message.
-        let message_id_for_show_thinking = message_id_for_thinking.clone();
-        let should_show_thinking = move || {
-            let Some(ts) = thinking_state.try_get() else { return false };
-            let has_thinking_data = !ts.events.is_empty();
-            let is_active_message = is_streaming.try_get().unwrap_or(false)
-                && active_message_id.try_get().flatten().as_deref() == Some(&message_id_for_show_thinking);
-            has_thinking_data || is_active_message
-        };
-
-        let thinking_events_signal = Signal::derive({
-            let stored = stored_thinking_events.clone();
+        // Thinking state signal that merges stored (DB) events with live streaming events.
+        let merged_thinking_state = Signal::derive({
+            let stored_events = stored_thinking_events.clone();
+            let stored_usage = stored_token_usage.clone();
             move || {
-                let Some(live) = thinking_state.try_get() else { return stored.clone() };
-                if !live.events.is_empty() {
-                    live.events.clone()
-                } else {
-                    stored.clone()
+                let Some(live) = thinking_state.try_get() else {
+                    return ThinkingState {
+                        events: stored_events.clone(),
+                        token_usage: stored_usage.clone(),
+                        ..Default::default()
+                    };
+                };
+                ThinkingState {
+                    events: if !live.events.is_empty() {
+                        live.events.clone()
+                    } else {
+                        stored_events.clone()
+                    },
+                    token_usage: live.token_usage.clone().or_else(|| stored_usage.clone()),
+                    is_active: live.is_active,
+                    cancelled: live.cancelled,
                 }
-            }
-        });
-
-        let thinking_is_active_signal = Signal::derive(move || {
-            thinking_state.try_get().map(|ts| ts.is_active).unwrap_or(false)
-        });
-
-        let thinking_token_usage = Signal::derive({
-            let stored = stored_token_usage.clone();
-            move || {
-                let Some(live) = thinking_state.try_get() else { return stored.clone() };
-                live.token_usage.clone().or_else(|| stored.clone())
             }
         });
 
@@ -203,15 +192,22 @@ pub fn ChatMessage(
                 && active_message_id.try_get().flatten().as_deref() == Some(&msg_id_for_streaming)
         });
 
+        // force_show_thinking: true when this is the active streaming message but
+        // no thinking events have arrived yet (timer must start immediately).
+        let message_id_for_force = message_id_for_thinking.clone();
+        let force_show_thinking = Signal::derive(move || {
+            is_streaming.try_get().unwrap_or(false)
+                && active_message_id.try_get().flatten().as_deref() == Some(&message_id_for_force)
+        });
+
         let ts_display_assistant = StoredValue::new(format_relative_time(&message_timestamp));
         let sender_name_footer = StoredValue::new(sender_name_footer);
         // Store String values so they can be accessed by Fn closures (not FnOnce).
         let message_id_for_pin = StoredValue::new(message_id_for_pin);
         let message_content_for_save = StoredValue::new(message_content_for_save);
 
-        // Clones needed inside closures.
+        // Clone needed inside footer closure.
         let message_content_for_footer = message_content.clone();
-        let message_content_for_show = message_content.clone();
 
         view! {
             <div class="flex flex-col items-start">
@@ -219,23 +215,14 @@ pub fn ChatMessage(
                     id=format!("message-{}", message.message_id)
                     class="w-full px-6 py-4 bg-card border border-border rounded-2xl shadow-sm overflow-hidden"
                 >
-                    <Show when=should_show_thinking>
-                        <AgentThinking
-                            thinking_events=thinking_events_signal
-                            is_active=thinking_is_active_signal
-                            token_usage=thinking_token_usage
-                            message_id=Signal::stored(message_id_for_thinking.clone())
-                        />
-                    </Show>
-
-                    <Show when=move || !message_content_for_show.is_empty()>
-                        <MarkdownRenderer
-                            content=content_signal
-                            is_streaming=is_streaming_this_msg
-                            on_chart_info=on_show_chart_info
-                            class="prose-kyomi-chat"
-                        />
-                    </Show>
+                    <AgentMessageBody
+                        message_id=Signal::stored(message_id_for_thinking.clone())
+                        content=content_signal
+                        thinking_state=merged_thinking_state
+                        is_streaming=is_streaming_this_msg
+                        force_show_thinking=force_show_thinking
+                        on_chart_info=on_show_chart_info
+                    />
                 </div>
 
                 // Footer: sender · timestamp on left, pin + save-to-dashboard on right.
