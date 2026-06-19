@@ -11,10 +11,10 @@
 
 use leptos::prelude::*;
 
+use super::agent_message_body::AgentMessageBody;
 use super::chat_engine::{ChatEngine, ChatEngineConfig, SessionMode};
 use super::websocket_client::WebSocketContext;
-use super::{AgentThinking, ChatInput};
-use crate::components::dashboard::MarkdownRenderer;
+use super::ChatInput;
 use crate::components::{EmptyState, Spinner};
 
 // ─── Main component ────────────────────────────────────────────────────────
@@ -168,36 +168,57 @@ pub fn CopilotChat(
                     }}
                 </Show>
 
-                // Messages
-                {move || {
-                    let msgs = messages.get();
-
-                    msgs.iter().map(|msg| {
+                // Messages — keyed <For> so each message component is stable across
+                // streaming chunks. AgentThinking mounts once per message and updates
+                // reactively via Signal props, preventing timer resets.
+                <For
+                    each=move || messages.get()
+                    key=|msg| msg.message_id.clone()
+                    children=move |msg| {
                         let is_user = msg.message_type == "user";
                         let content = msg.content.clone();
                         let msg_id = msg.message_id.clone();
 
-                        // Per-message thinking derived signals — created outside any
-                        // conditional or <Show> block so no .get() calls happen inside
-                        // children closures, preventing parent scope re-subscription.
-                        // Clone `thinking` for this iteration so the outer map closure
-                        // remains FnMut (each iteration needs its own owned copy).
+                        // Per-message thinking derived signals — created inside the For
+                        // child closure but outside any nested closures so they are
+                        // stable reactive nodes tied to this message's scope.
                         let thinking_for_msg = thinking.clone();
                         let msg_thinking = Signal::derive({
                             let mid = msg_id.clone();
-                            move || thinking_for_msg.state().get().get(&mid).cloned().unwrap_or_default()
+                            move || {
+                                thinking_for_msg
+                                    .state()
+                                    .get()
+                                    .get(&mid)
+                                    .cloned()
+                                    .unwrap_or_default()
+                            }
                         });
-                        let has_thinking = Signal::derive(move || !msg_thinking.get().events.is_empty());
-                        let thinking_events_sig = Signal::derive(move || msg_thinking.get().events.clone());
-                        let thinking_active_sig = Signal::derive(move || msg_thinking.get().is_active);
-                        let thinking_token_usage_signal = Signal::derive(move || msg_thinking.get().token_usage.clone());
+                        // Copilot does not merge stored DB events — the engine only
+                        // carries live ephemeral session messages, so `thinking_state`
+                        // IS the source of truth. No stored/live merge needed here.
+                        // msg_thinking is already Signal<ThinkingState> — pass it directly.
 
-                        // Clone content for the action slot and markdown renderer.
-                        let content_for_action = content.clone();
-                        let content_for_render = content.clone();
+                        // Content must be derived reactively from `messages` keyed by
+                        // `msg_id`. The <For> children closure runs only once per new
+                        // message (on DiffOpAdd), so a static `content.clone()` would
+                        // capture the initial empty string and never update during streaming.
+                        let content_signal = Signal::derive({
+                            let mid = msg_id.clone();
+                            move || {
+                                messages
+                                    .get()
+                                    .into_iter()
+                                    .find(|m| m.message_id == mid)
+                                    .map(|m| m.content.clone())
+                                    .unwrap_or_default()
+                            }
+                        });
 
-                        // Derive streaming signal from thinking state for MarkdownRenderer.
-                        let is_streaming_for_md = Signal::derive(move || msg_thinking.get().is_active);
+                        // Copilot uses `is_active` from thinking state as the streaming
+                        // indicator — same logic as the original unkeyed map.
+                        let is_streaming_sig =
+                            Signal::derive(move || msg_thinking.get().is_active);
 
                         view! {
                             <div class=if is_user { "flex justify-end" } else { "flex justify-start" }>
@@ -206,52 +227,41 @@ pub fn CopilotChat(
                                 } else {
                                     "bg-card border border-border rounded-2xl shadow-sm p-4 max-w-[85%] overflow-hidden"
                                 }>
-                                    // Agent thinking panel — shown for assistant messages with thinking events.
-                                    // AgentThinking is created once and reactively updates via Signal props —
-                                    // no component destruction/recreation on each thinking state change.
-                                    <Show when=move || has_thinking.get()>
-                                        <div class="mb-2">
-                                            <AgentThinking
-                                                thinking_events=thinking_events_sig
-                                                is_active=thinking_active_sig
-                                                token_usage=thinking_token_usage_signal
-                                            />
-                                        </div>
-                                    </Show>
-
-                                    // Message content
                                     {if is_user {
                                         // User messages: plain text
                                         view! {
                                             <p class="text-sm whitespace-pre-wrap">{content}</p>
                                         }.into_any()
-                                    } else if !content_for_render.is_empty() {
-                                        // Assistant messages: markdown rendering
-                                        let content_signal = Signal::derive({
-                                            let c = content_for_render.clone();
-                                            move || c.clone()
-                                        });
+                                    } else {
+                                        // Assistant messages: AgentMessageBody with optional action slot.
+                                        // The action slot (e.g. "Apply to Dashboard") receives content
+                                        // reactively — the render_fn is called inside a closure that
+                                        // re-runs when content_signal changes, so it sees final content.
+                                        let action_view = assistant_action_stored
+                                            .try_get_value()
+                                            .flatten()
+                                            .map(|render_fn| {
+                                                view! {
+                                                    {move || render_fn(content_signal.get())}
+                                                }
+                                            });
 
                                         view! {
-                                            <MarkdownRenderer content=content_signal is_streaming=is_streaming_for_md class="prose-kyomi-chat" />
+                                            <AgentMessageBody
+                                                message_id=Signal::stored(msg_id)
+                                                content=content_signal
+                                                thinking_state=msg_thinking
+                                                is_streaming=is_streaming_sig
+                                            >
+                                                {action_view}
+                                            </AgentMessageBody>
                                         }.into_any()
-                                    } else {
-                                        // Empty assistant message (thinking in progress)
-                                        ().into_any()
                                     }}
-
-                                    // Optional per-assistant-message action slot
-                                    {(!is_user).then(move || {
-                                        let action = assistant_action_stored.try_get_value().flatten();
-                                        action.map(|render_fn| {
-                                            render_fn(content_for_action.clone())
-                                        })
-                                    })}
                                 </div>
                             </div>
                         }
-                    }).collect_view()
-                }}
+                    }
+                />
 
                 // Loading spinner — shown when waiting for first thinking event
                 <Show when=move || chat_state.is_sending.get()>
