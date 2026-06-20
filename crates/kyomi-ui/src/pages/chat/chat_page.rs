@@ -1844,7 +1844,7 @@ pub fn ChatPage() -> impl IntoView {
                                     // creating reactive signals inside a non-reactive closure,
                                     // which caused "disposed reactive value" WASM panics.
                                     view! {
-                                        <div class="w-full max-w-full space-y-6" style="display: block;">
+                                        <div class="w-full max-w-6xl mx-auto space-y-6" style="display: block;">
                                             <For
                                                 each=move || filtered_messages.get()
                                                 key=|msg| msg.message_id.clone()

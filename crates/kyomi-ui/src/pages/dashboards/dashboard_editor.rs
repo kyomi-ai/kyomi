@@ -1148,7 +1148,7 @@ fn DashboardEditorInner(
                                     // Source/Visual `move ||` closure), so no per-mode wrapper
                                     // is needed here.
                                     <div class="flex-1 min-h-0 overflow-y-auto flex flex-col">
-                                        <div class="dashboard-content p-6 flex-1">
+                                        <div class="dashboard-content p-6 flex-1 w-full max-w-6xl mx-auto">
                                             <MarkdownRenderer
                                                 content=effective_preview
                                                 chart_palette=chart_palette.get_untracked().unwrap_or_else(|| "kyomi".to_string())
@@ -1246,7 +1246,7 @@ fn DashboardEditorInner(
                         // `use_context` — no per-mode re-registration required.
                         view! {
                             <div class="flex flex-1 min-h-0 overflow-hidden dashboard-wysiwyg">
-                                <div class="flex-1 min-h-0 overflow-hidden">
+                                <div class="flex-1 min-h-0 overflow-hidden w-full max-w-6xl mx-auto">
                                     <DashboardWysiwygEditor
                                         content=effective_editor_content
                                         on_change=on_editor_change.clone()

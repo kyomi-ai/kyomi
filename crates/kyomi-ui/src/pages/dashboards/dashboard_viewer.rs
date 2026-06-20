@@ -1113,7 +1113,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                             }
                                         })}
 
-                                        <div class="dashboard-content min-h-full">
+                                        <div class="dashboard-content min-h-full w-full max-w-6xl mx-auto">
                                             // Preview banner
                                             {move || preview_content.get().is_some().then(|| {
                                                 view! {
