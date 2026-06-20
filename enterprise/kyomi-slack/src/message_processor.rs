@@ -53,6 +53,10 @@ const CHART_WIDTH: u32 = 800;
 /// Default chart render height (px).
 const CHART_HEIGHT: u32 = 400;
 
+/// Chart render density (2× for retina sharpness on high-DPI displays;
+/// matches the email path's EMAIL_CHART_DENSITY).
+const CHART_DENSITY: u32 = 144;
+
 /// Marker for the first valid markdown table.
 const TABLE_MARKER: &str = "<<<SLACK_TABLE>>>";
 
@@ -266,7 +270,7 @@ pub async fn process_and_build_slack_blocks(
 
             // Render via chartml-rs (Rust-native, no HTTP)
             match kyomi_agent::chartml_factory::render_chart_to_png(
-                &resolved_yaml, CHART_WIDTH, CHART_HEIGHT, 72, Some(&user_palette),
+                &resolved_yaml, CHART_WIDTH, CHART_HEIGHT, CHART_DENSITY, Some(&user_palette),
             ).await {
                 Ok(png_bytes) => {
                     let filename = format!(
