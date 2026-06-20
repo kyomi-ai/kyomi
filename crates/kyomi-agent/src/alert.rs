@@ -586,7 +586,7 @@ fn build_chart_img_html(cid_light: &str, cid_dark: Option<&str>, title: &str) ->
     };
 
     format!(
-        r#"<div style="margin: 20px 0; text-align: center;">{light_img}{dark_img}<p class="attribution" style="font-size: 12px; margin-top: 8px;">{title}</p></div>"#
+        r#"<table role="presentation" align="center" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin: 20px 0;"><tr><td align="center">{light_img}{dark_img}<p class="attribution" style="font-size: 12px; margin-top: 8px;">{title}</p></td></tr></table>"#
     )
 }
 
@@ -1477,6 +1477,11 @@ mod tests {
         // stay on one line to survive that pass.
         assert!(!html.contains('\n'));
         assert!(html.contains(">Revenue</p>"));
+        // Centered via a bulletproof-email table (Apple Mail ignores text-align
+        // on the oversized 2x cid: PNG attachment — KYO-117).
+        assert!(html.contains(r#"<table role="presentation" align="center""#));
+        assert!(html.contains(r#"<td align="center">"#));
+        assert!(!html.contains("text-align: center"));
     }
 
     #[test]
