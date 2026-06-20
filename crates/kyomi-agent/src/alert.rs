@@ -423,8 +423,11 @@ async fn process_message_for_email(
         .collect();
 
     if !blocks.is_empty() {
-        // Get user's palette preference for chart rendering.
-        let user_palette = chart_palettes::get_user_palette(&query_ctx.db, &query_ctx.user_id).await;
+        // Get user's palette preference for chart rendering. The email path
+        // renders both a light and a dark variant, so we materialize both
+        // color lists from a single DB lookup here.
+        let (light_palette, dark_palette) =
+            chart_palettes::get_user_palette_light_dark(&query_ctx.db, &query_ctx.user_id).await;
 
         // Process blocks in reverse order so byte offsets stay valid after replacements.
         for (idx, (range, yaml_content)) in blocks.iter().enumerate().rev() {
@@ -488,7 +491,7 @@ async fn process_message_for_email(
                 EMAIL_CHART_WIDTH,
                 EMAIL_CHART_HEIGHT,
                 EMAIL_CHART_DENSITY,
-                Some(&user_palette),
+                Some(&light_palette),
                 false,
                 EMAIL_CARD_LIGHT_RGB,
             ).await {
@@ -503,7 +506,7 @@ async fn process_message_for_email(
                         EMAIL_CHART_WIDTH,
                         EMAIL_CHART_HEIGHT,
                         EMAIL_CHART_DENSITY,
-                        Some(&user_palette),
+                        Some(&dark_palette),
                         true,
                         EMAIL_CARD_DARK_RGB,
                     ).await {
