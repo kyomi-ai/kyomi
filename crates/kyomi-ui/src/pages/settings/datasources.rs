@@ -814,6 +814,7 @@ const PROVIDER_TYPES: &[(&str, &str)] = &[
     ("clickhouse", "ClickHouse"),
     ("snowflake", "Snowflake"),
     ("databricks", "Databricks"),
+    ("redshift", "Amazon Redshift"),
     ("sqlserver", "SQL Server"),
     ("flaredb", "FlareDB"),
 ];
@@ -1055,6 +1056,14 @@ pub fn DatasourceModal(
     // ── Load settings when switching to edit mode ─────────────────────────
     Effect::new(move |_| {
         if !open.get() {
+            // Modal closed — clear the Connect post-create state now, while the
+            // success view is unmounted (Modal gates children on `show`). If we
+            // left a stale token here, the next open would briefly re-mount the
+            // success view against it before `reset_form` runs, and the token
+            // accessor could observe the Some→None transition mid-render (KYO-121).
+            set_connect_token.set(None);
+            set_connect_created_name.set(String::new());
+            set_connect_created_type.set(String::new());
             return;
         }
         let id = datasource_id.get();
@@ -2284,11 +2293,13 @@ pub fn DatasourceModal(
                         // datasource list.
                         <Show when=move || connect_create_complete.get() && is_create_mode.get()>
                             <ConnectCreateSuccessView
-                                token=Signal::derive(move || {
-                                    connect_token
-                                        .get()
-                                        .expect("connect_token is set before the success view renders")
-                                })
+                                // `connect_create_complete` (the Show gate) and this
+                                // accessor are independent readers of `connect_token`
+                                // with no guaranteed update ordering. On a Some→None
+                                // transition the accessor can re-run before the Show
+                                // tears the child down, so degrade to an empty token
+                                // instead of panicking (KYO-121).
+                                token=Signal::derive(move || connect_token.get().unwrap_or_default())
                                 datasource_name=Signal::derive(move || connect_created_name.get())
                                 datasource_type=Signal::derive(move || connect_created_type.get())
                                 active_tab=active_deploy_tab
