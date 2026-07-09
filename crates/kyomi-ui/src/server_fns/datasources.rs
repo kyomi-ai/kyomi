@@ -190,6 +190,13 @@ pub struct CatalogStatsResult {
     pub table_count: i64,
     pub schema_count: i64,
     pub last_indexed: Option<String>,
+    /// True when the last catalog refresh attributed to *this* datasource
+    /// failed. Computed server-side from the workspace's typed refresh status
+    /// (the client can't depend on the ssr-only `kyomi_core` enum). Lets the
+    /// UI surface a failed catalog index instead of a silent empty catalog.
+    pub refresh_failed: bool,
+    /// Human-readable failure reason when `refresh_failed` is true.
+    pub refresh_error: Option<String>,
 }
 
 /// Create a new datasource (admin only).
@@ -847,10 +854,52 @@ pub async fn get_catalog_stats(
         .and_then(|r| r.last_catalog_refresh)
         .map(|dt| dt.to_rfc3339());
 
+    // Catalog refresh status is stored per-workspace; the progress JSON records
+    // which datasource the latest refresh was for. Only surface it on the
+    // matching datasource so one datasource's failure isn't shown on another.
+    #[derive(sqlx::FromRow)]
+    struct RefreshRow {
+        catalog_refresh_status: Option<kyomi_core::enums::CatalogRefreshStatus>,
+        catalog_refresh_progress: Option<serde_json::Value>,
+    }
+    let refresh_row = kyomi_core::db_fetch_optional!(
+        ac.db(),
+        RefreshRow,
+        "SELECT catalog_refresh_status, catalog_refresh_progress FROM workspaces \
+         WHERE workspace_id = $1",
+        &ac.ws_id
+    )
+    .into_sfn()?;
+
+    let (refresh_failed, refresh_error) = refresh_row
+        .and_then(|r| {
+            let progress = r.catalog_refresh_progress;
+            let for_this_ds = progress
+                .as_ref()
+                .and_then(|p| p.get("datasource_config_id"))
+                .and_then(|v| v.as_str())
+                == Some(datasource_id.as_str());
+            if !for_this_ds {
+                return None;
+            }
+            let failed =
+                r.catalog_refresh_status == Some(kyomi_core::enums::CatalogRefreshStatus::Failed);
+            let error = progress
+                .as_ref()
+                .and_then(|p| p.get("progress"))
+                .and_then(|p| p.get("error"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            Some((failed, error))
+        })
+        .unwrap_or((false, None));
+
     Ok(CatalogStatsResult {
         table_count,
         schema_count,
         last_indexed,
+        refresh_failed,
+        refresh_error,
     })
 }
 

@@ -5688,6 +5688,29 @@ fn EditModeCatalogTab(
                         }
                     }}
 
+                    // Persistent catalog-index failure from the last automatic
+                    // refresh — explains a "0 tables indexed" that would otherwise
+                    // look like a healthy empty catalog (KYO-126).
+                    {move || {
+                        let s = stats.get();
+                        let failed = s.as_ref().map(|s| s.refresh_failed).unwrap_or(false);
+                        failed.then(|| {
+                            let msg = s
+                                .and_then(|s| s.refresh_error)
+                                .unwrap_or_else(|| {
+                                    "No tables were discovered. The connection role may \
+                                     lack permission to read the catalog."
+                                        .to_string()
+                                });
+                            view! {
+                                <Alert variant=AlertVariant::Error class="mt-3">
+                                    <AlertTitle>"Catalog indexing failed"</AlertTitle>
+                                    <AlertDescription>{msg}</AlertDescription>
+                                </Alert>
+                            }
+                        })
+                    }}
+
                     // Refresh error
                     {move || refresh_action.value().get().and_then(|r| r.err()).map(|e| view! {
                         <Alert variant=AlertVariant::Error class="mt-3">

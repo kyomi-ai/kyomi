@@ -85,7 +85,7 @@ impl SQLCatalogIndexer for SynapseIndexer {
         );
 
         let result = provider.execute_query(&sql, None, None, false, None).await?;
-        let rows = extract_rows_from_batch(&result);
+        let rows = extract_rows_from_batch(&result)?;
 
         Ok(rows
             .iter()
@@ -122,7 +122,7 @@ impl SQLCatalogIndexer for SynapseIndexer {
         );
 
         let result = provider.execute_query(&sql, None, None, false, None).await?;
-        let rows = extract_rows_from_batch(&result);
+        let rows = extract_rows_from_batch(&result)?;
 
         Ok(rows
             .iter()
@@ -159,7 +159,7 @@ impl SQLCatalogIndexer for SynapseIndexer {
         );
 
         let result = provider.execute_query(&sql, None, None, false, None).await?;
-        let rows = extract_rows_from_batch(&result);
+        let rows = extract_rows_from_batch(&result)?;
 
         Ok(rows
             .iter()

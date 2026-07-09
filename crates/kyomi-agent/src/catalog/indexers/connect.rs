@@ -164,8 +164,24 @@ impl CatalogIndexer for ConnectIndexer {
         };
 
         let _ = update_datasource_last_refresh(db, &ctx.datasource_config_id).await;
+        // Surface an empty discovery as a visible failure rather than a silent
+        // "idle" (KYO-126). The Connect agent collapses a permission error into
+        // an empty result, so "no tables found" is the signal the user needs to
+        // see — it usually means the datasource role can't read the catalog.
+        let (refresh_status, refresh_progress) = if nothing_found {
+            (
+                "failed",
+                Some(serde_json::json!({
+                    "error": "No tables were discovered via Kyomi Connect. The \
+                              datasource may be empty, or the connection role may \
+                              lack permission to read the catalog."
+                })),
+            )
+        } else {
+            ("idle", None)
+        };
         let _ = update_workspace_status(
-            db, &ctx.workspace_id, &ctx.datasource_config_id, "idle", None,
+            db, &ctx.workspace_id, &ctx.datasource_config_id, refresh_status, refresh_progress,
         ).await;
 
         let end_time = Utc::now();

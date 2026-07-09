@@ -94,7 +94,7 @@ impl SQLCatalogIndexer for DatabricksIndexer {
             .execute_query("SHOW CATALOGS", None, None, false, None)
             .await?;
 
-        let rows = extract_rows_from_batch(&result);
+        let rows = extract_rows_from_batch(&result)?;
         let mut catalogs: Vec<String> = rows
             .iter()
             .filter_map(|row| {
@@ -123,7 +123,7 @@ impl SQLCatalogIndexer for DatabricksIndexer {
             .execute_query(&schema_sql, None, None, false, None)
             .await?;
 
-        let schema_rows = extract_rows_from_batch(&schema_result);
+        let schema_rows = extract_rows_from_batch(&schema_result)?;
         let mut tables = Vec::new();
 
         for schema_row in &schema_rows {
@@ -146,7 +146,18 @@ impl SQLCatalogIndexer for DatabricksIndexer {
                 Err(_) => continue,
             };
 
-            let table_rows = extract_rows_from_batch(&table_result);
+            // Tolerate a per-schema failure (transport OR driver-reported, e.g.
+            // a denied schema under Unity Catalog fine-grained grants) by
+            // skipping just that schema — mirrors the `Err(_) => continue` above.
+            // Aborting here would discard tables already collected from
+            // accessible schemas in the same catalog.
+            let table_rows = match extract_rows_from_batch(&table_result) {
+                Ok(rows) => rows,
+                Err(e) => {
+                    tracing::warn!("Failed to list tables in {container_name}.{schema_name}: {e}");
+                    continue;
+                }
+            };
 
             for row in &table_rows {
                 // SHOW TABLES returns: (database, tableName, isTemporary)
@@ -193,7 +204,7 @@ impl SQLCatalogIndexer for DatabricksIndexer {
         );
 
         let result = provider.execute_query(&sql, None, None, false, None).await?;
-        let rows = extract_rows_from_batch(&result);
+        let rows = extract_rows_from_batch(&result)?;
 
         Ok(rows
             .iter()

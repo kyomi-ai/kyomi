@@ -99,7 +99,7 @@ impl SQLCatalogIndexer for RedshiftIndexer {
             )
             .await?;
 
-        let names = extract_string_column(&result, 0);
+        let names = extract_string_column(&result, 0)?;
         Ok(names.into_iter().filter(|n| !is_system_schema(n)).collect())
     }
 
@@ -123,7 +123,7 @@ impl SQLCatalogIndexer for RedshiftIndexer {
         );
 
         let result = provider.execute_query(&sql, None, None, false, None).await?;
-        let rows = extract_rows_from_batch(&result);
+        let rows = extract_rows_from_batch(&result)?;
 
         Ok(rows
             .iter()
@@ -157,7 +157,7 @@ impl SQLCatalogIndexer for RedshiftIndexer {
         );
 
         let result = provider.execute_query(&sql, None, None, false, None).await?;
-        let rows = extract_rows_from_batch(&result);
+        let rows = extract_rows_from_batch(&result)?;
 
         Ok(rows
             .iter()

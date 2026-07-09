@@ -583,13 +583,28 @@ pub async fn index_catalog_sql(
     // Update datasource last refresh time
     let _ = update_datasource_last_refresh(db, &ctx.datasource_config_id).await;
 
-    // Update workspace status to idle
+    // Surface a discovery that found nothing as a failure the user can see,
+    // rather than a silent "idle" that looks identical to a healthy catalog
+    // (KYO-126). A discovery query that errored (permission denied, etc.)
+    // already returned early above with status "failed"; reaching here with
+    // `nothing_found` means every accessible container held zero tables.
+    let (refresh_status, refresh_progress) = if nothing_found {
+        (
+            "failed",
+            Some(serde_json::json!({
+                "error": "No tables were discovered. The datasource may be empty, \
+                          or the connection role may lack permission to read the catalog."
+            })),
+        )
+    } else {
+        ("idle", None)
+    };
     let _ = update_workspace_status(
         db,
         &ctx.workspace_id,
         &ctx.datasource_config_id,
-        "idle",
-        None,
+        refresh_status,
+        refresh_progress,
     )
     .await;
 

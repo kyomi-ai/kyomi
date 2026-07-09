@@ -95,7 +95,7 @@ impl SQLCatalogIndexer for SnowflakeIndexer {
             .await?;
 
         // SHOW DATABASES returns: (created_on, name, is_default, is_current, ...)
-        let rows = extract_rows_from_batch(&result);
+        let rows = extract_rows_from_batch(&result)?;
         let mut databases: Vec<String> = rows
             .iter()
             .filter_map(|row| {
@@ -139,7 +139,7 @@ impl SQLCatalogIndexer for SnowflakeIndexer {
         );
 
         let result = provider.execute_query(&sql, None, None, false, None).await?;
-        let rows = extract_rows_from_batch(&result);
+        let rows = extract_rows_from_batch(&result)?;
 
         Ok(rows
             .iter()
@@ -188,7 +188,7 @@ impl SQLCatalogIndexer for SnowflakeIndexer {
         );
 
         let result = provider.execute_query(&sql, None, None, false, None).await?;
-        let rows = extract_rows_from_batch(&result);
+        let rows = extract_rows_from_batch(&result)?;
 
         Ok(rows
             .iter()

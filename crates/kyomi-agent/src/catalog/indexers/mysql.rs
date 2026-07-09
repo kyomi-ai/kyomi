@@ -94,7 +94,7 @@ impl SQLCatalogIndexer for MySqlIndexer {
         );
 
         let result = provider.execute_query(&sql, None, None, false, None).await?;
-        let names = extract_string_column(&result, 0);
+        let names = extract_string_column(&result, 0)?;
         // Double-filter in Rust for robustness
         Ok(names.into_iter().filter(|n| !is_system_database(n)).collect())
     }
@@ -119,7 +119,7 @@ impl SQLCatalogIndexer for MySqlIndexer {
         );
 
         let result = provider.execute_query(&sql, None, None, false, None).await?;
-        let rows = extract_rows_from_batch(&result);
+        let rows = extract_rows_from_batch(&result)?;
 
         Ok(rows
             .iter()
@@ -153,7 +153,7 @@ impl SQLCatalogIndexer for MySqlIndexer {
         );
 
         let result = provider.execute_query(&sql, None, None, false, None).await?;
-        let rows = extract_rows_from_batch(&result);
+        let rows = extract_rows_from_batch(&result)?;
 
         Ok(rows
             .iter()
