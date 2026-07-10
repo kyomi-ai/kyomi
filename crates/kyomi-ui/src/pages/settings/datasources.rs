@@ -885,6 +885,10 @@ pub fn DatasourceModal(
     // Credentials form
     let (cred_username, set_cred_username) = signal(String::new());
     let (cred_password, set_cred_password) = signal(String::new());
+    // Tracks whether a password is already stored server-side for this
+    // datasource (edit mode only). Drives the "stored" placeholder hint on
+    // the password field so the user knows they don't have to re-type it.
+    let (cred_password_stored, set_cred_password_stored) = signal(false);
     let (cred_access_token, set_cred_access_token) = signal(String::new());
     let (cred_private_key, set_cred_private_key) = signal(String::new());
     let (cred_billing_project, set_cred_billing_project) = signal(String::new());
@@ -1016,6 +1020,7 @@ pub fn DatasourceModal(
         set_cred_sp_client_secret.set(String::new());
         set_cred_username.set(String::new());
         set_cred_password.set(String::new());
+        set_cred_password_stored.set(false);
         set_cred_access_token.set(String::new());
         set_cred_private_key.set(String::new());
         set_cred_billing_project.set(String::new());
@@ -1102,10 +1107,17 @@ pub fn DatasourceModal(
                                     .unwrap_or(false)
                             };
                             set_cfg_host.try_set(str_val("host"));
+                            // Legacy datasources (created by the old React frontend)
+                            // store port as a JSON string (e.g. "5439"). Try the
+                            // number shape first, then fall back to string so the
+                            // field isn't left blank on edit.
                             set_cfg_port.try_set(
                                 cfg.get("port")
-                                    .and_then(|v| v.as_i64())
-                                    .map(|n| n.to_string())
+                                    .and_then(|v| {
+                                        v.as_i64()
+                                            .map(|n| n.to_string())
+                                            .or_else(|| v.as_str().map(str::to_string))
+                                    })
                                     .unwrap_or_default(),
                             );
                             set_cfg_ssl_mode.try_set(
@@ -1189,7 +1201,14 @@ pub fn DatasourceModal(
                             };
                             set_cred_billing_project.try_set(user_str("billing_project"));
                             set_cred_default_project.try_set(user_str("default_project"));
-                            // Note: passwords are not pre-filled (security)
+                            // Restore the stored (non-sensitive) username so the user
+                            // doesn't have to re-type it. Reuses `user_str` (empty
+                            // string when absent, matching the reset-form default).
+                            set_cred_username.try_set(user_str("username"));
+                            // Note: passwords are not pre-filled (security). We do
+                            // surface whether one is already stored so the UI can
+                            // hint at it via the password field's placeholder.
+                            set_cred_password_stored.try_set(settings.has_password);
 
                             // Synapse: load tenant_id and service principal creds
                             if settings.datasource_type == "synapse" {
@@ -2734,6 +2753,7 @@ pub fn DatasourceModal(
                                             set_cred_username,
                                             cred_password,
                                             set_cred_password,
+                                            cred_password_stored,
                                             cred_access_token,
                                             set_cred_access_token,
                                             cred_private_key,
@@ -4650,6 +4670,7 @@ struct CredentialsFieldsSignals {
     set_cred_username: WriteSignal<String>,
     cred_password: ReadSignal<String>,
     set_cred_password: WriteSignal<String>,
+    cred_password_stored: ReadSignal<bool>,
     cred_access_token: ReadSignal<String>,
     set_cred_access_token: WriteSignal<String>,
     cred_private_key: ReadSignal<String>,
@@ -4676,6 +4697,7 @@ fn ProviderCredentialsFields(signals: CredentialsFieldsSignals) -> impl IntoView
         set_cred_username,
         cred_password,
         set_cred_password,
+        cred_password_stored,
         cred_access_token,
         set_cred_access_token,
         cred_private_key,
@@ -4850,7 +4872,13 @@ fn ProviderCredentialsFields(signals: CredentialsFieldsSignals) -> impl IntoView
                                             "Password " <span class="text-error-foreground">"*"</span>
                                         </label>
                                         <input type="password" class=MODAL_INPUT_CLASS
-                                            placeholder="••••••••"
+                                            prop:placeholder=move || {
+                                                if cred_password_stored.get() && cred_password.get().is_empty() {
+                                                    "•••••••• (stored)"
+                                                } else {
+                                                    "••••••••"
+                                                }
+                                            }
                                             prop:value=move || cred_password.get()
                                             on:input=move |ev| set_cred_password.set(event_target_value(&ev))
                                         />

@@ -547,6 +547,34 @@ pub async fn test_existing_datasource(
     Ok(result)
 }
 
+/// Overlay caller-supplied credential fields on top of the stored ones.
+/// Fields present in `provided` win; absent fields fall back to `stored`.
+/// Keeps Test & Discover working with the saved password when the user
+/// leaves the field blank, while still honoring a newly-typed password.
+///
+/// Unlike the save-path `merge_credentials` (kyomi-auth), this deliberately
+/// overlays *every* provided key with no OAuth-field exclusion. That is safe
+/// here because this path is per-user (creds are looked up by the caller's own
+/// `user_id`) and discover-only — nothing is persisted, so a caller can only
+/// overlay their own already-fully-controlled credential map. If this path ever
+/// gains persistence, mirror `merge_credentials`'s `OAUTH_FIELDS` protection.
+#[cfg(feature = "ssr")]
+fn overlay_credentials(stored: serde_json::Value, provided: &serde_json::Value) -> serde_json::Value {
+    match (stored.as_object(), provided.as_object()) {
+        (Some(s), Some(p)) => {
+            let mut merged = s.clone();
+            for (k, v) in p {
+                merged.insert(k.clone(), v.clone());
+            }
+            serde_json::Value::Object(merged)
+        }
+        // If either side isn't an object, prefer provided when it's non-null, else stored.
+        _ => {
+            if provided.is_null() { stored } else { provided.clone() }
+        }
+    }
+}
+
 /// Discover available resources (databases, schemas, warehouses, etc.) for a datasource.
 ///
 /// Mirrors `POST /api/v1/datasources/discover` from catalog.rs.
@@ -581,11 +609,13 @@ pub async fn discover_datasource_resources(
                 .await
                 {
                     Ok(Some(cred)) => {
-                        kyomi_auth::encryption::decrypt_json(
+                        match kyomi_auth::encryption::decrypt_json(
                             &cred.credentials,
                             &encryption_key,
-                        )
-                        .unwrap_or(credentials.clone())
+                        ) {
+                            Ok(decrypted) => overlay_credentials(decrypted, &credentials),
+                            Err(_) => credentials.clone(),
+                        }
                     }
                     _ => credentials.clone(),
                 }
@@ -877,4 +907,48 @@ pub(crate) async fn build_user_context(
     )
     .await
     .into_sfn()
+}
+
+#[cfg(all(test, feature = "ssr"))]
+mod overlay_credentials_tests {
+    use super::overlay_credentials;
+    use serde_json::json;
+
+    #[test]
+    fn blank_password_in_provided_keeps_stored_password() {
+        let stored = json!({ "username": "alice", "password": "s3cr3t" });
+        // `build_credentials` only inserts non-empty fields, so a blank
+        // password field means "password" is absent from `provided`.
+        let provided = json!({ "username": "alice" });
+        let merged = overlay_credentials(stored, &provided);
+        assert_eq!(merged["password"], json!("s3cr3t"));
+        assert_eq!(merged["username"], json!("alice"));
+    }
+
+    #[test]
+    fn typed_password_in_provided_overrides_stored() {
+        let stored = json!({ "username": "alice", "password": "old-password" });
+        let provided = json!({ "username": "alice", "password": "new-password" });
+        let merged = overlay_credentials(stored, &provided);
+        assert_eq!(merged["password"], json!("new-password"));
+    }
+
+    #[test]
+    fn empty_provided_object_leaves_stored_unchanged() {
+        let stored = json!({ "username": "alice", "password": "s3cr3t" });
+        let provided = json!({});
+        let merged = overlay_credentials(stored.clone(), &provided);
+        assert_eq!(merged, stored);
+    }
+
+    #[test]
+    fn non_object_stored_falls_back_to_provided() {
+        // Defensive edge case: `stored` isn't a JSON object at all (e.g.
+        // `serde_json::Value::default()`, which is `Null`). Since it can't
+        // be merged into, the caller-supplied fields should be used as-is.
+        let stored = serde_json::Value::default();
+        let provided = json!({ "username": "bob", "password": "typed-password" });
+        let merged = overlay_credentials(stored, &provided);
+        assert_eq!(merged, provided);
+    }
 }
