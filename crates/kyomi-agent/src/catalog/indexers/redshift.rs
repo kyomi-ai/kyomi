@@ -3,8 +3,11 @@
 //! Amazon Redshift catalog indexer.
 //!
 //! Mirrors Python's `datasources/redshift/indexer.py`.
-//! Uses `information_schema` for schema/table discovery and `svv_columns`
-//! for detailed column metadata including descriptions.
+//! Schema discovery uses `svv_all_schemas` rather than `information_schema.schemata`:
+//! on Redshift, `information_schema.schemata` only returns schemas owned by the
+//! current user, silently omitting schemas the user can read but doesn't own.
+//! Table discovery still uses `information_schema.tables`, and column metadata
+//! (including descriptions) comes from `svv_columns`.
 
 use async_trait::async_trait;
 use kyomi_core::datasource_registry::DatasourceType;
@@ -26,6 +29,11 @@ const SYSTEM_SCHEMAS: &[&str] = &[
     "pg_internal",
     "information_schema",
     "pg_toast",
+    "pg_automv",
+    "pg_auto_copy",
+    "pg_mv",
+    "pg_s3",
+    "catalog_history",
 ];
 
 /// Prefixes for temp schemas excluded dynamically.
@@ -88,9 +96,10 @@ impl SQLCatalogIndexer for RedshiftIndexer {
         let result = provider
             .execute_query(
                 "SELECT schema_name \
-                 FROM information_schema.schemata \
-                 WHERE schema_name NOT IN ('pg_catalog', 'pg_internal', 'information_schema', 'pg_toast') \
-                   AND schema_name NOT LIKE 'pg_temp_%' \
+                 FROM svv_all_schemas \
+                 WHERE database_name = current_database() \
+                   AND schema_name NOT IN ('information_schema', 'pg_catalog', 'pg_internal', 'pg_toast', \
+                                           'pg_automv', 'pg_auto_copy', 'pg_mv', 'pg_s3', 'catalog_history') \
                  ORDER BY schema_name",
                 None,
                 None,
@@ -202,9 +211,16 @@ mod tests {
         assert!(is_system_schema("pg_toast"));
         assert!(is_system_schema("pg_temp_1"));
         assert!(is_system_schema("pg_temp_99"));
+        assert!(is_system_schema("pg_automv"));
+        assert!(is_system_schema("PG_AUTOMV"));
+        assert!(is_system_schema("pg_auto_copy"));
+        assert!(is_system_schema("pg_mv"));
+        assert!(is_system_schema("pg_s3"));
+        assert!(is_system_schema("catalog_history"));
 
         assert!(!is_system_schema("public"));
         assert!(!is_system_schema("myschema"));
+        assert!(!is_system_schema("analytics"));
     }
 
     #[test]
