@@ -49,6 +49,7 @@ pub mod security_service;
 pub mod session;
 // Slack client and helpers moved to enterprise/kyomi-slack crate (Phase 12).
 pub mod sql_history_service;
+pub mod ssh_keygen;
 pub mod sync_log_service;
 pub mod stripe_config;
 pub mod stripe_service;

@@ -53,6 +53,7 @@ totp-rs = { workspace = true }
 hex = { workspace = true }
 subtle = { workspace = true }
 thiserror = { workspace = true }
+ssh-key = { version = "0.6", features = ["ed25519", "alloc", "std"] }
 
 [lints]
 workspace = true

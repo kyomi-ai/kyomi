@@ -34,6 +34,31 @@ pub struct DatasourceTypeInfo {
     pub display_name: String,
 }
 
+/// A freshly generated SSH keypair for a datasource's SSH tunnel.
+///
+/// Mirrors `kyomi_auth::ssh_keygen::GeneratedSshKey` — kept as a local type
+/// (rather than re-exported) because `kyomi-auth` is an `ssr`-only optional
+/// dependency and this type must also be visible to the WASM client for
+/// deserializing the server_fn response.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GeneratedSshKey {
+    /// OpenSSH public key line (`ssh-ed25519 AAAA... `), plaintext.
+    pub public_key: String,
+    /// OpenSSH private key PEM, AES-256-GCM encrypted with the workspace
+    /// encryption key. Never returned in plaintext.
+    pub private_key: String,
+}
+
+#[cfg(feature = "ssr")]
+impl From<kyomi_auth::ssh_keygen::GeneratedSshKey> for GeneratedSshKey {
+    fn from(key: kyomi_auth::ssh_keygen::GeneratedSshKey) -> Self {
+        Self {
+            public_key: key.public_key,
+            private_key: key.private_key,
+        }
+    }
+}
+
 // ─── Server Functions ───────────────────────────────────────────────────────
 
 /// List all datasources with credential status for the current user.
@@ -114,6 +139,25 @@ pub async fn delete_datasource(datasource_id: String) -> Result<(), ServerFnErro
         .into_sfn()?;
 
     Ok(())
+}
+
+/// Generate a new Ed25519 SSH keypair for a datasource's SSH tunnel (workspace
+/// admin only). The private key comes back encrypted with the workspace
+/// encryption key — never in plaintext.
+///
+/// No REST counterpart: the datasources REST router was removed (PR #183);
+/// this is served exclusively through the `/leptos-api/{*fn_name}` catch-all.
+#[server(prefix = "/leptos-api")]
+pub async fn generate_ssh_key() -> Result<GeneratedSshKey, ServerFnError> {
+    let ac = AuthenticatedContext::extract().await?;
+
+    require_workspace_admin(&ac.auth)?;
+
+    let encryption_key = ac.encryption_key()?;
+
+    let generated = kyomi_auth::ssh_keygen::generate_ssh_keypair(&encryption_key).into_sfn()?;
+
+    Ok(generated.into())
 }
 
 // ─── Helpers (server-only) ──────────────────────────────────────────────────
