@@ -378,7 +378,7 @@ fn compute_mcp_url() -> String {
     {
         let port = web_sys::window()
             .and_then(|w| w.location().port().ok())
-            .and_then(|p| if p.is_empty() { None } else { Some(p) })
+            .filter(|p| !p.is_empty())
             .unwrap_or_else(|| "3000".to_string());
         format!("http://localhost:{port}/mcp")
     }
