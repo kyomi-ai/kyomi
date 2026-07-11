@@ -477,7 +477,23 @@ pub async fn update_datasource(
     // Build and execute the update
     let final_name = name.unwrap_or(&existing.name);
     let final_slug = slug.unwrap_or(&existing.slug);
-    let final_config = connection_config.as_ref().unwrap_or(&existing.connection_config);
+
+    // Sensitive `connection_config` fields (e.g. `ssh_private_key`,
+    // `shared_password`) are masked on read and therefore never round-trip
+    // through the frontend as real values. Restore them from the stored
+    // config here so a wholesale replace doesn't clobber or drop the real
+    // secret when the caller resubmits the masked placeholder or omits the
+    // field entirely.
+    let final_config = match connection_config {
+        Some(mut cfg) => {
+            credential_service::preserve_masked_connection_config(
+                &mut cfg,
+                &existing.connection_config,
+            );
+            cfg
+        }
+        None => existing.connection_config.clone(),
+    };
     let final_active = active.unwrap_or(existing.active);
     let final_auto_refresh = auto_refresh_allowed.unwrap_or(existing.auto_refresh_allowed);
 
@@ -495,7 +511,7 @@ pub async fn update_datasource(
         &sql,
         final_name,
         final_slug,
-        final_config,
+        &final_config,
         final_active,
         final_auto_refresh,
         id,

@@ -73,6 +73,26 @@ pub const fn default_port(datasource_type: &str) -> u16 {
     }
 }
 
+/// Whether a datasource type supports SSH tunneling to reach the database
+/// through a bastion host.
+///
+/// Mirrors `kyomi_core::datasource_registry`'s `supports_ssh_tunnel` flag on
+/// `DatasourceTypeMetadata`. `kyomi-core` is an `ssr`-only optional
+/// dependency of `kyomi-ui` (see Cargo.toml), so `SshTunnelSection` in
+/// `datasources.rs` — which must gate its rendering on the WASM client too —
+/// cannot call the registry directly. This const-fn mirror exists for that,
+/// following the same pattern as [`default_port`] above. Kept in sync via
+/// the `supports_ssh_tunnel_matches_registry` test below (`kyomi-core` is
+/// available there as a dev-dependency regardless of feature flags).
+pub const fn supports_ssh_tunnel(type_id: &str) -> bool {
+    // Can't match on &str in a const fn stably, so use byte comparison —
+    // same technique as `default_port`.
+    matches!(
+        type_id.as_bytes(),
+        b"postgres" | b"mysql" | b"redshift" | b"clickhouse" | b"sqlserver"
+    )
+}
+
 /// Placeholder substituted into command text when no token is available.
 ///
 /// The React `ConnectStatus` passes this literal string in place of a real
@@ -358,6 +378,17 @@ mod tests {
         // Unknown type falls back to 5432 (JS `|| '5432'`).
         assert_eq!(default_port("bogus"), 5432);
         assert_eq!(default_port(""), 5432);
+    }
+
+    #[test]
+    fn supports_ssh_tunnel_matches_registry() {
+        for (type_id, meta) in kyomi_core::datasource_registry::all_metadata() {
+            assert_eq!(
+                supports_ssh_tunnel(type_id),
+                meta.supports_ssh_tunnel,
+                "supports_ssh_tunnel mirror mismatch for {type_id}"
+            );
+        }
     }
 
     #[test]

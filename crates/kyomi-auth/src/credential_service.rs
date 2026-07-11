@@ -14,6 +14,11 @@ use serde_json::Value;
 /// The placeholder string that replaces sensitive fields in API responses.
 pub const MASKED_VALUE: &str = "********";
 
+/// Connection config fields that are always sensitive, regardless of
+/// datasource type. Masked on read by [`mask_connection_config`] and
+/// restored on write by [`preserve_masked_connection_config`].
+pub(crate) const COMMON_SENSITIVE: &[&str] = &["shared_password", "ssh_private_key"];
+
 /// Mask sensitive credential fields for API responses.
 ///
 /// Looks up the datasource type in the registry to determine which credential
@@ -56,9 +61,6 @@ pub fn mask_connection_config(config: &Value, ds_type: &str) -> Value {
             .map(|m| m.sensitive_connection_config_fields)
             .unwrap_or(&[]);
 
-    // Common sensitive fields that are always masked for any type.
-    const COMMON_SENSITIVE: &[&str] = &["shared_password", "ssh_private_key"];
-
     let mut masked = obj.clone();
 
     // Mask type-specific sensitive fields
@@ -72,6 +74,61 @@ pub fn mask_connection_config(config: &Value, ds_type: &str) -> Value {
     }
 
     Value::Object(masked)
+}
+
+/// Restore masked/omitted sensitive `connection_config` fields from the
+/// stored config on update.
+///
+/// This is the write-side counterpart to [`mask_connection_config`]. Sensitive
+/// fields are never sent to the client in real form — they come back either
+/// masked as [`MASKED_VALUE`] or omitted entirely (e.g. a UI that only
+/// resubmits fields it actually loaded). Without this step, a wholesale
+/// replace of `connection_config` on update would clobber the real stored
+/// secret with the placeholder or silently drop it.
+///
+/// For each field in [`COMMON_SENSITIVE`], one of three things happens:
+///
+/// - `incoming[field]` is explicit JSON `null` — this is an **explicit clear**
+///   (e.g. disabling an SSH tunnel drops its stored key). The field is
+///   *removed* from `incoming` entirely; it is never restored from `existing`.
+/// - `incoming[field]` is missing, or equal to [`MASKED_VALUE`] — this is the
+///   normal edit case where the UI never resupplies a secret it only ever
+///   received masked. `incoming[field]` is overwritten with the value from
+///   `existing`, if any.
+/// - `incoming[field]` holds any other real value — a freshly-provided value
+///   always passes through unchanged; this function only ever fills gaps or
+///   honors explicit clears, never overrides a genuine new value.
+///
+/// No-ops if either `incoming` or `existing` is not a JSON object.
+pub fn preserve_masked_connection_config(incoming: &mut Value, existing: &Value) {
+    let Some(existing_obj) = existing.as_object() else {
+        return;
+    };
+    let Some(incoming_obj) = incoming.as_object_mut() else {
+        return;
+    };
+
+    for &field in COMMON_SENSITIVE {
+        let is_masked_or_absent = match incoming_obj.get(field) {
+            Some(Value::Null) => {
+                // Explicit clear — remove the field rather than restoring it.
+                incoming_obj.remove(field);
+                continue;
+            }
+            None => true,
+            Some(Value::String(s)) => s == MASKED_VALUE,
+            Some(_) => false,
+        };
+        if !is_masked_or_absent {
+            continue;
+        }
+
+        if let Some(Value::String(existing_val)) = existing_obj.get(field)
+            && !existing_val.is_empty()
+        {
+            incoming_obj.insert(field.to_string(), Value::String(existing_val.clone()));
+        }
+    }
 }
 
 /// Replace a field value with [`MASKED_VALUE`] if it is a non-empty string.
@@ -382,5 +439,97 @@ mod tests {
         assert_eq!(masked["client_secret"], MASKED_VALUE);
         assert_eq!(masked["oauth_access_token"], MASKED_VALUE);
         assert_eq!(masked["oauth_refresh_token"], MASKED_VALUE);
+    }
+
+    // -- preserve_masked_connection_config ---
+
+    #[test]
+    fn preserve_masked_restores_omitted_and_masked_sensitive_fields() {
+        let existing = json!({
+            "host": "db.example.com",
+            "ssh_private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\nreal-key\n-----END OPENSSH PRIVATE KEY-----",
+            "shared_password": "real-shared-pass"
+        });
+
+        // Incoming omits ssh_private_key entirely and sends the masked
+        // placeholder for shared_password.
+        let mut incoming = json!({
+            "host": "db.example.com",
+            "shared_password": MASKED_VALUE
+        });
+
+        preserve_masked_connection_config(&mut incoming, &existing);
+
+        assert_eq!(incoming["ssh_private_key"], existing["ssh_private_key"]);
+        assert_eq!(incoming["shared_password"], existing["shared_password"]);
+    }
+
+    #[test]
+    fn preserve_masked_does_not_clobber_new_real_value() {
+        let existing = json!({
+            "ssh_private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\nold-key\n-----END OPENSSH PRIVATE KEY-----"
+        });
+
+        let mut incoming = json!({
+            "ssh_private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\nnew-key\n-----END OPENSSH PRIVATE KEY-----"
+        });
+
+        preserve_masked_connection_config(&mut incoming, &existing);
+
+        // A freshly-provided real value overrides — it must NOT be replaced
+        // with the old stored value.
+        assert_eq!(
+            incoming["ssh_private_key"],
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nnew-key\n-----END OPENSSH PRIVATE KEY-----"
+        );
+    }
+
+    #[test]
+    fn preserve_masked_explicit_null_clears_instead_of_restoring() {
+        let existing = json!({
+            "host": "db.example.com",
+            "ssh_enabled": true,
+            "ssh_private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\nreal-key\n-----END OPENSSH PRIVATE KEY-----"
+        });
+
+        // Incoming explicitly clears ssh_private_key (e.g. SSH tunnel disabled),
+        // rather than merely omitting it.
+        let mut incoming = json!({
+            "host": "db.example.com",
+            "ssh_enabled": false,
+            "ssh_private_key": Value::Null
+        });
+
+        preserve_masked_connection_config(&mut incoming, &existing);
+
+        // The field must be absent from the result, not restored from existing.
+        assert!(
+            incoming.get("ssh_private_key").is_none(),
+            "explicit null must clear the field, not restore the old value"
+        );
+    }
+
+    #[test]
+    fn preserve_masked_leaves_non_sensitive_fields_untouched_and_absent_stays_absent() {
+        let existing = json!({
+            "host": "old-host.example.com",
+            "port": 5432
+        });
+
+        let mut incoming = json!({
+            "host": "new-host.example.com",
+            "port": 5433
+        });
+
+        preserve_masked_connection_config(&mut incoming, &existing);
+
+        // Non-sensitive fields pass through untouched.
+        assert_eq!(incoming["host"], "new-host.example.com");
+        assert_eq!(incoming["port"], 5433);
+
+        // A sensitive field absent from both existing and incoming stays
+        // absent — nothing to restore from.
+        assert!(incoming.get("ssh_private_key").is_none());
+        assert!(incoming.get("shared_password").is_none());
     }
 }
