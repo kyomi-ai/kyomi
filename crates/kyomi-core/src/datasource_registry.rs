@@ -366,6 +366,13 @@ pub struct DatasourceTypeMetadata {
     /// Set to `true` for single-database datasources where showing the project
     /// wrapper is redundant (e.g., PostgreSQL, MySQL).
     pub skip_single_project_wrapper: bool,
+
+    /// Whether this datasource type supports connecting through an SSH tunnel.
+    ///
+    /// `true` for direct-TCP database protocols (PostgreSQL, MySQL, Redshift,
+    /// ClickHouse, SQL Server). `false` for API/HTTPS-based providers (BigQuery,
+    /// Snowflake, Databricks, Synapse, FlareDB) where a tunnel doesn't apply.
+    pub supports_ssh_tunnel: bool,
 }
 
 impl DatasourceTypeMetadata {
@@ -484,6 +491,7 @@ static BIGQUERY_META: LazyLock<DatasourceTypeMetadata> = LazyLock::new(|| Dataso
     tree_level2_type: "dataset",
     skip_empty_project_wrapper: false,
     skip_single_project_wrapper: false,
+    supports_ssh_tunnel: false,
 });
 
 // --- ClickHouse ---
@@ -507,6 +515,7 @@ static CLICKHOUSE_META: LazyLock<DatasourceTypeMetadata> =
         tree_level2_type: "database",
         skip_empty_project_wrapper: true,
         skip_single_project_wrapper: true,
+        supports_ssh_tunnel: true,
     });
 
 // --- Snowflake ---
@@ -536,6 +545,7 @@ static SNOWFLAKE_META: LazyLock<DatasourceTypeMetadata> =
         tree_level2_type: "schema",
         skip_empty_project_wrapper: true,
         skip_single_project_wrapper: false,
+        supports_ssh_tunnel: false,
     });
 
 // --- Databricks ---
@@ -576,6 +586,7 @@ static DATABRICKS_META: LazyLock<DatasourceTypeMetadata> =
         tree_level2_type: "schema",
         skip_empty_project_wrapper: true,
         skip_single_project_wrapper: false,
+        supports_ssh_tunnel: false,
     });
 
 // --- Redshift ---
@@ -602,6 +613,7 @@ static REDSHIFT_META: LazyLock<DatasourceTypeMetadata> =
         tree_level2_type: "schema",
         skip_empty_project_wrapper: true,
         skip_single_project_wrapper: true,
+        supports_ssh_tunnel: true,
     });
 
 // --- PostgreSQL ---
@@ -627,6 +639,7 @@ static POSTGRES_META: LazyLock<DatasourceTypeMetadata> =
         tree_level2_type: "schema",
         skip_empty_project_wrapper: true,
         skip_single_project_wrapper: true,
+        supports_ssh_tunnel: true,
     });
 
 // --- MySQL ---
@@ -649,6 +662,7 @@ static MYSQL_META: LazyLock<DatasourceTypeMetadata> = LazyLock::new(|| Datasourc
     tree_level2_type: "database",
     skip_empty_project_wrapper: true,
     skip_single_project_wrapper: true,
+    supports_ssh_tunnel: true,
 });
 
 // --- SQL Server ---
@@ -673,6 +687,7 @@ static SQLSERVER_META: LazyLock<DatasourceTypeMetadata> =
         tree_level2_type: "schema",
         skip_empty_project_wrapper: true,
         skip_single_project_wrapper: false,
+        supports_ssh_tunnel: true,
     });
 
 // --- Azure Synapse ---
@@ -759,6 +774,7 @@ static SYNAPSE_META: LazyLock<DatasourceTypeMetadata> =
         tree_level2_type: "schema",
         skip_empty_project_wrapper: true,
         skip_single_project_wrapper: false,
+        supports_ssh_tunnel: false,
     });
 
 // --- FlareDB ---
@@ -796,6 +812,7 @@ static FLAREDB_META: LazyLock<DatasourceTypeMetadata> =
         tree_level2_type: "",
         skip_empty_project_wrapper: true,
         skip_single_project_wrapper: true,
+        supports_ssh_tunnel: false,
     });
 
 // ---------------------------------------------------------------------------
@@ -1217,6 +1234,20 @@ mod tests {
             serde_json::Value::Bool(true),
         );
         assert!(bq.is_shared_auth(&config));
+    }
+
+    #[test]
+    fn supports_ssh_tunnel_is_correct() {
+        const SSH_TUNNEL_SUPPORTED: &[&str] =
+            &["postgres", "mysql", "redshift", "clickhouse", "sqlserver"];
+
+        for (type_id, meta) in all_metadata() {
+            let expected = SSH_TUNNEL_SUPPORTED.contains(&type_id);
+            assert_eq!(
+                meta.supports_ssh_tunnel, expected,
+                "supports_ssh_tunnel mismatch for {type_id}"
+            );
+        }
     }
 
     #[test]
