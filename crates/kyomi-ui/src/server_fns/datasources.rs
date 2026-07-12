@@ -808,12 +808,15 @@ pub async fn discover_datasource_resources(
 
 /// Resolve a datasource by slug and create a provider ready for query execution.
 ///
-/// Used by the dry-run and catalog server functions. It:
-/// 1. Resolves the datasource from slug within the workspace
-/// 2. Decrypts per-user credentials
-/// 3. Builds a `UserContext` for OAuth-based providers (e.g. BigQuery)
-/// 4. Delegates Connect-vs-direct branching, OAuth refresh, and connection
-///    timeout to `kyomi_datasource_server::create_provider_from_parts`
+/// Used by the dry-run and catalog server functions. Resolves the
+/// datasource and checks the encryption key FIRST — in that order — so a
+/// bad slug still surfaces as "not found" rather than being masked by an
+/// unrelated "encryption key not configured" error, exactly as before this
+/// helper existed. Per-user credential decryption, the lazy `UserContext`
+/// build, connection config decryption, and provider construction are then
+/// delegated to the shared
+/// `kyomi_auth::datasource_service::build_provider_for_datasource` helper —
+/// mapping its raw `kyomi_core::Error` into a `ServerFnError` via `into_sfn()`.
 ///
 /// Returns the resolved datasource row alongside the provider so callers can
 /// access metadata (e.g., `datasource_type`, `slug`).
@@ -830,7 +833,7 @@ pub(crate) async fn create_query_provider(
     ),
     ServerFnError,
 > {
-    // Resolve datasource by slug (or UUID).
+    // Resolve datasource by slug (or UUID) FIRST.
     // `include_inactive = false` enforces the active constraint at the SQL level.
     let ds = kyomi_auth::datasource_service::resolve_datasource(
         &ctx.db,
@@ -841,53 +844,34 @@ pub(crate) async fn create_query_provider(
     .await
     .into_sfn()?;
 
-    // Decrypt per-user credentials (skipped for Connect-type datasources).
-    let credentials = if ds.connection_type != "connect" {
-        let encryption_key = ctx
-            .encryption_key
-            .as_deref()
-            .ok_or_else(|| ServerFnError::new("Encryption key not configured"))?;
-
-        let user_cred = kyomi_auth::datasource_service::get_user_credential(
-            &ctx.db,
-            &auth.user_id,
-            &ds.id,
-        )
-        .await
-        .into_sfn()?;
-
-        if let Some(ref cred) = user_cred {
-            kyomi_auth::encryption::decrypt_json(&cred.credentials, encryption_key)
-                .unwrap_or(serde_json::json!({}))
-        } else {
-            serde_json::json!({})
-        }
-    } else {
-        serde_json::json!({})
-    };
-
-    // Build user context for BigQuery OAuth (kyomi_oauth auth mode).
-    let user_context = build_user_context(ctx, auth).await?;
-
-    // `ds.connection_config` came straight from the database and may hold
-    // encrypted `COMMON_SENSITIVE` fields — the driver always needs plaintext.
+    // Encryption key check AFTER resolve: even Connect-type datasources
+    // (which skip per-user credential decryption) still need it to decrypt
+    // `connection_config` secrets below, so this unwrap is unconditional —
+    // but it must not run before the resolve above, or a bad slug would be
+    // masked by this error instead of surfacing as "not found".
     let encryption_key = ctx
         .encryption_key
         .as_deref()
         .ok_or_else(|| ServerFnError::new("Encryption key not configured"))?;
-    let decrypted_config = kyomi_auth::credential_service::decrypt_connection_config_secrets(
-        &ds.connection_config,
-        encryption_key,
-    );
 
-    let ds_type: kyomi_core::datasource_registry::DatasourceType = ds.datasource_type.into();
-    let provider = kyomi_datasource_server::create_provider_from_parts(
-        &ds.id,
-        &ds.connection_type,
-        &decrypted_config,
-        ds_type,
-        credentials,
-        user_context,
+    let provider = kyomi_auth::datasource_service::build_provider_for_datasource(
+        &ctx.db,
+        &auth.user_id,
+        &ds,
+        encryption_key,
+        || async {
+            let workspace_id = auth.workspace.workspace_id.clone().unwrap_or_default();
+            kyomi_auth::google_oauth::build_datasource_user_context(
+                &ctx.db,
+                &auth.user_id,
+                ctx.encryption_key.as_deref(),
+                ctx.config.google_oauth_client_id.as_deref(),
+                ctx.config.google_oauth_client_secret.as_deref(),
+                auth.email.clone(),
+                workspace_id,
+            )
+            .await
+        },
         ctx.connect_registry.as_ref(),
     )
     .await
@@ -966,31 +950,6 @@ pub async fn get_catalog_stats(
         schema_count,
         last_indexed,
     })
-}
-
-/// Build a `UserContext` for BigQuery provider creation.
-///
-/// Delegates to `kyomi_auth::google_oauth::build_datasource_user_context`.
-/// Returns `None` when Google OAuth is not configured or the user has no
-/// tokens — providers fall back to other auth modes automatically.
-#[cfg(feature = "ssr")]
-pub(crate) async fn build_user_context(
-    ctx: &super::ServerContext,
-    auth: &kyomi_auth::middleware::AuthUser,
-) -> Result<Option<kyomi_datasource_server::UserContext>, ServerFnError> {
-    let workspace_id = auth.workspace.workspace_id.clone().unwrap_or_default();
-
-    kyomi_auth::google_oauth::build_datasource_user_context(
-        &ctx.db,
-        &auth.user_id,
-        ctx.encryption_key.as_deref(),
-        ctx.config.google_oauth_client_id.as_deref(),
-        ctx.config.google_oauth_client_secret.as_deref(),
-        auth.email.clone(),
-        workspace_id,
-    )
-    .await
-    .into_sfn()
 }
 
 #[cfg(all(test, feature = "ssr"))]

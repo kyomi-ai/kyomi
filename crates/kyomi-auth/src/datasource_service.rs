@@ -927,6 +927,97 @@ pub async fn get_decrypted_user_credentials(
 }
 
 // ---------------------------------------------------------------------------
+// Shared helper: decrypt credentials, build provider for an already-resolved
+// datasource
+// ---------------------------------------------------------------------------
+
+/// Build a ready-to-query provider for an already-resolved datasource.
+///
+/// This is the shared core of the "decrypt per-user credentials -> build
+/// user context -> decrypt connection config -> build provider" sequence
+/// that was previously duplicated between `apps/server/src/routes/query_arrow.rs`
+/// and `crates/kyomi-ui/src/server_fns/datasources.rs::create_query_provider`.
+///
+/// Datasource resolution is deliberately NOT part of this helper — callers
+/// must call `resolve_datasource` themselves first. Folding resolution in
+/// here would force the encryption-key check and the (potentially
+/// network-calling, token-refreshing) `build_user_context` closure to run
+/// before the resolve outcome is known, changing both side-effect timing
+/// (e.g. triggering a Google OAuth refresh for a slug that doesn't even
+/// exist) and error precedence (masking a 403/not-found behind an
+/// unrelated "encryption key not configured" error) relative to today's
+/// behavior. See KYO-138 code review.
+///
+/// `build_user_context` is taken as a lazy closure rather than a
+/// pre-computed value so callers can preserve their *exact* original call
+/// order: this helper invokes it after the per-user credential decrypt and
+/// before the connection-config decrypt, matching both original call
+/// sites' sequencing precisely.
+///
+/// Steps:
+/// 1. Decrypt per-user credentials (skipped for `"connect"`-type datasources).
+/// 2. Invoke `build_user_context` (lazy — only evaluated here).
+/// 3. Decrypt `COMMON_SENSITIVE` fields in `connection_config`.
+/// 4. Delegate Connect-vs-direct branching, OAuth refresh, and connection
+///    timeout to `kyomi_datasource_server::create_provider_from_parts`.
+///
+/// # Errors
+///
+/// Returns the raw `kyomi_core::Error` from whichever step failed — this
+/// helper does not log or translate errors. Callers own all error
+/// presentation (HTTP status codes, `ServerFnError` messages, etc.).
+pub async fn build_provider_for_datasource<F, Fut>(
+    db: &kyomi_core::DbPool,
+    user_id: &str,
+    ds: &DatasourceConfig,
+    encryption_key: &[u8; 32],
+    build_user_context: F,
+    connect_registry: Option<&kyomi_datasource_server::ConnectRegistry>,
+) -> kyomi_core::Result<Box<dyn kyomi_datasource_server::DatasourceProvider>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = kyomi_core::Result<Option<kyomi_datasource_server::UserContext>>>,
+{
+    // Decrypt per-user credentials (skipped for Connect-type datasources).
+    let credentials = if ds.connection_type != "connect" {
+        let user_cred = get_user_credential(db, user_id, &ds.id).await?;
+        if let Some(ref cred) = user_cred {
+            encryption::decrypt_json(&cred.credentials, encryption_key)
+                .unwrap_or(serde_json::json!({}))
+        } else {
+            serde_json::json!({})
+        }
+    } else {
+        serde_json::json!({})
+    };
+
+    // Build user context for BigQuery OAuth (kyomi_oauth auth mode). Invoked
+    // here — after the credential decrypt, before the config decrypt — to
+    // preserve the original call order at both call sites exactly.
+    let user_context = build_user_context().await?;
+
+    // `ds.connection_config` came straight from the database and may hold
+    // encrypted `COMMON_SENSITIVE` fields (e.g. `ssh_private_key`) — the
+    // driver always needs plaintext.
+    let decrypted_config =
+        credential_service::decrypt_connection_config_secrets(&ds.connection_config, encryption_key);
+
+    let ds_type: kyomi_core::datasource_registry::DatasourceType = ds.datasource_type.into();
+    let provider = kyomi_datasource_server::create_provider_from_parts(
+        &ds.id,
+        &ds.connection_type,
+        &decrypted_config,
+        ds_type,
+        credentials,
+        user_context,
+        connect_registry,
+    )
+    .await?;
+
+    Ok(provider)
+}
+
+// ---------------------------------------------------------------------------
 // Enriched view types (used by list/settings orchestration below)
 // ---------------------------------------------------------------------------
 
