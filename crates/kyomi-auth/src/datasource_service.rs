@@ -1340,6 +1340,28 @@ pub async fn toggle_datasource_enabled(
 // Get datasource settings detail for the edit modal
 // ---------------------------------------------------------------------------
 
+/// Non-sensitive per-user credential fields the datasource edit modal needs.
+/// Default-deny whitelist — any field NOT listed here (password, private_key,
+/// client_secret, ssh_private_key, service_account_json, OAuth tokens, and any
+/// future secret) is excluded automatically and never reaches the client.
+const CLIENT_SAFE_USER_SETTINGS_FIELDS: &[&str] =
+    &["username", "billing_project", "default_project", "client_id"];
+
+/// Project the fully-decrypted per-user credential blob down to only the
+/// client-safe fields (see `CLIENT_SAFE_USER_SETTINGS_FIELDS`). The full blob
+/// contains plaintext secrets and must never be sent to the browser.
+fn client_safe_user_settings(full: &Value) -> Value {
+    let mut out = serde_json::Map::new();
+    if let Some(obj) = full.as_object() {
+        for &k in CLIENT_SAFE_USER_SETTINGS_FIELDS {
+            if let Some(v) = obj.get(k) {
+                out.insert(k.to_string(), v.clone());
+            }
+        }
+    }
+    Value::Object(out)
+}
+
 /// Load full datasource settings for the edit modal.
 ///
 /// Combines the datasource config with the user's decrypted credential data
@@ -1456,6 +1478,11 @@ pub async fn get_datasource_settings_detail(
         ds.datasource_type.as_ref(),
     );
 
+    // Project the decrypted per-user credential blob down to the client-safe
+    // whitelist — the full blob contains plaintext secrets and must never
+    // reach the browser.
+    let safe_user_settings = client_safe_user_settings(&user_settings);
+
     Ok(DatasourceSettingsDetail {
         id: ds.id,
         name: ds.name,
@@ -1463,7 +1490,7 @@ pub async fn get_datasource_settings_detail(
         datasource_type: ds.datasource_type.to_string(),
         connection_type: ds.connection_type.clone(),
         connection_config: masked_config,
-        user_settings,
+        user_settings: safe_user_settings,
         has_oauth,
         oauth_email,
         has_bigquery_scopes,
@@ -1616,5 +1643,46 @@ mod tests {
         // OAuth field should remain from existing
         assert_eq!(merged["oauth_access_token"], "existing-token");
         assert_eq!(merged["billing_project"], "new");
+    }
+
+    // -- client_safe_user_settings tests --
+
+    #[test]
+    fn client_safe_user_settings_excludes_secrets() {
+        let full = serde_json::json!({
+            "username": "alice",
+            "password": "s3cr3t",
+            "private_key": "-----BEGIN...",
+            "client_secret": "shhh",
+            "oauth_email": "alice@example.com",
+            "oauth_access_token": "tok",
+            "client_id": "app-123",
+            "billing_project": "proj-b",
+            "default_project": "proj-d"
+        });
+        let safe = client_safe_user_settings(&full);
+        let obj = safe.as_object().unwrap();
+        // included
+        assert_eq!(obj.get("username").and_then(|v| v.as_str()), Some("alice"));
+        assert_eq!(obj.get("client_id").and_then(|v| v.as_str()), Some("app-123"));
+        assert_eq!(
+            obj.get("billing_project").and_then(|v| v.as_str()),
+            Some("proj-b")
+        );
+        assert_eq!(
+            obj.get("default_project").and_then(|v| v.as_str()),
+            Some("proj-d")
+        );
+        // excluded secrets
+        for k in [
+            "password",
+            "private_key",
+            "client_secret",
+            "oauth_email",
+            "oauth_access_token",
+        ] {
+            assert!(!obj.contains_key(k), "leaked secret field: {k}");
+        }
+        assert_eq!(obj.len(), 4);
     }
 }
