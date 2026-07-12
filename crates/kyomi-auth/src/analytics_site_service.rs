@@ -244,6 +244,9 @@ pub struct CreateSiteParams<'a> {
     pub secret: &'a str,
     pub datasource_slug: Option<&'a str>,
     pub clickhouse: ClickHouseProvisioning<'a>,
+    /// Used to encrypt the freshly-generated ClickHouse `shared_password`
+    /// written into the provisioned datasource's `connection_config`.
+    pub encryption_key: &'a [u8; 32],
 }
 
 pub async fn create_site(params: CreateSiteParams<'_>) -> Result<AnalyticsSite> {
@@ -255,6 +258,7 @@ pub async fn create_site(params: CreateSiteParams<'_>) -> Result<AnalyticsSite> 
         secret,
         datasource_slug,
         clickhouse,
+        encryption_key,
     } = params;
     let ch_host = clickhouse.host;
     let ch_port = clickhouse.port;
@@ -311,6 +315,7 @@ pub async fn create_site(params: CreateSiteParams<'_>) -> Result<AnalyticsSite> 
             admin_password: ch_admin_password,
             secure: ch_secure,
         },
+        encryption_key,
     };
     match provision_datasource(provision_params).await {
         Ok(ds_id) => {
@@ -362,6 +367,7 @@ struct ProvisionDatasourceParams<'a> {
     ch_database: &'a str,
     datasource_slug: Option<&'a str>,
     clickhouse: ClickHouseProvisioning<'a>,
+    encryption_key: &'a [u8; 32],
 }
 
 async fn provision_datasource(params: ProvisionDatasourceParams<'_>) -> Result<String> {
@@ -371,6 +377,7 @@ async fn provision_datasource(params: ProvisionDatasourceParams<'_>) -> Result<S
         ch_database,
         datasource_slug,
         clickhouse,
+        encryption_key,
     } = params;
     let ch_host = clickhouse.host;
     let ch_port = clickhouse.port;
@@ -396,12 +403,15 @@ async fn provision_datasource(params: ProvisionDatasourceParams<'_>) -> Result<S
 
     let ds = datasource_service::create_datasource(
         db,
-        &site.workspace_id,
-        &ds_name,
-        datasource_slug,
-        "clickhouse",
-        connection_config,
-        None, // direct connection
+        datasource_service::CreateDatasourceParams {
+            workspace_id: &site.workspace_id,
+            name: &ds_name,
+            slug: datasource_slug,
+            ds_type: "clickhouse",
+            connection_config,
+            connection_type: None, // direct connection
+            encryption_key,
+        },
     )
     .await?;
 
@@ -448,16 +458,41 @@ pub async fn get_site_by_site_id(
     pg_fetch_optional_site(db, &sql, (site_id, workspace_id)).await
 }
 
+/// Parameters for [`update_site`].
+///
+/// Bundled into a struct (rather than individual arguments) to stay under
+/// clippy's `too_many_arguments` threshold now that an encryption key is
+/// required alongside the existing fields.
+pub struct UpdateSiteParams<'a> {
+    pub db: &'a DbPool,
+    pub id: &'a str,
+    pub workspace_id: &'a str,
+    pub name: Option<&'a str>,
+    pub domains: Option<&'a [String]>,
+    pub secret: &'a str,
+    pub datasource_slug: Option<&'a str>,
+    /// Used to encrypt any freshly-provided `COMMON_SENSITIVE`
+    /// `connection_config` field if the linked datasource's `connection_config`
+    /// is ever touched here in the future. Not used by the current
+    /// slug-only rename (which passes `connection_config: None` to
+    /// [`datasource_service::update_datasource`]), but still required —
+    /// `update_datasource` always needs a key, whether or not this call
+    /// happens to exercise it.
+    pub encryption_key: &'a [u8; 32],
+}
+
 /// Update a site's name, domains, and/or datasource slug. Regenerates signed_key when domains change.
-pub async fn update_site(
-    db: &DbPool,
-    id: &str,
-    workspace_id: &str,
-    name: Option<&str>,
-    domains: Option<&[String]>,
-    secret: &str,
-    datasource_slug: Option<&str>,
-) -> Result<AnalyticsSite> {
+pub async fn update_site(params: UpdateSiteParams<'_>) -> Result<AnalyticsSite> {
+    let UpdateSiteParams {
+        db,
+        id,
+        workspace_id,
+        name,
+        domains,
+        secret,
+        datasource_slug,
+        encryption_key,
+    } = params;
     // Fetch existing site to get current values for key regeneration
     let existing = get_site(db, id, workspace_id)
         .await?
@@ -506,6 +541,7 @@ pub async fn update_site(
             None,
             None,
             None,
+            encryption_key,
         )
         .await?;
     }

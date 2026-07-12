@@ -21,7 +21,7 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
-use super::{extract_auth, AuthenticatedContext, IntoServerFnError};
+use super::{AuthenticatedContext, IntoServerFnError};
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -44,8 +44,12 @@ pub struct DatasourceTypeInfo {
 pub struct GeneratedSshKey {
     /// OpenSSH public key line (`ssh-ed25519 AAAA... `), plaintext.
     pub public_key: String,
-    /// OpenSSH private key PEM, AES-256-GCM encrypted with the workspace
-    /// encryption key. Never returned in plaintext.
+    /// OpenSSH private key PEM, **plaintext**. The client holds this in
+    /// memory only long enough to submit it back as
+    /// `connection_config.ssh_private_key` on save — `create_datasource` /
+    /// `update_datasource_settings` encrypt it with the workspace encryption
+    /// key before it is ever written to the database (see
+    /// `credential_service::finalize_connection_config_secrets`).
     pub private_key: String,
 }
 
@@ -142,8 +146,10 @@ pub async fn delete_datasource(datasource_id: String) -> Result<(), ServerFnErro
 }
 
 /// Generate a new Ed25519 SSH keypair for a datasource's SSH tunnel (workspace
-/// admin only). The private key comes back encrypted with the workspace
-/// encryption key — never in plaintext.
+/// admin only). The private key comes back in plaintext — it is encrypted
+/// with the workspace encryption key only when the datasource is actually
+/// saved (see `finalize_connection_config_secrets`), same as any other
+/// `connection_config` secret the user types into the form.
 ///
 /// No REST counterpart: the datasources REST router was removed (PR #183);
 /// this is served exclusively through the `/leptos-api/{*fn_name}` catch-all.
@@ -153,9 +159,7 @@ pub async fn generate_ssh_key() -> Result<GeneratedSshKey, ServerFnError> {
 
     require_workspace_admin(&ac.auth)?;
 
-    let encryption_key = ac.encryption_key()?;
-
-    let generated = kyomi_auth::ssh_keygen::generate_ssh_keypair(&encryption_key).into_sfn()?;
+    let generated = kyomi_auth::ssh_keygen::generate_ssh_keypair().into_sfn()?;
 
     Ok(generated.into())
 }
@@ -252,15 +256,19 @@ pub async fn create_datasource_modal(
     require_workspace_admin(&ac.auth)?;
 
     let slug_opt = if slug.is_empty() { None } else { Some(slug.as_str()) };
+    let encryption_key = ac.encryption_key()?;
 
     let ds = kyomi_auth::datasource_service::create_datasource(
         ac.db(),
-        &ac.ws_id,
-        &name,
-        slug_opt,
-        &datasource_type,
-        connection_config,
-        Some("direct"),
+        kyomi_auth::datasource_service::CreateDatasourceParams {
+            workspace_id: &ac.ws_id,
+            name: &name,
+            slug: slug_opt,
+            ds_type: &datasource_type,
+            connection_config,
+            connection_type: Some("direct"),
+            encryption_key: &encryption_key,
+        },
     )
     .await
     .into_sfn()?;
@@ -268,8 +276,6 @@ pub async fn create_datasource_modal(
     // Save credentials if provided
     let has_creds = credentials.as_object().map(|o| !o.is_empty()).unwrap_or(false);
     if has_creds {
-        let encryption_key = ac.encryption_key()?;
-
         kyomi_auth::datasource_service::save_user_credential(
             ac.db(),
             &encryption_key,
@@ -328,6 +334,7 @@ pub async fn update_datasource_settings(
 
     let slug_opt = if slug.is_empty() { None } else { Some(slug.as_str()) };
     let name_opt = if name.is_empty() { None } else { Some(name.as_str()) };
+    let encryption_key = ac.encryption_key()?;
 
     let updated = kyomi_auth::datasource_service::update_datasource(
         ac.db(),
@@ -338,6 +345,7 @@ pub async fn update_datasource_settings(
         Some(connection_config),
         None,
         None,
+        &encryption_key,
     )
     .await
     .into_sfn()?;
@@ -436,10 +444,21 @@ pub async fn test_datasource_standalone(
     credentials: serde_json::Value,
 ) -> Result<TestConnectionResult, ServerFnError> {
     use std::str::FromStr as _;
-    let _auth = extract_auth().await?;
+    let ac = AuthenticatedContext::extract().await?;
 
     let ds_type = kyomi_core::datasource_registry::DatasourceType::from_str(&datasource_type)
         .into_sfn()?;
+
+    // `connection_config` here is create-mode form input straight from the
+    // client, so it's ordinarily plaintext already. Decrypting defensively
+    // is a no-op for plaintext/masked values (see
+    // `credential_service::decrypt_connection_config_secrets`) and protects
+    // against any future path that resupplies an already-encrypted field.
+    let encryption_key = ac.encryption_key()?;
+    let connection_config = kyomi_auth::credential_service::decrypt_connection_config_secrets(
+        &connection_config,
+        &encryption_key,
+    );
 
     let provider = match tokio::time::timeout(
         kyomi_datasource_server::DATASOURCE_TIMEOUT_CONNECT,
@@ -526,18 +545,21 @@ pub async fn test_existing_datasource(
             .await
             .into_sfn()?;
 
-    let credentials = if let Some(ref cred) = user_cred {
-        kyomi_auth::encryption::decrypt_json(&cred.credentials, &encryption_key)
-            .unwrap_or(serde_json::json!({}))
-    } else {
-        serde_json::json!({})
-    };
+    // `ds.connection_config` came straight from the database and may hold
+    // encrypted `COMMON_SENSITIVE` fields (e.g. `ssh_private_key`) — the
+    // driver always needs plaintext. The stored per-user credential blob
+    // (if any) needs the same treatment.
+    let (decrypted_config, credentials) = kyomi_auth::credential_service::decrypt_provider_secrets(
+        &ds.connection_config,
+        user_cred.as_ref().map(|c| c.credentials.as_str()),
+        &encryption_key,
+    );
 
     let provider = match tokio::time::timeout(
         kyomi_datasource_server::DATASOURCE_TIMEOUT_CONNECT,
         kyomi_datasource_server::create_provider(
             &ds_type,
-            &ds.connection_config,
+            &decrypted_config,
             &credentials,
             None,
         ),
@@ -637,10 +659,11 @@ pub async fn discover_datasource_resources(
     let ds_type = kyomi_core::datasource_registry::DatasourceType::from_str(&datasource_type)
         .into_sfn()?;
 
-    // If slug provided, look up stored credentials (for OAuth datasources)
-    let resolved_creds = if let Some(ref slug) = datasource_slug {
-        let encryption_key = ac.encryption_key()?;
+    let encryption_key = ac.encryption_key()?;
 
+    // If slug provided, look up any stored per-user credential blob (e.g.
+    // OAuth) to overlay caller-provided `credentials` on top of.
+    let stored_cred_str: Option<String> = if let Some(ref slug) = datasource_slug {
         match kyomi_auth::datasource_service::get_datasource_by_slug(ac.db(), slug, &ac.ws_id)
             .await
         {
@@ -652,23 +675,29 @@ pub async fn discover_datasource_resources(
                 )
                 .await
                 {
-                    Ok(Some(cred)) => {
-                        match kyomi_auth::encryption::decrypt_json(
-                            &cred.credentials,
-                            &encryption_key,
-                        ) {
-                            Ok(decrypted) => overlay_credentials(decrypted, &credentials),
-                            Err(_) => credentials.clone(),
-                        }
-                    }
-                    _ => credentials.clone(),
+                    Ok(Some(cred)) => Some(cred.credentials),
+                    _ => None,
                 }
             }
-            _ => credentials.clone(),
+            _ => None,
         }
     } else {
-        credentials.clone()
+        None
     };
+
+    // `connection_config` may be freshly-typed plaintext (create mode) or an
+    // already-persisted config fetched by the caller (edit mode) — decrypt
+    // defensively; non-ciphertext values pass through unchanged. The stored
+    // per-user credential blob (if any) needs the same treatment before being
+    // overlaid with caller-provided `credentials` (missing/undecryptable
+    // stored credentials yield an empty object, so the overlay falls back to
+    // whatever the caller provided).
+    let (connection_config, stored_creds) = kyomi_auth::credential_service::decrypt_provider_secrets(
+        &connection_config,
+        stored_cred_str.as_deref(),
+        &encryption_key,
+    );
+    let resolved_creds = overlay_credentials(stored_creds, &credentials);
 
     let provider = match tokio::time::timeout(
         kyomi_datasource_server::DATASOURCE_TIMEOUT_CONNECT,
@@ -840,11 +869,22 @@ pub(crate) async fn create_query_provider(
     // Build user context for BigQuery OAuth (kyomi_oauth auth mode).
     let user_context = build_user_context(ctx, auth).await?;
 
+    // `ds.connection_config` came straight from the database and may hold
+    // encrypted `COMMON_SENSITIVE` fields — the driver always needs plaintext.
+    let encryption_key = ctx
+        .encryption_key
+        .as_deref()
+        .ok_or_else(|| ServerFnError::new("Encryption key not configured"))?;
+    let decrypted_config = kyomi_auth::credential_service::decrypt_connection_config_secrets(
+        &ds.connection_config,
+        encryption_key,
+    );
+
     let ds_type: kyomi_core::datasource_registry::DatasourceType = ds.datasource_type.into();
     let provider = kyomi_datasource_server::create_provider_from_parts(
         &ds.id,
         &ds.connection_type,
-        &ds.connection_config,
+        &decrypted_config,
         ds_type,
         credentials,
         user_context,

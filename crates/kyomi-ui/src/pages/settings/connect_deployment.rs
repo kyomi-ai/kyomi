@@ -89,7 +89,7 @@ pub const fn supports_ssh_tunnel(type_id: &str) -> bool {
     // same technique as `default_port`.
     matches!(
         type_id.as_bytes(),
-        b"postgres" | b"mysql" | b"redshift" | b"clickhouse" | b"sqlserver"
+        b"postgres" | b"mysql" | b"redshift" | b"clickhouse" | b"sqlserver" | b"synapse"
     )
 }
 

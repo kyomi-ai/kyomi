@@ -192,6 +192,8 @@ pub async fn create_analytics_site(
         ));
     }
 
+    let encryption_key = ac.encryption_key()?;
+
     let site = kyomi_auth::analytics_site_service::create_site(
         kyomi_auth::analytics_site_service::CreateSiteParams {
             db: ac.db(),
@@ -206,6 +208,7 @@ pub async fn create_analytics_site(
                 admin_password: &ac.ctx.config.analytics_clickhouse_password,
                 secure: ac.ctx.config.analytics_clickhouse_secure,
             },
+            encryption_key: &encryption_key,
         },
     )
     .await
@@ -249,14 +252,19 @@ pub async fn update_analytics_site(
         return Err(ServerFnError::new("At least one domain is required"));
     }
 
+    let encryption_key = ac.encryption_key()?;
+
     let site = kyomi_auth::analytics_site_service::update_site(
-        ac.db(),
-        &site_id,
-        &ac.ws_id,
-        Some(name),
-        Some(&domains),
-        &ac.ctx.config.analytics_signing_secret,
-        datasource_slug.as_deref(),
+        kyomi_auth::analytics_site_service::UpdateSiteParams {
+            db: ac.db(),
+            id: &site_id,
+            workspace_id: &ac.ws_id,
+            name: Some(name),
+            domains: Some(&domains),
+            secret: &ac.ctx.config.analytics_signing_secret,
+            datasource_slug: datasource_slug.as_deref(),
+            encryption_key: &encryption_key,
+        },
     )
     .await
     .into_sfn()?;

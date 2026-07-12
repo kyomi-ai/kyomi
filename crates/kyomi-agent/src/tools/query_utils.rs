@@ -158,9 +158,18 @@ pub async fn create_provider_for_datasource(
             user_email: String::new(),
             workspace_id: ctx.workspace_id.clone(),
         };
+
+        // `ds.connection_config` came straight from the database and may
+        // hold encrypted `COMMON_SENSITIVE` fields — every driver needs
+        // plaintext.
+        let decrypted_config = kyomi_auth::credential_service::decrypt_connection_config_secrets(
+            &ds.connection_config,
+            &ctx.encryption_key,
+        );
+
         kyomi_datasource_server::factory::create_provider(
             &ds_type,
-            &ds.connection_config,
+            &decrypted_config,
             &credentials,
             Some(&user_context),
         )

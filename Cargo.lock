@@ -6253,9 +6253,9 @@ dependencies = [
 
 [[package]]
 name = "kyomi-datasource"
-version = "1.5.1"
+version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "375eb61b975d10d690d7e6116ff5a087c5670c05e8021a92b8d1670f6b087b4d"
+checksum = "667d191765376cc094f39f796ed5032c43fbc4f642c3a9508f8333117aa8b6aa"
 dependencies = [
  "arrow",
  "arrow-flight",

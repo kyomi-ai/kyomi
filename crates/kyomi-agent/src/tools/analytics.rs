@@ -195,6 +195,7 @@ impl AgentTool for CreateAnalyticsSiteTool {
                 admin_password: &ctx.config.analytics_clickhouse_password,
                 secure: ctx.config.analytics_clickhouse_secure,
             },
+            encryption_key: &ctx.encryption_key,
         })
         .await?;
 
@@ -336,15 +337,16 @@ impl AgentTool for UpdateAnalyticsSiteTool {
             return Ok("Error: Analytics is not configured on this instance.".into());
         }
 
-        let site = analytics_site_service::update_site(
-            &ctx.db,
-            &existing.id,
-            &ctx.workspace_id,
-            name.as_deref(),
-            allowed_domains.as_deref(),
-            &ctx.config.analytics_signing_secret,
-            datasource_slug.as_deref(),
-        )
+        let site = analytics_site_service::update_site(analytics_site_service::UpdateSiteParams {
+            db: &ctx.db,
+            id: &existing.id,
+            workspace_id: &ctx.workspace_id,
+            name: name.as_deref(),
+            domains: allowed_domains.as_deref(),
+            secret: &ctx.config.analytics_signing_secret,
+            datasource_slug: datasource_slug.as_deref(),
+            encryption_key: &ctx.encryption_key,
+        })
         .await?;
 
         let mut result = site_to_json(&site);

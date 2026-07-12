@@ -114,15 +114,19 @@ pub async fn create_connect_datasource(
     }
 
     let slug_ref = slug.as_deref().filter(|s| !s.is_empty());
+    let encryption_key = ac.encryption_key()?;
 
     let ds = kyomi_auth::datasource_service::create_datasource(
         ac.db(),
-        &ac.ws_id,
-        &name,
-        slug_ref,
-        &datasource_type,
-        serde_json::json!({}),
-        Some("connect"),
+        kyomi_auth::datasource_service::CreateDatasourceParams {
+            workspace_id: &ac.ws_id,
+            name: &name,
+            slug: slug_ref,
+            ds_type: &datasource_type,
+            connection_config: serde_json::json!({}),
+            connection_type: Some("connect"),
+            encryption_key: &encryption_key,
+        },
     )
     .await
     .map_err(|e| {

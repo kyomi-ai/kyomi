@@ -1,13 +1,21 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Credential masking helpers.
+//! Credential masking, encryption-at-rest, and decryption helpers.
 //!
 //! Masking functions use the datasource type registry to determine which
 //! fields are sensitive and should be replaced with `MASKED_VALUE`.
 //!
-//! For encrypting/decrypting credentials use `encryption::encrypt_json` /
+//! [`COMMON_SENSITIVE`] fields are additionally encrypted at rest in
+//! `connection_config` (see [`finalize_connection_config_secrets`]) and must
+//! be decrypted before use by a datasource driver (see
+//! [`decrypt_connection_config_secrets`]).
+//!
+//! For encrypting/decrypting arbitrary credential JSON (e.g. per-user
+//! `user_datasource_credentials.credentials`) use `encryption::encrypt_json` /
 //! `encryption::decrypt_json` directly.
 
+use base64::engine::general_purpose::URL_SAFE;
+use base64::Engine;
 use kyomi_core::datasource_registry;
 use serde_json::Value;
 
@@ -15,9 +23,12 @@ use serde_json::Value;
 pub const MASKED_VALUE: &str = "********";
 
 /// Connection config fields that are always sensitive, regardless of
-/// datasource type. Masked on read by [`mask_connection_config`] and
-/// restored on write by [`preserve_masked_connection_config`].
-pub(crate) const COMMON_SENSITIVE: &[&str] = &["shared_password", "ssh_private_key"];
+/// datasource type. Masked on read by [`mask_connection_config`], encrypted
+/// at rest on write by [`finalize_connection_config_secrets`], and decrypted
+/// just-in-time before a datasource provider is built by
+/// [`decrypt_connection_config_secrets`].
+pub(crate) const COMMON_SENSITIVE: &[&str] =
+    &["shared_password", "ssh_private_key", "ssh_passphrase"];
 
 /// Mask sensitive credential fields for API responses.
 ///
@@ -46,8 +57,9 @@ pub fn mask_credentials(credentials: &Value, ds_type: &str) -> Value {
 /// Mask sensitive connection config fields for API responses.
 ///
 /// Looks up the datasource type in the registry for type-specific sensitive
-/// fields. Also always masks `shared_password` and `ssh_private_key` regardless
-/// of type, as these are common sensitive fields across all datasource types.
+/// fields. Also always masks every [`COMMON_SENSITIVE`] field (currently
+/// `shared_password`, `ssh_private_key`, `ssh_passphrase`) regardless of
+/// type, as these are common sensitive fields across all datasource types.
 ///
 /// If the type is unknown or the config is not an object, the value is returned
 /// unchanged.
@@ -77,14 +89,16 @@ pub fn mask_connection_config(config: &Value, ds_type: &str) -> Value {
 }
 
 /// Restore masked/omitted sensitive `connection_config` fields from the
-/// stored config on update.
+/// stored config, and encrypt any freshly-provided plaintext secret, before
+/// a `connection_config` is written to the database.
 ///
 /// This is the write-side counterpart to [`mask_connection_config`]. Sensitive
 /// fields are never sent to the client in real form — they come back either
 /// masked as [`MASKED_VALUE`] or omitted entirely (e.g. a UI that only
 /// resubmits fields it actually loaded). Without this step, a wholesale
 /// replace of `connection_config` on update would clobber the real stored
-/// secret with the placeholder or silently drop it.
+/// secret with the placeholder or silently drop it — and a plaintext value
+/// typed by the user would be written to the database unencrypted.
 ///
 /// For each field in [`COMMON_SENSITIVE`], one of three things happens:
 ///
@@ -93,19 +107,24 @@ pub fn mask_connection_config(config: &Value, ds_type: &str) -> Value {
 ///   *removed* from `incoming` entirely; it is never restored from `existing`.
 /// - `incoming[field]` is missing, or equal to [`MASKED_VALUE`] — this is the
 ///   normal edit case where the UI never resupplies a secret it only ever
-///   received masked. `incoming[field]` is overwritten with the value from
-///   `existing`, if any.
-/// - `incoming[field]` holds any other real value — a freshly-provided value
-///   always passes through unchanged; this function only ever fills gaps or
-///   honors explicit clears, never overrides a genuine new value.
+///   received masked. `incoming[field]` is overwritten with the *already
+///   encrypted* value from `existing` verbatim — it is never re-encrypted.
+///   If `existing` is `None` (create) or has no stored value, the field is
+///   left absent.
+/// - `incoming[field]` holds a real, non-empty string — this is fresh
+///   plaintext supplied by the client. It is encrypted with `key` before
+///   being written into `incoming`. Any other real (non-string or empty
+///   string) value passes through unchanged.
 ///
-/// No-ops if either `incoming` or `existing` is not a JSON object.
-pub fn preserve_masked_connection_config(incoming: &mut Value, existing: &Value) {
-    let Some(existing_obj) = existing.as_object() else {
-        return;
-    };
+/// No-ops if `incoming` is not a JSON object.
+pub fn finalize_connection_config_secrets(
+    incoming: &mut Value,
+    existing: Option<&Value>,
+    key: &[u8; 32],
+) -> kyomi_core::Result<()> {
+    let existing_obj = existing.and_then(Value::as_object);
     let Some(incoming_obj) = incoming.as_object_mut() else {
-        return;
+        return Ok(());
     };
 
     for &field in COMMON_SENSITIVE {
@@ -119,16 +138,134 @@ pub fn preserve_masked_connection_config(incoming: &mut Value, existing: &Value)
             Some(Value::String(s)) => s == MASKED_VALUE,
             Some(_) => false,
         };
-        if !is_masked_or_absent {
+
+        if is_masked_or_absent {
+            match existing_obj.and_then(|eo| eo.get(field)) {
+                Some(Value::String(existing_val)) if !existing_val.is_empty() => {
+                    incoming_obj.insert(field.to_string(), Value::String(existing_val.clone()));
+                }
+                // Nothing to restore — e.g. `existing` is `None` on create,
+                // or the field was never set. A masked placeholder must
+                // never be persisted literally, so drop it rather than
+                // leaving `MASKED_VALUE` sitting in the stored config.
+                _ => {
+                    incoming_obj.remove(field);
+                }
+            }
             continue;
         }
 
-        if let Some(Value::String(existing_val)) = existing_obj.get(field)
-            && !existing_val.is_empty()
+        // A real, non-masked value was provided. If it's a non-empty
+        // string, it's fresh plaintext from the client — encrypt it before
+        // it's persisted.
+        if let Some(Value::String(s)) = incoming_obj.get(field)
+            && !s.is_empty()
         {
-            incoming_obj.insert(field.to_string(), Value::String(existing_val.clone()));
+            let encrypted = crate::encryption::encrypt(s, key)?;
+            incoming_obj.insert(field.to_string(), Value::String(encrypted));
         }
     }
+
+    Ok(())
+}
+
+/// Heuristic check for whether `s` looks like ciphertext produced by
+/// [`crate::encryption::encrypt`] (base64url of `version_byte + nonce + tag +
+/// ciphertext`, version `0x02`).
+///
+/// Used by [`decrypt_connection_config_secrets`] to distinguish freshly
+/// encrypted secrets from legacy plaintext values that predate this
+/// encryption layer (e.g. a `shared_password` written before this feature
+/// shipped) — legacy plaintext must pass through unchanged rather than
+/// erroring or being treated as garbage ciphertext.
+pub(crate) fn looks_encrypted(s: &str) -> bool {
+    match URL_SAFE.decode(s) {
+        // version byte (1) + nonce (12) + at least the 16-byte GCM tag.
+        Ok(bytes) => bytes.len() >= 1 + 12 + 16 && bytes[0] == 0x02,
+        Err(_) => false,
+    }
+}
+
+/// Decrypt `s` with `key` if it looks like our ciphertext; otherwise return
+/// it unchanged, treating it as legacy plaintext or a non-secret placeholder.
+fn decrypt_or_passthrough(field: &str, s: &str, key: &[u8; 32]) -> String {
+    if !looks_encrypted(s) {
+        return s.to_string();
+    }
+
+    match crate::encryption::decrypt(s, key) {
+        Ok(plaintext) => plaintext,
+        Err(e) => {
+            // Looked like our ciphertext but failed to decrypt (wrong key,
+            // corrupted data). Log and pass the raw value through rather
+            // than erroring — callers building a datasource provider will
+            // simply fail to authenticate, which surfaces the problem
+            // without crashing the indexing/query path.
+            tracing::warn!(
+                field,
+                error = %e,
+                "connection_config field looked encrypted but failed to decrypt; passing through raw value"
+            );
+            s.to_string()
+        }
+    }
+}
+
+/// Decrypt all [`COMMON_SENSITIVE`] fields in `config`, returning a clone
+/// with plaintext values.
+///
+/// **Migration-safe**: fields are only decrypted if [`looks_encrypted`]
+/// recognizes them as our ciphertext format. Legacy rows written before this
+/// encryption layer shipped (plaintext `shared_password`, for example) pass
+/// through unchanged instead of erroring.
+///
+/// Call this immediately before building any datasource provider —
+/// `connection_config` is encrypted at rest, but every driver must receive
+/// plaintext.
+pub fn decrypt_connection_config_secrets(config: &Value, key: &[u8; 32]) -> Value {
+    let Some(obj) = config.as_object() else {
+        return config.clone();
+    };
+
+    let mut result = obj.clone();
+    for &field in COMMON_SENSITIVE {
+        if let Some(Value::String(s)) = result.get(field) {
+            let decrypted = decrypt_or_passthrough(field, s, key);
+            result.insert(field.to_string(), Value::String(decrypted));
+        }
+    }
+
+    Value::Object(result)
+}
+
+/// Decrypt a datasource's `connection_config` secrets AND an optional
+/// encrypted credential blob together, for provider construction.
+///
+/// Returns `(plaintext_connection_config, plaintext_credentials)`.
+///
+/// - `connection_config` is decrypted via [`decrypt_connection_config_secrets`]
+///   (migration-safe: legacy plaintext / masked values pass through unchanged).
+/// - `encrypted_credentials`, if present, is decrypted via
+///   `encryption::decrypt_json`. Missing (`None`) or undecryptable credentials
+///   yield an empty JSON object rather than erroring — callers building a
+///   datasource provider with empty credentials will simply fail to
+///   authenticate, which surfaces the problem without crashing the request.
+///
+/// This is the single entry point `#[server]` fns should call before building
+/// a datasource provider — consolidating both decryptions into one call keeps
+/// callout-heavy server_fns under the service-callout lint budget (see
+/// `scripts/lint/check-server-fns.sh`).
+pub fn decrypt_provider_secrets(
+    connection_config: &Value,
+    encrypted_credentials: Option<&str>,
+    key: &[u8; 32],
+) -> (Value, Value) {
+    let plaintext_config = decrypt_connection_config_secrets(connection_config, key);
+    let plaintext_credentials = match encrypted_credentials {
+        Some(enc) => crate::encryption::decrypt_json(enc, key).unwrap_or_else(|_| serde_json::json!({})),
+        None => serde_json::json!({}),
+    };
+    (plaintext_config, plaintext_credentials)
 }
 
 /// Replace a field value with [`MASKED_VALUE`] if it is a non-empty string.
@@ -441,14 +578,16 @@ mod tests {
         assert_eq!(masked["oauth_refresh_token"], MASKED_VALUE);
     }
 
-    // -- preserve_masked_connection_config ---
+    // -- finalize_connection_config_secrets ---
 
     #[test]
-    fn preserve_masked_restores_omitted_and_masked_sensitive_fields() {
+    fn finalize_restores_omitted_and_masked_sensitive_fields_verbatim() {
+        let key = test_key();
+        let existing_ciphertext = encryption::encrypt("real-shared-pass", &key).unwrap();
         let existing = json!({
             "host": "db.example.com",
-            "ssh_private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\nreal-key\n-----END OPENSSH PRIVATE KEY-----",
-            "shared_password": "real-shared-pass"
+            "ssh_private_key": "already-ciphertext-blob",
+            "shared_password": existing_ciphertext
         });
 
         // Incoming omits ssh_private_key entirely and sends the masked
@@ -458,38 +597,40 @@ mod tests {
             "shared_password": MASKED_VALUE
         });
 
-        preserve_masked_connection_config(&mut incoming, &existing);
+        finalize_connection_config_secrets(&mut incoming, Some(&existing), &key).unwrap();
 
+        // Restored verbatim — NOT re-encrypted (still the exact stored ciphertext).
         assert_eq!(incoming["ssh_private_key"], existing["ssh_private_key"]);
         assert_eq!(incoming["shared_password"], existing["shared_password"]);
     }
 
     #[test]
-    fn preserve_masked_does_not_clobber_new_real_value() {
+    fn finalize_encrypts_a_fresh_plaintext_value_and_does_not_clobber_it() {
+        let key = test_key();
         let existing = json!({
-            "ssh_private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\nold-key\n-----END OPENSSH PRIVATE KEY-----"
+            "ssh_private_key": "old-ciphertext-blob"
         });
 
-        let mut incoming = json!({
-            "ssh_private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\nnew-key\n-----END OPENSSH PRIVATE KEY-----"
-        });
+        let new_plaintext = "-----BEGIN OPENSSH PRIVATE KEY-----\nnew-key\n-----END OPENSSH PRIVATE KEY-----";
+        let mut incoming = json!({ "ssh_private_key": new_plaintext });
 
-        preserve_masked_connection_config(&mut incoming, &existing);
+        finalize_connection_config_secrets(&mut incoming, Some(&existing), &key).unwrap();
 
-        // A freshly-provided real value overrides — it must NOT be replaced
-        // with the old stored value.
-        assert_eq!(
-            incoming["ssh_private_key"],
-            "-----BEGIN OPENSSH PRIVATE KEY-----\nnew-key\n-----END OPENSSH PRIVATE KEY-----"
-        );
+        // The freshly-provided value must be encrypted, not passed through
+        // as plaintext, and must NOT be replaced with the old stored value.
+        let stored = incoming["ssh_private_key"].as_str().unwrap();
+        assert_ne!(stored, new_plaintext, "plaintext must not be stored as-is");
+        assert!(looks_encrypted(stored), "new value should be encrypted at rest");
+        assert_eq!(encryption::decrypt(stored, &key).unwrap(), new_plaintext);
     }
 
     #[test]
-    fn preserve_masked_explicit_null_clears_instead_of_restoring() {
+    fn finalize_explicit_null_clears_instead_of_restoring() {
+        let key = test_key();
         let existing = json!({
             "host": "db.example.com",
             "ssh_enabled": true,
-            "ssh_private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\nreal-key\n-----END OPENSSH PRIVATE KEY-----"
+            "ssh_private_key": "old-ciphertext-blob"
         });
 
         // Incoming explicitly clears ssh_private_key (e.g. SSH tunnel disabled),
@@ -500,7 +641,7 @@ mod tests {
             "ssh_private_key": Value::Null
         });
 
-        preserve_masked_connection_config(&mut incoming, &existing);
+        finalize_connection_config_secrets(&mut incoming, Some(&existing), &key).unwrap();
 
         // The field must be absent from the result, not restored from existing.
         assert!(
@@ -510,7 +651,8 @@ mod tests {
     }
 
     #[test]
-    fn preserve_masked_leaves_non_sensitive_fields_untouched_and_absent_stays_absent() {
+    fn finalize_leaves_non_sensitive_fields_untouched_and_absent_stays_absent() {
+        let key = test_key();
         let existing = json!({
             "host": "old-host.example.com",
             "port": 5432
@@ -521,7 +663,7 @@ mod tests {
             "port": 5433
         });
 
-        preserve_masked_connection_config(&mut incoming, &existing);
+        finalize_connection_config_secrets(&mut incoming, Some(&existing), &key).unwrap();
 
         // Non-sensitive fields pass through untouched.
         assert_eq!(incoming["host"], "new-host.example.com");
@@ -531,5 +673,176 @@ mod tests {
         // absent — nothing to restore from.
         assert!(incoming.get("ssh_private_key").is_none());
         assert!(incoming.get("shared_password").is_none());
+    }
+
+    #[test]
+    fn finalize_on_create_with_no_existing_config_encrypts_fresh_values() {
+        let key = test_key();
+        let mut incoming = json!({
+            "host": "db.example.com",
+            "shared_password": "brand-new-password"
+        });
+
+        // `existing = None` is the create-mode case — there is nothing to
+        // restore from, but a freshly-provided secret must still be encrypted.
+        finalize_connection_config_secrets(&mut incoming, None, &key).unwrap();
+
+        let stored = incoming["shared_password"].as_str().unwrap();
+        assert!(looks_encrypted(stored));
+        assert_eq!(encryption::decrypt(stored, &key).unwrap(), "brand-new-password");
+    }
+
+    #[test]
+    fn finalize_on_create_with_masked_or_absent_value_leaves_field_absent() {
+        let key = test_key();
+
+        // Masked placeholder with nothing to restore from (existing = None).
+        let mut incoming = json!({ "shared_password": MASKED_VALUE });
+        finalize_connection_config_secrets(&mut incoming, None, &key).unwrap();
+        assert!(incoming.get("shared_password").is_none());
+    }
+
+    // -- looks_encrypted / decrypt_connection_config_secrets ---
+
+    #[test]
+    fn looks_encrypted_recognizes_our_ciphertext_format() {
+        let key = test_key();
+        let ciphertext = encryption::encrypt("some-secret", &key).unwrap();
+        assert!(looks_encrypted(&ciphertext));
+    }
+
+    #[test]
+    fn looks_encrypted_rejects_masked_placeholder() {
+        assert!(!looks_encrypted(MASKED_VALUE));
+    }
+
+    #[test]
+    fn looks_encrypted_rejects_legacy_plaintext() {
+        assert!(!looks_encrypted("hunter2"));
+        assert!(!looks_encrypted("-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----"));
+    }
+
+    #[test]
+    fn decrypt_connection_config_secrets_round_trips_finalize_encrypted_values() {
+        let key = test_key();
+        let mut config = json!({
+            "host": "db.example.com",
+            "ssh_private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\nreal-key\n-----END OPENSSH PRIVATE KEY-----",
+            "shared_password": "real-shared-pass"
+        });
+        finalize_connection_config_secrets(&mut config, None, &key).unwrap();
+
+        // Sanity: the finalized config really is ciphertext now.
+        assert!(looks_encrypted(config["ssh_private_key"].as_str().unwrap()));
+        assert!(looks_encrypted(config["shared_password"].as_str().unwrap()));
+
+        let decrypted = decrypt_connection_config_secrets(&config, &key);
+
+        assert_eq!(
+            decrypted["ssh_private_key"],
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nreal-key\n-----END OPENSSH PRIVATE KEY-----"
+        );
+        assert_eq!(decrypted["shared_password"], "real-shared-pass");
+        // Non-sensitive fields pass through unchanged.
+        assert_eq!(decrypted["host"], "db.example.com");
+    }
+
+    #[test]
+    fn decrypt_connection_config_secrets_passes_through_legacy_plaintext() {
+        let key = test_key();
+        // A row written before this encryption layer shipped — plaintext,
+        // not our ciphertext format.
+        let config = json!({
+            "host": "db.example.com",
+            "shared_password": "legacy-plaintext-password"
+        });
+
+        let decrypted = decrypt_connection_config_secrets(&config, &key);
+
+        assert_eq!(decrypted["shared_password"], "legacy-plaintext-password");
+    }
+
+    #[test]
+    fn decrypt_connection_config_secrets_leaves_masked_value_as_is() {
+        let key = test_key();
+        let config = json!({ "shared_password": MASKED_VALUE });
+
+        let decrypted = decrypt_connection_config_secrets(&config, &key);
+
+        assert_eq!(decrypted["shared_password"], MASKED_VALUE);
+    }
+
+    #[test]
+    fn decrypt_connection_config_secrets_handles_non_object() {
+        let key = test_key();
+        let config = json!("not an object");
+        assert_eq!(decrypt_connection_config_secrets(&config, &key), config);
+    }
+
+    // -- end-to-end-ish: finalize then decrypt round trip for a fresh SSH key ---
+
+    #[test]
+    fn ssh_private_key_survives_finalize_then_decrypt_round_trip() {
+        let key = test_key();
+        let pem = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEA\n-----END OPENSSH PRIVATE KEY-----";
+
+        // Simulates create_datasource: brand-new plaintext PEM from the
+        // client, no existing stored config.
+        let mut connection_config = json!({
+            "host": "db.example.com",
+            "ssh_enabled": true,
+            "ssh_private_key": pem
+        });
+        finalize_connection_config_secrets(&mut connection_config, None, &key).unwrap();
+
+        // What's "persisted" is ciphertext, not the PEM.
+        let stored = connection_config["ssh_private_key"].as_str().unwrap();
+        assert_ne!(stored, pem);
+        assert!(looks_encrypted(stored));
+
+        // What the driver receives just before provider creation is plaintext again.
+        let for_driver = decrypt_connection_config_secrets(&connection_config, &key);
+        assert_eq!(for_driver["ssh_private_key"], pem);
+    }
+
+    // -- decrypt_provider_secrets -------------------------------------------
+
+    #[test]
+    fn decrypt_provider_secrets_decrypts_both_config_and_credentials() {
+        let key = test_key();
+        let mut connection_config = json!({ "host": "db.example.com", "shared_password": "s3cr3t" });
+        finalize_connection_config_secrets(&mut connection_config, None, &key).unwrap();
+
+        let creds = json!({ "username": "alice", "password": "hunter2" });
+        let encrypted_creds = encryption::encrypt_json(&creds, &key).unwrap();
+
+        let (config, credentials) =
+            decrypt_provider_secrets(&connection_config, Some(&encrypted_creds), &key);
+
+        assert_eq!(config["shared_password"], "s3cr3t");
+        assert_eq!(config["host"], "db.example.com");
+        assert_eq!(credentials, creds);
+    }
+
+    #[test]
+    fn decrypt_provider_secrets_yields_empty_object_when_no_credentials() {
+        let key = test_key();
+        let connection_config = json!({ "host": "db.example.com" });
+
+        let (config, credentials) = decrypt_provider_secrets(&connection_config, None, &key);
+
+        assert_eq!(config["host"], "db.example.com");
+        assert_eq!(credentials, json!({}));
+    }
+
+    #[test]
+    fn decrypt_provider_secrets_yields_empty_object_when_credentials_undecryptable() {
+        let key = test_key();
+        let connection_config = json!({ "host": "db.example.com" });
+
+        let (_, credentials) =
+            decrypt_provider_secrets(&connection_config, Some("not valid ciphertext"), &key);
+
+        assert_eq!(credentials, json!({}));
     }
 }
