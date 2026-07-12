@@ -4,17 +4,19 @@
 //!
 //! Generates an Ed25519 SSH keypair using the `ssh-key` crate (RustCrypto).
 //! The private key is emitted in OpenSSH format (unencrypted, no passphrase)
-//! so it can be parsed directly by the driver's `russh::keys::decode_secret_key`,
-//! then encrypted at rest with the workspace encryption key before storage —
-//! the same AES-256-GCM scheme used for all other datasource credentials
-//! (see [`crate::encryption`]).
+//! so it can be parsed directly by the driver's `russh::keys::decode_secret_key`.
+//!
+//! The generated private key is returned **in plaintext**. Encryption at rest
+//! happens uniformly for every `connection_config` secret at the storage
+//! layer — see [`crate::credential_service::finalize_connection_config_secrets`] —
+//! not here. Keeping keygen encryption-agnostic means the same AES-256-GCM
+//! scheme protects a freshly generated key exactly the same way it protects
+//! any other secret the user types into the form.
 
 use ssh_key::rand_core::OsRng;
 use ssh_key::{Algorithm, LineEnding, PrivateKey};
 
-use crate::encryption;
-
-/// A freshly generated SSH keypair, ready for storage.
+/// A freshly generated SSH keypair, ready for use.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GeneratedSshKey {
     /// OpenSSH public key line (`ssh-ed25519 AAAA... `), plaintext.
@@ -23,20 +25,23 @@ pub struct GeneratedSshKey {
     /// `~/.ssh/authorized_keys`.
     pub public_key: String,
 
-    /// OpenSSH private key PEM, AES-256-GCM encrypted with the workspace
-    /// encryption key. Never returned in plaintext.
+    /// OpenSSH private key PEM, **plaintext**. The caller is responsible for
+    /// encrypting it before persisting it as part of a datasource's
+    /// `connection_config` (handled by
+    /// [`crate::credential_service::finalize_connection_config_secrets`] on
+    /// the save path).
     pub private_key: String,
 }
 
-/// Generate a new Ed25519 SSH keypair for an SSH tunnel and encrypt the
-/// private key with `encryption_key`.
+/// Generate a new Ed25519 SSH keypair for an SSH tunnel.
 ///
 /// The private key is generated without a passphrase — encryption at rest is
-/// handled by our own AES-256-GCM scheme (matching every other stored
-/// credential), not by OpenSSH's own passphrase protection. The decrypted PEM
-/// must be parseable by `russh::keys::decode_secret_key(pem, None)`, which the
-/// `ssh-key` crate's OpenSSH Ed25519 output satisfies.
-pub fn generate_ssh_keypair(encryption_key: &[u8; 32]) -> kyomi_core::Result<GeneratedSshKey> {
+/// handled by the storage-layer AES-256-GCM scheme (matching every other
+/// stored credential), not by OpenSSH's own passphrase protection. The
+/// plaintext PEM returned here must be parseable by
+/// `russh::keys::decode_secret_key(pem, None)`, which the `ssh-key` crate's
+/// OpenSSH Ed25519 output satisfies.
+pub fn generate_ssh_keypair() -> kyomi_core::Result<GeneratedSshKey> {
     let mut rng = OsRng;
     let private_key = PrivateKey::random(&mut rng, Algorithm::Ed25519).map_err(|e| {
         kyomi_core::Error::Internal(format!("failed to generate SSH keypair: {e}"))
@@ -50,11 +55,9 @@ pub fn generate_ssh_keypair(encryption_key: &[u8; 32]) -> kyomi_core::Result<Gen
         kyomi_core::Error::Internal(format!("failed to encode SSH private key: {e}"))
     })?;
 
-    let encrypted_private_key = encryption::encrypt(&private_key_pem, encryption_key)?;
-
     Ok(GeneratedSshKey {
         public_key,
-        private_key: encrypted_private_key,
+        private_key: private_key_pem.to_string(),
     })
 }
 
@@ -62,17 +65,9 @@ pub fn generate_ssh_keypair(encryption_key: &[u8; 32]) -> kyomi_core::Result<Gen
 mod tests {
     use super::*;
 
-    fn test_key() -> [u8; 32] {
-        let mut key = [0u8; 32];
-        key[..16].copy_from_slice(b"test-key-1234567");
-        key[16..].copy_from_slice(b"8901234567890123");
-        key
-    }
-
     #[test]
-    fn generates_ed25519_keypair_with_recoverable_private_key() {
-        let key = test_key();
-        let generated = generate_ssh_keypair(&key).expect("keygen should succeed");
+    fn generates_ed25519_keypair_with_a_directly_parseable_plaintext_private_key() {
+        let generated = generate_ssh_keypair().expect("keygen should succeed");
 
         assert!(
             generated.public_key.starts_with("ssh-ed25519 "),
@@ -80,32 +75,29 @@ mod tests {
             generated.public_key
         );
 
-        let decrypted_pem = encryption::decrypt(&generated.private_key, &key)
-            .expect("decrypting the stored private key should succeed");
-
         assert!(
-            decrypted_pem.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----"),
-            "decrypted private key should be an OpenSSH PEM block, got: {}",
-            decrypted_pem
+            generated.private_key.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----"),
+            "private key should be a plaintext OpenSSH PEM block, got: {}",
+            generated.private_key
         );
 
-        // The PEM must round-trip through ssh-key's own parser — this is
-        // what the russh driver relies on to load the tunnel key.
-        let parsed = PrivateKey::from_openssh(&decrypted_pem)
-            .expect("decrypted PEM should parse as a valid OpenSSH private key");
+        // The PEM must round-trip through ssh-key's own parser directly —
+        // no decryption step — which is what the russh driver relies on to
+        // load the tunnel key.
+        let parsed = PrivateKey::from_openssh(&generated.private_key)
+            .expect("plaintext PEM should parse as a valid OpenSSH private key");
         assert_eq!(parsed.algorithm(), Algorithm::Ed25519);
         assert!(
             !parsed.is_encrypted(),
             "private key must be unencrypted (no passphrase) — encryption at rest \
-             is handled by our own AES-256-GCM layer, not OpenSSH's"
+             is handled by the storage-layer AES-256-GCM scheme, not OpenSSH's"
         );
     }
 
     #[test]
     fn each_call_generates_a_different_keypair() {
-        let key = test_key();
-        let a = generate_ssh_keypair(&key).expect("keygen should succeed");
-        let b = generate_ssh_keypair(&key).expect("keygen should succeed");
+        let a = generate_ssh_keypair().expect("keygen should succeed");
+        let b = generate_ssh_keypair().expect("keygen should succeed");
         assert_ne!(a.public_key, b.public_key, "each keypair should be unique");
     }
 }

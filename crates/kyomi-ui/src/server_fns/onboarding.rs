@@ -171,15 +171,19 @@ pub async fn create_sample_datasource() -> Result<(), ServerFnError> {
     }
 
     let connection_config = ch_config.sample_datasource_config_json();
+    let encryption_key = ac.encryption_key()?;
 
     let ds = kyomi_auth::datasource_service::create_datasource(
         ac.db(),
-        &ac.ws_id,
-        "Acme Analytics (Sample)",
-        Some("acme-analytics-sample"),
-        "clickhouse",
-        connection_config,
-        None, // direct connection
+        kyomi_auth::datasource_service::CreateDatasourceParams {
+            workspace_id: &ac.ws_id,
+            name: "Acme Analytics (Sample)",
+            slug: Some("acme-analytics-sample"),
+            ds_type: "clickhouse",
+            connection_config,
+            connection_type: None, // direct connection
+            encryption_key: &encryption_key,
+        },
     )
     .await
     .into_sfn()?;

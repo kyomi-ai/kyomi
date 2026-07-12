@@ -179,11 +179,19 @@ async fn query_arrow(
     // ------------------------------------------------------------------
     // 6. Create provider (Connect-vs-direct branching, timeout).
     // ------------------------------------------------------------------
+    // `ds.connection_config` came straight from the database and may hold
+    // encrypted `COMMON_SENSITIVE` fields (e.g. `ssh_private_key`) — the
+    // driver always needs plaintext.
+    let decrypted_config = kyomi_auth::credential_service::decrypt_connection_config_secrets(
+        &ds.connection_config,
+        &state.encryption_key,
+    );
+
     let ds_type: kyomi_core::datasource_registry::DatasourceType = ds.datasource_type.into();
     let provider = match kyomi_datasource_server::create_provider_from_parts(
         &ds.id,
         &ds.connection_type,
-        &ds.connection_config,
+        &decrypted_config,
         ds_type,
         credentials,
         user_context,

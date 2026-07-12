@@ -328,21 +328,54 @@ pub async fn resolve_by_provider(
     }
 }
 
+/// Parameters for [`create_datasource`].
+///
+/// Bundled into a struct (rather than individual arguments) to stay under
+/// clippy's `too_many_arguments` threshold now that an encryption key is
+/// required alongside the existing fields.
+pub struct CreateDatasourceParams<'a> {
+    pub workspace_id: &'a str,
+    pub name: &'a str,
+    pub slug: Option<&'a str>,
+    pub ds_type: &'a str,
+    pub connection_config: Value,
+    /// Defaults to `"direct"` when `None`.
+    pub connection_type: Option<&'a str>,
+    /// Used to encrypt any freshly-provided `COMMON_SENSITIVE` field in
+    /// `connection_config` (e.g. a brand-new `shared_password` or
+    /// `ssh_private_key`) before it is persisted. See
+    /// [`credential_service::finalize_connection_config_secrets`].
+    pub encryption_key: &'a [u8; 32],
+}
+
 /// Create a new datasource configuration.
 ///
 /// Checks for duplicate name and slug within the workspace before inserting.
-/// Generates a datasource ID automatically.
-///
-/// `connection_type` defaults to `"direct"` when `None`.
+/// Generates a datasource ID automatically. Encrypts any `COMMON_SENSITIVE`
+/// `connection_config` field (see [`credential_service::finalize_connection_config_secrets`])
+/// before it is written to the database — there is no existing stored config
+/// to restore from on create, so any real value provided is treated as fresh
+/// plaintext.
 pub async fn create_datasource(
     pool: &DbPool,
-    workspace_id: &str,
-    name: &str,
-    slug: Option<&str>,
-    ds_type: &str,
-    connection_config: Value,
-    connection_type: Option<&str>,
+    params: CreateDatasourceParams<'_>,
 ) -> kyomi_core::Result<DatasourceConfig> {
+    let CreateDatasourceParams {
+        workspace_id,
+        name,
+        slug,
+        ds_type,
+        mut connection_config,
+        connection_type,
+        encryption_key,
+    } = params;
+
+    credential_service::finalize_connection_config_secrets(
+        &mut connection_config,
+        None,
+        encryption_key,
+    )?;
+
     // Check duplicate name
     let existing_name: i64 = kyomi_core::db_fetch_scalar!(
         pool,
@@ -423,6 +456,7 @@ pub async fn update_datasource(
     connection_config: Option<Value>,
     active: Option<bool>,
     auto_refresh_allowed: Option<bool>,
+    encryption_key: &[u8; 32],
 ) -> kyomi_core::Result<DatasourceConfig> {
     // Verify the datasource exists
     let existing = get_datasource(pool, id, workspace_id).await?;
@@ -481,15 +515,18 @@ pub async fn update_datasource(
     // Sensitive `connection_config` fields (e.g. `ssh_private_key`,
     // `shared_password`) are masked on read and therefore never round-trip
     // through the frontend as real values. Restore them from the stored
-    // config here so a wholesale replace doesn't clobber or drop the real
-    // secret when the caller resubmits the masked placeholder or omits the
-    // field entirely.
+    // config (already ciphertext, never re-encrypted) here so a wholesale
+    // replace doesn't clobber or drop the real secret when the caller
+    // resubmits the masked placeholder or omits the field entirely. Any
+    // genuinely new plaintext value the caller does provide is encrypted
+    // before being persisted.
     let final_config = match connection_config {
         Some(mut cfg) => {
-            credential_service::preserve_masked_connection_config(
+            credential_service::finalize_connection_config_secrets(
                 &mut cfg,
-                &existing.connection_config,
-            );
+                Some(&existing.connection_config),
+                encryption_key,
+            )?;
             cfg
         }
         None => existing.connection_config.clone(),

@@ -363,9 +363,15 @@ pub async fn index_catalog_sql(
         return result;
     };
 
-    // Create provider
+    // Create provider. `ctx.connection_config` came straight from the
+    // database and may hold encrypted `COMMON_SENSITIVE` fields (e.g.
+    // `ssh_private_key`) — every driver needs plaintext.
+    let decrypted_config = kyomi_auth::credential_service::decrypt_connection_config_secrets(
+        &ctx.connection_config,
+        &ctx.encryption_key,
+    );
     let provider = match indexer
-        .create_provider(&ctx.connection_config, &credentials)
+        .create_provider(&decrypted_config, &credentials)
         .await
     {
         Ok(p) => p,

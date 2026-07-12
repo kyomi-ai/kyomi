@@ -322,8 +322,9 @@ pub struct DatasourceTypeMetadata {
     /// Connection config fields that must be masked in API responses
     /// (e.g., `["oauth_client_secret", "service_account_json"]`).
     ///
-    /// Note: `shared_password` and `ssh_private_key` are always masked regardless
-    /// of this list (handled in `mask_connection_config`).
+    /// Note: `shared_password`, `ssh_private_key`, and `ssh_passphrase` are
+    /// always masked (and encrypted at rest) regardless of this list — see
+    /// `COMMON_SENSITIVE` in `kyomi_auth::credential_service`.
     pub sensitive_connection_config_fields: &'static [&'static str],
 
     /// Whether users must provide their own credentials.
@@ -370,8 +371,9 @@ pub struct DatasourceTypeMetadata {
     /// Whether this datasource type supports connecting through an SSH tunnel.
     ///
     /// `true` for direct-TCP database protocols (PostgreSQL, MySQL, Redshift,
-    /// ClickHouse, SQL Server). `false` for API/HTTPS-based providers (BigQuery,
-    /// Snowflake, Databricks, Synapse, FlareDB) where a tunnel doesn't apply.
+    /// ClickHouse, SQL Server, Azure Synapse). `false` for API/HTTPS-based
+    /// providers (BigQuery, Snowflake, Databricks, FlareDB) where a tunnel
+    /// doesn't apply.
     pub supports_ssh_tunnel: bool,
 }
 
@@ -774,7 +776,7 @@ static SYNAPSE_META: LazyLock<DatasourceTypeMetadata> =
         tree_level2_type: "schema",
         skip_empty_project_wrapper: true,
         skip_single_project_wrapper: false,
-        supports_ssh_tunnel: false,
+        supports_ssh_tunnel: true,
     });
 
 // --- FlareDB ---
@@ -1239,7 +1241,7 @@ mod tests {
     #[test]
     fn supports_ssh_tunnel_is_correct() {
         const SSH_TUNNEL_SUPPORTED: &[&str] =
-            &["postgres", "mysql", "redshift", "clickhouse", "sqlserver"];
+            &["postgres", "mysql", "redshift", "clickhouse", "sqlserver", "synapse"];
 
         for (type_id, meta) in all_metadata() {
             let expected = SSH_TUNNEL_SUPPORTED.contains(&type_id);

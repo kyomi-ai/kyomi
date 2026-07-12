@@ -10,7 +10,7 @@ use phosphor_leptos::{Icon, IconWeight};
 use crate::components::{
     Alert, AlertDescription, AlertTitle, AlertVariant, Badge, BadgeVariant, Button, ButtonLink,
     ButtonSize, ButtonVariant, Card, ConfirmDialog, EmptyState, Modal, ModalSize, Skeleton,
-    Spinner, Switch,
+    Spinner, Switch, ToggleButton,
 };
 use crate::components::toast::toast_error;
 #[cfg(target_arch = "wasm32")]
@@ -818,6 +818,7 @@ const PROVIDER_TYPES: &[(&str, &str)] = &[
     ("databricks", "Databricks"),
     ("redshift", "Amazon Redshift"),
     ("sqlserver", "SQL Server"),
+    ("synapse", "Azure Synapse"),
     ("flaredb", "FlareDB"),
 ];
 
@@ -847,6 +848,12 @@ pub fn DatasourceModal(
             .map(|c| c.workspace_roles.iter().any(|r| r == "workspace_admin"))
             .unwrap_or(false)
     });
+
+    // `datasource_id` is `Some` only in edit mode. Used by `SshTunnelSection`
+    // to pick placeholder copy for the BYOK private-key/passphrase fields
+    // ("leave blank to keep the existing key" only makes sense once a key
+    // already exists server-side).
+    let is_edit_mode = Signal::derive(move || datasource_id.get().is_some());
 
     // ── Form state ───────────────────────────────────────────────────────
     let (name, set_name) = signal(String::new());
@@ -878,19 +885,36 @@ pub fn DatasourceModal(
     // SSH tunnel state — admin-only, SSH-capable types only (see
     // `supports_ssh_tunnel`). `cfg_ssh_port` is kept as a `String` (like
     // `cfg_port`) and parsed at build time, defaulting to "22".
-    // `ssh_public_key` / `ssh_private_key_enc` are populated by a freshly
-    // generated keypair this session — the private key is force-masked on
-    // read server-side, so it is never loaded back on edit (see
+    // `ssh_public_key` / `ssh_private_key_generated` are populated by a freshly
+    // generated keypair this session. The private key held here is PLAINTEXT
+    // (`generate_ssh_key` returns plaintext; the save path encrypts it at rest
+    // via `finalize_connection_config_secrets`). It is force-masked on read
+    // server-side, so it is never loaded back on edit (see
     // `build_connection_config`, which only writes `ssh_private_key` when
-    // `ssh_private_key_enc` is `Some`, to avoid clobbering the stored
-    // ciphertext with the mask).
+    // `ssh_private_key_generated` is `Some`, to avoid clobbering the stored
+    // value with the mask).
     let (cfg_ssh_enabled, set_cfg_ssh_enabled) = signal(false);
     let (cfg_ssh_host, set_cfg_ssh_host) = signal(String::new());
     let (cfg_ssh_port, set_cfg_ssh_port) = signal("22".to_string());
     let (cfg_ssh_username, set_cfg_ssh_username) = signal(String::new());
     let (ssh_public_key, set_ssh_public_key) = signal::<Option<String>>(None);
-    let (ssh_private_key_enc, set_ssh_private_key_enc) = signal::<Option<String>>(None);
+    let (ssh_private_key_generated, set_ssh_private_key_generated) = signal::<Option<String>>(None);
     let (ssh_key_generating, set_ssh_key_generating) = signal(false);
+    // Non-sensitive: pinned bastion host key fingerprint (KYO-133). Written
+    // to `connection_config.ssh_host_fingerprint` as a plain string — never
+    // encrypted, never masked.
+    let (cfg_ssh_host_fingerprint, set_cfg_ssh_host_fingerprint) = signal(String::new());
+    // Key-source choice (KYO-134): "generate" (default — current UX, Kyomi
+    // generates and holds the keypair) or "byok" (user pastes their own
+    // private key, optionally passphrase-protected). `cfg_ssh_private_key_input`
+    // and `cfg_ssh_passphrase` are BYOK-only fields — like the generated
+    // private key, the stored values are force-masked server-side
+    // (`ssh_passphrase` is in `COMMON_SENSITIVE` alongside `ssh_private_key`)
+    // so they are deliberately never loaded back on edit; both start empty
+    // with a "leave blank to keep the existing key" placeholder instead.
+    let (cfg_ssh_key_mode, set_cfg_ssh_key_mode) = signal("generate".to_string());
+    let (cfg_ssh_private_key_input, set_cfg_ssh_private_key_input) = signal(String::new());
+    let (cfg_ssh_passphrase, set_cfg_ssh_passphrase) = signal(String::new());
 
     // BigQuery-specific
     let (bq_auth_mode, set_bq_auth_mode) = signal("kyomi_oauth".to_string());
@@ -1044,8 +1068,12 @@ pub fn DatasourceModal(
         set_cfg_ssh_port.set("22".to_string());
         set_cfg_ssh_username.set(String::new());
         set_ssh_public_key.set(None);
-        set_ssh_private_key_enc.set(None);
+        set_ssh_private_key_generated.set(None);
         set_ssh_key_generating.set(false);
+        set_cfg_ssh_host_fingerprint.set(String::new());
+        set_cfg_ssh_key_mode.set("generate".to_string());
+        set_cfg_ssh_private_key_input.set(String::new());
+        set_cfg_ssh_passphrase.set(String::new());
         set_bq_auth_mode.set("kyomi_oauth".to_string());
         set_cfg_oauth_client_id.set(String::new());
         set_cfg_oauth_client_secret.set(String::new());
@@ -1184,12 +1212,13 @@ pub fn DatasourceModal(
                             set_is_sample.try_set(bool_val("is_sample"));
                             set_cfg_shared_credentials.try_set(settings.shared_credentials);
 
-                            // SSH tunnel — `ssh_private_key` is force-masked
-                            // server-side (COMMON_SENSITIVE) so it is
-                            // deliberately NOT loaded back here; only the
+                            // SSH tunnel — `ssh_private_key` and `ssh_passphrase`
+                            // are force-masked server-side (COMMON_SENSITIVE) so
+                            // they are deliberately NOT loaded back here; only the
                             // public key (safe to display) and non-sensitive
                             // connection fields are restored.
-                            set_cfg_ssh_enabled.try_set(bool_val("ssh_enabled"));
+                            let ssh_enabled_val = bool_val("ssh_enabled");
+                            set_cfg_ssh_enabled.try_set(ssh_enabled_val);
                             set_cfg_ssh_host.try_set(str_val("ssh_host"));
                             set_cfg_ssh_username.try_set(str_val("ssh_username"));
                             set_cfg_ssh_port.try_set(
@@ -1202,11 +1231,27 @@ pub fn DatasourceModal(
                                     .filter(|s| !s.is_empty())
                                     .unwrap_or_else(|| "22".to_string()),
                             );
-                            set_ssh_public_key.try_set(
-                                cfg.get("ssh_public_key")
-                                    .and_then(|v| v.as_str())
-                                    .map(str::to_string),
+                            set_cfg_ssh_host_fingerprint.try_set(str_val("ssh_host_fingerprint"));
+                            let ssh_public_key_val = cfg
+                                .get("ssh_public_key")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string);
+                            // Key-source heuristic (KYO-134): the stored private
+                            // key is masked and can't tell us which mode was used,
+                            // but the public key is only ever present for a
+                            // Kyomi-generated keypair (BYOK never writes one back).
+                            // So: public key present → "generate"; SSH enabled but
+                            // no public key → the user brought their own → "byok".
+                            set_cfg_ssh_key_mode.try_set(
+                                if ssh_public_key_val.is_some() {
+                                    "generate".to_string()
+                                } else if ssh_enabled_val {
+                                    "byok".to_string()
+                                } else {
+                                    "generate".to_string()
+                                },
                             );
+                            set_ssh_public_key.try_set(ssh_public_key_val);
 
                             set_cfg_oauth_client_id.try_set(str_val("oauth_client_id"));
                             set_cfg_oauth_client_secret.try_set(str_val("oauth_client_secret"));
@@ -1611,43 +1656,82 @@ pub fn DatasourceModal(
             _ => {}
         }
 
-        // SSH tunnel — admin-only, SSH-capable types only. `ssh_private_key`
-        // is only written when a key was freshly generated THIS session
-        // (`ssh_private_key_enc` is `Some`); on edit, with SSH already
-        // enabled and no new key generated, we must not overwrite the
-        // stored ciphertext with the masked placeholder the field loads
-        // back as. This mirrors the "don't overwrite masked secret" rule
-        // used for password/shared_password elsewhere in this modal, but
-        // is easier to enforce here since the private key is never loaded
-        // into a signal at all (see the edit-mode load-back effect above).
-        if cfg_ssh_enabled.get_untracked() {
-            map.insert("ssh_enabled".to_string(), serde_json::json!(true));
-            let ssh_host = cfg_ssh_host.get_untracked();
-            if !ssh_host.is_empty() {
-                map.insert("ssh_host".to_string(), serde_json::json!(ssh_host));
+        // SSH tunnel — admin-only, SSH-capable types only (KYO-137: the
+        // whole block, including the disabled-state clear below, is gated on
+        // `supports_ssh_tunnel` so non-SSH-capable types never see ssh_* keys
+        // in their connection_config at all).
+        //
+        // `ssh_private_key` / `ssh_passphrase` writes depend on key-source
+        // mode (KYO-134):
+        // - "generate": `ssh_private_key` is only written when a key was
+        //   freshly generated THIS session (`ssh_private_key_generated` is
+        //   `Some`); on edit, with SSH already enabled and no new key
+        //   generated, we must not overwrite the stored ciphertext with the
+        //   masked placeholder the field loads back as. This mirrors the
+        //   "don't overwrite masked secret" rule used for
+        //   password/shared_password elsewhere in this modal, but is easier
+        //   to enforce here since the private key is never loaded into a
+        //   signal at all (see the edit-mode load-back effect above).
+        // - "byok": `ssh_private_key` / `ssh_passphrase` are written only
+        //   when the user typed something this session; a blank field on
+        //   edit means "keep the existing key/passphrase" (same masked-secret
+        //   discipline), so it's omitted rather than sent as empty. No
+        //   `ssh_public_key` is written — BYOK users manage their own
+        //   keypair, there is nothing for Kyomi to display.
+        if supports_ssh_tunnel(&t) {
+            if cfg_ssh_enabled.get_untracked() {
+                map.insert("ssh_enabled".to_string(), serde_json::json!(true));
+                let ssh_host = cfg_ssh_host.get_untracked();
+                if !ssh_host.is_empty() {
+                    map.insert("ssh_host".to_string(), serde_json::json!(ssh_host));
+                }
+                let ssh_username = cfg_ssh_username.get_untracked();
+                if !ssh_username.is_empty() {
+                    map.insert("ssh_username".to_string(), serde_json::json!(ssh_username));
+                }
+                let ssh_port = cfg_ssh_port.get_untracked().parse::<i64>().unwrap_or(22);
+                map.insert("ssh_port".to_string(), serde_json::json!(ssh_port));
+
+                // Host fingerprint (KYO-133) — plain string, not sensitive.
+                let fingerprint = cfg_ssh_host_fingerprint.get_untracked();
+                if !fingerprint.is_empty() {
+                    map.insert("ssh_host_fingerprint".to_string(), serde_json::json!(fingerprint));
+                }
+
+                match cfg_ssh_key_mode.get_untracked().as_str() {
+                    "byok" => {
+                        let private_key = cfg_ssh_private_key_input.get_untracked();
+                        if !private_key.is_empty() {
+                            map.insert("ssh_private_key".to_string(), serde_json::json!(private_key));
+                        }
+                        let passphrase = cfg_ssh_passphrase.get_untracked();
+                        if !passphrase.is_empty() {
+                            map.insert("ssh_passphrase".to_string(), serde_json::json!(passphrase));
+                        }
+                    }
+                    _ => {
+                        // "generate" (default)
+                        if let Some(public_key) = ssh_public_key.get_untracked() {
+                            map.insert("ssh_public_key".to_string(), serde_json::json!(public_key));
+                        }
+                        if let Some(private_key) = ssh_private_key_generated.get_untracked() {
+                            map.insert("ssh_private_key".to_string(), serde_json::json!(private_key));
+                        }
+                    }
+                }
+            } else {
+                map.insert("ssh_enabled".to_string(), serde_json::json!(false));
+                // Explicit clear: disabling the tunnel must drop the stored
+                // ciphertext, not just flip the flag. `preserve_masked_connection_config`
+                // treats an *absent* sensitive field as "not resupplied, restore
+                // the existing value" (the normal edit case) — so silently
+                // omitting `ssh_private_key` / `ssh_passphrase` here would leave
+                // the old encrypted secrets orphaned in `connection_config`
+                // forever. An explicit JSON `null` is the signal that means
+                // "clear it," not "didn't touch it."
+                map.insert("ssh_private_key".to_string(), serde_json::Value::Null);
+                map.insert("ssh_passphrase".to_string(), serde_json::Value::Null);
             }
-            let ssh_username = cfg_ssh_username.get_untracked();
-            if !ssh_username.is_empty() {
-                map.insert("ssh_username".to_string(), serde_json::json!(ssh_username));
-            }
-            let ssh_port = cfg_ssh_port.get_untracked().parse::<i64>().unwrap_or(22);
-            map.insert("ssh_port".to_string(), serde_json::json!(ssh_port));
-            if let Some(public_key) = ssh_public_key.get_untracked() {
-                map.insert("ssh_public_key".to_string(), serde_json::json!(public_key));
-            }
-            if let Some(private_key) = ssh_private_key_enc.get_untracked() {
-                map.insert("ssh_private_key".to_string(), serde_json::json!(private_key));
-            }
-        } else {
-            map.insert("ssh_enabled".to_string(), serde_json::json!(false));
-            // Explicit clear: disabling the tunnel must drop the stored
-            // ciphertext, not just flip the flag. `preserve_masked_connection_config`
-            // treats an *absent* sensitive field as "not resupplied, restore
-            // the existing value" (the normal edit case) — so silently
-            // omitting `ssh_private_key` here would leave the old encrypted
-            // key orphaned in `connection_config` forever. An explicit JSON
-            // `null` is the signal that means "clear it," not "didn't touch it."
-            map.insert("ssh_private_key".to_string(), serde_json::Value::Null);
         }
 
         if cfg_shared_credentials.get_untracked() {
@@ -1934,7 +2018,7 @@ pub fn DatasourceModal(
             match result {
                 Ok(GeneratedSshKey { public_key, private_key }) => {
                     set_ssh_public_key.set(Some(public_key));
-                    set_ssh_private_key_enc.set(Some(private_key));
+                    set_ssh_private_key_generated.set(Some(private_key));
                 }
                 Err(e) => {
                     toast_error(format!("Failed to generate SSH key: {e}"));
@@ -1951,17 +2035,22 @@ pub fn DatasourceModal(
     });
 
     // Auto-generate a keypair the first time SSH tunneling is enabled and no
-    // key exists yet. Guarded on `!settings_loading.get()` so this cannot
-    // race the edit-mode load-back effect above: `cfg_ssh_enabled` and
-    // `ssh_public_key` are both set synchronously (in the same async task,
-    // before `settings_loading` flips back to `false`), so waiting for
-    // `settings_loading` to clear guarantees we observe their final loaded
-    // values before deciding whether a key is missing. Without this guard,
-    // an intermediate tick where `cfg_ssh_enabled` has loaded `true` but
-    // `ssh_public_key` hasn't been set yet would trigger a spurious
-    // generation that discards the datasource's real stored key.
+    // key exists yet — "generate" key-source mode only (KYO-134). BYOK mode
+    // also has `ssh_public_key.get().is_none()` (BYOK never populates a
+    // public key), so without the mode check this would fire an unwanted
+    // auto-generation every time a BYOK user enables the tunnel.
+    // Guarded on `!settings_loading.get()` so this cannot race the edit-mode
+    // load-back effect above: `cfg_ssh_enabled` and `ssh_public_key` are both
+    // set synchronously (in the same async task, before `settings_loading`
+    // flips back to `false`), so waiting for `settings_loading` to clear
+    // guarantees we observe their final loaded values before deciding
+    // whether a key is missing. Without this guard, an intermediate tick
+    // where `cfg_ssh_enabled` has loaded `true` but `ssh_public_key` hasn't
+    // been set yet would trigger a spurious generation that discards the
+    // datasource's real stored key.
     Effect::new(move |_| {
         if cfg_ssh_enabled.get()
+            && cfg_ssh_key_mode.get() == "generate"
             && ssh_public_key.get().is_none()
             && !settings_loading.get()
             && !ssh_key_action.pending().get_untracked()
@@ -2905,9 +2994,18 @@ pub fn DatasourceModal(
                                                 set_cfg_ssh_username,
                                                 ssh_public_key,
                                                 set_ssh_public_key,
-                                                set_ssh_private_key_enc,
+                                                set_ssh_private_key_generated,
                                                 ssh_key_generating,
                                                 ssh_key_action,
+                                                cfg_ssh_host_fingerprint,
+                                                set_cfg_ssh_host_fingerprint,
+                                                cfg_ssh_key_mode,
+                                                set_cfg_ssh_key_mode,
+                                                cfg_ssh_private_key_input,
+                                                set_cfg_ssh_private_key_input,
+                                                cfg_ssh_passphrase,
+                                                set_cfg_ssh_passphrase,
+                                                is_edit_mode,
                                             }
                                         />
                                     </Show>
@@ -4844,9 +4942,21 @@ struct SshTunnelSignals {
     set_cfg_ssh_username: WriteSignal<String>,
     ssh_public_key: ReadSignal<Option<String>>,
     set_ssh_public_key: WriteSignal<Option<String>>,
-    set_ssh_private_key_enc: WriteSignal<Option<String>>,
+    set_ssh_private_key_generated: WriteSignal<Option<String>>,
     ssh_key_generating: ReadSignal<bool>,
     ssh_key_action: Action<(), Result<GeneratedSshKey, ServerFnError>>,
+    cfg_ssh_host_fingerprint: ReadSignal<String>,
+    set_cfg_ssh_host_fingerprint: WriteSignal<String>,
+    cfg_ssh_key_mode: ReadSignal<String>,
+    set_cfg_ssh_key_mode: WriteSignal<String>,
+    cfg_ssh_private_key_input: ReadSignal<String>,
+    set_cfg_ssh_private_key_input: WriteSignal<String>,
+    cfg_ssh_passphrase: ReadSignal<String>,
+    set_cfg_ssh_passphrase: WriteSignal<String>,
+    /// Whether the modal is editing an existing datasource (vs. creating a
+    /// new one) — drives the BYOK fields' "leave blank to keep the existing
+    /// key" placeholder, which only makes sense once a key already exists.
+    is_edit_mode: Signal<bool>,
 }
 
 /// Renders the "Connect via SSH Tunnel" checkbox, host/port/username fields,
@@ -4866,9 +4976,18 @@ fn SshTunnelSection(signals: SshTunnelSignals) -> impl IntoView {
         set_cfg_ssh_username,
         ssh_public_key,
         set_ssh_public_key,
-        set_ssh_private_key_enc,
+        set_ssh_private_key_generated,
         ssh_key_generating,
         ssh_key_action,
+        cfg_ssh_host_fingerprint,
+        set_cfg_ssh_host_fingerprint,
+        cfg_ssh_key_mode,
+        set_cfg_ssh_key_mode,
+        cfg_ssh_private_key_input,
+        set_cfg_ssh_private_key_input,
+        cfg_ssh_passphrase,
+        set_cfg_ssh_passphrase,
+        is_edit_mode,
     } = signals;
 
     // Signal::derive created outside the <Show> below so the child
@@ -4887,7 +5006,11 @@ fn SshTunnelSection(signals: SshTunnelSignals) -> impl IntoView {
             set_cfg_ssh_port.set("22".to_string());
             set_cfg_ssh_username.set(String::new());
             set_ssh_public_key.set(None);
-            set_ssh_private_key_enc.set(None);
+            set_ssh_private_key_generated.set(None);
+            set_cfg_ssh_host_fingerprint.set(String::new());
+            set_cfg_ssh_key_mode.set("generate".to_string());
+            set_cfg_ssh_private_key_input.set(String::new());
+            set_cfg_ssh_passphrase.set(String::new());
         }
     };
 
@@ -4950,32 +5073,125 @@ fn SshTunnelSection(signals: SshTunnelSignals) -> impl IntoView {
                         </div>
                     </div>
 
-                    <Show
-                        when=move || ssh_public_key.get().is_some()
-                        fallback=move || view! {
-                            <div class="space-y-2">
-                                <p class="text-xs text-muted-foreground">
-                                    "Kyomi needs an SSH keypair to authenticate with the bastion host."
-                                </p>
-                                <Button
-                                    variant=ButtonVariant::Secondary
-                                    size=ButtonSize::Sm
-                                    disabled=Signal::derive(move || ssh_key_generating.get())
-                                    on:click=handle_generate
-                                >
-                                    {move || {
-                                        if ssh_key_generating.get() {
-                                            "Generating..."
-                                        } else {
-                                            "Generate SSH key"
+                    <div>
+                        <label class="block text-sm font-medium mb-1">
+                            "SSH Host Fingerprint (optional)"
+                        </label>
+                        <input type="text" class=MODAL_INPUT_CLASS
+                            placeholder="SHA256:..."
+                            prop:value=move || cfg_ssh_host_fingerprint.get()
+                            on:input=move |ev| set_cfg_ssh_host_fingerprint.set(event_target_value(&ev))
+                        />
+                        <p class="text-xs text-muted-foreground mt-1">
+                            "Pin the bastion's host key to prevent man-in-the-middle. Get it with "
+                            <code class="font-mono">"ssh-keygen -lf"</code>
+                            "."
+                        </p>
+                    </div>
+
+                    <div>
+                        <label class="block text-sm font-medium mb-2">"SSH Key"</label>
+                        <div class="inline-flex bg-muted p-1 rounded-lg gap-1 mb-3">
+                            <ToggleButton
+                                variant=Signal::derive(move || {
+                                    if cfg_ssh_key_mode.get() == "generate" {
+                                        ButtonVariant::PillActive
+                                    } else {
+                                        ButtonVariant::Pill
+                                    }
+                                })
+                                size=ButtonSize::Pill
+                                on:click=move |_| set_cfg_ssh_key_mode.set("generate".to_string())
+                            >
+                                "Generate a key for me"
+                            </ToggleButton>
+                            <ToggleButton
+                                variant=Signal::derive(move || {
+                                    if cfg_ssh_key_mode.get() == "byok" {
+                                        ButtonVariant::PillActive
+                                    } else {
+                                        ButtonVariant::Pill
+                                    }
+                                })
+                                size=ButtonSize::Pill
+                                on:click=move |_| set_cfg_ssh_key_mode.set("byok".to_string())
+                            >
+                                "Use my own key"
+                            </ToggleButton>
+                        </div>
+
+                        <Show when=move || cfg_ssh_key_mode.get() == "generate">
+                            <Show
+                                when=move || ssh_public_key.get().is_some()
+                                fallback=move || view! {
+                                    <div class="space-y-2">
+                                        <p class="text-xs text-muted-foreground">
+                                            "Kyomi needs an SSH keypair to authenticate with the bastion host."
+                                        </p>
+                                        <Button
+                                            variant=ButtonVariant::Secondary
+                                            size=ButtonSize::Sm
+                                            disabled=Signal::derive(move || ssh_key_generating.get())
+                                            on:click=handle_generate
+                                        >
+                                            {move || {
+                                                if ssh_key_generating.get() {
+                                                    "Generating..."
+                                                } else {
+                                                    "Generate SSH key"
+                                                }
+                                            }}
+                                        </Button>
+                                    </div>
+                                }
+                            >
+                                <SshPublicKeyDisplay public_key=public_key_display/>
+                            </Show>
+                        </Show>
+
+                        <Show when=move || cfg_ssh_key_mode.get() == "byok">
+                            <div class="space-y-3">
+                                <div>
+                                    <label class="block text-sm font-medium mb-1">
+                                        "Private Key " <span class="text-error-foreground">"*"</span>
+                                    </label>
+                                    <textarea
+                                        rows="6"
+                                        class="w-full px-3 py-2 border border-input rounded-md bg-background text-sm font-mono focus:outline-none focus:ring-1 focus:ring-ring"
+                                        prop:placeholder=move || {
+                                            if is_edit_mode.get() {
+                                                "Leave blank to keep the existing key"
+                                            } else {
+                                                "-----BEGIN OPENSSH PRIVATE KEY-----"
+                                            }
                                         }
-                                    }}
-                                </Button>
+                                        prop:value=move || cfg_ssh_private_key_input.get()
+                                        on:input=move |ev| set_cfg_ssh_private_key_input.set(event_target_value(&ev))
+                                    />
+                                    <p class="text-xs text-muted-foreground mt-1">
+                                        "Paste an unencrypted or passphrase-protected OpenSSH/PEM private key."
+                                    </p>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium mb-1">"Passphrase"</label>
+                                    <input type="password" class=MODAL_INPUT_CLASS
+                                        prop:placeholder=move || {
+                                            if is_edit_mode.get() {
+                                                "Leave blank to keep the existing key"
+                                            } else {
+                                                ""
+                                            }
+                                        }
+                                        prop:value=move || cfg_ssh_passphrase.get()
+                                        on:input=move |ev| set_cfg_ssh_passphrase.set(event_target_value(&ev))
+                                    />
+                                    <p class="text-xs text-muted-foreground mt-1">
+                                        "Only if your private key is encrypted."
+                                    </p>
+                                </div>
                             </div>
-                        }
-                    >
-                        <SshPublicKeyDisplay public_key=public_key_display/>
-                    </Show>
+                        </Show>
+                    </div>
                 </div>
             </Show>
         </div>
