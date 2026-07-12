@@ -142,65 +142,33 @@ async fn query_arrow(
     };
 
     // ------------------------------------------------------------------
-    // 4. Resolve per-user credentials (decrypt from DB).
+    // 4. Build provider: per-user credentials, user context (BigQuery
+    //    OAuth), connection-config decrypt, Connect-vs-direct branching.
     // ------------------------------------------------------------------
-    let credentials = if ds.connection_type != "connect" {
-        let user_cred = match kyomi_auth::datasource_service::get_user_credential(
-            &state.db,
-            &auth.user_id,
-            &ds.id,
-        )
-        .await
-        {
-            Ok(cred) => cred,
-            Err(e) => {
-                tracing::error!("failed to load user credential: {e}");
-                return error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal server error",
-                );
-            }
-        };
-        if let Some(ref cred) = user_cred {
-            kyomi_auth::encryption::decrypt_json(&cred.credentials, &state.encryption_key)
-                .unwrap_or(serde_json::json!({}))
-        } else {
-            serde_json::json!({})
-        }
-    } else {
-        serde_json::json!({})
-    };
-
-    // ------------------------------------------------------------------
-    // 5. Build user context for BigQuery OAuth (kyomi_oauth auth mode).
-    // ------------------------------------------------------------------
-    let user_context = build_user_context(&state, &auth).await;
-
-    // ------------------------------------------------------------------
-    // 6. Create provider (Connect-vs-direct branching, timeout).
-    // ------------------------------------------------------------------
-    // `ds.connection_config` came straight from the database and may hold
-    // encrypted `COMMON_SENSITIVE` fields (e.g. `ssh_private_key`) — the
-    // driver always needs plaintext.
-    let decrypted_config = kyomi_auth::credential_service::decrypt_connection_config_secrets(
-        &ds.connection_config,
+    // Variant-purity analysis (verified against the source of every function
+    // called by `build_provider_for_datasource`, see KYO-138): with
+    // resolution now performed separately above, the helper can only
+    // surface `Error::Sqlx` (from `get_user_credential`, propagated via `?`
+    // from the `db_fetch_*!` macros) or `Error::Internal` (from
+    // `create_provider_from_parts` — every internal error path: missing
+    // Connect registry, OAuth refresh failure via
+    // `kyomi_connect_protocol::Error`, provider construction failure,
+    // connection timeout — is wrapped in `Error::Internal` before it
+    // crosses the `kyomi-datasource-server` boundary). So: Internal -> 422
+    // (with the "timed out" special case), anything else (i.e. Sqlx) -> 500.
+    // This reproduces today's exact behavior byte-for-byte.
+    let provider = match kyomi_auth::datasource_service::build_provider_for_datasource(
+        &state.db,
+        &auth.user_id,
+        &ds,
         &state.encryption_key,
-    );
-
-    let ds_type: kyomi_core::datasource_registry::DatasourceType = ds.datasource_type.into();
-    let provider = match kyomi_datasource_server::create_provider_from_parts(
-        &ds.id,
-        &ds.connection_type,
-        &decrypted_config,
-        ds_type,
-        credentials,
-        user_context,
+        || async { Ok(build_user_context(&state, &auth).await) },
         Some(&state.connect_registry),
     )
     .await
     {
         Ok(p) => p,
-        Err(e) => {
+        Err(e @ kyomi_core::Error::Internal(_)) => {
             let msg = e.to_string();
             if msg.contains("timed out") {
                 return error_response(StatusCode::UNPROCESSABLE_ENTITY, "connection timed out");
@@ -210,10 +178,17 @@ async fn query_arrow(
                 format!("failed to connect to datasource: {e}"),
             );
         }
+        Err(e) => {
+            tracing::error!("failed to load user credential: {e}");
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal server error",
+            );
+        }
     };
 
     // ------------------------------------------------------------------
-    // 7. Dispatch — paginated vs. streaming path.
+    // 5. Dispatch — paginated vs. streaming path.
     // ------------------------------------------------------------------
     if limit.is_some() {
         execute_paginated(provider, &req.sql, limit, offset, include_total, req.job_id.as_deref()).await
