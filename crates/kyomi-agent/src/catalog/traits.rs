@@ -511,7 +511,20 @@ pub async fn index_catalog_sql(
                     indexer.build_full_table_id(effective_dataset, &table.name),
                 )
             };
-            seen_table_ids.insert(full_table_id.clone());
+            // `archive_missing_tables` reconstructs each cached table's identity
+            // from its stored (project_id, dataset_id, table_id) columns via
+            // `build_full_table_name`. The seen-set key MUST be built the same
+            // way. Datasources whose `project_id` is non-empty (Postgres and
+            // Redshift set it to the database name) produce a 3-part archival
+            // key, so a 2-part `dataset.table` seen key never matches — every
+            // table would be archived the instant it is cached ("0 tables
+            // found / N archived"). Mirrors the Connect-path indexer.
+            let archive_id = kyomi_core::build_full_table_name(
+                &project_id,
+                &cache_dataset,
+                &table.name,
+            );
+            seen_table_ids.insert(archive_id);
 
             // Get columns — use effective_dataset (real database name) so the
             // indexer can query system.columns correctly.
@@ -636,4 +649,186 @@ pub async fn index_catalog_sql(
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use kyomi_core::DbPool;
+    use kyomi_datasource_server::{DatasourceProvider, QueryResult};
+    use kyomi_embed::EmbeddingService;
+    use serde_json::json;
+
+    /// Minimal provider stub. The mock indexer overrides all catalog SQL, so
+    /// only `test_connection`/`close` are ever exercised.
+    struct MockProvider;
+
+    #[async_trait]
+    impl DatasourceProvider for MockProvider {
+        async fn test_connection(&self) -> kyomi_connect_protocol::Result<bool> {
+            Ok(true)
+        }
+
+        async fn execute_query(
+            &self,
+            _sql: &str,
+            _limit: Option<u32>,
+            _offset: Option<u32>,
+            _include_total: bool,
+            _job_id: Option<&str>,
+        ) -> kyomi_connect_protocol::Result<QueryResult> {
+            Ok(QueryResult::success_empty())
+        }
+
+        async fn close(&self) {}
+    }
+
+    /// Mimics the Redshift/Postgres indexers: `get_project_id` returns the
+    /// database name (non-empty), which is what triggers the 3-part archival
+    /// key vs 2-part seen-key mismatch.
+    struct MockRedshiftIndexer;
+
+    #[async_trait]
+    impl SQLCatalogIndexer for MockRedshiftIndexer {
+        fn container_label(&self) -> &str {
+            "schema"
+        }
+
+        fn container_config_key(&self) -> &str {
+            "catalog_schemas"
+        }
+
+        async fn create_provider(
+            &self,
+            _connection_config: &Value,
+            _credentials: &Value,
+        ) -> Result<Box<dyn DatasourceProvider>> {
+            Ok(Box::new(MockProvider))
+        }
+
+        async fn discover_all_containers(
+            &self,
+            _provider: &dyn DatasourceProvider,
+        ) -> Result<Vec<String>> {
+            Ok(vec!["public".to_string()])
+        }
+
+        async fn get_tables_in_container(
+            &self,
+            _provider: &dyn DatasourceProvider,
+            _container_name: &str,
+            _max_tables: Option<usize>,
+        ) -> Result<Vec<TableEntry>> {
+            Ok(vec![
+                TableEntry {
+                    name: "users".to_string(),
+                    table_type: Some("BASE TABLE".to_string()),
+                    dataset_override: None,
+                },
+                TableEntry {
+                    name: "events".to_string(),
+                    table_type: Some("BASE TABLE".to_string()),
+                    dataset_override: None,
+                },
+            ])
+        }
+
+        async fn get_table_columns(
+            &self,
+            _provider: &dyn DatasourceProvider,
+            _container_name: &str,
+            _table_name: &str,
+        ) -> Result<Vec<ColumnEntry>> {
+            Ok(vec![ColumnEntry {
+                name: "id".to_string(),
+                col_type: Some("number".to_string()),
+                native_type: Some("INTEGER".to_string()),
+                description: None,
+            }])
+        }
+
+        fn get_project_id(&self, ctx: &IndexerContext) -> String {
+            ctx.connection_config
+                .get("database")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        }
+    }
+
+    /// Regression for the Redshift/Postgres "0 tables found / N archived" bug.
+    ///
+    /// When a SQL indexer reports a non-empty `project_id` (Redshift and
+    /// Postgres return the database name), the refresh loop must record each
+    /// cached table in `seen_table_ids` under the SAME 3-part identity that
+    /// `archive_missing_tables` reconstructs from the stored
+    /// `(project_id, dataset_id, table_id)` columns. Before the fix the seen-key
+    /// was the 2-part `schema.table`, so every freshly-cached table was archived
+    /// the instant it was cached — the catalog came back empty.
+    #[tokio::test]
+    async fn redshift_refresh_does_not_archive_freshly_cached_tables() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+
+        // Seed FK parents: users -> workspaces -> datasource_configs.
+        sqlx::query("INSERT INTO users (user_id, email) VALUES ('u1', 'u1@test.local')")
+            .execute(sq)
+            .await
+            .expect("insert user");
+        sqlx::query(
+            "INSERT INTO workspaces (workspace_id, name, owner_user_id) VALUES ('ws1', 'WS', 'u1')",
+        )
+        .execute(sq)
+        .await
+        .expect("insert workspace");
+        sqlx::query(
+            "INSERT INTO datasource_configs (id, workspace_id, name, datasource_type, slug) \
+             VALUES ('ds1', 'ws1', 'RS', 'redshift', 'rs')",
+        )
+        .execute(sq)
+        .await
+        .expect("insert datasource_config");
+
+        let embedding = EmbeddingService::new().expect("load embedding model");
+        let ctx = IndexerContext {
+            workspace_id: "ws1".to_string(),
+            datasource_config_id: "ds1".to_string(),
+            connection_config: json!({ "database": "analytics" }),
+            encryption_key: std::sync::Arc::new([0u8; 32]),
+        };
+        let credentials = json!({ "user": "x", "password": "y" });
+
+        let result = index_catalog_sql(
+            &MockRedshiftIndexer,
+            &ctx,
+            &db,
+            &embedding,
+            None,
+            Some(&credentials),
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            result.tables_archived, 0,
+            "freshly-cached tables must not be archived (bug archived all of them)"
+        );
+
+        // The user-observable symptom: rows must remain un-archived so they
+        // show up in the catalog.
+        let visible: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM datasource_table_cache WHERE is_archived = 0")
+                .fetch_one(sq)
+                .await
+                .expect("count visible tables");
+        assert_eq!(
+            visible, 2,
+            "both tables should remain visible in the catalog after refresh"
+        );
+    }
 }
