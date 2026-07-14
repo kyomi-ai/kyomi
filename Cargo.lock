@@ -6120,6 +6120,7 @@ dependencies = [
  "http",
  "kyomi-auth",
  "kyomi-chart-theme",
+ "kyomi-connect-protocol",
  "kyomi-core",
  "kyomi-datasource",
  "kyomi-datasource-server",
