@@ -1018,6 +1018,184 @@ where
 }
 
 // ---------------------------------------------------------------------------
+// Manual catalog refresh orchestration (KYO-143)
+// ---------------------------------------------------------------------------
+
+/// Outcome of [`prepare_manual_catalog_refresh`].
+pub enum ManualRefreshDecision {
+    /// A refresh is genuinely in flight — `workspaces.catalog_refresh_status`
+    /// is `running` AND the start stamp is still within the guard window.
+    /// The caller should not spawn a duplicate background index.
+    AlreadyRunning,
+    /// Validation passed. `credentials` are the OAuth-refreshed credentials,
+    /// ready for the caller to hand to the background `index_datasource` call.
+    Ready { credentials: Value },
+}
+
+/// Arguments for [`prepare_manual_catalog_refresh`].
+pub struct PrepareManualRefreshParams<'a> {
+    pub db: &'a kyomi_core::DbPool,
+    pub user_id: &'a str,
+    pub email: String,
+    pub ws_id: &'a str,
+    pub datasource: &'a DatasourceConfig,
+    pub encryption_key: &'a [u8; 32],
+    pub connect_registry: Option<&'a kyomi_datasource_server::ConnectRegistry>,
+    pub google_oauth_client_id: Option<&'a str>,
+    pub google_oauth_client_secret: Option<&'a str>,
+    /// Concurrency-guard window, in minutes. Passed in rather than
+    /// referenced from `kyomi_agent` — this crate must not depend on
+    /// `kyomi-agent` (the indexing service depends on `kyomi-auth`, not the
+    /// other way around). Callers pass
+    /// `kyomi_agent::catalog::indexing_service::CONCURRENT_RUN_GUARD_MINUTES`.
+    pub guard_minutes: i64,
+    /// Timeout for provider construction and `test_connection()`. Callers
+    /// pass `kyomi_datasource_server::DATASOURCE_TIMEOUT_CONNECT`.
+    pub connect_timeout: std::time::Duration,
+}
+
+/// Prepare a manual catalog refresh: concurrency guard → decrypt/refresh
+/// credentials → live connection validation.
+///
+/// This absorbs everything the `refresh_catalog` server fn used to run
+/// inline before backgrounding the slow table-by-table indexing:
+///
+/// 1. **Concurrency guard.** `workspaces.catalog_refresh_status == running`
+///    AND `last_index_started_at` within `guard_minutes` — returns
+///    [`ManualRefreshDecision::AlreadyRunning`] without touching credentials
+///    or the network if so. `catalog_refresh_status` alone isn't checked
+///    without the stamp because a crash could leave it stuck at `running`
+///    forever; the stamp bounds how long that can block a re-click.
+/// 2. **Credentials.** Decrypt the user's stored credentials, refresh OAuth
+///    if needed, and persist the refreshed token — best-effort, matching
+///    the original inline behavior (a failed persist doesn't fail the
+///    refresh; the refreshed token is still used for this run).
+/// 3. **Validation.** Build the provider the same way the shared indexing
+///    pipeline will ([`build_provider_for_datasource`], so Connect-type
+///    datasources and BigQuery `kyomi_oauth` mode validate correctly) and
+///    call `test_connection()`.
+///
+/// # Errors
+///
+/// Returns `Err` for the same failure cases the old synchronous
+/// `refresh_catalog` body did — bad/expired credentials, unreachable
+/// datasource, or a validation timeout — so the caller's error message to
+/// the user is unchanged. Only the slow table-by-table indexing itself
+/// stays out of this function; the caller backgrounds that afterward using
+/// the returned `credentials`.
+pub async fn prepare_manual_catalog_refresh(
+    p: PrepareManualRefreshParams<'_>,
+) -> kyomi_core::Result<ManualRefreshDecision> {
+    #[derive(sqlx::FromRow)]
+    struct WorkspaceRefreshStatusRow {
+        catalog_refresh_status: Option<kyomi_core::enums::CatalogRefreshStatus>,
+    }
+
+    let status_row = kyomi_core::db_fetch_optional!(
+        p.db,
+        WorkspaceRefreshStatusRow,
+        "SELECT catalog_refresh_status FROM workspaces WHERE workspace_id = $1",
+        &p.ws_id
+    )
+    .map_err(|e| {
+        kyomi_core::Error::Internal(format!(
+            "failed to load workspace catalog refresh status: {e}"
+        ))
+    })?;
+
+    let is_running = status_row
+        .and_then(|row| row.catalog_refresh_status)
+        .is_some_and(|s| s == kyomi_core::enums::CatalogRefreshStatus::Running);
+
+    if is_running
+        && crate::catalog::helpers::index_started_within(
+            p.db,
+            &p.datasource.id,
+            p.guard_minutes,
+        )
+        .await
+    {
+        return Ok(ManualRefreshDecision::AlreadyRunning);
+    }
+
+    // Fetch and decrypt credentials in one service call.
+    let (user_cred, credentials) =
+        get_decrypted_user_credentials(p.db, p.user_id, &p.datasource.id, p.encryption_key).await?;
+
+    let ds_type: kyomi_core::datasource_registry::DatasourceType =
+        p.datasource.datasource_type.into();
+
+    // Refresh OAuth credentials if needed.
+    let credentials = kyomi_datasource_server::ensure_valid_oauth_credentials(
+        &credentials,
+        &p.datasource.connection_config,
+        &ds_type,
+    )
+    .await?;
+
+    // Persist refreshed token if it changed.
+    if let Some(ref cred) = user_cred {
+        let _ = save_user_credential(
+            p.db,
+            p.encryption_key,
+            p.user_id,
+            &p.datasource.id,
+            &cred.workspace_id,
+            &credentials,
+        )
+        .await;
+    }
+
+    // Synchronous validation: build the provider the same way the shared
+    // indexing pipeline will and confirm it can actually connect before
+    // telling the caller it's safe to background the slow indexing.
+    //
+    // `build_provider_for_datasource`'s internal `get_user_credential` read
+    // happens after the `save_user_credential` call above, so it picks up
+    // the OAuth-refreshed token we just persisted rather than the stale one.
+    let provider = tokio::time::timeout(
+        p.connect_timeout,
+        build_provider_for_datasource(
+            p.db,
+            p.user_id,
+            p.datasource,
+            p.encryption_key,
+            || {
+                crate::google_oauth::build_datasource_user_context(
+                    p.db,
+                    p.user_id,
+                    Some(p.encryption_key),
+                    p.google_oauth_client_id,
+                    p.google_oauth_client_secret,
+                    p.email.clone(),
+                    p.ws_id.to_string(),
+                )
+            },
+            p.connect_registry,
+        ),
+    )
+    .await
+    .map_err(|_| kyomi_core::Error::Internal("Connection validation timed out".into()))??;
+
+    // `provider.close()` must run regardless of whether test_connection
+    // succeeded, timed out, or errored — capture the result first, close
+    // unconditionally, then propagate.
+    let connected_result = tokio::time::timeout(p.connect_timeout, provider.test_connection())
+        .await
+        .map_err(|_| kyomi_core::Error::Internal("Connection validation timed out".into()));
+
+    provider.close().await;
+
+    if !connected_result?? {
+        return Err(kyomi_core::Error::Internal(
+            "Connection test failed — check datasource credentials and connectivity".into(),
+        ));
+    }
+
+    Ok(ManualRefreshDecision::Ready { credentials })
+}
+
+// ---------------------------------------------------------------------------
 // Enriched view types (used by list/settings orchestration below)
 // ---------------------------------------------------------------------------
 

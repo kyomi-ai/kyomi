@@ -694,146 +694,39 @@ pub async fn refresh_catalog(
     .await
     .into_sfn()?;
 
-    // Bail out before any further work (credential decrypt, OAuth refresh,
-    // connection validation) if a run is already in flight — checked here,
-    // ahead of the spawn, so a concurrent click doesn't waste an OAuth
-    // token refresh + live connection test on a run we're going to skip
-    // anyway. `index_datasource` re-checks the stamp internally as a race
-    // backstop (see `force: false` below), but that check alone would
-    // only prevent the double *index* — this early check also avoids the
-    // redundant synchronous work in this function.
-    //
-    // `index_started_within` alone is not sufficient as the sole gate: the
-    // start stamp it reads is never cleared, so on its own it would report
-    // "in flight" for up to CONCURRENT_RUN_GUARD_MINUTES after ANY
-    // completed refresh, even one that finished in seconds — blocking a
-    // legitimate re-click for up to an hour. Require the workspace's
-    // `catalog_refresh_status` to actually be `Running` too: a normally
-    // completed run flips status back to `idle` immediately (so a
-    // re-click proceeds right away), while a crashed run stuck at
-    // `running` still self-heals once the start stamp ages out.
-    #[derive(sqlx::FromRow)]
-    struct WorkspaceRefreshStatusRow {
-        catalog_refresh_status: Option<kyomi_core::enums::CatalogRefreshStatus>,
-    }
-
-    let status_row = kyomi_core::db_fetch_optional!(
-        ac.db(),
-        WorkspaceRefreshStatusRow,
-        "SELECT catalog_refresh_status FROM workspaces WHERE workspace_id = $1",
-        &ac.ws_id
-    )
-    .into_sfn()?;
-
-    let is_running = status_row
-        .and_then(|row| row.catalog_refresh_status)
-        .is_some_and(|s| s == kyomi_core::enums::CatalogRefreshStatus::Running);
-
-    if is_running
-        && kyomi_auth::catalog::helpers::index_started_within(
-            ac.db(),
-            &datasource.id,
-            kyomi_agent::catalog::indexing_service::CONCURRENT_RUN_GUARD_MINUTES,
-        )
-        .await
-    {
-        return Ok("A catalog refresh is already running".to_string());
-    }
-
     let encryption_key = ac.encryption_key()?;
 
-    let ds_type: kyomi_core::datasource_registry::DatasourceType =
-        datasource.datasource_type.into();
-
-    // Fetch and decrypt credentials in one service call.
-    let (user_cred, credentials) =
-        kyomi_auth::datasource_service::get_decrypted_user_credentials(
-            ac.db(),
-            &ac.auth.user_id,
-            &datasource.id,
-            &encryption_key,
-        )
-        .await
-        .into_sfn()?;
-
-    // Refresh OAuth credentials if needed.
-    let credentials = kyomi_datasource_server::ensure_valid_oauth_credentials(
-        &credentials,
-        &datasource.connection_config,
-        &ds_type,
+    // Guard check → decrypt/refresh credentials → live connection
+    // validation, all in one shared orchestration function (kept out of
+    // this server_fn body so it stays under the `check-server-fns.sh`
+    // service-layer-callout limit). See `prepare_manual_catalog_refresh`
+    // for the full step-by-step behavior — it preserves the same
+    // "already running" guard semantics and the same synchronous
+    // validation error behavior this function had inline before.
+    let decision = kyomi_auth::datasource_service::prepare_manual_catalog_refresh(
+        kyomi_auth::datasource_service::PrepareManualRefreshParams {
+            db: ac.db(),
+            user_id: &ac.auth.user_id,
+            email: ac.auth.email.clone(),
+            ws_id: &ac.ws_id,
+            datasource: &datasource,
+            encryption_key: &encryption_key,
+            connect_registry: ac.ctx.connect_registry.as_ref(),
+            google_oauth_client_id: ac.ctx.config.google_oauth_client_id.as_deref(),
+            google_oauth_client_secret: ac.ctx.config.google_oauth_client_secret.as_deref(),
+            guard_minutes: kyomi_agent::catalog::indexing_service::CONCURRENT_RUN_GUARD_MINUTES,
+            connect_timeout: kyomi_datasource_server::DATASOURCE_TIMEOUT_CONNECT,
+        },
     )
     .await
     .into_sfn()?;
 
-    // Persist refreshed token if it changed.
-    if let Some(ref cred) = user_cred {
-        let _ = kyomi_auth::datasource_service::save_user_credential(
-            ac.db(),
-            &encryption_key,
-            &ac.auth.user_id,
-            &datasource.id,
-            &cred.workspace_id,
-            &credentials,
-        )
-        .await;
-    }
-
-    // Synchronous validation: build the provider the same way the shared
-    // indexing pipeline will and confirm it can actually connect before
-    // returning success to the user. This is what preserves the old
-    // synchronous error behavior for bad-credential/unreachable datasources
-    // — only the slow table-by-table indexing moves to the background.
-    //
-    // Reuses `build_provider_for_datasource` (the same helper
-    // `create_query_provider` in `datasources.rs` calls) instead of
-    // duplicating its decrypt-credentials → build-context → decrypt-config
-    // → `create_provider_from_parts` sequence. This is also what makes
-    // Connect-type datasources validate through the Connect registry
-    // instead of failing as "direct" connections, and gives BigQuery
-    // `kyomi_oauth` datasources a `UserContext` carrying live OAuth tokens.
-    //
-    // Its internal `get_user_credential` read happens after the
-    // `save_user_credential` call above, so it picks up the OAuth-refreshed
-    // token we just persisted rather than the stale one.
-    let provider = tokio::time::timeout(
-        kyomi_datasource_server::DATASOURCE_TIMEOUT_CONNECT,
-        kyomi_auth::datasource_service::build_provider_for_datasource(
-            ac.db(),
-            &ac.auth.user_id,
-            &datasource,
-            &encryption_key,
-            || {
-                kyomi_auth::google_oauth::build_datasource_user_context(
-                    ac.db(),
-                    &ac.auth.user_id,
-                    Some(&encryption_key),
-                    ac.ctx.config.google_oauth_client_id.as_deref(),
-                    ac.ctx.config.google_oauth_client_secret.as_deref(),
-                    ac.auth.email.clone(),
-                    ac.ws_id.clone(),
-                )
-            },
-            ac.ctx.connect_registry.as_ref(),
-        ),
-    )
-    .await
-    .map_err(|_| ServerFnError::new("Connection validation timed out"))?
-    .into_sfn()?;
-
-    let connected = tokio::time::timeout(
-        kyomi_datasource_server::DATASOURCE_TIMEOUT_CONNECT,
-        provider.test_connection(),
-    )
-    .await
-    .map_err(|_| ServerFnError::new("Connection validation timed out"));
-
-    provider.close().await;
-
-    if !connected?.into_sfn()? {
-        return Err(ServerFnError::new(
-            "Connection test failed — check datasource credentials and connectivity",
-        ));
-    }
+    let credentials = match decision {
+        kyomi_auth::datasource_service::ManualRefreshDecision::AlreadyRunning => {
+            return Ok("A catalog refresh is already running".to_string());
+        }
+        kyomi_auth::datasource_service::ManualRefreshDecision::Ready { credentials } => credentials,
+    };
 
     // Validation passed. Background the slow indexing so the request can
     // return well within Cloudflare's timeout. `force: false` — we already
