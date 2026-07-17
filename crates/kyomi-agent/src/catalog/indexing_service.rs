@@ -74,10 +74,13 @@ pub struct IndexDatasourceParams<'a> {
     pub credentials: Option<&'a Value>,
     pub max_tables_per_dataset: Option<usize>,
     /// When `true`, bypass the concurrent-run guard (the check that skips
-    /// if an indexing run started within the last hour). Set by the
-    /// manual refresh path so an explicit user click always proceeds even
-    /// if a background run is in flight. Scheduler and post-create spawn
-    /// leave this `false` so they defer to an in-flight run.
+    /// if an indexing run started within the last hour). All current
+    /// callers — scheduler, post-create spawn, and the manual refresh
+    /// server fn — leave this `false` so they defer to an in-flight run.
+    /// The manual refresh path performs its own upfront
+    /// [`CONCURRENT_RUN_GUARD_MINUTES`] check before spawning the
+    /// background indexing task, so this flag is a race backstop for
+    /// callers that skip the upfront check, not a way to jump the queue.
     pub force: bool,
     /// Connect registry for datasources that tunnel through a Connect binary.
     /// `None` is fine for callers that don't have a Connect registry (e.g.
@@ -92,7 +95,12 @@ pub struct IndexDatasourceParams<'a> {
 /// single run should take, shorter than the 24h `can_refresh_now` rate
 /// limit so the two gates stay orthogonal. Panicked runs self-heal
 /// after the stamp ages out.
-const CONCURRENT_RUN_GUARD_MINUTES: i64 = 60;
+///
+/// `pub` so callers that need to check the guard themselves before
+/// deciding whether to do more work (e.g. `refresh_catalog` checking
+/// before running connection validation and spawning the background
+/// index) reference this constant instead of hardcoding `60`.
+pub const CONCURRENT_RUN_GUARD_MINUTES: i64 = 60;
 
 /// Provider-agnostic catalog indexing service.
 ///
@@ -191,9 +199,11 @@ impl CatalogIndexingService {
 
         // Concurrent-run guard: skip if an indexing run started within the
         // last hour. This is the serialization point that prevents the
-        // scheduler and spawn_post_create from doubling up. `force: true`
-        // (set by manual refresh) bypasses the guard so an explicit user
-        // click always proceeds.
+        // scheduler, spawn_post_create, and the manual refresh background
+        // task from doubling up. `force: true` bypasses the guard entirely
+        // — no current caller sets it; it exists for callers that have
+        // already established (via their own check) that proceeding is
+        // safe and want to skip the redundant read here.
         //
         // The stamp is written below BEFORE dispatching to the indexer, so
         // the first caller wins and any later caller (scheduler tick firing

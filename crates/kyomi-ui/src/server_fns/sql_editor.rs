@@ -652,12 +652,19 @@ pub async fn search_catalog(
 
 /// Trigger a manual catalog refresh for a datasource.
 ///
-/// Only workspace admins can trigger refreshes. Routes through the shared
-/// `CatalogIndexingService::index_datasource()` — the single catalog
-/// indexing pipeline used by all callers (manual refresh, scheduler,
-/// post-create spawn).
+/// Only workspace admins can trigger refreshes. The actual table indexing
+/// can take minutes for large catalogs, which is far past Cloudflare's
+/// ~100s request timeout, so this function only does cheap synchronous
+/// work — permission check, credential resolution/refresh, and a live
+/// `test_connection()` validation — before backgrounding the slow
+/// `CatalogIndexingService::index_datasource()` call (the single catalog
+/// indexing pipeline used by all callers: manual refresh, scheduler,
+/// post-create spawn) in a `tokio::spawn`. The spawned task updates
+/// `workspaces.catalog_refresh_status` on its own (see
+/// `update_workspace_status` in `traits.rs`) — poll it via
+/// `get_catalog_refresh_status`.
 ///
-/// Returns the status message on success (e.g. "12 tables indexed, 0 archived").
+/// Returns immediately once validation passes, before indexing starts.
 #[server(prefix = "/leptos-api")]
 pub async fn refresh_catalog(
     datasource_slug: String,
@@ -686,6 +693,52 @@ pub async fn refresh_catalog(
     )
     .await
     .into_sfn()?;
+
+    // Bail out before any further work (credential decrypt, OAuth refresh,
+    // connection validation) if a run is already in flight — checked here,
+    // ahead of the spawn, so a concurrent click doesn't waste an OAuth
+    // token refresh + live connection test on a run we're going to skip
+    // anyway. `index_datasource` re-checks the stamp internally as a race
+    // backstop (see `force: false` below), but that check alone would
+    // only prevent the double *index* — this early check also avoids the
+    // redundant synchronous work in this function.
+    //
+    // `index_started_within` alone is not sufficient as the sole gate: the
+    // start stamp it reads is never cleared, so on its own it would report
+    // "in flight" for up to CONCURRENT_RUN_GUARD_MINUTES after ANY
+    // completed refresh, even one that finished in seconds — blocking a
+    // legitimate re-click for up to an hour. Require the workspace's
+    // `catalog_refresh_status` to actually be `Running` too: a normally
+    // completed run flips status back to `idle` immediately (so a
+    // re-click proceeds right away), while a crashed run stuck at
+    // `running` still self-heals once the start stamp ages out.
+    #[derive(sqlx::FromRow)]
+    struct WorkspaceRefreshStatusRow {
+        catalog_refresh_status: Option<kyomi_core::enums::CatalogRefreshStatus>,
+    }
+
+    let status_row = kyomi_core::db_fetch_optional!(
+        ac.db(),
+        WorkspaceRefreshStatusRow,
+        "SELECT catalog_refresh_status FROM workspaces WHERE workspace_id = $1",
+        &ac.ws_id
+    )
+    .into_sfn()?;
+
+    let is_running = status_row
+        .and_then(|row| row.catalog_refresh_status)
+        .is_some_and(|s| s == kyomi_core::enums::CatalogRefreshStatus::Running);
+
+    if is_running
+        && kyomi_auth::catalog::helpers::index_started_within(
+            ac.db(),
+            &datasource.id,
+            kyomi_agent::catalog::indexing_service::CONCURRENT_RUN_GUARD_MINUTES,
+        )
+        .await
+    {
+        return Ok("A catalog refresh is already running".to_string());
+    }
 
     let encryption_key = ac.encryption_key()?;
 
@@ -725,53 +778,179 @@ pub async fn refresh_catalog(
         .await;
     }
 
-    let embedding = ac
-        .ctx
-        .embedding
-        .wait_ready()
-        .await
-        .into_sfn()?;
-
-    let result = kyomi_agent::catalog::indexing_service::CatalogIndexingService::index_datasource(
-        kyomi_agent::catalog::indexing_service::IndexDatasourceParams {
-            db: ac.db(),
-            encryption_key,
-            embedding,
-            workspace_id: &ac.ws_id,
-            datasource_config_id: &datasource.id,
-            user_email: Some(&ac.auth.email),
-            credentials: Some(&credentials),
-            max_tables_per_dataset: None,
-            force: true,
-            connect_registry: ac.ctx.connect_registry.as_ref(),
-        },
+    // Synchronous validation: build the provider the same way the shared
+    // indexing pipeline will and confirm it can actually connect before
+    // returning success to the user. This is what preserves the old
+    // synchronous error behavior for bad-credential/unreachable datasources
+    // — only the slow table-by-table indexing moves to the background.
+    //
+    // Reuses `build_provider_for_datasource` (the same helper
+    // `create_query_provider` in `datasources.rs` calls) instead of
+    // duplicating its decrypt-credentials → build-context → decrypt-config
+    // → `create_provider_from_parts` sequence. This is also what makes
+    // Connect-type datasources validate through the Connect registry
+    // instead of failing as "direct" connections, and gives BigQuery
+    // `kyomi_oauth` datasources a `UserContext` carrying live OAuth tokens.
+    //
+    // Its internal `get_user_credential` read happens after the
+    // `save_user_credential` call above, so it picks up the OAuth-refreshed
+    // token we just persisted rather than the stale one.
+    let provider = tokio::time::timeout(
+        kyomi_datasource_server::DATASOURCE_TIMEOUT_CONNECT,
+        kyomi_auth::datasource_service::build_provider_for_datasource(
+            ac.db(),
+            &ac.auth.user_id,
+            &datasource,
+            &encryption_key,
+            || {
+                kyomi_auth::google_oauth::build_datasource_user_context(
+                    ac.db(),
+                    &ac.auth.user_id,
+                    Some(&encryption_key),
+                    ac.ctx.config.google_oauth_client_id.as_deref(),
+                    ac.ctx.config.google_oauth_client_secret.as_deref(),
+                    ac.auth.email.clone(),
+                    ac.ws_id.clone(),
+                )
+            },
+            ac.ctx.connect_registry.as_ref(),
+        ),
     )
-    .await;
+    .await
+    .map_err(|_| ServerFnError::new("Connection validation timed out"))?
+    .into_sfn()?;
 
-    match result.status.as_str() {
-        "error" => {
-            let msg = result
-                .errors
-                .as_ref()
-                .and_then(|e| e.first())
-                .cloned()
-                .unwrap_or_else(|| "Catalog refresh failed".into());
-            Err(ServerFnError::new(msg))
-        }
-        "skipped" => {
-            let msg = result
-                .errors
-                .as_ref()
-                .and_then(|e| e.first())
-                .cloned()
-                .unwrap_or_else(|| "Catalog refresh skipped".into());
-            Ok(msg)
-        }
-        _ => Ok(format!(
-            "Catalog refreshed successfully. {} tables indexed, {} archived.",
-            result.tables_indexed, result.tables_archived
-        )),
+    let connected = tokio::time::timeout(
+        kyomi_datasource_server::DATASOURCE_TIMEOUT_CONNECT,
+        provider.test_connection(),
+    )
+    .await
+    .map_err(|_| ServerFnError::new("Connection validation timed out"));
+
+    provider.close().await;
+
+    if !connected?.into_sfn()? {
+        return Err(ServerFnError::new(
+            "Connection test failed — check datasource credentials and connectivity",
+        ));
     }
+
+    // Validation passed. Background the slow indexing so the request can
+    // return well within Cloudflare's timeout. `force: false` — we already
+    // checked the concurrent-run guard above; leaving it `false` here (not
+    // `true` as before) means `index_datasource`'s internal guard is still
+    // a live backstop against a second click racing this same request.
+    let db = ac.ctx.db.clone();
+    let embedding = ac.ctx.embedding.clone();
+    let connect_registry = ac.ctx.connect_registry.clone();
+    let workspace_id = ac.ws_id.clone();
+    let datasource_id = datasource.id.clone();
+    let user_email = ac.auth.email.clone();
+
+    tokio::spawn(async move {
+        let embed = match embedding.wait_ready().await {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(
+                    datasource_id = %datasource_id,
+                    workspace_id = %workspace_id,
+                    error = %e,
+                    "Embedding model not ready, skipping catalog refresh"
+                );
+                return;
+            }
+        };
+
+        let result =
+            kyomi_agent::catalog::indexing_service::CatalogIndexingService::index_datasource(
+                kyomi_agent::catalog::indexing_service::IndexDatasourceParams {
+                    db: &db,
+                    encryption_key,
+                    embedding: embed,
+                    workspace_id: &workspace_id,
+                    datasource_config_id: &datasource_id,
+                    user_email: Some(&user_email),
+                    credentials: Some(&credentials),
+                    max_tables_per_dataset: None,
+                    force: false,
+                    connect_registry: connect_registry.as_ref(),
+                },
+            )
+            .await;
+
+        tracing::info!(
+            datasource_id = %datasource_id,
+            workspace_id = %workspace_id,
+            status = ?result.status,
+            tables = result.tables_indexed,
+            "Manual catalog refresh completed"
+        );
+    });
+
+    Ok("Catalog refresh started — this can take a few minutes for large catalogs.".to_string())
+}
+
+// ---------------------------------------------------------------------------
+// get_catalog_refresh_status — poll catalog refresh progress
+// ---------------------------------------------------------------------------
+
+/// Response for `get_catalog_refresh_status`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CatalogRefreshStatusResponse {
+    /// One of "idle", "running", "failed".
+    pub status: String,
+    /// Progress details written by the indexing pipeline, if any.
+    pub progress: Option<serde_json::Value>,
+}
+
+/// Fetch the current catalog refresh status for a datasource's workspace.
+///
+/// Status is tracked per-workspace (`workspaces.catalog_refresh_status`),
+/// not per-datasource — `datasource_slug` is used only to confirm the
+/// caller has access to a datasource in this workspace before returning
+/// workspace-wide status.
+#[server(prefix = "/leptos-api")]
+pub async fn get_catalog_refresh_status(
+    datasource_slug: String,
+) -> Result<CatalogRefreshStatusResponse, ServerFnError> {
+    let ac = AuthenticatedContext::extract().await?;
+
+    // Resolve the slug to confirm workspace access before returning status.
+    kyomi_auth::datasource_service::resolve_datasource(
+        ac.db(),
+        &datasource_slug,
+        &ac.ws_id,
+        false,
+    )
+    .await
+    .into_sfn()?;
+
+    #[derive(sqlx::FromRow)]
+    struct WorkspaceCatalogStatusRow {
+        catalog_refresh_status: Option<kyomi_core::enums::CatalogRefreshStatus>,
+        catalog_refresh_progress: Option<serde_json::Value>,
+    }
+
+    let row = kyomi_core::db_fetch_optional!(
+        ac.db(),
+        WorkspaceCatalogStatusRow,
+        "SELECT catalog_refresh_status, catalog_refresh_progress FROM workspaces \
+         WHERE workspace_id = $1",
+        &ac.ws_id
+    )
+    .into_sfn()?;
+
+    let (status, progress) = match row {
+        Some(row) => (
+            row.catalog_refresh_status
+                .map(|s| s.as_ref().to_string())
+                .unwrap_or_else(|| "idle".to_string()),
+            row.catalog_refresh_progress,
+        ),
+        None => ("idle".to_string(), None),
+    };
+
+    Ok(CatalogRefreshStatusResponse { status, progress })
 }
 
 // ---------------------------------------------------------------------------

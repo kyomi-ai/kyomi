@@ -75,7 +75,11 @@ pub fn SqlEditorSidebar(
 
     // ── Catalog search state (immediate — client-side filtering only) ──
     let (catalog_search_input, set_catalog_search_input) = signal(String::new());
-    let (catalog_refresh_trigger, set_catalog_refresh_trigger) = signal(0u32);
+    // `_set_catalog_refresh_trigger` has no callers yet — catalog indexing now
+    // runs in the background (KYO-143), so bumping the tree refresh right
+    // after `refresh_catalog` returns would reload stale pre-index data.
+    // KYO-144 (poll for completion) will call this once indexing is done.
+    let (catalog_refresh_trigger, _set_catalog_refresh_trigger) = signal(0u32);
 
     // ── History search state (with 300ms debounce) ──────────────────────
     let (history_search_input, set_history_search_input) = signal(String::new());
@@ -129,7 +133,10 @@ pub fn SqlEditorSidebar(
         leptos::task::spawn_local(async move {
             match crate::server_fns::sql_editor::refresh_catalog(slug).await {
                 Ok(message) => {
-                    set_catalog_refresh_trigger.try_update(|n| *n += 1);
+                    // Indexing now runs in the background — `message` says
+                    // "started", not "done". Don't bump the catalog tree's
+                    // refresh trigger here, it would just reload the same
+                    // stale pre-index data.
                     toast_success(message);
                 }
                 Err(e) => {
