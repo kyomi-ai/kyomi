@@ -27,6 +27,8 @@ use crate::server_fns::connect::create_connect_datasource;
 use crate::server_fns::context::UserContext;
 use crate::server_fns::datasources::*;
 use crate::server_fns::sql_editor::refresh_catalog;
+#[cfg(target_arch = "wasm32")]
+use crate::server_fns::sql_editor::get_catalog_refresh_status;
 use crate::server_fns::onboarding::{
     check_sample_datasource_available, create_sample_datasource,
 };
@@ -6072,18 +6074,170 @@ fn EditModeCatalogTab(
         }
     });
 
+    // ── Live refresh status (KYO-144) ─────────────────────────────────────
     // Catalog indexing now runs in the background (KYO-143) — the server
-    // fn returns as soon as it has kicked off the refresh, so the message
-    // here is "started", not "done". Re-dispatching stats_action would
-    // reload the same (stale) counts immediately, before indexing has done
-    // any work, so we just surface the "started" message via toast instead.
-    // Polling for completion is the follow-on ticket KYO-144.
+    // fn returns as soon as it has kicked off the refresh. `refresh_phase`
+    // drives the "Refreshing..." indicator while a background run is (or
+    // is believed to be) in flight. Declared unconditionally so the view
+    // compiles on both targets; only ever written from the WASM poll loop.
+    // `_set_refresh_phase` is only written from WASM poll code below; the
+    // underscore prefix avoids an unused-variable warning on the native
+    // (SSR) target, matching the `Ok(_msg)` convention already used in
+    // this file for WASM-only-consumed Action results.
+    let (refresh_phase, _set_refresh_phase) = signal::<Option<String>>(None);
+
+    // Interval handle lives in a StoredValue so `on_cleanup` can drop it —
+    // never `.forget()`. `seen_running` and `poll_count` guard the startup
+    // race: a poll can observe the pre-existing "idle" status before the
+    // background task has flipped it to "running". We only treat a
+    // subsequent "idle"/"failed" as terminal once we've actually observed
+    // "running", or after a few polls have passed with no "running"
+    // sighting (the job finished faster than our poll interval could
+    // catch it). `poll_count` doubles as an overall safety cap so a stuck
+    // "running" status can't poll forever.
+    #[cfg(target_arch = "wasm32")]
+    let interval_handle: StoredValue<Option<send_wrapper::SendWrapper<gloo_timers::callback::Interval>>> =
+        StoredValue::new(None);
+    #[cfg(target_arch = "wasm32")]
+    let seen_running: StoredValue<bool> = StoredValue::new(false);
+    #[cfg(target_arch = "wasm32")]
+    let poll_count: StoredValue<u32> = StoredValue::new(0);
+
+    #[cfg(target_arch = "wasm32")]
+    on_cleanup(move || {
+        interval_handle.set_value(None);
+    });
+
+    // Poll interval — 4s. Starts a fresh run each time `refresh_action`
+    // reports the background job was (re-)kicked off.
+    #[cfg(target_arch = "wasm32")]
+    const CATALOG_REFRESH_POLL_INTERVAL_MS: u32 = 4_000;
+    // ~5 minutes at the poll interval above.
+    #[cfg(target_arch = "wasm32")]
+    const CATALOG_REFRESH_MAX_POLLS: u32 = 75;
+    // Number of polls to tolerate a stale "idle" reading before treating
+    // it as terminal, when "running" was never observed.
+    #[cfg(target_arch = "wasm32")]
+    const CATALOG_REFRESH_IDLE_GRACE_POLLS: u32 = 3;
+
+    #[cfg(target_arch = "wasm32")]
+    let start_refresh_polling = move || {
+        use send_wrapper::SendWrapper;
+
+        // Reset race-guard state for this run and optimistically show the
+        // live indicator — the background task may not have flipped
+        // status to "running" yet.
+        seen_running.set_value(false);
+        poll_count.set_value(0);
+        _set_refresh_phase.try_set(Some("running".to_string()));
+        // Cancel any previous interval before starting a new one (e.g. the
+        // user clicked Refresh again after a prior run already finished).
+        interval_handle.set_value(None);
+
+        let poll = move || {
+            // This callback fires from a detached JS interval — the
+            // component may already be disposed if cleanup raced the
+            // timer. `try_get_untracked` bails out gracefully instead of
+            // panicking (bare `.get_untracked()` would panic).
+            let Some(slug) = datasource_slug.try_get_untracked() else {
+                return;
+            };
+            if slug.is_empty() {
+                return;
+            }
+            leptos::task::spawn_local(async move {
+                match get_catalog_refresh_status(slug).await {
+                    Ok(resp) => {
+                        // The response can arrive after the component was
+                        // disposed (e.g. modal closed mid-request). Every
+                        // StoredValue/signal touch below uses `try_`
+                        // variants so a disposed scope short-circuits
+                        // instead of panicking.
+                        let Some(count) = poll_count.try_get_value().map(|c| c + 1) else {
+                            return;
+                        };
+                        poll_count.try_set_value(count);
+
+                        // Safety cap first, so a status that never reaches a
+                        // terminal state (e.g. a job wedged at "running"
+                        // forever — crashed worker, orphaned run) can't
+                        // poll indefinitely. Checked before the match below
+                        // so it bounds every arm uniformly, including
+                        // "running" itself.
+                        if count >= CATALOG_REFRESH_MAX_POLLS {
+                            interval_handle.try_set_value(None);
+                            _set_refresh_phase.try_set(None);
+                            return;
+                        }
+
+                        match resp.status.as_str() {
+                            "running" => {
+                                seen_running.try_set_value(true);
+                                _set_refresh_phase.try_set(Some("running".to_string()));
+                            }
+                            "idle" => {
+                                let seen = seen_running.try_get_value().unwrap_or(false);
+                                if seen || count >= CATALOG_REFRESH_IDLE_GRACE_POLLS {
+                                    interval_handle.try_set_value(None);
+                                    // `Action::dispatch` has no `try_` variant
+                                    // and panics if its owning scope is
+                                    // disposed. `try_set` returning `None`
+                                    // confirms the component is still alive
+                                    // before we touch `stats_action`.
+                                    let still_mounted =
+                                        _set_refresh_phase.try_set(None).is_none();
+                                    if still_mounted
+                                        && let Some(id) = datasource_id.try_get_untracked()
+                                        && !id.is_empty()
+                                    {
+                                        stats_action.dispatch(id);
+                                    }
+                                    toast_success("Catalog refresh complete".to_string());
+                                }
+                            }
+                            "failed" => {
+                                interval_handle.try_set_value(None);
+                                _set_refresh_phase.try_set(None);
+                                let detail = resp
+                                    .progress
+                                    .as_ref()
+                                    .and_then(|p| p.get("error"))
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string())
+                                    .unwrap_or_else(|| "Catalog refresh failed".to_string());
+                                toast_error(detail);
+                            }
+                            _ => {}
+                        }
+                    }
+                    Err(err) => {
+                        // Transient network/auth error — keep polling
+                        // rather than flashing a toast every 4s. The
+                        // safety cap above still bounds the overall wait.
+                        leptos::logging::warn!("Failed to poll catalog refresh status: {err}");
+                    }
+                }
+            });
+        };
+
+        // Immediate poll so the UI doesn't wait a full interval for the
+        // first status check.
+        poll();
+
+        let interval =
+            gloo_timers::callback::Interval::new(CATALOG_REFRESH_POLL_INTERVAL_MS, poll);
+        interval_handle.set_value(Some(SendWrapper::new(interval)));
+    };
+
     Effect::new(move |_| {
         if let Some(result) = refresh_action.value().get() {
             match result {
                 Ok(_msg) => {
                     #[cfg(target_arch = "wasm32")]
-                    toast_success(_msg);
+                    {
+                        toast_success(_msg);
+                        start_refresh_polling();
+                    }
                 }
                 Err(e) => {
                     leptos::logging::error!("Catalog refresh failed: {e}");
@@ -6221,13 +6375,18 @@ fn EditModeCatalogTab(
                         <Button
                             variant=ButtonVariant::Outline
                             size=ButtonSize::Sm
-                            disabled=Signal::derive(move || refresh_action.pending().get())
+                            disabled=Signal::derive(move || {
+                                refresh_action.pending().get()
+                                    || refresh_phase.get().as_deref() == Some("running")
+                            })
                             on:click=on_refresh_click
                         >
                             <span class="h-4 w-4 inline-flex items-center justify-center">
                                 <Icon icon=phosphor_leptos::ARROWS_CLOCKWISE/>
                             </span>
-                            {move || if refresh_action.pending().get() {
+                            {move || if refresh_action.pending().get()
+                                || refresh_phase.get().as_deref() == Some("running")
+                            {
                                 "Refreshing..."
                             } else {
                                 "Refresh Now"
