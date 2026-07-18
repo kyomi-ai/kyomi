@@ -11,9 +11,11 @@ use leptos::prelude::*;
 
 use crate::components::{
     Alert, AlertDescription, AlertTitle, AlertVariant, Badge, BadgeVariant, Button, ButtonSize,
-    ButtonVariant, ConfirmDialog, EmptyState, Modal, ModalSize, Skeleton, INPUT_CLASS,
+    ButtonVariant, Card, CardContent, CardHeader, CardTitle, ConfirmDialog, EmptyState, Modal,
+    ModalSize, Skeleton, INPUT_CLASS,
 };
 use crate::components::select::Select;
+use crate::server_fns::billing::get_subscription_info;
 use crate::server_fns::context::UserContext;
 use crate::server_fns::team::*;
 use crate::types::{OwnershipTransferData, TeamInvitation, TeamMember};
@@ -86,6 +88,16 @@ fn TeamPageInner() -> impl IntoView {
         move || transfers_version.get(),
         |_| list_ownership_transfers(),
     );
+
+    // Subscription info — used to check seat cap for billing gate
+    let subscription = Resource::new(|| (), |_| get_subscription_info());
+    let seat_capped = Memo::new(move |_| {
+        subscription
+            .get()
+            .and_then(|r| r.ok())
+            .map(|info| info.user_limit.unwrap_or(1) <= 1)
+            .unwrap_or(false)
+    });
 
     // Invite modal state
     let (show_invite_modal, set_show_invite_modal) = signal(false);
@@ -374,20 +386,47 @@ fn TeamPageInner() -> impl IntoView {
                             view! { <span></span> }.into_any()
                         }
                     }}
-                    <Button
-                        variant=ButtonVariant::Default
-                        on:click=move |_| set_show_invite_modal.set(true)
-                        attr:title="Invite Member"
+                    <Show
+                        when=move || !seat_capped.get()
+                        fallback=|| ()
                     >
-                        <span class="inline-flex items-center gap-0 sm:gap-2">
-                            <span class="inline-flex">
-                                <phosphor_leptos::Icon icon=phosphor_leptos::USER_PLUS size="16px"/>
+                        <Button
+                            variant=ButtonVariant::Default
+                            on:click=move |_| set_show_invite_modal.set(true)
+                            attr:title="Invite Member"
+                        >
+                            <span class="inline-flex items-center gap-0 sm:gap-2">
+                                <span class="inline-flex">
+                                    <phosphor_leptos::Icon icon=phosphor_leptos::USER_PLUS size="16px"/>
+                                </span>
+                                <span class="hidden sm:inline">"Invite Member"</span>
                             </span>
-                            <span class="hidden sm:inline">"Invite Member"</span>
-                        </span>
-                    </Button>
+                        </Button>
+                    </Show>
                 </div>
             </div>
+
+            // Billing gate — seat-capped placeholder
+            <Show when=move || seat_capped.get()>
+                <div class="mb-6">
+                    <Card>
+                        <CardHeader>
+                            <CardTitle>"Invite Team Members"</CardTitle>
+                        </CardHeader>
+                        <CardContent>
+                            <p class="text-sm text-muted-foreground mb-4">
+                                "Enter billing information to enable multi-user workspaces and invite other team members."
+                            </p>
+                            <a
+                                href="/settings/billing"
+                                class="inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-md text-sm font-semibold px-4 py-2 bg-primary text-primary-foreground shadow hover:bg-primary/90 transition-colors"
+                            >
+                                "Go to Billing"
+                            </a>
+                        </CardContent>
+                    </Card>
+                </div>
+            </Show>
 
             // Pending Invitations
             <div class="mb-6">
@@ -523,54 +562,56 @@ fn TeamPageInner() -> impl IntoView {
                 </Transition>
             </div>
 
-            // Invite Member Modal
-            <Modal
-                show=Signal::from(show_invite_modal)
-                on_close=on_close_modal
-                title="Invite Team Member"
-                size=ModalSize::Md
-                footer=modal_footer.clone()
-            >
-                <div class="space-y-4">
-                    <div>
-                        <label class="block text-sm font-medium text-foreground mb-1">
-                            "Email Address"
-                        </label>
-                        <input
-                            type="email"
-                            class=INPUT_CLASS
-                            placeholder="colleague@example.com"
-                            prop:value=invite_email
-                            on:input=move |ev| set_invite_email.set(event_target_value(&ev))
-                        />
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium text-foreground mb-1">
-                            "Role"
-                        </label>
-                        <crate::components::StaticSelect
-                            value=invite_role.get_untracked()
-                            options=vec![
-                                ("user", "User - Full feature access"),
-                                ("admin", "Admin - Can manage workspace settings"),
-                            ]
-                            on_change=move |val| set_invite_role.set(val)
-                        />
-                    </div>
+            // Invite Member Modal (hidden when seat-capped — no dead-end)
+            <Show when=move || !seat_capped.get()>
+                <Modal
+                    show=Signal::from(show_invite_modal)
+                    on_close=on_close_modal
+                    title="Invite Team Member"
+                    size=ModalSize::Md
+                    footer=modal_footer.clone()
+                >
+                    <div class="space-y-4">
+                        <div>
+                            <label class="block text-sm font-medium text-foreground mb-1">
+                                "Email Address"
+                            </label>
+                            <input
+                                type="email"
+                                class=INPUT_CLASS
+                                placeholder="colleague@example.com"
+                                prop:value=invite_email
+                                on:input=move |ev| set_invite_email.set(event_target_value(&ev))
+                            />
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-foreground mb-1">
+                                "Role"
+                            </label>
+                            <crate::components::StaticSelect
+                                value=invite_role.get_untracked()
+                                options=vec![
+                                    ("user", "User - Full feature access"),
+                                    ("admin", "Admin - Can manage workspace settings"),
+                                ]
+                                on_change=move |val| set_invite_role.set(val)
+                            />
+                        </div>
 
-                    // Show invite action error
-                    {move || {
-                        invite_action.value().get().and_then(|r| r.err()).map(|e| {
-                            let msg = e.to_string();
-                            view! {
-                                <crate::components::Alert variant=crate::components::AlertVariant::Error>
-                                    <crate::components::AlertDescription>{msg}</crate::components::AlertDescription>
-                                </crate::components::Alert>
-                            }
-                        })
-                    }}
-                </div>
-            </Modal>
+                        // Show invite action error
+                        {move || {
+                            invite_action.value().get().and_then(|r| r.err()).map(|e| {
+                                let msg = e.to_string();
+                                view! {
+                                    <crate::components::Alert variant=crate::components::AlertVariant::Error>
+                                        <crate::components::AlertDescription>{msg}</crate::components::AlertDescription>
+                                    </crate::components::Alert>
+                                }
+                            })
+                        }}
+                    </div>
+                </Modal>
+            </Show>
 
             // Confirm Dialog
             <ConfirmDialog
