@@ -1175,19 +1175,19 @@ pub async fn prepare_manual_catalog_refresh(
         ),
     )
     .await
-    .map_err(|_| kyomi_core::Error::Internal("Connection validation timed out".into()))??;
+    .map_err(|_| kyomi_core::Error::DatasourceConnection("Connection validation timed out".into()))??;
 
     // `provider.close()` must run regardless of whether test_connection
     // succeeded, timed out, or errored — capture the result first, close
     // unconditionally, then propagate.
     let connected_result = tokio::time::timeout(p.connect_timeout, provider.test_connection())
         .await
-        .map_err(|_| kyomi_core::Error::Internal("Connection validation timed out".into()));
+        .map_err(|_| kyomi_core::Error::DatasourceConnection("Connection validation timed out".into()));
 
     provider.close().await;
 
     if !connected_result?? {
-        return Err(kyomi_core::Error::Internal(
+        return Err(kyomi_core::Error::DatasourceConnection(
             "Connection test failed — check datasource credentials and connectivity".into(),
         ));
     }

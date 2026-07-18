@@ -32,6 +32,14 @@ pub enum Error {
     #[error("service unavailable: {0}")]
     ServiceUnavailable(String),
 
+    /// A datasource connection or validation failure whose message is already
+    /// a complete, user-facing sentence (e.g. "Connection test failed — check
+    /// datasource credentials and connectivity"). Unlike the other variants,
+    /// its `Display` is prefix-free so the message surfaces verbatim in a
+    /// client toast instead of reading as `internal: <message>`.
+    #[error("{0}")]
+    DatasourceConnection(String),
+
     #[error("internal: {0}")]
     Internal(String),
 
@@ -95,6 +103,9 @@ impl IntoResponse for Error {
             }
             Error::NotImplemented(msg) => (StatusCode::NOT_IMPLEMENTED, msg.clone()),
             Error::ServiceUnavailable(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg.clone()),
+            // Client-actionable (bad credentials / wrong host / unreachable):
+            // surface the full message so the caller can fix the config.
+            Error::DatasourceConnection(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             Error::Internal(msg) => {
                 tracing::error!("internal error: {msg}");
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal server error".into())
@@ -119,5 +130,24 @@ impl IntoResponse for Error {
 
         let body = serde_json::json!({ "detail": message });
         (status, axum::Json(body)).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn datasource_connection_display_is_prefix_free() {
+        // KYO-145: this variant exists specifically so its message surfaces
+        // verbatim to the user (no `internal: ` / `bad request: ` prefix).
+        // Guards against a future refactor reintroducing a prefix.
+        let err = Error::DatasourceConnection(
+            "Connection test failed — check datasource credentials and connectivity".into(),
+        );
+        assert_eq!(
+            err.to_string(),
+            "Connection test failed — check datasource credentials and connectivity"
+        );
     }
 }
