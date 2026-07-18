@@ -466,6 +466,16 @@ async fn process_message_for_email(
                 }
             };
 
+            // Metric types: render as native HTML (table-based layout)
+            // instead of PNG rasterization — MetricRenderer outputs CSS Grid
+            // which doesn't survive resvg.  Mirrors Slack and PDF dispatch.
+            let viz_type = crate::chartml_utils::get_visualize_type(&resolved_spec);
+            if let Some("metric") = viz_type.as_deref() {
+                let metric_html = render_metric_email_html(&resolved_spec);
+                processed.replace_range(range.clone(), &metric_html);
+                continue;
+            }
+
             // Extract a title for the alt text.
             let chart_title = resolved_spec
                 .get("title")
@@ -597,6 +607,111 @@ fn escape_html(text: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+/// Render a metric ChartML spec as email-compatible HTML.
+///
+/// Uses table-based layout (email clients don't support CSS Grid) with inline
+/// styles only. The output is a single line — [`markdown_to_simple_html`] runs
+/// after injection and converts newlines to `<br>`.
+///
+/// Mirrors the data-extraction pattern from `render_metric_slack_blocks` (Slack)
+/// and `render_metric_typst_markup` (PDF).
+fn render_metric_email_html(spec: &serde_json::Value) -> String {
+    use crate::chartml_utils;
+    use crate::d3_format;
+    use serde_json::json;
+
+    let visualize = spec.get("visualize").cloned().unwrap_or(json!({}));
+    let data = spec.get("data").cloned().unwrap_or(json!({}));
+    let rows = data
+        .get("rows")
+        .and_then(|r| r.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let title = chartml_utils::get_chart_title(spec);
+    let label = visualize
+        .get("label")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&title);
+
+    if rows.is_empty() {
+        let label_esc = escape_html(label);
+        return format!(
+            r#"<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin: 16px 0;"><tr><td style="background-color: #FAFAF8; border: 1px solid #E8E5DE; border-radius: 8px; padding: 20px; text-align: center;"><p style="font-size: 13px; color: #6B6660; margin: 0 0 4px 0;">{label_esc}</p><p style="font-size: 24px; font-weight: 700; color: #1C1917; margin: 0;">No data</p></td></tr></table>"#
+        );
+    }
+
+    let first_row = &rows[0];
+    let value_field = visualize
+        .get("value")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let format_str = visualize
+        .get("format")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let raw_value = first_row.get(value_field).cloned().unwrap_or(json!(null));
+
+    let formatted = if format_str.is_empty() {
+        match &raw_value {
+            serde_json::Value::Number(n) => n.to_string(),
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Null => "N/A".to_string(),
+            other => other.to_string(),
+        }
+    } else {
+        d3_format::format_d3(Some(&raw_value), Some(format_str))
+    };
+
+    // Trend calculation — mirrors pdf_export.rs:434-458
+    let trend_html = if let Some(compare_field) =
+        visualize.get("compareWith").and_then(|v| v.as_str())
+    {
+        let current = raw_value.as_f64().unwrap_or(0.0);
+        let previous = first_row
+            .get(compare_field)
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+
+        if previous != 0.0 {
+            let pct_change = ((current - previous) / previous.abs()) * 100.0;
+            let invert = visualize
+                .get("invertTrend")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let is_positive = if invert {
+                pct_change <= 0.0
+            } else {
+                pct_change >= 0.0
+            };
+            let arrow = if pct_change > 0.0 {
+                "&#9650;"
+            } else if pct_change < 0.0 {
+                "&#9660;"
+            } else {
+                "&#8212;"
+            };
+            let color = if is_positive { "#059669" } else { "#DC2626" };
+            format!(
+                r#"<p style="font-size: 13px; color: {color}; margin: 4px 0 0 0;">{arrow} {:.1}% vs previous</p>"#,
+                pct_change.abs()
+            )
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
+    let label_esc = escape_html(label);
+    let value_esc = escape_html(&formatted);
+
+    format!(
+        r#"<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin: 16px 0;"><tr><td style="background-color: #FAFAF8; border: 1px solid #E8E5DE; border-radius: 8px; padding: 20px; text-align: center;"><p style="font-size: 13px; color: #6B6660; margin: 0 0 4px 0;">{label_esc}</p><p style="font-size: 28px; font-weight: 700; color: #1C1917; margin: 0;">{value_esc}</p>{trend_html}</td></tr></table>"#
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1676,6 +1791,153 @@ mod tests {
     #[test]
     fn email_chart_limits_match_python() {
         assert_eq!(MAX_EMAIL_CHARTS, 3);
+    }
+
+    // -- Metric email HTML rendering --
+
+    #[test]
+    fn metric_email_html_with_label_value_and_trend() {
+        use serde_json::json;
+
+        let spec = json!({
+            "title": "Revenue",
+            "visualize": {
+                "type": "metric",
+                "value": "total",
+                "format": "$,.0f",
+                "label": "Total Revenue",
+                "compareWith": "prev_total",
+                "invertTrend": false
+            },
+            "data": {
+                "rows": [
+                    {"total": 150000, "prev_total": 120000}
+                ]
+            }
+        });
+
+        let html = render_metric_email_html(&spec);
+        assert!(html.contains("Total Revenue"), "should contain label");
+        assert!(html.contains("$150,000"), "should contain formatted value");
+        assert!(html.contains("25.0%"), "should contain trend percentage");
+        assert!(html.contains("&#9650;"), "should contain up arrow for positive trend");
+        assert!(html.contains("#059669"), "should use green for positive trend");
+    }
+
+    #[test]
+    fn metric_email_html_empty_data_shows_no_data() {
+        use serde_json::json;
+
+        let spec = json!({
+            "title": "Users",
+            "visualize": {
+                "type": "metric",
+                "value": "count",
+                "label": "Active Users"
+            },
+            "data": {
+                "rows": []
+            }
+        });
+
+        let html = render_metric_email_html(&spec);
+        assert!(html.contains("No data"), "should show 'No data' for empty rows");
+        assert!(html.contains("Active Users"), "should still show label");
+    }
+
+    #[test]
+    fn metric_email_html_invert_trend_flips_color() {
+        use serde_json::json;
+
+        // Error rate went up — invertTrend makes that negative (red)
+        let spec = json!({
+            "title": "Error Rate",
+            "visualize": {
+                "type": "metric",
+                "value": "rate",
+                "format": ".1%",
+                "label": "Error Rate",
+                "compareWith": "prev_rate",
+                "invertTrend": true
+            },
+            "data": {
+                "rows": [
+                    {"rate": 0.05, "prev_rate": 0.03}
+                ]
+            }
+        });
+
+        let html = render_metric_email_html(&spec);
+        // 66.7% increase, but invertTrend=true → negative = red
+        assert!(html.contains("#DC2626"), "should use red when invertTrend flips positive change");
+        assert!(html.contains("&#9650;"), "arrow reflects raw pct_change direction (up for positive)");
+    }
+
+    #[test]
+    fn metric_email_html_no_newlines() {
+        use serde_json::json;
+
+        let spec = json!({
+            "title": "MRR",
+            "visualize": {
+                "type": "metric",
+                "value": "mrr",
+                "format": "$,.0f",
+                "label": "Monthly Recurring Revenue",
+                "compareWith": "prev_mrr",
+                "invertTrend": false
+            },
+            "data": {
+                "rows": [
+                    {"mrr": 50000, "prev_mrr": 45000}
+                ]
+            }
+        });
+
+        let html = render_metric_email_html(&spec);
+        assert!(!html.contains('\n'), "output must contain no newlines to survive markdown_to_simple_html");
+    }
+
+    #[test]
+    fn metric_email_html_uses_table_layout() {
+        use serde_json::json;
+
+        let spec = json!({
+            "title": "Count",
+            "visualize": {
+                "type": "metric",
+                "value": "n",
+                "label": "Total"
+            },
+            "data": {
+                "rows": [{"n": 42}]
+            }
+        });
+
+        let html = render_metric_email_html(&spec);
+        assert!(html.contains("<table"), "should use table-based layout for email compatibility");
+        assert!(html.contains("role=\"presentation\""), "should use presentation role for accessibility");
+    }
+
+    #[test]
+    fn metric_email_html_escapes_user_text() {
+        use serde_json::json;
+
+        let spec = json!({
+            "title": "Revenue <Q1>",
+            "visualize": {
+                "type": "metric",
+                "value": "total",
+                "label": "Revenue \"Q1\" & More"
+            },
+            "data": {
+                "rows": [{"total": 100}]
+            }
+        });
+
+        let html = render_metric_email_html(&spec);
+        assert!(html.contains("&amp;"), "should escape ampersands in label");
+        assert!(html.contains("&quot;"), "should escape quotes in label");
     }
 }
 
