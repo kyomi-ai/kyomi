@@ -196,6 +196,7 @@ impl StripeService {
         let metadata: std::collections::HashMap<String, String> = [
             ("workspace_id".to_string(), workspace_id.to_string()),
             ("workspace_name".to_string(), workspace_name.to_string()),
+            ("app".to_string(), "kyomi".to_string()),
         ]
         .into_iter()
         .collect();
@@ -233,6 +234,7 @@ impl StripeService {
         let metadata: std::collections::HashMap<String, String> = [
             ("workspace_id".to_string(), workspace_id.to_string()),
             ("brand".to_string(), "kyomi".to_string()),
+            ("app".to_string(), "kyomi".to_string()),
         ]
         .into_iter()
         .collect();
@@ -275,10 +277,11 @@ impl StripeService {
             ..Default::default()
         }];
 
-        // Subscription metadata — just workspace_id and brand
+        // Subscription metadata — workspace_id, brand, and app identifier
         let sub_metadata: std::collections::HashMap<String, String> = [
             ("workspace_id".to_string(), params.workspace_id.clone()),
             ("brand".to_string(), "kyomi".to_string()),
+            ("app".to_string(), "kyomi".to_string()),
         ]
         .into_iter()
         .collect();
@@ -432,12 +435,9 @@ impl StripeService {
 
         let first_item_id = items[0].id.to_string();
 
-        let update_metadata: std::collections::HashMap<String, String> = [
-            ("tier".to_string(), tier.to_string()),
-            ("billing_cycle".to_string(), billing_cycle.to_string()),
-        ]
-        .into_iter()
-        .collect();
+        let mut update_metadata = subscription.metadata.clone();
+        update_metadata.insert("tier".to_string(), tier.to_string());
+        update_metadata.insert("billing_cycle".to_string(), billing_cycle.to_string());
 
         // Build update parameters using the builder.
         let updated = kyomi_core::retry::retry_with_backoff_classified(
@@ -773,6 +773,7 @@ impl StripeService {
         let sub_metadata: std::collections::HashMap<String, String> = [
             ("workspace_id".to_string(), params.workspace_id.clone()),
             ("brand".to_string(), "kyomi".to_string()),
+            ("app".to_string(), "kyomi".to_string()),
         ]
         .into_iter()
         .collect();

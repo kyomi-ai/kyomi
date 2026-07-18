@@ -154,6 +154,17 @@ async fn handle_subscription_event(
     subscription: &Subscription,
     event_type: &str,
 ) {
+    // Defensive guard: skip subscriptions not owned by Kyomi.
+    // Prevents cross-app contamination when sharing a Stripe account.
+    if subscription.metadata.get("app").map(|s| s.as_str()) != Some("kyomi") {
+        tracing::debug!(
+            subscription_id = %subscription.id,
+            app = ?subscription.metadata.get("app"),
+            "Ignoring subscription event for non-Kyomi app"
+        );
+        return;
+    }
+
     // Get workspace_id from subscription metadata
     let workspace_id = match subscription.metadata.get("workspace_id") {
         Some(id) if !id.is_empty() => id.clone(),
@@ -262,6 +273,15 @@ async fn handle_subscription_event(
 
 /// Handle `customer.subscription.deleted` — revert workspace to free tier.
 async fn handle_subscription_deleted(state: &AppState, subscription: &Subscription) {
+    if subscription.metadata.get("app").map(|s| s.as_str()) != Some("kyomi") {
+        tracing::debug!(
+            subscription_id = %subscription.id,
+            app = ?subscription.metadata.get("app"),
+            "Ignoring subscription deletion for non-Kyomi app"
+        );
+        return;
+    }
+
     let workspace_id = match subscription.metadata.get("workspace_id") {
         Some(id) if !id.is_empty() => id.clone(),
         _ => {
