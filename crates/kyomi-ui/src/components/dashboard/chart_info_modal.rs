@@ -4,8 +4,8 @@
 //! ChartML YAML source, matching React's ChartInfoModal component exactly.
 
 use leptos::prelude::*;
-use phosphor_leptos::Icon;
 use crate::components::modal::{Modal, ModalSize};
+use crate::components::dashboard::highlighted_code_block::HighlightedCodeBlock;
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -61,22 +61,6 @@ pub fn ChartInfoModal(
     let datasource = Memo::new(move |_| extract_datasource(&yaml.get()));
     let query = Memo::new(move |_| extract_query(&yaml.get()));
 
-    let (copied, set_copied) = signal(false);
-
-    let on_copy = move |_: leptos::ev::MouseEvent| {
-        let text = yaml.get_untracked();
-        leptos::task::spawn_local(async move {
-            if let Some(window) = web_sys::window() {
-                let clipboard = window.navigator().clipboard();
-                let promise = clipboard.write_text(&text);
-                let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
-                set_copied.try_set(true);
-                gloo_timers::future::TimeoutFuture::new(2000).await;
-                set_copied.try_set(false);
-            }
-        });
-    };
-
     view! {
         <Modal
             show=open
@@ -95,88 +79,25 @@ pub fn ChartInfoModal(
                 </div>
 
                 // SQL Query section — only shown when present
-                // Matches React: `{query && <CopyableCodeBlock label="SQL Query" />}`
+                // Uses HighlightedCodeBlock for syntax highlighting with arborium
                 {move || query.get().map(|sql| {
-                    let sql_for_copy = sql.clone();
-                    let (sql_copied, set_sql_copied) = signal(false);
-                    let on_sql_copy = move |_: leptos::ev::MouseEvent| {
-                        let text = sql_for_copy.clone();
-                        leptos::task::spawn_local(async move {
-                            if let Some(window) = web_sys::window() {
-                                let clipboard = window.navigator().clipboard();
-                                let promise = clipboard.write_text(&text);
-                                let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
-                                set_sql_copied.try_set(true);
-                                gloo_timers::future::TimeoutFuture::new(2000).await;
-                                set_sql_copied.try_set(false);
-                            }
-                        });
-                    };
-                    let sql_text = sql;
+                    let sql_signal = Signal::derive(move || sql.clone());
                     view! {
-                        <div class="space-y-2">
-                            <span class="text-sm font-medium text-foreground">"SQL Query"</span>
-                            <div class="relative group">
-                                <button
-                                    on:click=on_sql_copy
-                                    class="absolute top-2 right-2 p-2 rounded-md bg-secondary hover:bg-accent opacity-0 group-hover:opacity-100 transition-opacity z-10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                                    title=move || if sql_copied.get() { "Copied!" } else { "Copy code" }
-                                >
-                                    {move || if sql_copied.get() {
-                                        view! {
-                                            <span class="block h-4 w-4 text-success-foreground">
-                                                <Icon icon=phosphor_leptos::CHECK size="16px" />
-                                            </span>
-                                        }.into_any()
-                                    } else {
-                                        view! {
-                                            <span class="block h-4 w-4 text-muted-foreground">
-                                                <Icon icon=phosphor_leptos::COPY size="16px" />
-                                            </span>
-                                        }.into_any()
-                                    }}
-                                </button>
-                                <pre class="bg-muted rounded-md p-4 overflow-x-auto text-sm font-mono max-h-[300px] overflow-y-auto">
-                                    <code class="font-mono bg-transparent">
-                                        {sql_text}
-                                    </code>
-                                </pre>
-                            </div>
-                        </div>
+                        <HighlightedCodeBlock
+                            code=sql_signal
+                            language=Signal::stored("sql".to_string())
+                            label=Signal::stored("SQL Query".to_string())
+                        />
                     }
                 })}
 
                 // ChartML Source section — always shown
-                // Matches React: <CopyableCodeBlock label="ChartML Source" language="yaml" />
-                <div class="space-y-2">
-                    <span class="text-sm font-medium text-foreground">"ChartML Source"</span>
-                    <div class="relative group">
-                        <button
-                            on:click=on_copy
-                            class="absolute top-2 right-2 p-2 rounded-md bg-secondary hover:bg-accent opacity-0 group-hover:opacity-100 transition-opacity z-10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                            title=move || if copied.get() { "Copied!" } else { "Copy code" }
-                        >
-                            {move || if copied.get() {
-                                view! {
-                                    <span class="block h-4 w-4 text-success-foreground">
-                                        <Icon icon=phosphor_leptos::CHECK size="16px" />
-                                    </span>
-                                }.into_any()
-                            } else {
-                                view! {
-                                    <span class="block h-4 w-4 text-muted-foreground">
-                                        <Icon icon=phosphor_leptos::COPY size="16px" />
-                                    </span>
-                                }.into_any()
-                            }}
-                        </button>
-                        <pre class="bg-muted rounded-md p-4 overflow-x-auto text-sm font-mono max-h-[300px] overflow-y-auto">
-                            <code class="font-mono bg-transparent">
-                                {move || yaml.get()}
-                            </code>
-                        </pre>
-                    </div>
-                </div>
+                // Uses HighlightedCodeBlock for YAML syntax highlighting
+                <HighlightedCodeBlock
+                    code=yaml
+                    language=Signal::stored("yaml".to_string())
+                    label=Signal::stored("ChartML Source".to_string())
+                />
             </div>
         </Modal>
     }

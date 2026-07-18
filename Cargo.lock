@@ -296,9 +296,9 @@ dependencies = [
 
 [[package]]
 name = "arborium-theme"
-version = "2.18.0"
+version = "2.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b513088effb64db7d471ddc13d9d4b487b4e74e9d0963c8afb567b3a11445525"
+checksum = "a00a8f02b994f454d9703dd6a8b6075ba778320550d699198faff1882594c0f7"
 
 [[package]]
 name = "arborium-toml"
@@ -6495,6 +6495,7 @@ name = "kyomi-ui"
 version = "0.1.0"
 dependencies = [
  "arborium",
+ "arborium-theme",
  "arrow-array",
  "arrow-ipc",
  "arrow-schema",

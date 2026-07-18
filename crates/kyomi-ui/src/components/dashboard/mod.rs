@@ -8,6 +8,7 @@ pub mod chart_info_modal;
 pub mod chartml_completion;
 pub mod chartml_extension;
 pub mod copilot_sidebar;
+pub mod highlighted_code_block;
 pub mod history_panel;
 pub mod insert_link_modal;
 pub mod kyomi_chart;
