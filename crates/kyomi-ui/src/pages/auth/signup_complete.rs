@@ -256,10 +256,7 @@ pub fn SignupCompletePage() -> impl IntoView {
 
                                     // Terms and consent
                                     <div class="space-y-3">
-                                        <div
-                                            class="flex items-start space-x-3 cursor-pointer"
-                                            on:click=move |_| set_terms_accepted.set(!terms_accepted.get_untracked())
-                                        >
+                                        <label class="flex items-start space-x-3 cursor-pointer">
                                             <Checkbox
                                                 checked=terms_signal
                                                 on_change=on_terms_change
@@ -272,7 +269,6 @@ pub fn SignupCompletePage() -> impl IntoView {
                                                     target="_blank"
                                                     rel="noopener noreferrer"
                                                     class="text-primary hover:underline"
-                                                    on:click=move |ev: leptos::ev::MouseEvent| ev.stop_propagation()
                                                 >
                                                     "Terms of Service"
                                                 </a>
@@ -282,17 +278,13 @@ pub fn SignupCompletePage() -> impl IntoView {
                                                     target="_blank"
                                                     rel="noopener noreferrer"
                                                     class="text-primary hover:underline"
-                                                    on:click=move |ev: leptos::ev::MouseEvent| ev.stop_propagation()
                                                 >
                                                     "Privacy Policy"
                                                 </a>
                                             </span>
-                                        </div>
+                                        </label>
 
-                                        <div
-                                            class="flex items-start space-x-3 cursor-pointer"
-                                            on:click=move |_| set_marketing_consent.set(!marketing_consent.get_untracked())
-                                        >
+                                        <label class="flex items-start space-x-3 cursor-pointer">
                                             <Checkbox
                                                 checked=marketing_signal
                                                 on_change=on_marketing_change
@@ -301,7 +293,7 @@ pub fn SignupCompletePage() -> impl IntoView {
                                             <span class="text-sm text-muted-foreground">
                                                 "I agree to receive product updates and announcements from Kyomi. You can unsubscribe anytime."
                                             </span>
-                                        </div>
+                                        </label>
                                     </div>
 
                                     // Error alert
