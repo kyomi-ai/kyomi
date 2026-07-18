@@ -1537,11 +1537,13 @@ ChartML uses [d3-format](https://d3js.org/d3-format) for number formatting and [
 | `$,.0f` | $1,234 | Currency with thousands separator, no decimals |
 | `$,.2f` | $1,234.56 | Currency with thousands separator, 2 decimals |
 | `,.0f` | 1,234 | Thousands separator, no decimals |
-| `.1%` | 12.3% | Percentage with 1 decimal place |
-| `.0%` | 12% | Percentage with no decimals |
+| `.1%` | 12.3% | Percentage, 1 decimal — **input is a proportion; `0.123` → `12.3%` (×100)** |
+| `.0%` | 12%   | Percentage, no decimals — input `0.12` → `12%` |
 | `~s` | 1.2K, 3.4M, 5.6B | SI-prefix notation (K, M, B, T) |
 | `.2e` | 1.23e+4 | Scientific notation |
 | `+,.0f` | +1,234 | Always show sign |
+
+> **Note:** `%` formats multiply by 100. Pass proportions (0–1), not percentage points.
 
 ### Usage in ChartML
 
