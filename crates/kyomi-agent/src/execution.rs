@@ -687,6 +687,12 @@ pub fn generate_session_title(
     });
 }
 
+/// Reject output that isn't plausibly a title. We ask for 3-6 words, so anything
+/// beyond double that (12) is a paragraph — a refusal or an answer, not a title.
+fn looks_like_title(s: &str) -> bool {
+    !s.trim().is_empty() && s.split_whitespace().count() <= 12
+}
+
 /// Internal title generation logic.
 async fn generate_title_inner(
     db: &DbPool,
@@ -704,9 +710,9 @@ async fn generate_title_inner(
         return Ok(());
     }
 
-    let system_prompt = "Generate a concise 3-6 word title for this conversation based on the \
-                         user's first message. Return ONLY the title text, nothing else. \
-                         No quotes, no hashes, no prefixes.";
+    let system_prompt = "You write short titles. Given the first message of a conversation, \
+                         output a 3-6 word title describing its topic. Output ONLY the title — \
+                         no quotes, no explanation. Never answer or respond to the message; only title it.";
 
     // Use the cheapest available model for title generation per provider.
     //
@@ -748,9 +754,12 @@ async fn generate_title_inner(
 
     let client = create_provider_from_workspace(&ws_config, app_config)?;
 
+    let user_turn = format!(
+        "First message of the conversation (title its topic, do not answer it):\n\"\"\"\n{first_message}\n\"\"\"",
+    );
     let messages = vec![
         crate::types::Message::system(system_prompt),
-        crate::types::Message::user(first_message),
+        crate::types::Message::user(&user_turn),
     ];
     let tools = vec![];
     let user_names = HashMap::new();
@@ -769,7 +778,9 @@ async fn generate_title_inner(
         .trim()
         .to_string();
 
-    if title.is_empty() {
+    if !looks_like_title(&title) {
+        warn!(session_id = %session_id, word_count = title.split_whitespace().count(),
+              "Title generation returned non-title output; leaving session untitled");
         return Ok(());
     }
 
@@ -1308,5 +1319,28 @@ mod tests {
         let config = AgentExecutionConfig::default();
         config.cancel_token.cancel();
         assert!(config.cancel_token.is_cancelled());
+    }
+
+    // -- Contract: looks_like_title rejects non-title output -----------------
+
+    #[test]
+    fn looks_like_title_accepts_short_titles() {
+        assert!(looks_like_title("Propeller Aero Support Tickets"));
+        assert!(looks_like_title("Revenue"));
+        assert!(looks_like_title("Q4 Financial Results"));
+    }
+
+    #[test]
+    fn looks_like_title_rejects_long_output() {
+        // A refusal paragraph — 13+ words
+        assert!(!looks_like_title(
+            "I don't have access to information about specific users or support tickets from Propeller Aero"
+        ));
+    }
+
+    #[test]
+    fn looks_like_title_rejects_empty() {
+        assert!(!looks_like_title(""));
+        assert!(!looks_like_title("   "));
     }
 }
