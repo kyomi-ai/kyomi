@@ -1125,13 +1125,22 @@ pub async fn prepare_manual_catalog_refresh(
     let ds_type: kyomi_core::datasource_registry::DatasourceType =
         p.datasource.datasource_type.into();
 
-    // Refresh OAuth credentials if needed.
+    // Refresh OAuth credentials if needed. This runs directly here (before
+    // `build_provider_for_datasource` below), so an OAuth-refresh failure
+    // surfaces from this call rather than from `create_provider_from_parts`.
+    // Remap its `Internal` to `DatasourceConnection` — a re-authorization
+    // requirement is user-actionable and must reach the "Refresh Now" toast
+    // prefix-free, exactly like the connect/timeout failures.
     let credentials = kyomi_datasource_server::ensure_valid_oauth_credentials(
         &credentials,
         &p.datasource.connection_config,
         &ds_type,
     )
-    .await?;
+    .await
+    .map_err(|e| match e {
+        kyomi_core::Error::Internal(msg) => kyomi_core::Error::DatasourceConnection(msg),
+        other => other,
+    })?;
 
     // Persist refreshed token if it changed.
     if let Some(ref cred) = user_cred {

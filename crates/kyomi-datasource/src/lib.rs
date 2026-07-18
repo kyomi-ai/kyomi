@@ -131,6 +131,8 @@ pub async fn create_provider_from_parts(
     connect_registry: Option<&ConnectRegistry>,
 ) -> kyomi_core::Result<Box<dyn DatasourceProvider>> {
     if connection_type == "connect" {
+        // Server-side configuration issue (registry not wired up), not
+        // something the user can act on — keep as `Internal`.
         let registry = connect_registry.ok_or_else(|| {
             kyomi_core::Error::Internal("Connect registry not available".into())
         })?;
@@ -140,13 +142,23 @@ pub async fn create_provider_from_parts(
         )));
     }
 
+    // OAuth refresh failure (e.g. re-authorization required) is
+    // user-actionable — remap `Internal` to `DatasourceConnection` so it
+    // surfaces prefix-free like the connect/timeout failures below.
     let credentials = ensure_valid_oauth_credentials(
         &credentials,
         connection_config,
         &datasource_type,
     )
-    .await?;
+    .await
+    .map_err(|e| match e {
+        kyomi_core::Error::Internal(msg) => kyomi_core::Error::DatasourceConnection(msg),
+        other => other,
+    })?;
 
+    // Provider-build/connection failures below are user-actionable (bad
+    // credentials, unreachable host) — use `DatasourceConnection` so the
+    // message reaches the client without an `internal: ` prefix.
     match tokio::time::timeout(
         DATASOURCE_TIMEOUT_CONNECT,
         create_provider(
@@ -159,10 +171,10 @@ pub async fn create_provider_from_parts(
     .await
     {
         Ok(Ok(p)) => Ok(p),
-        Ok(Err(e)) => Err(kyomi_core::Error::Internal(format!(
+        Ok(Err(e)) => Err(kyomi_core::Error::DatasourceConnection(format!(
             "failed to connect to datasource: {e}"
         ))),
-        Err(_) => Err(kyomi_core::Error::Internal(
+        Err(_) => Err(kyomi_core::Error::DatasourceConnection(
             "datasource connection timed out".into(),
         )),
     }

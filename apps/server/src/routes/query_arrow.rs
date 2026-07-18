@@ -146,17 +146,17 @@ async fn query_arrow(
     //    OAuth), connection-config decrypt, Connect-vs-direct branching.
     // ------------------------------------------------------------------
     // Variant-purity analysis (verified against the source of every function
-    // called by `build_provider_for_datasource`, see KYO-138): with
-    // resolution now performed separately above, the helper can only
-    // surface `Error::Sqlx` (from `get_user_credential`, propagated via `?`
-    // from the `db_fetch_*!` macros) or `Error::Internal` (from
-    // `create_provider_from_parts` — every internal error path: missing
-    // Connect registry, OAuth refresh failure via
-    // `kyomi_connect_protocol::Error`, provider construction failure,
-    // connection timeout — is wrapped in `Error::Internal` before it
-    // crosses the `kyomi-datasource-server` boundary). So: Internal -> 422
-    // (with the "timed out" special case), anything else (i.e. Sqlx) -> 500.
-    // This reproduces today's exact behavior byte-for-byte.
+    // called by `build_provider_for_datasource`, see KYO-138, updated for
+    // KYO-146): with resolution now performed separately above, the helper
+    // can only surface `Error::Sqlx` (from `get_user_credential`, propagated
+    // via `?` from the `db_fetch_*!` macros) or, from
+    // `create_provider_from_parts`, either `Error::DatasourceConnection`
+    // (OAuth-refresh failure, provider construction failure, or connection
+    // timeout — all three user-actionable, connection-related outcomes) or
+    // `Error::Internal` (only the missing-Connect-registry case, which can't
+    // happen here since we always pass `Some(&state.connect_registry)`). So:
+    // DatasourceConnection -> 422 (with the "timed out" special case),
+    // anything else (Sqlx, or the unreachable Internal case) -> 500.
     let provider = match kyomi_auth::datasource_service::build_provider_for_datasource(
         &state.db,
         &auth.user_id,
@@ -168,15 +168,12 @@ async fn query_arrow(
     .await
     {
         Ok(p) => p,
-        Err(e @ kyomi_core::Error::Internal(_)) => {
+        Err(e @ kyomi_core::Error::DatasourceConnection(_)) => {
             let msg = e.to_string();
             if msg.contains("timed out") {
                 return error_response(StatusCode::UNPROCESSABLE_ENTITY, "connection timed out");
             }
-            return error_response(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!("failed to connect to datasource: {e}"),
-            );
+            return error_response(StatusCode::UNPROCESSABLE_ENTITY, e.to_string());
         }
         Err(e) => {
             tracing::error!("failed to load user credential: {e}");
