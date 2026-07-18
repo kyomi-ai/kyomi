@@ -162,6 +162,8 @@ kode-leptos = { workspace = true }
 # Cargo.toml keep only the grammars this app actually uses (sql, yaml,
 # markdown) — cutting ~12 other language tables saves multiple MB of WASM.
 arborium = { workspace = true }
+# Theme colors for arborium syntax highlighting (used by HighlightedCodeBlock)
+arborium-theme = { workspace = true }
 
 # libm: software-implemented math functions for wasm32-unknown-unknown.
 # DataFusion's default math UDFs (acosh/asinh/atanh) emit extern C calls that

@@ -164,6 +164,7 @@ kode-leptos = "0.5"
 arborium = { version = "2.16", default-features = false, features = [
     "lang-sql", "lang-yaml", "lang-markdown",
 ] }
+arborium-theme = "2.16"
 
 # SQL parser (extract table/column references from agent-generated SQL)
 sqlparser = { version = "0.55", features = ["visitor"] }
