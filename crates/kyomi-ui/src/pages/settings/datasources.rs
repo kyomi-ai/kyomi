@@ -6072,19 +6072,23 @@ fn EditModeCatalogTab(
         }
     });
 
-    // After a successful refresh, reload stats to show updated counts.
+    // Catalog indexing now runs in the background (KYO-143) — the server
+    // fn returns as soon as it has kicked off the refresh, so the message
+    // here is "started", not "done". Re-dispatching stats_action would
+    // reload the same (stale) counts immediately, before indexing has done
+    // any work, so we just surface the "started" message via toast instead.
+    // Polling for completion is the follow-on ticket KYO-144.
     Effect::new(move |_| {
         if let Some(result) = refresh_action.value().get() {
             match result {
                 Ok(_msg) => {
-                    // Reload stats — re-dispatch the stats action.
-                    let id = datasource_id.get_untracked();
-                    if !id.is_empty() {
-                        stats_action.dispatch(id);
-                    }
+                    #[cfg(target_arch = "wasm32")]
+                    toast_success(_msg);
                 }
                 Err(e) => {
                     leptos::logging::error!("Catalog refresh failed: {e}");
+                    #[cfg(target_arch = "wasm32")]
+                    toast_error(format!("Catalog refresh failed: {e}"));
                 }
             }
         }
