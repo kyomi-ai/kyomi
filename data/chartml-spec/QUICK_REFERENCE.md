@@ -38,6 +38,40 @@ visualize:
 
 **Data Source:** Use the `datasource` slug from `list_datasources` or `search_catalog` results.
 
+## Inline Data (no datasource)
+
+When you **already have the values** — computed constants, a small known result set, or
+data you fetched and want to reshape — use `provider: inline` with `rows:`. Do **NOT**
+fabricate a SQL query (e.g. `SELECT ... UNION ALL SELECT ...` of literals) against a
+datasource just to feed the chart known numbers — that wastes a query round-trip and
+misrepresents the source.
+
+```chartml
+type: chart
+version: 1
+title: "Traffic Metrics"
+
+data:
+  provider: inline
+  rows:
+    - metric: "Unique Visitors"
+      yesterday: 5
+      avg_7day: 5
+    - metric: "Sessions"
+      yesterday: 6
+      avg_7day: 5
+
+visualize:
+  type: bar
+  mode: grouped
+  columns: metric
+  rows:
+    - yesterday
+    - avg_7day
+```
+
+Use `datasource` + `query` only when the data genuinely lives in a database.
+
 ---
 
 ## Common Chart Types
@@ -185,13 +219,18 @@ visualize:
     rows:
       format: "$,.0f"        # Currency: $1,234
       # or ",.2f"           # Decimal: 1,234.56
-      # or ".1%"            # Percent: 45.6%
+      # or ".1%"            # Percent: 0.456 → 45.6% (multiplies by 100)
 ```
 
 **Common formats:**
 - `$,.0f` → $1,234 (currency, no decimals)
 - `,.2f` → 1,234.56 (comma separator, 2 decimals)
-- `.1%` → 45.6% (percentage, 1 decimal)
+- `.1%` → input `0.456` renders as `45.6%`
+
+> ⚠️ **Percent formats multiply by 100.** The value must be a proportion in 0–1
+> (e.g. `0.85` → `85%`). If your data is already in percentage points (e.g. `85.42`),
+> divide by 100 first, or use `.1f` with a literal `%` in the label — otherwise
+> `85.42` renders as `8542.0%`.
 
 ---
 
