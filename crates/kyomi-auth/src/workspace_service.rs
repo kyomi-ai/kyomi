@@ -627,7 +627,7 @@ pub async fn accept_invitation(
     let sql = format!(
         "UPDATE workspace_invitations SET \
          status = 'accepted', accepted_at = {now}, accepted_by_user_id = $1 \
-         WHERE invitation_id = $2"
+         WHERE invitation_id = $2 AND status = 'pending'"
     );
     let result = kyomi_core::db_execute!(pool, &sql, user_id, invitation_id)?;
     Ok(result.rows_affected() > 0)
@@ -646,9 +646,16 @@ pub async fn accept_invitation_for_user(
         .await?
         .ok_or_else(|| kyomi_core::Error::NotFound("Invitation not found".into()))?;
 
+    // CAS: atomically transition status from 'pending' to 'accepted'.
+    // If another concurrent accept already won the race, this returns false
+    // and we skip the membership insert — no duplicate membership possible.
+    let accepted = accept_invitation(pool, invitation_id, user_id).await?;
+    if !accepted {
+        return Ok(());
+    }
+
     let db_role = invitation.role.as_ref();
     create_workspace_user(pool, &invitation.workspace_id, user_id, db_role).await?;
-    accept_invitation(pool, invitation_id, user_id).await?;
     Ok(())
 }
 
@@ -1078,4 +1085,83 @@ pub async fn list_ownership_transfers_for_user(
         });
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify that `accept_invitation` returns false when called on an
+    /// already-accepted invitation (simulating the CAS loser in a double-accept
+    /// race). Requires a running Postgres instance via DATABASE_URL.
+    #[tokio::test]
+    async fn accept_invitation_cas_rejects_double_accept() {
+        let database_url = match std::env::var("DATABASE_URL") {
+            Ok(url) if url.starts_with("postgresql://") || url.starts_with("postgres://") => url,
+            _ => {
+                eprintln!("skipping: DATABASE_URL not set or not Postgres");
+                return;
+            }
+        };
+
+        let pool = DbPool::connect(&database_url)
+            .await
+            .expect("failed to connect to database");
+
+        // Use unique IDs to avoid collisions with other tests.
+        let invitation_id = format!("test-cas-{}", uuid::Uuid::new_v4());
+        let workspace_id = format!("test-ws-{}", uuid::Uuid::new_v4());
+        let user_id = format!("test-user-{}", uuid::Uuid::new_v4());
+        let email = format!("cas-test-{}@example.com", uuid::Uuid::new_v4());
+        let expires_at = chrono::Utc::now() + chrono::Duration::days(7);
+
+        // Create a workspace (needed for FK constraints).
+        kyomi_core::db_execute!(
+            &pool,
+            "INSERT INTO workspaces (workspace_id, name, slug) \
+             VALUES ($1, 'CAS Test', $2)",
+            workspace_id,
+            workspace_id
+        )
+        .expect("failed to create workspace");
+
+        // Create a pending invitation.
+        create_invitation(
+            &pool,
+            &invitation_id,
+            &workspace_id,
+            &email,
+            "viewer",
+            &user_id,
+            expires_at,
+        )
+        .await
+        .expect("failed to create invitation");
+
+        // First accept should succeed (CAS wins, 1 row updated).
+        let first = accept_invitation(&pool, &invitation_id, &user_id)
+            .await
+            .expect("first accept failed");
+        assert!(first, "first accept should return true (CAS won)");
+
+        // Second accept should be a no-op (CAS loses, 0 rows updated).
+        let second = accept_invitation(&pool, &invitation_id, &user_id)
+            .await
+            .expect("second accept errored");
+        assert!(!second, "second accept should return false (already accepted)");
+
+        // Cleanup: delete the test rows.
+        kyomi_core::db_execute!(
+            &pool,
+            "DELETE FROM workspace_invitations WHERE invitation_id = $1",
+            invitation_id
+        )
+        .expect("cleanup failed");
+        kyomi_core::db_execute!(
+            &pool,
+            "DELETE FROM workspaces WHERE workspace_id = $1",
+            workspace_id
+        )
+        .expect("cleanup failed");
+    }
 }
