@@ -2,6 +2,7 @@
 
 //! Page components — each maps to a route in the Leptos router.
 
+pub mod accept_invite;
 pub mod accept_ownership;
 pub mod auth;
 pub mod billing_return;

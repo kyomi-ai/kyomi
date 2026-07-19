@@ -266,6 +266,7 @@ impl EmailService {
         workspace_name: &str,
         inviter_name: &str,
         role: &str,
+        invitation_id: &str,
     ) -> bool {
         let role_display = if role == "admin" {
             "an Admin"
@@ -274,6 +275,7 @@ impl EmailService {
         };
 
         let frontend_url = &self.frontend_url;
+        let accept_url = format!("{frontend_url}/accept-invite/{invitation_id}");
         let subject = format!("You've been invited to join {} on Kyomi", workspace_name);
 
         let html_body = format!(
@@ -399,10 +401,10 @@ impl EmailService {
 
         <div class="features">
             <div class="feature">
-                <strong>Log in to Kyomi</strong> - Sign in with the email address this invitation was sent to ({email})
+                <strong>Open the invitation</strong> - Click the button below to view the invitation
             </div>
             <div class="feature">
-                <strong>Accept the invitation</strong> - You'll see a prompt to accept when you log in
+                <strong>Sign in if needed</strong> - Use the email address this invitation was sent to ({email}); you'll be brought back here afterward
             </div>
             <div class="feature">
                 <strong>Start collaborating</strong> - Access shared dashboards and insights with your team
@@ -410,7 +412,7 @@ impl EmailService {
         </div>
 
         <div class="cta">
-            <a href="{frontend_url}/login" class="button">Log In to Accept</a>
+            <a href="{accept_url}" class="button">View Invitation</a>
         </div>
 
         <p>This invitation will expire in 7 days. If you have any questions, reach out to {inviter_name} or reply to this email.</p>
@@ -447,11 +449,11 @@ Kyomi is a data intelligence platform that captures how your team understands da
 
 To accept this invitation:
 
-1. Log in to Kyomi - Sign in with the email address this invitation was sent to ({email})
-2. Accept the invitation - You'll see a prompt to accept when you log in
+1. Open the invitation - Visit the link below to view the invitation
+2. Sign in if needed - Use the email address this invitation was sent to ({email}); you'll be brought back here afterward
 3. Start collaborating - Access shared dashboards and insights with your team
 
-Log in to accept: {frontend_url}/login
+View invitation: {accept_url}
 
 This invitation will expire in 7 days. If you have any questions, reach out to {inviter_name} or reply to this email.
 
@@ -1372,7 +1374,13 @@ mod tests {
         };
 
         let result = service
-            .send_workspace_invitation("test@example.com", "My Workspace", "Jane Doe", "admin")
+            .send_workspace_invitation(
+                "test@example.com",
+                "My Workspace",
+                "Jane Doe",
+                "admin",
+                "inv-test123",
+            )
             .await;
         assert!(!result);
     }

@@ -6,6 +6,7 @@
 //! Each function calls the same service-layer code as the existing REST routes.
 
 use leptos::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::types::{DashboardSummary, InvitationData, ProfileData};
 
@@ -238,11 +239,47 @@ pub async fn update_chart_palette(palette: String) -> Result<(), ServerFnError> 
     Ok(())
 }
 
+/// Verify an invitation can be accepted/declined by the authenticated user.
+///
+/// Pure and DB-free so it's directly unit-testable — no pool, no I/O.
+/// Checked in this order: recipient match, then status, then expiry, so the
+/// first error surfaced always matches the first thing actually wrong with
+/// the invitation.
+#[cfg(feature = "ssr")]
+fn check_invitation_acceptable(
+    inv: &kyomi_core::models::WorkspaceInvitation,
+    auth_email: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), String> {
+    if !inv.email.eq_ignore_ascii_case(auth_email) {
+        return Err("This invitation is addressed to a different account".into());
+    }
+    if inv.status != kyomi_core::enums::InvitationStatus::Pending {
+        return Err("This invitation is no longer pending".into());
+    }
+    if inv.expires_at < now {
+        return Err("This invitation has expired".into());
+    }
+    Ok(())
+}
+
 /// Accept a workspace invitation.
+///
+/// Validates the invitation is addressed to the authenticated user's email,
+/// still pending, and not expired before accepting (KYO-159 — the previous
+/// implementation had no recipient check, allowing any authenticated user to
+/// accept any invitation by ID).
 #[server(prefix = "/leptos-api")]
 pub async fn accept_invitation(invitation_id: String) -> Result<(), ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
+
+    let inv = kyomi_auth::workspace_service::get_invitation(&ctx.db, &invitation_id)
+        .await
+        .into_sfn()?
+        .ok_or_else(|| ServerFnError::new("Invitation not found"))?;
+    check_invitation_acceptable(&inv, &auth.email, chrono::Utc::now())
+        .map_err(ServerFnError::new)?;
 
     kyomi_auth::workspace_service::accept_invitation_for_user(
         &ctx.db,
@@ -256,10 +293,21 @@ pub async fn accept_invitation(invitation_id: String) -> Result<(), ServerFnErro
 }
 
 /// Decline a workspace invitation.
+///
+/// Same recipient/state validation as `accept_invitation` (KYO-159 — the
+/// previous implementation let any authenticated user decline any
+/// invitation by ID).
 #[server(prefix = "/leptos-api")]
 pub async fn decline_invitation(invitation_id: String) -> Result<(), ServerFnError> {
-    let _auth = extract_auth().await?; // verify authenticated
+    let auth = extract_auth().await?;
     let ctx = extract_context()?;
+
+    let inv = kyomi_auth::workspace_service::get_invitation(&ctx.db, &invitation_id)
+        .await
+        .into_sfn()?
+        .ok_or_else(|| ServerFnError::new("Invitation not found"))?;
+    check_invitation_acceptable(&inv, &auth.email, chrono::Utc::now())
+        .map_err(ServerFnError::new)?;
 
     kyomi_auth::workspace_service::update_invitation_status(
         &ctx.db,
@@ -270,6 +318,49 @@ pub async fn decline_invitation(invitation_id: String) -> Result<(), ServerFnErr
     .into_sfn()?;
 
     Ok(())
+}
+
+/// Invitation details for display on the accept-invite page.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct InvitationDisplay {
+    pub invitation_id: String,
+    pub workspace_name: String,
+    pub inviter_name: String,
+    pub role: String,
+    pub expires_at: String,
+    pub status: String,
+}
+
+/// Fetch invitation details for the accept-invite page.
+///
+/// Returns `Ok(None)` both when the invitation doesn't exist AND when it
+/// exists but isn't addressed to the authenticated user — the latter case
+/// must not leak invitation existence to a non-recipient.
+#[server(prefix = "/leptos-api")]
+pub async fn get_invitation_for_accept(
+    invitation_id: String,
+) -> Result<Option<InvitationDisplay>, ServerFnError> {
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+
+    let inv = kyomi_auth::workspace_service::get_invitation_enriched(&ctx.db, &invitation_id)
+        .await
+        .into_sfn()?;
+    let Some(inv) = inv else {
+        return Ok(None);
+    };
+    if !inv.email.eq_ignore_ascii_case(&auth.email) {
+        return Ok(None);
+    }
+
+    Ok(Some(InvitationDisplay {
+        invitation_id: inv.invitation_id,
+        workspace_name: inv.workspace_name.unwrap_or_default(),
+        inviter_name: inv.inviter_name.unwrap_or_default(),
+        role: inv.role,
+        expires_at: inv.expires_at.to_rfc3339(),
+        status: inv.status,
+    }))
 }
 
 // Helpers — delegate to shared extractors in parent module
@@ -300,5 +391,82 @@ mod tests {
             config.get("config").is_none(),
             "chartml_config must be flat, not nested under a 'config' key"
         );
+    }
+
+    /// Rejection-path coverage for `check_invitation_acceptable` (KYO-159).
+    ///
+    /// This is the IDOR fix's regression guard: `accept_invitation` and
+    /// `decline_invitation` both delegate their validation to this pure
+    /// function, so these tests lock in the exact rejection behavior
+    /// without needing a database.
+    mod check_invitation_acceptable_tests {
+        use super::super::check_invitation_acceptable;
+        use kyomi_core::enums::{InvitationStatus, WorkspaceRole};
+        use kyomi_core::models::WorkspaceInvitation;
+
+        fn base_invitation(status: InvitationStatus, expires_at: chrono::DateTime<chrono::Utc>) -> WorkspaceInvitation {
+            WorkspaceInvitation {
+                invitation_id: "inv-test123".to_string(),
+                workspace_id: "ws-test123".to_string(),
+                email: "recipient@example.com".to_string(),
+                role: WorkspaceRole::WorkspaceUser,
+                invited_by_user_id: "user-inviter".to_string(),
+                status,
+                created_at: chrono::Utc::now(),
+                expires_at,
+                accepted_at: None,
+                accepted_by_user_id: None,
+            }
+        }
+
+        #[test]
+        fn accepts_valid_pending_invite_for_recipient() {
+            let now = chrono::Utc::now();
+            let inv = base_invitation(InvitationStatus::Pending, now + chrono::Duration::days(1));
+            assert_eq!(
+                check_invitation_acceptable(&inv, "recipient@example.com", now),
+                Ok(())
+            );
+        }
+
+        #[test]
+        fn rejects_wrong_recipient() {
+            let now = chrono::Utc::now();
+            let inv = base_invitation(InvitationStatus::Pending, now + chrono::Duration::days(1));
+            assert_eq!(
+                check_invitation_acceptable(&inv, "attacker@example.com", now),
+                Err("This invitation is addressed to a different account".to_string())
+            );
+        }
+
+        #[test]
+        fn rejects_expired() {
+            let now = chrono::Utc::now();
+            let inv = base_invitation(InvitationStatus::Pending, now - chrono::Duration::days(1));
+            assert_eq!(
+                check_invitation_acceptable(&inv, "recipient@example.com", now),
+                Err("This invitation has expired".to_string())
+            );
+        }
+
+        #[test]
+        fn rejects_already_accepted() {
+            let now = chrono::Utc::now();
+            let inv = base_invitation(InvitationStatus::Accepted, now + chrono::Duration::days(1));
+            assert_eq!(
+                check_invitation_acceptable(&inv, "recipient@example.com", now),
+                Err("This invitation is no longer pending".to_string())
+            );
+        }
+
+        #[test]
+        fn rejects_cancelled() {
+            let now = chrono::Utc::now();
+            let inv = base_invitation(InvitationStatus::Cancelled, now + chrono::Duration::days(1));
+            assert_eq!(
+                check_invitation_acceptable(&inv, "recipient@example.com", now),
+                Err("This invitation is no longer pending".to_string())
+            );
+        }
     }
 }
