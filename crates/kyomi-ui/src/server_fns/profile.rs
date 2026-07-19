@@ -101,7 +101,7 @@ pub async fn get_pending_invitations() -> Result<Vec<InvitationData>, ServerFnEr
     let ctx = extract_context()?;
 
     let invitations =
-        kyomi_auth::workspace_service::get_pending_invitations_for_email(&ctx.db, &auth.email)
+        kyomi_auth::workspace_service::get_pending_invitations_enriched_for_email(&ctx.db, &auth.email)
             .await
             .into_sfn()?;
 
@@ -111,9 +111,11 @@ pub async fn get_pending_invitations() -> Result<Vec<InvitationData>, ServerFnEr
             invitation_id: inv.invitation_id,
             workspace_id: inv.workspace_id,
             email: inv.email,
-            role: inv.role.to_string(),
+            role: inv.role,
             created_at: inv.created_at.to_rfc3339(),
             expires_at: inv.expires_at.to_rfc3339(),
+            workspace_name: inv.workspace_name,
+            inviter_name: inv.inviter_name,
         })
         .collect())
 }
