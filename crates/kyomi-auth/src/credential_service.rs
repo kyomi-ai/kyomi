@@ -85,6 +85,23 @@ pub fn mask_connection_config(config: &Value, ds_type: &str) -> Value {
         mask_field_if_present(&mut masked, field);
     }
 
+    // Mask indexing_credentials if present as a non-null/non-empty value.
+    // It's stored as an encrypted JSON string, but may arrive as an object
+    // (after decryption) or as a non-empty string (encrypted blob).
+    if let Some(val) = masked.get("indexing_credentials") {
+        let should_mask = match val {
+            Value::Object(_) => true,
+            Value::String(s) => !s.is_empty(),
+            _ => false,
+        };
+        if should_mask {
+            masked.insert(
+                "indexing_credentials".to_string(),
+                Value::String(MASKED_VALUE.into()),
+            );
+        }
+    }
+
     Value::Object(masked)
 }
 
@@ -126,6 +143,43 @@ pub fn finalize_connection_config_secrets(
     let Some(incoming_obj) = incoming.as_object_mut() else {
         return Ok(());
     };
+
+    // Handle indexing_credentials as a nested object before COMMON_SENSITIVE.
+    // It's serialized to a JSON string and encrypted as an opaque blob.
+    if let Some(ic_value) = incoming_obj.remove("indexing_credentials") {
+        match ic_value {
+            Value::Null => {
+                // Explicit clear — already removed, nothing to restore.
+            }
+            Value::String(s) if s == MASKED_VALUE => {
+                // Restore the existing encrypted blob.
+                if let Some(existing_val) =
+                    existing_obj.and_then(|eo| eo.get("indexing_credentials"))
+                {
+                    if existing_val.is_null() {
+                        // Nothing to restore.
+                    } else {
+                        incoming_obj
+                            .insert("indexing_credentials".to_string(), existing_val.clone());
+                    }
+                }
+                // else: no existing value — field stays removed.
+            }
+            Value::Object(_) => {
+                let json_str = serde_json::to_string(&ic_value).map_err(|e| {
+                    kyomi_core::Error::Internal(format!(
+                        "failed to serialize indexing_credentials: {e}"
+                    ))
+                })?;
+                let encrypted = crate::encryption::encrypt(&json_str, key)?;
+                incoming_obj
+                    .insert("indexing_credentials".to_string(), Value::String(encrypted));
+            }
+            _ => {
+                // Any other type — remove it.
+            }
+        }
+    }
 
     for &field in COMMON_SENSITIVE {
         let is_masked_or_absent = match incoming_obj.get(field) {
@@ -232,6 +286,21 @@ pub fn decrypt_connection_config_secrets(config: &Value, key: &[u8; 32]) -> Valu
         if let Some(Value::String(s)) = result.get(field) {
             let decrypted = decrypt_or_passthrough(field, s, key);
             result.insert(field.to_string(), Value::String(decrypted));
+        }
+    }
+
+    // Decrypt indexing_credentials — stored as an encrypted JSON string,
+    // restore to a Value::Object for the datasource driver.
+    if let Some(Value::String(s)) = result.get("indexing_credentials") {
+        let decrypted = decrypt_or_passthrough("indexing_credentials", s, key);
+        match serde_json::from_str::<Value>(&decrypted) {
+            Ok(obj @ Value::Object(_)) => {
+                result.insert("indexing_credentials".to_string(), obj);
+            }
+            _ => {
+                // Not valid JSON or not an object — leave as decrypted string.
+                result.insert("indexing_credentials".to_string(), Value::String(decrypted));
+            }
         }
     }
 
@@ -844,5 +913,149 @@ mod tests {
             decrypt_provider_secrets(&connection_config, Some("not valid ciphertext"), &key);
 
         assert_eq!(credentials, json!({}));
+    }
+
+    // -- indexing_credentials -----------------------------------------------
+
+    #[test]
+    fn indexing_credentials_finalize_encrypts_object_at_rest() {
+        let key = test_key();
+        let ic = json!({
+            "type": "password",
+            "username": "readonly",
+            "password": "secret123"
+        });
+        let mut incoming = json!({
+            "host": "db.example.com",
+            "indexing_credentials": ic
+        });
+
+        finalize_connection_config_secrets(&mut incoming, None, &key).unwrap();
+
+        let stored = incoming["indexing_credentials"].as_str().unwrap();
+        assert!(
+            looks_encrypted(stored),
+            "indexing_credentials must be encrypted at rest"
+        );
+        assert_ne!(
+            stored,
+            serde_json::to_string(&json!({
+                "type": "password",
+                "username": "readonly",
+                "password": "secret123"
+            }))
+            .unwrap(),
+            "DB row must not contain plaintext JSON"
+        );
+    }
+
+    #[test]
+    fn indexing_credentials_masking_replaces_with_placeholder() {
+        let config = json!({
+            "host": "db.example.com",
+            "indexing_credentials": {
+                "type": "service_account",
+                "service_account_json": "{\"type\":\"service_account\"}"
+            }
+        });
+
+        let masked = mask_connection_config(&config, "bigquery");
+        assert_eq!(masked["indexing_credentials"], MASKED_VALUE);
+        assert_eq!(masked["host"], "db.example.com");
+    }
+
+    #[test]
+    fn indexing_credentials_masking_masks_encrypted_string() {
+        let key = test_key();
+        let mut config = json!({
+            "host": "db.example.com",
+            "indexing_credentials": {
+                "type": "password",
+                "username": "ro",
+                "password": "pw"
+            }
+        });
+        finalize_connection_config_secrets(&mut config, None, &key).unwrap();
+
+        let masked = mask_connection_config(&config, "bigquery");
+        assert_eq!(masked["indexing_credentials"], MASKED_VALUE);
+    }
+
+    #[test]
+    fn indexing_credentials_round_trip_finalize_mask_finalize_preserves_encrypted() {
+        let key = test_key();
+        let ic = json!({
+            "type": "password",
+            "username": "readonly",
+            "password": "secret123"
+        });
+        let mut config = json!({
+            "host": "db.example.com",
+            "indexing_credentials": ic
+        });
+
+        // First finalize — encrypts the object.
+        finalize_connection_config_secrets(&mut config, None, &key).unwrap();
+        let first_encrypted = config["indexing_credentials"].as_str().unwrap().to_string();
+
+        // Mask it (simulates API response to client).
+        let masked = mask_connection_config(&config, "bigquery");
+        assert_eq!(masked["indexing_credentials"], MASKED_VALUE);
+
+        // Finalize again with masked value and existing = first_encrypted
+        // (simulates client resubmitting without changes).
+        let existing = config.clone();
+        let mut incoming = masked.clone();
+        finalize_connection_config_secrets(&mut incoming, Some(&existing), &key).unwrap();
+
+        assert_eq!(
+            incoming["indexing_credentials"].as_str().unwrap(),
+            first_encrypted,
+            "round-trip must preserve the existing encrypted blob, not re-encrypt"
+        );
+    }
+
+    #[test]
+    fn indexing_credentials_decryption_restores_object() {
+        let key = test_key();
+        let ic = json!({
+            "type": "service_account",
+            "service_account_json": "{\"type\":\"service_account\",\"client_email\":\"a@b.iam\"}"
+        });
+        let mut config = json!({
+            "host": "db.example.com",
+            "indexing_credentials": ic.clone()
+        });
+
+        finalize_connection_config_secrets(&mut config, None, &key).unwrap();
+
+        let decrypted = decrypt_connection_config_secrets(&config, &key);
+        assert_eq!(decrypted["indexing_credentials"], ic);
+        assert_eq!(decrypted["host"], "db.example.com");
+    }
+
+    #[test]
+    fn indexing_credentials_explicit_null_removes_field() {
+        let key = test_key();
+        let existing = json!({
+            "host": "db.example.com",
+            "indexing_credentials": {
+                "type": "password",
+                "username": "ro",
+                "password": "pw"
+            }
+        });
+
+        let mut incoming = json!({
+            "host": "db.example.com",
+            "indexing_credentials": Value::Null
+        });
+
+        finalize_connection_config_secrets(&mut incoming, Some(&existing), &key).unwrap();
+
+        assert!(
+            incoming.get("indexing_credentials").is_none(),
+            "explicit null must remove indexing_credentials entirely"
+        );
     }
 }

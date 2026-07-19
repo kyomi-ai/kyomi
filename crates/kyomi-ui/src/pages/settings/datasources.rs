@@ -884,6 +884,23 @@ pub fn DatasourceModal(
     let (cfg_trust_cert, set_cfg_trust_cert) = signal(false);
     let (cfg_shared_credentials, set_cfg_shared_credentials) = signal(false);
 
+    // Indexing credentials — dedicated credentials for catalog indexing,
+    // separate from the user's primary OAuth/password credentials. Required
+    // for OAuth datasources because background jobs cannot refresh tokens.
+    let (use_indexing_credentials, set_use_indexing_credentials) = signal(false);
+    let (indexing_creds_type, set_indexing_creds_type) = signal(String::new());
+    let (indexing_creds_json, set_indexing_creds_json) = signal(String::new());
+    let (indexing_username, set_indexing_username) = signal(String::new());
+    let (indexing_password, set_indexing_password) = signal(String::new());
+    let (indexing_token, set_indexing_token) = signal(String::new());
+    let (indexing_client_id, set_indexing_client_id) = signal(String::new());
+    let (indexing_client_secret, set_indexing_client_secret) = signal(String::new());
+    let (indexing_tenant_id, set_indexing_tenant_id) = signal(String::new());
+    // True when the loaded datasource had masked indexing credentials and the
+    // user hasn't modified them. On save, we must send MASKED_VALUE to
+    // preserve the stored encrypted blob instead of re-submitting empty fields.
+    let (indexing_creds_unchanged, set_indexing_creds_unchanged) = signal(false);
+
     // SSH tunnel state — admin-only, SSH-capable types only (see
     // `supports_ssh_tunnel`). `cfg_ssh_port` is kept as a `String` (like
     // `cfg_port`) and parsed at build time, defaulting to "22".
@@ -1125,6 +1142,16 @@ pub fn DatasourceModal(
         set_bq_projects.set(vec![]);
         set_bq_projects_loading.set(false);
         set_bq_projects_error.set(None);
+        set_use_indexing_credentials.set(false);
+        set_indexing_creds_type.set(String::new());
+        set_indexing_creds_json.set(String::new());
+        set_indexing_username.set(String::new());
+        set_indexing_password.set(String::new());
+        set_indexing_token.set(String::new());
+        set_indexing_client_id.set(String::new());
+        set_indexing_client_secret.set(String::new());
+        set_indexing_tenant_id.set(String::new());
+        set_indexing_creds_unchanged.set(false);
     };
 
     // ── Load settings when switching to edit mode ─────────────────────────
@@ -1301,6 +1328,51 @@ pub fn DatasourceModal(
                                 false,
                             );
                             set_bq_include_public.try_set(include_public);
+
+                            // Load indexing credentials from connection_config.
+                            // The API masks secrets, so the value may be an object
+                            // (unmasked) or the masked string "********".
+                            if let Some(ic) = cfg.get("indexing_credentials") {
+                                let is_masked = ic.as_str() == Some("********");
+                                if ic.is_object() || is_masked {
+                                    set_use_indexing_credentials.try_set(true);
+                                    if is_masked {
+                                        // Credentials exist but are masked — the user
+                                        // hasn't changed them yet. Mark as unchanged so
+                                        // save sends MASKED_VALUE to preserve the blob.
+                                        set_indexing_creds_unchanged.try_set(true);
+                                    }
+                                    if let Some(ic_obj) = ic.as_object() {
+                                        set_indexing_creds_type.try_set(
+                                            ic_obj.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string()
+                                        );
+                                        if let Some(sa_json) = ic_obj.get("service_account_json").and_then(|v| v.as_str()) {
+                                            set_indexing_creds_json.try_set(sa_json.to_string());
+                                        }
+                                        if let Some(u) = ic_obj.get("username").and_then(|v| v.as_str()) {
+                                            set_indexing_username.try_set(u.to_string());
+                                        }
+                                        if let Some(t) = ic_obj.get("access_token").and_then(|v| v.as_str()) {
+                                            set_indexing_token.try_set(t.to_string());
+                                        }
+                                        if let Some(cid) = ic_obj.get("client_id").and_then(|v| v.as_str()) {
+                                            set_indexing_client_id.try_set(cid.to_string());
+                                        }
+                                        if let Some(tid) = ic_obj.get("tenant_id").and_then(|v| v.as_str()) {
+                                            set_indexing_tenant_id.try_set(tid.to_string());
+                                        }
+                                        // Sensitive fields — only load if the object is
+                                        // unmasked (dev/test). In production the whole
+                                        // blob is masked, so these won't be present.
+                                        if let Some(p) = ic_obj.get("password").and_then(|v| v.as_str()) {
+                                            set_indexing_password.try_set(p.to_string());
+                                        }
+                                        if let Some(cs) = ic_obj.get("client_secret").and_then(|v| v.as_str()) {
+                                            set_indexing_client_secret.try_set(cs.to_string());
+                                        }
+                                    }
+                                }
+                            }
 
                             // Load user settings (masked credentials)
                             let user = &settings.user_settings;
@@ -1783,6 +1855,72 @@ pub fn DatasourceModal(
             }
         }
 
+        // Indexing credentials
+        if use_indexing_credentials.get_untracked() {
+            if indexing_creds_unchanged.get_untracked() {
+                // Credentials were loaded masked and the user didn't change
+                // them. Send MASKED_VALUE so finalize_connection_config_secrets
+                // restores the existing encrypted blob.
+                map.insert(
+                    "indexing_credentials".to_string(),
+                    serde_json::Value::String("********".to_string()),
+                );
+            } else {
+                let ic_type = indexing_creds_type.get_untracked();
+                if !ic_type.is_empty() {
+                    let mut ic_map = serde_json::Map::new();
+                    ic_map.insert("type".to_string(), serde_json::json!(ic_type));
+                    match ic_type.as_str() {
+                        "service_account" => {
+                            let sa_json = indexing_creds_json.get_untracked();
+                            if !sa_json.is_empty() {
+                                ic_map.insert("service_account_json".to_string(), serde_json::json!(sa_json));
+                            }
+                        }
+                        "password" | "sql" => {
+                            let u = indexing_username.get_untracked();
+                            let p = indexing_password.get_untracked();
+                            if !u.is_empty() && !p.is_empty() {
+                                ic_map.insert("username".to_string(), serde_json::json!(u));
+                                ic_map.insert("password".to_string(), serde_json::json!(p));
+                            }
+                        }
+                        "token" => {
+                            let t = indexing_token.get_untracked();
+                            if !t.is_empty() {
+                                ic_map.insert("access_token".to_string(), serde_json::json!(t));
+                            }
+                        }
+                        "service_principal" => {
+                            let cid = indexing_client_id.get_untracked();
+                            let cs = indexing_client_secret.get_untracked();
+                            let tid = indexing_tenant_id.get_untracked();
+                            if !cid.is_empty() && !cs.is_empty() && !tid.is_empty() {
+                                ic_map.insert("client_id".to_string(), serde_json::json!(cid));
+                                ic_map.insert("client_secret".to_string(), serde_json::json!(cs));
+                                ic_map.insert("tenant_id".to_string(), serde_json::json!(tid));
+                            }
+                        }
+                        _ => {}
+                    }
+                    if ic_map.len() > 1 {
+                        map.insert(
+                            "indexing_credentials".to_string(),
+                            serde_json::Value::Object(ic_map),
+                        );
+                    }
+                }
+            }
+        } else if datasource_id.get_untracked().is_some() {
+            // Edit mode with toggle off: emit explicit null to clear the stored
+            // indexing_credentials. An absent field would be restored by
+            // finalize_connection_config_secrets (same pattern as SSH keys).
+            map.insert(
+                "indexing_credentials".to_string(),
+                serde_json::Value::Null,
+            );
+        }
+
         serde_json::Value::Object(map)
     };
 
@@ -2116,6 +2254,31 @@ pub fn DatasourceModal(
         if name_val.is_empty() {
             set_error_msg.set(Some("Name is required".to_string()));
             return;
+        }
+
+        // Validate indexing credentials completeness when enabled
+        if use_indexing_credentials.get_untracked() && !indexing_creds_unchanged.get_untracked() {
+            let ic_type = indexing_creds_type.get_untracked();
+            let incomplete = match ic_type.as_str() {
+                "service_account" => indexing_creds_json.get_untracked().is_empty(),
+                "password" | "sql" => {
+                    indexing_username.get_untracked().is_empty()
+                        || indexing_password.get_untracked().is_empty()
+                }
+                "token" => indexing_token.get_untracked().is_empty(),
+                "service_principal" => {
+                    indexing_client_id.get_untracked().is_empty()
+                        || indexing_client_secret.get_untracked().is_empty()
+                        || indexing_tenant_id.get_untracked().is_empty()
+                }
+                _ => false,
+            };
+            if incomplete {
+                set_error_msg.set(Some(
+                    "Indexing credentials are incomplete. Fill in all required fields or disable dedicated indexing credentials.".to_string()
+                ));
+                return;
+            }
         }
 
         set_error_msg.set(None);
@@ -3167,6 +3330,25 @@ pub fn DatasourceModal(
                                     set_catalog_selected=set_catalog_selected
                                     bq_include_public=bq_include_public
                                     set_bq_include_public=set_bq_include_public
+                                    use_indexing_credentials=use_indexing_credentials
+                                    set_use_indexing_credentials=set_use_indexing_credentials
+                                    indexing_creds_type=indexing_creds_type
+                                    set_indexing_creds_type=set_indexing_creds_type
+                                    indexing_creds_json=indexing_creds_json
+                                    set_indexing_creds_json=set_indexing_creds_json
+                                    indexing_username=indexing_username
+                                    set_indexing_username=set_indexing_username
+                                    indexing_password=indexing_password
+                                    set_indexing_password=set_indexing_password
+                                    indexing_token=indexing_token
+                                    set_indexing_token=set_indexing_token
+                                    indexing_client_id=indexing_client_id
+                                    set_indexing_client_id=set_indexing_client_id
+                                    indexing_client_secret=indexing_client_secret
+                                    set_indexing_client_secret=set_indexing_client_secret
+                                    indexing_tenant_id=indexing_tenant_id
+                                    set_indexing_tenant_id=set_indexing_tenant_id
+                                    set_indexing_creds_unchanged=set_indexing_creds_unchanged
                                 />
                             </Show>
 
@@ -6017,32 +6199,255 @@ fn CreateModeCatalogPicker(
 // Edit-Mode Catalog Tab
 // ─────────────────────────────────────────────────────────────────────────────
 
+fn get_indexing_auth_modes(ds_type: &str) -> &[(&str, &str)] {
+    match ds_type {
+        "bigquery" => &[("service_account", "Service Account")],
+        "synapse" => &[
+            ("sql", "SQL Authentication"),
+            ("service_principal", "Service Principal"),
+        ],
+        "snowflake" | "postgres" | "clickhouse" | "mysql" | "sqlserver" | "redshift" => {
+            &[("password", "Password")]
+        }
+        "databricks" => &[("token", "Personal Access Token")],
+        _ => &[],
+    }
+}
+
+fn view_service_account_form(
+    json_signal: ReadSignal<String>,
+    set_json_signal: WriteSignal<String>,
+    set_unchanged: WriteSignal<bool>,
+) -> leptos::prelude::AnyView {
+    let has_json = Signal::derive(move || !json_signal.get().is_empty());
+
+    let sa_email = Signal::derive(move || {
+        let json_str = json_signal.get();
+        if json_str.is_empty() {
+            return None;
+        }
+        serde_json::from_str::<serde_json::Value>(&json_str)
+            .ok()
+            .and_then(|v| v.get("client_email")?.as_str().map(|s| s.to_string()))
+    });
+
+    view! {
+        <div class="space-y-3">
+            <Show
+                when=move || has_json.get()
+                fallback=move || view! {
+                    <div class="space-y-3">
+                        <div>
+                            <label class="block text-sm font-medium text-foreground mb-1">"Service Account JSON"</label>
+                            <textarea
+                                class=format!("{} font-mono", MODAL_INPUT_CLASS)
+                                rows=4
+                                placeholder="{\"type\": \"service_account\", \"client_email\": \"...\"}"
+                                prop:value=move || json_signal.get()
+                                on:input=move |ev| {
+                                    let text = event_target_value(&ev);
+                                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text)
+                                        && v.get("type").and_then(|t| t.as_str()) == Some("service_account")
+                                        && v.get("client_email").and_then(|e| e.as_str()).is_some()
+                                    {
+                                        set_json_signal.set(text);
+                                        set_unchanged.set(false);
+                                    }
+                                }
+                            />
+                        </div>
+                        <p class="text-xs text-muted-foreground">
+                            "Paste a Google Cloud service account JSON key. Must have type \"service_account\" and a client_email field."
+                        </p>
+                    </div>
+                }
+            >
+                <div class="flex items-center justify-between p-3 bg-muted/50 rounded-lg">
+                    <div class="flex items-center gap-2">
+                        <Icon icon=phosphor_leptos::CHECK attr:class="h-4 w-4 text-success-foreground"/>
+                        <span class="text-sm text-foreground">
+                            {move || format!("Service Account: {}", sa_email.get().unwrap_or_else(|| "loaded".to_string()))}
+                        </span>
+                    </div>
+                    <Button
+                        variant=ButtonVariant::Outline
+                        size=ButtonSize::Sm
+                        on:click=move |_| {
+                            set_json_signal.set(String::new());
+                            set_unchanged.set(false);
+                        }
+                    >
+                        "Remove"
+                    </Button>
+                </div>
+            </Show>
+        </div>
+    }.into_any()
+}
+
+fn view_password_form(
+    username: ReadSignal<String>,
+    set_username: WriteSignal<String>,
+    password: ReadSignal<String>,
+    set_password: WriteSignal<String>,
+    set_unchanged: WriteSignal<bool>,
+) -> leptos::prelude::AnyView {
+    view! {
+        <div class="space-y-3">
+            <div>
+                <label class="block text-sm font-medium text-foreground mb-1">"Username"</label>
+                <input
+                    type="text"
+                    class=MODAL_INPUT_CLASS
+                    placeholder="e.g., readonly_indexer"
+                    prop:value=move || username.get()
+                    on:input=move |ev| {
+                        set_username.set(event_target_value(&ev));
+                        set_unchanged.set(false);
+                    }
+                />
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-foreground mb-1">"Password"</label>
+                <input
+                    type="password"
+                    class=MODAL_INPUT_CLASS
+                    placeholder="Enter password"
+                    prop:value=move || password.get()
+                    on:input=move |ev| {
+                        set_password.set(event_target_value(&ev));
+                        set_unchanged.set(false);
+                    }
+                />
+            </div>
+            <p class="text-xs text-muted-foreground">
+                "These credentials will be used for catalog indexing only, not for user queries."
+            </p>
+        </div>
+    }.into_any()
+}
+
+fn view_token_form(
+    token: ReadSignal<String>,
+    set_token: WriteSignal<String>,
+    set_unchanged: WriteSignal<bool>,
+) -> leptos::prelude::AnyView {
+    view! {
+        <div class="space-y-3">
+            <div>
+                <label class="block text-sm font-medium text-foreground mb-1">"Personal Access Token"</label>
+                <input
+                    type="password"
+                    class=MODAL_INPUT_CLASS
+                    placeholder="dapi..."
+                    prop:value=move || token.get()
+                    on:input=move |ev| {
+                        set_token.set(event_target_value(&ev));
+                        set_unchanged.set(false);
+                    }
+                />
+            </div>
+            <p class="text-xs text-muted-foreground">
+                "Databricks Personal Access Token for catalog indexing."
+            </p>
+        </div>
+    }.into_any()
+}
+
+fn view_service_principal_form(
+    client_id: ReadSignal<String>,
+    set_client_id: WriteSignal<String>,
+    client_secret: ReadSignal<String>,
+    set_client_secret: WriteSignal<String>,
+    tenant_id: ReadSignal<String>,
+    set_tenant_id: WriteSignal<String>,
+    set_unchanged: WriteSignal<bool>,
+) -> leptos::prelude::AnyView {
+    view! {
+        <div class="space-y-3">
+            <div>
+                <label class="block text-sm font-medium text-foreground mb-1">"Tenant ID"</label>
+                <input
+                    type="text"
+                    class=MODAL_INPUT_CLASS
+                    placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                    prop:value=move || tenant_id.get()
+                    on:input=move |ev| {
+                        set_tenant_id.set(event_target_value(&ev));
+                        set_unchanged.set(false);
+                    }
+                />
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-foreground mb-1">"Client ID"</label>
+                <input
+                    type="text"
+                    class=MODAL_INPUT_CLASS
+                    placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                    prop:value=move || client_id.get()
+                    on:input=move |ev| {
+                        set_client_id.set(event_target_value(&ev));
+                        set_unchanged.set(false);
+                    }
+                />
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-foreground mb-1">"Client Secret"</label>
+                <input
+                    type="password"
+                    class=MODAL_INPUT_CLASS
+                    placeholder="Enter client secret"
+                    prop:value=move || client_secret.get()
+                    on:input=move |ev| {
+                        set_client_secret.set(event_target_value(&ev));
+                        set_unchanged.set(false);
+                    }
+                />
+            </div>
+            <p class="text-xs text-muted-foreground">
+                "Azure AD service principal credentials for catalog indexing."
+            </p>
+        </div>
+    }.into_any()
+}
+
 /// Edit-mode catalog tab — stats card, Refresh Now button, and schema/database
 /// picker.
 ///
 /// Replaces `apps/frontend/src/components/settings/CatalogSection.jsx`.
 #[component]
 fn EditModeCatalogTab(
-    /// The datasource UUID (used to load stats via `get_catalog_stats`).
     datasource_id: Signal<String>,
-    /// The datasource slug (used to trigger a refresh via `refresh_catalog`).
     datasource_slug: Signal<String>,
-    /// The datasource type string (e.g. `"bigquery"`, `"postgres"`).
     datasource_type: Signal<String>,
-    /// Current `connection_config` from the modal (used for discovery requests).
     connection_config: Signal<serde_json::Value>,
-    /// Current credentials from the modal (used for discovery requests).
     credentials: Signal<serde_json::Value>,
-    /// Whether this is a sample datasource (read-only).
     is_sample: ReadSignal<bool>,
     /// Whether this is a Connect datasource (suppresses scope picker).
     is_connect: Signal<bool>,
-    /// Selected catalog scope items (projects / databases / schemas / catalogs).
     catalog_selected: ReadSignal<Vec<String>>,
     set_catalog_selected: WriteSignal<Vec<String>>,
-    /// BigQuery only: include public datasets.
     bq_include_public: ReadSignal<bool>,
     set_bq_include_public: WriteSignal<bool>,
+    use_indexing_credentials: ReadSignal<bool>,
+    set_use_indexing_credentials: WriteSignal<bool>,
+    indexing_creds_type: ReadSignal<String>,
+    set_indexing_creds_type: WriteSignal<String>,
+    indexing_creds_json: ReadSignal<String>,
+    set_indexing_creds_json: WriteSignal<String>,
+    indexing_username: ReadSignal<String>,
+    set_indexing_username: WriteSignal<String>,
+    indexing_password: ReadSignal<String>,
+    set_indexing_password: WriteSignal<String>,
+    indexing_token: ReadSignal<String>,
+    set_indexing_token: WriteSignal<String>,
+    indexing_client_id: ReadSignal<String>,
+    set_indexing_client_id: WriteSignal<String>,
+    indexing_client_secret: ReadSignal<String>,
+    set_indexing_client_secret: WriteSignal<String>,
+    indexing_tenant_id: ReadSignal<String>,
+    set_indexing_tenant_id: WriteSignal<String>,
+    set_indexing_creds_unchanged: WriteSignal<bool>,
 ) -> impl IntoView {
     // ── Load catalog stats on mount ──────────────────────────────────────
     // Input: datasource_id
@@ -6695,6 +7100,153 @@ fn EditModeCatalogTab(
                 </div>
             </Show>
 
+            // ── INDEXING CREDENTIALS ──────────────────────────────
+            <Show when=move || !is_sample.get() && !is_connect.get()>
+                <div class="border-t border-border pt-6 space-y-4">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <h4 class="text-sm font-medium text-foreground">"Catalog Indexing Credentials"</h4>
+                            <p class="text-xs text-muted-foreground mt-0.5">
+                                "By default, the workspace owner's credentials are used for catalog indexing."
+                            </p>
+                        </div>
+                        <a
+                            href="https://kyomi.ai/docs/datasources/indexing-credentials"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            class="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                        >
+                            <Icon icon=phosphor_leptos::QUESTION/>
+                            "Learn more"
+                        </a>
+                    </div>
+
+                    <label class="flex items-center gap-3 cursor-pointer">
+                        <input
+                            type="checkbox"
+                            class="h-4 w-4 rounded-md border-input accent-primary"
+                            prop:checked=move || use_indexing_credentials.get()
+                            on:change=move |ev| {
+                                let checked = event_target_checked(&ev);
+                                set_use_indexing_credentials.set(checked);
+                                if !checked {
+                                    set_indexing_creds_type.set(String::new());
+                                    set_indexing_creds_json.set(String::new());
+                                    set_indexing_username.set(String::new());
+                                    set_indexing_password.set(String::new());
+                                    set_indexing_token.set(String::new());
+                                    set_indexing_client_id.set(String::new());
+                                    set_indexing_client_secret.set(String::new());
+                                    set_indexing_tenant_id.set(String::new());
+                                }
+                            }
+                        />
+                        <span class="text-sm text-foreground">"Use dedicated indexing credentials"</span>
+                    </label>
+
+                    <Show when=move || use_indexing_credentials.get()>
+                        <div class="pl-7 space-y-4">
+                            <Alert variant=AlertVariant::Info>
+                                <AlertDescription>
+                                    "OAuth credentials cannot be used for indexing (tokens expire and background jobs cannot refresh them). Use a service account or password-based credentials."
+                                </AlertDescription>
+                            </Alert>
+
+                            {move || {
+                                let ds_type_val = datasource_type.get();
+                                let auth_modes = get_indexing_auth_modes(&ds_type_val);
+
+                                if auth_modes.is_empty() {
+                                    return view! {
+                                        <Alert variant=AlertVariant::Warning>
+                                            <AlertDescription>
+                                                {format!("Indexing credentials configuration is not available for {} datasources.", ds_type_val)}
+                                            </AlertDescription>
+                                        </Alert>
+                                    }.into_any();
+                                }
+
+                                let current_type = indexing_creds_type.get();
+                                if current_type.is_empty() {
+                                    set_indexing_creds_type.set(auth_modes[0].0.to_string());
+                                }
+
+                                view! {
+                                    {if auth_modes.len() > 1 {
+                                        view! {
+                                            <div class="space-y-2">
+                                                <label class="text-sm font-medium text-foreground">"Authentication Method"</label>
+                                                <div class="flex flex-wrap gap-2">
+                                                    {auth_modes.iter().map(|(value, label)| {
+                                                        let value = value.to_string();
+                                                        let label = label.to_string();
+                                                        let value_for_click = value.clone();
+                                                        view! {
+                                                            <button
+                                                                type="button"
+                                                                class=format!("px-3 py-1.5 text-sm rounded-md border transition-colors {}",
+                                                                    if indexing_creds_type.get() == value {
+                                                                        "border-primary bg-primary/10 text-primary font-medium"
+                                                                    } else {
+                                                                        "border-input text-muted-foreground hover:text-foreground hover:border-foreground/30"
+                                                                    }
+                                                                )
+                                                                on:click=move |_| set_indexing_creds_type.set(value_for_click.clone())
+                                                            >
+                                                                {label.clone()}
+                                                            </button>
+                                                        }
+                                                    }).collect::<Vec<_>>()}
+                                                </div>
+                                            </div>
+                                        }.into_any()
+                                    } else {
+                                        view! { <div></div> }.into_any()
+                                    }}
+
+                                    {move || {
+                                        match indexing_creds_type.get().as_str() {
+                                            "service_account" => view_service_account_form(
+                                                indexing_creds_json,
+                                                set_indexing_creds_json,
+                                                set_indexing_creds_unchanged,
+                                            ),
+                                            "password" | "sql" => view_password_form(
+                                                indexing_username,
+                                                set_indexing_username,
+                                                indexing_password,
+                                                set_indexing_password,
+                                                set_indexing_creds_unchanged,
+                                            ),
+                                            "token" => view_token_form(
+                                                indexing_token,
+                                                set_indexing_token,
+                                                set_indexing_creds_unchanged,
+                                            ),
+                                            "service_principal" => view_service_principal_form(
+                                                indexing_client_id,
+                                                set_indexing_client_id,
+                                                indexing_client_secret,
+                                                set_indexing_client_secret,
+                                                indexing_tenant_id,
+                                                set_indexing_tenant_id,
+                                                set_indexing_creds_unchanged,
+                                            ),
+                                            _ => view! {
+                                                <Alert variant=AlertVariant::Warning>
+                                                    <AlertDescription>
+                                                        {format!("Unknown auth mode: {}", indexing_creds_type.get())}
+                                                    </AlertDescription>
+                                                </Alert>
+                                            }.into_any(),
+                                        }
+                                    }}
+                                }.into_any()
+                            }}
+                        </div>
+                    </Show>
+                </div>
+            </Show>
             <Show when=move || is_connect.get()>
                 <Alert variant=AlertVariant::Info class="mt-3">
                     <AlertDescription>

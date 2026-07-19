@@ -49,6 +49,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use kyomi_auth::catalog::helpers as catalog_helpers;
+use kyomi_auth::credential_service::decrypt_connection_config_secrets;
 use kyomi_core::{DbPool, KVPool};
 use kyomi_embed::LazyEmbedding;
 
@@ -410,8 +411,14 @@ impl CatalogRefreshScheduler {
             return RefreshResult::Skipped;
         }
 
+        // Decrypt connection_config secrets before reading indexing_credentials.
+        // The DB stores them as encrypted strings; get_indexing_credentials needs
+        // the decrypted JSON object to work correctly.
+        let decrypted_config =
+            decrypt_connection_config_secrets(connection_config, &self.encryption_key);
+
         // Get indexing credentials
-        let (_user_email, indexing_creds) = get_indexing_credentials(connection_config);
+        let (_user_email, indexing_creds) = get_indexing_credentials(&decrypted_config);
 
         // Determine effective email for credential lookup
         let effective_email = owner_email.unwrap_or("");
@@ -1404,6 +1411,68 @@ mod tests {
         });
         let (_, creds) = get_indexing_credentials(&config);
         assert!(creds.is_none());
+    }
+
+    // -- Scheduler-level encrypt-decrypt-resolution round-trip --
+
+    #[test]
+    fn indexing_credentials_survive_encrypt_decrypt_round_trip() {
+        use kyomi_auth::credential_service::{
+            decrypt_connection_config_secrets, finalize_connection_config_secrets,
+        };
+
+        let key = [42u8; 32];
+
+        // 1. Plaintext config — what the frontend sends on save
+        let mut config = serde_json::json!({
+            "host": "redshift.example.com",
+            "port": "5439",
+            "database": "mydb",
+            "indexing_credentials": {
+                "type": "password",
+                "username": "index_user",
+                "password": "s3cret!"
+            }
+        });
+
+        // 2. Encrypt on write (simulate what finalize_connection_config_secrets does)
+        finalize_connection_config_secrets(&mut config, None, &key)
+            .expect("finalize should succeed");
+
+        // After encryption, indexing_credentials should be an encrypted string, not an object
+        assert!(
+            config["indexing_credentials"].is_string(),
+            "after finalize, indexing_credentials must be an encrypted string"
+        );
+
+        // 3. get_indexing_credentials on the ENCRYPTED config returns None — this is the bug
+        let (email_before, creds_before) = get_indexing_credentials(&config);
+        assert!(
+            creds_before.is_none(),
+            "encrypted indexing_credentials (string) must not resolve — this was the bug"
+        );
+        assert!(email_before.is_none());
+
+        // 4. Decrypt (simulate what the scheduler should do before reading)
+        let decrypted = decrypt_connection_config_secrets(&config, &key);
+
+        // After decryption, indexing_credentials should be an object again
+        assert!(
+            decrypted["indexing_credentials"].is_object(),
+            "after decrypt, indexing_credentials must be a JSON object"
+        );
+
+        // 5. get_indexing_credentials on the DECRYPTED config returns the creds
+        let (email_after, creds_after) = get_indexing_credentials(&decrypted);
+        assert!(
+            creds_after.is_some(),
+            "decrypted indexing_credentials must resolve to dedicated creds"
+        );
+        let creds = creds_after.unwrap();
+        assert_eq!(creds["type"], "password");
+        assert_eq!(creds["username"], "index_user");
+        assert_eq!(creds["password"], "s3cret!");
+        assert!(email_after.is_none());
     }
 
     // -- RefreshResult enum exists and is used --
