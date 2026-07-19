@@ -2568,12 +2568,10 @@ pub fn DatasourceModal(
                         </Show>
 
                         // Edit-mode tab bar — Connection | Catalog.
-                        // Hidden for sample and Connect datasources (both are
-                        // read-only in this modal; no catalog management applies).
+                        // Hidden for sample datasources (read-only; no catalog management applies).
                         <Show when=move || {
                             !is_create_mode.get()
                                 && !is_sample.get()
-                                && !is_connect.get()
                         }>
                             <div class="flex border-b border-border mb-4">
                                 <button
@@ -3164,6 +3162,7 @@ pub fn DatasourceModal(
                                     connection_config=Signal::derive(build_connection_config)
                                     credentials=Signal::derive(build_credentials)
                                     is_sample=is_sample
+                                    is_connect=is_connect
                                     catalog_selected=catalog_selected
                                     set_catalog_selected=set_catalog_selected
                                     bq_include_public=bq_include_public
@@ -6036,6 +6035,8 @@ fn EditModeCatalogTab(
     credentials: Signal<serde_json::Value>,
     /// Whether this is a sample datasource (read-only).
     is_sample: ReadSignal<bool>,
+    /// Whether this is a Connect datasource (suppresses scope picker).
+    is_connect: Signal<bool>,
     /// Selected catalog scope items (projects / databases / schemas / catalogs).
     catalog_selected: ReadSignal<Vec<String>>,
     set_catalog_selected: WriteSignal<Vec<String>>,
@@ -6453,8 +6454,8 @@ fn EditModeCatalogTab(
                 </div>
             </div>
 
-            // ── Schema/catalog picker (admin only, not for sample) ──────────
-            <Show when=move || !is_sample.get()>
+            // ── Schema/catalog picker (admin only, not for sample/connect) ──
+            <Show when=move || !is_sample.get() && !is_connect.get()>
                 <div class="space-y-3">
                     {move || {
                         let ds_type_val = datasource_type.get();
@@ -6692,6 +6693,14 @@ fn EditModeCatalogTab(
                         "Changes to the catalog scope take effect on the next refresh."
                     </p>
                 </div>
+            </Show>
+
+            <Show when=move || is_connect.get()>
+                <Alert variant=AlertVariant::Info class="mt-3">
+                    <AlertDescription>
+                        "Kyomi Connect indexes all schemas the agent can access. Scoped indexing for Connect is coming soon."
+                    </AlertDescription>
+                </Alert>
             </Show>
         </div>
     }
