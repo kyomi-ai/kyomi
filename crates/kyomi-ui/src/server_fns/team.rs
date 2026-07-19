@@ -243,10 +243,17 @@ pub async fn invite_member(email: String, role: String) -> Result<(), ServerFnEr
     let workspace_name = ac.auth.workspace.workspace_name.clone().unwrap_or_default();
     let inviter_name = ac.auth.name.clone().unwrap_or_else(|| ac.auth.email.clone());
     let display_role = role.clone();
+    let invite_id = invitation_id.clone();
     tokio::spawn(async move {
         let email_svc = kyomi_auth::email_service::EmailService::from_env();
         let sent = email_svc
-            .send_workspace_invitation(&invite_email, &workspace_name, &inviter_name, &display_role)
+            .send_workspace_invitation(
+                &invite_email,
+                &workspace_name,
+                &inviter_name,
+                &display_role,
+                &invite_id,
+            )
             .await;
         if sent {
             tracing::info!("Invitation email sent to {invite_email}");

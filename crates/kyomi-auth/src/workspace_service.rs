@@ -556,6 +556,26 @@ pub async fn get_pending_invitations_enriched_for_email(
     Ok(invitations)
 }
 
+/// Get a single invitation by ID, enriched with workspace name and inviter
+/// name via LEFT JOINs. No status filter — the caller is responsible for
+/// checking recipient/status/expiry (see `check_invitation_acceptable`).
+pub async fn get_invitation_enriched(
+    pool: &DbPool,
+    invitation_id: &str,
+) -> kyomi_core::Result<Option<EnrichedInvitation>> {
+    let sql = "SELECT wi.invitation_id, wi.workspace_id, wi.email, wi.role, \
+                      wi.invited_by_user_id, wi.status, wi.created_at, \
+                      wi.expires_at, wi.accepted_at, wi.accepted_by_user_id, \
+                      w.name AS workspace_name, \
+                      u.name AS inviter_name \
+               FROM workspace_invitations wi \
+               LEFT JOIN workspaces w ON w.workspace_id = wi.workspace_id \
+               LEFT JOIN users u ON u.user_id = wi.invited_by_user_id \
+               WHERE wi.invitation_id = $1";
+    let invitation = kyomi_core::db_fetch_optional!(pool, EnrichedInvitation, sql, invitation_id)?;
+    Ok(invitation)
+}
+
 /// Count pending invitations for a workspace.
 pub async fn count_pending_invitations(
     pool: &DbPool,

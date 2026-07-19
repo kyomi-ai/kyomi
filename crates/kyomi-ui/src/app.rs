@@ -11,6 +11,7 @@ use leptos_router::{
 
 use crate::components::toast::ToastProvider;
 use crate::components::{Layout, NavigationProgress, ThemeProvider};
+use crate::pages::accept_invite::AcceptInvitePage;
 use crate::pages::accept_ownership::AcceptOwnershipPage;
 use crate::pages::billing_return::BillingReturnPage;
 use crate::pages::auth::account_recovery::AccountRecoveryPage;
@@ -114,6 +115,7 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/setup") view=PersonalSetupPage/>
                     <Route path=path!("/connect/setup") view=ConnectSetupPage/>
                     <Route path=path!("/accept-ownership/:transfer_id") view=AcceptOwnershipPage/>
+                    <Route path=path!("/accept-invite/:invitation_id") view=AcceptInvitePage/>
                     // ── Authenticated app shell ──────────────────────────
                     // ALL routes below mount under a single Layout instance
                     // via this ParentRoute. The Layout — and the WebSocket
