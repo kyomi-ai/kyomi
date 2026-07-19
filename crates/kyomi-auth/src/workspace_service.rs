@@ -428,7 +428,8 @@ pub async fn create_workspace_user(
     let bt = sql_compat::bool_true(is_pg);
     let sql = format!(
         "INSERT INTO workspace_users (workspace_id, user_id, role, active) \
-         VALUES ($1, $2, $3, {bt})"
+         VALUES ($1, $2, $3, {bt}) \
+         ON CONFLICT (workspace_id, user_id) DO NOTHING"
     );
     kyomi_core::db_execute!(pool, &sql, workspace_id, user_id, role)?;
     Ok(())
@@ -647,7 +648,7 @@ pub async fn accept_invitation(
     let sql = format!(
         "UPDATE workspace_invitations SET \
          status = 'accepted', accepted_at = {now}, accepted_by_user_id = $1 \
-         WHERE invitation_id = $2"
+         WHERE invitation_id = $2 AND status = 'pending'"
     );
     let result = kyomi_core::db_execute!(pool, &sql, user_id, invitation_id)?;
     Ok(result.rows_affected() > 0)
@@ -666,9 +667,18 @@ pub async fn accept_invitation_for_user(
         .await?
         .ok_or_else(|| kyomi_core::Error::NotFound("Invitation not found".into()))?;
 
+    // CAS: atomically transition status from 'pending' to 'accepted'.
+    // If another concurrent accept already consumed this invitation,
+    // rows_affected == 0 and we bail — no duplicate membership is created.
+    let accepted = accept_invitation(pool, invitation_id, user_id).await?;
+    if !accepted {
+        return Err(kyomi_core::Error::Conflict(
+            "Invitation already accepted".into(),
+        ));
+    }
+
     let db_role = invitation.role.as_ref();
     create_workspace_user(pool, &invitation.workspace_id, user_id, db_role).await?;
-    accept_invitation(pool, invitation_id, user_id).await?;
     Ok(())
 }
 
@@ -1098,4 +1108,125 @@ pub async fn list_ownership_transfers_for_user(
         });
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    /// Build an in-memory SQLite pool with migrations applied.
+    async fn test_pool() -> DbPool {
+        let _ = kyomi_core::constants::load_with_fallback();
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+
+        sqlx::query("PRAGMA foreign_keys=ON")
+            .execute(&pool)
+            .await
+            .expect("enable foreign keys");
+
+        sqlx::migrate!("../../apps/server/migrations-sqlite")
+            .run(&pool)
+            .await
+            .expect("run sqlite migrations");
+
+        DbPool::Sqlite(pool)
+    }
+
+    /// Insert a user, workspace, and workspace_invitation for testing.
+    async fn seed_invitation(pool: &DbPool, invitation_id: &str) {
+        let sq = match pool {
+            DbPool::Sqlite(sq) => sq,
+            _ => panic!("test requires sqlite pool"),
+        };
+
+        // Owner user
+        sqlx::query("INSERT INTO users (user_id, email) VALUES ('owner-1', 'owner@test.local')")
+            .execute(sq)
+            .await
+            .expect("insert owner");
+
+        // Invitee user
+        sqlx::query("INSERT INTO users (user_id, email) VALUES ('user-1', 'user@test.local')")
+            .execute(sq)
+            .await
+            .expect("insert invitee");
+
+        // Workspace
+        sqlx::query(
+            "INSERT INTO workspaces (workspace_id, name, owner_user_id) \
+             VALUES ('ws-1', 'Test Workspace', 'owner-1')",
+        )
+        .execute(sq)
+        .await
+        .expect("insert workspace");
+
+        // Pending invitation
+        sqlx::query(
+            "INSERT INTO workspace_invitations \
+             (invitation_id, workspace_id, email, role, invited_by_user_id, status, expires_at) \
+             VALUES (?1, 'ws-1', 'user@test.local', 'workspace_user', 'owner-1', 'pending', datetime('now', '+7 days'))",
+        )
+        .bind(invitation_id)
+        .execute(sq)
+        .await
+        .expect("insert invitation");
+    }
+
+    #[tokio::test]
+    async fn accept_invitation_cas_succeeds_first_time() {
+        let pool = test_pool().await;
+        seed_invitation(&pool, "inv-cas-1").await;
+
+        let accepted = accept_invitation(&pool, "inv-cas-1", "user-1").await.unwrap();
+        assert!(accepted, "first accept should succeed (CAS won)");
+
+        // Verify status is now 'accepted'.
+        let inv = get_invitation(&pool, "inv-cas-1").await.unwrap().unwrap();
+        assert_eq!(inv.status.to_string(), "accepted");
+        assert!(inv.accepted_at.is_some());
+        assert_eq!(inv.accepted_by_user_id.as_deref(), Some("user-1"));
+    }
+
+    #[tokio::test]
+    async fn accept_invitation_cas_fails_second_time() {
+        let pool = test_pool().await;
+        seed_invitation(&pool, "inv-cas-2").await;
+
+        // First accept wins the CAS.
+        let first = accept_invitation(&pool, "inv-cas-2", "user-1").await.unwrap();
+        assert!(first);
+
+        // Second accept loses — status is no longer 'pending'.
+        let second = accept_invitation(&pool, "inv-cas-2", "user-1").await.unwrap();
+        assert!(!second, "second accept should fail (CAS lost)");
+    }
+
+    #[tokio::test]
+    async fn accept_invitation_for_user_returns_conflict_on_double_accept() {
+        let pool = test_pool().await;
+        seed_invitation(&pool, "inv-cas-3").await;
+
+        // First accept succeeds.
+        accept_invitation_for_user(&pool, "inv-cas-3", "user-1")
+            .await
+            .unwrap();
+
+        // Second accept returns Conflict.
+        let err = accept_invitation_for_user(&pool, "inv-cas-3", "user-1")
+            .await
+            .unwrap_err();
+
+        match err {
+            kyomi_core::Error::Conflict(msg) => {
+                assert!(msg.contains("already accepted"), "message: {msg}");
+            }
+            other => panic!("expected Conflict error, got: {other:?}"),
+        }
+    }
 }
