@@ -1120,8 +1120,8 @@ mod tests {
             &pool,
             "INSERT INTO workspaces (workspace_id, name, slug) \
              VALUES ($1, 'CAS Test', $2)",
-            workspace_id,
-            workspace_id
+            workspace_id.clone(),
+            workspace_id.clone()
         )
         .expect("failed to create workspace");
 
