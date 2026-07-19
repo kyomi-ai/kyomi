@@ -1029,6 +1029,7 @@ pub fn DatasourceModal(
     // saving from the Connection tab after the user configures them on the
     // Catalog tab.
     let (catalog_selected, set_catalog_selected) = signal::<Vec<String>>(vec![]);
+    let (catalog_scope_touched, set_catalog_scope_touched) = signal(false);
     // BigQuery-specific: whether to include public datasets in catalog indexing.
     let (bq_include_public, set_bq_include_public) = signal(false);
 
@@ -1131,6 +1132,7 @@ pub fn DatasourceModal(
         // refreshed by an async effect when the modal opens in create mode.
         set_creating_sample.set(false);
         set_catalog_selected.set(vec![]);
+        set_catalog_scope_touched.set(false);
         set_bq_include_public.set(false);
         set_create_catalog_selected.set(vec![]);
         set_create_catalog_text.set(String::new());
@@ -1180,6 +1182,7 @@ pub fn DatasourceModal(
                 set_test_result.set(None);
                 set_error_msg.set(None);
                 set_discovery_status.set("idle".to_string());
+                set_catalog_scope_touched.set(false);
 
                 leptos::task::spawn_local(async move {
                     match get_datasource_settings(ds_id).await {
@@ -1840,10 +1843,13 @@ pub fn DatasourceModal(
                 );
             }
         } else {
-            // Edit-mode catalog scope: written only when a non-empty selection
-            // exists (the picker in EditModeCatalogTab manages this signal).
+            // Edit-mode catalog scope: write when the user has made a selection
+            // or explicitly cleared the scope. An empty Vec means "index nothing";
+            // an absent key means "index all" (the default). Only write when
+            // the user touched the picker, to preserve the default for
+            // datasources that were never configured for scoped indexing.
             let selected = catalog_selected.get_untracked();
-            if !selected.is_empty() {
+            if !selected.is_empty() || catalog_scope_touched.get_untracked() {
                 let key = catalog_config_key_for_type(&t);
                 map.insert(key.to_string(), serde_json::json!(selected));
             }
@@ -2914,7 +2920,8 @@ pub fn DatasourceModal(
                                                 on_change=move |val: String| {
                                                     set_ds_type.set(val);
                                                     // Reset discovery when type changes
-                                                    set_discovery_status.set("idle".to_string());
+                set_discovery_status.set("idle".to_string());
+                set_catalog_scope_touched.set(false);
                                                     set_test_result.set(None);
                                                     set_discovered_databases.set(vec![]);
                                                     set_discovered_schemas.set(vec![]);
@@ -3328,6 +3335,7 @@ pub fn DatasourceModal(
                                     is_connect=is_connect
                                     catalog_selected=catalog_selected
                                     set_catalog_selected=set_catalog_selected
+                                    set_catalog_scope_touched=set_catalog_scope_touched
                                     bq_include_public=bq_include_public
                                     set_bq_include_public=set_bq_include_public
                                     use_indexing_credentials=use_indexing_credentials
@@ -6131,7 +6139,9 @@ fn CreateModeCatalogPicker(
                                 <button
                                     type="button"
                                     class="text-xs text-primary hover:underline"
-                                    on:click=move |_| set_catalog_selected.set(vec![])
+                                    on:click=move |_| {
+                                        set_catalog_selected.set(vec![]);
+                                    }
                                 >
                                     "Clear"
                                 </button>
@@ -6429,6 +6439,7 @@ fn EditModeCatalogTab(
     is_connect: Signal<bool>,
     catalog_selected: ReadSignal<Vec<String>>,
     set_catalog_selected: WriteSignal<Vec<String>>,
+    set_catalog_scope_touched: WriteSignal<bool>,
     bq_include_public: ReadSignal<bool>,
     set_bq_include_public: WriteSignal<bool>,
     use_indexing_credentials: ReadSignal<bool>,
@@ -6995,6 +7006,7 @@ fn EditModeCatalogTab(
                                     type="button"
                                     class="text-xs text-primary hover:underline"
                                     on:click=move |_| {
+                                        set_catalog_scope_touched.set(true);
                                         set_catalog_selected.set(discovered_items.get_untracked());
                                     }
                                 >
@@ -7004,7 +7016,10 @@ fn EditModeCatalogTab(
                                 <button
                                     type="button"
                                     class="text-xs text-primary hover:underline"
-                                    on:click=move |_| set_catalog_selected.set(vec![])
+                                    on:click=move |_| {
+                                        set_catalog_scope_touched.set(true);
+                                        set_catalog_selected.set(vec![]);
+                                    }
                                 >
                                     "Clear"
                                 </button>
@@ -7035,6 +7050,7 @@ fn EditModeCatalogTab(
                                                     on:change=move |ev| {
                                                         let checked = event_target_checked(&ev);
                                                         let val = item_for_change.clone();
+                                                        set_catalog_scope_touched.set(true);
                                                         set_catalog_selected.update(|list| {
                                                             if checked {
                                                                 if !list.contains(&val) {
@@ -7077,6 +7093,7 @@ fn EditModeCatalogTab(
                                                     class="h-3.5 w-3.5 inline-flex items-center justify-center text-muted-foreground hover:text-foreground transition-colors"
                                                     on:click=move |_| {
                                                         let val = item_for_remove.clone();
+                                                        set_catalog_scope_touched.set(true);
                                                         set_catalog_selected.update(|list| {
                                                             list.retain(|i| i != &val);
                                                         });
