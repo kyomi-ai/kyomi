@@ -38,6 +38,8 @@ pub struct InvitationData {
     pub role: String,
     pub created_at: String,
     pub expires_at: String,
+    pub workspace_name: Option<String>,
+    pub inviter_name: Option<String>,
 }
 
 /// Slack connection status for the current user.

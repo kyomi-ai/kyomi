@@ -785,8 +785,15 @@ fn InvitationsCard(invitations: Vec<crate::types::InvitationData>) -> impl IntoV
                                 <div class="flex items-center justify-between p-4 border border-border rounded-lg">
                                     <div>
                                         <p class="text-sm font-medium text-foreground">
-                                            "Workspace: " {inv.workspace_id.clone()}
+                                            {inv.workspace_name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| "a workspace".to_string())}
                                         </p>
+                                        {move || inv.inviter_name.clone().filter(|n| !n.trim().is_empty()).map(|name| {
+                                            view! {
+                                                <p class="text-xs text-muted-foreground">
+                                                    "Invited by " {name}
+                                                </p>
+                                            }.into_view()
+                                        })}
                                         <p class="text-xs text-muted-foreground">
                                             "Role: " {inv.role.clone()}
                                         </p>

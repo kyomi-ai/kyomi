@@ -519,6 +519,43 @@ pub async fn get_pending_invitations_for_email(
     Ok(invitations)
 }
 
+/// Workspace invitation enriched with workspace and inviter display names.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct EnrichedInvitation {
+    pub invitation_id: String,
+    pub workspace_id: String,
+    pub email: String,
+    pub role: String,
+    pub invited_by_user_id: String,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub accepted_at: Option<DateTime<Utc>>,
+    pub accepted_by_user_id: Option<String>,
+    pub workspace_name: Option<String>,
+    pub inviter_name: Option<String>,
+}
+
+/// Get all pending invitations for a specific email, enriched with workspace
+/// name and inviter name via LEFT JOINs.
+pub async fn get_pending_invitations_enriched_for_email(
+    pool: &DbPool,
+    email: &str,
+) -> kyomi_core::Result<Vec<EnrichedInvitation>> {
+    let sql = "SELECT wi.invitation_id, wi.workspace_id, wi.email, wi.role, \
+                      wi.invited_by_user_id, wi.status, wi.created_at, \
+                      wi.expires_at, wi.accepted_at, wi.accepted_by_user_id, \
+                      w.name AS workspace_name, \
+                      u.name AS inviter_name \
+               FROM workspace_invitations wi \
+               LEFT JOIN workspaces w ON w.workspace_id = wi.workspace_id \
+               LEFT JOIN users u ON u.user_id = wi.invited_by_user_id \
+               WHERE LOWER(wi.email) = LOWER($1) AND wi.status = 'pending' \
+               ORDER BY wi.created_at DESC";
+    let invitations = kyomi_core::db_fetch_all!(pool, EnrichedInvitation, sql, email)?;
+    Ok(invitations)
+}
+
 /// Count pending invitations for a workspace.
 pub async fn count_pending_invitations(
     pool: &DbPool,
