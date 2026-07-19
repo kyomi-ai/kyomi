@@ -13,6 +13,7 @@ pub mod chat;
 pub mod dashboard;
 pub mod documents;
 pub mod feedback_modal;
+pub mod invitation_status_bar;
 pub mod layout;
 pub mod right_panel;
 pub mod skeleton;
@@ -36,6 +37,7 @@ pub use kyomi_ui_components::components::search_input;
 pub use kyomi_ui_components::components::select;
 pub use kyomi_ui_components::components::spinner;
 pub use kyomi_ui_components::components::status_badge;
+pub use kyomi_ui_components::components::status_bar;
 pub use kyomi_ui_components::components::switch;
 pub use kyomi_ui_components::components::theme;
 pub use kyomi_ui_components::components::toast;
@@ -60,6 +62,7 @@ pub use kyomi_ui_components::components::{
     Skeleton,
     Spinner,
     StatusBadge, StatusBadgeVariant,
+    StatusBar, StatusBarVariant,
     Switch,
     ThemeProvider,
     Tooltip,
@@ -67,6 +70,7 @@ pub use kyomi_ui_components::components::{
 
 // App-specific re-exports
 pub use feedback_modal::FeedbackModal;
+pub use invitation_status_bar::InvitationStatusBar;
 pub use layout::Layout;
 pub use right_panel::RightPanel;
 pub use skeleton::{

@@ -16,6 +16,7 @@ use leptos_router::NavigateOptions;
 use crate::components::chat::WebSocketProvider;
 use crate::components::empty_state::EmptyStateVariant;
 use crate::components::feedback_modal::FeedbackModal;
+use crate::components::invitation_status_bar::InvitationStatusBar;
 use crate::components::modal::{Modal, ModalSize};
 use crate::components::popover::{Placement, Popover};
 use crate::components::EmptyState;
@@ -451,6 +452,7 @@ pub fn Layout(children: ChildrenFn) -> impl IntoView {
                             {children_render.with_value(|c| c())}
                         </main>
                     </div>
+                    <InvitationStatusBar/>
                 </div>
             </WebSocketProvider>
         </Show>
