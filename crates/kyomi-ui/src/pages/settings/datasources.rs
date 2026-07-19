@@ -23,7 +23,7 @@ use crate::pages::settings::connect_deployment::{
 };
 use crate::pages::settings::connect_status_panel::ConnectStatusPanel;
 use crate::query_cache::{use_query, QueryCache};
-use crate::server_fns::connect::create_connect_datasource;
+use crate::server_fns::connect::{create_connect_datasource, discover_connect_containers};
 use crate::server_fns::context::UserContext;
 use crate::server_fns::datasources::*;
 use crate::server_fns::sql_editor::refresh_catalog;
@@ -6423,7 +6423,9 @@ fn EditModeCatalogTab(
     connection_config: Signal<serde_json::Value>,
     credentials: Signal<serde_json::Value>,
     is_sample: ReadSignal<bool>,
-    /// Whether this is a Connect datasource (suppresses scope picker).
+    /// Whether this is a Connect datasource. The scope picker discovers
+    /// containers through the live agent (`discover_connect_containers`) rather
+    /// than dialing the database directly; the credentials section is hidden.
     is_connect: Signal<bool>,
     catalog_selected: ReadSignal<Vec<String>>,
     set_catalog_selected: WriteSignal<Vec<String>>,
@@ -6706,21 +6708,56 @@ fn EditModeCatalogTab(
         }
     });
 
+    // ── Discover resources — Connect path ──────────────────────────────────
+    // Kyomi holds no direct DB credentials for Connect datasources; discovery
+    // must round-trip through the live agent instead of dialing the database
+    // directly. Reuses the same `discover_status` / `discover_error` /
+    // `discovered_items` signals as the direct-discovery path above so the
+    // rest of the picker UI works unchanged for Connect.
+    let connect_discover_action = Action::new(|datasource_id: &String| {
+        let datasource_id = datasource_id.clone();
+        async move { discover_connect_containers(datasource_id).await }
+    });
+
+    Effect::new(move |_| {
+        if let Some(result) = connect_discover_action.value().get() {
+            match result {
+                Ok(names) => {
+                    set_discover_status.set("success".to_string());
+                    set_discover_error.set(None);
+                    set_discovered_items.set(names);
+                }
+                Err(e) => {
+                    set_discover_status.set("error".to_string());
+                    set_discover_error.set(Some(e.to_string()));
+                    set_discovered_items.set(vec![]);
+                }
+            }
+        }
+    });
+
     let on_discover_click = move |_: leptos::ev::MouseEvent| {
-        if discover_action.pending().get_untracked() {
+        if discover_action.pending().get_untracked()
+            || connect_discover_action.pending().get_untracked()
+        {
             return;
         }
         set_discover_status.set("loading".to_string());
         set_discover_error.set(None);
         set_discovered_items.set(vec![]);
 
-        let ds_type_val = datasource_type.get_untracked();
-        let conn_cfg = connection_config.get_untracked();
-        let creds = credentials.get_untracked();
-        let slug = datasource_slug.get_untracked();
-        let slug_opt = if slug.is_empty() { None } else { Some(slug) };
+        if is_connect.get_untracked() {
+            let ds_id = datasource_id.get_untracked();
+            connect_discover_action.dispatch(ds_id);
+        } else {
+            let ds_type_val = datasource_type.get_untracked();
+            let conn_cfg = connection_config.get_untracked();
+            let creds = credentials.get_untracked();
+            let slug = datasource_slug.get_untracked();
+            let slug_opt = if slug.is_empty() { None } else { Some(slug) };
 
-        discover_action.dispatch((ds_type_val, conn_cfg, creds, slug_opt));
+            discover_action.dispatch((ds_type_val, conn_cfg, creds, slug_opt));
+        }
     };
 
     // ── Text input for manual item entry ──────────────────────────────────
@@ -6859,8 +6896,8 @@ fn EditModeCatalogTab(
                 </div>
             </div>
 
-            // ── Schema/catalog picker (admin only, not for sample/connect) ──
-            <Show when=move || !is_sample.get() && !is_connect.get()>
+            // ── Schema/catalog picker (admin only, not for sample) ──────────
+            <Show when=move || !is_sample.get()>
                 <div class="space-y-3">
                     {move || {
                         let ds_type_val = datasource_type.get();
@@ -6911,13 +6948,18 @@ fn EditModeCatalogTab(
                         <Button
                             variant=ButtonVariant::Outline
                             size=ButtonSize::Sm
-                            disabled=Signal::derive(move || discover_action.pending().get())
+                            disabled=Signal::derive(move || {
+                                discover_action.pending().get()
+                                    || connect_discover_action.pending().get()
+                            })
                             on:click=on_discover_click
                         >
                             <span class="h-4 w-4 inline-flex items-center justify-center">
                                 <Icon icon=phosphor_leptos::MAGNIFYING_GLASS/>
                             </span>
-                            {move || if discover_action.pending().get() {
+                            {move || if discover_action.pending().get()
+                                || connect_discover_action.pending().get()
+                            {
                                 "Discovering..."
                             } else {
                                 "Discover Available"
@@ -7246,13 +7288,6 @@ fn EditModeCatalogTab(
                         </div>
                     </Show>
                 </div>
-            </Show>
-            <Show when=move || is_connect.get()>
-                <Alert variant=AlertVariant::Info class="mt-3">
-                    <AlertDescription>
-                        "Kyomi Connect indexes all schemas the agent can access. Scoped indexing for Connect is coming soon."
-                    </AlertDescription>
-                </Alert>
             </Show>
         </div>
     }
