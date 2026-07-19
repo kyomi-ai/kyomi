@@ -19,8 +19,8 @@ use arrow_select::concat::concat_batches;
 
 use kyomi_connect_protocol::ArrowStreamEvent;
 use kyomi_core::connect_protocol::{
-    CatalogResult, ConnectOp, ConnectRequest, ConnectResponse, ConnectResponseBody, DryRunParams,
-    QueryParams,
+    CatalogResult, ConnectOp, ConnectRequest, ConnectResponse, ConnectResponseBody,
+    DiscoverCatalogParams, DryRunParams, QueryParams,
 };
 use kyomi_connect_protocol::stream::QueryFormat;
 
@@ -76,8 +76,22 @@ impl ConnectProvider {
     ///
     /// Uses a longer timeout (120s) than normal queries because catalog
     /// discovery can be slow for large databases.
-    pub async fn discover_catalog(&self) -> kyomi_core::Result<CatalogResult> {
-        let request = Self::build_request(ConnectOp::DiscoverCatalog, None);
+    pub async fn discover_catalog(
+        &self,
+        params: DiscoverCatalogParams,
+    ) -> kyomi_core::Result<CatalogResult> {
+        // A default (unscoped) request serializes to `{}`. Send `None` in that
+        // case so the wire message is byte-identical to the pre-scope protocol
+        // — older agents never see an unexpected params object.
+        //
+        // `to_value` on this plain Option/Vec/bool struct cannot fail; `.expect`
+        // makes that invariant explicit and surfaces a developer error loudly
+        // rather than silently degrading to an unscoped discovery.
+        let value = serde_json::to_value(&params)
+            .expect("DiscoverCatalogParams is always serializable");
+        let params_value =
+            (!matches!(&value, serde_json::Value::Object(m) if m.is_empty())).then_some(value);
+        let request = Self::build_request(ConnectOp::DiscoverCatalog, params_value);
         let result = self.send_and_unwrap(request).await.map_err(core_error)?;
         serde_json::from_value::<CatalogResult>(result).map_err(|e| {
             kyomi_core::Error::Internal(format!("Failed to deserialize CatalogResult: {e}"))
@@ -807,7 +821,7 @@ mod tests {
 
         let provider = ConnectProvider::new(registry.clone(), dsid.to_string());
         let result = provider
-            .discover_catalog()
+            .discover_catalog(DiscoverCatalogParams::default())
             .await
             .expect("should succeed");
 
@@ -854,7 +868,7 @@ mod tests {
         .await;
 
         let provider = ConnectProvider::new(registry.clone(), dsid.to_string());
-        let result = provider.discover_catalog().await.expect("should succeed");
+        let result = provider.discover_catalog(DiscoverCatalogParams::default()).await.expect("should succeed");
         assert!(result.containers.is_empty());
 
         handle.await.unwrap();
@@ -876,7 +890,7 @@ mod tests {
         .await;
 
         let provider = ConnectProvider::new(registry.clone(), dsid.to_string());
-        let result = provider.discover_catalog().await;
+        let result = provider.discover_catalog(DiscoverCatalogParams::default()).await;
 
         assert!(result.is_err());
         let err_msg = format!("{}", result.unwrap_err());

@@ -21,7 +21,65 @@ use kyomi_auth::catalog::helpers::{
     CacheTableParams, IndexerContext,
 };
 use kyomi_auth::catalog::types::{CatalogIndexResult, ColumnEntry};
+use kyomi_core::connect_protocol::{CatalogResult, DiscoverCatalogParams};
 use kyomi_datasource_server::ConnectRegistry;
+
+/// `connection_config` keys under which a Connect datasource's selected
+/// containers may be stored, depending on its underlying datasource type
+/// (postgres/redshift/… → `catalog_schemas`, mysql/clickhouse/snowflake →
+/// `catalog_databases`, databricks → `catalog_catalogs`). The UI writes exactly
+/// one of these via `catalog_config_key_for_type`, so the indexer reads
+/// whichever is present. Mirrors the direct path's `container_config_key()`.
+const CONNECT_CONTAINER_KEYS: &[&str] =
+    &["catalog_schemas", "catalog_databases", "catalog_catalogs"];
+
+/// The set of containers a Connect refresh should index.
+#[derive(Debug, Clone, PartialEq)]
+enum ContainerScope {
+    /// No scope configured — index every container the agent can see.
+    All,
+    /// Index only these containers. An empty list means "index nothing"
+    /// (the user explicitly cleared the selection).
+    Only(Vec<String>),
+}
+
+/// Resolve the container scope from a Connect datasource's `connection_config`.
+///
+/// Returns [`ContainerScope::All`] when no container key is set, is null, or
+/// holds an unexpected type; otherwise [`ContainerScope::Only`] with the listed
+/// names (possibly empty). Mirrors `get_catalog_containers`' handling on the
+/// direct path so the two paths agree on what a given config means.
+fn connect_container_scope(connection_config: &Value) -> ContainerScope {
+    for key in CONNECT_CONTAINER_KEYS {
+        match connection_config.get(*key) {
+            Some(Value::Array(arr)) => {
+                let names = arr
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect();
+                return ContainerScope::Only(names);
+            }
+            // Absent, null, or an unexpected type for this key → keep looking.
+            _ => continue,
+        }
+    }
+    ContainerScope::All
+}
+
+/// Defensively drop any container the agent returned that isn't in `scope`.
+///
+/// The agent-side filter already honors the scope, but an un-upgraded agent
+/// ignores it and returns everything — this client-side pass guarantees a
+/// scoped refresh only ever caches the selected containers regardless of the
+/// agent's version. A `None` scope (index all) leaves the result untouched.
+fn filter_catalog_to_scope(mut catalog: CatalogResult, scope: Option<&[String]>) -> CatalogResult {
+    if let Some(scope) = scope {
+        catalog
+            .containers
+            .retain(|c| scope.iter().any(|s| s.eq_ignore_ascii_case(&c.name)));
+    }
+    catalog
+}
 
 pub struct ConnectIndexer {
     registry: ConnectRegistry,
@@ -74,20 +132,45 @@ impl CatalogIndexer for ConnectIndexer {
             db, &ctx.workspace_id, &ctx.datasource_config_id, "running", None,
         ).await;
 
-        let catalog_result = match provider.discover_catalog().await {
-            Ok(cr) => cr,
-            Err(e) => {
-                warn!(
-                    datasource_config_id = ctx.datasource_config_id,
-                    error = %e,
-                    "discover_catalog command failed"
-                );
-                let _ = update_workspace_status(
-                    db, &ctx.workspace_id, &ctx.datasource_config_id, "failed", None,
-                ).await;
-                return CatalogIndexResult::error(&format!("Catalog discovery failed: {e}"))
-                    .with_times(&start_time.to_rfc3339(), &Utc::now().to_rfc3339())
-                    .with_ids(&ctx.datasource_config_id, &ctx.workspace_id);
+        // Resolve the configured container scope (KYO-162). An explicit empty
+        // selection means "index nothing": skip discovery entirely and let the
+        // archival pass remove any previously-cached tables.
+        let scope = connect_container_scope(&ctx.connection_config);
+        let explicit_empty = matches!(&scope, ContainerScope::Only(v) if v.is_empty());
+
+        let catalog_result = if explicit_empty {
+            info!(
+                datasource_config_id = ctx.datasource_config_id,
+                "no containers selected for Connect indexing — archiving existing catalog"
+            );
+            CatalogResult { containers: Vec::new() }
+        } else {
+            let scoped_containers = match &scope {
+                ContainerScope::Only(names) => Some(names.clone()),
+                ContainerScope::All => None,
+            };
+            let params = DiscoverCatalogParams {
+                containers: scoped_containers.clone(),
+                include_public_datasets: None,
+                containers_only: false,
+            };
+            match provider.discover_catalog(params).await {
+                // Defense-in-depth: filter client-side too, so scope is honored
+                // even against an agent that predates the wire-protocol change.
+                Ok(cr) => filter_catalog_to_scope(cr, scoped_containers.as_deref()),
+                Err(e) => {
+                    warn!(
+                        datasource_config_id = ctx.datasource_config_id,
+                        error = %e,
+                        "discover_catalog command failed"
+                    );
+                    let _ = update_workspace_status(
+                        db, &ctx.workspace_id, &ctx.datasource_config_id, "failed", None,
+                    ).await;
+                    return CatalogIndexResult::error(&format!("Catalog discovery failed: {e}"))
+                        .with_times(&start_time.to_rfc3339(), &Utc::now().to_rfc3339())
+                        .with_ids(&ctx.datasource_config_id, &ctx.workspace_id);
+                }
             }
         };
 
@@ -143,8 +226,12 @@ impl CatalogIndexer for ConnectIndexer {
             }
         }
 
-        // Archive missing tables — guard against empty discovery.
-        let nothing_found = seen_table_ids.is_empty() && tables_indexed == 0;
+        // Archive missing tables — guard against empty discovery. As on the
+        // direct path, an *explicit empty selection* is exempt from the guard:
+        // the user intentionally cleared the scope, so stale tables should be
+        // archived rather than preserved.
+        let nothing_found =
+            seen_table_ids.is_empty() && tables_indexed == 0 && !explicit_empty;
         let tables_archived = if nothing_found {
             warn!(
                 datasource_config_id = ctx.datasource_config_id,
@@ -193,11 +280,92 @@ impl CatalogIndexer for ConnectIndexer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kyomi_core::connect_protocol::CatalogContainer;
+    use serde_json::json;
 
     #[test]
     fn connect_indexer_requires_registry() {
         // ConnectIndexer can only be created with a registry — no Default.
         // This test verifies the struct exists and fields are correct.
         let _: fn(ConnectRegistry) -> ConnectIndexer = ConnectIndexer::new;
+    }
+
+    // ── connect_container_scope (KYO-162) ────────────────────────────────
+
+    #[test]
+    fn scope_absent_is_all() {
+        assert_eq!(connect_container_scope(&json!({})), ContainerScope::All);
+    }
+
+    #[test]
+    fn scope_null_is_all() {
+        assert_eq!(
+            connect_container_scope(&json!({ "catalog_schemas": null })),
+            ContainerScope::All
+        );
+    }
+
+    #[test]
+    fn scope_reads_catalog_schemas() {
+        assert_eq!(
+            connect_container_scope(&json!({ "catalog_schemas": ["public", "analytics"] })),
+            ContainerScope::Only(vec!["public".into(), "analytics".into()])
+        );
+    }
+
+    #[test]
+    fn scope_reads_catalog_databases_for_non_schema_types() {
+        // A Connect MySQL/ClickHouse datasource stores its selection under
+        // `catalog_databases`; the indexer must pick it up too.
+        assert_eq!(
+            connect_container_scope(&json!({ "catalog_databases": ["shop"] })),
+            ContainerScope::Only(vec!["shop".into()])
+        );
+    }
+
+    #[test]
+    fn scope_empty_array_is_index_nothing() {
+        assert_eq!(
+            connect_container_scope(&json!({ "catalog_schemas": [] })),
+            ContainerScope::Only(vec![])
+        );
+    }
+
+    // ── filter_catalog_to_scope (KYO-162) ────────────────────────────────
+
+    fn catalog(names: &[&str]) -> CatalogResult {
+        CatalogResult {
+            containers: names
+                .iter()
+                .map(|n| CatalogContainer {
+                    name: (*n).to_string(),
+                    tables: Vec::new(),
+                })
+                .collect(),
+        }
+    }
+
+    fn container_names(c: &CatalogResult) -> Vec<String> {
+        c.containers.iter().map(|c| c.name.clone()).collect()
+    }
+
+    #[test]
+    fn filter_none_scope_keeps_everything() {
+        let c = filter_catalog_to_scope(catalog(&["public", "staging"]), None);
+        assert_eq!(container_names(&c), vec!["public", "staging"]);
+    }
+
+    #[test]
+    fn filter_keeps_only_scoped_case_insensitive() {
+        let scope = vec!["PUBLIC".to_string()];
+        let c = filter_catalog_to_scope(catalog(&["public", "staging"]), Some(&scope));
+        assert_eq!(container_names(&c), vec!["public"]);
+    }
+
+    #[test]
+    fn filter_drops_all_when_scope_matches_nothing() {
+        let scope = vec!["missing".to_string()];
+        let c = filter_catalog_to_scope(catalog(&["public"]), Some(&scope));
+        assert!(c.containers.is_empty());
     }
 }

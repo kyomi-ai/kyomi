@@ -284,6 +284,63 @@ pub async fn disconnect_connect_datasource(datasource_id: String) -> Result<(), 
     Ok(())
 }
 
+/// Discover the container names (schemas/databases) available on a Connect
+/// datasource, for populating the catalog scope picker (KYO-162).
+///
+/// Round-trips a lightweight `discover_catalog` (`containers_only`) through the
+/// live agent — no full table/column crawl. Requires the agent to be online;
+/// when it isn't reachable, returns a clear error the UI surfaces as a disabled
+/// "connect the agent to choose schemas" state rather than a hanging spinner.
+#[server(prefix = "/leptos-api")]
+pub async fn discover_connect_containers(
+    datasource_id: String,
+) -> Result<Vec<String>, ServerFnError> {
+    let ac = AuthenticatedContext::extract().await?;
+
+    require_workspace_admin(&ac.auth)?;
+
+    let ds = kyomi_auth::datasource_service::get_datasource(ac.db(), &datasource_id, &ac.ws_id)
+        .await
+        .into_sfn()?
+        .ok_or_else(|| ServerFnError::new("Datasource not found"))?;
+
+    if ds.connection_type != "connect" {
+        return Err(ServerFnError::new(
+            "Container discovery is only available for Connect datasources",
+        ));
+    }
+
+    let registry = ac
+        .ctx
+        .connect_registry
+        .clone()
+        .ok_or_else(|| ServerFnError::new("Kyomi Connect is not configured on this server"))?;
+
+    let provider = kyomi_datasource_server::ConnectProvider::with_timeout(
+        registry,
+        ds.id.clone(),
+        std::time::Duration::from_secs(60),
+    );
+
+    let params = kyomi_core::connect_protocol::DiscoverCatalogParams {
+        containers: None,
+        include_public_datasets: None,
+        containers_only: true,
+    };
+
+    let catalog = provider.discover_catalog(params).await.map_err(|e| {
+        tracing::warn!(datasource_id = %ds.id, error = %e, "Connect container discovery failed");
+        ServerFnError::new(
+            "Could not reach the Connect agent. Make sure it is running, then try again.",
+        )
+    })?;
+
+    let mut names: Vec<String> = catalog.containers.into_iter().map(|c| c.name).collect();
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
 // ─── Helpers (server-only) ──────────────────────────────────────────────────
 
 /// Reject non-workspace-admin users.
