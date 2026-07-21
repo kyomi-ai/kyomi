@@ -458,9 +458,14 @@ impl BillingService {
                     ws.subscription_period_end
                 };
 
-                (reset, ws.trial_ends_at, ws.user_limit.unwrap_or(999_999))
+                (
+                    reset,
+                    ws.trial_ends_at,
+                    ws.user_limit
+                        .unwrap_or(kyomi_core::capability::UNLIMITED_USER_LIMIT),
+                )
             }
-            None => (None, None, 999_999),
+            None => (None, None, kyomi_core::capability::UNLIMITED_USER_LIMIT),
         };
 
         // Per-user fair share (simple: user gets 100% of their share)

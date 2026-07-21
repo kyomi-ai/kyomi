@@ -662,8 +662,8 @@ impl StripeService {
     /// Parse a Stripe `Subscription` object into our application-level
     /// `SubscriptionData`.
     ///
-    /// All subscriptions are Cloud tier. User limit equals the quantity
-    /// on the first subscription item.
+    /// All subscriptions are Cloud tier. The seat cap is always unlimited
+    /// (member count is not capped; billing is per active user).
     pub async fn parse_subscription_data(
         &self,
         subscription: &Subscription,
@@ -673,11 +673,10 @@ impl StripeService {
         // Billing cycle from metadata (kept for display purposes)
         let billing_cycle = subscription.metadata.get("billing_cycle").cloned();
 
-        // User limit = quantity of the first (and only) subscription item
-        let user_limit = items
-            .first()
-            .and_then(|item| item.quantity)
-            .unwrap_or(1) as i32;
+        // Seat cap is decoupled from the billed seat count: workspaces are never
+        // capped on member count (billing is per active user), so the cap is
+        // always unlimited rather than the subscription item quantity.
+        let user_limit = kyomi_core::capability::UNLIMITED_USER_LIMIT;
 
         // Determine status
         let status = if subscription.cancel_at_period_end {
