@@ -89,13 +89,19 @@ fn TeamPageInner() -> impl IntoView {
         |_| list_ownership_transfers(),
     );
 
-    // Subscription info — used to check seat cap for billing gate
+    // Subscription info — used to check seat cap for billing gate.
+    // Workspaces are never capped on member count (billing is per active user),
+    // so an unset limit resolves to unlimited and the gate stays open.
     let subscription = Resource::new(|| (), |_| get_subscription_info());
     let seat_capped = Memo::new(move |_| {
         subscription
             .get()
             .and_then(|r| r.ok())
-            .map(|info| info.user_limit.unwrap_or(1) <= 1)
+            .map(|info| {
+                info.user_limit
+                    .unwrap_or(kyomi_core::capability::UNLIMITED_USER_LIMIT)
+                    <= 1
+            })
             .unwrap_or(false)
     });
 

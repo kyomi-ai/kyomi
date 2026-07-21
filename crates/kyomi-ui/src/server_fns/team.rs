@@ -212,11 +212,17 @@ pub async fn invite_member(email: String, role: String) -> Result<(), ServerFnEr
     }
 
     // Resolve the per-plan user limit (None = self-hosted, no limit enforced).
+    // SaaS workspaces are never capped on member count — billing is per active
+    // user — so an unset limit resolves to unlimited.
     let user_limit = if ac.ctx.config.self_hosted {
         None
     } else {
         let workspace = get_current_workspace(ac.db(), &ac.ws_id).await?;
-        Some(workspace.user_limit.unwrap_or(1) as i64)
+        Some(
+            workspace
+                .user_limit
+                .unwrap_or(kyomi_core::capability::UNLIMITED_USER_LIMIT) as i64,
+        )
     };
 
     let invitation_id = generate_invitation_id();

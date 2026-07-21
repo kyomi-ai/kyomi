@@ -17,6 +17,11 @@ use serde::Serialize;
 use crate::enums::{SubscriptionStatus, SubscriptionTier};
 use crate::models::Workspace;
 
+/// Effective "no limit" seat cap. Workspaces are never capped on member count —
+/// billing is per active user, so the cap is always unlimited. Used as the
+/// default anywhere a workspace's `user_limit` is unset.
+pub const UNLIMITED_USER_LIMIT: i32 = 999_999;
+
 /// Included analytics events per month for all Cloud subscribers.
 pub const ANALYTICS_EVENTS_INCLUDED: u64 = 100_000;
 
@@ -158,7 +163,7 @@ pub fn get_credits_info(workspace: &Workspace, tier: SubscriptionTier) -> Capabi
 /// 999_999 (effectively unlimited) when not set.
 pub fn get_user_limit(workspace: &Workspace, tier: SubscriptionTier) -> i32 {
     let _ = tier;
-    workspace.user_limit.unwrap_or(999_999)
+    workspace.user_limit.unwrap_or(UNLIMITED_USER_LIMIT)
 }
 
 /// Check if a tier has a specific premium capability.

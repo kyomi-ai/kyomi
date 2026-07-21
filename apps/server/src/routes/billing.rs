@@ -299,7 +299,7 @@ async fn handle_subscription_deleted(state: &AppState, subscription: &Subscripti
              subscription_period_start = NULL, \
              subscription_period_end = NULL, \
              stripe_subscription_id = NULL, \
-             user_limit = 1, \
+             user_limit = 999999, \
              ai_credits_used_usd = 0.0 \
          WHERE workspace_id = $1",
         &workspace_id
