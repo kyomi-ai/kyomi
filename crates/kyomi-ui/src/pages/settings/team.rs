@@ -97,11 +97,10 @@ fn TeamPageInner() -> impl IntoView {
         subscription
             .get()
             .and_then(|r| r.ok())
-            .map(|info| {
-                info.user_limit
-                    .unwrap_or(kyomi_core::capability::UNLIMITED_USER_LIMIT)
-                    <= 1
-            })
+            // Capped only when an explicit limit of 1 or less is set; an unset
+            // limit means unlimited. (This runs on the wasm client, which can't
+            // reference the server-only kyomi_core crate, so no constant here.)
+            .map(|info| info.user_limit.is_some_and(|limit| limit <= 1))
             .unwrap_or(false)
     });
 
