@@ -11,11 +11,10 @@ use leptos::prelude::*;
 
 use crate::components::{
     Alert, AlertDescription, AlertTitle, AlertVariant, Badge, BadgeVariant, Button, ButtonSize,
-    ButtonVariant, Card, CardContent, CardHeader, CardTitle, ConfirmDialog, EmptyState, Modal,
+    ButtonVariant, ConfirmDialog, EmptyState, Modal,
     ModalSize, Skeleton, INPUT_CLASS,
 };
 use crate::components::select::Select;
-use crate::server_fns::billing::get_subscription_info;
 use crate::server_fns::context::UserContext;
 use crate::server_fns::team::*;
 use crate::types::{OwnershipTransferData, TeamInvitation, TeamMember};
@@ -88,21 +87,6 @@ fn TeamPageInner() -> impl IntoView {
         move || transfers_version.get(),
         |_| list_ownership_transfers(),
     );
-
-    // Subscription info — used to check seat cap for billing gate.
-    // Workspaces are never capped on member count (billing is per active user),
-    // so an unset limit resolves to unlimited and the gate stays open.
-    let subscription = Resource::new(|| (), |_| get_subscription_info());
-    let seat_capped = Memo::new(move |_| {
-        subscription
-            .get()
-            .and_then(|r| r.ok())
-            // Capped only when an explicit limit of 1 or less is set; an unset
-            // limit means unlimited. (This runs on the wasm client, which can't
-            // reference the server-only kyomi_core crate, so no constant here.)
-            .map(|info| info.user_limit.is_some_and(|limit| limit <= 1))
-            .unwrap_or(false)
-    });
 
     // Invite modal state
     let (show_invite_modal, set_show_invite_modal) = signal(false);
@@ -391,47 +375,20 @@ fn TeamPageInner() -> impl IntoView {
                             view! { <span></span> }.into_any()
                         }
                     }}
-                    <Show
-                        when=move || !seat_capped.get()
-                        fallback=|| ()
+                    <Button
+                        variant=ButtonVariant::Default
+                        on:click=move |_| set_show_invite_modal.set(true)
+                        attr:title="Invite Member"
                     >
-                        <Button
-                            variant=ButtonVariant::Default
-                            on:click=move |_| set_show_invite_modal.set(true)
-                            attr:title="Invite Member"
-                        >
-                            <span class="inline-flex items-center gap-0 sm:gap-2">
-                                <span class="inline-flex">
-                                    <phosphor_leptos::Icon icon=phosphor_leptos::USER_PLUS size="16px"/>
-                                </span>
-                                <span class="hidden sm:inline">"Invite Member"</span>
+                        <span class="inline-flex items-center gap-0 sm:gap-2">
+                            <span class="inline-flex">
+                                <phosphor_leptos::Icon icon=phosphor_leptos::USER_PLUS size="16px"/>
                             </span>
-                        </Button>
-                    </Show>
+                            <span class="hidden sm:inline">"Invite Member"</span>
+                        </span>
+                    </Button>
                 </div>
             </div>
-
-            // Billing gate — seat-capped placeholder
-            <Show when=move || seat_capped.get()>
-                <div class="mb-6">
-                    <Card>
-                        <CardHeader>
-                            <CardTitle>"Invite Team Members"</CardTitle>
-                        </CardHeader>
-                        <CardContent>
-                            <p class="text-sm text-muted-foreground mb-4">
-                                "Enter billing information to enable multi-user workspaces and invite other team members."
-                            </p>
-                            <a
-                                href="/settings/billing"
-                                class="inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-md text-sm font-semibold px-4 py-2 bg-primary text-primary-foreground shadow hover:bg-primary/90 transition-colors"
-                            >
-                                "Go to Billing"
-                            </a>
-                        </CardContent>
-                    </Card>
-                </div>
-            </Show>
 
             // Pending Invitations
             <div class="mb-6">
@@ -567,11 +524,10 @@ fn TeamPageInner() -> impl IntoView {
                 </Transition>
             </div>
 
-            // Invite Member Modal (hidden when seat-capped — no dead-end)
-            <Show when=move || !seat_capped.get()>
-                <Modal
-                    show=Signal::from(show_invite_modal)
-                    on_close=on_close_modal
+            // Invite Member Modal
+            <Modal
+                show=Signal::from(show_invite_modal)
+                on_close=on_close_modal
                     title="Invite Team Member"
                     size=ModalSize::Md
                     footer=modal_footer.clone()
@@ -616,7 +572,6 @@ fn TeamPageInner() -> impl IntoView {
                         }}
                     </div>
                 </Modal>
-            </Show>
 
             // Confirm Dialog
             <ConfirmDialog
