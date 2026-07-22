@@ -119,3 +119,147 @@ pub async fn create_authenticated_session(
         workspace_roles,
     })
 }
+
+/// Switch the user's active workspace and mint a fresh session for it.
+///
+/// 1. Validates the caller has an ACTIVE membership in the target workspace
+///    (rejects with `Forbidden` otherwise).
+/// 2. Persists it as `users.last_workspace_id`.
+/// 3. Re-mints the session JWT + refresh token + cookies via
+///    `create_authenticated_session`, which now resolves the target workspace
+///    as the active context.
+pub async fn switch_active_workspace(
+    db: &DbPool,
+    kv: &KVPool,
+    jwt_secret: &str,
+    user: &User,
+    target_workspace_id: &str,
+    device_info: &DeviceInfo,
+) -> kyomi_core::Result<AuthenticatedSession> {
+    // Validate active membership. `get_workspace_user` filters `active = true`,
+    // matching what `get_user_workspace_context` treats as a valid last workspace.
+    user_service::get_workspace_user(db, target_workspace_id, &user.user_id)
+        .await?
+        .ok_or_else(|| {
+            kyomi_core::Error::Forbidden("You do not have access to this workspace".into())
+        })?;
+
+    user_service::update_last_workspace(db, &user.user_id, target_workspace_id).await?;
+
+    create_authenticated_session(db, kv, jwt_secret, user, device_info).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    /// Build an in-memory SQLite pool with migrations applied.
+    ///
+    /// Mirrors the local `test_pool()` helper in `workspace_service.rs` and
+    /// `workspace_ai_config.rs` — the established in-memory-sqlite pattern
+    /// used across `kyomi-auth` unit tests.
+    async fn test_pool() -> DbPool {
+        let _ = kyomi_core::constants::load_with_fallback();
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+
+        sqlx::query("PRAGMA foreign_keys=ON")
+            .execute(&pool)
+            .await
+            .expect("enable foreign keys");
+
+        sqlx::migrate!("../../apps/server/migrations-sqlite")
+            .run(&pool)
+            .await
+            .expect("run sqlite migrations");
+
+        DbPool::Sqlite(pool)
+    }
+
+    #[tokio::test]
+    async fn switch_active_workspace_rejects_workspace_with_no_active_membership() {
+        let pool = test_pool().await;
+
+        // A user who belongs to ws-member but NOT ws-other.
+        sqlx::query("INSERT INTO users (user_id, email) VALUES ('user-1', 'user@test.local')")
+            .execute(match &pool {
+                DbPool::Sqlite(sq) => sq,
+                _ => unreachable!(),
+            })
+            .await
+            .expect("insert user");
+
+        sqlx::query("INSERT INTO users (user_id, email) VALUES ('owner-2', 'owner2@test.local')")
+            .execute(match &pool {
+                DbPool::Sqlite(sq) => sq,
+                _ => unreachable!(),
+            })
+            .await
+            .expect("insert other owner");
+
+        sqlx::query(
+            "INSERT INTO workspaces (workspace_id, name, owner_user_id) \
+             VALUES ('ws-member', 'Member Workspace', 'user-1')",
+        )
+        .execute(match &pool {
+            DbPool::Sqlite(sq) => sq,
+            _ => unreachable!(),
+        })
+        .await
+        .expect("insert ws-member");
+
+        sqlx::query(
+            "INSERT INTO workspaces (workspace_id, name, owner_user_id) \
+             VALUES ('ws-other', 'Other Workspace', 'owner-2')",
+        )
+        .execute(match &pool {
+            DbPool::Sqlite(sq) => sq,
+            _ => unreachable!(),
+        })
+        .await
+        .expect("insert ws-other");
+
+        sqlx::query(
+            "INSERT INTO workspace_users (workspace_id, user_id, role, active) \
+             VALUES ('ws-member', 'user-1', 'workspace_admin', 1)",
+        )
+        .execute(match &pool {
+            DbPool::Sqlite(sq) => sq,
+            _ => unreachable!(),
+        })
+        .await
+        .expect("insert membership");
+
+        let user = user_service::get_user_by_id(&pool, "user-1")
+            .await
+            .expect("query user")
+            .expect("user exists");
+
+        let kv = kyomi_core::create_kv_store(None)
+            .await
+            .expect("in-memory kv store");
+
+        let device = DeviceInfo {
+            user_agent: None,
+            ip_address: None,
+            country_code: None,
+            oauth_client_id: None,
+        };
+
+        let result =
+            switch_active_workspace(&pool, &kv, "test-secret", &user, "ws-other", &device).await;
+
+        match result {
+            Err(kyomi_core::Error::Forbidden(msg)) => {
+                assert!(msg.contains("do not have access"), "message: {msg}");
+            }
+            Err(other) => panic!("expected Forbidden error, got: {other:?}"),
+            Ok(_) => panic!("expected Forbidden error, but switch succeeded"),
+        }
+    }
+}

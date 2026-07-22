@@ -19,7 +19,8 @@ use crate::components::feedback_modal::FeedbackModal;
 use crate::components::invitation_status_bar::InvitationStatusBar;
 use crate::components::modal::{Modal, ModalSize};
 use crate::components::popover::{Placement, Popover};
-use crate::components::EmptyState;
+use crate::components::toast::toast_error;
+use crate::components::{Badge, BadgeVariant, EmptyState};
 use crate::query_cache::{provide_query_cache, use_query};
 #[cfg(target_arch = "wasm32")]
 use crate::query_cache::QueryCache;
@@ -28,6 +29,33 @@ use crate::server_fns::security::logout;
 use crate::server_fns::home::get_landing_config;
 use crate::server_fns::sidebar::{get_recent_sessions, get_sidebar_user};
 use crate::server_fns::watches::get_unread_alerts_count;
+use crate::server_fns::workspace::{list_my_workspaces, switch_workspace};
+
+/// Map a workspace's subscription tier to a badge variant for the switcher.
+///
+/// Matches the React reference exactly: enterprise gets the solid/primary
+/// badge, team gets the secondary badge, everything else (free, pro, etc.)
+/// gets the outline badge.
+fn tier_badge_variant(tier: &str) -> BadgeVariant {
+    match tier {
+        "enterprise" => BadgeVariant::Default,
+        "team" => BadgeVariant::Secondary,
+        _ => BadgeVariant::Outline,
+    }
+}
+
+#[cfg(test)]
+mod tier_badge_variant_tests {
+    use super::*;
+
+    #[test]
+    fn maps_known_and_unknown_tiers_to_expected_variants() {
+        assert!(matches!(tier_badge_variant("enterprise"), BadgeVariant::Default));
+        assert!(matches!(tier_badge_variant("team"), BadgeVariant::Secondary));
+        assert!(matches!(tier_badge_variant("free"), BadgeVariant::Outline));
+        assert!(matches!(tier_badge_variant(""), BadgeVariant::Outline));
+    }
+}
 
 /// Main layout shell wrapping all Leptos pages.
 ///
@@ -697,6 +725,32 @@ fn Sidebar(
         }
     });
 
+    // Workspace switcher — list of workspaces the user belongs to, plus the
+    // action that switches the active one. See `list_my_workspaces` /
+    // `switch_workspace` in `server_fns::workspace`.
+    let my_workspaces = Resource::new(|| (), |_| list_my_workspaces());
+
+    let switch_action = Action::new(|ws_id: &String| {
+        let ws_id = ws_id.clone();
+        async move { switch_workspace(ws_id).await }
+    });
+
+    Effect::new(move |_| {
+        if let Some(result) = switch_action.value().get() {
+            match result {
+                Ok(()) => {
+                    #[cfg(target_arch = "wasm32")]
+                    if let Some(win) = web_sys::window() {
+                        let _ = win.location().reload();
+                    }
+                }
+                Err(e) => {
+                    toast_error(format!("Failed to switch workspace: {e}"));
+                }
+            }
+        }
+    });
+
     // Listen for 'sessions-deleted' custom events to refresh the recent sessions list.
     // Matches React: Sidebar.jsx lines 171-173.
     // Uses QueryCache invalidation instead of Resource::refetch (KYO-23).
@@ -1000,6 +1054,68 @@ fn Sidebar(
                                     } else {
                                         None
                                     }}
+                                    // Workspace switcher — only rendered for non-personal accounts
+                                    // that belong to more than one workspace. Design note: this
+                                    // lives inside the sidebar-themed Popover, so it uses the same
+                                    // `var(--color-sidebar-*)` tokens as the sibling menu items
+                                    // (Settings/Help/Logout) rather than the React reference's raw
+                                    // `bg-accent` classes — keeps it visually coherent with its
+                                    // container while preserving the React structure (checkmark,
+                                    // name, member count, tier badge, active highlight).
+                                    {(!is_personal).then(|| view! {
+                                        {move || {
+                                            match my_workspaces.get() {
+                                                Some(Ok(list)) if list.len() > 1 => {
+                                                    let mut sorted = list.clone();
+                                                    sorted.sort_by_key(|a| a.name.to_lowercase());
+                                                    let rows = sorted.into_iter().map(|ws| {
+                                                        let ws_id = ws.workspace_id.clone();
+                                                        let is_active = ws.is_active;
+                                                        let variant = tier_badge_variant(&ws.subscription_tier);
+                                                        let members = format!("{} member{}", ws.member_count, if ws.member_count == 1 { "" } else { "s" });
+                                                        view! {
+                                                            <button
+                                                                on:click={
+                                                                    let ws_id = ws_id.clone();
+                                                                    move |_| {
+                                                                        if is_active { return; }
+                                                                        set_user_menu_open.set(false);
+                                                                        if !switch_action.pending().get_untracked() {
+                                                                            switch_action.dispatch(ws_id.clone());
+                                                                        }
+                                                                    }
+                                                                }
+                                                                class=move || format!(
+                                                                    "w-full px-4 py-2 text-left transition-colors flex items-center justify-between gap-2 {}",
+                                                                    if is_active { "bg-[var(--color-sidebar-hover)]" } else { "hover:bg-[var(--color-sidebar-hover)]" }
+                                                                )
+                                                            >
+                                                                <div class="flex items-center gap-2 min-w-0 flex-1">
+                                                                    {if is_active {
+                                                                        view!{ <span class="text-primary flex-shrink-0"><Icon icon=phosphor_leptos::CHECK weight=IconWeight::Bold size="16px"/></span> }.into_any()
+                                                                    } else {
+                                                                        view!{ <span class="w-4 h-4 flex-shrink-0"></span> }.into_any()
+                                                                    }}
+                                                                    <div class="min-w-0 flex-1">
+                                                                        <div class="text-sm font-medium text-[var(--color-sidebar-foreground)] truncate">{ws.name.clone()}</div>
+                                                                        <div class="text-xs text-[var(--color-sidebar-foreground-secondary)] truncate">{members}</div>
+                                                                    </div>
+                                                                </div>
+                                                                <Badge variant=variant class="text-xs flex-shrink-0">{ws.subscription_tier.clone()}</Badge>
+                                                            </button>
+                                                        }
+                                                    }).collect_view();
+                                                    view! {
+                                                        <div>
+                                                            {rows}
+                                                            <div class="border-b border-[var(--color-sidebar-border)] my-1"></div>
+                                                        </div>
+                                                    }.into_any()
+                                                }
+                                                _ => ().into_any(),
+                                            }
+                                        }}
+                                    })}
                                     <a
                                         href="/settings"
                                         on:click=move |_| set_user_menu_open.set(false)
