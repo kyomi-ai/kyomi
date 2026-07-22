@@ -1238,7 +1238,7 @@ pub async fn passkey_recovery_verify(
 /// layer — `ResponseOptions` is a Leptos/Axum concern and cannot live in the
 /// service layer.
 #[cfg(feature = "ssr")]
-fn set_session_cookies(sess: &kyomi_auth::session::AuthenticatedSession) {
+pub(crate) fn set_session_cookies(sess: &kyomi_auth::session::AuthenticatedSession) {
     use leptos::prelude::expect_context;
     use leptos_axum::ResponseOptions;
 

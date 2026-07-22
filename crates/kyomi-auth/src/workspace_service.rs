@@ -52,6 +52,37 @@ pub async fn count_workspace_users(
     Ok(count)
 }
 
+/// Summary of a workspace a user belongs to, for the workspace switcher.
+#[derive(Debug, Clone)]
+pub struct UserWorkspaceSummary {
+    pub workspace_id: String,
+    pub name: Option<String>,
+    pub member_count: i64,
+    pub subscription_tier: kyomi_core::enums::SubscriptionTier,
+    pub role: kyomi_core::enums::WorkspaceRole,
+}
+
+/// Get all workspaces a user belongs to, enriched with member counts.
+/// Reuses `get_user_workspaces` + `count_workspace_users`.
+pub async fn get_user_workspaces_with_counts(
+    pool: &DbPool,
+    user_id: &str,
+) -> kyomi_core::Result<Vec<UserWorkspaceSummary>> {
+    let pairs = get_user_workspaces(pool, user_id).await?;
+    let mut out = Vec::with_capacity(pairs.len());
+    for (ws, wu) in pairs {
+        let member_count = count_workspace_users(pool, &ws.workspace_id).await?;
+        out.push(UserWorkspaceSummary {
+            workspace_id: ws.workspace_id,
+            name: ws.name,
+            member_count,
+            subscription_tier: ws.subscription_tier,
+            role: wu.role,
+        });
+    }
+    Ok(out)
+}
+
 /// Get all workspaces a user belongs to (active memberships).
 ///
 /// Returns pairs of (Workspace, WorkspaceUser) for each membership.

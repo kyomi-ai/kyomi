@@ -8,8 +8,100 @@
 //! `apps/server/src/routes/workspaces.rs`.
 
 use leptos::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::types::WorkspaceSettingsData;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Workspace switcher
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// One workspace in the sidebar switcher.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceSummary {
+    pub workspace_id: String,
+    pub name: String,              // "Workspace" fallback applied server-side
+    pub member_count: i64,
+    pub subscription_tier: String, // snake_case tier ("team", "enterprise", ...)
+    pub role: String,              // humanized ("Admin"/"Viewer"/"Member")
+    pub is_active: bool,           // true for the caller's current JWT workspace
+}
+
+/// List all workspaces the caller belongs to, for the sidebar switcher.
+#[server(prefix = "/leptos-api")]
+pub async fn list_my_workspaces() -> Result<Vec<WorkspaceSummary>, ServerFnError> {
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+
+    let current = auth.workspace.workspace_id.clone();
+
+    let summaries =
+        kyomi_auth::workspace_service::get_user_workspaces_with_counts(&ctx.db, &auth.user_id)
+            .await
+            .into_sfn()?;
+
+    Ok(summaries
+        .into_iter()
+        .map(|s| {
+            // Tier -> snake_case string, same convention the JWT uses.
+            let tier = serde_json::to_value(s.subscription_tier)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_default();
+            // Role DB token -> humanized label (server-side; kyomi-core is ssr-only in kyomi-ui).
+            let role_token = serde_json::to_value(s.role)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_default();
+            let is_active = Some(&s.workspace_id) == current.as_ref();
+            WorkspaceSummary {
+                name: s.name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| "Workspace".to_string()),
+                workspace_id: s.workspace_id,
+                member_count: s.member_count,
+                subscription_tier: tier,
+                role: kyomi_core::constants::humanize_workspace_role(&role_token).to_string(),
+                is_active,
+            }
+        })
+        .collect())
+}
+
+/// Switch the caller's active workspace and re-mint their session.
+#[server(prefix = "/leptos-api")]
+pub async fn switch_workspace(workspace_id: String) -> Result<(), ServerFnError> {
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+
+    let user = kyomi_auth::user_service::get_user_by_id(&ctx.db, &auth.user_id)
+        .await
+        .into_sfn()?
+        .ok_or_else(|| ServerFnError::new("User not found"))?;
+
+    let headers: axum::http::HeaderMap = leptos_axum::extract()
+        .await
+        .map_err(|e| ServerFnError::new(format!("Failed to extract headers: {e}")))?;
+    let device = super::auth::extract_device_info(&headers);
+
+    let kv = ctx
+        .kv
+        .clone()
+        .ok_or_else(|| ServerFnError::new("KV store not available"))?;
+
+    let sess = kyomi_auth::session::switch_active_workspace(
+        &ctx.db,
+        &kv,
+        &ctx.config.jwt_secret,
+        &user,
+        &workspace_id,
+        &device,
+    )
+    .await
+    .into_sfn()?;
+
+    // Apply the new session cookies so middleware sees the new workspace next request.
+    super::auth::set_session_cookies(&sess);
+    Ok(())
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers (server-only)
@@ -396,7 +488,7 @@ pub async fn uninstall_workspace_slack(team_id: String) -> Result<(), ServerFnEr
 
 // Helpers — delegate to shared extractors in parent module
 #[cfg(feature = "ssr")]
-use super::{AuthenticatedContext, IntoServerFnError};
+use super::{extract_auth, extract_context, AuthenticatedContext, IntoServerFnError};
 
 #[cfg(all(test, feature = "ssr"))]
 mod tests {
