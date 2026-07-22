@@ -281,13 +281,51 @@ pub async fn accept_invitation(invitation_id: String) -> Result<(), ServerFnErro
     check_invitation_acceptable(&inv, &auth.email, chrono::Utc::now())
         .map_err(ServerFnError::new)?;
 
-    kyomi_auth::workspace_service::accept_invitation_for_user(
-        &ctx.db,
-        &invitation_id,
-        &auth.user_id,
-    )
-    .await
-    .into_sfn()?;
+    // KYO-171: accept, then drop the user into the workspace they just joined.
+    // Switching re-mints the session JWT for the new workspace; the client
+    // hard-navigates afterward, so the fresh cookie takes effect on the next
+    // request. Acceptance errors propagate; the switch is best-effort — a
+    // failure there must not surface as an accept failure, since the
+    // membership is already committed and the user can switch manually
+    // (KYO-170). See `accept_invitation_and_switch` for the full contract.
+    let headers: axum::http::HeaderMap = leptos_axum::extract()
+        .await
+        .map_err(|e| ServerFnError::new(format!("Failed to extract headers: {e}")))?;
+    let device = super::auth::extract_device_info(&headers);
+
+    let session = match ctx.kv.clone() {
+        Some(kv) => kyomi_auth::workspace_service::accept_invitation_and_switch(
+            &ctx.db,
+            &kv,
+            &ctx.config.jwt_secret,
+            &invitation_id,
+            &auth.user_id,
+            &inv.workspace_id,
+            &device,
+        )
+        .await
+        .into_sfn()?,
+        None => {
+            // No KV (single-instance/test) — still accept the invite; just can't
+            // re-mint a session for the new workspace.
+            tracing::warn!(
+                user_id = %auth.user_id,
+                "invite accepted but KV store unavailable; skipping active-workspace switch"
+            );
+            kyomi_auth::workspace_service::accept_invitation_for_user(
+                &ctx.db,
+                &invitation_id,
+                &auth.user_id,
+            )
+            .await
+            .into_sfn()?;
+            None
+        }
+    };
+
+    if let Some(session) = session {
+        super::auth::set_session_cookies(&session);
+    }
 
     Ok(())
 }

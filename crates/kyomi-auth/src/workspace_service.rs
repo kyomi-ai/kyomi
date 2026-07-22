@@ -12,7 +12,7 @@ use kyomi_core::models::{
     OwnershipTransfer, Workspace, WorkspaceInvitation, WorkspaceUser,
 };
 use kyomi_core::sql_compat;
-use kyomi_core::DbPool;
+use kyomi_core::{DbPool, KVPool};
 use serde::{Deserialize, Serialize};
 
 use crate::sync_log_service;
@@ -711,6 +711,47 @@ pub async fn accept_invitation_for_user(
     let db_role = invitation.role.as_ref();
     create_workspace_user(pool, &invitation.workspace_id, user_id, db_role).await?;
     Ok(())
+}
+
+/// Accept an invitation, then switch the user into the workspace they just
+/// joined, re-minting the session for it.
+///
+/// Acceptance (atomic CAS pending→accepted + membership creation via
+/// `accept_invitation_for_user`) is committed FIRST and its error propagates —
+/// a failed accept is a real failure. The subsequent switch is best-effort:
+/// the membership is already durably created, so a switch failure (user row
+/// missing, or `switch_active_workspace` erroring) is logged and returns
+/// `Ok(None)` rather than undoing the join. Returns `Some(session)` with fresh
+/// cookies to apply when the switch succeeded, `None` when it was skipped/failed.
+///
+/// Reuses `crate::session::switch_active_workspace` (KYO-170) — no duplicated
+/// JWT/cookie logic.
+pub async fn accept_invitation_and_switch(
+    db: &DbPool,
+    kv: &KVPool,
+    jwt_secret: &str,
+    invitation_id: &str,
+    user_id: &str,
+    joined_workspace_id: &str,
+    device_info: &crate::token_service::DeviceInfo,
+) -> kyomi_core::Result<Option<crate::session::AuthenticatedSession>> {
+    // Acceptance first — its failure is a genuine error and must propagate.
+    accept_invitation_for_user(db, invitation_id, user_id).await?;
+
+    // Best-effort switch: acceptance is already committed, so from here we never
+    // turn a successful join into a failure.
+    let Some(user) = crate::user_service::get_user_by_id(db, user_id).await? else {
+        tracing::warn!(%user_id, "invite accepted but user row not found; skipping active-workspace switch");
+        return Ok(None);
+    };
+
+    match crate::session::switch_active_workspace(db, kv, jwt_secret, &user, joined_workspace_id, device_info).await {
+        Ok(sess) => Ok(Some(sess)),
+        Err(e) => {
+            tracing::warn!(%user_id, workspace_id = %joined_workspace_id, error = %e, "invite accepted but failed to switch active workspace; user can switch manually");
+            Ok(None)
+        }
+    }
 }
 
 // ===========================================================================

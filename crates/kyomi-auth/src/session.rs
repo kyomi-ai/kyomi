@@ -262,4 +262,204 @@ mod tests {
             Ok(_) => panic!("expected Forbidden error, but switch succeeded"),
         }
     }
+
+    /// KYO-171: accepting a workspace invitation must make the just-joined
+    /// workspace immediately switchable-into, and switching into it must
+    /// persist as the user's active workspace.
+    ///
+    /// Uses the real `accept_invitation_for_user` service path (not a
+    /// simulated membership insert) — the sqlite `workspace_invitations`
+    /// schema's NOT NULL columns (invitation_id, workspace_id, email,
+    /// invited_by_user_id, expires_at) all have straightforward test values,
+    /// so there was no need to fall back to directly inserting the
+    /// membership via `create_workspace_user`.
+    #[tokio::test]
+    async fn accept_then_switch_drops_user_into_joined_workspace() {
+        let pool = test_pool().await;
+        let sq = match &pool {
+            DbPool::Sqlite(sq) => sq,
+            _ => unreachable!(),
+        };
+
+        // user-1 already belongs to ws-home (their current active workspace).
+        sqlx::query("INSERT INTO users (user_id, email) VALUES ('user-1', 'user@test.local')")
+            .execute(sq)
+            .await
+            .expect("insert user-1");
+        sqlx::query("INSERT INTO users (user_id, email) VALUES ('owner-2', 'owner2@test.local')")
+            .execute(sq)
+            .await
+            .expect("insert owner-2");
+
+        sqlx::query(
+            "INSERT INTO workspaces (workspace_id, name, owner_user_id) \
+             VALUES ('ws-home', 'Home Workspace', 'user-1')",
+        )
+        .execute(sq)
+        .await
+        .expect("insert ws-home");
+        sqlx::query(
+            "INSERT INTO workspaces (workspace_id, name, owner_user_id) \
+             VALUES ('ws-joined', 'Joined Workspace', 'owner-2')",
+        )
+        .execute(sq)
+        .await
+        .expect("insert ws-joined");
+
+        sqlx::query(
+            "INSERT INTO workspace_users (workspace_id, user_id, role, active) \
+             VALUES ('ws-home', 'user-1', 'workspace_admin', 1)",
+        )
+        .execute(sq)
+        .await
+        .expect("insert ws-home membership");
+
+        sqlx::query("UPDATE users SET last_workspace_id = 'ws-home' WHERE user_id = 'user-1'")
+            .execute(sq)
+            .await
+            .expect("set last_workspace_id");
+
+        // Pending invitation for user-1 into ws-joined.
+        sqlx::query(
+            "INSERT INTO workspace_invitations \
+             (invitation_id, workspace_id, email, role, invited_by_user_id, status, expires_at) \
+             VALUES ('inv-1', 'ws-joined', 'user@test.local', 'workspace_user', 'owner-2', \
+             'pending', datetime('now', '+1 day'))",
+        )
+        .execute(sq)
+        .await
+        .expect("insert invitation");
+
+        // Accept — mirrors what accept_invitation (the server fn) calls before
+        // performing the KYO-171 switch.
+        crate::workspace_service::accept_invitation_for_user(&pool, "inv-1", "user-1")
+            .await
+            .expect("accept invitation");
+
+        let user = user_service::get_user_by_id(&pool, "user-1")
+            .await
+            .expect("query user")
+            .expect("user exists");
+
+        let kv = kyomi_core::create_kv_store(None)
+            .await
+            .expect("in-memory kv store");
+
+        let device = DeviceInfo {
+            user_agent: None,
+            ip_address: None,
+            country_code: None,
+            oauth_client_id: None,
+        };
+
+        let sess = switch_active_workspace(&pool, &kv, "test-secret", &user, "ws-joined", &device)
+            .await
+            .expect("switch into just-joined workspace should succeed");
+
+        assert_eq!(sess.workspace_id, Some("ws-joined".to_string()));
+
+        let updated_user = user_service::get_user_by_id(&pool, "user-1")
+            .await
+            .expect("query user")
+            .expect("user exists");
+        assert_eq!(updated_user.last_workspace_id, Some("ws-joined".to_string()));
+    }
+
+    /// KYO-171 follow-up: `workspace_service::accept_invitation_and_switch`
+    /// is the single service-layer call the `accept_invitation` server fn now
+    /// makes to fold accept-then-switch into one orchestration (extracted to
+    /// satisfy `check-server-fns.sh` Rule B — see KYO-143 precedent). This
+    /// test exercises that fn end to end, mirroring
+    /// `accept_then_switch_drops_user_into_joined_workspace` above but through
+    /// the new entry point instead of calling `accept_invitation_for_user` +
+    /// `switch_active_workspace` separately.
+    #[tokio::test]
+    async fn accept_invitation_and_switch_drops_user_into_joined_workspace() {
+        let pool = test_pool().await;
+        let sq = match &pool {
+            DbPool::Sqlite(sq) => sq,
+            _ => unreachable!(),
+        };
+
+        // user-1 already belongs to ws-home (their current active workspace).
+        sqlx::query("INSERT INTO users (user_id, email) VALUES ('user-1', 'user@test.local')")
+            .execute(sq)
+            .await
+            .expect("insert user-1");
+        sqlx::query("INSERT INTO users (user_id, email) VALUES ('owner-2', 'owner2@test.local')")
+            .execute(sq)
+            .await
+            .expect("insert owner-2");
+
+        sqlx::query(
+            "INSERT INTO workspaces (workspace_id, name, owner_user_id) \
+             VALUES ('ws-home', 'Home Workspace', 'user-1')",
+        )
+        .execute(sq)
+        .await
+        .expect("insert ws-home");
+        sqlx::query(
+            "INSERT INTO workspaces (workspace_id, name, owner_user_id) \
+             VALUES ('ws-joined', 'Joined Workspace', 'owner-2')",
+        )
+        .execute(sq)
+        .await
+        .expect("insert ws-joined");
+
+        sqlx::query(
+            "INSERT INTO workspace_users (workspace_id, user_id, role, active) \
+             VALUES ('ws-home', 'user-1', 'workspace_admin', 1)",
+        )
+        .execute(sq)
+        .await
+        .expect("insert ws-home membership");
+
+        sqlx::query("UPDATE users SET last_workspace_id = 'ws-home' WHERE user_id = 'user-1'")
+            .execute(sq)
+            .await
+            .expect("set last_workspace_id");
+
+        // Pending invitation for user-1 into ws-joined.
+        sqlx::query(
+            "INSERT INTO workspace_invitations \
+             (invitation_id, workspace_id, email, role, invited_by_user_id, status, expires_at) \
+             VALUES ('inv-2', 'ws-joined', 'user@test.local', 'workspace_user', 'owner-2', \
+             'pending', datetime('now', '+1 day'))",
+        )
+        .execute(sq)
+        .await
+        .expect("insert invitation");
+
+        let kv = kyomi_core::create_kv_store(None)
+            .await
+            .expect("in-memory kv store");
+
+        let device = DeviceInfo {
+            user_agent: None,
+            ip_address: None,
+            country_code: None,
+            oauth_client_id: None,
+        };
+
+        let sess = crate::workspace_service::accept_invitation_and_switch(
+            &pool,
+            &kv,
+            "test-secret",
+            "inv-2",
+            "user-1",
+            "ws-joined",
+            &device,
+        )
+        .await
+        .expect("accept-and-switch should succeed")
+        .expect("switch should succeed and return a session");
+
+        assert_eq!(sess.workspace_id, Some("ws-joined".to_string()));
+
+        let updated_user = user_service::get_user_by_id(&pool, "user-1")
+            .await
+            .expect("query user")
+            .expect("user exists");
+        assert_eq!(updated_user.last_workspace_id, Some("ws-joined".to_string()));
+    }
 }
