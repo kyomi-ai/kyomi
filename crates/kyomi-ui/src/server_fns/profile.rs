@@ -357,7 +357,7 @@ pub async fn get_invitation_for_accept(
         invitation_id: inv.invitation_id,
         workspace_name: inv.workspace_name.unwrap_or_default(),
         inviter_name: inv.inviter_name.unwrap_or_default(),
-        role: inv.role,
+        role: kyomi_core::constants::humanize_workspace_role(&inv.role).to_string(),
         expires_at: inv.expires_at.to_rfc3339(),
         status: inv.status,
     }))

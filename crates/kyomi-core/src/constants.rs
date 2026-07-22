@@ -294,6 +294,24 @@ pub struct WorkspaceRoleConstants {
     pub viewer: String,
 }
 
+/// Map a stored DB workspace-role token (e.g. `workspace_admin`) to a
+/// human-readable display label (e.g. `"Admin"`).
+///
+/// Any value that doesn't match a known role constant falls back to
+/// `"Member"`, mirroring the generic non-admin wording the invitation
+/// email uses (note: `kyomi-auth::email_service` matches on a separate
+/// UI-level role string, so it shares the outcome, not this mechanism).
+pub fn humanize_workspace_role(role: &str) -> &'static str {
+    let roles = &get().workspace.roles;
+    if role == roles.admin {
+        "Admin"
+    } else if role == roles.viewer {
+        "Viewer"
+    } else {
+        "Member"
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct WebSocketConstants {
     pub message_types: std::collections::HashMap<String, String>,
@@ -345,5 +363,25 @@ mod tests {
             Some(&"chat_stream".to_string())
         );
         assert_eq!(constants.websocket.message_types.len(), 23);
+    }
+
+    #[test]
+    fn humanize_workspace_role_maps_known_roles() {
+        // Ensure the global singleton is populated (embedded fallback always
+        // succeeds, so this is safe regardless of `find_constants_file()`
+        // resolving in this test's working directory or test execution order).
+        let _ = load_with_fallback();
+        let roles = &get().workspace.roles;
+
+        assert_eq!(humanize_workspace_role(&roles.admin), "Admin");
+        assert_eq!(humanize_workspace_role(&roles.user), "Member");
+        assert_eq!(humanize_workspace_role(&roles.viewer), "Viewer");
+    }
+
+    #[test]
+    fn humanize_workspace_role_falls_back_to_member_for_unknown_value() {
+        let _ = load_with_fallback();
+
+        assert_eq!(humanize_workspace_role("some_unrecognized_role"), "Member");
     }
 }
