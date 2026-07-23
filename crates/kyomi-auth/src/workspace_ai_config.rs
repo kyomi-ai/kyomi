@@ -390,11 +390,15 @@ pub async fn update(
         crate::workspace_service::get_workspace_settings_for_sync(db, workspace_id).await;
     if let Err(e) = crate::sync_log_service::write_sync_entry(
         db,
-        kyomi_types::sync::entity_types::WORKSPACE_SETTINGS,
-        workspace_id,
-        workspace_id,
-        kyomi_types::sync::SyncActionType::Update,
-        snapshot,
+        crate::sync_log_service::SyncEntryParams {
+            entity_type: kyomi_types::sync::entity_types::WORKSPACE_SETTINGS,
+            entity_id: workspace_id,
+            workspace_id,
+            action: kyomi_types::sync::SyncActionType::Update,
+            data: snapshot,
+            owner_user_id: None,
+            is_workspace_visible: true,
+        },
     )
     .await
     {

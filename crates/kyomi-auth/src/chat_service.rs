@@ -381,11 +381,15 @@ pub async fn create_session(
         });
         if let Err(e) = sync_log_service::write_sync_entry(
             db,
-            entity_types::CHAT_SESSION,
-            &session_id,
-            workspace_id,
-            SyncActionType::Insert,
-            Some(snapshot),
+            sync_log_service::SyncEntryParams {
+                entity_type: entity_types::CHAT_SESSION,
+                entity_id: &session_id,
+                workspace_id,
+                action: SyncActionType::Insert,
+                data: Some(snapshot),
+                owner_user_id: Some(user_id),
+                is_workspace_visible: false,
+            },
         )
         .await
         {
@@ -879,18 +883,29 @@ pub async fn add_message(
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to update session timestamp: {e}")))?;
 
     // Sync log for the session metadata update — best-effort.
-    if let Some((workspace_id, snapshot)) = fetch_session_snapshot(db, session_id).await
-        && let Err(e) = sync_log_service::write_sync_entry(
+    if let Some((workspace_id, snapshot)) = fetch_session_snapshot(db, session_id).await {
+        let is_shared = snapshot.get("shared").and_then(|v| v.as_bool()).unwrap_or(false);
+        let session_owner = snapshot
+            .get("created_by")
+            .and_then(|cb| cb.get("user_id"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        if let Err(e) = sync_log_service::write_sync_entry(
             db,
-            entity_types::CHAT_SESSION,
-            session_id,
-            &workspace_id,
-            SyncActionType::Update,
-            Some(snapshot),
+            sync_log_service::SyncEntryParams {
+                entity_type: entity_types::CHAT_SESSION,
+                entity_id: session_id,
+                workspace_id: &workspace_id,
+                action: SyncActionType::Update,
+                data: Some(snapshot),
+                owner_user_id: session_owner.as_deref(),
+                is_workspace_visible: is_shared,
+            },
         )
         .await
-    {
-        tracing::warn!(error = %e, session_id = %session_id, "Failed to write sync log entry");
+        {
+            tracing::warn!(error = %e, session_id = %session_id, "Failed to write sync log entry");
+        }
     }
 
     Ok(msg_id)
@@ -1001,17 +1016,29 @@ pub async fn update_session(
     // Sync log — best-effort: log a warning and continue on failure.
     if rows_affected > 0
         && let Some((workspace_id, snapshot)) = fetch_session_snapshot(db, session_id).await
-        && let Err(e) = sync_log_service::write_sync_entry(
+    {
+        let is_shared = snapshot.get("shared").and_then(|v| v.as_bool()).unwrap_or(false);
+        let session_owner = snapshot
+            .get("created_by")
+            .and_then(|cb| cb.get("user_id"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        if let Err(e) = sync_log_service::write_sync_entry(
             db,
-            entity_types::CHAT_SESSION,
-            session_id,
-            &workspace_id,
-            SyncActionType::Update,
-            Some(snapshot),
+            sync_log_service::SyncEntryParams {
+                entity_type: entity_types::CHAT_SESSION,
+                entity_id: session_id,
+                workspace_id: &workspace_id,
+                action: SyncActionType::Update,
+                data: Some(snapshot),
+                owner_user_id: session_owner.as_deref(),
+                is_workspace_visible: is_shared,
+            },
         )
         .await
-    {
-        tracing::warn!(error = %e, session_id = %session_id, "Failed to write sync log entry");
+        {
+            tracing::warn!(error = %e, session_id = %session_id, "Failed to write sync log entry");
+        }
     }
 
     Ok(rows_affected > 0)
@@ -1087,6 +1114,18 @@ pub async fn delete_session(
     )
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to delete messages: {e}")))?;
 
+    // Capture visibility state before deletion for the sync log entry.
+    let is_pg = db.is_postgres();
+    let bf = kyomi_core::sql_compat::bool_false(is_pg);
+    let shared_sql = format!(
+        "SELECT COALESCE(shared, {bf}) AS shared FROM chat_sessions WHERE session_id = $1"
+    );
+    let was_shared: bool = kyomi_core::db_fetch_optional!(db, (bool,), &shared_sql, session_id)
+        .ok()
+        .flatten()
+        .map(|(s,)| s)
+        .unwrap_or(false);
+
     // Delete the session.
     let result = if let Some(wid) = workspace_id {
         kyomi_core::db_execute!(
@@ -1113,11 +1152,15 @@ pub async fn delete_session(
         if let Some(wid) = &resolved_wid {
             if let Err(e) = sync_log_service::write_sync_entry(
                 db,
-                entity_types::CHAT_SESSION,
-                session_id,
-                wid,
-                SyncActionType::Delete,
-                None,
+                sync_log_service::SyncEntryParams {
+                    entity_type: entity_types::CHAT_SESSION,
+                    entity_id: session_id,
+                    workspace_id: wid,
+                    action: SyncActionType::Delete,
+                    data: None,
+                    owner_user_id: Some(user_id),
+                    is_workspace_visible: was_shared,
+                },
             )
             .await
             {
@@ -1179,6 +1222,39 @@ pub async fn bulk_delete_sessions(
 
     let owned_ids: Vec<String> = owned.into_iter().map(|r| r.session_id).collect();
 
+    // Capture visibility state before deletion for sync log entries.
+    let shared_map: std::collections::HashMap<String, bool> = match db {
+        kyomi_core::db::DbPool::Postgres(pg) => {
+            sqlx::query_as::<_, (String, bool)>(
+                "SELECT session_id, COALESCE(shared, false) FROM chat_sessions \
+                 WHERE session_id = ANY($1)",
+            )
+            .bind(&owned_ids)
+            .fetch_all(pg)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+        }
+        kyomi_core::db::DbPool::Sqlite(sq) => {
+            let (in_clause, _) = in_clause_placeholders(owned_ids.len(), 1);
+            let sql = format!(
+                "SELECT session_id, COALESCE(shared, 0) FROM chat_sessions \
+                 WHERE session_id IN {in_clause}"
+            );
+            let mut query = sqlx::query_as::<_, (String, bool)>(&sql);
+            for sid in &owned_ids {
+                query = query.bind(sid);
+            }
+            query
+                .fetch_all(sq)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .collect()
+        }
+    };
+
     // Delete messages first, then sessions using match blocks for array binds.
     let deleted_count = match db {
         kyomi_core::db::DbPool::Postgres(pg) => {
@@ -1218,13 +1294,18 @@ pub async fn bulk_delete_sessions(
 
     // Sync log — one Delete entry per removed session, best-effort.
     for sid in &owned_ids {
+        let was_shared = shared_map.get(sid).copied().unwrap_or(false);
         if let Err(e) = sync_log_service::write_sync_entry(
             db,
-            entity_types::CHAT_SESSION,
-            sid,
-            workspace_id,
-            SyncActionType::Delete,
-            None,
+            sync_log_service::SyncEntryParams {
+                entity_type: entity_types::CHAT_SESSION,
+                entity_id: sid,
+                workspace_id,
+                action: SyncActionType::Delete,
+                data: None,
+                owner_user_id: Some(user_id),
+                is_workspace_visible: was_shared,
+            },
         )
         .await
         {

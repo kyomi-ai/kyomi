@@ -187,11 +187,15 @@ pub async fn update_workspace_name(
         let snapshot = fetch_workspace_settings_snapshot(pool, workspace_id).await;
         if let Err(e) = sync_log_service::write_sync_entry(
             pool,
-            entity_types::WORKSPACE_SETTINGS,
-            workspace_id,
-            workspace_id,
-            SyncActionType::Update,
-            snapshot,
+            sync_log_service::SyncEntryParams {
+                entity_type: entity_types::WORKSPACE_SETTINGS,
+                entity_id: workspace_id,
+                workspace_id,
+                action: SyncActionType::Update,
+                data: snapshot,
+                owner_user_id: None,
+                is_workspace_visible: true,
+            },
         )
         .await
         {
@@ -235,11 +239,15 @@ pub async fn update_workspace_settings(
         let snapshot = fetch_workspace_settings_snapshot(pool, workspace_id).await;
         if let Err(e) = sync_log_service::write_sync_entry(
             pool,
-            entity_types::WORKSPACE_SETTINGS,
-            workspace_id,
-            workspace_id,
-            SyncActionType::Update,
-            snapshot,
+            sync_log_service::SyncEntryParams {
+                entity_type: entity_types::WORKSPACE_SETTINGS,
+                entity_id: workspace_id,
+                workspace_id,
+                action: SyncActionType::Update,
+                data: snapshot,
+                owner_user_id: None,
+                is_workspace_visible: true,
+            },
         )
         .await
         {
@@ -327,11 +335,15 @@ pub async fn update_workspace_knowledge(
         let snapshot = fetch_workspace_settings_snapshot(pool, workspace_id).await;
         if let Err(e) = sync_log_service::write_sync_entry(
             pool,
-            entity_types::WORKSPACE_SETTINGS,
-            workspace_id,
-            workspace_id,
-            SyncActionType::Update,
-            snapshot,
+            sync_log_service::SyncEntryParams {
+                entity_type: entity_types::WORKSPACE_SETTINGS,
+                entity_id: workspace_id,
+                workspace_id,
+                action: SyncActionType::Update,
+                data: snapshot,
+                owner_user_id: None,
+                is_workspace_visible: true,
+            },
         )
         .await
         {

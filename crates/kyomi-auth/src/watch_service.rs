@@ -560,11 +560,15 @@ pub async fn create_watch(
         let snapshot = serde_json::to_value(&watch).ok();
         if let Err(e) = sync_log_service::write_sync_entry(
             db,
-            entity_types::WATCH,
-            &watch.watch_id,
-            &watch.workspace_id,
-            SyncActionType::Insert,
-            snapshot,
+            sync_log_service::SyncEntryParams {
+                entity_type: entity_types::WATCH,
+                entity_id: &watch.watch_id,
+                workspace_id: &watch.workspace_id,
+                action: SyncActionType::Insert,
+                data: snapshot,
+                owner_user_id: None,
+                is_workspace_visible: true,
+            },
         )
         .await
         {
@@ -845,11 +849,15 @@ pub async fn update_watch(
         let snapshot = serde_json::to_value(&watch).ok();
         if let Err(e) = sync_log_service::write_sync_entry(
             db,
-            entity_types::WATCH,
-            &watch.watch_id,
-            &watch.workspace_id,
-            SyncActionType::Update,
-            snapshot,
+            sync_log_service::SyncEntryParams {
+                entity_type: entity_types::WATCH,
+                entity_id: &watch.watch_id,
+                workspace_id: &watch.workspace_id,
+                action: SyncActionType::Update,
+                data: snapshot,
+                owner_user_id: None,
+                is_workspace_visible: true,
+            },
         )
         .await
         {
@@ -883,11 +891,15 @@ pub async fn delete_watch(db: &DbPool, watch_id: &str, workspace_id: &str) -> Re
     // Sync log — best-effort: log a warning and continue on failure.
     if let Err(e) = sync_log_service::write_sync_entry(
         db,
-        entity_types::WATCH,
-        watch_id,
-        workspace_id,
-        SyncActionType::Delete,
-        None,
+        sync_log_service::SyncEntryParams {
+            entity_type: entity_types::WATCH,
+            entity_id: watch_id,
+            workspace_id,
+            action: SyncActionType::Delete,
+            data: None,
+            owner_user_id: None,
+            is_workspace_visible: true,
+        },
     )
     .await
     {

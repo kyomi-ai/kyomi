@@ -408,13 +408,18 @@ pub async fn create_dashboard(
             entity_types::KNOWLEDGE
         };
         let snapshot = fetch_dashboard_snapshot(db, &dashboard_id, user_id).await;
+        let is_visible = is_doc_publicly_visible(db, &dashboard_id).await;
         if let Err(e) = sync_log_service::write_sync_entry(
             db,
-            entity_type,
-            &dashboard_id,
-            workspace_id,
-            SyncActionType::Insert,
-            snapshot,
+            sync_log_service::SyncEntryParams {
+                entity_type,
+                entity_id: &dashboard_id,
+                workspace_id,
+                action: SyncActionType::Insert,
+                data: snapshot,
+                owner_user_id: Some(user_id),
+                is_workspace_visible: is_visible,
+            },
         )
         .await
         {
@@ -679,13 +684,18 @@ pub async fn update_dashboard(
             entity_types::KNOWLEDGE
         };
         let snapshot = fetch_dashboard_snapshot(db, dashboard_id, user_id).await;
+        let is_visible = is_doc_publicly_visible(db, dashboard_id).await;
         if let Err(e) = sync_log_service::write_sync_entry(
             db,
-            entity_type,
-            dashboard_id,
-            workspace_id,
-            SyncActionType::Update,
-            snapshot,
+            sync_log_service::SyncEntryParams {
+                entity_type,
+                entity_id: dashboard_id,
+                workspace_id,
+                action: SyncActionType::Update,
+                data: snapshot,
+                owner_user_id: Some(user_id),
+                is_workspace_visible: is_visible,
+            },
         )
         .await
         {
@@ -719,6 +729,9 @@ pub async fn delete_dashboard(
         ));
     }
 
+    // Capture visibility state before deletion for the sync log entry.
+    let was_visible = is_doc_publicly_visible(db, dashboard_id).await;
+
     let result = db_execute!(
         db,
         "DELETE FROM dashboards WHERE dashboard_id = $1 AND workspace_id = $2",
@@ -738,11 +751,15 @@ pub async fn delete_dashboard(
         };
         if let Err(e) = sync_log_service::write_sync_entry(
             db,
-            entity_type,
-            dashboard_id,
-            workspace_id,
-            SyncActionType::Delete,
-            None,
+            sync_log_service::SyncEntryParams {
+                entity_type,
+                entity_id: dashboard_id,
+                workspace_id,
+                action: SyncActionType::Delete,
+                data: None,
+                owner_user_id: Some(user_id),
+                is_workspace_visible: was_visible,
+            },
         )
         .await
         {
