@@ -35,7 +35,12 @@ pub struct InvitationData {
     pub invitation_id: String,
     pub workspace_id: String,
     pub email: String,
+    /// Raw DB role token (`workspace_admin` / `workspace_user` / `workspace_viewer`).
     pub role: String,
+    /// Human-readable role label ("Admin" / "Viewer" / "Member"), humanized
+    /// server-side via `humanize_workspace_role` — the client is `ssr`-gated
+    /// out of `kyomi-core` so it cannot humanize the token itself.
+    pub role_display: String,
     pub created_at: String,
     pub expires_at: String,
     pub workspace_name: Option<String>,

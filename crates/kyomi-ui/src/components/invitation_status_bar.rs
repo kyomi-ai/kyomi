@@ -15,6 +15,18 @@ use crate::components::toast::{toast_error, toast_success};
 use crate::server_fns::profile::{accept_invitation, decline_invitation, get_pending_invitations};
 use crate::types::InvitationData;
 
+/// Indefinite article for a humanized role label — "an Admin", "a Member",
+/// "a Viewer". Fixes KYO-169: the previous inline check compared the RAW token
+/// (`workspace_admin`) against `"admin"` and never matched, so admin invites
+/// always rendered "a" instead of "an".
+fn role_article(role_label: &str) -> &'static str {
+    if role_label.eq_ignore_ascii_case("admin") {
+        "an"
+    } else {
+        "a"
+    }
+}
+
 /// Global bottom bar showing pending workspace invitations.
 ///
 /// Renders nothing when there are no invitations or while the initial fetch
@@ -95,7 +107,7 @@ pub fn InvitationStatusBar() -> impl IntoView {
             // Clone all needed fields from the first invitation so we don't
             // borrow across the view boundary.
             let first_id = invs[0].invitation_id.clone();
-            let first_role = invs[0].role.clone();
+            let first_role = invs[0].role_display.clone();
             let first_workspace = invs[0]
                 .workspace_name
                 .as_deref()
@@ -109,11 +121,7 @@ pub fn InvitationStatusBar() -> impl IntoView {
                 .map(|s| s.to_string());
 
             // Build the message.
-            let role_article = if first_role.eq_ignore_ascii_case("admin") {
-                "an"
-            } else {
-                "a"
-            };
+            let role_article = role_article(&first_role);
 
             let message = match first_inviter.as_deref() {
                 Some(inviter) if total > 1 => {
@@ -183,5 +191,23 @@ pub fn InvitationStatusBar() -> impl IntoView {
                 </StatusBar>
             }.into_any()
         }}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::role_article;
+    #[test]
+    fn admin_label_gets_an_article() {
+        assert_eq!(role_article("Admin"), "an");
+    }
+    #[test]
+    fn member_and_viewer_labels_get_a_article() {
+        assert_eq!(role_article("Member"), "a");
+        assert_eq!(role_article("Viewer"), "a");
+    }
+    #[test]
+    fn article_is_case_insensitive() {
+        assert_eq!(role_article("admin"), "an");
     }
 }

@@ -112,6 +112,7 @@ pub async fn get_pending_invitations() -> Result<Vec<InvitationData>, ServerFnEr
             invitation_id: inv.invitation_id,
             workspace_id: inv.workspace_id,
             email: inv.email,
+            role_display: kyomi_core::constants::humanize_workspace_role(&inv.role).to_string(),
             role: inv.role,
             created_at: inv.created_at.to_rfc3339(),
             expires_at: inv.expires_at.to_rfc3339(),

@@ -795,7 +795,7 @@ fn InvitationsCard(invitations: Vec<crate::types::InvitationData>) -> impl IntoV
                                             }.into_view()
                                         })}
                                         <p class="text-xs text-muted-foreground">
-                                            "Role: " {inv.role.clone()}
+                                            "Role: " {inv.role_display.clone()}
                                         </p>
                                     </div>
                                     <div class="flex gap-2">
