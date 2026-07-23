@@ -100,6 +100,22 @@ fn normalise_timestamp(ts: &str) -> String {
     }
 }
 
+// ─── SyncEntryParams ─────────────────────────────────────────────────────────
+
+/// Parameters for [`write_sync_entry`].
+///
+/// Groups all per-entry fields into a single struct to keep call sites readable
+/// and avoid the `clippy::too_many_arguments` lint.
+pub struct SyncEntryParams<'a> {
+    pub entity_type: &'a str,
+    pub entity_id: &'a str,
+    pub workspace_id: &'a str,
+    pub action: SyncActionType,
+    pub data: Option<serde_json::Value>,
+    pub owner_user_id: Option<&'a str>,
+    pub is_workspace_visible: bool,
+}
+
 // ─── write_sync_entry ────────────────────────────────────────────────────────
 
 /// Insert a row into `sync_log` and return the assigned `sync_id`.
@@ -108,20 +124,22 @@ fn normalise_timestamp(ts: &str) -> String {
 /// SQLite because the ID is assigned by the database (BIGSERIAL / AUTOINCREMENT).
 pub async fn write_sync_entry(
     db: &DbPool,
-    entity_type: &str,
-    entity_id: &str,
-    workspace_id: &str,
-    action: SyncActionType,
-    data: Option<serde_json::Value>,
+    params: SyncEntryParams<'_>,
 ) -> kyomi_core::Result<i64> {
     let is_pg = db.is_postgres();
     let now_expr = sql_compat::now(is_pg);
-    let action_str = action_type_to_str(&action);
+    let action_str = action_type_to_str(&params.action);
+    let visible_literal = if params.is_workspace_visible {
+        sql_compat::bool_true(is_pg)
+    } else {
+        sql_compat::bool_false(is_pg)
+    };
 
     // Serialise the data payload.
     // Postgres: stored as JSONB — pass the JSON string with ::jsonb cast.
     // SQLite:   stored as TEXT — pass the JSON string directly.
-    let data_str: Option<String> = data
+    let data_str: Option<String> = params
+        .data
         .as_ref()
         .map(serde_json::to_string)
         .transpose()
@@ -134,12 +152,13 @@ pub async fn write_sync_entry(
         let json_cast = sql_compat::cast_to_json(is_pg, "$5");
         let sql = format!(
             r#"
-            INSERT INTO sync_log (entity_type, entity_id, workspace_id, action, data, created_at)
-            VALUES ($1, $2, $3, $4, {json_cast}, {now_expr})
+            INSERT INTO sync_log (entity_type, entity_id, workspace_id, action, data,
+                                   owner_user_id, is_workspace_visible, created_at)
+            VALUES ($1, $2, $3, $4, {json_cast}, $6, {visible_literal}, {now_expr})
             RETURNING sync_id
             "#
         );
-        db_fetch_scalar!(db, i64, &sql, entity_type, entity_id, workspace_id, action_str, data_str)
+        db_fetch_scalar!(db, i64, &sql, params.entity_type, params.entity_id, params.workspace_id, action_str, data_str, params.owner_user_id)
             .map_err(|e| {
                 kyomi_core::Error::Internal(format!("failed to write sync entry: {e}"))
             })?
@@ -147,11 +166,12 @@ pub async fn write_sync_entry(
         // SQLite: INSERT then query last_insert_rowid().
         let sql = format!(
             r#"
-            INSERT INTO sync_log (entity_type, entity_id, workspace_id, action, data, created_at)
-            VALUES ($1, $2, $3, $4, $5, {now_expr})
+            INSERT INTO sync_log (entity_type, entity_id, workspace_id, action, data,
+                                   owner_user_id, is_workspace_visible, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, {visible_literal}, {now_expr})
             "#
         );
-        db_execute!(db, &sql, entity_type, entity_id, workspace_id, action_str, data_str)
+        db_execute!(db, &sql, params.entity_type, params.entity_id, params.workspace_id, action_str, data_str, params.owner_user_id)
             .map_err(|e| {
                 kyomi_core::Error::Internal(format!("failed to write sync entry: {e}"))
             })?;
@@ -165,9 +185,9 @@ pub async fn write_sync_entry(
 
     tracing::debug!(
         sync_id,
-        entity_type,
-        entity_id,
-        workspace_id,
+        entity_type = params.entity_type,
+        entity_id = params.entity_id,
+        workspace_id = params.workspace_id,
         action = action_str,
         "Wrote sync log entry"
     );
@@ -177,31 +197,41 @@ pub async fn write_sync_entry(
 
 // ─── get_entries_since ───────────────────────────────────────────────────────
 
-/// Fetch all sync entries with `sync_id > since_sync_id` for a workspace.
+/// Fetch all sync entries with `sync_id > since_sync_id` for a workspace,
+/// filtered by visibility: only workspace-visible entries or entries owned by
+/// the requesting user are returned.
 ///
 /// Results are ordered by `sync_id ASC` (oldest first) and capped by `limit`.
 pub async fn get_entries_since(
     db: &DbPool,
     workspace_id: &str,
     since_sync_id: i64,
+    user_id: &str,
     limit: i64,
 ) -> kyomi_core::Result<Vec<SyncAction>> {
     // On Postgres, JSONB columns are decoded as String by sqlx when the target
     // field type is `String`.  On SQLite the column is already TEXT.
-    let rows: Vec<SyncLogRow> = db_fetch_all!(
-        db,
-        SyncLogRow,
+    let is_pg = db.is_postgres();
+    let visible_literal = sql_compat::bool_true(is_pg);
+    let sql = format!(
         r#"
         SELECT sync_id, entity_type, entity_id, workspace_id, action,
                CAST(data AS TEXT) AS data,
                CAST(created_at AS TEXT) AS created_at
         FROM sync_log
         WHERE workspace_id = $1 AND sync_id > $2
+          AND (is_workspace_visible = {visible_literal} OR owner_user_id = $3)
         ORDER BY sync_id ASC
-        LIMIT $3
-        "#,
+        LIMIT $4
+        "#
+    );
+    let rows: Vec<SyncLogRow> = db_fetch_all!(
+        db,
+        SyncLogRow,
+        &sql,
         workspace_id,
         since_sync_id,
+        user_id,
         limit
     )
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to get sync entries: {e}")))?;

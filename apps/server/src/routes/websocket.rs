@@ -450,7 +450,7 @@ async fn handle_sync_delta(
 
     // 2. Fetch all entries since last_sync_id (capped at 10 000 rows).
     let entries =
-        kyomi_auth::sync_log_service::get_entries_since(db, workspace_id, last_sync_id, 10_000)
+        kyomi_auth::sync_log_service::get_entries_since(db, workspace_id, last_sync_id, user_id, 10_000)
             .await
             .unwrap_or_default();
 
