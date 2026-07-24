@@ -1733,6 +1733,7 @@ pub async fn prepare_chat_dispatch(
             crate::websocket::helpers::broadcast_chat_session_sync(
                 p.db, ws_manager, &new_sid, p.workspace_id,
                 kyomi_types::sync::SyncActionType::Insert,
+                p.user_id,
             )
             .await;
         }

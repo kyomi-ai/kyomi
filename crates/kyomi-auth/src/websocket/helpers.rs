@@ -863,22 +863,37 @@ pub async fn broadcast_watch_sync(
     send_sync_action(manager, workspace_id, &sync_action, None).await;
 }
 
-/// Broadcast a chat session mutation to all workspace members.
+/// Broadcast a chat session mutation to workspace members.
+///
+/// For shared sessions the sync action is broadcast to all workspace members.
+/// For private (unshared) sessions the action is sent only to the session
+/// owner, matching the visibility routing used by [`broadcast_dashboard_sync`].
 pub async fn broadcast_chat_session_sync(
     db: &kyomi_core::DbPool,
     manager: &WebSocketManager,
     session_id: &str,
     workspace_id: &str,
     action: kyomi_types::sync::SyncActionType,
+    user_id: &str,
 ) {
     use kyomi_types::sync::{SyncAction, SyncActionType, entity_types};
 
-    let data = if matches!(action, SyncActionType::Delete) {
-        None
+    let (data, is_shared) = if matches!(action, SyncActionType::Delete) {
+        (None, false)
     } else {
-        crate::chat_service::fetch_session_snapshot(db, session_id)
+        let result = crate::chat_service::fetch_session_snapshot(db, session_id)
             .await
-            .map(|(_ws_id, snapshot)| snapshot)
+            .map(|(_ws_id, snapshot)| {
+                let shared = snapshot
+                    .get("shared")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                (Some(snapshot), shared)
+            });
+        match result {
+            Some((data, shared)) => (data, shared),
+            None => return,
+        }
     };
 
     let sync_action = SyncAction {
@@ -890,7 +905,60 @@ pub async fn broadcast_chat_session_sync(
         data,
         timestamp: chrono::Utc::now().to_rfc3339(),
     };
-    send_sync_action(manager, workspace_id, &sync_action, None).await;
+
+    if is_shared {
+        send_sync_action(manager, workspace_id, &sync_action, None).await;
+    } else {
+        let msg = WebSocketMessage::new(MessageType::SyncAction)
+            .with_data(serde_json::to_value(&sync_action).unwrap_or_default());
+        manager.send_to_user(user_id, msg).await;
+    }
+}
+
+/// Broadcast the unshare (privatization) of a chat session.
+///
+/// Sends a `Delete` sync action to all workspace members except the owner
+/// (so non-owners remove it from their cache) and an `Update` with the
+/// latest snapshot to the owner (so they keep it with updated visibility).
+pub async fn broadcast_chat_session_unshare(
+    db: &kyomi_core::DbPool,
+    manager: &WebSocketManager,
+    session_id: &str,
+    workspace_id: &str,
+    owner_user_id: &str,
+) {
+    use kyomi_types::sync::{SyncAction, SyncActionType, entity_types};
+
+    let delete_action = SyncAction {
+        sync_id: 0,
+        entity_type: entity_types::CHAT_SESSION.to_string(),
+        entity_id: session_id.to_string(),
+        workspace_id: workspace_id.to_string(),
+        action: SyncActionType::Delete,
+        data: None,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    };
+
+    // Send delete to all except owner so non-owners remove the session.
+    send_sync_action(manager, workspace_id, &delete_action, Some(owner_user_id)).await;
+
+    // Send update to owner with latest snapshot so they keep it.
+    if let Some((_ws, snapshot)) =
+        crate::chat_service::fetch_session_snapshot(db, session_id).await
+    {
+        let update_action = SyncAction {
+            sync_id: 0,
+            entity_type: entity_types::CHAT_SESSION.to_string(),
+            entity_id: session_id.to_string(),
+            workspace_id: workspace_id.to_string(),
+            action: SyncActionType::Update,
+            data: Some(snapshot),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        };
+        let msg = WebSocketMessage::new(MessageType::SyncAction)
+            .with_data(serde_json::to_value(&update_action).unwrap_or_default());
+        manager.send_to_user(owner_user_id, msg).await;
+    }
 }
 
 /// Broadcast an entity deletion to all workspace members.

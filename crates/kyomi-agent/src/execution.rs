@@ -804,6 +804,7 @@ async fn generate_title_inner(
         session_id,
         workspace_id,
         kyomi_types::sync::SyncActionType::Update,
+        user_id,
     )
     .await;
 

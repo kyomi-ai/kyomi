@@ -843,6 +843,15 @@ pub async fn share_session(session_id: String) -> Result<(), ServerFnError> {
         "Session shared"
     );
 
+    if let Some(ws_manager) = &ctx.ws_manager {
+        let ws_id = super::workspace_id(&auth)?;
+        kyomi_auth::websocket::helpers::broadcast_chat_session_sync(
+            &ctx.db, ws_manager, &session_id, ws_id,
+            kyomi_types::sync::SyncActionType::Update,
+            &auth.user_id,
+        ).await;
+    }
+
     Ok(())
 }
 
@@ -909,6 +918,13 @@ pub async fn unshare_session(session_id: String) -> Result<(), ServerFnError> {
         user_id = %auth.user_id,
         "Session unshared"
     );
+
+    if let Some(ws_manager) = &ctx.ws_manager {
+        let ws_id = super::workspace_id(&auth)?;
+        kyomi_auth::websocket::helpers::broadcast_chat_session_unshare(
+            &ctx.db, ws_manager, &session_id, ws_id, &auth.user_id,
+        ).await;
+    }
 
     Ok(())
 }
