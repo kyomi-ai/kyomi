@@ -364,7 +364,7 @@ async fn handle_sync_bootstrap(
             tracing::warn!(user_id, workspace_id, error = %e, "list_sessions_for_sync failed");
             vec![]
         });
-    let watches = kyomi_auth::watch_service::list_watches_for_sync(db, workspace_id)
+    let watches = kyomi_auth::watch_service::list_watches_for_sync(db, workspace_id, user_id)
         .await
         .unwrap_or_else(|e| {
             tracing::warn!(user_id, workspace_id, error = %e, "list_watches_for_sync failed");

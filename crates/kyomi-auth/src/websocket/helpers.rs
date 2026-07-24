@@ -827,17 +827,23 @@ pub async fn broadcast_dashboard_sync(
     }
 }
 
-/// Broadcast a watch mutation to all workspace members.
+/// Broadcast a watch mutation to its owner only.
 ///
 /// Fetches the watch from the database and serializes the full model so the
 /// client sync engine can deserialize it as `WatchListItem`. For delete
 /// actions the snapshot is skipped.
+///
+/// Watches and their alert history have no sharing model — they are strictly
+/// private to their creator — so unlike [`broadcast_dashboard_sync`] there is
+/// no public/private branch: this always routes to `owner_user_id` via
+/// `send_to_user`, never a workspace-wide broadcast.
 pub async fn broadcast_watch_sync(
     db: &kyomi_core::DbPool,
     manager: &WebSocketManager,
     watch_id: &str,
     workspace_id: &str,
     action: kyomi_types::sync::SyncActionType,
+    owner_user_id: &str,
 ) {
     use kyomi_types::sync::{SyncAction, SyncActionType, entity_types};
 
@@ -860,7 +866,10 @@ pub async fn broadcast_watch_sync(
         data,
         timestamp: chrono::Utc::now().to_rfc3339(),
     };
-    send_sync_action(manager, workspace_id, &sync_action, None).await;
+
+    let msg = WebSocketMessage::new(MessageType::SyncAction)
+        .with_data(serde_json::to_value(&sync_action).unwrap_or_default());
+    manager.send_to_user(owner_user_id, msg).await;
 }
 
 /// Broadcast a chat session mutation to workspace members.

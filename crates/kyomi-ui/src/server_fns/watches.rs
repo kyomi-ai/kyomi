@@ -243,7 +243,7 @@ pub async fn create_watch(config: WatchConfig) -> Result<WatchListItem, ServerFn
     if let Some(ws_manager) = &ac.ctx.ws_manager {
         kyomi_auth::websocket::helpers::broadcast_watch_sync(
             ac.db(), ws_manager, &watch.watch_id, &ac.ws_id,
-            kyomi_types::sync::SyncActionType::Insert,
+            kyomi_types::sync::SyncActionType::Insert, &watch.created_by,
         ).await;
     }
 
@@ -337,11 +337,22 @@ pub async fn update_watch(
         return Err(ServerFnError::new("No updates provided"));
     }
 
-    if has_updates {
-        kyomi_auth::watch_service::update_watch(ac.db(), &watch_id, &ac.ws_id, &updates)
+    // Track the owner so the live-sync broadcast below can route privately —
+    // watches have no sharing model, so this always goes to `created_by`.
+    let created_by = if has_updates {
+        let updated = kyomi_auth::watch_service::update_watch(ac.db(), &watch_id, &ac.ws_id, &updates)
             .await
             .into_sfn()?;
-    }
+        updated.created_by
+    } else {
+        // Slack-only update path — no field update call was made, so fetch
+        // the current watch to learn its owner.
+        kyomi_auth::watch_service::get_watch(ac.db(), &watch_id, &ac.ws_id)
+            .await
+            .into_sfn()?
+            .ok_or_else(|| ServerFnError::new("Watch not found"))?
+            .created_by
+    };
 
     // Update the Slack alert channel if provided
     if let Some(ref channel_id) = slack_channel_id {
@@ -371,7 +382,7 @@ pub async fn update_watch(
     if let Some(ws_manager) = &ac.ctx.ws_manager {
         kyomi_auth::websocket::helpers::broadcast_watch_sync(
             ac.db(), ws_manager, &watch_id, &ac.ws_id,
-            kyomi_types::sync::SyncActionType::Update,
+            kyomi_types::sync::SyncActionType::Update, &created_by,
         ).await;
     }
 
@@ -385,14 +396,14 @@ pub async fn update_watch(
 pub async fn delete_watch(watch_id: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    kyomi_auth::watch_service::delete_watch(ac.db(), &watch_id, &ac.ws_id)
+    let created_by = kyomi_auth::watch_service::delete_watch(ac.db(), &watch_id, &ac.ws_id)
         .await
         .into_sfn()?;
 
     if let Some(ws_manager) = &ac.ctx.ws_manager {
-        kyomi_auth::websocket::helpers::broadcast_entity_delete(
-            ws_manager, kyomi_types::sync::entity_types::WATCH,
-            &watch_id, &ac.ws_id,
+        kyomi_auth::websocket::helpers::broadcast_watch_sync(
+            ac.db(), ws_manager, &watch_id, &ac.ws_id,
+            kyomi_types::sync::SyncActionType::Delete, &created_by,
         ).await;
     }
 
@@ -418,7 +429,7 @@ pub async fn toggle_watch(watch_id: String) -> Result<(), ServerFnError> {
     if let Some(ws_manager) = &ac.ctx.ws_manager {
         kyomi_auth::websocket::helpers::broadcast_watch_sync(
             ac.db(), ws_manager, &watch_id, &ac.ws_id,
-            kyomi_types::sync::SyncActionType::Update,
+            kyomi_types::sync::SyncActionType::Update, &watch.created_by,
         ).await;
     }
 
@@ -565,6 +576,7 @@ pub async fn get_alerts(
         limit,
         offset,
         include_deleted,
+        &ac.auth.user_id,
     )
     .await
     .into_sfn()?;
@@ -582,7 +594,7 @@ pub async fn get_alerts(
 pub async fn get_unread_alerts_count() -> Result<i64, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    kyomi_auth::watch_service::get_unread_alerts_count(ac.db(), &ac.ws_id)
+    kyomi_auth::watch_service::get_unread_alerts_count(ac.db(), &ac.ws_id, &ac.auth.user_id)
         .await
         .into_sfn()
 }

@@ -772,7 +772,7 @@ impl AgentTool for DeleteWatchTool {
         )
         .await
         {
-            Ok(()) => {
+            Ok(_created_by) => {
                 // Broadcast watch deletion to workspace members.
                 // Broadcast to all workspace members including the actor's other tabs —
                 // same-user multi-tab sync requires this. QueryCache is stale-while-
