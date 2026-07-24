@@ -1963,6 +1963,7 @@ struct ExistsRow {
 pub async fn list_sessions_for_sync(
     db: &kyomi_core::DbPool,
     workspace_id: &str,
+    user_id: &str,
 ) -> kyomi_core::Result<Vec<serde_json::Value>> {
     #[derive(sqlx::FromRow)]
     struct SessionSyncRow {
@@ -1981,6 +1982,7 @@ pub async fn list_sessions_for_sync(
 
     let is_pg = db.is_postgres();
     let bf = kyomi_core::sql_compat::bool_false(is_pg);
+    let bt = kyomi_core::sql_compat::bool_true(is_pg);
     let sql = format!(
         r#"SELECT cs.session_id, cs.user_id, cs.title,
                   cs.model, cs.session_type,
@@ -1992,11 +1994,12 @@ pub async fn list_sessions_for_sync(
            FROM chat_sessions cs
            LEFT JOIN users u ON cs.user_id = u.user_id
            WHERE cs.workspace_id = $1 AND cs.session_type = 'chat'
+             AND (cs.user_id = $2 OR cs.shared = {bt})
            ORDER BY cs.updated_at DESC"#
     );
 
     let rows: Vec<SessionSyncRow> =
-        kyomi_core::db_fetch_all!(db, SessionSyncRow, &sql, workspace_id).map_err(|e| {
+        kyomi_core::db_fetch_all!(db, SessionSyncRow, &sql, workspace_id, user_id).map_err(|e| {
             kyomi_core::Error::Internal(format!("failed to list sessions for sync: {e}"))
         })?;
 

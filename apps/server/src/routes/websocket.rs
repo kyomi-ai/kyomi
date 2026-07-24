@@ -358,7 +358,7 @@ async fn handle_sync_bootstrap(
                 tracing::warn!(user_id, workspace_id, error = %e, "list_knowledge_for_sync failed");
                 vec![]
             });
-    let sessions = kyomi_auth::chat_service::list_sessions_for_sync(db, workspace_id)
+    let sessions = kyomi_auth::chat_service::list_sessions_for_sync(db, workspace_id, user_id)
         .await
         .unwrap_or_else(|e| {
             tracing::warn!(user_id, workspace_id, error = %e, "list_sessions_for_sync failed");
