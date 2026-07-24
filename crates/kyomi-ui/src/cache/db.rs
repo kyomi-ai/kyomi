@@ -63,7 +63,7 @@ const DB_VERSION: u8 = 3;
 ///
 /// Bump this when: fields added/removed from list item structs, server-side
 /// sync queries change shape, entity types added/removed from bootstrap.
-pub const SCHEMA_HASH: &str = "2026-07-24-v5-sync-log-visibility";
+pub const SCHEMA_HASH: &str = "2026-07-24-v6-chat-bootstrap-filter";
 
 /// Handle to the open IndexedDB database.
 ///
