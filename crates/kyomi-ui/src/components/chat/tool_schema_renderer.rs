@@ -1723,7 +1723,7 @@ fn render_search_watches(schema: &Value) -> impl IntoView {
                     }.into_any()
                 } else {
                     let count = watches.len();
-                    let total = output.and_then(|o| u64_field(o, "total_workspace_watches"));
+                    let total = output.and_then(|o| u64_field(o, "total_watches"));
 
                     view! {
                         <div class="bg-success p-2 rounded border border-success-border text-xs space-y-2">
@@ -1731,7 +1731,7 @@ fn render_search_watches(schema: &Value) -> impl IntoView {
                                 {format!("Found {} watch{}", count, if count != 1 { "es" } else { "" })}
                             </div>
                             {total.map(|t| view! {
-                                <div class="text-muted-foreground text-xs">{format!("Total watches in workspace: {}", t)}</div>
+                                <div class="text-muted-foreground text-xs">{format!("Total watches: {}", t)}</div>
                             })}
                             <div class="space-y-2 mt-2 max-h-60 overflow-y-auto">
                                 {watches.iter().map(|w| {
