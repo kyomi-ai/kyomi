@@ -262,8 +262,16 @@ pub fn generate_change_summary(old_content: &str, new_content: &str) -> String {
 
 /// Fetch a dashboard/knowledge row and build a JSON snapshot for the sync log.
 ///
-/// Returns `None` if the row no longer exists or if the query fails.
-pub(crate) async fn fetch_dashboard_snapshot(db: &DbPool, dashboard_id: &str, user_id: &str) -> Option<serde_json::Value> {
+/// Returns `Ok(None)` if the row genuinely doesn't exist (or isn't visible to
+/// `user_id`) and `Err` if the query itself failed. Callers must not collapse
+/// these into the same case — a DB error is not the same fact as "not found",
+/// and treating them identically is what let `broadcast_dashboard_sync` emit
+/// a null-payload Upsert on a transient DB failure (KYO-245).
+pub(crate) async fn fetch_dashboard_snapshot(
+    db: &DbPool,
+    dashboard_id: &str,
+    user_id: &str,
+) -> Result<Option<serde_json::Value>> {
     #[derive(sqlx::FromRow)]
     struct SnapshotRow {
         dashboard_id: String,
@@ -310,16 +318,30 @@ pub(crate) async fn fetch_dashboard_snapshot(db: &DbPool, dashboard_id: &str, us
         recent_cutoff,
         user_id
     )
-    .ok()?;
+    .map_err(|e| {
+        tracing::error!(
+            dashboard_id,
+            error = %e,
+            "fetch_dashboard_snapshot: query failed"
+        );
+        kyomi_core::Error::from(e)
+    })?;
 
-    let row = row?;
+    let Some(row) = row else {
+        tracing::warn!(
+            dashboard_id,
+            "fetch_dashboard_snapshot: dashboard not found or not visible to user"
+        );
+        return Ok(None);
+    };
+
     let summary = extract_summary(&row.content);
     let content_preview = if row.content.is_empty() {
         None
     } else {
         Some(row.content.chars().take(200).collect::<String>())
     };
-    Some(serde_json::json!({
+    Ok(Some(serde_json::json!({
         "dashboard_id": row.dashboard_id,
         "user_id": row.user_id,
         "workspace_id": row.workspace_id,
@@ -333,7 +355,7 @@ pub(crate) async fn fetch_dashboard_snapshot(db: &DbPool, dashboard_id: &str, us
         "created_at": row.created_at,
         "view_count": row.view_count,
         "recent_views": row.recent_views,
-    }))
+    })))
 }
 
 // ─── Create dashboard ────────────────────────────────────────────────────────
@@ -404,30 +426,52 @@ pub async fn create_dashboard(
 
     tracing::info!(dashboard_id = %dashboard_id, doc_type = doc_type_str, "Created dashboard");
 
-    // Sync log — best-effort: log a warning and continue on failure.
+    // Sync log — best-effort: log a warning and continue on failure. Never
+    // write an Insert-type row with `data: None` (KYO-245, mirroring the
+    // live-broadcast fix): if the snapshot can't be fetched right after the
+    // row was created, skip the write entirely rather than persist a
+    // null-payload row — a missing sync_log entry means "not converged
+    // yet", recoverable on the next mutation or a full bootstrap, whereas a
+    // null-payload Insert row would replay to every future delta consumer.
     {
         let entity_type = if doc_type.is_dashboard() {
             entity_types::DASHBOARD
         } else {
             entity_types::KNOWLEDGE
         };
-        let snapshot = fetch_dashboard_snapshot(db, &dashboard_id, user_id).await;
-        let is_visible = is_doc_publicly_visible(db, &dashboard_id).await;
-        if let Err(e) = sync_log_service::write_sync_entry(
-            db,
-            sync_log_service::SyncEntryParams {
-                entity_type,
-                entity_id: &dashboard_id,
-                workspace_id,
-                action: SyncActionType::Insert,
-                data: snapshot,
-                owner_user_id: Some(user_id),
-                is_workspace_visible: is_visible,
-            },
-        )
-        .await
-        {
-            tracing::warn!(error = %e, dashboard_id = %dashboard_id, "Failed to write sync log entry");
+        match fetch_dashboard_snapshot(db, &dashboard_id, user_id).await {
+            Ok(Some(snapshot)) => {
+                let is_visible = is_doc_publicly_visible(db, &dashboard_id).await;
+                if let Err(e) = sync_log_service::write_sync_entry(
+                    db,
+                    sync_log_service::SyncEntryParams {
+                        entity_type,
+                        entity_id: &dashboard_id,
+                        workspace_id,
+                        action: SyncActionType::Insert,
+                        data: Some(snapshot),
+                        owner_user_id: Some(user_id),
+                        is_workspace_visible: is_visible,
+                    },
+                )
+                .await
+                {
+                    tracing::warn!(error = %e, dashboard_id = %dashboard_id, "Failed to write sync log entry");
+                }
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    dashboard_id = %dashboard_id,
+                    "sync log: snapshot unavailable immediately after create; skipping write"
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    dashboard_id = %dashboard_id,
+                    error = %e,
+                    "sync log: failed to fetch snapshot after create; skipping write"
+                );
+            }
         }
     }
 
@@ -680,30 +724,50 @@ pub async fn update_dashboard(
         }
     }
 
-    // Sync log — best-effort: log a warning and continue on failure.
+    // Sync log — best-effort: log a warning and continue on failure. Never
+    // write an Update-type row with `data: None` (KYO-245, mirroring the
+    // live-broadcast fix): if the snapshot can't be fetched right after the
+    // update lands, skip the write entirely rather than persist a
+    // null-payload row — see the matching comment in `create_dashboard`.
     if rows_affected > 0 {
         let entity_type = if current_doc_type.is_dashboard() {
             entity_types::DASHBOARD
         } else {
             entity_types::KNOWLEDGE
         };
-        let snapshot = fetch_dashboard_snapshot(db, dashboard_id, user_id).await;
-        let is_visible = is_doc_publicly_visible(db, dashboard_id).await;
-        if let Err(e) = sync_log_service::write_sync_entry(
-            db,
-            sync_log_service::SyncEntryParams {
-                entity_type,
-                entity_id: dashboard_id,
-                workspace_id,
-                action: SyncActionType::Update,
-                data: snapshot,
-                owner_user_id: Some(user_id),
-                is_workspace_visible: is_visible,
-            },
-        )
-        .await
-        {
-            tracing::warn!(error = %e, dashboard_id = %dashboard_id, "Failed to write sync log entry");
+        match fetch_dashboard_snapshot(db, dashboard_id, user_id).await {
+            Ok(Some(snapshot)) => {
+                let is_visible = is_doc_publicly_visible(db, dashboard_id).await;
+                if let Err(e) = sync_log_service::write_sync_entry(
+                    db,
+                    sync_log_service::SyncEntryParams {
+                        entity_type,
+                        entity_id: dashboard_id,
+                        workspace_id,
+                        action: SyncActionType::Update,
+                        data: Some(snapshot),
+                        owner_user_id: Some(user_id),
+                        is_workspace_visible: is_visible,
+                    },
+                )
+                .await
+                {
+                    tracing::warn!(error = %e, dashboard_id = %dashboard_id, "Failed to write sync log entry");
+                }
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    dashboard_id = %dashboard_id,
+                    "sync log: snapshot unavailable immediately after update; skipping write"
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    dashboard_id = %dashboard_id,
+                    error = %e,
+                    "sync log: failed to fetch snapshot after update; skipping write"
+                );
+            }
         }
     }
 

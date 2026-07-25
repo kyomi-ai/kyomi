@@ -426,18 +426,31 @@ async fn write_visibility_sync_log(
     now_public: bool,
 ) {
     // Never write an Update/Insert-type row with `data: None` — same
-    // discipline as the live broadcast (KYO-218). If the snapshot can't be
-    // fetched, skip the write entirely: a missing sync_log entry means
-    // "not converged yet" (recoverable on the next mutation or a full
-    // bootstrap), which is the only safe failure mode here.
-    let Some(snapshot) =
-        dashboard_service::fetch_dashboard_snapshot(db, dashboard_id, owner_user_id).await
-    else {
-        tracing::warn!(
-            dashboard_id,
-            "visibility sync log: snapshot unavailable; skipping write"
-        );
-        return;
+    // discipline as the live broadcast (KYO-218/KYO-245). If the snapshot
+    // can't be fetched, skip the write entirely: a missing sync_log entry
+    // means "not converged yet" (recoverable on the next mutation or a full
+    // bootstrap), which is the only safe failure mode here. A DB error and
+    // a genuinely-missing row are distinguished in logs via
+    // `fetch_dashboard_snapshot`'s `Result` (KYO-245).
+    let snapshot = match dashboard_service::fetch_dashboard_snapshot(db, dashboard_id, owner_user_id)
+        .await
+    {
+        Ok(Some(snapshot)) => snapshot,
+        Ok(None) => {
+            tracing::warn!(
+                dashboard_id,
+                "visibility sync log: snapshot unavailable; skipping write"
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::error!(
+                dashboard_id,
+                error = %e,
+                "visibility sync log: fetch failed; skipping write"
+            );
+            return;
+        }
     };
 
     let update_entry = sync_log_service::SyncEntryParams {
@@ -1578,6 +1591,236 @@ mod tests {
         assert!(
             owner_entries[0].sync_id < owner_entries[1].sync_id,
             "Delete must be applied before Update, or the owner ends up evicted too"
+        );
+    }
+
+    // ─── Live broadcast — content sync (KYO-245) ─────────────────────────────
+    //
+    // `websocket::helpers::broadcast_dashboard_sync` (a content edit, not a
+    // visibility transition — see the KYO-238 tests above for that) had the
+    // same defect KYO-218 fixed for watches: a DB error and a genuinely
+    // absent dashboard both collapsed to `data: None` in `Insert`/`Update`
+    // sync actions, which is the wire protocol's `Delete` signal. Unlike the
+    // watch case this fans out workspace-wide for public docs, and its
+    // `entity_type` fallback meant a knowledge doc could be broadcast
+    // mislabeled `dashboard` on the same failure path.
+
+    async fn create_test_knowledge_doc(
+        db: &DbPool,
+        owner: &str,
+        workspace_id: &str,
+        title: &str,
+    ) -> String {
+        dashboard_service::create_dashboard(
+            db,
+            owner,
+            workspace_id,
+            title,
+            "# knowledge content",
+            kyomi_core::models::DocType::Knowledge,
+            None,
+        )
+        .await
+        .expect("create knowledge doc")
+    }
+
+    /// KYO-245 regression guard: an Upsert broadcast for a dashboard that
+    /// exists must carry the full payload — `data` must be non-null and
+    /// `entity_type` must be resolved from the real snapshot.
+    #[tokio::test]
+    async fn broadcast_dashboard_sync_upsert_includes_full_payload() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        seed_two_users_one_workspace(sq).await;
+
+        let dashboard_id = create_test_dashboard(&db, "user-a", "ws-1", "A's Dashboard").await;
+
+        let manager = crate::websocket::WebSocketManager::new(None, db.clone());
+        let (_conn_a, mut rx_a) = manager.connect("user-a").expect("connect user-a");
+        rx_a.try_recv().expect("heartbeat for user-a");
+
+        crate::websocket::helpers::broadcast_dashboard_sync(
+            &db,
+            &manager,
+            &dashboard_id,
+            "ws-1",
+            SyncActionType::Insert,
+            "user-a",
+        )
+        .await;
+
+        let msg: serde_json::Value = serde_json::from_str(
+            &rx_a
+                .try_recv()
+                .expect("owner should receive the sync_action broadcast"),
+        )
+        .expect("valid JSON");
+        assert_eq!(msg["data"]["action"], "insert");
+        assert_eq!(msg["data"]["entity_type"], entity_types::DASHBOARD);
+        assert!(
+            !msg["data"]["data"].is_null(),
+            "Upsert broadcast for an existing dashboard must not have a null payload: {msg}"
+        );
+    }
+
+    /// KYO-245 regression guard: an Upsert broadcast for a dashboard that
+    /// does NOT exist (deleted between the mutation and the broadcast, or a
+    /// bad ID) must send no message at all rather than an Upsert with
+    /// `data: None` — a payload-less Upsert is wire-indistinguishable from a
+    /// Delete, and this broadcast fans out to the whole workspace for
+    /// public docs.
+    ///
+    /// This is the load-bearing test: against the pre-fix code, the missing
+    /// snapshot still produced a broadcast (with `data: null`), so this
+    /// assertion fails without the fix.
+    #[tokio::test]
+    async fn broadcast_dashboard_sync_upsert_for_missing_dashboard_sends_nothing() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        seed_two_users_one_workspace(sq).await;
+
+        let manager = crate::websocket::WebSocketManager::new(None, db.clone());
+        let (_conn_a, mut rx_a) = manager.connect("user-a").expect("connect user-a");
+        rx_a.try_recv().expect("heartbeat for user-a");
+
+        crate::websocket::helpers::broadcast_dashboard_sync(
+            &db,
+            &manager,
+            "dashboard-does-not-exist",
+            "ws-1",
+            SyncActionType::Insert,
+            "user-a",
+        )
+        .await;
+
+        let result_a = rx_a.try_recv();
+        assert!(
+            result_a.is_err(),
+            "no message should be sent for an Upsert of a nonexistent dashboard, got: {result_a:?}"
+        );
+    }
+
+    /// Regression guard for the fix itself: a Delete broadcast must still
+    /// carry `data: None`. The fix must only suppress the broadcast for
+    /// non-Delete actions when the fetch fails or the row is missing — it
+    /// must not touch the Delete branch.
+    #[tokio::test]
+    async fn broadcast_dashboard_sync_delete_still_sends_null_payload() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        seed_two_users_one_workspace(sq).await;
+
+        let dashboard_id =
+            create_test_dashboard(&db, "user-a", "ws-1", "A's Dashboard To Delete").await;
+
+        let manager = crate::websocket::WebSocketManager::new(None, db.clone());
+        let (_conn_a, mut rx_a) = manager.connect("user-a").expect("connect user-a");
+        rx_a.try_recv().expect("heartbeat for user-a");
+
+        crate::websocket::helpers::broadcast_dashboard_sync(
+            &db,
+            &manager,
+            &dashboard_id,
+            "ws-1",
+            SyncActionType::Delete,
+            "user-a",
+        )
+        .await;
+
+        let msg: serde_json::Value = serde_json::from_str(
+            &rx_a
+                .try_recv()
+                .expect("owner should receive the Delete sync_action broadcast"),
+        )
+        .expect("valid JSON");
+        assert_eq!(msg["data"]["action"], "delete");
+        assert_eq!(
+            msg["data"]["data"],
+            serde_json::Value::Null,
+            "Delete broadcasts must still carry data: None: {msg}"
+        );
+    }
+
+    /// KYO-245's misrouting-specific guard: if a knowledge doc's row
+    /// disappears between the mutation and the broadcast (simulating the
+    /// same "unavailable snapshot" condition as the DB-error path, since
+    /// neither is distinguishable from the fetch's caller side), the
+    /// broadcast must be suppressed entirely — never sent with a
+    /// defaulted `entity_type: dashboard`, which would misroute a
+    /// knowledge doc to the dashboard cache store on every connected
+    /// client.
+    ///
+    /// This is the load-bearing test for the misrouting defect: against
+    /// the pre-fix code, this still sent a message with
+    /// `entity_type: "dashboard"` for what was a knowledge document.
+    #[tokio::test]
+    async fn broadcast_dashboard_sync_missing_knowledge_doc_is_never_mislabeled_dashboard() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        seed_two_users_one_workspace(sq).await;
+
+        let doc_id = create_test_knowledge_doc(&db, "user-a", "ws-1", "A's Knowledge Doc").await;
+
+        // Simulate the row disappearing out from under the broadcast (a
+        // concurrent delete, or the same "unavailable" condition a DB error
+        // would produce) — fetch_dashboard_snapshot can't tell these apart
+        // from its caller's side, which is exactly the bug this ticket
+        // fixes.
+        sqlx::query("DELETE FROM dashboards WHERE dashboard_id = $1")
+            .bind(&doc_id)
+            .execute(sq)
+            .await
+            .expect("simulate concurrent delete of the knowledge doc row");
+
+        let manager = crate::websocket::WebSocketManager::new(None, db.clone());
+        let (_conn_a, mut rx_a) = manager.connect("user-a").expect("connect user-a");
+        rx_a.try_recv().expect("heartbeat for user-a");
+
+        crate::websocket::helpers::broadcast_dashboard_sync(
+            &db,
+            &manager,
+            &doc_id,
+            "ws-1",
+            SyncActionType::Insert,
+            "user-a",
+        )
+        .await;
+
+        let result_a = rx_a.try_recv();
+        assert!(
+            result_a.is_err(),
+            "no message — let alone one mislabeled entity_type: dashboard — should be sent for \
+             a knowledge doc whose snapshot is unavailable, got: {result_a:?}"
+        );
+    }
+
+    /// KYO-245: `create_dashboard`'s `write_sync_entry` call must produce a
+    /// `sync_log` row with a non-null `data` payload when the snapshot
+    /// fetches without error — locking in the persisted-log half of the fix
+    /// (the live-broadcast half is covered by the tests above). The
+    /// durable path is where a null-payload row is worse than the live one:
+    /// it replays to every future delta consumer instead of failing once.
+    #[tokio::test]
+    async fn create_dashboard_sync_log_entry_has_non_null_data() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        seed_two_users_one_workspace(sq).await;
+
+        let dashboard_id =
+            create_test_dashboard(&db, "user-a", "ws-1", "A's Sync Log Dashboard").await;
+
+        let entries = sync_log_service::get_entries_since(&db, "ws-1", 0, "user-a", 50)
+            .await
+            .expect("get_entries_since");
+
+        let entry = entries
+            .iter()
+            .find(|e| e.entity_id == dashboard_id)
+            .expect("sync_log should contain an entry for the created dashboard");
+
+        assert!(
+            entry.data.is_some(),
+            "sync_log row for a dashboard that fetched successfully must have non-null data: {entry:?}"
         );
     }
 }
