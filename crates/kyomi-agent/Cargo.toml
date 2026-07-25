@@ -52,6 +52,7 @@ kyomi-chart-theme = { workspace = true }
 [dev-dependencies]
 kyomi-core = { workspace = true, features = ["test-helpers"] }
 kyomi-connect-protocol = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true
