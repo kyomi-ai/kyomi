@@ -94,7 +94,9 @@ impl MCPSessionManager {
         }
         // Best-effort TTL on the workspace set: 2× session TTL so expired
         // session IDs don't accumulate indefinitely.
-        self.kv.expire(&ws_key, SESSION_TTL_SECS * 2).await.ok();
+        if let Err(e) = self.kv.expire(&ws_key, SESSION_TTL_SECS * 2).await {
+            tracing::debug!(workspace_id, error = %e, "Failed to set TTL on workspace session set");
+        }
 
         tracing::info!(
             workspace_id,
@@ -105,12 +107,33 @@ impl MCPSessionManager {
         session_id
     }
 
-    /// Validate a session ID. Returns the workspace_id if valid, None if unknown/expired.
+    /// Validate a session ID. Returns the workspace_id if the session exists
+    /// and its stored data parses cleanly. Returns `None` if the session is
+    /// unknown or expired — but also, indistinguishably to the caller, if the
+    /// KV store read failed or the stored payload was malformed. Both of
+    /// those failure cases are logged at `error!` (never the session
+    /// payload — it is auth material) so an outage or a bad deploy is
+    /// distinguishable from a genuine expiry in the logs, even though the
+    /// return value alone can't tell them apart.
     pub async fn validate_session(&self, session_id: &str) -> Option<String> {
-        let value: Option<String> = self.kv.get(&session_key(session_id)).await.ok()?;
+        let value: Option<String> = self
+            .kv
+            .get(&session_key(session_id))
+            .await
+            .map_err(|e| {
+                tracing::error!(session_id, error = %e, "Failed to read MCP session from KV store");
+            })
+            .ok()?;
 
         value.and_then(|json| {
             serde_json::from_str::<SessionData>(&json)
+                .map_err(|e| {
+                    tracing::error!(
+                        session_id,
+                        error = %e,
+                        "MCP session data is malformed (not merely absent) — treating as invalid"
+                    );
+                })
                 .ok()
                 .map(|d| d.workspace_id)
         })
@@ -123,10 +146,24 @@ impl MCPSessionManager {
             .kv
             .get(&session_key(session_id))
             .await
+            .map_err(|e| {
+                tracing::warn!(
+                    session_id,
+                    error = %e,
+                    "Failed to read MCP session from KV store during removal"
+                );
+            })
             .ok()
             .and_then(|json: Option<String>| {
                 json.and_then(|j| {
                     serde_json::from_str::<SessionData>(&j)
+                        .map_err(|e| {
+                            tracing::warn!(
+                                session_id,
+                                error = %e,
+                                "MCP session data is malformed during removal"
+                            );
+                        })
                         .ok()
                         .map(|d| d.workspace_id)
                 })
@@ -289,7 +326,106 @@ impl MCPSessionManager {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+    use std::sync::{Arc, Mutex};
+
+    use kyomi_core::kv_store::KVStore;
+    use tracing::Level;
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+    use tracing_subscriber::{Layer, Registry};
+
     use super::*;
+
+    /// Shared sink that a `CaptureLayer` writes tracing events into.
+    type EventLog = Arc<Mutex<Vec<(Level, String)>>>;
+
+    /// Minimal `tracing_subscriber::Layer` that records every event's level
+    /// and rendered fields, so tests can assert on log output without a real
+    /// subscriber (fmt/json) formatting to stdout.
+    ///
+    /// Duplicated from `apps/server/src/routes/auth_passkeys.rs` — see
+    /// `kyomi-auth/Cargo.toml`: pulling in `kyomi-test-harness` here would
+    /// drag `kyomi-server`/`axum`/`sqlx` into this crate's test build since
+    /// the harness depends on `kyomi-auth`. A follow-up ticket tracks
+    /// extracting a shared test-only helper crate.
+    struct CaptureLayer(EventLog);
+
+    impl<S: tracing::Subscriber> Layer<S> for CaptureLayer {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            struct FieldVisitor(String);
+            impl tracing::field::Visit for FieldVisitor {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "message" {
+                        let _ = write!(self.0, "{value:?}");
+                    } else {
+                        let _ = write!(self.0, " {}={value:?}", field.name());
+                    }
+                }
+            }
+
+            let mut visitor = FieldVisitor(String::new());
+            event.record(&mut visitor);
+            self.0
+                .lock()
+                .expect("capture lock poisoned")
+                .push((*event.metadata().level(), visitor.0));
+        }
+    }
+
+    /// Minimal `KVStore` whose `get` always fails, to exercise the KV-outage
+    /// path in `validate_session`. No other method is reachable through that
+    /// path, so they panic if called — a test that somehow hits them should
+    /// fail loudly rather than silently succeed against unintended behaviour.
+    struct FailingKVStore;
+
+    #[async_trait::async_trait]
+    impl KVStore for FailingKVStore {
+        async fn set(&self, _key: &str, _value: &str, _ttl_secs: Option<u64>) -> kyomi_core::Result<()> {
+            unimplemented!("not exercised by the KV-outage test")
+        }
+
+        async fn get(&self, _key: &str) -> kyomi_core::Result<Option<String>> {
+            Err(kyomi_core::Error::ServiceUnavailable(
+                "simulated KV outage".to_string(),
+            ))
+        }
+
+        async fn del(&self, _key: &str) -> kyomi_core::Result<()> {
+            unimplemented!("not exercised by the KV-outage test")
+        }
+
+        async fn getdel(&self, _key: &str) -> kyomi_core::Result<Option<String>> {
+            unimplemented!("not exercised by the KV-outage test")
+        }
+
+        async fn incr(&self, _key: &str) -> kyomi_core::Result<i64> {
+            unimplemented!("not exercised by the KV-outage test")
+        }
+
+        async fn expire(&self, _key: &str, _ttl_secs: u64) -> kyomi_core::Result<()> {
+            unimplemented!("not exercised by the KV-outage test")
+        }
+
+        async fn sadd(&self, _key: &str, _member: &str) -> kyomi_core::Result<()> {
+            unimplemented!("not exercised by the KV-outage test")
+        }
+
+        async fn srem(&self, _key: &str, _member: &str) -> kyomi_core::Result<()> {
+            unimplemented!("not exercised by the KV-outage test")
+        }
+
+        async fn smembers(&self, _key: &str) -> kyomi_core::Result<Vec<String>> {
+            unimplemented!("not exercised by the KV-outage test")
+        }
+
+        async fn sdel(&self, _key: &str) -> kyomi_core::Result<()> {
+            unimplemented!("not exercised by the KV-outage test")
+        }
+    }
 
     async fn test_manager() -> MCPSessionManager {
         let kv = kyomi_core::kv_store::create_kv_store(None)
@@ -324,6 +460,115 @@ mod tests {
         assert_eq!(ws, Some("ws-test-1".to_string()));
 
         cleanup(&mgr, &[&session_id], &["ws-test-1"]).await;
+    }
+
+    /// The normal "no such session" path must stay silent. This is the load-
+    /// bearing counterpart to the two tests below: without it, logging
+    /// unconditionally on every `None` would pass those tests while making
+    /// the ordinary "session expired" case as noisy as a real outage.
+    #[tokio::test(flavor = "current_thread")]
+    async fn validate_session_absent_does_not_log_error() {
+        let mgr = test_manager().await;
+
+        let captured: EventLog = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = Registry::default().with(CaptureLayer(captured.clone()));
+        let guard = tracing::subscriber::set_default(subscriber);
+
+        let result = mgr.validate_session("nonexistent-session").await;
+
+        drop(guard);
+
+        assert!(result.is_none(), "an absent session should validate to None");
+
+        let events = captured.lock().expect("capture lock poisoned").clone();
+        let error_events: Vec<&(Level, String)> =
+            events.iter().filter(|(level, _)| *level == Level::ERROR).collect();
+        assert!(
+            error_events.is_empty(),
+            "a merely-absent session must not log an error; captured: {events:?}"
+        );
+    }
+
+    /// A malformed (but present) session payload must return `None` exactly
+    /// like an absent session, but unlike the absent case it must log an
+    /// `error!` that identifies the data as malformed — and must never leak
+    /// the stored payload itself, since `SessionData` is auth material.
+    #[tokio::test(flavor = "current_thread")]
+    async fn validate_session_malformed_payload_logs_error() {
+        let mgr = test_manager().await;
+        let session_id = "malformed-session";
+        let bogus_payload = r#"{"totally":"not-session-data","secret":"sh-should-not-leak"}"#;
+
+        mgr.kv
+            .set(&session_key(session_id), bogus_payload, Some(60))
+            .await
+            .expect("in-memory KV set should succeed");
+
+        let captured: EventLog = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = Registry::default().with(CaptureLayer(captured.clone()));
+        let guard = tracing::subscriber::set_default(subscriber);
+
+        let result = mgr.validate_session(session_id).await;
+
+        drop(guard);
+
+        assert!(
+            result.is_none(),
+            "malformed session data must be treated as invalid, not surfaced to the caller"
+        );
+
+        let events = captured.lock().expect("capture lock poisoned").clone();
+        let error_events: Vec<&(Level, String)> =
+            events.iter().filter(|(level, _)| *level == Level::ERROR).collect();
+        assert!(
+            !error_events.is_empty(),
+            "malformed session data must emit an error!-level log; captured: {events:?}"
+        );
+        assert!(
+            error_events.iter().any(|(_, message)| message.contains("malformed")),
+            "expected an error log identifying the data as malformed (not merely absent); \
+             captured: {events:?}"
+        );
+        for (_, message) in &error_events {
+            assert!(
+                !message.contains(bogus_payload) && !message.contains("sh-should-not-leak"),
+                "session-data error logs must never contain the stored payload \
+                 (SessionData is auth material); got: {message}"
+            );
+        }
+
+        cleanup(&mgr, &[session_id], &[]).await;
+    }
+
+    /// A KV store outage must return `None` — the safe, fail-closed
+    /// direction — but must be logged at `error!` so it is distinguishable
+    /// from a genuine session expiry. Without this test, a Redis blip would
+    /// look identical to every client simply having an expired session, and
+    /// nothing would tell an operator the store was unreachable.
+    #[tokio::test(flavor = "current_thread")]
+    async fn validate_session_kv_error_logs_error() {
+        let mgr = MCPSessionManager::new(Arc::new(FailingKVStore));
+
+        let captured: EventLog = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = Registry::default().with(CaptureLayer(captured.clone()));
+        let guard = tracing::subscriber::set_default(subscriber);
+
+        let result = mgr.validate_session("any-session").await;
+
+        drop(guard);
+
+        assert!(
+            result.is_none(),
+            "a KV store error must deny access (fail closed), not surface to the caller"
+        );
+
+        let events = captured.lock().expect("capture lock poisoned").clone();
+        let error_events: Vec<&(Level, String)> =
+            events.iter().filter(|(level, _)| *level == Level::ERROR).collect();
+        assert!(
+            !error_events.is_empty(),
+            "a KV store error must emit an error!-level log; captured: {events:?}"
+        );
     }
 
     #[tokio::test]
