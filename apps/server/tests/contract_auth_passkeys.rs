@@ -466,6 +466,54 @@ async fn recovery_request_returns_200_even_for_unknown_email() {
     );
 }
 
+// NOTE: `apps/server/tests/*.rs` contract tests do not currently run in CI —
+// the CI job is `cargo test --lib --bins` (tracked as KYO-236). This test is
+// not gating; it documents the enumeration-resistance contract for anyone
+// running the contract suite manually or once KYO-236 is resolved. The
+// substantive DB-error-vs-absent-user regression test lives in
+// `apps/server/src/routes/auth_passkeys.rs`'s `#[cfg(test)] mod tests`,
+// which `--lib --bins` does run.
+#[tokio::test]
+async fn recovery_request_response_is_identical_for_different_unknown_emails() {
+    let base = base_url().await;
+
+    let request = |email: String| {
+        let base = base.clone();
+        async move {
+            client()
+                .post(format!("{base}/api/v1/auth/passkeys/recovery/request"))
+                .header("origin", "http://localhost:5173")
+                .header("content-type", "application/json")
+                .body(serde_json::json!({ "email": email }).to_string())
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+
+    let email_a = format!("recovery-enum-a-{}@example.com", uuid::Uuid::new_v4());
+    let email_b = format!("recovery-enum-b-{}@example.com", uuid::Uuid::new_v4());
+
+    let resp_a = request(email_a).await;
+    let status_a = resp_a.status();
+    let body_a: Value = resp_a.json().await.unwrap();
+
+    let resp_b = request(email_b).await;
+    let status_b = resp_b.status();
+    let body_b: Value = resp_b.json().await.unwrap();
+
+    assert_eq!(
+        status_a, status_b,
+        "recovery/request must return the same status for any unknown email"
+    );
+    assert_eq!(
+        body_a, body_b,
+        "recovery/request must return byte-identical bodies for any unknown email \
+         — any difference (including one keyed on whether the email happens to \
+         exist) would leak account existence"
+    );
+}
+
 // ─── POST /auth/passkeys/recovery/verify ────────────────────────────────────
 
 #[tokio::test]
