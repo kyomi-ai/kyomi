@@ -60,7 +60,7 @@ impl UserContext {
     /// divergence is inert today because an owner structurally always holds
     /// the `workspace_admin` role (enforced at workspace creation, by
     /// `update_member_role`'s owner guard, and on ownership transfer), but it
-    /// is a latent trap — see KYO-191.
+    /// is a latent trap — see KYO-208.
     pub fn is_workspace_admin(&self) -> bool {
         self.workspace_roles.iter().any(|r| r == "workspace_admin") || self.is_owner
     }
