@@ -131,6 +131,26 @@ async fn serve() {
         .await
         .expect("failed to run folder-to-collection migration");
 
+    // Post-SQL-migration hook (KYO-219): the SQL migrations above are a
+    // coarse best-effort purge of invalid push subscription endpoints — this
+    // sweep is the authoritative pass, revalidating every remaining row
+    // against the real `validate_push_endpoint` predicate. Idempotent and
+    // cheap; safe to run on every boot. Non-fatal on failure — a purge
+    // sweep failing shouldn't block the server from starting, since egress
+    // re-validation already guards every send regardless.
+    match kyomi_auth::push_service::purge_invalid_subscriptions(&db).await {
+        Ok(count) if count > 0 => {
+            tracing::info!(
+                purged = count,
+                "Startup sweep purged invalid push subscription endpoints"
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "Push subscription startup purge sweep failed");
+        }
+    }
+
     // Personal mode: auto-provision local user and workspace on first boot
     if config.is_personal() {
         kyomi_server::auto_provision_personal_mode(&db)

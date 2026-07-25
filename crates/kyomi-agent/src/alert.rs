@@ -218,7 +218,10 @@ pub async fn deliver_watch_alert(
             icon: "/kyomi_icon_192.png".to_string(),
         };
 
-        let http_client = kyomi_datasource_server::http_client()
+        // KYO-219: dedicated client with redirects disabled — see
+        // `push_http_client` doc comment for why this must not be
+        // `kyomi_datasource_server::http_client()`.
+        let http_client = crate::web_push::push_http_client()
             .expect("building HTTP client with user_agent should not fail");
         let push_count = crate::web_push::send_push_notifications(
             db,

@@ -77,11 +77,18 @@ async fn get_vapid_key(
 }
 
 /// `POST /subscribe` — Save a push subscription from the browser.
+///
+/// `endpoint` is validated before it ever reaches storage — see
+/// `push_service::validate_push_endpoint` (KYO-219). The server will later
+/// POST to this URL carrying a VAPID-signed `Authorization` header, so an
+/// unvalidated endpoint is an SSRF primitive with credential leakage.
 async fn subscribe(
     State(state): State<AppState>,
     user: AuthUser,
     Json(body): Json<SubscribeRequest>,
 ) -> Result<Json<Value>, kyomi_core::Error> {
+    push_service::validate_push_endpoint(&body.endpoint).map_err(kyomi_core::Error::BadRequest)?;
+
     let input = push_service::SaveSubscriptionInput {
         endpoint: body.endpoint,
         p256dh: body.p256dh,
