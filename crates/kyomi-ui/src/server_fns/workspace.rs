@@ -107,23 +107,6 @@ pub async fn switch_workspace(workspace_id: String) -> Result<(), ServerFnError>
 // Helpers (server-only)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Reject non-workspace-admin users.
-///
-/// Mirrors `require_workspace_admin()` in `apps/server/src/routes/workspaces.rs`.
-#[cfg(feature = "ssr")]
-fn require_workspace_admin(
-    auth: &kyomi_auth::middleware::AuthUser,
-) -> Result<(), ServerFnError> {
-    if !auth
-        .workspace
-        .workspace_roles
-        .contains(&kyomi_core::enums::WorkspaceRole::WorkspaceAdmin)
-    {
-        return Err(ServerFnError::new("Workspace admin access required"));
-    }
-    Ok(())
-}
-
 /// Read a nested key from `settings.custom_settings[key]`.
 ///
 /// Mirrors `custom_settings_get()` in `apps/server/src/routes/workspaces.rs`.
@@ -200,7 +183,7 @@ fn merge_custom_settings(
 #[server(prefix = "/leptos-api")]
 pub async fn get_workspace_settings() -> Result<WorkspaceSettingsData, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
-    require_workspace_admin(&ac.auth)?;
+    ac.require(Permission::ManageWorkspaceSettings, "Workspace admin access required")?;
 
     let workspace = kyomi_auth::workspace_service::get_workspace_full(ac.db(), &ac.ws_id)
         .await
@@ -237,7 +220,7 @@ pub async fn get_workspace_settings() -> Result<WorkspaceSettingsData, ServerFnE
 #[server(prefix = "/leptos-api")]
 pub async fn update_workspace_name(name: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
-    require_workspace_admin(&ac.auth)?;
+    ac.require(Permission::ManageWorkspaceSettings, "Workspace admin access required")?;
 
     let trimmed = name.trim();
     if trimmed.is_empty() {
@@ -258,7 +241,7 @@ pub async fn update_workspace_model(
     context_window: Option<u64>,
 ) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
-    require_workspace_admin(&ac.auth)?;
+    ac.require(Permission::ManageWorkspaceSettings, "Workspace admin access required")?;
 
     let workspace = kyomi_auth::workspace_service::get_workspace_full(ac.db(), &ac.ws_id)
         .await
@@ -299,7 +282,7 @@ pub async fn update_workspace_model(
 #[server(prefix = "/leptos-api")]
 pub async fn update_workspace_title_model(model: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
-    require_workspace_admin(&ac.auth)?;
+    ac.require(Permission::ManageWorkspaceSettings, "Workspace admin access required")?;
 
     let workspace = kyomi_auth::workspace_service::get_workspace_full(ac.db(), &ac.ws_id)
         .await
@@ -331,7 +314,7 @@ pub async fn update_workspace_title_model(model: String) -> Result<(), ServerFnE
 #[server(prefix = "/leptos-api")]
 pub async fn update_workspace_chartml_config(palette: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
-    require_workspace_admin(&ac.auth)?;
+    ac.require(Permission::ManageWorkspaceSettings, "Workspace admin access required")?;
 
     let workspace = kyomi_auth::workspace_service::get_workspace_full(ac.db(), &ac.ws_id)
         .await
@@ -406,7 +389,7 @@ pub async fn get_workspace_slack_status() -> Result<crate::types::WorkspaceSlack
 #[server(prefix = "/leptos-api")]
 pub async fn get_slack_install_url() -> Result<String, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
-    require_workspace_admin(&ac.auth)?;
+    ac.require(Permission::ManageIntegrations, "Workspace admin access required")?;
 
     let client_id = ac.ctx.config
         .slack_client_id
@@ -462,7 +445,7 @@ pub async fn get_slack_install_url() -> Result<String, ServerFnError> {
 #[server(prefix = "/leptos-api")]
 pub async fn uninstall_workspace_slack(team_id: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
-    require_workspace_admin(&ac.auth)?;
+    ac.require(Permission::ManageIntegrations, "Workspace admin access required")?;
 
     // Verify the integration exists
     let integration =
@@ -489,6 +472,8 @@ pub async fn uninstall_workspace_slack(team_id: String) -> Result<(), ServerFnEr
 // Helpers — delegate to shared extractors in parent module
 #[cfg(feature = "ssr")]
 use super::{extract_auth, extract_context, AuthenticatedContext, IntoServerFnError};
+#[cfg(feature = "ssr")]
+use kyomi_types::Permission;
 
 #[cfg(all(test, feature = "ssr"))]
 mod tests {

@@ -10,6 +10,7 @@
 
 use std::sync::Arc;
 
+use kyomi_types::Permission;
 use leptos::prelude::*;
 use phosphor_leptos::Icon;
 
@@ -19,7 +20,7 @@ use super::state::SqlEditorState;
 use super::types::SidebarTab;
 use crate::components::toast::toast_success;
 use crate::components::{Button, ButtonSize, ButtonVariant, RightPanel, SearchInput};
-use crate::server_fns::context::UserContext;
+use crate::utils::permissions::use_permissions;
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -63,20 +64,15 @@ pub fn SqlEditorSidebar(
     // Derived: is the sidebar open at all?
     let is_open = Memo::new(move |_| state.active_right_tab.try_get().flatten().is_some());
 
-    // ── Admin gate: refresh-catalog button ──────────────────────────────
-    // `refresh_catalog` (server_fns::sql_editor) is admin-only server-side.
-    // Mirror that here so non-admins never see an action that will 403.
-    // Provided by the parent Layout (see components/layout.rs), which
-    // mounts once for the whole authed session — SqlEditorPage renders
-    // under it, so `expect_context` is safe here.
-    let user_ctx = expect_context::<LocalResource<Result<UserContext, ServerFnError>>>();
-    let is_admin = Signal::derive(move || {
-        user_ctx
-            .get()
-            .and_then(|r| r.ok())
-            .map(|c| c.is_workspace_admin())
-            .unwrap_or(false)
-    });
+    // ── Permission gate: refresh-catalog button ──────────────────────────
+    // `refresh_catalog` (server_fns::sql_editor) requires
+    // `ac.require(Permission::RefreshCatalog, ...)` server-side. Mirror that
+    // here so users without it never see an action that will 403. Backed by
+    // the shared `UserContext` resource provided by the parent Layout (see
+    // components/layout.rs), which mounts once for the whole authed session
+    // — SqlEditorPage renders under it, so `use_permissions` is safe here.
+    let perms = use_permissions();
+    let can_refresh_catalog = Signal::derive(move || perms.can(Permission::RefreshCatalog));
 
     // ── Tab + close handlers ────────────────────────────────────────────
     let set_catalog_tab = move |_| {
@@ -191,7 +187,7 @@ pub fn SqlEditorSidebar(
                 </div>
                 // Refresh button — catalog tab only, admins only (backend
                 // rejects non-admins; see refresh_catalog's admin gate).
-                <Show when=move || active_tab.get() == SidebarTab::Catalog && is_admin.get()>
+                <Show when=move || active_tab.get() == SidebarTab::Catalog && can_refresh_catalog.get()>
                     <Button
                         variant=ButtonVariant::GhostMuted
                         size=ButtonSize::IconSm

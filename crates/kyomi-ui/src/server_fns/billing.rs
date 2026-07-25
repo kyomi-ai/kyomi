@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
 use super::{extract_auth, extract_context, AuthenticatedContext, IntoServerFnError};
+#[cfg(feature = "ssr")]
+use kyomi_types::Permission;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -116,7 +118,7 @@ pub struct BillingResult {
 fn require_workspace_owner(
     auth: &kyomi_auth::middleware::AuthUser,
 ) -> Result<(), ServerFnError> {
-    if auth.workspace.is_owner {
+    if kyomi_auth::permissions::permissions_for(auth).contains(&Permission::ManageBilling) {
         Ok(())
     } else {
         leptos::prelude::expect_context::<leptos_axum::ResponseOptions>()

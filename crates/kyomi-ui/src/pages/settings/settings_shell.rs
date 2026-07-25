@@ -22,6 +22,8 @@ use phosphor_leptos::{Icon, IconWeight};
 use leptos_router::components::Outlet;
 use leptos_router::hooks::use_location;
 
+use kyomi_types::Permission;
+
 use crate::server_fns::context::UserContext;
 
 /// Settings tab definition.
@@ -48,9 +50,16 @@ const TABS: &[SettingsTab] = &[
 
 /// Return the list of tab IDs that should be visible for the given user context.
 ///
-/// Matches React's SettingsContent.jsx tab visibility logic exactly.
+/// Matches React's SettingsContent.jsx tab visibility logic exactly. Each
+/// tab gates on the specific [`Permission`] its content actually requires
+/// (KYO-189 P2) rather than a single "is admin" check — the workspace,
+/// analytics, and team tabs lead to different server fns with different
+/// `ac.require(Permission::X, ...)` gates, so they're checked independently
+/// even though today's role mapping happens to grant all three together.
 fn visible_tabs(ctx: &UserContext) -> Vec<&'static str> {
-    let is_admin = ctx.workspace_roles.iter().any(|r| r == "workspace_admin");
+    let can_manage_workspace_settings = ctx.can(Permission::ManageWorkspaceSettings);
+    let can_manage_analytics = ctx.can(Permission::ManageAnalytics);
+    let can_manage_team = ctx.can(Permission::ManageTeam);
     let multi_user = ctx.capabilities.get("multi_user_enabled").copied().unwrap_or(false);
     let is_team_tier = matches!(ctx.subscription_tier.as_str(), "team" | "enterprise" | "cloud");
 
@@ -64,8 +73,8 @@ fn visible_tabs(ctx: &UserContext) -> Vec<&'static str> {
         tabs.push("security");
     }
 
-    // workspace: admin only, hidden in personal mode
-    if is_admin && !ctx.is_personal_mode {
+    // workspace: requires ManageWorkspaceSettings, hidden in personal mode
+    if can_manage_workspace_settings && !ctx.is_personal_mode {
         tabs.push("workspace");
     }
 
@@ -77,8 +86,8 @@ fn visible_tabs(ctx: &UserContext) -> Vec<&'static str> {
         tabs.push("ai");
     }
 
-    // analytics: admin only, not self-hosted, billing enabled
-    if is_admin && !ctx.is_self_hosted && ctx.billing_enabled {
+    // analytics: requires ManageAnalytics, not self-hosted, billing enabled
+    if can_manage_analytics && !ctx.is_self_hosted && ctx.billing_enabled {
         tabs.push("analytics");
     }
 
@@ -92,8 +101,8 @@ fn visible_tabs(ctx: &UserContext) -> Vec<&'static str> {
         tabs.push("billing");
     }
 
-    // team: admin, not personal mode, multi_user_enabled capability, team/enterprise tier
-    if is_admin && !ctx.is_personal_mode && multi_user && is_team_tier {
+    // team: requires ManageTeam, not personal mode, multi_user_enabled capability, team/enterprise tier
+    if can_manage_team && !ctx.is_personal_mode && multi_user && is_team_tier {
         tabs.push("team");
     }
 

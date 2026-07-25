@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
 use super::{AuthenticatedContext, IntoServerFnError};
+#[cfg(feature = "ssr")]
+use kyomi_types::Permission;
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -84,7 +86,7 @@ pub async fn create_connect_datasource(
 ) -> Result<CreateConnectResult, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    require_workspace_admin(&ac.auth)?;
+    ac.require(Permission::ManageConnect, "Workspace admin access required")?;
 
     // Validate datasource type is supported
     if !kyomi_core::datasource_registry::is_supported_type(&datasource_type) {
@@ -174,7 +176,7 @@ pub async fn create_connect_datasource(
 pub async fn rotate_connect_token(datasource_id: String) -> Result<String, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    require_workspace_admin(&ac.auth)?;
+    ac.require(Permission::ManageConnect, "Workspace admin access required")?;
 
     let ds = kyomi_auth::datasource_service::get_datasource(ac.db(), &datasource_id, &ac.ws_id)
         .await
@@ -218,7 +220,7 @@ pub async fn rotate_connect_token(datasource_id: String) -> Result<String, Serve
 pub async fn connect_status(datasource_id: String) -> Result<ConnectStatusResponse, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    require_workspace_admin(&ac.auth)?;
+    ac.require(Permission::ManageConnect, "Workspace admin access required")?;
 
     let ds = kyomi_auth::datasource_service::get_datasource(ac.db(), &datasource_id, &ac.ws_id)
         .await
@@ -257,7 +259,7 @@ pub async fn connect_status(datasource_id: String) -> Result<ConnectStatusRespon
 pub async fn disconnect_connect_datasource(datasource_id: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    require_workspace_admin(&ac.auth)?;
+    ac.require(Permission::ManageConnect, "Workspace admin access required")?;
 
     let ds = kyomi_auth::datasource_service::get_datasource(ac.db(), &datasource_id, &ac.ws_id)
         .await
@@ -297,7 +299,7 @@ pub async fn discover_connect_containers(
 ) -> Result<Vec<String>, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    require_workspace_admin(&ac.auth)?;
+    ac.require(Permission::ManageConnect, "Workspace admin access required")?;
 
     let ds = kyomi_auth::datasource_service::get_datasource(ac.db(), &datasource_id, &ac.ws_id)
         .await
@@ -342,19 +344,6 @@ pub async fn discover_connect_containers(
 }
 
 // ─── Helpers (server-only) ──────────────────────────────────────────────────
-
-/// Reject non-workspace-admin users.
-#[cfg(feature = "ssr")]
-fn require_workspace_admin(auth: &kyomi_auth::middleware::AuthUser) -> Result<(), ServerFnError> {
-    if !auth
-        .workspace
-        .workspace_roles
-        .contains(&kyomi_core::enums::WorkspaceRole::WorkspaceAdmin)
-    {
-        return Err(ServerFnError::new("Workspace admin access required"));
-    }
-    Ok(())
-}
 
 /// Mint a Connect JWT for a datasource using the server's `ConnectTokenService`.
 ///

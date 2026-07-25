@@ -685,15 +685,7 @@ pub async fn set_workspace_default_dashboard(
 ) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    // Require workspace admin role
-    if !ac
-        .auth
-        .workspace
-        .workspace_roles
-        .contains(&kyomi_core::enums::WorkspaceRole::WorkspaceAdmin)
-    {
-        return Err(ServerFnError::new("Workspace admin access required"));
-    }
+    ac.require(Permission::SetWorkspaceDefaults, "Workspace admin access required")?;
 
     let workspace = kyomi_auth::workspace_service::get_workspace_full(ac.db(), &ac.ws_id)
         .await
@@ -724,3 +716,5 @@ pub async fn set_workspace_default_dashboard(
 
 #[cfg(feature = "ssr")]
 use super::{extract_auth, extract_context, AuthenticatedContext, IntoServerFnError};
+#[cfg(feature = "ssr")]
+use kyomi_types::Permission;

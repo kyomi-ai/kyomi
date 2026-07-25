@@ -5,6 +5,7 @@
 //! Replaces `apps/frontend/src/components/settings/DatasourceSettings.jsx` and
 //! `apps/frontend/src/components/settings/DatasourceModal.jsx`.
 
+use kyomi_types::Permission;
 use leptos::prelude::*;
 use phosphor_leptos::{Icon, IconWeight};
 use crate::components::{
@@ -37,7 +38,7 @@ use crate::server_fns::datasource_oauth::{
     get_google_oauth_projects,
 };
 use crate::utils::json::config_bool;
-use crate::utils::permissions::use_is_workspace_admin;
+use crate::utils::permissions::use_permissions;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -220,13 +221,14 @@ fn DatasourcesContent(
     let (datasources, set_datasources) = signal(initial_datasources);
     let query_cache = expect_context::<QueryCache>();
 
-    // ── Admin gating (KYO-184) ───────────────────────────────────────────
-    // Create/edit/delete are workspace-admin-only server-side
-    // (`require_workspace_admin` in `server_fns/datasources.rs`). Per-user
+    // ── Permission gating (KYO-184, KYO-189 P2) ──────────────────────────
+    // Create/edit/delete require ManageDatasources server-side
+    // (`ac.require(Permission::ManageDatasources, ...)` in `server_fns/datasources.rs`). Per-user
     // credential entry, the OAuth connect buttons, and the per-user enable
     // toggle stay ungated — those are intentionally available to every
     // member (see `docs/DATASOURCE_ARCHITECTURE.md` §5.2).
-    let is_admin = use_is_workspace_admin();
+    let perms = use_permissions();
+    let is_admin = Signal::derive(move || perms.can(Permission::ManageDatasources));
 
     // ── Modal state ──────────────────────────────────────────────────────
     // None = closed, Some(None) = create mode, Some(Some(id)) = edit mode
@@ -372,7 +374,7 @@ fn DatasourcesContent(
                 </div>
                 // Header CTA — only shown when at least one datasource exists
                 // AND the caller is a workspace admin (create is admin-only —
-                // `create_datasource_modal` → `require_workspace_admin`).
+                // `create_datasource_modal` → `Permission::ManageDatasources`).
                 // Empty state renders its own prominent CTA below (see `EmptyState`),
                 // so double-showing the button creates a duplicate "Add Datasource" CTA.
                 <Show when=move || !datasources.get().is_empty() && is_admin.get()>
@@ -493,7 +495,7 @@ fn DatasourceRow(
     /// Setter for the OAuth connecting state — passed to the popup monitor.
     set_oauth_connecting: WriteSignal<Option<String>>,
     /// Whether the caller is a workspace admin — gates the delete button
-    /// (`delete_datasource` → `require_workspace_admin`). Passed as a
+    /// (`delete_datasource` → `Permission::ManageDatasources`). Passed as a
     /// `Signal` (not snapshotted) per CODING_STANDARDS.md.
     is_admin: Signal<bool>,
 ) -> impl IntoView {
@@ -810,7 +812,7 @@ fn DatasourceRow(
 
                 // Delete button — hidden for analytics datasources (lifecycle-managed
                 // by analytics site CRUD) AND for non-admins (`delete_datasource` →
-                // `require_workspace_admin`). `<Show>` (not `.then()`) because
+                // `Permission::ManageDatasources`). `<Show>` (not `.then()`) because
                 // `is_admin` is a reactive Signal, unlike the static `is_analytics`
                 // check it's combined with.
                 <Show when=move || is_admin.get() && !ds.is_analytics>
@@ -876,13 +878,14 @@ pub fn DatasourceModal(
     /// Called when a datasource was successfully saved.
     on_saved: Callback<DatasourceResult>,
 ) -> impl IntoView {
-    // ── Admin context ────────────────────────────────────────────────────
+    // ── Permission context ────────────────────────────────────────────────
     // Shared resource provided by the parent Layout (see settings_shell.rs).
-    // Gates the SSH Tunnel section (admin-only, SSH-capable types only — see
-    // `supports_ssh_tunnel`) as well as the Add/Edit/Save surfaces below:
-    // the header/empty-state "Add Datasource" CTAs, the delete button, the
-    // edit-mode connection-config fields, and the Catalog tab (KYO-184).
-    let is_admin = use_is_workspace_admin();
+    // Gates the SSH Tunnel section (ManageDatasources-only, SSH-capable types
+    // only — see `supports_ssh_tunnel`) as well as the Add/Edit/Save surfaces
+    // below: the header/empty-state "Add Datasource" CTAs, the delete button,
+    // the edit-mode connection-config fields, and the Catalog tab (KYO-184).
+    let perms = use_permissions();
+    let is_admin = Signal::derive(move || perms.can(Permission::ManageDatasources));
 
     // `datasource_id` is `Some` only in edit mode. Used by `SshTunnelSection`
     // to pick placeholder copy for the BYOK private-key/passphrase fields

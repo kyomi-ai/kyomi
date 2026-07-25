@@ -44,10 +44,12 @@ use tracing::{error, info, warn};
 use kyomi_auth::{
     encryption,
     middleware::AuthUser,
+    permissions::permissions_for,
     redis_ops,
     user_service,
 };
 use kyomi_core::{capability, DbPool};
+use kyomi_types::Permission;
 
 use crate::client::{self as slack_client, SlackClient, SLACK_TIMEZONE_CACHE_HOURS};
 use crate::helpers as slack_helpers;
@@ -148,20 +150,19 @@ fn require_slack_capability(user: &AuthUser) -> Result<(), kyomi_core::Error> {
 }
 
 /// Reject non-workspace-admin users with 403.
+///
+/// Thin wrapper over the shared [`permissions_for`] mapping (KYO-189 P1) —
+/// adapts its `BTreeSet<Permission>` result to this crate's `kyomi_core::Error`
+/// return type, since `kyomi-auth` cannot depend on `kyomi-slack` for the
+/// error type and the mapping itself must not be duplicated per-crate.
 fn require_workspace_admin(user: &AuthUser) -> Result<(), kyomi_core::Error> {
-    if user.workspace.is_owner {
-        return Ok(());
-    }
-    if !user
-        .workspace
-        .workspace_roles
-        .contains(&kyomi_core::WorkspaceRole::WorkspaceAdmin)
-    {
-        return Err(kyomi_core::Error::Forbidden(
+    if permissions_for(user).contains(&Permission::ManageIntegrations) {
+        Ok(())
+    } else {
+        Err(kyomi_core::Error::Forbidden(
             "Workspace admin access required".into(),
-        ));
+        ))
     }
-    Ok(())
 }
 
 /// Extract workspace_id from user, or return 400.

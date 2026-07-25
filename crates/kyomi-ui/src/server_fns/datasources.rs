@@ -22,6 +22,8 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
 use super::{AuthenticatedContext, IntoServerFnError};
+#[cfg(feature = "ssr")]
+use kyomi_types::Permission;
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -110,7 +112,7 @@ pub async fn toggle_datasource(
 pub async fn delete_datasource(datasource_id: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    require_workspace_admin(&ac.auth)?;
+    ac.require(Permission::ManageDatasources, "Workspace admin access required")?;
 
     kyomi_auth::datasource_service::delete_datasource(ac.db(), &datasource_id, &ac.ws_id)
         .await
@@ -131,28 +133,11 @@ pub async fn delete_datasource(datasource_id: String) -> Result<(), ServerFnErro
 pub async fn generate_ssh_key() -> Result<GeneratedSshKey, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    require_workspace_admin(&ac.auth)?;
+    ac.require(Permission::ManageDatasources, "Workspace admin access required")?;
 
     let generated = kyomi_auth::ssh_keygen::generate_ssh_keypair().into_sfn()?;
 
     Ok(generated)
-}
-
-// ─── Helpers (server-only) ──────────────────────────────────────────────────
-
-/// Reject non-workspace-admin users.
-#[cfg(feature = "ssr")]
-fn require_workspace_admin(
-    auth: &kyomi_auth::middleware::AuthUser,
-) -> Result<(), ServerFnError> {
-    if !auth
-        .workspace
-        .workspace_roles
-        .contains(&kyomi_core::enums::WorkspaceRole::WorkspaceAdmin)
-    {
-        return Err(ServerFnError::new("Workspace admin access required"));
-    }
-    Ok(())
 }
 
 // ─── Modal Server Functions ─────────────────────────────────────────────────
@@ -227,7 +212,7 @@ pub async fn create_datasource_modal(
 ) -> Result<DatasourceResult, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    require_workspace_admin(&ac.auth)?;
+    ac.require(Permission::ManageDatasources, "Workspace admin access required")?;
 
     let slug_opt = if slug.is_empty() { None } else { Some(slug.as_str()) };
     let encryption_key = ac.encryption_key()?;
@@ -304,7 +289,7 @@ pub async fn update_datasource_settings(
 ) -> Result<DatasourceResult, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    require_workspace_admin(&ac.auth)?;
+    ac.require(Permission::ManageDatasources, "Workspace admin access required")?;
 
     let slug_opt = if slug.is_empty() { None } else { Some(slug.as_str()) };
     let name_opt = if name.is_empty() { None } else { Some(name.as_str()) };
@@ -367,12 +352,7 @@ pub async fn get_datasource_settings(
 ) -> Result<DatasourceSettingsResult, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    let is_admin = ac
-        .auth
-        .workspace
-        .workspace_roles
-        .contains(&kyomi_core::enums::WorkspaceRole::WorkspaceAdmin)
-        || ac.auth.workspace.is_owner;
+    let is_admin = ac.has(Permission::ManageDatasources);
 
     let encryption_key = ac.encryption_key()?;
 

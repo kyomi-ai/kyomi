@@ -161,6 +161,45 @@ pub(crate) fn workspace_id(auth: &kyomi_auth::middleware::AuthUser) -> Result<&s
         })
 }
 
+/// Whether `auth` holds `permission`, per the single role→capability mapping
+/// in [`kyomi_auth::permissions::permissions_for`].
+///
+/// Prefer [`AuthenticatedContext::has`] when an `AuthenticatedContext` is
+/// already in scope; this free function exists for the rare server fn that
+/// only extracts a bare `AuthUser` (e.g. `ai::test_workspace_ai_config`).
+#[cfg(feature = "ssr")]
+pub(crate) fn has_permission(
+    auth: &kyomi_auth::middleware::AuthUser,
+    permission: kyomi_types::Permission,
+) -> bool {
+    kyomi_auth::permissions::permissions_for(auth).contains(&permission)
+}
+
+/// Reject the request with `message` unless `auth` holds `permission`.
+///
+/// The single shared authorization guard for Leptos server functions. This
+/// replaces the six byte-identical `require_workspace_admin` copies that
+/// used to live in `team.rs`, `analytics.rs`, `datasources.rs`,
+/// `workspace.rs`, `ai.rs`, and `connect.rs`, plus the inline role checks in
+/// `dashboards.rs`, `onboarding.rs`, and `sql_editor.rs`. Does not set an
+/// HTTP status code — the default `ServerFnError` classification applies,
+/// matching every one of those call sites. For the owner-only gate that
+/// also sets HTTP 403 (billing), see `billing::require_workspace_owner`,
+/// which wraps the same [`kyomi_auth::permissions::permissions_for`]
+/// mapping rather than duplicating it.
+#[cfg(feature = "ssr")]
+pub(crate) fn require_permission(
+    auth: &kyomi_auth::middleware::AuthUser,
+    permission: kyomi_types::Permission,
+    message: &str,
+) -> Result<(), leptos::prelude::ServerFnError> {
+    if has_permission(auth, permission) {
+        Ok(())
+    } else {
+        Err(leptos::prelude::ServerFnError::new(message))
+    }
+}
+
 /// Bundles the three values every authenticated server function needs:
 /// the authenticated user, the server context, and the resolved workspace ID.
 ///
@@ -200,6 +239,22 @@ impl AuthenticatedContext {
             tracing::error!("Encryption key requested but not configured in ServerContext");
             leptos::prelude::ServerFnError::new("Encryption key not configured")
         })
+    }
+
+    /// Whether the authenticated user holds `permission` in their workspace.
+    /// See [`has_permission`].
+    pub(crate) fn has(&self, permission: kyomi_types::Permission) -> bool {
+        has_permission(&self.auth, permission)
+    }
+
+    /// Reject the request with `message` unless the authenticated user holds
+    /// `permission`. See [`require_permission`].
+    pub(crate) fn require(
+        &self,
+        permission: kyomi_types::Permission,
+        message: &str,
+    ) -> Result<(), leptos::prelude::ServerFnError> {
+        require_permission(&self.auth, permission, message)
     }
 }
 

@@ -29,6 +29,17 @@ fn map_role_to_db(role: &str) -> &'static str {
     }
 }
 
+/// Whether a raw DB role token is the workspace-admin role.
+///
+/// Compares against the admin role constant, not a display string — this is
+/// the source of `TeamMember::is_admin_role` / `TeamInvitation::is_admin_role`
+/// (KYO-189 P3). The client never sees the raw token comparison; it only
+/// receives the resulting `bool`.
+#[cfg(feature = "ssr")]
+fn is_admin_role(role: &str) -> bool {
+    role == kyomi_core::constants::get().workspace.roles.admin
+}
+
 /// Generate an invitation ID: `inv-{uuid_hex[0..24]}`.
 ///
 /// Mirrors `generate_invitation_id()` in `apps/server/src/routes/workspaces.rs`.
@@ -36,21 +47,6 @@ fn map_role_to_db(role: &str) -> &'static str {
 fn generate_invitation_id() -> String {
     let hex = sqlx::types::Uuid::new_v4().simple().to_string();
     format!("inv-{}", &hex[..24])
-}
-
-/// Reject non-workspace-admin users.
-#[cfg(feature = "ssr")]
-fn require_workspace_admin(
-    auth: &kyomi_auth::middleware::AuthUser,
-) -> Result<(), ServerFnError> {
-    if !auth
-        .workspace
-        .workspace_roles
-        .contains(&kyomi_core::enums::WorkspaceRole::WorkspaceAdmin)
-    {
-        return Err(ServerFnError::new("Workspace admin access required"));
-    }
-    Ok(())
 }
 
 /// Load the workspace record for the authenticated user.
@@ -89,6 +85,8 @@ pub async fn list_workspace_members() -> Result<Vec<TeamMember>, ServerFnError> 
             email: m.email.clone(),
             name: m.name.clone(),
             role: m.role.clone(),
+            role_display: kyomi_core::constants::humanize_workspace_role(&m.role).to_string(),
+            is_admin_role: is_admin_role(&m.role),
             is_owner: m.user_id == workspace.owner_user_id,
             joined_at: m.wu_created_at.to_rfc3339(),
         })
@@ -103,7 +101,7 @@ pub async fn list_workspace_members() -> Result<Vec<TeamMember>, ServerFnError> 
 #[server(prefix = "/leptos-api")]
 pub async fn update_member_role(user_id: String, role: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
-    require_workspace_admin(&ac.auth)?;
+    ac.require(Permission::ManageTeam, "Workspace admin access required")?;
 
     let workspace = get_current_workspace(ac.db(), &ac.ws_id).await?;
 
@@ -148,7 +146,7 @@ pub async fn update_member_role(user_id: String, role: String) -> Result<(), Ser
 #[server(prefix = "/leptos-api")]
 pub async fn remove_member(user_id: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
-    require_workspace_admin(&ac.auth)?;
+    ac.require(Permission::ManageTeam, "Workspace admin access required")?;
 
     let workspace = get_current_workspace(ac.db(), &ac.ws_id).await?;
 
@@ -176,7 +174,7 @@ pub async fn remove_member(user_id: String) -> Result<(), ServerFnError> {
 #[server(prefix = "/leptos-api")]
 pub async fn list_workspace_invitations() -> Result<Vec<TeamInvitation>, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
-    require_workspace_admin(&ac.auth)?;
+    ac.require(Permission::ManageTeam, "Workspace admin access required")?;
 
     let invitations =
         kyomi_auth::workspace_service::get_pending_invitations_for_workspace(ac.db(), &ac.ws_id)
@@ -185,13 +183,20 @@ pub async fn list_workspace_invitations() -> Result<Vec<TeamInvitation>, ServerF
 
     let result = invitations
         .iter()
-        .map(|inv| TeamInvitation {
-            invitation_id: inv.invitation_id.clone(),
-            email: inv.email.clone(),
-            role: inv.role.to_string(),
-            status: inv.status.to_string(),
-            created_at: inv.created_at.to_rfc3339(),
-            expires_at: inv.expires_at.to_rfc3339(),
+        .map(|inv| {
+            let role = inv.role.to_string();
+            let role_display = kyomi_core::constants::humanize_workspace_role(&role).to_string();
+            let admin_role = is_admin_role(&role);
+            TeamInvitation {
+                invitation_id: inv.invitation_id.clone(),
+                email: inv.email.clone(),
+                role,
+                role_display,
+                is_admin_role: admin_role,
+                status: inv.status.to_string(),
+                created_at: inv.created_at.to_rfc3339(),
+                expires_at: inv.expires_at.to_rfc3339(),
+            }
         })
         .collect();
 
@@ -204,7 +209,7 @@ pub async fn list_workspace_invitations() -> Result<Vec<TeamInvitation>, ServerF
 #[server(prefix = "/leptos-api")]
 pub async fn invite_member(email: String, role: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
-    require_workspace_admin(&ac.auth)?;
+    ac.require(Permission::ManageTeam, "Workspace admin access required")?;
 
     let email = email.trim().to_lowercase();
 
@@ -278,7 +283,7 @@ pub async fn invite_member(email: String, role: String) -> Result<(), ServerFnEr
 #[server(prefix = "/leptos-api")]
 pub async fn cancel_invitation(invitation_id: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
-    require_workspace_admin(&ac.auth)?;
+    ac.require(Permission::ManageTeam, "Workspace admin access required")?;
 
     let invitation =
         kyomi_auth::workspace_service::get_invitation_in_workspace(ac.db(), &invitation_id, &ac.ws_id)
@@ -371,11 +376,10 @@ pub async fn cancel_ownership_transfer(transfer_id: String) -> Result<(), Server
 pub async fn initiate_ownership_transfer(to_user_id: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    if !ac.auth.workspace.is_owner {
-        return Err(ServerFnError::new(
-            "Only the workspace owner can transfer ownership",
-        ));
-    }
+    ac.require(
+        Permission::TransferOwnership,
+        "Only the workspace owner can transfer ownership",
+    )?;
 
     if to_user_id == ac.auth.user_id {
         return Err(ServerFnError::new("You are already the owner"));
@@ -402,3 +406,5 @@ pub async fn initiate_ownership_transfer(to_user_id: String) -> Result<(), Serve
 // Helpers — delegate to shared extractors in parent module
 #[cfg(feature = "ssr")]
 use super::{extract_auth, extract_context, AuthenticatedContext, IntoServerFnError};
+#[cfg(feature = "ssr")]
+use kyomi_types::Permission;
