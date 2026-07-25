@@ -604,7 +604,10 @@ impl AgentTool for UpdateWatchTool {
 // SearchWatchesTool
 // ---------------------------------------------------------------------------
 
-/// Search for existing watches in the workspace.
+/// Search the caller's own watches.
+///
+/// Watches are strictly private to their creator — there is no sharing
+/// model — so this only ever surfaces the calling user's watches.
 pub struct SearchWatchesTool;
 
 #[async_trait]
@@ -614,9 +617,10 @@ impl AgentTool for SearchWatchesTool {
     }
 
     fn description(&self) -> &str {
-        "Search for existing watches to avoid duplicates or find watches to modify. \
-         Leave the query empty to list all watches. Returns matching watches with \
-         full details (name, prompt, schedule, mode, queries, status, last execution)."
+        "Search your own watches to avoid duplicates or find watches to modify. \
+         Leave the query empty to list all of your watches. Returns matching watches \
+         with full details (name, prompt, schedule, mode, queries, status, last execution). \
+         Watches are private to their creator — this never returns another user's watches."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -665,15 +669,20 @@ impl AgentTool for SearchWatchesTool {
         let results = kyomi_auth::watch_service::search_watches(
             &ctx.db,
             &ctx.workspace_id,
+            &ctx.user_id,
             query,
             limit,
         )
         .await?;
 
-        // Get total workspace watch count
-        let all_watches =
-            kyomi_auth::watch_service::list_watches(&ctx.db, &ctx.workspace_id).await?;
-        let total_workspace_watches = all_watches.len();
+        // Get the caller's total watch count
+        let all_watches = kyomi_auth::watch_service::list_watches(
+            &ctx.db,
+            &ctx.workspace_id,
+            &ctx.user_id,
+        )
+        .await?;
+        let total_watches = all_watches.len();
 
         let watches: Vec<serde_json::Value> = results
             .iter()
@@ -708,7 +717,7 @@ impl AgentTool for SearchWatchesTool {
         Ok(serde_json::json!({
             "watches": watches,
             "count": count,
-            "total_workspace_watches": total_workspace_watches,
+            "total_watches": total_watches,
         })
         .to_string())
     }

@@ -160,7 +160,7 @@ fn execution_to_alert(execution: &kyomi_core::models::WatchExecution) -> AlertIt
 pub async fn list_watches() -> Result<Vec<WatchListItem>, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    let watches = kyomi_auth::watch_service::list_watches(ac.db(), &ac.ws_id)
+    let watches = kyomi_auth::watch_service::list_watches(ac.db(), &ac.ws_id, &ac.auth.user_id)
         .await
         .into_sfn()?;
 

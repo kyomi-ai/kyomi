@@ -619,10 +619,15 @@ pub async fn get_watch(
 
 // ─── List watches ───────────────────────────────────────────────────────────
 
-/// List all watches for a workspace (newest first).
+/// List a user's own watches within a workspace (newest first).
+///
+/// Watches are strictly private to their creator — there is no sharing
+/// model. Filters to `created_by = user_id` so a caller never receives
+/// another member's watches.
 pub async fn list_watches(
     db: &DbPool,
     workspace_id: &str,
+    user_id: &str,
 ) -> Result<Vec<kyomi_core::models::Watch>> {
     let sql = r#"
         SELECT watch_id, workspace_id, created_by, name, prompt, schedule,
@@ -630,12 +635,13 @@ pub async fn list_watches(
                alert_emails_enabled, enabled, last_run_at, last_run_status,
                next_run_at, created_at, updated_at
         FROM watches
-        WHERE workspace_id = $1
+        WHERE workspace_id = $1 AND created_by = $2
         ORDER BY created_at DESC
     "#;
 
-    let watches = kyomi_core::db_fetch_all!(db, kyomi_core::models::Watch, sql, workspace_id)
-        .map_err(|e| kyomi_core::Error::Internal(format!("failed to list watches: {e}")))?;
+    let watches =
+        kyomi_core::db_fetch_all!(db, kyomi_core::models::Watch, sql, workspace_id, user_id)
+            .map_err(|e| kyomi_core::Error::Internal(format!("failed to list watches: {e}")))?;
 
     Ok(watches)
 }
@@ -1427,13 +1433,17 @@ pub async fn update_watch_run_status(
 
 // ─── Search watches ─────────────────────────────────────────────────────────
 
-/// Search watches in a workspace by name and prompt.
+/// Search a user's own watches within a workspace by name and prompt.
 ///
-/// If `query` is `None` or empty, returns all watches sorted by `created_at DESC`.
-/// Otherwise, performs ILIKE search on `name` and `prompt`.
+/// Watches are strictly private to their creator — there is no sharing
+/// model. Filters to `created_by = user_id` so a caller never receives
+/// another member's watches. If `query` is `None` or empty, returns all of
+/// the caller's watches sorted by `created_at DESC`. Otherwise, performs
+/// ILIKE search on `name` and `prompt`.
 pub async fn search_watches(
     db: &DbPool,
     workspace_id: &str,
+    user_id: &str,
     query: Option<&str>,
     limit: i64,
 ) -> Result<Vec<kyomi_core::models::Watch>> {
@@ -1449,12 +1459,13 @@ pub async fn search_watches(
                    next_run_at, created_at, updated_at
             FROM watches
             WHERE workspace_id = $1
+              AND created_by = $3
               AND ({name_like} OR {prompt_like})
             ORDER BY created_at DESC
             LIMIT $2
             "#,
-            name_like = sql_compat::ilike(is_pg, "name", "'%' || $3 || '%'"),
-            prompt_like = sql_compat::ilike(is_pg, "prompt", "'%' || $3 || '%'"),
+            name_like = sql_compat::ilike(is_pg, "name", "'%' || $4 || '%'"),
+            prompt_like = sql_compat::ilike(is_pg, "prompt", "'%' || $4 || '%'"),
         )
     } else {
         r#"
@@ -1464,17 +1475,21 @@ pub async fn search_watches(
                next_run_at, created_at, updated_at
         FROM watches
         WHERE workspace_id = $1
+          AND created_by = $3
         ORDER BY created_at DESC
         LIMIT $2
         "#
         .to_string()
     };
 
-    // Dynamic SQL — bind chain varies based on has_query
+    // Dynamic SQL — bind chain varies based on has_query. Placeholder order
+    // is fixed across both branches: $1=workspace_id, $2=limit,
+    // $3=user_id, and (has_query only) $4=query.
     let watches = kyomi_core::db_with_pool!(db, |p| {
         let mut q = sqlx::query_as::<_, kyomi_core::models::Watch>(&sql)
             .bind(workspace_id)
-            .bind(limit);
+            .bind(limit)
+            .bind(user_id);
         if let (true, Some(query_str)) = (has_query, query) {
             q = q.bind(query_str.trim());
         }
@@ -2712,6 +2727,84 @@ mod privacy_tests {
             .expect("watch_id field");
         assert_eq!(seen_id, wb.watch_id, "should be user-b's watch");
         assert_ne!(seen_id, wa.watch_id, "must not leak user-a's watch");
+    }
+
+    // ── list_watches / search_watches (KYO-178) ──────────────────────────
+    //
+    // `list_watches` and `search_watches` previously filtered on
+    // `workspace_id` alone, so any workspace member could read every other
+    // member's private watches. These tests lock in `created_by = user_id`
+    // scoping on both functions.
+
+    #[tokio::test]
+    async fn list_watches_excludes_other_users_watches() {
+        let pool = test_pool().await;
+        seed_workspace_with_two_users(&pool).await;
+
+        let wa = create_test_watch(&pool, "user-a", "A's Watch").await;
+        let wb = create_test_watch(&pool, "user-b", "B's Watch").await;
+
+        let bs_watches = list_watches(&pool, "ws-1", "user-b")
+            .await
+            .expect("list_watches for user-b");
+
+        assert_eq!(
+            bs_watches.len(),
+            1,
+            "user-b should see exactly their own watch, not user-a's"
+        );
+        assert_eq!(bs_watches[0].watch_id, wb.watch_id, "should be user-b's watch");
+        assert_ne!(bs_watches[0].watch_id, wa.watch_id, "must not leak user-a's watch");
+    }
+
+    #[tokio::test]
+    async fn search_watches_excludes_other_users_watches_with_query() {
+        let pool = test_pool().await;
+        seed_workspace_with_two_users(&pool).await;
+
+        // Both users have a watch whose name matches the same search term
+        // (watch names are unique per workspace, so the names differ but
+        // both contain "Revenue"), exercising the `has_query` branch (ILIKE
+        // on name/prompt) — this is what proves the renumbered
+        // $3=user_id / $4=query bind chain is correct, since a bind-order
+        // mistake would either error or silently leak user-a's row into
+        // user-b's results.
+        let wa = create_test_watch(&pool, "user-a", "Revenue Alert Watch A").await;
+        let wb = create_test_watch(&pool, "user-b", "Revenue Alert Watch B").await;
+
+        let results = search_watches(&pool, "ws-1", "user-b", Some("revenue"), 50)
+            .await
+            .expect("search_watches with query for user-b");
+
+        assert_eq!(
+            results.len(),
+            1,
+            "user-b should only match their own watch, not user-a's identically-named one"
+        );
+        assert_eq!(results[0].watch_id, wb.watch_id, "should be user-b's watch");
+        assert_ne!(results[0].watch_id, wa.watch_id, "must not leak user-a's watch");
+    }
+
+    #[tokio::test]
+    async fn search_watches_excludes_other_users_watches_without_query() {
+        let pool = test_pool().await;
+        seed_workspace_with_two_users(&pool).await;
+
+        // No query term — exercises the no-query branch.
+        let wa = create_test_watch(&pool, "user-a", "A's Watch").await;
+        let wb = create_test_watch(&pool, "user-b", "B's Watch").await;
+
+        let results = search_watches(&pool, "ws-1", "user-b", None, 50)
+            .await
+            .expect("search_watches without query for user-b");
+
+        assert_eq!(
+            results.len(),
+            1,
+            "user-b should only see their own watch when listing without a query"
+        );
+        assert_eq!(results[0].watch_id, wb.watch_id, "should be user-b's watch");
+        assert_ne!(results[0].watch_id, wa.watch_id, "must not leak user-a's watch");
     }
 
     // ── sync_log delta filtering ─────────────────────────────────────────
