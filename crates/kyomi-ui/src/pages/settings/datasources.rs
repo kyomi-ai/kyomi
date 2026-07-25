@@ -24,7 +24,6 @@ use crate::pages::settings::connect_deployment::{
 use crate::pages::settings::connect_status_panel::ConnectStatusPanel;
 use crate::query_cache::{use_query, QueryCache};
 use crate::server_fns::connect::{create_connect_datasource, discover_connect_containers};
-use crate::server_fns::context::UserContext;
 use crate::server_fns::datasources::*;
 use crate::server_fns::sql_editor::refresh_catalog;
 #[cfg(target_arch = "wasm32")]
@@ -38,6 +37,7 @@ use crate::server_fns::datasource_oauth::{
     get_google_oauth_projects,
 };
 use crate::utils::json::config_bool;
+use crate::utils::permissions::use_is_workspace_admin;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -220,6 +220,14 @@ fn DatasourcesContent(
     let (datasources, set_datasources) = signal(initial_datasources);
     let query_cache = expect_context::<QueryCache>();
 
+    // ── Admin gating (KYO-184) ───────────────────────────────────────────
+    // Create/edit/delete are workspace-admin-only server-side
+    // (`require_workspace_admin` in `server_fns/datasources.rs`). Per-user
+    // credential entry, the OAuth connect buttons, and the per-user enable
+    // toggle stay ungated — those are intentionally available to every
+    // member (see `docs/DATASOURCE_ARCHITECTURE.md` §5.2).
+    let is_admin = use_is_workspace_admin();
+
     // ── Modal state ──────────────────────────────────────────────────────
     // None = closed, Some(None) = create mode, Some(Some(id)) = edit mode
     let (modal_datasource_id, set_modal_datasource_id) =
@@ -362,10 +370,12 @@ fn DatasourcesContent(
                         "Manage database connections"
                     </p>
                 </div>
-                // Header CTA — only shown when at least one datasource exists.
+                // Header CTA — only shown when at least one datasource exists
+                // AND the caller is a workspace admin (create is admin-only —
+                // `create_datasource_modal` → `require_workspace_admin`).
                 // Empty state renders its own prominent CTA below (see `EmptyState`),
                 // so double-showing the button creates a duplicate "Add Datasource" CTA.
-                <Show when=move || !datasources.get().is_empty()>
+                <Show when=move || !datasources.get().is_empty() && is_admin.get()>
                     <Button
                         on:click=move |_| set_modal_datasource_id.set(Some(None))
                     >
@@ -383,21 +393,40 @@ fn DatasourcesContent(
                     <Show
                         when=move || !datasources.get().is_empty()
                         fallback=move || view! {
-                            <EmptyState
-                                icon=std::sync::Arc::new(|| view! {
-                                    <Icon icon=phosphor_leptos::DATABASE weight=IconWeight::Duotone size="64px"/>
-                                }.into_any())
-                                title="No datasources configured"
-                                description="Connect a data source to start querying your data"
-                                action=std::sync::Arc::new(move || view! {
-                                    <Button on:click=move |_| set_modal_datasource_id.set(Some(None))>
-                                        <span class="h-4 w-4 inline-flex items-center justify-center">
-                                            <Icon icon=phosphor_leptos::PLUS/>
-                                        </span>
-                                        "Add Datasource"
-                                    </Button>
-                                }.into_any())
-                            />
+                            // Empty-state CTA is admin-only for the same reason as the
+                            // header CTA above. Nested <Show> (not a `.get()` read inside
+                            // this fallback closure) per CODING_STANDARDS.md — reading
+                            // `is_admin` directly here would subscribe the outer Show's
+                            // wrapping closure to it, causing the whole list branch to
+                            // remount whenever admin status resolves.
+                            <Show
+                                when=move || is_admin.get()
+                                fallback=move || view! {
+                                    <EmptyState
+                                        icon=std::sync::Arc::new(|| view! {
+                                            <Icon icon=phosphor_leptos::DATABASE weight=IconWeight::Duotone size="64px"/>
+                                        }.into_any())
+                                        title="No datasources configured"
+                                        description="Ask a workspace admin to connect a data source"
+                                    />
+                                }
+                            >
+                                <EmptyState
+                                    icon=std::sync::Arc::new(|| view! {
+                                        <Icon icon=phosphor_leptos::DATABASE weight=IconWeight::Duotone size="64px"/>
+                                    }.into_any())
+                                    title="No datasources configured"
+                                    description="Connect a data source to start querying your data"
+                                    action=std::sync::Arc::new(move || view! {
+                                        <Button on:click=move |_| set_modal_datasource_id.set(Some(None))>
+                                            <span class="h-4 w-4 inline-flex items-center justify-center">
+                                                <Icon icon=phosphor_leptos::PLUS/>
+                                            </span>
+                                            "Add Datasource"
+                                        </Button>
+                                    }.into_any())
+                                />
+                            </Show>
                         }
                     >
                         <div class="divide-y divide-border">
@@ -414,6 +443,7 @@ fn DatasourcesContent(
                                     set_modal_datasource_id=set_modal_datasource_id
                                     oauth_connecting=oauth_connecting
                                     set_oauth_connecting=set_oauth_connecting
+                                    is_admin=is_admin
                                 />
                             </For>
                         </div>
@@ -462,6 +492,10 @@ fn DatasourceRow(
     oauth_connecting: ReadSignal<Option<String>>,
     /// Setter for the OAuth connecting state — passed to the popup monitor.
     set_oauth_connecting: WriteSignal<Option<String>>,
+    /// Whether the caller is a workspace admin — gates the delete button
+    /// (`delete_datasource` → `require_workspace_admin`). Passed as a
+    /// `Signal` (not snapshotted) per CODING_STANDARDS.md.
+    is_admin: Signal<bool>,
 ) -> impl IntoView {
     // ── Toggle state ────────────────────────────────────────────────────
     let ds_for_toggle = ds.clone();
@@ -774,16 +808,20 @@ fn DatasourceRow(
                     }.into_any()
                 }}
 
-                // Delete button — hidden for analytics datasources (lifecycle-managed by analytics site CRUD)
-                {(!ds.is_analytics).then(|| view! {
+                // Delete button — hidden for analytics datasources (lifecycle-managed
+                // by analytics site CRUD) AND for non-admins (`delete_datasource` →
+                // `require_workspace_admin`). `<Show>` (not `.then()`) because
+                // `is_admin` is a reactive Signal, unlike the static `is_analytics`
+                // check it's combined with.
+                <Show when=move || is_admin.get() && !ds.is_analytics>
                     <Button
                         variant=ButtonVariant::GhostDestructive
                         size=ButtonSize::Icon
-                        on:click=on_delete_click
+                        on:click=on_delete_click.clone()
                     >
                         <Icon icon=phosphor_leptos::TRASH/>
                     </Button>
-                })}
+                </Show>
             </div>
         </div>
     }
@@ -840,16 +878,11 @@ pub fn DatasourceModal(
 ) -> impl IntoView {
     // ── Admin context ────────────────────────────────────────────────────
     // Shared resource provided by the parent Layout (see settings_shell.rs).
-    // Gates the SSH Tunnel section, which is admin-only and only rendered
-    // for SSH-capable datasource types (see `supports_ssh_tunnel`).
-    let user_ctx = expect_context::<LocalResource<Result<UserContext, ServerFnError>>>();
-    let is_admin = Signal::derive(move || {
-        user_ctx
-            .get()
-            .and_then(|r| r.ok())
-            .map(|c| c.workspace_roles.iter().any(|r| r == "workspace_admin"))
-            .unwrap_or(false)
-    });
+    // Gates the SSH Tunnel section (admin-only, SSH-capable types only — see
+    // `supports_ssh_tunnel`) as well as the Add/Edit/Save surfaces below:
+    // the header/empty-state "Add Datasource" CTAs, the delete button, the
+    // edit-mode connection-config fields, and the Catalog tab (KYO-184).
+    let is_admin = use_is_workspace_admin();
 
     // `datasource_id` is `Some` only in edit mode. Used by `SshTunnelSection`
     // to pick placeholder copy for the BYOK private-key/passphrase fields
@@ -2206,19 +2239,28 @@ pub fn DatasourceModal(
     });
 
     // ── Save ─────────────────────────────────────────────────────────────
-    // Input: (ds_id, name, slug, conn_cfg, creds, ds_type)
-    type SaveInput = (Option<String>, String, String, serde_json::Value, serde_json::Value, String);
+    // Input: (ds_id, name, slug, conn_cfg, creds, ds_type, is_admin)
+    //
+    // `is_admin` is threaded through the Action input (resolved at dispatch
+    // time in `do_save` via `get_untracked()`, per CODING_STANDARDS.md
+    // "resolve derived signal values at click time") rather than read live
+    // inside the async block, so a mid-save admin-status change can't alter
+    // which branch runs.
+    type SaveInput = (Option<String>, String, String, serde_json::Value, serde_json::Value, String, bool);
 
     let save_action = Action::new(|input: &SaveInput| {
-        let (ds_id, name_val, slug_val, conn_cfg, creds, ds_type_val) = input.clone();
+        let (ds_id, name_val, slug_val, conn_cfg, creds, ds_type_val, is_admin_val) = input.clone();
         async move {
             match ds_id {
                 None => {
-                    // Create mode
+                    // Create mode — the header/empty-state "Add Datasource" CTAs
+                    // are admin-gated (KYO-184), so this path is only reachable
+                    // by admins in the UI; `create_datasource_modal` enforces it
+                    // server-side regardless.
                     create_datasource_modal(name_val, slug_val, ds_type_val, conn_cfg, creds).await
                 }
-                Some(id) => {
-                    // Edit mode — save connection settings first
+                Some(id) if is_admin_val => {
+                    // Admin edit — save connection settings first, then credentials.
                     let update_result = update_datasource_settings(id.clone(), name_val, slug_val, conn_cfg).await;
                     match update_result {
                         Ok(r) => {
@@ -2231,6 +2273,25 @@ pub fn DatasourceModal(
                         }
                         Err(e) => Err(e),
                     }
+                }
+                Some(id) => {
+                    // Non-admin edit — `update_datasource_settings` is
+                    // workspace-admin-gated (KYO-184); a non-admin can only save
+                    // their own credentials. Skip the call entirely when no
+                    // credentials were entered — same `has_creds` guard the
+                    // create-mode branch uses above — so merely opening the
+                    // modal and clicking "Save Credentials" can't insert an
+                    // empty credential row.
+                    let has_creds = creds.as_object().map(|o| !o.is_empty()).unwrap_or(false);
+                    if has_creds {
+                        save_datasource_credentials(id.clone(), creds).await?;
+                    }
+                    Ok(DatasourceResult {
+                        id,
+                        slug: slug_val,
+                        name: name_val,
+                        datasource_type: ds_type_val,
+                    })
                 }
             }
         }
@@ -2288,7 +2349,7 @@ pub fn DatasourceModal(
         }
 
         set_error_msg.set(None);
-        save_action.dispatch((ds_id, name_val, slug_val, conn_cfg, creds, ds_type_val));
+        save_action.dispatch((ds_id, name_val, slug_val, conn_cfg, creds, ds_type_val, is_admin.get_untracked()));
     };
 
     // ── Create-mode: create a Connect datasource ─────────────────────────
@@ -2508,7 +2569,15 @@ pub fn DatasourceModal(
                                     disabled=is_saving
                                     on:click=move |_| do_save()
                                 >
-                                    {move || if save_action.pending().get() { "Saving..." } else { "Save" }}
+                                    {move || {
+                                        if save_action.pending().get() {
+                                            "Saving..."
+                                        } else if is_admin.get() {
+                                            "Save"
+                                        } else {
+                                            "Save Credentials"
+                                        }
+                                    }}
                                 </Button>
                             </Show>
                         }.into_any()
@@ -2749,12 +2818,22 @@ pub fn DatasourceModal(
                                 >
                                     "Connection"
                                 </button>
-                                <button
-                                    class=move || if active_tab.get() == "catalog" { TAB_ACTIVE } else { TAB_INACTIVE }
-                                    on:click=move |_| set_active_tab.set("catalog".to_string())
-                                >
-                                    "Catalog"
-                                </button>
+                                // Catalog tab is workspace-admin-only (KYO-184): every field on
+                                // it — scope selection, dedicated indexing credentials — persists
+                                // through `update_datasource_settings`, and "Refresh Now" is
+                                // separately gated by `refresh_catalog`'s admin check
+                                // (`server_fns/sql_editor.rs:674-686`). Hiding the tab is what
+                                // satisfies "Refresh Catalog is not rendered for non-admins" — do
+                                // NOT also gate the Refresh Now button itself, that would be dead
+                                // code a non-admin can never reach.
+                                <Show when=move || is_admin.get()>
+                                    <button
+                                        class=move || if active_tab.get() == "catalog" { TAB_ACTIVE } else { TAB_INACTIVE }
+                                        on:click=move |_| set_active_tab.set("catalog".to_string())
+                                    >
+                                        "Catalog"
+                                    </button>
+                                </Show>
                             </div>
                         </Show>
 
@@ -2874,6 +2953,55 @@ pub fn DatasourceModal(
                                         </div>
                                     </Show>
 
+                                    // ── Non-admin edit-mode read-only view (KYO-184) ──
+                                    // A non-admin cannot persist connection-config changes —
+                                    // `update_datasource_settings` is workspace-admin-gated
+                                    // (`server_fns/datasources.rs`) — so presenting the editable
+                                    // connection-config inputs would let them type into fields
+                                    // that silently never save. Mirrors the shape of the sample
+                                    // read-only branch above; excludes samples since that branch
+                                    // already covers them for every role. The credentials section
+                                    // and provider OAuth connect/disconnect UI further down are
+                                    // NOT part of this gate — personal credential entry still
+                                    // works for non-admins.
+                                    <Show when=move || !is_create_mode.get() && !is_admin.get() && !is_sample.get()>
+                                        <div class="space-y-4">
+                                            <Alert>
+                                                <AlertDescription>
+                                                    "Connection settings are managed by workspace admins. You can still connect your own credentials below."
+                                                </AlertDescription>
+                                            </Alert>
+                                            <div class="grid grid-cols-2 gap-4">
+                                                <div>
+                                                    <label class="block text-sm font-medium mb-1 text-muted-foreground">"Name"</label>
+                                                    <p class="text-sm">{move || name.get()}</p>
+                                                </div>
+                                                <div>
+                                                    <label class="block text-sm font-medium mb-1 text-muted-foreground">"Slug"</label>
+                                                    <p class="text-sm font-mono">{move || slug.get()}</p>
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <label class="block text-sm font-medium mb-1 text-muted-foreground">"Type"</label>
+                                                <div class="flex items-center gap-2">
+                                                    <span class="h-4 w-4 inline-flex items-center justify-center">
+                                                        <Icon icon=phosphor_leptos::DATABASE/>
+                                                    </span>
+                                                    <span class="text-sm">
+                                                        {move || {
+                                                            let t = ds_type.get();
+                                                            PROVIDER_TYPES
+                                                                .iter()
+                                                                .find(|(v, _)| *v == t)
+                                                                .map(|(_, l)| (*l).to_string())
+                                                                .unwrap_or(t)
+                                                        }}
+                                                    </span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </Show>
+
                                     // ── Sample quick-add tile (create mode only) ──
                                     // Matches the React sample quick-add block at the top of
                                     // the connection tab. Only visible for admins when the
@@ -2937,7 +3065,14 @@ pub fn DatasourceModal(
                                         </div>
                                     </Show>
 
-                                    // Name & Slug (admin fields)
+                                    // Name & Slug (admin fields) — hidden for non-admins in edit
+                                    // mode (KYO-184): `update_datasource_settings` is
+                                    // workspace-admin-gated, so a non-admin's edits here would
+                                    // silently fail to persist. The read-only summary branch
+                                    // above already shows these values. Always shown in create
+                                    // mode, which is admin-only-reachable anyway (header/empty-
+                                    // state CTAs are admin-gated).
+                                    <Show when=move || is_create_mode.get() || is_admin.get()>
                                     <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                         <div>
                                             <label class="block text-sm font-medium mb-1">
@@ -2980,6 +3115,7 @@ pub fn DatasourceModal(
                                             </p>
                                         </div>
                                     </div>
+                                    </Show>
 
                                     // ── Kyomi Connect status panel ──
                                     // For Connect datasources, the agent owns
@@ -3050,6 +3186,7 @@ pub fn DatasourceModal(
                                             bq_projects=bq_projects
                                             bq_projects_loading=bq_projects_loading
                                             bq_projects_error=bq_projects_error
+                                            is_admin=is_admin
                                         />
                                     </Show>
 
@@ -3069,6 +3206,7 @@ pub fn DatasourceModal(
                                             set_oauth_connecting=set_modal_oauth_connecting
                                             datasource_disconnect_action=datasource_disconnect_action
                                             is_create_mode=is_create_mode
+                                            is_admin=is_admin
                                         />
                                     </Show>
 
@@ -3092,6 +3230,7 @@ pub fn DatasourceModal(
                                             set_cfg_oauth_client_id=set_cfg_oauth_client_id
                                             cfg_oauth_client_secret=cfg_oauth_client_secret
                                             set_cfg_oauth_client_secret=set_cfg_oauth_client_secret
+                                            is_admin=is_admin
                                         />
                                     </Show>
 
@@ -3112,10 +3251,15 @@ pub fn DatasourceModal(
                                             set_oauth_connecting=set_modal_oauth_connecting
                                             datasource_disconnect_action=datasource_disconnect_action
                                             is_create_mode=is_create_mode
+                                            is_admin=is_admin
                                         />
                                     </Show>
 
-                                    // Connection fields (provider-specific)
+                                    // Connection fields (provider-specific) — workspace-admin-only
+                                    // (KYO-184): these persist through `update_datasource_settings`,
+                                    // which non-admins cannot call, so editing them would silently
+                                    // do nothing on save.
+                                    <Show when=move || is_admin.get()>
                                     <ProviderConnectionFields
                                         signals=ConnectionFieldsSignals {
                                             ds_type,
@@ -3149,6 +3293,7 @@ pub fn DatasourceModal(
                                             set_cfg_oauth_client_secret,
                                         }
                                     />
+                                    </Show>
 
                                     // SSH tunnel section — SSH-capable types, workspace admins only.
                                     <Show when=move || is_admin.get() && supports_ssh_tunnel(&ds_type.get())>
@@ -3203,10 +3348,13 @@ pub fn DatasourceModal(
                                             set_cred_sp_client_secret,
                                             cfg_shared_credentials,
                                             set_cfg_shared_credentials,
+                                            is_admin,
                                         }
                                     />
 
-                                    // Test & Discover button
+                                    // Test & Discover button — workspace-admin-only (KYO-184): it
+                                    // probes the remote system using the connection-config fields
+                                    // above, which non-admins can no longer edit.
                                     // Hidden for BigQuery (uses OAuth), Snowflake OAuth mode,
                                     // Databricks OAuth mode when not yet connected,
                                     // and Synapse Enterprise OAuth when not yet connected.
@@ -3219,10 +3367,11 @@ pub fn DatasourceModal(
                                         let synapse_eo_not_connected = t == "synapse"
                                             && syn == "enterprise_oauth"
                                             && !modal_oauth_connected.get();
-                                        !(t == "bigquery"
-                                            || (t == "snowflake" && sf == "oauth" && !modal_oauth_connected.get())
-                                            || db_oauth_not_ready
-                                            || synapse_eo_not_connected)
+                                        is_admin.get()
+                                            && !(t == "bigquery"
+                                                || (t == "snowflake" && sf == "oauth" && !modal_oauth_connected.get())
+                                                || db_oauth_not_ready
+                                                || synapse_eo_not_connected)
                                     }>
                                         <div class="border-t border-border pt-4 mt-4">
                                             <div class="flex items-center gap-3">
@@ -3266,11 +3415,14 @@ pub fn DatasourceModal(
                                         </div>
                                     </Show>
 
-                                    // Discovery fields (shown after successful Test & Discover, or always in edit mode)
+                                    // Discovery fields (shown after successful Test & Discover, or
+                                    // always in edit mode) — workspace-admin-only (KYO-184): these
+                                    // set the catalog scope, which persists through
+                                    // `update_datasource_settings`, non-admin-inaccessible.
                                     <Show when=move || {
                                         let t = ds_type.get();
                                         let is_create = is_create_mode.get();
-                                        t != "bigquery" && (!is_create || discovery_succeeded.get())
+                                        is_admin.get() && t != "bigquery" && (!is_create || discovery_succeeded.get())
                                     }>
                                         <DiscoveryFields
                                             signals=DiscoveryFieldsSignals {
@@ -3320,8 +3472,12 @@ pub fn DatasourceModal(
                             </Show>
 
                             // ── CATALOG TAB (edit mode only) ──
+                            // `is_admin` here is defense in depth — the tab button that sets
+                            // `active_tab` to "catalog" is itself admin-gated above, so a
+                            // non-admin can't normally reach this state, but `active_tab` isn't
+                            // reset if admin status changes while the modal is open.
                             <Show when=move || {
-                                active_tab.get() == "catalog" && !is_create_mode.get()
+                                active_tab.get() == "catalog" && !is_create_mode.get() && is_admin.get()
                             }>
                                 <EditModeCatalogTab
                                     datasource_id=Signal::derive(move || {
@@ -3872,6 +4028,14 @@ fn BigQueryAuthModeSection(
     bq_projects_loading: ReadSignal<bool>,
     /// Non-None when the project fetch returned an error or warning message.
     bq_projects_error: ReadSignal<Option<String>>,
+    /// Gates the admin-only connection-config surfaces in this section: the
+    /// Authentication Mode selector, the Enterprise OAuth Client ID/Secret
+    /// fields, and the Service Account JSON textarea. All three persist
+    /// through `update_datasource_settings`, which non-admins cannot call
+    /// (KYO-184). Does NOT gate the personal OAuth connect/disconnect panel
+    /// or billing/default project fields — those are per-user and must stay
+    /// visible to every member (`docs/DATASOURCE_ARCHITECTURE.md` §1/§5.2).
+    is_admin: Signal<bool>,
 ) -> impl IntoView {
     // Parse service account email from JSON
     let handle_service_account_json = move |json_text: String| {
@@ -3976,26 +4140,33 @@ fn BigQueryAuthModeSection(
     let enterprise_redirect_url_signal = Signal::stored(enterprise_redirect_url.clone());
 
     view! {
-        <div class="space-y-2 pb-4 border-b border-border">
-            <label class="block text-sm font-medium">"Authentication Mode"</label>
-            <Select
-                value=Signal::derive(move || bq_auth_mode.get())
-                options=Signal::stored(vec![
-                    ("kyomi_oauth".to_string(), "Kyomi OAuth (Recommended)".to_string()),
-                    ("enterprise_oauth".to_string(), "Enterprise OAuth".to_string()),
-                    ("service_account".to_string(), "Service Account".to_string()),
-                ])
-                on_change=move |val| set_bq_auth_mode.set(val)
-            />
-            <p class="text-xs text-muted-foreground">
-                {move || match bq_auth_mode.get().as_str() {
-                    "kyomi_oauth" => "Users authenticate with their Google accounts via Kyomi.",
-                    "enterprise_oauth" => "Users authenticate with your organization's OAuth app.",
-                    "service_account" => "All users share a service account for automated access.",
-                    _ => "",
-                }}
-            </p>
-        </div>
+        // Authentication Mode selector — admin-only (KYO-184): persists via
+        // `update_datasource_settings`, which non-admins cannot call. The
+        // per-mode panels below still render correctly for non-admins using
+        // whatever mode was already loaded from the server (`bq_auth_mode`
+        // is set by the settings-load effect regardless of who is viewing).
+        <Show when=move || is_admin.get()>
+            <div class="space-y-2 pb-4 border-b border-border">
+                <label class="block text-sm font-medium">"Authentication Mode"</label>
+                <Select
+                    value=Signal::derive(move || bq_auth_mode.get())
+                    options=Signal::stored(vec![
+                        ("kyomi_oauth".to_string(), "Kyomi OAuth (Recommended)".to_string()),
+                        ("enterprise_oauth".to_string(), "Enterprise OAuth".to_string()),
+                        ("service_account".to_string(), "Service Account".to_string()),
+                    ])
+                    on_change=move |val| set_bq_auth_mode.set(val)
+                />
+                <p class="text-xs text-muted-foreground">
+                    {move || match bq_auth_mode.get().as_str() {
+                        "kyomi_oauth" => "Users authenticate with their Google accounts via Kyomi.",
+                        "enterprise_oauth" => "Users authenticate with your organization's OAuth app.",
+                        "service_account" => "All users share a service account for automated access.",
+                        _ => "",
+                    }}
+                </p>
+            </div>
+        </Show>
 
         // BigQuery Credentials section
         <div class="space-y-4 border-t border-border pt-4 mt-4">
@@ -4058,44 +4229,47 @@ fn BigQueryAuthModeSection(
             // Enterprise OAuth mode
             <Show when=move || bq_auth_mode.get() == "enterprise_oauth">
                 <div class="space-y-4">
-                    // Admin OAuth configuration
-                    <div class="space-y-3 pb-4 border-b border-border">
-                        <h4 class="text-sm font-medium">"OAuth Configuration"</h4>
-                        <p class="text-xs text-muted-foreground">
-                            "Configure your organization's Google Cloud OAuth app."
-                        </p>
-                        <div class="p-3 bg-muted/30 rounded-lg space-y-1">
-                            <label class="block text-xs font-medium text-muted-foreground">
-                                "Redirect URL (use when creating Google Cloud OAuth client)"
-                            </label>
-                            <div class="flex items-center gap-2">
-                                <code class="text-xs font-mono break-all flex-1">{move || enterprise_redirect_url_signal.get()}</code>
-                                <CopyButton text=enterprise_redirect_url_signal/>
+                    // Admin OAuth configuration — admin-only (KYO-184): the
+                    // client ID/secret persist through `update_datasource_settings`.
+                    <Show when=move || is_admin.get()>
+                        <div class="space-y-3 pb-4 border-b border-border">
+                            <h4 class="text-sm font-medium">"OAuth Configuration"</h4>
+                            <p class="text-xs text-muted-foreground">
+                                "Configure your organization's Google Cloud OAuth app."
+                            </p>
+                            <div class="p-3 bg-muted/30 rounded-lg space-y-1">
+                                <label class="block text-xs font-medium text-muted-foreground">
+                                    "Redirect URL (use when creating Google Cloud OAuth client)"
+                                </label>
+                                <div class="flex items-center gap-2">
+                                    <code class="text-xs font-mono break-all flex-1">{move || enterprise_redirect_url_signal.get()}</code>
+                                    <CopyButton text=enterprise_redirect_url_signal/>
+                                </div>
+                            </div>
+                            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                <div>
+                                    <label class="block text-sm font-medium mb-1">"OAuth Client ID"</label>
+                                    <input
+                                        type="text"
+                                        class=MODAL_INPUT_CLASS
+                                        placeholder="From Google Cloud Console"
+                                        prop:value=move || cfg_oauth_client_id.get()
+                                        on:input=move |ev| set_cfg_oauth_client_id.set(event_target_value(&ev))
+                                    />
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium mb-1">"OAuth Client Secret"</label>
+                                    <input
+                                        type="password"
+                                        class=MODAL_INPUT_CLASS
+                                        placeholder="OAuth client secret"
+                                        prop:value=move || cfg_oauth_client_secret.get()
+                                        on:input=move |ev| set_cfg_oauth_client_secret.set(event_target_value(&ev))
+                                    />
+                                </div>
                             </div>
                         </div>
-                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                            <div>
-                                <label class="block text-sm font-medium mb-1">"OAuth Client ID"</label>
-                                <input
-                                    type="text"
-                                    class=MODAL_INPUT_CLASS
-                                    placeholder="From Google Cloud Console"
-                                    prop:value=move || cfg_oauth_client_id.get()
-                                    on:input=move |ev| set_cfg_oauth_client_id.set(event_target_value(&ev))
-                                />
-                            </div>
-                            <div>
-                                <label class="block text-sm font-medium mb-1">"OAuth Client Secret"</label>
-                                <input
-                                    type="password"
-                                    class=MODAL_INPUT_CLASS
-                                    placeholder="OAuth client secret"
-                                    prop:value=move || cfg_oauth_client_secret.get()
-                                    on:input=move |ev| set_cfg_oauth_client_secret.set(event_target_value(&ev))
-                                />
-                            </div>
-                        </div>
-                    </div>
+                    </Show>
                     // User connection — 4-state status panel.
                     // Hidden in create mode (no slug yet for the enterprise endpoint).
                     <Show when=move || !is_create_mode.get()>
@@ -4149,55 +4323,66 @@ fn BigQueryAuthModeSection(
                 </div>
             </Show>
 
-            // Service Account mode
+            // Service Account mode — entirely admin-config (KYO-184): there is
+            // no personal credential in this mode, so a non-admin sees an
+            // explanatory note instead of the JSON textarea.
             <Show when=move || bq_auth_mode.get() == "service_account">
-                <div class="space-y-4">
-                    <p class="text-xs text-muted-foreground">
-                        "Upload or paste your Google Cloud service account credentials JSON."
-                    </p>
-                    {move || service_account_email.get().is_empty().then(|| view! {
-                        <div class="space-y-3">
-                            <div>
-                                <label class="block text-sm font-medium mb-1">"Service Account JSON"</label>
-                                <textarea
-                                    rows="6"
-                                    class="w-full px-3 py-2 border border-input rounded-md bg-background text-sm font-mono focus:outline-none focus:ring-1 focus:ring-ring"
-                                    placeholder=r#"{"type": "service_account", "client_email": "...", ...}"#
-                                    prop:value=move || cfg_service_account_json.get()
-                                    on:input=move |ev| {
-                                        handle_service_account_json(event_target_value(&ev));
-                                    }
-                                />
-                                <p class="text-xs text-muted-foreground mt-1">
-                                    "Paste the contents of your service account JSON file"
-                                </p>
-                            </div>
-                        </div>
-                    })}
-                    {move || {
-                        let email = service_account_email.get();
-                        (!email.is_empty()).then(move || view! {
-                            <div class="flex items-center justify-between p-3 bg-muted/50 rounded-lg">
-                                <div class="flex items-center gap-2">
-                                    <Icon icon=phosphor_leptos::CHECK attr:class="h-4 w-4 text-success-foreground"/>
-                                    <span class="text-sm text-foreground">
-                                        {format!("Service Account: {email}")}
-                                    </span>
+                <Show
+                    when=move || is_admin.get()
+                    fallback=move || view! {
+                        <p class="text-xs text-muted-foreground">
+                            "This datasource uses a shared service account configured by a workspace admin."
+                        </p>
+                    }
+                >
+                    <div class="space-y-4">
+                        <p class="text-xs text-muted-foreground">
+                            "Upload or paste your Google Cloud service account credentials JSON."
+                        </p>
+                        {move || service_account_email.get().is_empty().then(|| view! {
+                            <div class="space-y-3">
+                                <div>
+                                    <label class="block text-sm font-medium mb-1">"Service Account JSON"</label>
+                                    <textarea
+                                        rows="6"
+                                        class="w-full px-3 py-2 border border-input rounded-md bg-background text-sm font-mono focus:outline-none focus:ring-1 focus:ring-ring"
+                                        placeholder=r#"{"type": "service_account", "client_email": "...", ...}"#
+                                        prop:value=move || cfg_service_account_json.get()
+                                        on:input=move |ev| {
+                                            handle_service_account_json(event_target_value(&ev));
+                                        }
+                                    />
+                                    <p class="text-xs text-muted-foreground mt-1">
+                                        "Paste the contents of your service account JSON file"
+                                    </p>
                                 </div>
-                                <Button
-                                    variant=ButtonVariant::Outline
-                                    size=ButtonSize::Sm
-                                    on:click=move |_| {
-                                        set_service_account_email.set(String::new());
-                                        set_cfg_service_account_json.set(String::new());
-                                    }
-                                >
-                                    "Remove"
-                                </Button>
                             </div>
-                        })
-                    }}
-                </div>
+                        })}
+                        {move || {
+                            let email = service_account_email.get();
+                            (!email.is_empty()).then(move || view! {
+                                <div class="flex items-center justify-between p-3 bg-muted/50 rounded-lg">
+                                    <div class="flex items-center gap-2">
+                                        <Icon icon=phosphor_leptos::CHECK attr:class="h-4 w-4 text-success-foreground"/>
+                                        <span class="text-sm text-foreground">
+                                            {format!("Service Account: {email}")}
+                                        </span>
+                                    </div>
+                                    <Button
+                                        variant=ButtonVariant::Outline
+                                        size=ButtonSize::Sm
+                                        on:click=move |_| {
+                                            set_service_account_email.set(String::new());
+                                            set_cfg_service_account_json.set(String::new());
+                                        }
+                                    >
+                                        "Remove"
+                                    </Button>
+                                </div>
+                            })
+                        }}
+                    </div>
+                </Show>
             </Show>
         </div>
     }
@@ -4233,6 +4418,11 @@ fn SnowflakeAuthModeSection(
     datasource_disconnect_action: Action<(String, String), Result<crate::server_fns::datasource_oauth::DatasourceOAuthDisconnectResult, ServerFnError>>,
     /// True in create mode — OAuth status panel is hidden in create mode.
     is_create_mode: Signal<bool>,
+    /// Gates the Authentication Mode selector — admin-only (KYO-184), it
+    /// persists through `update_datasource_settings`. Does NOT gate the
+    /// personal OAuth connect/disconnect panel below, which stays visible to
+    /// every member for whatever mode is already loaded.
+    is_admin: Signal<bool>,
 ) -> impl IntoView {
     // Snowflake connect URL is slug-scoped.
     let sf_connect_url = Signal::derive(move || {
@@ -4291,26 +4481,31 @@ fn SnowflakeAuthModeSection(
         Signal::derive(move || datasource_disconnect_action.pending().get());
 
     view! {
-        <div class="space-y-2 pb-4 border-b border-border">
-            <label class="block text-sm font-medium">"Authentication Mode"</label>
-            <Select
-                value=Signal::derive(move || sf_auth_mode.get())
-                options=Signal::stored(vec![
-                    ("password".to_string(), "Password".to_string()),
-                    ("oauth".to_string(), "OAuth".to_string()),
-                    ("keypair".to_string(), "Key-Pair".to_string()),
-                ])
-                on_change=move |val| set_sf_auth_mode.set(val)
-            />
-            <p class="text-xs text-muted-foreground">
-                {move || match sf_auth_mode.get().as_str() {
-                    "oauth" => "Users authenticate with their Snowflake accounts via OAuth.",
-                    "password" => "Users authenticate with username and password.",
-                    "keypair" => "Users authenticate using RSA key-pair.",
-                    _ => "",
-                }}
-            </p>
-        </div>
+        // Authentication Mode selector — admin-only (KYO-184). The OAuth
+        // status panel below still reflects whichever mode was already
+        // loaded from the server, so it renders correctly for non-admins too.
+        <Show when=move || is_admin.get()>
+            <div class="space-y-2 pb-4 border-b border-border">
+                <label class="block text-sm font-medium">"Authentication Mode"</label>
+                <Select
+                    value=Signal::derive(move || sf_auth_mode.get())
+                    options=Signal::stored(vec![
+                        ("password".to_string(), "Password".to_string()),
+                        ("oauth".to_string(), "OAuth".to_string()),
+                        ("keypair".to_string(), "Key-Pair".to_string()),
+                    ])
+                    on_change=move |val| set_sf_auth_mode.set(val)
+                />
+                <p class="text-xs text-muted-foreground">
+                    {move || match sf_auth_mode.get().as_str() {
+                        "oauth" => "Users authenticate with their Snowflake accounts via OAuth.",
+                        "password" => "Users authenticate with username and password.",
+                        "keypair" => "Users authenticate using RSA key-pair.",
+                        _ => "",
+                    }}
+                </p>
+            </div>
+        </Show>
 
         // OAuth connection status — shown only when OAuth mode is selected.
         <Show when=move || sf_auth_mode.get() == "oauth">
@@ -4389,6 +4584,11 @@ fn DatabricksAuthModeSection(
     /// OAuth Client Secret (admin-configured).
     cfg_oauth_client_secret: ReadSignal<String>,
     set_cfg_oauth_client_secret: WriteSignal<String>,
+    /// Gates the Authentication Mode selector and the admin-configured OAuth
+    /// Client ID/Secret fields — both persist through
+    /// `update_datasource_settings` (KYO-184). Does NOT gate "Your Databricks
+    /// Connection" below, which is per-user and stays visible to every member.
+    is_admin: Signal<bool>,
 ) -> impl IntoView {
     // Databricks connect URL is slug-scoped.
     let db_connect_url = Signal::derive(move || {
@@ -4450,68 +4650,74 @@ fn DatabricksAuthModeSection(
     let redirect_url_signal = Signal::stored(redirect_url_text);
 
     view! {
-        <div class="space-y-2 pb-4 border-b border-border">
-            <label class="block text-sm font-medium">"Authentication Mode"</label>
-            <Select
-                value=Signal::derive(move || db_auth_mode.get())
-                options=Signal::stored(vec![
-                    ("token".to_string(), "Personal Access Token".to_string()),
-                    ("oauth".to_string(), "OAuth".to_string()),
-                ])
-                on_change=move |val| set_db_auth_mode.set(val)
-            />
-            <p class="text-xs text-muted-foreground">
-                {move || match db_auth_mode.get().as_str() {
-                    "oauth" => "Users authenticate with their Databricks accounts via OAuth.",
-                    _ => "Users authenticate with a Personal Access Token.",
-                }}
-            </p>
-        </div>
+        // Authentication Mode selector — admin-only (KYO-184).
+        <Show when=move || is_admin.get()>
+            <div class="space-y-2 pb-4 border-b border-border">
+                <label class="block text-sm font-medium">"Authentication Mode"</label>
+                <Select
+                    value=Signal::derive(move || db_auth_mode.get())
+                    options=Signal::stored(vec![
+                        ("token".to_string(), "Personal Access Token".to_string()),
+                        ("oauth".to_string(), "OAuth".to_string()),
+                    ])
+                    on_change=move |val| set_db_auth_mode.set(val)
+                />
+                <p class="text-xs text-muted-foreground">
+                    {move || match db_auth_mode.get().as_str() {
+                        "oauth" => "Users authenticate with their Databricks accounts via OAuth.",
+                        _ => "Users authenticate with a Personal Access Token.",
+                    }}
+                </p>
+            </div>
+        </Show>
 
         // OAuth configuration — shown only when OAuth mode is selected.
         <Show when=move || db_auth_mode.get() == "oauth">
             <div class="space-y-3 border-t border-border pt-4 mt-4">
-                // Admin OAuth Client ID/Secret configuration
-                <div class="space-y-3 pb-4 border-b border-border">
-                    <h4 class="text-sm font-medium">"OAuth Configuration"</h4>
-                    <p class="text-xs text-muted-foreground">
-                        "Configure your organization's Databricks OAuth app."
-                    </p>
-                    // Redirect URL helper
-                    <div class="mt-3 p-3 rounded-md bg-muted">
-                        <p class="text-xs text-muted-foreground mb-1">
-                            "Redirect URL (use when creating Databricks OAuth app)"
+                // Admin OAuth Client ID/Secret configuration — admin-only
+                // (KYO-184): persists through `update_datasource_settings`.
+                <Show when=move || is_admin.get()>
+                    <div class="space-y-3 pb-4 border-b border-border">
+                        <h4 class="text-sm font-medium">"OAuth Configuration"</h4>
+                        <p class="text-xs text-muted-foreground">
+                            "Configure your organization's Databricks OAuth app."
                         </p>
-                        <div class="flex items-center gap-2">
-                            <code class="text-xs font-mono break-all flex-1">
-                                {move || redirect_url_signal.get()}
-                            </code>
-                            <CopyButton text=redirect_url_signal/>
+                        // Redirect URL helper
+                        <div class="mt-3 p-3 rounded-md bg-muted">
+                            <p class="text-xs text-muted-foreground mb-1">
+                                "Redirect URL (use when creating Databricks OAuth app)"
+                            </p>
+                            <div class="flex items-center gap-2">
+                                <code class="text-xs font-mono break-all flex-1">
+                                    {move || redirect_url_signal.get()}
+                                </code>
+                                <CopyButton text=redirect_url_signal/>
+                            </div>
+                        </div>
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-sm font-medium mb-1">"OAuth Client ID"</label>
+                                <input
+                                    type="text"
+                                    class=MODAL_INPUT_CLASS
+                                    placeholder="From Databricks OAuth app"
+                                    prop:value=move || cfg_oauth_client_id.get()
+                                    on:input=move |ev| set_cfg_oauth_client_id.set(event_target_value(&ev))
+                                />
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium mb-1">"OAuth Client Secret"</label>
+                                <input
+                                    type="password"
+                                    class=MODAL_INPUT_CLASS
+                                    placeholder="OAuth client secret"
+                                    prop:value=move || cfg_oauth_client_secret.get()
+                                    on:input=move |ev| set_cfg_oauth_client_secret.set(event_target_value(&ev))
+                                />
+                            </div>
                         </div>
                     </div>
-                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                        <div>
-                            <label class="block text-sm font-medium mb-1">"OAuth Client ID"</label>
-                            <input
-                                type="text"
-                                class=MODAL_INPUT_CLASS
-                                placeholder="From Databricks OAuth app"
-                                prop:value=move || cfg_oauth_client_id.get()
-                                on:input=move |ev| set_cfg_oauth_client_id.set(event_target_value(&ev))
-                            />
-                        </div>
-                        <div>
-                            <label class="block text-sm font-medium mb-1">"OAuth Client Secret"</label>
-                            <input
-                                type="password"
-                                class=MODAL_INPUT_CLASS
-                                placeholder="OAuth client secret"
-                                prop:value=move || cfg_oauth_client_secret.get()
-                                on:input=move |ev| set_cfg_oauth_client_secret.set(event_target_value(&ev))
-                            />
-                        </div>
-                    </div>
-                </div>
+                </Show>
                 // User connection status
                 <h4 class="text-sm font-medium">"Your Databricks Connection"</h4>
                 // 4-state status panel — hidden in create mode (no slug yet).
@@ -4569,6 +4775,11 @@ fn SynapseAuthModeSection(
     datasource_disconnect_action: Action<(String, String), Result<crate::server_fns::datasource_oauth::DatasourceOAuthDisconnectResult, ServerFnError>>,
     /// True in create mode — OAuth status panel is hidden in create mode.
     is_create_mode: Signal<bool>,
+    /// Gates the Authentication Mode selector and the admin-configured OAuth
+    /// Client ID/Secret fields — both persist through
+    /// `update_datasource_settings` (KYO-184). Does NOT gate "Your
+    /// Connection" below, which is per-user and stays visible to every member.
+    is_admin: Signal<bool>,
 ) -> impl IntoView {
     // Microsoft Enterprise OAuth connect URL — slug-scoped
     let enterprise_oauth_url = Signal::derive(move || {
@@ -4610,67 +4821,73 @@ fn SynapseAuthModeSection(
     let redirect_url_signal = Signal::stored(redirect_url);
 
     view! {
-        <div class="space-y-2 pb-4 border-b border-border">
-            <label class="block text-sm font-medium">"Authentication Mode"</label>
-            <Select
-                value=Signal::derive(move || synapse_auth_mode.get())
-                options=Signal::stored(vec![
-                    ("sql".to_string(), "SQL Authentication".to_string()),
-                    ("service_principal".to_string(), "Service Principal".to_string()),
-                    ("enterprise_oauth".to_string(), "Enterprise OAuth (Microsoft)".to_string()),
-                ])
-                on_change=move |val| set_synapse_auth_mode.set(val)
-            />
-            <p class="text-xs text-muted-foreground">
-                {move || match synapse_auth_mode.get().as_str() {
-                    "sql" => "Users authenticate with SQL username and password.",
-                    "service_principal" => "All users share a service principal (app registration) identity.",
-                    "enterprise_oauth" => "Users authenticate with their Microsoft accounts via your Azure AD app.",
-                    _ => "",
-                }}
-            </p>
-        </div>
+        // Authentication Mode selector — admin-only (KYO-184).
+        <Show when=move || is_admin.get()>
+            <div class="space-y-2 pb-4 border-b border-border">
+                <label class="block text-sm font-medium">"Authentication Mode"</label>
+                <Select
+                    value=Signal::derive(move || synapse_auth_mode.get())
+                    options=Signal::stored(vec![
+                        ("sql".to_string(), "SQL Authentication".to_string()),
+                        ("service_principal".to_string(), "Service Principal".to_string()),
+                        ("enterprise_oauth".to_string(), "Enterprise OAuth (Microsoft)".to_string()),
+                    ])
+                    on_change=move |val| set_synapse_auth_mode.set(val)
+                />
+                <p class="text-xs text-muted-foreground">
+                    {move || match synapse_auth_mode.get().as_str() {
+                        "sql" => "Users authenticate with SQL username and password.",
+                        "service_principal" => "All users share a service principal (app registration) identity.",
+                        "enterprise_oauth" => "Users authenticate with their Microsoft accounts via your Azure AD app.",
+                        _ => "",
+                    }}
+                </p>
+            </div>
+        </Show>
 
         // Enterprise OAuth admin configuration + user connection panel
         <Show when=move || synapse_auth_mode.get() == "enterprise_oauth">
             <div class="space-y-4 border-t border-border pt-4 mt-4">
-                // Admin OAuth configuration
-                <div class="space-y-3 pb-4 border-b border-border">
-                    <h4 class="text-sm font-medium">"OAuth Configuration"</h4>
-                    <p class="text-xs text-muted-foreground">
-                        "Configure your organization's Azure AD app registration."
-                    </p>
-                    // Redirect URL copy block
-                    <div class="p-3 bg-muted/30 rounded-lg space-y-1">
-                        <label class="block text-xs font-medium text-muted-foreground">
-                            "Redirect URL (add as a redirect URI in your Azure AD app)"
-                        </label>
-                        <div class="flex items-center gap-2 mt-1">
-                            <code class="flex-1 text-xs font-mono text-foreground break-all">
-                                {move || redirect_url_signal.get()}
-                            </code>
-                            <CopyButton text=redirect_url_signal/>
+                // Admin OAuth configuration — admin-only (KYO-184): persists
+                // through `update_datasource_settings`.
+                <Show when=move || is_admin.get()>
+                    <div class="space-y-3 pb-4 border-b border-border">
+                        <h4 class="text-sm font-medium">"OAuth Configuration"</h4>
+                        <p class="text-xs text-muted-foreground">
+                            "Configure your organization's Azure AD app registration."
+                        </p>
+                        // Redirect URL copy block
+                        <div class="p-3 bg-muted/30 rounded-lg space-y-1">
+                            <label class="block text-xs font-medium text-muted-foreground">
+                                "Redirect URL (add as a redirect URI in your Azure AD app)"
+                            </label>
+                            <div class="flex items-center gap-2 mt-1">
+                                <code class="flex-1 text-xs font-mono text-foreground break-all">
+                                    {move || redirect_url_signal.get()}
+                                </code>
+                                <CopyButton text=redirect_url_signal/>
+                            </div>
+                        </div>
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-sm font-medium mb-1">"OAuth Client ID"</label>
+                                <input type="text" class=MODAL_INPUT_CLASS
+                                    placeholder="Application (client) ID"
+                                    prop:value=move || cfg_oauth_client_id.get()
+                                    on:input=move |ev| set_cfg_oauth_client_id.set(event_target_value(&ev))
+                                />
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium mb-1">"OAuth Client Secret"</label>
+                                <input type="password" class=MODAL_INPUT_CLASS
+                                    placeholder="Client secret value"
+                                    prop:value=move || cfg_oauth_client_secret.get()
+                                    on:input=move |ev| set_cfg_oauth_client_secret.set(event_target_value(&ev))
+                                />
+                            </div>
                         </div>
                     </div>
-                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                        <div>
-                            <label class="block text-sm font-medium mb-1">"OAuth Client ID"</label>
-                            <input type="text" class=MODAL_INPUT_CLASS
-                                placeholder="Application (client) ID"
-                                prop:value=move || cfg_oauth_client_id.get()
-                                on:input=move |ev| set_cfg_oauth_client_id.set(event_target_value(&ev))
-                            />
-                        </div>
-                        <div>
-                            <label class="block text-sm font-medium mb-1">"OAuth Client Secret"</label>
-                            <input type="password" class=MODAL_INPUT_CLASS
-                                placeholder="Client secret value"
-                                prop:value=move || cfg_oauth_client_secret.get()
-                                on:input=move |ev| set_cfg_oauth_client_secret.set(event_target_value(&ev))
-                            />
-                        </div>
-                    </div>
-                </div>
+                </Show>
                 // User connection — 4-state status panel.
                 // Hidden in create mode (no slug yet for the enterprise endpoint).
                 <Show when=move || !is_create_mode.get()>
@@ -5437,6 +5654,11 @@ struct CredentialsFieldsSignals {
     set_cred_sp_client_secret: WriteSignal<String>,
     cfg_shared_credentials: ReadSignal<bool>,
     set_cfg_shared_credentials: WriteSignal<bool>,
+    /// Gates the "Shared credentials (all users)" toggle — enabling/rotating
+    /// shared credentials is workspace-admin-only (KYO-184; see
+    /// `docs/DATASOURCE_ARCHITECTURE.md` §5.2). Does not affect the personal
+    /// credential fields below it, which every member can use.
+    is_admin: Signal<bool>,
 }
 
 /// Renders credentials fields for the active provider.
@@ -5464,6 +5686,7 @@ fn ProviderCredentialsFields(signals: CredentialsFieldsSignals) -> impl IntoView
         set_cred_sp_client_secret,
         cfg_shared_credentials,
         set_cfg_shared_credentials,
+        is_admin,
     } = signals;
     view! {
         {move || {
@@ -5531,18 +5754,26 @@ fn ProviderCredentialsFields(signals: CredentialsFieldsSignals) -> impl IntoView
                 <div class="space-y-4 border-t border-border pt-4 mt-4">
                     <div class="flex items-center justify-between">
                         <h4 class="text-sm font-medium">"Credentials"</h4>
-                        // Shared credentials toggle
-                        <label class="flex items-center gap-2 cursor-pointer text-xs text-muted-foreground">
-                            <input
-                                type="checkbox"
-                                class="h-4 w-4 rounded-md border-input"
-                                prop:checked=move || cfg_shared_credentials.get()
-                                on:change=move |ev| {
-                                    set_cfg_shared_credentials.set(event_target_checked(&ev));
-                                }
-                            />
-                            "Shared credentials (all users)"
-                        </label>
+                        // Shared credentials toggle — workspace-admin-only
+                        // (KYO-184): enabling/rotating shared credentials persists
+                        // through `update_datasource_settings`, which non-admins
+                        // cannot call, and grants every workspace member query
+                        // access under this identity (DATASOURCE_ARCHITECTURE.md
+                        // §5.2/§5.3) — not something a member should be able to
+                        // toggle even cosmetically.
+                        <Show when=move || is_admin.get()>
+                            <label class="flex items-center gap-2 cursor-pointer text-xs text-muted-foreground">
+                                <input
+                                    type="checkbox"
+                                    class="h-4 w-4 rounded-md border-input"
+                                    prop:checked=move || cfg_shared_credentials.get()
+                                    on:change=move |ev| {
+                                        set_cfg_shared_credentials.set(event_target_checked(&ev));
+                                    }
+                                />
+                                "Shared credentials (all users)"
+                            </label>
+                        </Show>
                     </div>
 
                     <Show when=move || !cfg_shared_credentials.get()>
@@ -7307,5 +7538,169 @@ fn EditModeCatalogTab(
                 </div>
             </Show>
         </div>
+    }
+}
+
+#[cfg(all(test, feature = "ssr"))]
+mod tests {
+    //! KYO-184 compile-time sanity checks. This file is a Leptos view tree —
+    //! its reactive branching can't be exercised as a plain unit test — so,
+    //! following the precedent in `pages/settings/profile.rs`
+    //! (`tests_part3`), these assert against the source text itself. Each
+    //! assertion locks in one specific piece of wiring; if it fails, that
+    //! wiring has regressed.
+
+    /// Returns the source slice from the first occurrence of `start` up to
+    /// (but not including) the first occurrence of `end` that follows it.
+    /// Panics with a clear message if either marker is missing — a missing
+    /// marker means the code it was anchoring has been renamed or removed.
+    fn extract_between<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
+        let start_pos = src
+            .find(start)
+            .unwrap_or_else(|| panic!("marker not found in datasources.rs: {start:?}"));
+        let end_pos = src[start_pos..]
+            .find(end)
+            .map(|i| start_pos + i)
+            .unwrap_or_else(|| panic!("end marker not found after {start:?} in datasources.rs: {end:?}"));
+        &src[start_pos..end_pos]
+    }
+
+    /// True when `needle` appears somewhere in the `window` characters
+    /// immediately preceding the first occurrence of `anchor` in `haystack`.
+    /// Whitespace/indentation-agnostic, unlike a plain substring match on
+    /// the two markers concatenated verbatim.
+    fn appears_shortly_before(haystack: &str, needle: &str, anchor: &str, window: usize) -> bool {
+        let Some(anchor_pos) = haystack.find(anchor) else {
+            return false;
+        };
+        let start = anchor_pos.saturating_sub(window);
+        haystack[start..anchor_pos].contains(needle)
+    }
+
+    const SRC: &str = include_str!("datasources.rs");
+
+    // ── MAJOR 2: non-admin save branch ──────────────────────────────────
+
+    /// The non-admin edit branch of `save_action` must call
+    /// `save_datasource_credentials` and must NEVER call
+    /// `update_datasource_settings` — the latter is workspace-admin-gated
+    /// server-side, so a non-admin's edits would error there. Prior to
+    /// KYO-184 this branch didn't exist at all: `save_action` always called
+    /// `update_datasource_settings` first, which meant credential-only saves
+    /// were completely broken for non-admins.
+    #[test]
+    fn non_admin_save_branch_calls_credentials_not_settings() {
+        let branch = extract_between(
+            SRC,
+            "// Non-admin edit — `update_datasource_settings` is",
+            "\n            }\n        }\n    });",
+        );
+        assert!(
+            branch.contains("save_datasource_credentials("),
+            "non-admin save branch must call save_datasource_credentials"
+        );
+        assert!(
+            !branch.contains("update_datasource_settings("),
+            "non-admin save branch must NOT call the admin-gated update_datasource_settings"
+        );
+    }
+
+    /// MINOR 3: opening the edit modal and clicking "Save Credentials"
+    /// without typing anything must not insert an empty credential row —
+    /// the non-admin branch must guard the call the same way the create-mode
+    /// branch guards its own credentials save with `has_creds`.
+    #[test]
+    fn non_admin_save_branch_skips_empty_credentials() {
+        let branch = extract_between(
+            SRC,
+            "// Non-admin edit — `update_datasource_settings` is",
+            "\n            }\n        }\n    });",
+        );
+        assert!(
+            branch.contains("has_creds") && branch.contains("if has_creds {"),
+            "non-admin save branch must guard save_datasource_credentials on non-empty creds"
+        );
+    }
+
+    // ── MAJOR 1: auth-mode section gating ───────────────────────────────
+    //
+    // Each of the four provider Auth Mode Sections mixes admin-only
+    // connection-config fields (Authentication Mode selector, OAuth Client
+    // ID/Secret, Service Account JSON) with per-user OAuth connect UI. Only
+    // the admin-only fields must be gated on `is_admin` — gating the whole
+    // component would hide the personal OAuth panel from every member.
+
+    // `needle` deliberately omits the `<Show ` prefix and trailing `>` — the
+    // gate around "Service Account JSON" is a multi-line `<Show>` tag
+    // (`when=` on its own line), while the others are single-line. Matching
+    // on `when=move || is_admin.get()` catches both forms.
+    const IS_ADMIN_GATE: &str = "when=move || is_admin.get()";
+
+    #[test]
+    fn bigquery_auth_mode_admin_fields_are_gated() {
+        let f = extract_between(SRC, "fn BigQueryAuthModeSection(", "fn SnowflakeAuthModeSection(");
+        assert!(
+            f.contains("is_admin: Signal<bool>"),
+            "BigQueryAuthModeSection must accept an is_admin prop"
+        );
+        assert!(
+            appears_shortly_before(f, IS_ADMIN_GATE, "\"Authentication Mode\"", 250),
+            "BigQuery Authentication Mode selector must be is_admin-gated"
+        );
+        assert!(
+            appears_shortly_before(f, IS_ADMIN_GATE, "\"OAuth Client ID\"", 1500),
+            "BigQuery Enterprise OAuth Client ID field must be is_admin-gated"
+        );
+        assert!(
+            appears_shortly_before(f, IS_ADMIN_GATE, "\"Service Account JSON\"", 1000),
+            "BigQuery Service Account JSON field must be is_admin-gated"
+        );
+    }
+
+    #[test]
+    fn snowflake_auth_mode_selector_is_gated() {
+        let f = extract_between(SRC, "fn SnowflakeAuthModeSection(", "fn DatabricksAuthModeSection(");
+        assert!(
+            f.contains("is_admin: Signal<bool>"),
+            "SnowflakeAuthModeSection must accept an is_admin prop"
+        );
+        assert!(
+            appears_shortly_before(f, IS_ADMIN_GATE, "\"Authentication Mode\"", 250),
+            "Snowflake Authentication Mode selector must be is_admin-gated"
+        );
+    }
+
+    #[test]
+    fn databricks_auth_mode_admin_fields_are_gated() {
+        let f = extract_between(SRC, "fn DatabricksAuthModeSection(", "fn SynapseAuthModeSection(");
+        assert!(
+            f.contains("is_admin: Signal<bool>"),
+            "DatabricksAuthModeSection must accept an is_admin prop"
+        );
+        assert!(
+            appears_shortly_before(f, IS_ADMIN_GATE, "\"Authentication Mode\"", 250),
+            "Databricks Authentication Mode selector must be is_admin-gated"
+        );
+        assert!(
+            appears_shortly_before(f, IS_ADMIN_GATE, "\"OAuth Client ID\"", 1500),
+            "Databricks OAuth Client ID field must be is_admin-gated"
+        );
+    }
+
+    #[test]
+    fn synapse_auth_mode_admin_fields_are_gated() {
+        let f = extract_between(SRC, "fn SynapseAuthModeSection(", "struct ConnectionFieldsSignals");
+        assert!(
+            f.contains("is_admin: Signal<bool>"),
+            "SynapseAuthModeSection must accept an is_admin prop"
+        );
+        assert!(
+            appears_shortly_before(f, IS_ADMIN_GATE, "\"Authentication Mode\"", 250),
+            "Synapse Authentication Mode selector must be is_admin-gated"
+        );
+        assert!(
+            appears_shortly_before(f, IS_ADMIN_GATE, "\"OAuth Client ID\"", 1500),
+            "Synapse OAuth Client ID field must be is_admin-gated"
+        );
     }
 }

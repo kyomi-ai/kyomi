@@ -53,6 +53,14 @@ impl UserContext {
     /// `is_owner` (see `server_fns::sql_editor::refresh_catalog` and
     /// `server_fns/datasources.rs:401`); use it to hide admin-only UI so it
     /// matches what the server will actually allow.
+    ///
+    /// Note that `require_workspace_admin` in `server_fns/datasources.rs`
+    /// (create / delete / update) is role-only and does *not* OR in
+    /// `is_owner`, so it is fractionally stricter than this helper. That
+    /// divergence is inert today because an owner structurally always holds
+    /// the `workspace_admin` role (enforced at workspace creation, by
+    /// `update_member_role`'s owner guard, and on ownership transfer), but it
+    /// is a latent trap — see KYO-191.
     pub fn is_workspace_admin(&self) -> bool {
         self.workspace_roles.iter().any(|r| r == "workspace_admin") || self.is_owner
     }
