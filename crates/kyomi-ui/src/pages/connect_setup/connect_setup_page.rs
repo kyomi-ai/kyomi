@@ -323,7 +323,12 @@ pub fn ConnectSetupPage() -> impl IntoView {
             <div class="min-h-screen flex items-center justify-center bg-background p-4">
                 <Card class="max-w-lg w-full p-8">
                     <div class="flex items-center justify-center py-12">
-                        <Spinner class="h-6 w-6 text-muted-foreground"/>
+                        // Branded moment — DESIGN.md Loading State Pattern
+                        <img
+                            src="/kyomi_animated_logo.svg"
+                            alt="Processing"
+                            class="w-12 h-12"
+                        />
                     </div>
                 </Card>
             </div>
@@ -372,10 +377,15 @@ pub fn ConnectSetupPage() -> impl IntoView {
                                 </div>
                             })}
 
-                            // Loading spinner
+                            // Loading indicator
                             <Show when=move || loading.get()>
                                 <div class="flex items-center justify-center py-12">
-                                    <Spinner class="h-6 w-6 text-muted-foreground"/>
+                                    // Branded moment — DESIGN.md Loading State Pattern
+                                    <img
+                                        src="/kyomi_animated_logo.svg"
+                                        alt="Processing"
+                                        class="w-12 h-12"
+                                    />
                                 </div>
                             </Show>
 
