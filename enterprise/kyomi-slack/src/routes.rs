@@ -1003,15 +1003,14 @@ fn verify_slack_request(
     body: &[u8],
     config: &kyomi_core::Config,
 ) -> Result<(), kyomi_core::Error> {
-    let signing_secret = config
-        .slack_signing_secret
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            kyomi_core::Error::Internal(
-                "Slack signing secret not configured — cannot verify Slack requests".into(),
-            )
-        })?;
+    let signing_secret = slack_client::SlackSigningSecret::new(
+        config.slack_signing_secret.as_deref(),
+    )
+    .ok_or_else(|| {
+        kyomi_core::Error::Internal(
+            "Slack signing secret not configured — cannot verify Slack requests".into(),
+        )
+    })?;
 
     let timestamp = headers
         .get("X-Slack-Request-Timestamp")
@@ -1023,7 +1022,7 @@ fn verify_slack_request(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    if !slack_client::verify_slack_signature(signing_secret, timestamp, body, signature) {
+    if !slack_client::verify_slack_signature(&signing_secret, timestamp, body, signature) {
         return Err(kyomi_core::Error::Unauthorized(
             "Invalid Slack signature".into(),
         ));
@@ -2431,6 +2430,22 @@ mod tests {
         config.frontend_url = "https://app.kyomi.ai/".into();
         let uri = build_redirect_uri(&config, "/slack/user/callback");
         assert_eq!(uri, "https://app.kyomi.ai/api/v1/slack/user/callback");
+    }
+
+    #[test]
+    fn verify_slack_request_missing_secret_returns_internal_error() {
+        let mut config = kyomi_core::Config::test_config();
+        config.slack_signing_secret = None;
+        let result = verify_slack_request(&HeaderMap::new(), b"", &config);
+        assert!(matches!(result, Err(kyomi_core::Error::Internal(_))));
+    }
+
+    #[test]
+    fn verify_slack_request_empty_secret_returns_internal_error() {
+        let mut config = kyomi_core::Config::test_config();
+        config.slack_signing_secret = Some("".into());
+        let result = verify_slack_request(&HeaderMap::new(), b"", &config);
+        assert!(matches!(result, Err(kyomi_core::Error::Internal(_))));
     }
 
     #[test]

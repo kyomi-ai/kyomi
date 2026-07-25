@@ -1077,6 +1077,40 @@ impl SlackClient {
 // Signature verification
 // ---------------------------------------------------------------------------
 
+/// A Slack signing secret that is guaranteed non-empty.
+///
+/// `verify_slack_signature` takes this rather than `&str` so that a missing or
+/// empty secret cannot reach the verification path at all. Construction is the
+/// only place the empty case is handled, and it fails there rather than
+/// silently accepting every request.
+///
+/// Deliberately has no `Debug` impl: the secret must never be printable via
+/// `{:?}` (e.g. an accidental `debug!(?config, ...)` log line). If a caller
+/// needs to debug-print something containing this type, that is itself a sign
+/// the value shouldn't be logged.
+pub struct SlackSigningSecret(String);
+
+impl SlackSigningSecret {
+    /// Returns `None` if the secret is absent, empty, or whitespace-only.
+    ///
+    /// Trims surrounding whitespace before the emptiness check and stores the
+    /// trimmed value — a secret with stray whitespace from an env var would
+    /// otherwise produce silently-wrong HMACs.
+    pub fn new(raw: Option<&str>) -> Option<Self> {
+        let trimmed = raw?.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(Self(trimmed.to_string()))
+        }
+    }
+
+    /// The trimmed secret bytes, for HMAC computation.
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
 /// Verify a Slack request signature using HMAC-SHA256.
 ///
 /// Slack signs each request with `v0=HMAC-SHA256(signing_secret, "v0:{timestamp}:{body}")`.
@@ -1084,20 +1118,14 @@ impl SlackClient {
 /// in `X-Slack-Request-Timestamp`.
 ///
 /// Returns `true` if the signature is valid, `false` otherwise.
-/// If `signing_secret` is empty, returns `true` (skips verification for development).
 pub fn verify_slack_signature(
-    signing_secret: &str,
+    signing_secret: &SlackSigningSecret,
     timestamp: &str,
     body: &[u8],
     signature: &str,
 ) -> bool {
     use sha2::Sha256;
     use hmac::{Hmac, Mac};
-
-    if signing_secret.is_empty() {
-        warn!("Slack signing secret not configured, skipping signature verification");
-        return true;
-    }
 
     if timestamp.is_empty() || signature.is_empty() {
         return false;
@@ -1187,23 +1215,34 @@ mod tests {
     }
 
     #[test]
-    fn verify_signature_empty_secret_passes() {
-        assert!(verify_slack_signature("", "12345", b"body", "v0=abc"));
+    fn signing_secret_rejects_absent_empty_and_blank() {
+        assert!(SlackSigningSecret::new(None).is_none());
+        assert!(SlackSigningSecret::new(Some("")).is_none());
+        assert!(SlackSigningSecret::new(Some("   ")).is_none());
+    }
+
+    #[test]
+    fn signing_secret_trims_valid_value() {
+        let secret = SlackSigningSecret::new(Some(" secret ")).unwrap();
+        assert_eq!(secret.as_bytes(), b"secret");
     }
 
     #[test]
     fn verify_signature_empty_timestamp_fails() {
-        assert!(!verify_slack_signature("secret", "", b"body", "v0=abc"));
+        let secret = SlackSigningSecret::new(Some("secret")).unwrap();
+        assert!(!verify_slack_signature(&secret, "", b"body", "v0=abc"));
     }
 
     #[test]
     fn verify_signature_empty_signature_fails() {
-        assert!(!verify_slack_signature("secret", "12345", b"body", ""));
+        let secret = SlackSigningSecret::new(Some("secret")).unwrap();
+        assert!(!verify_slack_signature(&secret, "12345", b"body", ""));
     }
 
     #[test]
     fn verify_signature_invalid_timestamp_fails() {
-        assert!(!verify_slack_signature("secret", "not_a_number", b"body", "v0=abc"));
+        let secret = SlackSigningSecret::new(Some("secret")).unwrap();
+        assert!(!verify_slack_signature(&secret, "not_a_number", b"body", "v0=abc"));
     }
 
     #[test]
@@ -1227,7 +1266,8 @@ mod tests {
         let result = mac.finalize();
         let signature = format!("v0={}", hex::encode(result.into_bytes()));
 
-        assert!(verify_slack_signature(secret, &timestamp, body, &signature));
+        let secret = SlackSigningSecret::new(Some(secret)).unwrap();
+        assert!(verify_slack_signature(&secret, &timestamp, body, &signature));
     }
 
     #[test]
@@ -1251,7 +1291,8 @@ mod tests {
         let result = mac.finalize();
         let signature = format!("v0={}", hex::encode(result.into_bytes()));
 
-        assert!(!verify_slack_signature(secret, &timestamp, body, &signature));
+        let secret = SlackSigningSecret::new(Some(secret)).unwrap();
+        assert!(!verify_slack_signature(&secret, &timestamp, body, &signature));
     }
 
     #[test]
@@ -1275,6 +1316,7 @@ mod tests {
         let result = mac.finalize();
         let signature = format!("v0={}", hex::encode(result.into_bytes()));
 
-        assert!(!verify_slack_signature(secret, &old_timestamp, body, &signature));
+        let secret = SlackSigningSecret::new(Some(secret)).unwrap();
+        assert!(!verify_slack_signature(&secret, &old_timestamp, body, &signature));
     }
 }
