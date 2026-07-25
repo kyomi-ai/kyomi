@@ -30,6 +30,7 @@ use kyomi_auth::{
     user_service,
     webauthn as wa,
 };
+use kyomi_core::models::User;
 
 use crate::state::AppState;
 
@@ -1071,6 +1072,23 @@ async fn passkey_rename(
 // POST /auth/passkeys/recovery/request
 // ---------------------------------------------------------------------------
 
+/// Look up the user for the enumeration-resistant passkey-recovery path.
+///
+/// Returns `None` both when no such user exists and when the lookup fails —
+/// callers must not be able to distinguish those, or the endpoint leaks
+/// account existence. The difference is recorded in the logs instead, so a
+/// database outage on the recovery path is visible to operators rather than
+/// silently returning success to every caller.
+async fn lookup_recovery_user(db: &kyomi_core::DbPool, email: &str) -> Option<User> {
+    match user_service::get_user_by_email(db, email).await {
+        Ok(user) => user,
+        Err(e) => {
+            tracing::error!(error = %e, "passkey recovery: user lookup failed");
+            None
+        }
+    }
+}
+
 async fn recovery_request(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1093,13 +1111,13 @@ async fn recovery_request(
     let email = data.email.to_lowercase().trim().to_string();
 
     // Always return success to prevent enumeration — do work silently
-    let user = user_service::get_user_by_email(&state.db, &email).await.ok().flatten();
+    let user = lookup_recovery_user(&state.db, &email).await;
 
     if let Some(user) = user
         && user.verified
     {
         // Create recovery token (15 min = 0.25 hours)
-        if let Ok(raw_token) = token_service::create_verification_token_with_expiry(
+        match token_service::create_verification_token_with_expiry(
             &state.db,
             &email,
             "passkey_recovery",
@@ -1107,31 +1125,36 @@ async fn recovery_request(
         )
         .await
         {
-            let recovery_url = format!(
-                "{}/auth/recover-passkey/complete?token={raw_token}",
-                state.config.frontend_url.trim_end_matches('/')
-            );
+            Ok(raw_token) => {
+                let recovery_url = format!(
+                    "{}/auth/recover-passkey/complete?token={raw_token}",
+                    state.config.frontend_url.trim_end_matches('/')
+                );
 
-            // Send recovery email
-            let user_name = user.name.clone().unwrap_or_default();
-            let email_clone = email.clone();
-            let url_clone = recovery_url.clone();
-            tokio::spawn(async move {
-                let email_svc = kyomi_auth::email_service::EmailService::from_env();
-                let sent = email_svc
-                    .send_passkey_recovery(&email_clone, &user_name, &url_clone)
-                    .await;
-                if sent {
-                    tracing::info!("📧 Passkey recovery email sent to {email_clone}");
-                } else {
-                    tracing::warn!(
-                        "⚠️ Failed to send passkey recovery email to {email_clone}"
-                    );
-                    tracing::info!(
-                        "📧 PASSKEY RECOVERY LINK for {email_clone}: {url_clone}"
-                    );
-                }
-            });
+                // Send recovery email
+                let user_name = user.name.clone().unwrap_or_default();
+                let email_clone = email.clone();
+                let url_clone = recovery_url.clone();
+                tokio::spawn(async move {
+                    let email_svc = kyomi_auth::email_service::EmailService::from_env();
+                    let sent = email_svc
+                        .send_passkey_recovery(&email_clone, &user_name, &url_clone)
+                        .await;
+                    if sent {
+                        tracing::info!("📧 Passkey recovery email sent to {email_clone}");
+                    } else {
+                        tracing::warn!(
+                            "⚠️ Failed to send passkey recovery email to {email_clone}"
+                        );
+                        tracing::info!(
+                            "📧 PASSKEY RECOVERY LINK for {email_clone}: {url_clone}"
+                        );
+                    }
+                });
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "passkey recovery: token creation failed");
+            }
         }
     }
 
@@ -1370,7 +1393,131 @@ async fn recovery_register(
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+    use std::sync::{Arc, Mutex};
+
+    use tracing::Level;
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+    use tracing_subscriber::{Layer, Registry};
     use webauthn_rs::prelude::Passkey;
+
+    use super::lookup_recovery_user;
+
+    /// Shared sink that a `CaptureLayer` writes tracing events into.
+    type EventLog = Arc<Mutex<Vec<(Level, String)>>>;
+
+    /// Minimal `tracing_subscriber::Layer` that records every event's level
+    /// and rendered fields, so tests can assert on log output without a real
+    /// subscriber (fmt/json) formatting to stdout.
+    struct CaptureLayer(EventLog);
+
+    impl<S: tracing::Subscriber> Layer<S> for CaptureLayer {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            struct FieldVisitor(String);
+            impl tracing::field::Visit for FieldVisitor {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "message" {
+                        let _ = write!(self.0, "{value:?}");
+                    } else {
+                        let _ = write!(self.0, " {}={value:?}", field.name());
+                    }
+                }
+            }
+
+            let mut visitor = FieldVisitor(String::new());
+            event.record(&mut visitor);
+            self.0
+                .lock()
+                .expect("capture lock poisoned")
+                .push((*event.metadata().level(), visitor.0));
+        }
+    }
+
+    /// `lookup_recovery_user` must return `None` when the database lookup
+    /// itself fails (not merely when no user exists) — and it must say so
+    /// via an `error!`-level log rather than swallowing the error, since a
+    /// DB outage on the recovery path would otherwise silently return
+    /// success to every caller. See KYO-215.
+    #[tokio::test(flavor = "current_thread")]
+    async fn lookup_recovery_user_db_error_returns_none_and_logs_error() {
+        let db = kyomi_core::DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        match &db {
+            kyomi_core::DbPool::Sqlite(pool) => pool.close().await,
+            kyomi_core::DbPool::Postgres(_) => panic!("expected sqlite pool"),
+        }
+
+        let email = "db-error-recovery-test@example.com";
+        let captured: EventLog = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = Registry::default().with(CaptureLayer(captured.clone()));
+        let guard = tracing::subscriber::set_default(subscriber);
+
+        let result = lookup_recovery_user(&db, email).await;
+
+        drop(guard);
+
+        assert!(
+            result.is_none(),
+            "a DB error must be reported as no user, not surfaced to the caller"
+        );
+
+        let events = captured.lock().expect("capture lock poisoned").clone();
+        let error_events: Vec<&(Level, String)> =
+            events.iter().filter(|(level, _)| *level == Level::ERROR).collect();
+        assert!(
+            !error_events.is_empty(),
+            "a DB error during passkey recovery must emit an error!-level log; captured: {events:?}"
+        );
+        assert!(
+            error_events
+                .iter()
+                .any(|(_, message)| message.contains("user lookup failed")),
+            "expected an error log describing the lookup failure; captured: {events:?}"
+        );
+        for (_, message) in &error_events {
+            assert!(
+                !message.contains(email),
+                "recovery error logs must never contain the requester's email \
+                 (that would reintroduce the enumeration leak through logs); got: {message}"
+            );
+        }
+    }
+
+    /// The absent-user case must NOT log an error — only the DB-failure case
+    /// should. Without this test, a broad "always log an error" change would
+    /// pass the test above while defeating the entire point of the fix: the
+    /// two enumeration-resistant outcomes (no such user vs. DB down) must
+    /// stay distinguishable in the logs.
+    #[tokio::test(flavor = "current_thread")]
+    async fn lookup_recovery_user_absent_user_returns_none_without_error_log() {
+        let db = kyomi_core::DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+
+        let email = "absent-recovery-test@example.com";
+        let captured: EventLog = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = Registry::default().with(CaptureLayer(captured.clone()));
+        let guard = tracing::subscriber::set_default(subscriber);
+
+        let result = lookup_recovery_user(&db, email).await;
+
+        drop(guard);
+
+        assert!(result.is_none(), "no such user should look up to None");
+
+        let events = captured.lock().expect("capture lock poisoned").clone();
+        let error_events: Vec<&(Level, String)> =
+            events.iter().filter(|(level, _)| *level == Level::ERROR).collect();
+        assert!(
+            error_events.is_empty(),
+            "a merely-absent user must not log an error — only a DB failure should; captured: {events:?}"
+        );
+    }
 
     /// Verify that the JSON format produced by the Alembic migration
     /// (774c005b0f00_migrate_python_passkeys_to_rust_format.py)
