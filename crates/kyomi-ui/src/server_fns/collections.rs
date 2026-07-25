@@ -174,6 +174,7 @@ pub async fn update_collection(
         &collection_id,
         &ac.ws_id,
         &updates,
+        ac.ctx.ws_manager.as_ref(),
     )
     .await
     .into_sfn()?;
@@ -213,7 +214,7 @@ pub async fn add_dashboard_to_collection(
 ) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    kyomi_auth::collection_service::add_dashboard(
+    let transition = kyomi_auth::collection_service::add_dashboard(
         ac.db(),
         &collection_id,
         &dashboard_id,
@@ -223,6 +224,12 @@ pub async fn add_dashboard_to_collection(
     )
     .await
     .into_sfn()?;
+
+    if let (Some(t), Some(ws_manager)) = (transition, &ac.ctx.ws_manager) {
+        kyomi_auth::websocket::helpers::broadcast_dashboard_visibility_change(
+            ac.db(), ws_manager, &t.dashboard_id, &ac.ws_id, &t.owner_user_id, t.now_public,
+        ).await;
+    }
 
     Ok(())
 }
@@ -235,7 +242,7 @@ pub async fn remove_dashboard_from_collection(
 ) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    kyomi_auth::collection_service::remove_dashboard(
+    let transition = kyomi_auth::collection_service::remove_dashboard(
         ac.db(),
         &collection_id,
         &dashboard_id,
@@ -243,6 +250,12 @@ pub async fn remove_dashboard_from_collection(
     )
     .await
     .into_sfn()?;
+
+    if let (Some(t), Some(ws_manager)) = (transition, &ac.ctx.ws_manager) {
+        kyomi_auth::websocket::helpers::broadcast_dashboard_visibility_change(
+            ac.db(), ws_manager, &t.dashboard_id, &ac.ws_id, &t.owner_user_id, t.now_public,
+        ).await;
+    }
 
     Ok(())
 }
