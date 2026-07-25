@@ -48,7 +48,7 @@ use kyomi_auth::{
     redis_ops,
     user_service,
 };
-use kyomi_core::{capability, DbPool};
+use kyomi_core::{capability, enums::WorkspaceRole, DbPool};
 use kyomi_types::Permission;
 
 use crate::client::{self as slack_client, SlackClient, SLACK_TIMEZONE_CACHE_HOURS};
@@ -1553,71 +1553,13 @@ async fn handle_app_mention(
     )
     .await;
 
-    // Build query context for chart rendering in Slack responses
-    let query_ctx = kyomi_agent::tools::QueryContext {
-        db: state.db.clone(),
-        user_id: ctx.user_id.clone(),
-        workspace_id: ctx.workspace_id.clone(),
-        encryption_key: state.encryption_key.clone(),
-        config: state.config.clone(),
-        connect_registry: Some(state.connect_registry.clone()),
+    let target = SlackReplyTarget {
+        channel_id,
+        thread_ts,
+        placeholder_ts: placeholder_ts.as_deref(),
+        slack_user_id,
     };
-    let footer_url = format!("{}/chat/{}", state.config.frontend_url, session_id);
-
-    match response {
-        Ok(response_text) if response_text.is_empty() => {
-            warn!(session_id = %session_id, "Agent returned empty response for Slack query");
-            post_slack_response(
-                &ctx.bot_token,
-                channel_id,
-                thread_ts,
-                placeholder_ts.as_deref(),
-                "I couldn't generate a response. Please try rephrasing your question.",
-                &state.slack_client,
-                &query_ctx,
-                &footer_url,
-            )
-            .await;
-        }
-        Ok(response_text) => {
-            post_slack_response(
-                &ctx.bot_token,
-                channel_id,
-                thread_ts,
-                placeholder_ts.as_deref(),
-                &response_text,
-                &state.slack_client,
-                &query_ctx,
-                &footer_url,
-            )
-            .await;
-        }
-        Err(e) => {
-            error!(error = %e, "Slack agent query failed");
-            // Update placeholder with error if we have one, otherwise post ephemeral.
-            if let Some(ref pts) = placeholder_ts {
-                let _ = state
-                    .slack_client
-                    .update_message(
-                        &ctx.bot_token,
-                        channel_id,
-                        pts,
-                        "Sorry, I encountered an error processing your request. Please try again.",
-                        None,
-                    )
-                    .await;
-            } else {
-                post_slack_error(
-                    &ctx.bot_token,
-                    channel_id,
-                    slack_user_id,
-                    "Sorry, I encountered an error processing your request. Please try again.",
-                    &state.slack_client,
-                )
-                .await;
-            }
-        }
-    }
+    respond_to_slack_query(state, response, &ctx, &target, &session_id, "app_mention").await;
 
     Ok(())
 }
@@ -1741,70 +1683,13 @@ async fn handle_direct_message(
     )
     .await;
 
-    // Build query context for chart rendering in Slack responses
-    let query_ctx = kyomi_agent::tools::QueryContext {
-        db: state.db.clone(),
-        user_id: ctx.user_id.clone(),
-        workspace_id: ctx.workspace_id.clone(),
-        encryption_key: state.encryption_key.clone(),
-        config: state.config.clone(),
-        connect_registry: Some(state.connect_registry.clone()),
+    let target = SlackReplyTarget {
+        channel_id,
+        thread_ts,
+        placeholder_ts: placeholder_ts.as_deref(),
+        slack_user_id,
     };
-    let footer_url = format!("{}/chat/{}", state.config.frontend_url, session_id);
-
-    match response {
-        Ok(response_text) if response_text.is_empty() => {
-            warn!(session_id = %session_id, "Agent returned empty response for Slack DM");
-            post_slack_response(
-                &ctx.bot_token,
-                channel_id,
-                thread_ts,
-                placeholder_ts.as_deref(),
-                "I couldn't generate a response. Please try rephrasing your question.",
-                &state.slack_client,
-                &query_ctx,
-                &footer_url,
-            )
-            .await;
-        }
-        Ok(response_text) => {
-            post_slack_response(
-                &ctx.bot_token,
-                channel_id,
-                thread_ts,
-                placeholder_ts.as_deref(),
-                &response_text,
-                &state.slack_client,
-                &query_ctx,
-                &footer_url,
-            )
-            .await;
-        }
-        Err(e) => {
-            error!(error = %e, "Slack DM agent query failed");
-            if let Some(ref pts) = placeholder_ts {
-                let _ = state
-                    .slack_client
-                    .update_message(
-                        &ctx.bot_token,
-                        channel_id,
-                        pts,
-                        "Sorry, I encountered an error processing your request. Please try again.",
-                        None,
-                    )
-                    .await;
-            } else {
-                post_slack_error(
-                    &ctx.bot_token,
-                    channel_id,
-                    slack_user_id,
-                    "Sorry, I encountered an error processing your request. Please try again.",
-                    &state.slack_client,
-                )
-                .await;
-            }
-        }
-    }
+    respond_to_slack_query(state, response, &ctx, &target, &session_id, "direct_message").await;
 
     Ok(())
 }
@@ -1876,6 +1761,43 @@ async fn resolve_slack_context(
 // Agent query execution
 // ===========================================================================
 
+/// Resolve the acting Slack user's current workspace roles.
+///
+/// Returns `Err(Forbidden)` if the user has no active membership row in
+/// `workspace_id`. `user_service::get_workspace_user` filters on
+/// `active = true`, so a `None` result covers both "never a member" and
+/// "was removed or deactivated after linking Slack" — the row it queries
+/// is exactly the one `remove_workspace_member` deletes on offboarding.
+///
+/// This is the last gate before agent execution in [`run_slack_query`]; a
+/// user whose `platform_user_links` row outlived their workspace
+/// membership must never reach it (KYO-223).
+async fn resolve_active_workspace_roles(
+    db: &DbPool,
+    workspace_id: &str,
+    user_id: &str,
+) -> kyomi_core::Result<Vec<WorkspaceRole>> {
+    match user_service::get_workspace_user(db, workspace_id, user_id)
+        .await
+        .map_err(|e| {
+            kyomi_core::Error::Internal(format!(
+                "failed to load Slack user's workspace role: {e}"
+            ))
+        })? {
+        Some(wu) => Ok(vec![wu.role]),
+        None => {
+            warn!(
+                %user_id,
+                %workspace_id,
+                "Slack user has no active workspace membership; rejecting query"
+            );
+            Err(kyomi_core::Error::Forbidden(
+                "Your access to this Kyomi workspace has ended. If you believe this is a mistake, contact your workspace admin.".into(),
+            ))
+        }
+    }
+}
+
 /// Execute an agent query for a Slack message.
 ///
 /// Gets the user timezone (cached), builds agent execution config,
@@ -1929,35 +1851,23 @@ async fn run_slack_query(
     // UUID and the server_fn passes it via user_message_id).
     let user_message_id = uuid::Uuid::new_v4().to_string();
 
-    // Resolve the Slack-linked Kyomi user's current workspace role so it
-    // can be threaded into the agent's ToolContext (gates admin-only
-    // tools). A genuine DB error is propagated (we don't know the answer,
-    // so we can't proceed). But `resolve_slack_context` only confirms a
-    // `platform_user_links` row exists, not that workspace membership is
-    // still active — pre-existing behavior here already runs the query
-    // for any resolved link regardless of membership state. Failing hard
-    // on a stale link would newly deny a path that previously worked
-    // (scope of KYO-190 is fixing the *role input*, not changing who can
-    // use the Slack integration), so a missing/inactive membership row
-    // logs a warning and falls back to no roles — i.e. non-admin, which
-    // is the only role we can respect without a confirmed active row.
-    let user_roles = match user_service::get_workspace_user(db, workspace_id, user_id)
-        .await
-        .map_err(|e| {
-            kyomi_core::Error::Internal(format!(
-                "failed to load Slack user's workspace role: {e}"
-            ))
-        })? {
-        Some(wu) => vec![wu.role],
-        None => {
-            warn!(
-                %user_id,
-                %workspace_id,
-                "Slack user has no active workspace membership row; running with no workspace roles (non-admin)"
-            );
-            Vec::new()
-        }
-    };
+    // Resolve the Slack-linked Kyomi user's current workspace role — and,
+    // critically, reject the query outright if that membership is no
+    // longer active. KYO-190 added this `get_workspace_user` lookup to
+    // feed the agent's ToolContext but deliberately let a `None` result
+    // (no active membership row) fall through to running the query anyway
+    // with no roles. That was a live authorization bypass (KYO-223):
+    // `resolve_slack_context` only confirms a `platform_user_links` row
+    // exists, never that the linked user still belongs to the workspace.
+    // A user removed from the workspace keeps their Slack link (nothing
+    // currently cleans up `platform_user_links` on offboarding — see
+    // KYO-223's follow-up ticket) and could otherwise go on querying the
+    // workspace's dashboards, datasources, and knowledge through the bot
+    // indefinitely. Every other authenticated entry point already rejects
+    // on revoked membership (the `AuthUser` axum extractor, scheduled
+    // watch execution in `watch_execution.rs`); this closes the same gap
+    // for the Slack path.
+    let user_roles = resolve_active_workspace_roles(db, workspace_id, user_id).await?;
 
     // Build agent execution config.
     let agent_config = kyomi_agent::execution::AgentExecutionConfig {
@@ -2006,6 +1916,115 @@ async fn run_slack_query(
 // ===========================================================================
 // Slack response helpers
 // ===========================================================================
+
+/// Where in Slack a [`run_slack_query`] result should be posted.
+///
+/// Bundles the per-message routing fields so [`respond_to_slack_query`]
+/// stays under the clippy argument-count lint instead of taking each field
+/// as its own parameter.
+struct SlackReplyTarget<'a> {
+    channel_id: &'a str,
+    thread_ts: &'a str,
+    placeholder_ts: Option<&'a str>,
+    slack_user_id: &'a str,
+}
+
+/// Choose the Slack-visible text for a failed [`run_slack_query`] call.
+///
+/// `Forbidden` errors carry a message that is already a complete, safe
+/// sentence for the end user — e.g. the KYO-223 workspace-membership gate
+/// in [`resolve_active_workspace_roles`]. Every other error variant is
+/// replaced with a generic message: the caller logs the real error
+/// server-side, but Slack must never see raw internal error text (it can
+/// leak implementation details, and for `Sqlx`/`Internal` variants may
+/// include query fragments).
+fn slack_query_error_message(err: &kyomi_core::Error) -> String {
+    match err {
+        kyomi_core::Error::Forbidden(msg) => msg.clone(),
+        _ => "Sorry, I encountered an error processing your request. Please try again.".to_string(),
+    }
+}
+
+/// Post the result of [`run_slack_query`] back to Slack.
+///
+/// Shared by the channel-mention and DM handlers so the three outcomes —
+/// success, empty response, and failure — are handled identically in one
+/// place instead of being duplicated per handler (the duplication is what
+/// let KYO-190's role-lookup fix land in only one of the two call sites
+/// the first time around). `context` is a short label ("app_mention" /
+/// "direct_message") used only for log disambiguation.
+async fn respond_to_slack_query(
+    state: &SlackState,
+    response: kyomi_core::Result<String>,
+    ctx: &SlackContext,
+    target: &SlackReplyTarget<'_>,
+    session_id: &str,
+    context: &str,
+) {
+    let query_ctx = kyomi_agent::tools::QueryContext {
+        db: state.db.clone(),
+        user_id: ctx.user_id.clone(),
+        workspace_id: ctx.workspace_id.clone(),
+        encryption_key: state.encryption_key.clone(),
+        config: state.config.clone(),
+        connect_registry: Some(state.connect_registry.clone()),
+    };
+    let footer_url = format!("{}/chat/{}", state.config.frontend_url, session_id);
+
+    match response {
+        Ok(response_text) if response_text.is_empty() => {
+            warn!(session_id = %session_id, %context, "Agent returned empty response for Slack query");
+            post_slack_response(
+                &ctx.bot_token,
+                target.channel_id,
+                target.thread_ts,
+                target.placeholder_ts,
+                "I couldn't generate a response. Please try rephrasing your question.",
+                &state.slack_client,
+                &query_ctx,
+                &footer_url,
+            )
+            .await;
+        }
+        Ok(response_text) => {
+            post_slack_response(
+                &ctx.bot_token,
+                target.channel_id,
+                target.thread_ts,
+                target.placeholder_ts,
+                &response_text,
+                &state.slack_client,
+                &query_ctx,
+                &footer_url,
+            )
+            .await;
+        }
+        Err(e) => {
+            let user_message = slack_query_error_message(&e);
+            if matches!(e, kyomi_core::Error::Forbidden(_)) {
+                warn!(session_id = %session_id, %context, error = %e, "Slack query rejected");
+            } else {
+                error!(session_id = %session_id, %context, error = %e, "Slack agent query failed");
+            }
+            // Update placeholder with the message if we have one, otherwise post ephemeral.
+            if let Some(pts) = target.placeholder_ts {
+                let _ = state
+                    .slack_client
+                    .update_message(&ctx.bot_token, target.channel_id, pts, &user_message, None)
+                    .await;
+            } else {
+                post_slack_error(
+                    &ctx.bot_token,
+                    target.channel_id,
+                    target.slack_user_id,
+                    &user_message,
+                    &state.slack_client,
+                )
+                .await;
+            }
+        }
+    }
+}
 
 /// Post the agent response to Slack using the full message processor pipeline.
 ///
@@ -2215,6 +2234,189 @@ async fn get_slack_user_timezone(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    /// Build an in-memory SQLite pool with migrations applied.
+    ///
+    /// Mirrors the `test_pool()` helper in `kyomi_auth::session` /
+    /// `workspace_service` — the established in-memory-sqlite pattern used
+    /// across the workspace's unit tests.
+    async fn test_pool() -> DbPool {
+        let _ = kyomi_core::constants::load_with_fallback();
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+
+        sqlx::query("PRAGMA foreign_keys=ON")
+            .execute(&pool)
+            .await
+            .expect("enable foreign keys");
+
+        sqlx::migrate!("../../apps/server/migrations-sqlite")
+            .run(&pool)
+            .await
+            .expect("run sqlite migrations");
+
+        DbPool::Sqlite(pool)
+    }
+
+    /// Insert a user row with the given id.
+    async fn insert_user(pool: &DbPool, user_id: &str) {
+        let sq = match pool {
+            DbPool::Sqlite(sq) => sq,
+            _ => unreachable!(),
+        };
+        sqlx::query("INSERT INTO users (user_id, email) VALUES ($1, $2)")
+            .bind(user_id)
+            .bind(format!("{user_id}@test.local"))
+            .execute(sq)
+            .await
+            .expect("insert user");
+    }
+
+    /// Insert a workspace row owned by `owner_user_id`.
+    async fn insert_workspace(pool: &DbPool, workspace_id: &str, owner_user_id: &str) {
+        let sq = match pool {
+            DbPool::Sqlite(sq) => sq,
+            _ => unreachable!(),
+        };
+        sqlx::query(
+            "INSERT INTO workspaces (workspace_id, name, owner_user_id) VALUES ($1, $2, $3)",
+        )
+        .bind(workspace_id)
+        .bind(format!("Workspace {workspace_id}"))
+        .bind(owner_user_id)
+        .execute(sq)
+        .await
+        .expect("insert workspace");
+    }
+
+    /// Insert a `workspace_users` row with an explicit `active` flag.
+    async fn insert_workspace_user(
+        pool: &DbPool,
+        workspace_id: &str,
+        user_id: &str,
+        role: &str,
+        active: bool,
+    ) {
+        let sq = match pool {
+            DbPool::Sqlite(sq) => sq,
+            _ => unreachable!(),
+        };
+        sqlx::query(
+            "INSERT INTO workspace_users (workspace_id, user_id, role, active) \
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(workspace_id)
+        .bind(user_id)
+        .bind(role)
+        .bind(active)
+        .execute(sq)
+        .await
+        .expect("insert workspace_users row");
+    }
+
+    // -----------------------------------------------------------------
+    // KYO-223: resolve_active_workspace_roles (the membership gate that
+    // sits in front of agent execution in run_slack_query)
+    // -----------------------------------------------------------------
+
+    /// Happy path: a Slack-linked user with active workspace membership
+    /// must not regress — the gate has to let them through with their role.
+    #[tokio::test]
+    async fn resolve_active_workspace_roles_allows_active_member() {
+        let pool = test_pool().await;
+        insert_user(&pool, "user-1").await;
+        insert_workspace(&pool, "ws-1", "user-1").await;
+        insert_workspace_user(&pool, "ws-1", "user-1", "workspace_admin", true).await;
+
+        let roles = resolve_active_workspace_roles(&pool, "ws-1", "user-1")
+            .await
+            .expect("active member must be allowed through the gate");
+
+        assert_eq!(roles, vec![WorkspaceRole::WorkspaceAdmin]);
+    }
+
+    /// KYO-223 core case: the `platform_user_links` row survives offboarding
+    /// (nothing deletes it — see `remove_workspace_member`), but the
+    /// `workspace_users` row is gone. The gate must reject, not degrade to
+    /// running with no roles.
+    #[tokio::test]
+    async fn resolve_active_workspace_roles_rejects_revoked_membership() {
+        let pool = test_pool().await;
+        insert_user(&pool, "user-1").await;
+        insert_workspace(&pool, "ws-1", "user-1").await;
+        // No workspace_users row at all — membership was removed.
+
+        let result = resolve_active_workspace_roles(&pool, "ws-1", "user-1").await;
+
+        match result {
+            Err(kyomi_core::Error::Forbidden(msg)) => {
+                assert!(
+                    msg.contains("access") && msg.contains("ended"),
+                    "message should be actionable, got: {msg}"
+                );
+            }
+            other => panic!("expected Forbidden, got: {other:?}"),
+        }
+    }
+
+    /// Guards the `active = true` filter itself: a `workspace_users` row
+    /// that exists but is deactivated (rather than deleted) must be
+    /// rejected exactly like a missing row. If `get_workspace_user` ever
+    /// stopped filtering on `active`, this test — unlike the "row absent"
+    /// case above — would catch it because the row genuinely exists.
+    #[tokio::test]
+    async fn resolve_active_workspace_roles_rejects_inactive_membership_row() {
+        let pool = test_pool().await;
+        insert_user(&pool, "user-1").await;
+        insert_workspace(&pool, "ws-1", "user-1").await;
+        insert_workspace_user(&pool, "ws-1", "user-1", "workspace_admin", false).await;
+
+        let result = resolve_active_workspace_roles(&pool, "ws-1", "user-1").await;
+
+        assert!(
+            matches!(result, Err(kyomi_core::Error::Forbidden(_))),
+            "inactive membership row must be rejected, got: {result:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // KYO-223: the rejection must surface as a readable Slack message,
+    // not be swallowed into the generic failure text.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn slack_query_error_message_forbidden_is_shown_verbatim() {
+        let err = kyomi_core::Error::Forbidden(
+            "Your access to this Kyomi workspace has ended. If you believe this is a mistake, contact your workspace admin.".into(),
+        );
+        let msg = slack_query_error_message(&err);
+        assert_eq!(
+            msg,
+            "Your access to this Kyomi workspace has ended. If you believe this is a mistake, contact your workspace admin."
+        );
+    }
+
+    /// Non-Forbidden errors must never reach Slack verbatim — only the
+    /// generic fallback. This is what keeps internal error text (which can
+    /// include query fragments for `Sqlx`/`Internal` variants) out of a
+    /// public or semi-public Slack channel.
+    #[test]
+    fn slack_query_error_message_other_errors_are_generic() {
+        let err = kyomi_core::Error::Internal(
+            "duplicate key value violates unique constraint \"chat_sessions_pkey\"".into(),
+        );
+        let msg = slack_query_error_message(&err);
+        assert_eq!(
+            msg,
+            "Sorry, I encountered an error processing your request. Please try again."
+        );
+        assert!(!msg.contains("constraint"), "must not leak internal error detail");
+    }
 
     #[test]
     fn build_redirect_uri_format() {

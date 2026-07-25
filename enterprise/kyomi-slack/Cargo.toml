@@ -32,5 +32,8 @@ sqlx = { workspace = true }
 tokio-util = { workspace = true }
 serde_yaml = "0.9"
 
+[dev-dependencies]
+kyomi-core = { workspace = true, features = ["test-helpers"] }
+
 [lints]
 workspace = true
