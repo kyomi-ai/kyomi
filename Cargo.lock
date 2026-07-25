@@ -6195,6 +6195,7 @@ dependencies = [
  "tokio",
  "totp-rs",
  "tracing",
+ "tracing-subscriber",
  "url",
  "uuid",
  "webauthn-rs",
