@@ -84,6 +84,7 @@ fn client() -> reqwest::Client {
 // Members — 401 without auth
 // ===========================================================================
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn list_members_returns_401_without_auth() {
     let base = base_url().await;
@@ -100,6 +101,7 @@ async fn list_members_returns_401_without_auth() {
     assert!(body.get("detail").is_some(), "error response must have 'detail' field");
 }
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn update_member_role_returns_401_without_auth() {
     let base = base_url().await;
@@ -122,6 +124,7 @@ async fn update_member_role_returns_401_without_auth() {
     assert!(body.get("detail").is_some(), "error response must have 'detail' field");
 }
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn remove_member_returns_401_without_auth() {
     let base = base_url().await;
@@ -146,6 +149,7 @@ async fn remove_member_returns_401_without_auth() {
 // Invitations — 401 without auth
 // ===========================================================================
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn create_invitation_returns_401_without_auth() {
     let base = base_url().await;
@@ -168,6 +172,7 @@ async fn create_invitation_returns_401_without_auth() {
     assert!(body.get("detail").is_some(), "error response must have 'detail' field");
 }
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn list_invitations_returns_401_without_auth() {
     let base = base_url().await;
@@ -188,6 +193,7 @@ async fn list_invitations_returns_401_without_auth() {
     assert!(body.get("detail").is_some(), "error response must have 'detail' field");
 }
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn cancel_invitation_returns_401_without_auth() {
     let base = base_url().await;
@@ -210,6 +216,7 @@ async fn cancel_invitation_returns_401_without_auth() {
     assert!(body.get("detail").is_some(), "error response must have 'detail' field");
 }
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn pending_invitations_returns_401_without_auth() {
     let base = base_url().await;
@@ -230,6 +237,7 @@ async fn pending_invitations_returns_401_without_auth() {
     assert!(body.get("detail").is_some(), "error response must have 'detail' field");
 }
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn accept_invitation_returns_401_without_auth() {
     let base = base_url().await;
@@ -252,6 +260,7 @@ async fn accept_invitation_returns_401_without_auth() {
     assert!(body.get("detail").is_some(), "error response must have 'detail' field");
 }
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn decline_invitation_returns_401_without_auth() {
     let base = base_url().await;
@@ -278,6 +287,7 @@ async fn decline_invitation_returns_401_without_auth() {
 // Ownership Transfer — 401 without auth
 // ===========================================================================
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn initiate_transfer_returns_401_without_auth() {
     let base = base_url().await;
@@ -300,6 +310,7 @@ async fn initiate_transfer_returns_401_without_auth() {
     assert!(body.get("detail").is_some(), "error response must have 'detail' field");
 }
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn accept_transfer_returns_401_without_auth() {
     let base = base_url().await;
@@ -322,6 +333,7 @@ async fn accept_transfer_returns_401_without_auth() {
     assert!(body.get("detail").is_some(), "error response must have 'detail' field");
 }
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn decline_transfer_returns_401_without_auth() {
     let base = base_url().await;
@@ -344,6 +356,7 @@ async fn decline_transfer_returns_401_without_auth() {
     assert!(body.get("detail").is_some(), "error response must have 'detail' field");
 }
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn cancel_transfer_returns_401_without_auth() {
     let base = base_url().await;
@@ -366,6 +379,7 @@ async fn cancel_transfer_returns_401_without_auth() {
     assert!(body.get("detail").is_some(), "error response must have 'detail' field");
 }
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn list_transfers_returns_401_without_auth() {
     let base = base_url().await;
@@ -390,6 +404,7 @@ async fn list_transfers_returns_401_without_auth() {
 // Error response format — all 4D endpoints return { "detail": ... }
 // ===========================================================================
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn member_error_responses_have_detail_field() {
     let base = base_url().await;

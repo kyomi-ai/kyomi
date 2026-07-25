@@ -81,6 +81,7 @@ fn client() -> reqwest::Client {
 
 // ---- Auth enforcement: all collection endpoints require authentication ----
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn create_collection_returns_401_without_auth() {
     let base = base_url().await;
@@ -98,6 +99,7 @@ async fn create_collection_returns_401_without_auth() {
     assert!(body.get("detail").is_some());
 }
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn list_collections_returns_401_without_auth() {
     let base = base_url().await;
@@ -113,6 +115,7 @@ async fn list_collections_returns_401_without_auth() {
     assert!(body.get("detail").is_some());
 }
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn get_collection_returns_401_without_auth() {
     let base = base_url().await;
@@ -128,6 +131,7 @@ async fn get_collection_returns_401_without_auth() {
     assert!(body.get("detail").is_some());
 }
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn update_collection_returns_401_without_auth() {
     let base = base_url().await;
@@ -145,6 +149,7 @@ async fn update_collection_returns_401_without_auth() {
     assert!(body.get("detail").is_some());
 }
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn delete_collection_returns_401_without_auth() {
     let base = base_url().await;
@@ -160,6 +165,7 @@ async fn delete_collection_returns_401_without_auth() {
     assert!(body.get("detail").is_some());
 }
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn add_dashboard_to_collection_returns_401_without_auth() {
     let base = base_url().await;
@@ -179,6 +185,7 @@ async fn add_dashboard_to_collection_returns_401_without_auth() {
     assert!(body.get("detail").is_some());
 }
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn remove_dashboard_from_collection_returns_401_without_auth() {
     let base = base_url().await;
@@ -222,6 +229,7 @@ async fn collection_endpoints_have_cors_headers() {
 
 // ---- Error response format ----
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn collection_error_responses_have_detail_field() {
     let base = base_url().await;

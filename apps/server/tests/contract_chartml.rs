@@ -136,6 +136,7 @@ async fn chartml_validate_markdown_returns_401_without_auth() {
 // Usage endpoints (/api/v1/usage)
 // ===========================================================================
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn usage_llm_returns_401_without_auth() {
     let base = base_url().await;
@@ -151,6 +152,7 @@ async fn usage_llm_returns_401_without_auth() {
     assert!(body.get("detail").is_some());
 }
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn usage_llm_with_params_returns_401_without_auth() {
     let base = base_url().await;
@@ -172,6 +174,7 @@ async fn usage_llm_with_params_returns_401_without_auth() {
 // Feedback endpoints (/api/v1/feedback)
 // ===========================================================================
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn submit_feedback_returns_401_without_auth() {
     let base = base_url().await;
@@ -189,6 +192,7 @@ async fn submit_feedback_returns_401_without_auth() {
     assert!(body.get("detail").is_some());
 }
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn list_feedback_returns_401_without_auth() {
     let base = base_url().await;
@@ -243,6 +247,7 @@ async fn phase_12_4_endpoints_have_cors_headers() {
 // Error response format validation
 // ===========================================================================
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn phase_12_4_error_responses_have_detail_field() {
     let base = base_url().await;

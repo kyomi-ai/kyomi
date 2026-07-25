@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Shared constants loaded from `shared/constants.toml`.
+//! Shared constants loaded from `data/constants.toml`.
 //!
 //! This is the Rust side of the cross-backend single source of truth.
 //! The Python backend loads the same file. NEVER hardcode values that
@@ -132,39 +132,44 @@ fn parse_file(path: &Path) -> crate::Result<SharedConstants> {
     })
 }
 
-/// Find the constants file by checking common locations.
+/// Find the constants file.
+///
+/// `data/constants.toml` lives at a fixed location relative to this crate's
+/// manifest (`crates/kyomi-core/`), so it is located by anchoring to
+/// `CARGO_MANIFEST_DIR` — a compile-time constant — rather than guessing at
+/// the process's current working directory, which varies by invocation
+/// (workspace root for `cargo run`, the package directory for `cargo test`,
+/// an arbitrary directory for a packaged binary).
 ///
 /// Searches in this order:
-/// 1. `../../shared/constants.toml` — running from `apps/backend-rust/`
-/// 2. `shared/constants.toml` — running from repo root
-/// 3. `../../../../shared/constants.toml` — running from a nested crate directory
-/// 4. `$SHARED_CONSTANTS_PATH` env var — absolute fallback for CI/tests
+/// 1. `$SHARED_CONSTANTS_PATH` env var — explicit override, e.g. for
+///    deployments that ship the file at a different path.
+/// 2. `<CARGO_MANIFEST_DIR>/../../data/constants.toml` — repo-relative path
+///    from `crates/kyomi-core/`, stable regardless of working directory.
+/// 3. `data/constants.toml` — relative to the current working directory,
+///    for invocations with a known cwd (e.g. `cargo run` from repo root).
 ///
-/// Returns the first path that exists, or an error if none are found.
+/// Returns the first path that exists, or an error if none are found. Note
+/// that most callers don't need this at all — [`load_with_fallback`] embeds
+/// the file at compile time and only calls this to prefer the on-disk copy
+/// when present.
 pub fn find_constants_file() -> crate::Result<std::path::PathBuf> {
-    // Try common locations
     let candidates = [
-        // Running from apps/backend-rust/
-        std::path::PathBuf::from("../../shared/constants.toml"),
-        // Running from repo root
-        std::path::PathBuf::from("shared/constants.toml"),
-        // Running from apps/backend-rust/crates/kyomi-api/
-        std::path::PathBuf::from("../../../../shared/constants.toml"),
-        // Absolute fallback for tests
-        std::path::PathBuf::from(
-            std::env::var("SHARED_CONSTANTS_PATH")
-                .unwrap_or_default(),
-        ),
+        std::env::var("SHARED_CONSTANTS_PATH")
+            .ok()
+            .map(std::path::PathBuf::from),
+        Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/constants.toml")),
+        Some(std::path::PathBuf::from("data/constants.toml")),
     ];
 
-    for candidate in &candidates {
+    for candidate in candidates.into_iter().flatten() {
         if candidate.exists() {
-            return Ok(candidate.clone());
+            return Ok(candidate);
         }
     }
 
     Err(crate::Error::Internal(
-        "shared/constants.toml not found — set SHARED_CONSTANTS_PATH env var".into(),
+        "data/constants.toml not found — set SHARED_CONSTANTS_PATH env var".into(),
     ))
 }
 
@@ -330,7 +335,7 @@ mod tests {
         let path = match find_constants_file() {
             Ok(p) => p,
             Err(_) => {
-                eprintln!("skipping constants test — shared/constants.toml not found");
+                eprintln!("skipping constants test — data/constants.toml not found");
                 return;
             }
         };
@@ -346,7 +351,11 @@ mod tests {
         assert_eq!(constants.jwt.refresh_token_expire_days, 7);
         assert_eq!(constants.cookies.access_token_name, "access_token");
         assert_eq!(constants.cookies.samesite, "strict");
-        assert_eq!(constants.cors.allowed_origins.len(), 5);
+        // `parse_file` returns the raw static TOML content — the 5th
+        // effective origin (the deployment's own FRONTEND_URL) is appended
+        // at runtime by `apply_runtime_overrides`, which this test does not
+        // call. See `data/constants.toml`'s `[cors]` section (4 entries).
+        assert_eq!(constants.cors.allowed_origins.len(), 4);
         assert!(constants.cors.allow_credentials);
         assert_eq!(constants.security_headers.x_frame_options, "DENY");
         assert_eq!(

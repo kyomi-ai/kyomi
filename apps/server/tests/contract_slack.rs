@@ -82,6 +82,7 @@ fn auth_delete(base: &str, path: &str, token: &str) -> reqwest::RequestBuilder {
 // 1. Unauthenticated 401 tests
 // ===========================================================================
 
+#[ignore = "KYO-236: quarantined. KYO-254 — kyomi_server::build_service() never mounts /api/v1/slack (only main.rs does); this test cannot exercise real Slack logic"]
 #[tokio::test]
 async fn install_returns_401_without_auth() {
     let base = base_url().await;
@@ -95,6 +96,7 @@ async fn install_returns_401_without_auth() {
     assert_eq!(resp.status(), 401, "GET /install without auth should be 401");
 }
 
+#[ignore = "KYO-236: quarantined. KYO-254 — kyomi_server::build_service() never mounts /api/v1/slack (only main.rs does); this test cannot exercise real Slack logic"]
 #[tokio::test]
 async fn uninstall_returns_401_without_auth() {
     let base = base_url().await;
@@ -112,6 +114,7 @@ async fn uninstall_returns_401_without_auth() {
     );
 }
 
+#[ignore = "KYO-236: quarantined. KYO-254 — kyomi_server::build_service() never mounts /api/v1/slack (only main.rs does); this test cannot exercise real Slack logic"]
 #[tokio::test]
 async fn user_connect_returns_401_without_auth() {
     let base = base_url().await;
@@ -129,6 +132,7 @@ async fn user_connect_returns_401_without_auth() {
     );
 }
 
+#[ignore = "KYO-236: quarantined. KYO-254 — kyomi_server::build_service() never mounts /api/v1/slack (only main.rs does); this test cannot exercise real Slack logic"]
 #[tokio::test]
 async fn user_disconnect_returns_401_without_auth() {
     let base = base_url().await;
@@ -148,6 +152,7 @@ async fn user_disconnect_returns_401_without_auth() {
     );
 }
 
+#[ignore = "KYO-236: quarantined. KYO-254 — kyomi_server::build_service() never mounts /api/v1/slack (only main.rs does); this test cannot exercise real Slack logic"]
 #[tokio::test]
 async fn status_returns_401_without_auth() {
     let base = base_url().await;
@@ -165,6 +170,7 @@ async fn status_returns_401_without_auth() {
     );
 }
 
+#[ignore = "KYO-236: quarantined. KYO-254 — kyomi_server::build_service() never mounts /api/v1/slack (only main.rs does); this test cannot exercise real Slack logic"]
 #[tokio::test]
 async fn channels_returns_401_without_auth() {
     let base = base_url().await;
@@ -182,6 +188,7 @@ async fn channels_returns_401_without_auth() {
     );
 }
 
+#[ignore = "KYO-236: quarantined. KYO-254 — kyomi_server::build_service() never mounts /api/v1/slack (only main.rs does); this test cannot exercise real Slack logic"]
 #[tokio::test]
 async fn default_watch_channel_get_returns_401_without_auth() {
     let base = base_url().await;
@@ -203,6 +210,7 @@ async fn default_watch_channel_get_returns_401_without_auth() {
 // 2. Free tier gets 403 for Slack endpoints requiring Team tier
 // ===========================================================================
 
+#[ignore = "KYO-236: quarantined. KYO-254 — kyomi_server::build_service() never mounts /api/v1/slack (only main.rs does); this test cannot exercise real Slack logic"]
 #[tokio::test]
 async fn install_returns_403_for_free_tier() {
     let ctx = setup_auth_context("tier-install").await;
@@ -234,6 +242,7 @@ async fn install_returns_403_for_free_tier() {
     cleanup_test_user(&ctx.db, "slack-test-tier-install@contract-test.local").await;
 }
 
+#[ignore = "KYO-236: quarantined. KYO-254 — kyomi_server::build_service() never mounts /api/v1/slack (only main.rs does); this test cannot exercise real Slack logic"]
 #[tokio::test]
 async fn status_returns_403_for_free_tier() {
     let ctx = setup_auth_context("tier-status").await;
@@ -261,6 +270,7 @@ async fn status_returns_403_for_free_tier() {
     cleanup_test_user(&ctx.db, "slack-test-tier-status@contract-test.local").await;
 }
 
+#[ignore = "KYO-236: quarantined. KYO-254 — kyomi_server::build_service() never mounts /api/v1/slack (only main.rs does); this test cannot exercise real Slack logic"]
 #[tokio::test]
 async fn uninstall_returns_403_for_free_tier() {
     let ctx = setup_auth_context("tier-uninstall").await;
@@ -292,6 +302,7 @@ async fn uninstall_returns_403_for_free_tier() {
 // 3. Team tier gets correct responses for Slack endpoints
 // ===========================================================================
 
+#[ignore = "KYO-236: quarantined. KYO-254 — kyomi_server::build_service() never mounts /api/v1/slack (only main.rs does); this test cannot exercise real Slack logic"]
 #[tokio::test]
 async fn status_returns_correct_response_shape_for_team_tier() {
     let ctx = setup_team_auth_context("team-status").await;
@@ -334,6 +345,7 @@ async fn status_returns_correct_response_shape_for_team_tier() {
     cleanup_test_user(&ctx.db, "slack-test-team-status@contract-test.local").await;
 }
 
+#[ignore = "KYO-236: quarantined. KYO-254 — kyomi_server::build_service() never mounts /api/v1/slack (only main.rs does); this test cannot exercise real Slack logic"]
 #[tokio::test]
 async fn install_returns_500_when_slack_not_configured() {
     let ctx = setup_team_auth_context("team-install").await;
@@ -434,6 +446,7 @@ async fn user_disconnect_returns_404_when_not_connected() {
 // 5. Slash command — POST with form-encoded data
 // ===========================================================================
 
+#[ignore = "KYO-236: quarantined. KYO-254 — kyomi_server::build_service() never mounts /api/v1/slack (only main.rs does); this test cannot exercise real Slack logic"]
 #[tokio::test]
 async fn slash_command_returns_json_response() {
     let base = base_url().await;
@@ -464,6 +477,7 @@ async fn slash_command_returns_json_response() {
 // 6. Events API — url_verification
 // ===========================================================================
 
+#[ignore = "KYO-236: quarantined. KYO-254 — kyomi_server::build_service() never mounts /api/v1/slack (only main.rs does); this test cannot exercise real Slack logic"]
 #[tokio::test]
 async fn events_url_verification_returns_challenge() {
     let base = base_url().await;
@@ -499,6 +513,7 @@ async fn events_url_verification_returns_challenge() {
     );
 }
 
+#[ignore = "KYO-236: quarantined. KYO-254 — kyomi_server::build_service() never mounts /api/v1/slack (only main.rs does); this test cannot exercise real Slack logic"]
 #[tokio::test]
 async fn events_url_verification_returns_correct_shape() {
     let base = base_url().await;
@@ -532,6 +547,7 @@ async fn events_url_verification_returns_correct_shape() {
 // 7. Events API — event_callback without signature fails
 // ===========================================================================
 
+#[ignore = "KYO-236: quarantined. KYO-254 — kyomi_server::build_service() never mounts /api/v1/slack (only main.rs does); this test cannot exercise real Slack logic"]
 #[tokio::test]
 async fn events_callback_without_signature_returns_error() {
     let base = base_url().await;
@@ -570,6 +586,7 @@ async fn events_callback_without_signature_returns_error() {
 // 8. Interactions endpoint — without signature fails
 // ===========================================================================
 
+#[ignore = "KYO-236: quarantined. KYO-254 — kyomi_server::build_service() never mounts /api/v1/slack (only main.rs does); this test cannot exercise real Slack logic"]
 #[tokio::test]
 async fn interactions_without_signature_returns_error() {
     let base = base_url().await;
@@ -595,6 +612,7 @@ async fn interactions_without_signature_returns_error() {
 // 9. Default watch channel — returns correct shape
 // ===========================================================================
 
+#[ignore = "KYO-236: quarantined. KYO-254 — kyomi_server::build_service() never mounts /api/v1/slack (only main.rs does); this test cannot exercise real Slack logic"]
 #[tokio::test]
 async fn default_watch_channel_get_returns_correct_shape() {
     let ctx = setup_auth_context("dwc-shape").await;
@@ -630,6 +648,7 @@ async fn default_watch_channel_get_returns_correct_shape() {
 // 10. User connect returns 500 when Slack not configured
 // ===========================================================================
 
+#[ignore = "KYO-236: quarantined. KYO-254 — kyomi_server::build_service() never mounts /api/v1/slack (only main.rs does); this test cannot exercise real Slack logic"]
 #[tokio::test]
 async fn user_connect_returns_500_when_slack_not_configured() {
     let ctx = setup_auth_context("user-connect-noconfig").await;
@@ -664,6 +683,7 @@ async fn user_connect_returns_500_when_slack_not_configured() {
 // 11. Channels returns correct error when not connected
 // ===========================================================================
 
+#[ignore = "KYO-236: quarantined. KYO-254 — kyomi_server::build_service() never mounts /api/v1/slack (only main.rs does); this test cannot exercise real Slack logic"]
 #[tokio::test]
 async fn channels_returns_403_for_free_tier() {
     let ctx = setup_auth_context("chan-free").await;
@@ -693,6 +713,7 @@ async fn channels_returns_403_for_free_tier() {
     cleanup_test_user(&ctx.db, "slack-test-chan-free@contract-test.local").await;
 }
 
+#[ignore = "KYO-236: quarantined. KYO-254 — kyomi_server::build_service() never mounts /api/v1/slack (only main.rs does); this test cannot exercise real Slack logic"]
 #[tokio::test]
 async fn channels_returns_400_when_not_installed() {
     let ctx = setup_team_auth_context("chan-noinstall").await;

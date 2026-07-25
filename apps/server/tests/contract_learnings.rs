@@ -81,6 +81,7 @@ fn client() -> reqwest::Client {
 
 // ---- Auth enforcement: all learning endpoints require authentication ----
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn list_learnings_returns_401_without_auth() {
     let base = base_url().await;
@@ -98,6 +99,7 @@ async fn list_learnings_returns_401_without_auth() {
     assert!(body.get("detail").is_some());
 }
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn update_learning_returns_401_without_auth() {
     let base = base_url().await;
@@ -117,6 +119,7 @@ async fn update_learning_returns_401_without_auth() {
     assert!(body.get("detail").is_some());
 }
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn delete_learning_returns_401_without_auth() {
     let base = base_url().await;
@@ -162,6 +165,7 @@ async fn learning_endpoints_have_cors_headers() {
 
 // ---- Error response format ----
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn learning_error_responses_have_detail_field() {
     let base = base_url().await;
