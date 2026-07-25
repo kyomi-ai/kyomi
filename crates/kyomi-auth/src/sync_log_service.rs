@@ -195,6 +195,153 @@ pub async fn write_sync_entry(
     Ok(sync_id)
 }
 
+// ─── write_sync_entries_in_transaction ───────────────────────────────────────
+
+/// Insert multiple `sync_log` rows atomically — either all of them land or
+/// none do.
+///
+/// `write_sync_entry` writes one row per call with no shared transaction,
+/// which is fine when each row is independently a self-consistent statement
+/// of the current state (every existing call site — `chat_service.rs`,
+/// `dashboard_service.rs`, `workspace_service.rs`, `watch_service.rs`,
+/// `workspace_ai_config.rs` — writes exactly one row per mutation). It stops
+/// being fine when a single visibility transition must be represented by
+/// *more than one* row with a sequential dependency between them — see
+/// `collection_service::write_visibility_sync_log`'s "going private" case: a
+/// `Delete` row (workspace-visible, so every member's delta evicts it) must
+/// be followed by an owner-only `Update` row restoring the owner's copy. If
+/// only the `Delete` half landed (a transient error on the second insert),
+/// the *owner's own* next delta would apply that Delete too — the row is
+/// workspace-visible, which the filter in `get_entries_since` does not
+/// distinguish from "everyone but the owner" — evicting their own dashboard
+/// with no compensating row ever arriving. That is actively wrong, not
+/// merely stale, and unlike every other `write_sync_entry` call site it
+/// cannot self-heal from a later mutation. Wrapping both inserts in one
+/// transaction restores the ordinary failure mode: no rows means "not
+/// converged yet", recoverable on the next mutation or a full re-bootstrap.
+///
+/// Does not return the assigned `sync_id`s — no caller of this batched form
+/// needs them (the few `write_sync_entry` callers that get one back only
+/// pass it to `tracing::debug!`).
+pub async fn write_sync_entries_in_transaction(
+    db: &DbPool,
+    entries: &[SyncEntryParams<'_>],
+) -> kyomi_core::Result<()> {
+    let is_pg = db.is_postgres();
+    let now_expr = sql_compat::now(is_pg);
+
+    match db {
+        kyomi_core::db::DbPool::Postgres(pg) => {
+            let mut tx = pg.begin().await.map_err(|e| {
+                kyomi_core::Error::Internal(format!(
+                    "failed to begin sync_log transaction: {e}"
+                ))
+            })?;
+            for params in entries {
+                let (sql, data_str) =
+                    build_insert_sql_and_data(is_pg, now_expr, params)?;
+                sqlx::query(&sql)
+                    .bind(params.entity_type)
+                    .bind(params.entity_id)
+                    .bind(params.workspace_id)
+                    .bind(action_type_to_str(&params.action))
+                    .bind(data_str)
+                    .bind(params.owner_user_id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| {
+                        kyomi_core::Error::Internal(format!("failed to write sync entry: {e}"))
+                    })?;
+            }
+            tx.commit().await.map_err(|e| {
+                kyomi_core::Error::Internal(format!(
+                    "failed to commit sync_log transaction: {e}"
+                ))
+            })?;
+        }
+        kyomi_core::db::DbPool::Sqlite(sq) => {
+            let mut tx = sq.begin().await.map_err(|e| {
+                kyomi_core::Error::Internal(format!(
+                    "failed to begin sync_log transaction: {e}"
+                ))
+            })?;
+            for params in entries {
+                let (sql, data_str) =
+                    build_insert_sql_and_data(is_pg, now_expr, params)?;
+                sqlx::query(&sql)
+                    .bind(params.entity_type)
+                    .bind(params.entity_id)
+                    .bind(params.workspace_id)
+                    .bind(action_type_to_str(&params.action))
+                    .bind(data_str)
+                    .bind(params.owner_user_id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| {
+                        kyomi_core::Error::Internal(format!("failed to write sync entry: {e}"))
+                    })?;
+            }
+            tx.commit().await.map_err(|e| {
+                kyomi_core::Error::Internal(format!(
+                    "failed to commit sync_log transaction: {e}"
+                ))
+            })?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Build the parameterised INSERT statement and serialised data payload for
+/// one `SyncEntryParams` — shared by both match arms of
+/// `write_sync_entries_in_transaction` since the statement text only differs
+/// in the JSON cast (Postgres binds through `::jsonb`, SQLite binds the raw
+/// string), the same distinction `write_sync_entry` makes.
+///
+/// No `RETURNING` / `last_insert_rowid()` here — this batched form never
+/// hands back `sync_id`s (see the doc comment above), so there is nothing
+/// backend-specific left to branch on beyond the JSON cast.
+fn build_insert_sql_and_data(
+    is_pg: bool,
+    now_expr: &str,
+    params: &SyncEntryParams<'_>,
+) -> kyomi_core::Result<(String, Option<String>)> {
+    let visible_literal = if params.is_workspace_visible {
+        sql_compat::bool_true(is_pg)
+    } else {
+        sql_compat::bool_false(is_pg)
+    };
+    let data_str: Option<String> = params
+        .data
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|e| {
+            kyomi_core::Error::Internal(format!("failed to serialise sync entry data: {e}"))
+        })?;
+
+    let sql = if is_pg {
+        let json_cast = sql_compat::cast_to_json(is_pg, "$5");
+        format!(
+            r#"
+            INSERT INTO sync_log (entity_type, entity_id, workspace_id, action, data,
+                                   owner_user_id, is_workspace_visible, created_at)
+            VALUES ($1, $2, $3, $4, {json_cast}, $6, {visible_literal}, {now_expr})
+            "#
+        )
+    } else {
+        format!(
+            r#"
+            INSERT INTO sync_log (entity_type, entity_id, workspace_id, action, data,
+                                   owner_user_id, is_workspace_visible, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, {visible_literal}, {now_expr})
+            "#
+        )
+    };
+
+    Ok((sql, data_str))
+}
+
 // ─── get_entries_since ───────────────────────────────────────────────────────
 
 /// Fetch all sync entries with `sync_id > since_sync_id` for a workspace,
@@ -864,6 +1011,96 @@ mod tests {
         let sync_ids_a: Vec<i64> = entries_a.iter().map(|e| e.sync_id).collect();
         assert_eq!(sync_ids_a, vec![sid1, sid2]);
     }
+
+    // ─── write_sync_entries_in_transaction (KYO-238 review follow-up) ────────
+    //
+    // Added after review flagged that the original two-row write for a
+    // "going private" collection-visibility transition
+    // (`collection_service::write_visibility_sync_log`) called
+    // `write_sync_entry` twice with no shared transaction: a Delete that
+    // lands followed by an Update that fails leaves a lone
+    // `is_workspace_visible: true` Delete row, which evicts the *owner's*
+    // own cache on their own next delta with no compensating row ever
+    // arriving — worse than every other `write_sync_entry` call site in
+    // this codebase, where a missing row just means "not converged yet".
+
+    #[tokio::test]
+    async fn write_sync_entries_in_transaction_commits_all_rows_together() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+
+        seed_user(sq, "user-a", "a@test.local").await;
+        seed_user(sq, "user-b", "b@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+        seed_workspace_member(sq, "ws-1", "user-b", "user").await;
+        seed_dashboard(sq, "dash-1", "user-a", "ws-1", "dashboard").await;
+
+        // The exact shape `write_visibility_sync_log` sends for a "going
+        // private" transition: a workspace-visible Delete, then an
+        // owner-only Update with the fresh snapshot.
+        let entries = [
+            SyncEntryParams {
+                entity_type: "dashboard",
+                entity_id: "dash-1",
+                workspace_id: "ws-1",
+                action: SyncActionType::Delete,
+                data: None,
+                owner_user_id: Some("user-a"),
+                is_workspace_visible: true,
+            },
+            SyncEntryParams {
+                entity_type: "dashboard",
+                entity_id: "dash-1",
+                workspace_id: "ws-1",
+                action: SyncActionType::Update,
+                data: Some(serde_json::json!({"dashboard_id": "dash-1", "title": "Restored"})),
+                owner_user_id: Some("user-a"),
+                is_workspace_visible: false,
+            },
+        ];
+
+        write_sync_entries_in_transaction(&db, &entries)
+            .await
+            .expect("both rows should commit together");
+
+        // Owner sees both rows, in order — the Delete then the restoring Update.
+        let owner_entries = get_entries_since(&db, "ws-1", 0, "user-a", 100)
+            .await
+            .unwrap();
+        assert_eq!(owner_entries.len(), 2, "{owner_entries:?}");
+        assert!(matches!(owner_entries[0].action, SyncActionType::Delete));
+        assert!(matches!(owner_entries[1].action, SyncActionType::Update));
+        assert!(owner_entries[0].sync_id < owner_entries[1].sync_id);
+
+        // Non-owner sees only the workspace-visible Delete — never a
+        // dangling Update with no matching eviction, and never the
+        // reverse (an Update with no Delete, which would leak the
+        // now-private snapshot to a non-owner).
+        let non_owner_entries = get_entries_since(&db, "ws-1", 0, "user-b", 100)
+            .await
+            .unwrap();
+        assert_eq!(non_owner_entries.len(), 1, "{non_owner_entries:?}");
+        assert!(matches!(non_owner_entries[0].action, SyncActionType::Delete));
+    }
+
+    // No test exercises the actual partial-failure case (row 1 commits,
+    // row 2 errors, transaction rolls back) — logged here rather than
+    // faked. `sync_log` (both the Postgres and SQLite migrations) has no
+    // FK, CHECK, or UNIQUE constraint beyond the auto-assigned primary
+    // key, so there is no way to make the *second* insert in a valid pair
+    // fail on this SQLite test harness while the first succeeds, without
+    // adding a fault-injection seam to production code (a mock `DbPool`
+    // variant, or a poisoned-value backdoor) that doesn't exist anywhere
+    // else in this codebase and would itself be the kind of hack this
+    // project's standards rule out. A `serde_json` NaN/Infinity payload
+    // was the other candidate for a "real" second-statement failure, but
+    // `serde_json::Number`/the `json!` macro cannot construct a non-finite
+    // float in the first place, so that path isn't reachable through the
+    // public API either. What *is* tested above is that the transaction
+    // commits both rows together on the success path, and every other
+    // KYO-238 test (`collection_service.rs`) exercises the two-row
+    // sequencing end to end — but the rollback-on-error branch itself is
+    // unverified by an automated test.
 
     #[tokio::test]
     async fn test_owner_always_sees_own_entries_regardless_of_visibility() {

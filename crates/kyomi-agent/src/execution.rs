@@ -1052,12 +1052,18 @@ async fn generate_dashboard_summary_inner(
                                 )
                                 .await
                                 {
-                                    Ok(()) => {
+                                    Ok(transition) => {
                                         info!(
                                             collection_id = %collection_id,
                                             dashboard_id = %dashboard_id,
                                             "Auto-tagged dashboard with collection"
                                         );
+                                        if let Some(t) = transition {
+                                            ws_helpers::broadcast_dashboard_visibility_change(
+                                                db, ws_manager, &t.dashboard_id, workspace_id,
+                                                &t.owner_user_id, t.now_public,
+                                            ).await;
+                                        }
                                     }
                                     Err(kyomi_core::Error::BadRequest(_)) => {
                                         // Already in collection — skip silently

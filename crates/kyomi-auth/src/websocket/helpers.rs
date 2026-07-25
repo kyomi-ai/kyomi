@@ -800,6 +800,91 @@ pub async fn broadcast_dashboard_sync(
     }
 }
 
+/// Broadcast a dashboard/knowledge doc's visibility transition caused by a
+/// collection-membership change or a collection's `is_public` flip — not a
+/// content edit. `now_public` is the visibility *after* the transition.
+///
+/// - Going public (`now_public = true`): sends an `Update` with the fresh
+///   snapshot to every workspace member **except** the owner, who already
+///   has it.
+/// - Going private (`now_public = false`): sends a `Delete` to every
+///   workspace member **except** the owner (so non-owners evict their
+///   cached copy) and a separate `Update` with the fresh snapshot **to**
+///   the owner (so they keep it, now correctly scoped as private) —
+///   mirrors [`broadcast_chat_session_unshare`].
+///
+/// Fetches the snapshot with `owner_user_id` as the requesting user, which
+/// always satisfies `dashboard_service::visibility_predicate` regardless of
+/// collection state (the owner clause is unconditional). If the snapshot
+/// comes back `None` — the row was deleted mid-transition, or the DB error
+/// `fetch_dashboard_snapshot` swallows (KYO-245, not fixed here) — no sync
+/// action is emitted at all. That's recoverable: the caller's matching
+/// `sync_log` write (see `collection_service::write_visibility_sync_log`)
+/// still lets an offline member converge on their next delta sync. Emitting
+/// a non-`Delete` action with `data: None` is not recoverable the same way
+/// (KYO-218), so this never does that.
+pub async fn broadcast_dashboard_visibility_change(
+    db: &kyomi_core::DbPool,
+    manager: &WebSocketManager,
+    dashboard_id: &str,
+    workspace_id: &str,
+    owner_user_id: &str,
+    now_public: bool,
+) {
+    use kyomi_types::sync::{SyncAction, SyncActionType, entity_types};
+
+    let Some(snapshot) =
+        crate::dashboard_service::fetch_dashboard_snapshot(db, dashboard_id, owner_user_id).await
+    else {
+        tracing::warn!(
+            dashboard_id,
+            now_public,
+            "dashboard visibility broadcast: snapshot unavailable; skipping broadcast"
+        );
+        return;
+    };
+
+    let entity_type = snapshot
+        .get("doc_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or(entity_types::DASHBOARD)
+        .to_string();
+
+    if !now_public {
+        // Evict from every non-owner's cache immediately.
+        let delete_action = SyncAction {
+            sync_id: 0,
+            entity_type: entity_type.clone(),
+            entity_id: dashboard_id.to_string(),
+            workspace_id: workspace_id.to_string(),
+            action: SyncActionType::Delete,
+            data: None,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        };
+        send_sync_action(manager, workspace_id, &delete_action, Some(owner_user_id)).await;
+    }
+
+    let update_action = SyncAction {
+        sync_id: 0,
+        entity_type,
+        entity_id: dashboard_id.to_string(),
+        workspace_id: workspace_id.to_string(),
+        action: SyncActionType::Update,
+        data: Some(snapshot),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    };
+
+    if now_public {
+        // Owner already has it — push the newly-visible snapshot to everyone else.
+        send_sync_action(manager, workspace_id, &update_action, Some(owner_user_id)).await;
+    } else {
+        // Owner keeps it, now correctly scoped as private.
+        let msg = WebSocketMessage::new(MessageType::SyncAction)
+            .with_data(serde_json::to_value(&update_action).unwrap_or_default());
+        manager.send_to_user(owner_user_id, msg).await;
+    }
+}
+
 /// Broadcast a watch mutation to its owner only.
 ///
 /// Fetches the watch from the database and serializes the full model so the
