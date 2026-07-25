@@ -19,6 +19,7 @@ use super::state::SqlEditorState;
 use super::types::SidebarTab;
 use crate::components::toast::toast_success;
 use crate::components::{Button, ButtonSize, ButtonVariant, RightPanel, SearchInput};
+use crate::server_fns::context::UserContext;
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -61,6 +62,21 @@ pub fn SqlEditorSidebar(
 
     // Derived: is the sidebar open at all?
     let is_open = Memo::new(move |_| state.active_right_tab.try_get().flatten().is_some());
+
+    // ── Admin gate: refresh-catalog button ──────────────────────────────
+    // `refresh_catalog` (server_fns::sql_editor) is admin-only server-side.
+    // Mirror that here so non-admins never see an action that will 403.
+    // Provided by the parent Layout (see components/layout.rs), which
+    // mounts once for the whole authed session — SqlEditorPage renders
+    // under it, so `expect_context` is safe here.
+    let user_ctx = expect_context::<LocalResource<Result<UserContext, ServerFnError>>>();
+    let is_admin = Signal::derive(move || {
+        user_ctx
+            .get()
+            .and_then(|r| r.ok())
+            .map(|c| c.is_workspace_admin())
+            .unwrap_or(false)
+    });
 
     // ── Tab + close handlers ────────────────────────────────────────────
     let set_catalog_tab = move |_| {
@@ -173,8 +189,9 @@ pub fn SqlEditorSidebar(
                         "History"
                     </button>
                 </div>
-                // Refresh button — catalog tab only
-                <Show when=move || active_tab.get() == SidebarTab::Catalog>
+                // Refresh button — catalog tab only, admins only (backend
+                // rejects non-admins; see refresh_catalog's admin gate).
+                <Show when=move || active_tab.get() == SidebarTab::Catalog && is_admin.get()>
                     <Button
                         variant=ButtonVariant::GhostMuted
                         size=ButtonSize::IconSm

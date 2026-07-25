@@ -44,6 +44,20 @@ pub struct UserContext {
     pub chart_palette: String,
 }
 
+impl UserContext {
+    /// Whether the user is a workspace admin or the workspace owner.
+    ///
+    /// Single source of truth for the `"workspace_admin"` string literal on
+    /// the frontend — call this instead of re-checking `workspace_roles`
+    /// inline. Deliberately mirrors the backend's admin gate, which ORs in
+    /// `is_owner` (see `server_fns::sql_editor::refresh_catalog` and
+    /// `server_fns/datasources.rs:401`); use it to hide admin-only UI so it
+    /// matches what the server will actually allow.
+    pub fn is_workspace_admin(&self) -> bool {
+        self.workspace_roles.iter().any(|r| r == "workspace_admin") || self.is_owner
+    }
+}
+
 /// Load the authenticated user's full context: identity, workspace, and capabilities.
 ///
 /// This is called once at the settings shell level and provided via Leptos context
@@ -217,6 +231,63 @@ fn build_capabilities_map(caps: &kyomi_core::capability::Capabilities) -> HashMa
 #[cfg(all(test, feature = "ssr"))]
 mod tests {
     use super::*;
+
+    /// Minimal `UserContext` for role-check tests — only `workspace_roles`
+    /// varies between cases.
+    fn user_context_with_roles(roles: &[&str]) -> UserContext {
+        user_context_with_roles_and_owner(roles, false)
+    }
+
+    /// Minimal `UserContext` for role-check tests — `workspace_roles` and
+    /// `is_owner` both vary between cases.
+    fn user_context_with_roles_and_owner(roles: &[&str], is_owner: bool) -> UserContext {
+        UserContext {
+            user_id: "user-1".to_string(),
+            email: "user@example.com".to_string(),
+            name: None,
+            workspace_id: Some("ws-1".to_string()),
+            workspace_name: Some("Test Workspace".to_string()),
+            workspace_roles: roles.iter().map(|r| r.to_string()).collect(),
+            is_owner,
+            subscription_tier: "free".to_string(),
+            subscription_status: "active".to_string(),
+            is_personal_mode: false,
+            is_self_hosted: false,
+            billing_enabled: false,
+            capabilities: HashMap::new(),
+            chart_palette: "balanced".to_string(),
+        }
+    }
+
+    #[test]
+    fn is_workspace_admin_true_when_role_present() {
+        let ctx = user_context_with_roles(&["workspace_admin", "user"]);
+        assert!(ctx.is_workspace_admin());
+    }
+
+    #[test]
+    fn is_workspace_admin_false_when_role_absent() {
+        let ctx = user_context_with_roles(&["user"]);
+        assert!(!ctx.is_workspace_admin());
+    }
+
+    #[test]
+    fn is_workspace_admin_false_when_no_roles() {
+        let ctx = user_context_with_roles(&[]);
+        assert!(!ctx.is_workspace_admin());
+    }
+
+    #[test]
+    fn is_workspace_admin_true_when_owner_without_role() {
+        // Workspace owners can lack the explicit `workspace_admin` role but
+        // must still pass — matches the backend's `|| is_owner` gate (e.g.
+        // `refresh_catalog`).
+        let ctx = user_context_with_roles_and_owner(&["workspace_user"], true);
+        assert!(ctx.is_workspace_admin());
+
+        let ctx_no_roles = user_context_with_roles_and_owner(&[], true);
+        assert!(ctx_no_roles.is_workspace_admin());
+    }
 
     #[test]
     fn build_capabilities_map_includes_all_boolean_flags() {
