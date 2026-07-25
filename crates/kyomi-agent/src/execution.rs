@@ -24,6 +24,7 @@ use tracing::{error, info, warn};
 use kyomi_auth::chat_service;
 use kyomi_auth::websocket::helpers as ws_helpers;
 use kyomi_auth::websocket::WebSocketManager;
+use kyomi_core::enums::WorkspaceRole;
 use kyomi_core::{DbPool, KVPool};
 use kyomi_embed::LazyEmbedding;
 
@@ -88,6 +89,15 @@ pub struct AgentExecutionConfig {
     /// Context window size for the configured model (0 = unknown).
     /// Used to display context utilisation percentage in the thinking tracker UI.
     pub context_window: u32,
+    /// Workspace roles of the user this execution is attributed to.
+    ///
+    /// Threaded into [`crate::tools::ToolContext::workspace_roles`], which
+    /// gates admin-only tools (e.g. analytics site management) via
+    /// `ToolContext::is_workspace_admin()`. Callers MUST populate this with
+    /// the real roles of the attributed user — an empty vec is silently
+    /// interpreted as "not an admin", so leaving it empty for a real user
+    /// produces a false denial, not a safe default.
+    pub workspace_roles: Vec<WorkspaceRole>,
 }
 
 impl Default for AgentExecutionConfig {
@@ -114,6 +124,9 @@ impl Default for AgentExecutionConfig {
             conversation_history: None,
             user_display_name: "Unknown".to_string(),
             context_window: 0,
+            // Test/placeholder default only — see field doc. Production call
+            // sites must pass the attributed user's real workspace roles.
+            workspace_roles: Vec::new(),
         }
     }
 }
@@ -151,6 +164,34 @@ pub struct AgentExecutionEnv<'a> {
     pub platforms: Arc<kyomi_core::platform::PlatformRegistry>,
 }
 
+/// Build the [`ToolContext`] used for tool execution during an agent turn.
+///
+/// Pulled out as a pure, synchronous function (no I/O, cannot fail) so the
+/// mapping from [`AgentExecutionConfig`] into [`ToolContext`] — most
+/// importantly `workspace_roles`, which gates admin-only tools via
+/// [`ToolContext::is_workspace_admin`] — can be pinned by a unit test
+/// without exercising the rest of the async agent loop (LLM calls, DB
+/// writes, etc.). Mirrors the equivalent extraction in the MCP route
+/// handler (`apps/server/src/routes/mcp.rs::build_tool_context`).
+fn build_tool_context(config: &AgentExecutionConfig, env: &AgentExecutionEnv<'_>) -> ToolContext {
+    ToolContext {
+        db: env.db.clone(),
+        kv: env.kv.clone(),
+        user_id: config.user_id.clone(),
+        workspace_id: config.workspace_id.clone(),
+        encryption_key: env.encryption_key.clone(),
+        embedding: env.embedding.clone(),
+        ws_manager: env.ws_manager.clone(),
+        config: env.app_config.clone(),
+        session_id: Some(config.session_id.clone()),
+        supports_mcp_apps: false, // Chat/watch execution — not MCP
+        workspace_roles: config.workspace_roles.clone(),
+        connect_registry: env.connect_registry.clone(),
+        platforms: env.platforms.clone(),
+        user_display_name: config.user_display_name.clone(),
+    }
+}
+
 /// Execute the agent chat loop for a single user message.
 ///
 /// This is the main entry point that coordinates all the pieces:
@@ -159,6 +200,13 @@ pub async fn execute_agent_chat(
     config: AgentExecutionConfig,
     env: AgentExecutionEnv<'_>,
 ) -> kyomi_core::Result<AgentExecutionResult> {
+    // Built up front: a pure mapping off `config`/`env` with no I/O, so it
+    // can happen before `env` is destructured below. See `build_tool_context`.
+    let tool_context = build_tool_context(&config, &env);
+
+    // `connect_registry` and `platforms` are already folded into
+    // `tool_context` above and are not needed by name again in this
+    // function, so they're intentionally left out of this destructure.
     let AgentExecutionEnv {
         db,
         kv,
@@ -166,8 +214,7 @@ pub async fn execute_agent_chat(
         embedding,
         ws_manager,
         app_config,
-        connect_registry,
-        platforms,
+        ..
     } = env;
     // 1. Build system prompt (or use provided custom one).
     let mut system_prompt = if let Some(ref custom) = config.system_prompt {
@@ -289,23 +336,8 @@ pub async fn execute_agent_chat(
     // 5. Create tool registry (filtered by tools_subset if provided).
     let registry = Arc::new(create_default_registry());
 
-    // 6. Create tool context.
-    let tool_context = ToolContext {
-        db: db.clone(),
-        kv: kv.clone(),
-        user_id: config.user_id.clone(),
-        workspace_id: config.workspace_id.clone(),
-        encryption_key: encryption_key.clone(),
-        embedding: embedding.clone(),
-        ws_manager: ws_manager.clone(),
-        config: app_config.clone(),
-        session_id: Some(config.session_id.clone()),
-        supports_mcp_apps: false, // Chat/watch execution — not MCP
-        workspace_roles: vec![], // Chat/watch — no admin checks needed
-        connect_registry: connect_registry.clone(),
-        platforms,
-        user_display_name: config.user_display_name.clone(),
-    };
+    // 6. Tool context was already built at the top of this function (see
+    // `build_tool_context`) — nothing to do here.
 
     // 7. Create agent and inject system prompt as the first message.
     let user_names: HashMap<String, String> = HashMap::new();
@@ -1174,6 +1206,10 @@ mod tests {
         assert_eq!(config.component, "custom_agent");
         assert!(config.assistant_message_id.is_none());
         assert_eq!(config.context_window, 0);
+        // Empty is the correct *test/placeholder* default (see field doc) —
+        // production call sites must never rely on this default; they must
+        // populate the attributed user's real roles.
+        assert!(config.workspace_roles.is_empty());
     }
 
     // -- Contract: AgentExecutionConfig with all fields set -----------------
@@ -1205,6 +1241,7 @@ mod tests {
             ]),
             user_display_name: "Test User".to_string(),
             context_window: 200_000,
+            workspace_roles: vec![WorkspaceRole::WorkspaceAdmin],
         };
 
         assert_eq!(config.session_id, "sess-123");
@@ -1215,6 +1252,7 @@ mod tests {
         assert_eq!(config.tools_subset.as_ref().unwrap().len(), 2);
         assert_eq!(config.max_iterations, 10);
         assert_eq!(config.conversation_history.as_ref().unwrap().len(), 2);
+        assert_eq!(config.workspace_roles, vec![WorkspaceRole::WorkspaceAdmin]);
     }
 
     // -- Contract: AgentExecutionResult serialization roundtrip -------------
@@ -1343,5 +1381,95 @@ mod tests {
     fn looks_like_title_rejects_empty() {
         assert!(!looks_like_title(""));
         assert!(!looks_like_title("   "));
+    }
+
+    // -- Contract: build_tool_context threads workspace_roles through -------
+    //
+    // KYO-190 regression: `execute_agent_chat` used to hardcode
+    // `workspace_roles: vec![]` when building the `ToolContext` for every
+    // chat/copilot/watch/Slack turn, so `ToolContext::is_workspace_admin()`
+    // returned `false` for every caller on that path — including real
+    // workspace admins and owners. `build_tool_context` is the exact
+    // function `execute_agent_chat` calls to build that `ToolContext`, so
+    // exercising it directly here (no LLM/network calls needed) pins the
+    // real code path. Against the old `vec![]` hardcode, every case below
+    // that expects `is_workspace_admin() == true` would fail.
+    //
+    // There is no separate "owner" `WorkspaceRole` variant — ownership is
+    // tracked independently via `Workspace::owner_user_id` /
+    // `WorkspaceContext::is_owner`, and owners are provisioned with the
+    // `WorkspaceAdmin` role at workspace-creation time (see
+    // `kyomi_auth::workspace_service`). So "owner" and "admin" collapse to
+    // the same `WorkspaceAdmin` role case for this mapping; `WorkspaceUser`
+    // covers "member".
+
+    /// Build a real (unmigrated queries never run against it — this test
+    /// never issues a query) in-memory sqlite `AgentExecutionEnv` so
+    /// `build_tool_context` can be called without touching a live DB, KV
+    /// store, or WebSocket connection.
+    async fn test_tool_context_for_roles(workspace_roles: Vec<WorkspaceRole>) -> ToolContext {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+        let encryption_key: Arc<[u8; 32]> = Arc::new([0u8; 32]);
+        let embedding = LazyEmbedding::new();
+        let ws_manager = WebSocketManager::new(None, db.clone());
+        let app_config = Arc::new(kyomi_core::Config::test_config());
+        let platforms = Arc::new(kyomi_core::platform::PlatformRegistry::new());
+
+        let env = AgentExecutionEnv {
+            db: &db,
+            kv: &kv,
+            encryption_key: &encryption_key,
+            embedding: &embedding,
+            ws_manager: &ws_manager,
+            app_config: &app_config,
+            connect_registry: None,
+            platforms,
+        };
+
+        let config = AgentExecutionConfig {
+            workspace_roles,
+            ..AgentExecutionConfig::default()
+        };
+
+        build_tool_context(&config, &env)
+    }
+
+    #[tokio::test]
+    async fn build_tool_context_admin_role_is_workspace_admin() {
+        let ctx = test_tool_context_for_roles(vec![WorkspaceRole::WorkspaceAdmin]).await;
+        assert!(
+            ctx.is_workspace_admin(),
+            "a WorkspaceAdmin-role context (covers both 'owner' and 'admin', \
+             since owners are provisioned with the admin role) must report \
+             is_workspace_admin() == true"
+        );
+        assert_eq!(ctx.workspace_roles, vec![WorkspaceRole::WorkspaceAdmin]);
+    }
+
+    #[tokio::test]
+    async fn build_tool_context_member_role_is_not_workspace_admin() {
+        let ctx = test_tool_context_for_roles(vec![WorkspaceRole::WorkspaceUser]).await;
+        assert!(
+            !ctx.is_workspace_admin(),
+            "a plain member (WorkspaceUser role) must not be treated as admin"
+        );
+        assert_eq!(ctx.workspace_roles, vec![WorkspaceRole::WorkspaceUser]);
+    }
+
+    #[tokio::test]
+    async fn build_tool_context_viewer_role_is_not_workspace_admin() {
+        let ctx = test_tool_context_for_roles(vec![WorkspaceRole::WorkspaceViewer]).await;
+        assert!(!ctx.is_workspace_admin());
+        assert_eq!(ctx.workspace_roles, vec![WorkspaceRole::WorkspaceViewer]);
+    }
+
+    #[tokio::test]
+    async fn build_tool_context_no_roles_is_not_workspace_admin() {
+        let ctx = test_tool_context_for_roles(vec![]).await;
+        assert!(!ctx.is_workspace_admin());
+        assert!(ctx.workspace_roles.is_empty());
     }
 }
