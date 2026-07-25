@@ -2264,10 +2264,25 @@ pub fn DatasourceModal(
                     let update_result = update_datasource_settings(id.clone(), name_val, slug_val, conn_cfg).await;
                     match update_result {
                         Ok(r) => {
-                            // Save credentials if any were entered
+                            // Save credentials if any were entered. Connection
+                            // settings have already persisted at this point, so a
+                            // credential-save failure here is a *partial*
+                            // success, not a failure of the whole save — return
+                            // Ok(r) either way (a blanket `?` would incorrectly
+                            // tell the caller settings were never saved), but
+                            // surface the failure via toast rather than
+                            // discarding it. A toast (not `error_msg`) is
+                            // required here specifically because `on_saved`
+                            // closes the modal on Ok, so an `error_msg` Alert
+                            // — which only renders inside the modal body —
+                            // would never be seen.
                             let creds_obj = creds.as_object().map(|o| !o.is_empty()).unwrap_or(false);
-                            if creds_obj {
-                                let _ = save_datasource_credentials(id, creds).await;
+                            if creds_obj
+                                && let Err(e) = save_datasource_credentials(id, creds).await
+                            {
+                                toast_error(format!(
+                                    "Connection settings saved, but credentials failed to save: {e}"
+                                ));
                             }
                             Ok(r)
                         }
@@ -7619,6 +7634,45 @@ mod tests {
         assert!(
             branch.contains("has_creds") && branch.contains("if has_creds {"),
             "non-admin save branch must guard save_datasource_credentials on non-empty creds"
+        );
+    }
+
+    /// Review finding on PR #232: the admin edit branch discarded the
+    /// `save_datasource_credentials` result with `let _ = ...`, so a
+    /// credential-save failure after a successful `update_datasource_settings`
+    /// call was invisible — the modal closed as if everything had saved. The
+    /// fix must not swallow the error (`let _ =`) and must not propagate it
+    /// with a blanket `?` either (settings genuinely did persist, so the
+    /// whole save must not be reported as failed) — it must surface the
+    /// failure via `toast_error` while still returning `Ok(r)`.
+    #[test]
+    fn admin_save_branch_does_not_discard_credential_save_result() {
+        let branch = extract_between(
+            SRC,
+            "Some(id) if is_admin_val => {",
+            "\n                Some(id) => {",
+        );
+        assert!(
+            !branch.contains("let _ = save_datasource_credentials"),
+            "admin save branch must not silently discard the credential save result"
+        );
+        assert!(
+            branch.contains("let Err(e) = save_datasource_credentials(id, creds).await"),
+            "admin save branch must inspect the credential save result"
+        );
+        assert!(
+            branch.contains("toast_error("),
+            "admin save branch must surface a credential-save failure via toast \
+             (error_msg would be invisible — on_saved closes the modal on Ok)"
+        );
+        assert!(
+            !branch.contains("save_datasource_credentials(id, creds).await?"),
+            "admin save branch must not propagate the credential error with a blanket `?` — \
+             settings genuinely persisted, so the whole save must not be reported as failed"
+        );
+        assert!(
+            branch.contains("Ok(r)"),
+            "admin save branch must still return Ok(r) on a partial (settings-only) success"
         );
     }
 
