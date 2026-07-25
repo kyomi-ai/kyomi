@@ -1,10 +1,47 @@
 # Kyomi — Project Instructions
 
+## Where things live (read this first)
+
+Kyomi is **not** a single repository, and its engineering docs are **not** in this
+one. Both facts have caused real defects — an audit concluded a security control
+"was never enforced" because it only searched this repo; the enforcement was in
+`kyomi-connect`.
+
+### Sibling repositories — search these too
+
+| Repo | Local path | Contains |
+|---|---|---|
+| **kyomi-connect** | `~/repos/kyomi-connect` | **Datasource drivers and the provider factory** — credential resolution, connection pooling, every per-provider implementation (`crates/kyomi-datasource/`) |
+| **chartml** | `~/repos/chartml` | ChartML spec, renderers, chart components |
+| **kode** | `~/repos/kode` | The code/WYSIWYG editor |
+| **kyomi-private** | `~/repos/kyomi-private` | Deploy infrastructure, k8s, proprietary services — **and `docs/`** (below) |
+
+These are consumed via crates.io (see *External Crate Dependencies*), so their
+source is **not** vendored here. When auditing, debugging, or tracing a call that
+leaves this workspace, **grep the sibling repo before concluding anything is
+missing, unenforced, or unimplemented.** A `grep` limited to `~/repos/kyomi` will
+silently miss it.
+
+### Documentation
+
+| Where | What |
+|---|---|
+| **`~/repos/kyomi-private/docs/`** | **Canonical.** Architecture, per-provider reference, ops runbooks, and the required-reading set. Start at its `README.md`. |
+| `docs/product/` (this repo, tracked) | Public-facing product documentation |
+| `docs/CODING_STANDARDS.md` (this repo, tracked) | Coding standards mined from code reviews |
+| `DESIGN.md` (this repo, tracked) | Design system — visual/UI decisions |
+| `docs/*.md` (this repo, **untracked**) | Completed migration plans and historical reports only. `.gitignore` has `docs/*` with `!docs/product/`, so these exist on one machine and are not authoritative. |
+
+**Do not add new engineering docs to this repo's `docs/`** — they will be
+gitignored, invisible to everyone else, and will drift. Put them in
+`~/repos/kyomi-private/docs/`. Anything describing *unfixed* weaknesses (open
+gaps, vulnerabilities, audit findings) **must** go there: this repo is public.
+
 ## Build & Testing
 
 The Leptos frontend has THREE separate build artifacts (Tailwind CSS, WASM, server binary) that must ALL be current. The #1 source of wasted time is testing against a stale binary.
 
-**Before verifying ANY UI change, read `docs/BUILD_AND_TESTING.md`.**
+**Before verifying ANY UI change, read `~/repos/kyomi-private/docs/BUILD_AND_TESTING.md`.**
 
 **Use `dev-server` profile for development.** It reads `dist/` from disk — no server restart for frontend changes.
 
@@ -22,11 +59,11 @@ Server-side Rust:         cargo build --locked --profile dev-server → restart 
 
 ## Sync Engine (Local-First Cache)
 
-**Read `docs/SYNC_ENGINE_ARCHITECTURE.md` before touching any sync/cache code.** That document is the authoritative reference — if the code doesn't match it, the code is wrong. Key rules: schema hash gates re-bootstrap on format changes, `session_type = 'chat'` filter on chat sync queries, IDB is a cache not source of truth.
+**Read `~/repos/kyomi-private/docs/SYNC_ENGINE_ARCHITECTURE.md` before touching any sync/cache code.** That document is the intended authoritative reference — but treat it as *describing intent, not proof*: verify against the code. It fell behind the KYO-172 visibility work and documented the pre-fix (leaking) behaviour; KYO-203 tracks correcting it. Key rules: schema hash gates re-bootstrap on format changes, `session_type = 'chat'` filter on chat sync queries, IDB is a cache not source of truth.
 
 ## SSR + Hydration
 
-Some pages are server-side rendered for instant load. **Read `docs/SSR_HYDRATION_GUIDE.md` before touching SSR code.**
+Some pages are server-side rendered for instant load. **Read `~/repos/kyomi-private/docs/SSR_HYDRATION_GUIDE.md` before touching SSR code.**
 
 Critical rules (violations cause silent hydration panics):
 - **Never use `Resource::new()` inside `#[cfg(target_arch = "wasm32")]` blocks** — it desyncs serialized resource IDs between server and client. Use `spawn_local` or `Effect::new` instead.
@@ -42,6 +79,11 @@ Workspace lints are enforced in `Cargo.toml [workspace.lints]` at `deny` level. 
 ## External Crate Dependencies (chartml, kyomi-connect)
 
 Kyomi depends on crates from sibling repos (`chartml`, `kyomi-connect`) via **crates.io**, not path dependencies. Production builds always resolve against the registry.
+
+> **Their source is not in this workspace.** A significant amount of Kyomi's
+> behaviour — notably all datasource credential resolution and provider
+> construction — lives in `~/repos/kyomi-connect`. See *Where things live* above
+> before concluding a control is missing.
 
 **This means fixes in those repos don't reach kyomi until:**
 1. The fix is merged to the external repo's main branch
