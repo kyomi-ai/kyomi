@@ -1,9 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Contract tests for ChartML validation, Usage, and Feedback endpoints.
+//! Contract tests for ChartML validation endpoints.
 //!
 //! Verifies HTTP-level contract (status codes, auth enforcement, response format)
-//! for endpoints under `/api/v1/chartml`, `/api/v1/usage`, and `/api/v1/feedback`.
+//! for endpoints under `/api/v1/chartml`.
+//!
+//! The `/api/v1/usage` and `/api/v1/feedback` REST routes this file used to
+//! also cover were deleted in KYO-73 (migrated to Leptos server_fns). Their
+//! dead contract tests were removed accordingly — see `contract_feedback.rs`
+//! for the surviving `/api/v1/subscribe` etc. tests, which are a different,
+//! still-live feature.
 
 use serde_json::Value;
 
@@ -133,149 +139,27 @@ async fn chartml_validate_markdown_returns_401_without_auth() {
 }
 
 // ===========================================================================
-// Usage endpoints (/api/v1/usage)
+// CORS on ChartML endpoints
 // ===========================================================================
 
-#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
-async fn usage_llm_returns_401_without_auth() {
+async fn chartml_endpoints_have_cors_headers() {
     let base = base_url().await;
     let resp = client()
-        .get(format!("{base}/api/v1/usage/llm"))
+        .get(format!("{base}/api/v1/chartml/schema"))
         .header("origin", "http://localhost:5173")
         .send()
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), 401);
-    let body: Value = resp.json().await.unwrap();
-    assert!(body.get("detail").is_some());
-}
+    let acao = resp
+        .headers()
+        .get("access-control-allow-origin")
+        .map(|v| v.to_str().unwrap().to_string());
 
-#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
-#[tokio::test]
-async fn usage_llm_with_params_returns_401_without_auth() {
-    let base = base_url().await;
-    let resp = client()
-        .get(format!(
-            "{base}/api/v1/usage/llm?days=7&group_by=model&component=chat_agent"
-        ))
-        .header("origin", "http://localhost:5173")
-        .send()
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), 401);
-    let body: Value = resp.json().await.unwrap();
-    assert!(body.get("detail").is_some());
-}
-
-// ===========================================================================
-// Feedback endpoints (/api/v1/feedback)
-// ===========================================================================
-
-#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
-#[tokio::test]
-async fn submit_feedback_returns_401_without_auth() {
-    let base = base_url().await;
-    let resp = client()
-        .post(format!("{base}/api/v1/feedback"))
-        .header("origin", "http://localhost:5173")
-        .header("content-type", "application/json")
-        .body(r#"{"type": "bug", "description": "Something is broken in the dashboard"}"#)
-        .send()
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), 401);
-    let body: Value = resp.json().await.unwrap();
-    assert!(body.get("detail").is_some());
-}
-
-#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
-#[tokio::test]
-async fn list_feedback_returns_401_without_auth() {
-    let base = base_url().await;
-    let resp = client()
-        .get(format!("{base}/api/v1/feedback"))
-        .header("origin", "http://localhost:5173")
-        .send()
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), 401);
-    let body: Value = resp.json().await.unwrap();
-    assert!(body.get("detail").is_some());
-}
-
-// ===========================================================================
-// CORS on all Phase 12-4 endpoints
-// ===========================================================================
-
-#[tokio::test]
-async fn phase_12_4_endpoints_have_cors_headers() {
-    let base = base_url().await;
-
-    let paths = vec![
-        "/api/v1/chartml/schema",
-        "/api/v1/usage/llm",
-        "/api/v1/feedback",
-    ];
-
-    for path in paths {
-        let resp = client()
-            .get(format!("{base}{path}"))
-            .header("origin", "http://localhost:5173")
-            .send()
-            .await
-            .unwrap();
-
-        let acao = resp
-            .headers()
-            .get("access-control-allow-origin")
-            .map(|v| v.to_str().unwrap().to_string());
-
-        assert_eq!(
-            acao.as_deref(),
-            Some("http://localhost:5173"),
-            "CORS should be present on {path}"
-        );
-    }
-}
-
-// ===========================================================================
-// Error response format validation
-// ===========================================================================
-
-#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
-#[tokio::test]
-async fn phase_12_4_error_responses_have_detail_field() {
-    let base = base_url().await;
-
-    let endpoints = vec![
-        ("GET", "/api/v1/chartml/schema"),
-        ("GET", "/api/v1/usage/llm"),
-        ("GET", "/api/v1/feedback"),
-    ];
-
-    for (method, path) in endpoints {
-        let resp = client()
-            .get(format!("{base}{path}"))
-            .header("origin", "http://localhost:5173")
-            .send()
-            .await
-            .unwrap();
-
-        assert_eq!(
-            resp.status(),
-            401,
-            "expected 401 for {method} {path}"
-        );
-
-        let body: Value = resp.json().await.unwrap();
-        assert!(
-            body.get("detail").is_some(),
-            "{method} {path}: error response must have 'detail' field, got: {body}"
-        );
-    }
+    assert_eq!(
+        acao.as_deref(),
+        Some("http://localhost:5173"),
+        "CORS should be present on /api/v1/chartml/schema"
+    );
 }
