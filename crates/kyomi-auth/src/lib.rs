@@ -42,6 +42,7 @@ pub mod middleware;
 pub mod notifications;
 pub mod onboarding_service;
 pub mod password;
+pub mod permissions;
 pub mod push_service;
 pub mod rate_limiter;
 pub mod redis_ops;

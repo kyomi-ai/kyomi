@@ -222,7 +222,7 @@ fn DatasourcesContent(
 
     // ── Admin gating (KYO-184) ───────────────────────────────────────────
     // Create/edit/delete are workspace-admin-only server-side
-    // (`require_workspace_admin` in `server_fns/datasources.rs`). Per-user
+    // (`ac.require(Permission::ManageDatasources, ...)` in `server_fns/datasources.rs`). Per-user
     // credential entry, the OAuth connect buttons, and the per-user enable
     // toggle stay ungated — those are intentionally available to every
     // member (see `docs/DATASOURCE_ARCHITECTURE.md` §5.2).
@@ -372,7 +372,7 @@ fn DatasourcesContent(
                 </div>
                 // Header CTA — only shown when at least one datasource exists
                 // AND the caller is a workspace admin (create is admin-only —
-                // `create_datasource_modal` → `require_workspace_admin`).
+                // `create_datasource_modal` → `Permission::ManageDatasources`).
                 // Empty state renders its own prominent CTA below (see `EmptyState`),
                 // so double-showing the button creates a duplicate "Add Datasource" CTA.
                 <Show when=move || !datasources.get().is_empty() && is_admin.get()>
@@ -493,7 +493,7 @@ fn DatasourceRow(
     /// Setter for the OAuth connecting state — passed to the popup monitor.
     set_oauth_connecting: WriteSignal<Option<String>>,
     /// Whether the caller is a workspace admin — gates the delete button
-    /// (`delete_datasource` → `require_workspace_admin`). Passed as a
+    /// (`delete_datasource` → `Permission::ManageDatasources`). Passed as a
     /// `Signal` (not snapshotted) per CODING_STANDARDS.md.
     is_admin: Signal<bool>,
 ) -> impl IntoView {
@@ -810,7 +810,7 @@ fn DatasourceRow(
 
                 // Delete button — hidden for analytics datasources (lifecycle-managed
                 // by analytics site CRUD) AND for non-admins (`delete_datasource` →
-                // `require_workspace_admin`). `<Show>` (not `.then()`) because
+                // `Permission::ManageDatasources`). `<Show>` (not `.then()`) because
                 // `is_admin` is a reactive Signal, unlike the static `is_analytics`
                 // check it's combined with.
                 <Show when=move || is_admin.get() && !ds.is_analytics>

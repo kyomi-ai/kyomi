@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+pub mod permission;
 pub mod sync;
 pub mod websocket;
+pub use permission::Permission;
 pub use websocket::{MessageType, WebSocketMessage};
 
 use serde::{Deserialize, Serialize};

@@ -93,22 +93,6 @@ pub struct TestAiConfigResult {
 // Helpers (server-only)
 // ---------------------------------------------------------------------------
 
-/// Reject non-admin users. Mirrors `require_workspace_admin` in
-/// `server_fns/workspace.rs` — admins include workspace owners.
-#[cfg(feature = "ssr")]
-fn require_workspace_admin(
-    auth: &kyomi_auth::middleware::AuthUser,
-) -> Result<(), ServerFnError> {
-    if !auth
-        .workspace
-        .workspace_roles
-        .contains(&kyomi_core::enums::WorkspaceRole::WorkspaceAdmin)
-    {
-        return Err(ServerFnError::new("Workspace admin access required"));
-    }
-    Ok(())
-}
-
 /// Reject self-hosted deployments. Workspace AI config management is a SaaS UI surface.
 #[cfg(feature = "ssr")]
 fn require_saas(ctx: &super::ServerContext) -> Result<(), ServerFnError> {
@@ -196,7 +180,7 @@ pub async fn update_workspace_ai_config(
 
     let ac = AuthenticatedContext::extract().await?;
     require_saas(&ac.ctx)?;
-    require_workspace_admin(&ac.auth)?;
+    ac.require(Permission::ManageAiConfig, "Workspace admin access required")?;
 
     let parsed_provider =
         kyomi_auth::workspace_ai_config::WorkspaceAiProvider::from_str(&provider)
@@ -261,7 +245,7 @@ pub async fn test_workspace_ai_config(
             "API key testing is not available in SaaS mode. AI is included in your plan.",
         ));
     }
-    require_workspace_admin(&auth)?;
+    require_permission(&auth, Permission::ManageAiConfig, "Workspace admin access required")?;
 
     // `model` is accepted for forward-compat (and to match the update shape)
     // but the free auth-check endpoints don't need it.
@@ -467,7 +451,7 @@ pub async fn list_workspace_ai_models(
             "Custom provider model listing is not available in SaaS mode.",
         ));
     }
-    require_workspace_admin(&ac.auth)?;
+    ac.require(Permission::ManageAiConfig, "Workspace admin access required")?;
 
     if provider == "kyomi" {
         return Err(ServerFnError::new(
@@ -799,7 +783,7 @@ pub async fn list_openrouter_models(
     force_refresh: bool,
 ) -> Result<Vec<AiModelInfo>, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
-    require_workspace_admin(&ac.auth)?;
+    ac.require(Permission::ManageAiConfig, "Workspace admin access required")?;
 
     let cfg = kyomi_auth::workspace_ai_config::load(ac.db(), &ac.ws_id)
         .await
@@ -1004,7 +988,9 @@ fn parse_cost_value(v: Option<&serde_json::Value>) -> f64 {
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, AuthenticatedContext, IntoServerFnError};
+use super::{extract_auth, extract_context, require_permission, AuthenticatedContext, IntoServerFnError};
+#[cfg(feature = "ssr")]
+use kyomi_types::Permission;
 
 // ---------------------------------------------------------------------------
 // Tests

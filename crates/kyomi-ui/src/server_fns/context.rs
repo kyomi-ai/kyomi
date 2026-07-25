@@ -49,18 +49,18 @@ impl UserContext {
     ///
     /// Single source of truth for the `"workspace_admin"` string literal on
     /// the frontend — call this instead of re-checking `workspace_roles`
-    /// inline. Deliberately mirrors the backend's admin gate, which ORs in
-    /// `is_owner` (see `server_fns::sql_editor::refresh_catalog` and
-    /// `server_fns/datasources.rs:401`); use it to hide admin-only UI so it
-    /// matches what the server will actually allow.
+    /// inline. Deliberately mirrors the backend's admin gate,
+    /// `kyomi_auth::permissions::permissions_for` (KYO-189 P1), which also
+    /// ORs in `is_owner`; use it to hide admin-only UI so it matches what
+    /// the server will actually allow.
     ///
-    /// Note that `require_workspace_admin` in `server_fns/datasources.rs`
-    /// (create / delete / update) is role-only and does *not* OR in
-    /// `is_owner`, so it is fractionally stricter than this helper. That
-    /// divergence is inert today because an owner structurally always holds
-    /// the `workspace_admin` role (enforced at workspace creation, by
-    /// `update_member_role`'s owner guard, and on ownership transfer), but it
-    /// is a latent trap — see KYO-208.
+    /// Both this helper and the backend mapping's Owner ⊇ Admin behavior
+    /// depend on an owner structurally always holding the `workspace_admin`
+    /// role — see the doc comment on `permissions_for` for the three
+    /// enforcement points that guarantee it. This is still two independent
+    /// implementations of the same OR, one per side of the wire; unifying
+    /// them (shipping `Permission` to the client) is KYO-189 P2, not this
+    /// helper — see KYO-208 for the underlying invariant-fragility concern.
     pub fn is_workspace_admin(&self) -> bool {
         self.workspace_roles.iter().any(|r| r == "workspace_admin") || self.is_owner
     }

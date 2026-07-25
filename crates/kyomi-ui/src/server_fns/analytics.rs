@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
 use super::{AuthenticatedContext, IntoServerFnError};
+#[cfg(feature = "ssr")]
+use kyomi_types::Permission;
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -56,7 +58,7 @@ pub struct AnalyticsUsageData {
 pub async fn list_analytics_sites() -> Result<Vec<AnalyticsSiteData>, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    require_workspace_admin(&ac.auth)?;
+    ac.require(Permission::ManageAnalytics, "Workspace admin access required")?;
 
     let sites = kyomi_auth::analytics_site_service::list_sites(ac.db(), &ac.ws_id)
         .await
@@ -169,7 +171,7 @@ pub async fn create_analytics_site(
 ) -> Result<AnalyticsSiteData, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    require_workspace_admin(&ac.auth)?;
+    ac.require(Permission::ManageAnalytics, "Workspace admin access required")?;
 
     let name = name.trim();
     if name.is_empty() || name.len() > 255 {
@@ -235,7 +237,7 @@ pub async fn update_analytics_site(
 ) -> Result<AnalyticsSiteData, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    require_workspace_admin(&ac.auth)?;
+    ac.require(Permission::ManageAnalytics, "Workspace admin access required")?;
 
     let name = name.trim();
     if name.is_empty() || name.len() > 255 {
@@ -285,7 +287,7 @@ pub async fn update_analytics_site(
 pub async fn delete_analytics_site(site_id: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    require_workspace_admin(&ac.auth)?;
+    ac.require(Permission::ManageAnalytics, "Workspace admin access required")?;
 
     kyomi_auth::analytics_site_service::delete_site(
         ac.db(),
@@ -302,19 +304,3 @@ pub async fn delete_analytics_site(site_id: String) -> Result<(), ServerFnError>
     Ok(())
 }
 
-// ─── Helpers ────────────────────────────────────────────────────────────────
-
-/// Check that the auth user has workspace admin role.
-#[cfg(feature = "ssr")]
-fn require_workspace_admin(
-    auth: &kyomi_auth::middleware::AuthUser,
-) -> Result<(), ServerFnError> {
-    if !auth
-        .workspace
-        .workspace_roles
-        .contains(&kyomi_core::enums::WorkspaceRole::WorkspaceAdmin)
-    {
-        return Err(ServerFnError::new("Workspace admin access required"));
-    }
-    Ok(())
-}

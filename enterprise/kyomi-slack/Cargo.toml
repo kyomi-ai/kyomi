@@ -7,6 +7,7 @@ license = "LicenseRef-Alytic-Enterprise"
 [dependencies]
 kyomi-core = { workspace = true }
 kyomi-auth = { workspace = true }
+kyomi-types = { workspace = true }
 kyomi-agent = { workspace = true }
 kyomi-embed = { workspace = true }
 kyomi-datasource-server = { workspace = true }

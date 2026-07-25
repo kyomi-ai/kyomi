@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "ssr")]
 use super::{AuthenticatedContext, IntoServerFnError};
 #[cfg(feature = "ssr")]
+use kyomi_types::Permission;
+#[cfg(feature = "ssr")]
 use kyomi_core::json_utils::config_bool;
 
 use crate::pages::sql_editor::types::{CatalogNode, QueryHistoryEntry};
@@ -671,19 +673,10 @@ pub async fn refresh_catalog(
 ) -> Result<String, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    // Check admin permission.
-    let is_admin = ac
-        .auth
-        .workspace
-        .workspace_roles
-        .contains(&kyomi_core::enums::WorkspaceRole::WorkspaceAdmin)
-        || ac.auth.workspace.is_owner;
-
-    if !is_admin {
-        return Err(ServerFnError::new(
-            "Only workspace admins can trigger catalog refresh",
-        ));
-    }
+    ac.require(
+        Permission::RefreshCatalog,
+        "Only workspace admins can trigger catalog refresh",
+    )?;
 
     let datasource = kyomi_auth::datasource_service::resolve_datasource(
         ac.db(),

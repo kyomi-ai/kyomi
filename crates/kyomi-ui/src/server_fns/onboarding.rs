@@ -15,6 +15,8 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
 use super::{extract_context, AuthenticatedContext, IntoServerFnError};
+#[cfg(feature = "ssr")]
+use kyomi_types::Permission;
 
 // `CredentialStatusItem` and `OnboardingState` are defined in `kyomi_types` and
 // shared with `kyomi_auth::onboarding_service`. Re-exported here so that UI
@@ -111,12 +113,7 @@ pub async fn accept_terms(
 pub async fn get_onboarding_state() -> Result<OnboardingState, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    let is_admin = ac
-        .auth
-        .workspace
-        .workspace_roles
-        .contains(&kyomi_core::enums::WorkspaceRole::WorkspaceAdmin)
-        || ac.auth.workspace.is_owner;
+    let is_admin = ac.has(Permission::ManageDatasources);
 
     let encryption_key = ac.encryption_key()?;
 
@@ -133,16 +130,7 @@ pub async fn get_onboarding_state() -> Result<OnboardingState, ServerFnError> {
 pub async fn create_sample_datasource() -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    // Require admin
-    if !ac
-        .auth
-        .workspace
-        .workspace_roles
-        .contains(&kyomi_core::enums::WorkspaceRole::WorkspaceAdmin)
-        && !ac.auth.workspace.is_owner
-    {
-        return Err(ServerFnError::new("Workspace admin access required"));
-    }
+    ac.require(Permission::ManageDatasources, "Workspace admin access required")?;
 
     // Check if sample ClickHouse is configured
     let ch_config =
@@ -246,12 +234,7 @@ pub async fn check_sample_datasource_available()
 -> Result<SampleDatasourceAvailability, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    let is_admin = ac
-        .auth
-        .workspace
-        .workspace_roles
-        .contains(&kyomi_core::enums::WorkspaceRole::WorkspaceAdmin)
-        || ac.auth.workspace.is_owner;
+    let is_admin = ac.has(Permission::ManageDatasources);
 
     let configured =
         kyomi_auth::catalog::indexers::sample_data::SampleClickHouseConfig::from_env()
