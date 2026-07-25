@@ -88,6 +88,12 @@ pub struct WatchExecution {
     /// Snapshot of workspace ID (for authorization after watch deletion, nullable in DB).
     pub workspace_id: Option<String>,
 
+    /// Snapshot of the watch owner's user ID (for ownership filtering after
+    /// watch deletion — `watch_id` alone can't be joined back to `watches`
+    /// once the parent watch is gone). Nullable: rows whose parent watch was
+    /// deleted before this column existed have no way to recover ownership.
+    pub created_by: Option<String>,
+
     /// FK to chat_sessions table (optional — the session used for execution).
     pub session_id: Option<String>,
 

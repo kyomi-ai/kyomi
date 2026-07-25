@@ -550,7 +550,7 @@ async fn fetch_recent_alerts_direct(
                cost_estimate, \
                execution_trace, \
                alert_triggered, notification_id, \
-               read_at, deleted_at, deleted_by \
+               read_at, deleted_at, deleted_by, created_by \
         FROM watch_executions \
         WHERE watch_id = $1 \
           AND alert_triggered = {bool_true} \
@@ -835,6 +835,7 @@ pub async fn execute_watch(
         &watch.name,
         &watch.workspace_id,
         watch.mode,
+        &watch.created_by,
     )
     .await?;
 
