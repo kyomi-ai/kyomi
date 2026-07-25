@@ -10,6 +10,11 @@ use serde::{Deserialize, Serialize};
 use crate::enums::TransferStatus;
 
 /// A pending or completed workspace ownership transfer request.
+///
+/// Not a duplicate of `kyomi_ui::server_fns::ownership::OwnershipTransfer`:
+/// this is the full `sqlx::FromRow` DB row for the `ownership_transfers`
+/// table, while that one is a slimmer page-view DTO with `workspace_name`
+/// and `from_user_email` resolved via a join.
 #[derive(Debug, Clone, sqlx::FromRow, Serialize, Deserialize)]
 pub struct OwnershipTransfer {
     /// Primary key: "transfer-{uuid_hex[0..20]}".

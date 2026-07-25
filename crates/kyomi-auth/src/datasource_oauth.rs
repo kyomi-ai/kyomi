@@ -799,11 +799,10 @@ pub async fn datasource_oauth_status_service(
 }
 
 /// Result of `datasource_oauth_disconnect_service`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct DatasourceOAuthDisconnectResult {
-    pub success: bool,
-    pub already_disconnected: bool,
-}
+///
+/// Defined in `kyomi_types` because it also crosses into the WASM client as
+/// a server_fn response — see `kyomi_types::datasource_contracts`.
+pub use kyomi_types::DatasourceOAuthDisconnectResult;
 
 /// Disconnect OAuth credentials for a specific datasource and user.
 ///
