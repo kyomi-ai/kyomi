@@ -295,17 +295,23 @@ pub async fn accept_invitation(invitation_id: String) -> Result<(), ServerFnErro
     let device = super::auth::extract_device_info(&headers);
 
     let session = match ctx.kv.clone() {
-        Some(kv) => kyomi_auth::workspace_service::accept_invitation_and_switch(
-            &ctx.db,
-            &kv,
-            &ctx.config.jwt_secret,
-            &invitation_id,
-            &auth.user_id,
-            &inv.workspace_id,
-            &device,
-        )
-        .await
-        .into_sfn()?,
+        Some(kv) => {
+            let accept_ctx = kyomi_auth::workspace_service::AcceptInvitationCtx {
+                db: &ctx.db,
+                kv: &kv,
+                jwt_secret: &ctx.config.jwt_secret,
+                config: Some(&ctx.config),
+            };
+            kyomi_auth::workspace_service::accept_invitation_and_switch(
+                &accept_ctx,
+                &invitation_id,
+                &auth.user_id,
+                &inv.workspace_id,
+                &device,
+            )
+            .await
+            .into_sfn()?
+        }
         None => {
             // No KV (single-instance/test) — still accept the invite; just can't
             // re-mint a session for the new workspace.
@@ -317,6 +323,7 @@ pub async fn accept_invitation(invitation_id: String) -> Result<(), ServerFnErro
                 &ctx.db,
                 &invitation_id,
                 &auth.user_id,
+                Some(&ctx.config),
             )
             .await
             .into_sfn()?;

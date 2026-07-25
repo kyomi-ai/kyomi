@@ -586,6 +586,7 @@ impl StripeService {
                 async move {
                     UpdateSubscriptionItem::new(first_item_id)
                         .quantity(total_users)
+                        .proration_behavior(stripe_billing::subscription_item::UpdateSubscriptionItemProrationBehavior::CreateProrations)
                         .send(&self.client)
                         .await
                 }
