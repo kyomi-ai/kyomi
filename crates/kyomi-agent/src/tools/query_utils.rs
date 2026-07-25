@@ -165,7 +165,8 @@ pub async fn create_provider_for_datasource(
         let decrypted_config = kyomi_auth::credential_service::decrypt_connection_config_secrets(
             &ds.connection_config,
             &ctx.encryption_key,
-        );
+        )
+        .map_err(|e| format!("Failed to decrypt connection_config for '{}': {e}", ds.slug))?;
 
         kyomi_datasource_server::factory::create_provider(
             &ds_type,

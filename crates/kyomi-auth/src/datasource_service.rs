@@ -1000,7 +1000,7 @@ where
     // encrypted `COMMON_SENSITIVE` fields (e.g. `ssh_private_key`) — the
     // driver always needs plaintext.
     let decrypted_config =
-        credential_service::decrypt_connection_config_secrets(&ds.connection_config, encryption_key);
+        credential_service::decrypt_connection_config_secrets(&ds.connection_config, encryption_key)?;
 
     let ds_type: kyomi_core::datasource_registry::DatasourceType = ds.datasource_type.into();
     let provider = kyomi_datasource_server::create_provider_from_parts(

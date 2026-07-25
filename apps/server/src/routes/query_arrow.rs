@@ -147,16 +147,19 @@ async fn query_arrow(
     // ------------------------------------------------------------------
     // Variant-purity analysis (verified against the source of every function
     // called by `build_provider_for_datasource`, see KYO-138, updated for
-    // KYO-146): with resolution now performed separately above, the helper
-    // can only surface `Error::Sqlx` (from `get_user_credential`, propagated
-    // via `?` from the `db_fetch_*!` macros) or, from
+    // KYO-146 and KYO-221): with resolution now performed separately above,
+    // the helper can only surface `Error::Sqlx` (from `get_user_credential`,
+    // propagated via `?` from the `db_fetch_*!` macros), or
+    // `Error::CredentialDecryptionFailed` (encrypted connection_config that
+    // can't be decrypted — wrong/rotated key), or, from
     // `create_provider_from_parts`, either `Error::DatasourceConnection`
     // (OAuth-refresh failure, provider construction failure, or connection
     // timeout — all three user-actionable, connection-related outcomes) or
     // `Error::Internal` (only the missing-Connect-registry case, which can't
     // happen here since we always pass `Some(&state.connect_registry)`). So:
     // DatasourceConnection -> 422 (with the "timed out" special case),
-    // anything else (Sqlx, or the unreachable Internal case) -> 500.
+    // anything else (Sqlx, CredentialDecryptionFailed, or the unreachable
+    // Internal case) -> 500.
     let provider = match kyomi_auth::datasource_service::build_provider_for_datasource(
         &state.db,
         &auth.user_id,
