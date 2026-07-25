@@ -3260,8 +3260,11 @@ pub fn DatasourceModal(
                                             cfg_oauth_client_secret=cfg_oauth_client_secret
                                             set_cfg_oauth_client_secret=set_cfg_oauth_client_secret
                                             oauth_connected=modal_oauth_connected
+                                            set_oauth_connected=set_modal_oauth_connected
                                             oauth_email=modal_oauth_email
+                                            set_oauth_email=set_modal_oauth_email
                                             oauth_expired=modal_oauth_expired
+                                            set_oauth_expired=set_modal_oauth_expired
                                             oauth_connecting=modal_oauth_connecting
                                             set_oauth_connecting=set_modal_oauth_connecting
                                             datasource_disconnect_action=datasource_disconnect_action
@@ -3952,6 +3955,132 @@ fn ModalOAuthStatusPanel(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// OAuth Status Re-fetch Hook
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Which OAuth status endpoint backs a given auth mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OAuthStatusSource {
+    /// Account-level Google OAuth — `get_google_oauth_status()`.
+    GoogleAccount,
+    /// Per-datasource OAuth for this provider key — `get_datasource_oauth_status(key, slug)`.
+    Datasource(&'static str),
+}
+
+/// The three OAuth status setters an `*AuthModeSection` component owns,
+/// packed as a single struct so [`use_oauth_status_refetch`] doesn't take a
+/// pile of positional `WriteSignal` arguments.
+#[derive(Clone, Copy)]
+struct OAuthStatusSetters {
+    connected: WriteSignal<bool>,
+    email: WriteSignal<Option<String>>,
+    expired: WriteSignal<bool>,
+}
+
+/// Re-fetches OAuth connection status whenever the auth mode changes in an
+/// open datasource modal.
+///
+/// Without this, the status panel is fetched once when the modal opens
+/// (using whichever auth mode was loaded from the server) and never again —
+/// so switching the mode selector leaves the panel showing the previous
+/// mode's stale connected/email/expired state. This exact defect was
+/// independently flagged in KYO-13 (BigQuery) and KYO-17 (Databricks) and
+/// documented in `docs/CODING_STANDARDS.md` §Leptos as a required
+/// `Effect::new` re-fetch — and it recurred a third time in Synapse anyway,
+/// because each fix copy-pasted the Effect instead of sharing it (KYO-197).
+/// Any new provider's OAuth status panel must call this hook rather than
+/// hand-rolling another copy of the Effect.
+fn use_oauth_status_refetch(
+    auth_mode: ReadSignal<String>,
+    slug: ReadSignal<String>,
+    setters: OAuthStatusSetters,
+    source_for_mode: fn(&str) -> Option<OAuthStatusSource>,
+) {
+    Effect::new(move |_| {
+        let current_mode = auth_mode.get(); // subscribe to mode changes
+        let slug_val = slug.get();
+        // Skip create mode (no slug) and modes with no OAuth status to fetch.
+        let source = if slug_val.is_empty() {
+            None
+        } else {
+            source_for_mode(&current_mode)
+        };
+        let Some(source) = source else {
+            return;
+        };
+        // Reset to disconnected state while the fetch is in flight.
+        setters.connected.set(false);
+        setters.email.set(None);
+        setters.expired.set(false);
+
+        leptos::task::spawn_local(async move {
+            match source {
+                OAuthStatusSource::GoogleAccount => {
+                    if let Ok(status) = get_google_oauth_status().await {
+                        setters.connected.try_set(status.connected);
+                        setters.email.try_set(status.google_email);
+                        setters.expired.try_set(status.token_expired);
+                    }
+                }
+                OAuthStatusSource::Datasource(provider_key) => {
+                    if let Ok(status) =
+                        get_datasource_oauth_status(provider_key.to_string(), slug_val).await
+                    {
+                        setters.connected.try_set(status.connected);
+                        setters.email.try_set(status.provider_email);
+                        setters.expired.try_set(status.token_expired);
+                    }
+                }
+            }
+        });
+    });
+}
+
+/// Maps BigQuery's auth mode to its OAuth status source. `service_account`
+/// mode has no OAuth status to fetch.
+fn bigquery_oauth_source(mode: &str) -> Option<OAuthStatusSource> {
+    match mode {
+        "kyomi_oauth" => Some(OAuthStatusSource::GoogleAccount),
+        "enterprise_oauth" => Some(OAuthStatusSource::Datasource("bigquery-enterprise")),
+        _ => None,
+    }
+}
+
+/// Maps Snowflake's auth mode to its OAuth status source. `password` and
+/// `keypair` modes have no OAuth status to fetch.
+///
+/// Deliberate behaviour change from the hand-rolled Effect this replaces:
+/// the old guard was negative (`mode == "password" || mode == "keypair"`
+/// bails), so an *unrecognised* mode fell through and fetched anyway. This
+/// allow-list makes an unrecognised mode a no-op instead, matching what
+/// Databricks already does. The selector only ever offers
+/// `password`/`oauth`/`keypair`, so this is unreachable in practice.
+fn snowflake_oauth_source(mode: &str) -> Option<OAuthStatusSource> {
+    match mode {
+        "oauth" => Some(OAuthStatusSource::Datasource("snowflake")),
+        _ => None,
+    }
+}
+
+/// Maps Databricks's auth mode to its OAuth status source. `token` mode has
+/// no OAuth status to fetch.
+fn databricks_oauth_source(mode: &str) -> Option<OAuthStatusSource> {
+    match mode {
+        "oauth" => Some(OAuthStatusSource::Datasource("databricks")),
+        _ => None,
+    }
+}
+
+/// Maps Synapse's auth mode to its OAuth status source. `sql` and
+/// `service_principal` modes have no OAuth status to fetch.
+fn synapse_oauth_source(mode: &str) -> Option<OAuthStatusSource> {
+    match mode {
+        "enterprise_oauth" => Some(OAuthStatusSource::Datasource("microsoft-enterprise")),
+        _ => None,
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // BigQuery Auth Mode Section
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -4103,41 +4232,16 @@ fn BigQueryAuthModeSection(
 
     // Re-fetch OAuth status whenever bq_auth_mode changes so the status panel
     // reflects the correct account for the newly selected mode.
-    Effect::new(move |_| {
-        let current_mode = bq_auth_mode.get(); // subscribe to mode changes
-        let slug_val = slug.get();
-        // Skip create mode (no slug) and non-OAuth modes.
-        if slug_val.is_empty() || current_mode == "service_account" {
-            return;
-        }
-        // Reset to disconnected state while the fetch is in flight.
-        set_oauth_connected.set(false);
-        set_oauth_email.set(None);
-        set_oauth_expired.set(false);
-
-        leptos::task::spawn_local(async move {
-            match current_mode.as_str() {
-                "kyomi_oauth" => {
-                    if let Ok(status) = get_google_oauth_status().await {
-                        set_oauth_connected.try_set(status.connected);
-                        set_oauth_email.try_set(status.google_email);
-                        set_oauth_expired.try_set(status.token_expired);
-                    }
-                }
-                "enterprise_oauth" => {
-                    if let Ok(status) =
-                        get_datasource_oauth_status("bigquery-enterprise".to_string(), slug_val)
-                            .await
-                    {
-                        set_oauth_connected.try_set(status.connected);
-                        set_oauth_email.try_set(status.provider_email);
-                        set_oauth_expired.try_set(status.token_expired);
-                    }
-                }
-                _ => {}
-            }
-        });
-    });
+    use_oauth_status_refetch(
+        bq_auth_mode,
+        slug,
+        OAuthStatusSetters {
+            connected: set_oauth_connected,
+            email: set_oauth_email,
+            expired: set_oauth_expired,
+        },
+        bigquery_oauth_source,
+    );
 
     // Redirect URL shown in the Enterprise OAuth configuration panel so users
     // know what to enter in the Google Cloud OAuth client settings.
@@ -4461,28 +4565,16 @@ fn SnowflakeAuthModeSection(
 
     // Re-fetch OAuth status whenever sf_auth_mode changes so the status panel
     // reflects the correct account for the newly selected mode.
-    Effect::new(move |_| {
-        let current_mode = sf_auth_mode.get(); // subscribe to mode changes
-        let slug_val = slug.get();
-        // Skip create mode (no slug) and non-OAuth modes.
-        if slug_val.is_empty() || current_mode == "password" || current_mode == "keypair" {
-            return;
-        }
-        // Reset to disconnected state while the fetch is in flight.
-        set_oauth_connected.set(false);
-        set_oauth_email.set(None);
-        set_oauth_expired.set(false);
-
-        leptos::task::spawn_local(async move {
-            if let Ok(status) =
-                get_datasource_oauth_status("snowflake".to_string(), slug_val).await
-            {
-                set_oauth_connected.try_set(status.connected);
-                set_oauth_email.try_set(status.provider_email);
-                set_oauth_expired.try_set(status.token_expired);
-            }
-        });
-    });
+    use_oauth_status_refetch(
+        sf_auth_mode,
+        slug,
+        OAuthStatusSetters {
+            connected: set_oauth_connected,
+            email: set_oauth_email,
+            expired: set_oauth_expired,
+        },
+        snowflake_oauth_source,
+    );
 
     let slug_for_disconnect = slug;
     let on_sf_disconnect = Callback::new(move |()| {
@@ -4629,26 +4721,16 @@ fn DatabricksAuthModeSection(
 
     // Re-fetch OAuth status whenever db_auth_mode changes to "oauth" so the
     // status panel reflects the current account state.
-    Effect::new(move |_| {
-        let current_mode = db_auth_mode.get();
-        let slug_val = slug.get();
-        if slug_val.is_empty() || current_mode != "oauth" {
-            return;
-        }
-        set_oauth_connected.set(false);
-        set_oauth_email.set(None);
-        set_oauth_expired.set(false);
-
-        leptos::task::spawn_local(async move {
-            if let Ok(status) =
-                get_datasource_oauth_status("databricks".to_string(), slug_val).await
-            {
-                set_oauth_connected.try_set(status.connected);
-                set_oauth_email.try_set(status.provider_email);
-                set_oauth_expired.try_set(status.token_expired);
-            }
-        });
-    });
+    use_oauth_status_refetch(
+        db_auth_mode,
+        slug,
+        OAuthStatusSetters {
+            connected: set_oauth_connected,
+            email: set_oauth_email,
+            expired: set_oauth_expired,
+        },
+        databricks_oauth_source,
+    );
 
     // Redirect URL for the Databricks OAuth app registration.
     // Only computed on WASM — the component won't render server-side.
@@ -4778,10 +4860,16 @@ fn SynapseAuthModeSection(
     set_cfg_oauth_client_secret: WriteSignal<String>,
     /// Whether the OAuth account is currently connected.
     oauth_connected: ReadSignal<bool>,
+    /// Setter for the connected state (used by the re-fetch hook on mode change).
+    set_oauth_connected: WriteSignal<bool>,
     /// The connected account email, if any.
     oauth_email: ReadSignal<Option<String>>,
+    /// Setter for the email state (used by the re-fetch hook on mode change).
+    set_oauth_email: WriteSignal<Option<String>>,
     /// Whether the OAuth token has expired.
     oauth_expired: ReadSignal<bool>,
+    /// Setter for the expired state (used by the re-fetch hook on mode change).
+    set_oauth_expired: WriteSignal<bool>,
     /// Whether an OAuth popup is currently in progress.
     oauth_connecting: ReadSignal<bool>,
     /// Setter for the connecting state.
@@ -4796,6 +4884,19 @@ fn SynapseAuthModeSection(
     /// Connection" below, which is per-user and stays visible to every member.
     is_admin: Signal<bool>,
 ) -> impl IntoView {
+    // Re-fetch OAuth status whenever synapse_auth_mode changes so the status
+    // panel reflects the correct account for the newly selected mode.
+    use_oauth_status_refetch(
+        synapse_auth_mode,
+        slug,
+        OAuthStatusSetters {
+            connected: set_oauth_connected,
+            email: set_oauth_email,
+            expired: set_oauth_expired,
+        },
+        synapse_oauth_source,
+    );
+
     // Microsoft Enterprise OAuth connect URL — slug-scoped
     let enterprise_oauth_url = Signal::derive(move || {
         let s = slug.get();
@@ -7756,5 +7857,158 @@ mod tests {
             appears_shortly_before(f, IS_ADMIN_GATE, "\"OAuth Client ID\"", 1500),
             "Synapse OAuth Client ID field must be is_admin-gated"
         );
+    }
+
+    // ── KYO-197: shared OAuth status re-fetch hook ─────────────────────
+    //
+    // The four provider Auth Mode Sections previously each carried their own
+    // copy-pasted `Effect::new` re-fetching OAuth status on mode change
+    // (KYO-13, KYO-17), and Synapse's copy was simply missing — it only took
+    // `ReadSignal`s, so it had no write signals to re-fetch into, and the
+    // status panel went stale the moment the user switched to
+    // `enterprise_oauth` after the modal loaded a different mode. The fix
+    // consolidates the fetch logic into `use_oauth_status_refetch` plus one
+    // pure mapping function per provider. The mapping functions are the
+    // substantive coverage below; the two guard tests that follow ensure a
+    // fifth provider can't reintroduce a hand-rolled copy.
+
+    use super::{
+        bigquery_oauth_source, databricks_oauth_source, snowflake_oauth_source,
+        synapse_oauth_source, OAuthStatusSource,
+    };
+
+    #[test]
+    fn bigquery_oauth_source_maps_documented_modes() {
+        assert_eq!(
+            bigquery_oauth_source("kyomi_oauth"),
+            Some(OAuthStatusSource::GoogleAccount),
+            "kyomi_oauth must fetch the account-level Google OAuth status"
+        );
+        assert_eq!(
+            bigquery_oauth_source("enterprise_oauth"),
+            Some(OAuthStatusSource::Datasource("bigquery-enterprise")),
+            "enterprise_oauth must fetch per-datasource status for the bigquery-enterprise provider key"
+        );
+        for mode in ["service_account", "password", "keypair", "sql", "service_principal", "nonsense"] {
+            assert_eq!(
+                bigquery_oauth_source(mode),
+                None,
+                "non-OAuth or unrecognised mode {mode:?} must not trigger an OAuth status fetch"
+            );
+        }
+    }
+
+    #[test]
+    fn snowflake_oauth_source_maps_documented_modes() {
+        assert_eq!(
+            snowflake_oauth_source("oauth"),
+            Some(OAuthStatusSource::Datasource("snowflake")),
+            "oauth must fetch per-datasource status for the snowflake provider key"
+        );
+        for mode in ["service_account", "password", "keypair", "sql", "service_principal", "nonsense"] {
+            assert_eq!(
+                snowflake_oauth_source(mode),
+                None,
+                "non-OAuth or unrecognised mode {mode:?} must not trigger an OAuth status fetch \
+                 (allow-list, not the old password/keypair deny-list — an unrecognised mode is now a no-op)"
+            );
+        }
+    }
+
+    #[test]
+    fn databricks_oauth_source_maps_documented_modes() {
+        assert_eq!(
+            databricks_oauth_source("oauth"),
+            Some(OAuthStatusSource::Datasource("databricks")),
+            "oauth must fetch per-datasource status for the databricks provider key"
+        );
+        for mode in ["service_account", "password", "keypair", "sql", "service_principal", "nonsense"] {
+            assert_eq!(
+                databricks_oauth_source(mode),
+                None,
+                "non-OAuth or unrecognised mode {mode:?} must not trigger an OAuth status fetch"
+            );
+        }
+    }
+
+    #[test]
+    fn synapse_oauth_source_maps_documented_modes() {
+        assert_eq!(
+            synapse_oauth_source("enterprise_oauth"),
+            Some(OAuthStatusSource::Datasource("microsoft-enterprise")),
+            "enterprise_oauth must fetch per-datasource status for the microsoft-enterprise provider key \
+             — this is the KYO-197 regression: Synapse never re-fetched at all"
+        );
+        for mode in ["service_account", "password", "keypair", "sql", "service_principal", "nonsense"] {
+            assert_eq!(
+                synapse_oauth_source(mode),
+                None,
+                "non-OAuth or unrecognised mode {mode:?} must not trigger an OAuth status fetch"
+            );
+        }
+    }
+
+    /// Guard against a fifth provider (or a future edit to one of the four)
+    /// hand-rolling another copy of the re-fetch `Effect::new` instead of
+    /// calling the shared hook — the exact mistake this ticket fixes.
+    #[test]
+    fn auth_mode_sections_use_the_shared_refetch_hook() {
+        let sections: &[(&str, &str, &str)] = &[
+            ("BigQuery", "fn BigQueryAuthModeSection(", "fn SnowflakeAuthModeSection("),
+            ("Snowflake", "fn SnowflakeAuthModeSection(", "fn DatabricksAuthModeSection("),
+            ("Databricks", "fn DatabricksAuthModeSection(", "fn SynapseAuthModeSection("),
+            ("Synapse", "fn SynapseAuthModeSection(", "struct ConnectionFieldsSignals"),
+        ];
+        for (name, start, end) in sections {
+            let f = extract_between(SRC, start, end);
+            assert!(
+                f.contains("use_oauth_status_refetch("),
+                "{name}AuthModeSection must re-fetch OAuth status via the shared \
+                 use_oauth_status_refetch hook, not a hand-rolled Effect"
+            );
+        }
+    }
+
+    /// The fetch-on-mode-change logic must live only in
+    /// `use_oauth_status_refetch` — none of the four `*AuthModeSection`
+    /// bodies may call the OAuth status server_fns directly from their own
+    /// `Effect::new`. If one does, it has silently reverted to the
+    /// copy-pasted-Effect pattern this ticket removed.
+    #[test]
+    fn auth_mode_sections_do_not_hand_roll_oauth_status_effects() {
+        let sections: &[(&str, &str, &str)] = &[
+            ("BigQuery", "fn BigQueryAuthModeSection(", "fn SnowflakeAuthModeSection("),
+            ("Snowflake", "fn SnowflakeAuthModeSection(", "fn DatabricksAuthModeSection("),
+            ("Databricks", "fn DatabricksAuthModeSection(", "fn SynapseAuthModeSection("),
+            ("Synapse", "fn SynapseAuthModeSection(", "struct ConnectionFieldsSignals"),
+        ];
+        for (name, start, end) in sections {
+            let f = extract_between(SRC, start, end);
+            assert!(
+                !f.contains("get_google_oauth_status(") && !f.contains("get_datasource_oauth_status("),
+                "{name}AuthModeSection must not call the OAuth status server_fns directly — \
+                 that call belongs solely inside use_oauth_status_refetch"
+            );
+        }
+    }
+
+    /// Regression guard for the actual KYO-197 bug: `SynapseAuthModeSection`
+    /// must accept the three `set_oauth_*` write signals so it can call the
+    /// re-fetch hook at all. Before this fix it took only `ReadSignal`s and
+    /// therefore could not re-fetch when the mode selector changed.
+    #[test]
+    fn synapse_auth_mode_section_accepts_oauth_status_setters() {
+        let f = extract_between(SRC, "fn SynapseAuthModeSection(", "struct ConnectionFieldsSignals");
+        for setter in [
+            "set_oauth_connected: WriteSignal<bool>",
+            "set_oauth_email: WriteSignal<Option<String>>",
+            "set_oauth_expired: WriteSignal<bool>",
+        ] {
+            assert!(
+                f.contains(setter),
+                "SynapseAuthModeSection must accept `{setter}` — without it, the mode-change \
+                 re-fetch (KYO-197) cannot update the OAuth status panel"
+            );
+        }
     }
 }
