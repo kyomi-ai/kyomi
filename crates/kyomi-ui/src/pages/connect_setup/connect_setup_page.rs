@@ -21,6 +21,8 @@ use phosphor_leptos::Icon;
 use leptos_router::hooks::use_query_map;
 use wasm_bindgen::JsCast;
 
+use kyomi_types::Permission;
+
 use crate::components::input::INPUT_CLASS;
 use crate::components::{
     Alert, AlertDescription, AlertVariant, Button, ButtonSize, ButtonVariant, Card, Spinner,
@@ -327,8 +329,10 @@ pub fn ConnectSetupPage() -> impl IntoView {
             </div>
         }>
             {move || Suspend::new(async move {
+                // Every server_fns::connect fn gates on
+                // `ac.require(Permission::ManageConnect, ...)` — mirror that here.
                 let is_admin = match user_ctx_resource.await {
-                    Ok(ctx) => ctx.workspace_roles.iter().any(|r| r == "workspace_admin"),
+                    Ok(ctx) => ctx.can(Permission::ManageConnect),
                     Err(_) => false,
                 };
 

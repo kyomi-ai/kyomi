@@ -3,10 +3,15 @@
 //! Server function for user context — replaces React's AuthContext,
 //! CapabilitiesContext, and SystemConfigContext with a single RPC call.
 //!
-//! Every settings tab uses this for role-based visibility and feature gating.
+//! Every settings tab uses this for permission-based visibility and feature
+//! gating. `permissions` (KYO-189 P2) is the computed capability set from
+//! `kyomi_auth::permissions::permissions_for` — UI surfaces call
+//! `UserContext::can` / `use_permissions().can` rather than re-deriving
+//! admin/owner status from `workspace_roles`.
 
 use std::collections::HashMap;
 
+use kyomi_types::Permission;
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -42,6 +47,13 @@ pub struct UserContext {
     pub capabilities: HashMap<String, bool>,
     /// User's chart color palette preference (e.g. "balanced", "vibrant", "accessible").
     pub chart_palette: String,
+    /// The set of capabilities the user holds in their active workspace,
+    /// computed server-side by the same `kyomi_auth::permissions::permissions_for`
+    /// every backend authorization gate calls (KYO-189 P1/P2). The client
+    /// never derives this itself — it only ever reads what the server sent.
+    /// UI surfaces should gate on `can(Permission::X)`, not on
+    /// `workspace_roles`/`is_owner` directly.
+    pub permissions: Vec<Permission>,
 }
 
 impl UserContext {
@@ -60,9 +72,21 @@ impl UserContext {
     /// enforcement points that guarantee it. This is still two independent
     /// implementations of the same OR, one per side of the wire; unifying
     /// them (shipping `Permission` to the client) is KYO-189 P2, not this
-    /// helper — see KYO-208 for the underlying invariant-fragility concern.
+    /// helper — see KYO-198 for the underlying invariant-fragility concern.
     pub fn is_workspace_admin(&self) -> bool {
         self.workspace_roles.iter().any(|r| r == "workspace_admin") || self.is_owner
+    }
+
+    /// Whether the user holds `permission` in their active workspace.
+    ///
+    /// Reads the server-computed `permissions` set — the single source of
+    /// truth shipped by `get_user_context` (KYO-189 P2). UI surfaces should
+    /// call this instead of re-deriving admin/owner status from
+    /// `workspace_roles`/`is_owner`, so the client agrees with whatever the
+    /// corresponding server fn's `ac.require(Permission::X, ...)` actually
+    /// enforces.
+    pub fn can(&self, permission: Permission) -> bool {
+        self.permissions.contains(&permission)
     }
 }
 
@@ -72,6 +96,7 @@ impl UserContext {
 /// so all settings tabs can read it without re-fetching.
 #[server(prefix = "/leptos-api")]
 pub async fn get_user_context() -> Result<UserContext, ServerFnError> {
+    // lint-allow: server-fn-callouts=this fn's entire purpose is aggregating workspace/capability/permission context from several kyomi_auth services into one RPC (see module doc) — it has no REST counterpart to drift from, so Rule B's drift rationale does not apply
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
 
@@ -129,6 +154,13 @@ pub async fn get_user_context() -> Result<UserContext, ServerFnError> {
     // See kyomi_auth::user_service::get_user_palette_name.
     let chart_palette = kyomi_auth::user_service::get_user_palette_name(&ctx.db, &auth.user_id).await;
 
+    // Single source of truth for client-side permission gating (KYO-189 P2):
+    // computed by the exact same mapping every backend server fn's
+    // `ac.require(Permission::X, ...)` calls. The client receives the result
+    // of this computation — it never re-derives permissions from roles.
+    let permissions: Vec<Permission> =
+        kyomi_auth::permissions::permissions_for(&auth).into_iter().collect();
+
     Ok(UserContext {
         user_id: auth.user_id,
         email: auth.email,
@@ -149,6 +181,7 @@ pub async fn get_user_context() -> Result<UserContext, ServerFnError> {
         billing_enabled,
         capabilities: caps_map,
         chart_palette,
+        permissions,
     })
 }
 
@@ -264,7 +297,28 @@ mod tests {
             billing_enabled: false,
             capabilities: HashMap::new(),
             chart_palette: "balanced".to_string(),
+            permissions: Vec::new(),
         }
+    }
+
+    /// Minimal `UserContext` for `can()` tests — only `permissions` varies.
+    fn user_context_with_permissions(permissions: &[Permission]) -> UserContext {
+        UserContext {
+            permissions: permissions.to_vec(),
+            ..user_context_with_roles(&[])
+        }
+    }
+
+    #[test]
+    fn can_true_when_permission_present() {
+        let ctx = user_context_with_permissions(&[Permission::ManageTeam]);
+        assert!(ctx.can(Permission::ManageTeam));
+    }
+
+    #[test]
+    fn can_false_when_permission_absent() {
+        let ctx = user_context_with_permissions(&[Permission::ManageTeam]);
+        assert!(!ctx.can(Permission::ManageDatasources));
     }
 
     #[test]

@@ -9,6 +9,8 @@ use std::sync::Arc;
 
 use leptos::prelude::*;
 
+use kyomi_types::Permission;
+
 use crate::components::{
     Alert, AlertDescription, AlertTitle, AlertVariant, Badge, BadgeVariant, Button, ButtonSize,
     ButtonVariant, ConfirmDialog, EmptyState, Modal,
@@ -34,9 +36,11 @@ pub fn TeamPage() -> impl IntoView {
             {move || Suspend::new(async move {
                 match user_ctx.await {
                     Ok(ctx) => {
-                        let is_admin = ctx.workspace_roles.iter().any(|r| r == "workspace_admin");
+                        // `list_workspace_members`/`update_member_role`/etc. all gate on
+                        // `ac.require(Permission::ManageTeam, ...)` — see server_fns/team.rs.
+                        let can_manage_team = ctx.can(Permission::ManageTeam);
                         let is_team_tier = matches!(ctx.subscription_tier.as_str(), "team" | "enterprise" | "cloud");
-                        if !is_admin || !is_team_tier {
+                        if !can_manage_team || !is_team_tier {
                             let msg = if !is_team_tier {
                                 "Team management requires a Cloud subscription."
                             } else {

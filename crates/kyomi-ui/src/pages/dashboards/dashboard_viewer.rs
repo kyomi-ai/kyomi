@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 
+use kyomi_types::Permission;
 use leptos::prelude::*;
 use leptos_router::hooks::use_params_map;
 
@@ -207,7 +208,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
     let is_knowledge = Memo::new(move |_| location.pathname.get().starts_with("/knowledge"));
     // Knowledge documents don't participate in the default-dashboard system,
     // so hide the "Set as My Default" / "Set Workspace Default" toggles there.
-    // Same pattern as `is_admin` below: read once into a plain bool captured by
+    // Same pattern as `can_set_workspace_default` below: read once into a plain bool captured by
     // the view closures (the toolbar action closures are FnOnce, so reactive
     // `move || ...` wrappers around them won't compile).
     let show_default_toggles = Memo::new(move |_| !is_knowledge.get());
@@ -557,14 +558,18 @@ pub fn DashboardViewerPage() -> impl IntoView {
                 // Get user context (gracefully handle errors)
                 let user_ctx = user_ctx_result.ok();
 
-                let is_admin = user_ctx.as_ref()
-                    .map(|ctx| ctx.workspace_roles.contains(&"workspace_admin".to_string()))
+                // `set_workspace_default_dashboard` gates on
+                // `ac.require(Permission::SetWorkspaceDefaults, ...)` — see
+                // server_fns/dashboards.rs. Mirror that here so non-admins never
+                // see a toggle that will 403.
+                let can_set_workspace_default = user_ctx.as_ref()
+                    .map(|ctx| ctx.can(Permission::SetWorkspaceDefaults))
                     .unwrap_or(false);
 
                 // Read the route-derived gate once so the non-reactive view
                 // closures below (several are FnOnce) can capture a plain bool.
                 // Route changes remount this component, so a one-shot read is
-                // correct here — same pattern as `is_admin`.
+                // correct here — same pattern as `can_set_workspace_default`.
                 let show_default_toggles = show_default_toggles.get();
 
                 let pdf_export_enabled = user_ctx.as_ref()
@@ -1001,7 +1006,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                         })}
 
                                         // Set Workspace Default — visible when toolbar has room, admin only, dashboards only
-                                        {(show_default_toggles && is_admin).then(|| {
+                                        {(show_default_toggles && can_set_workspace_default).then(|| {
                                             view! {
                                                 <div class="hidden @3xl:flex">
                                                     <ToggleButton
@@ -1072,7 +1077,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                                         })}
 
                                                         // Set Workspace Default (mobile, admin only, dashboards only)
-                                                        {(show_default_toggles && is_admin).then(|| {
+                                                        {(show_default_toggles && can_set_workspace_default).then(|| {
                                                             view! {
                                                                 <div class="border-t border-border my-1" />
                                                                 <button
