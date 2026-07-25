@@ -566,8 +566,8 @@ pub async fn create_watch(
                 workspace_id: &watch.workspace_id,
                 action: SyncActionType::Insert,
                 data: snapshot,
-                owner_user_id: None,
-                is_workspace_visible: true,
+                owner_user_id: Some(&watch.created_by),
+                is_workspace_visible: false,
             },
         )
         .await
@@ -633,13 +633,32 @@ pub async fn list_watches(
 
 // ─── Sync helpers ─────────────────────────────────────────────────────────────
 
-/// List all watches for a workspace, returning the full Watch records as JSON
-/// values for the sync bootstrap protocol.
+/// List a user's own watches within a workspace, returning the full Watch
+/// records as JSON values for the sync bootstrap protocol.
+///
+/// Watches and their alert history are strictly private to their creator —
+/// there is no sharing model. Filters to `created_by = user_id` so a
+/// bootstrapping client never receives another member's watches.
 pub async fn list_watches_for_sync(
     db: &DbPool,
     workspace_id: &str,
+    user_id: &str,
 ) -> Result<Vec<serde_json::Value>> {
-    let watches = list_watches(db, workspace_id).await?;
+    let sql = r#"
+        SELECT watch_id, workspace_id, created_by, name, prompt, schedule,
+               mode, datasource_hints, queries, alert_emails,
+               alert_emails_enabled, enabled, last_run_at, last_run_status,
+               next_run_at, created_at, updated_at
+        FROM watches
+        WHERE workspace_id = $1 AND created_by = $2
+        ORDER BY created_at DESC
+    "#;
+
+    let watches =
+        kyomi_core::db_fetch_all!(db, kyomi_core::models::Watch, sql, workspace_id, user_id)
+            .map_err(|e| {
+                kyomi_core::Error::Internal(format!("failed to list watches for sync: {e}"))
+            })?;
 
     let values = watches
         .into_iter()
@@ -855,8 +874,8 @@ pub async fn update_watch(
                 workspace_id: &watch.workspace_id,
                 action: SyncActionType::Update,
                 data: snapshot,
-                owner_user_id: None,
-                is_workspace_visible: true,
+                owner_user_id: Some(&watch.created_by),
+                is_workspace_visible: false,
             },
         )
         .await
@@ -871,20 +890,25 @@ pub async fn update_watch(
 // ─── Delete watch ───────────────────────────────────────────────────────────
 
 /// Delete a watch by ID within a workspace.
-pub async fn delete_watch(db: &DbPool, watch_id: &str, workspace_id: &str) -> Result<()> {
-    let result = kyomi_core::db_execute!(
-        db,
-        "DELETE FROM watches WHERE watch_id = $1 AND workspace_id = $2",
-        watch_id,
-        workspace_id
-    )
-    .map_err(|e| kyomi_core::Error::Internal(format!("failed to delete watch: {e}")))?;
+///
+/// Returns the deleted watch's `created_by` (the owner) so callers can route
+/// the private live-sync broadcast correctly. Watches have no sharing model —
+/// only the creator may ever see them — so there is no workspace-wide
+/// notification of the deletion, and no separate SELECT is needed to recover
+/// the owner: `RETURNING created_by` gets it from the same statement.
+pub async fn delete_watch(db: &DbPool, watch_id: &str, workspace_id: &str) -> Result<String> {
+    let sql = r#"
+        DELETE FROM watches WHERE watch_id = $1 AND workspace_id = $2
+        RETURNING created_by AS value
+    "#;
 
-    if result.rows_affected() == 0 {
-        return Err(kyomi_core::Error::NotFound(format!(
-            "Watch {watch_id} not found"
-        )));
-    }
+    let deleted: Option<StringRow> =
+        kyomi_core::db_fetch_optional!(db, StringRow, sql, watch_id, workspace_id)
+            .map_err(|e| kyomi_core::Error::Internal(format!("failed to delete watch: {e}")))?;
+
+    let created_by = deleted
+        .ok_or_else(|| kyomi_core::Error::NotFound(format!("Watch {watch_id} not found")))?
+        .value;
 
     tracing::info!(watch_id = %watch_id, "Deleted watch");
 
@@ -897,8 +921,8 @@ pub async fn delete_watch(db: &DbPool, watch_id: &str, workspace_id: &str) -> Re
             workspace_id,
             action: SyncActionType::Delete,
             data: None,
-            owner_user_id: None,
-            is_workspace_visible: true,
+            owner_user_id: Some(&created_by),
+            is_workspace_visible: false,
         },
     )
     .await
@@ -906,7 +930,7 @@ pub async fn delete_watch(db: &DbPool, watch_id: &str, workspace_id: &str) -> Re
         tracing::warn!(error = %e, watch_id = %watch_id, "Failed to write sync log entry");
     }
 
-    Ok(())
+    Ok(created_by)
 }
 
 // ─── Toggle watch ───────────────────────────────────────────────────────────
@@ -950,7 +974,7 @@ pub async fn get_executions(
         SELECT id, watch_id, watch_name, mode, workspace_id, session_id,
                started_at, completed_at, status, agent_response, error_message,
                input_tokens, output_tokens, cost_estimate, execution_trace,
-               alert_triggered, notification_id, read_at, deleted_at, deleted_by
+               alert_triggered, notification_id, read_at, deleted_at, deleted_by, created_by
         FROM watch_executions
         WHERE watch_id = $1
         ORDER BY started_at DESC
@@ -986,7 +1010,7 @@ pub async fn get_execution_by_id(
         SELECT id, watch_id, watch_name, mode, workspace_id, session_id,
                started_at, completed_at, status, agent_response, error_message,
                input_tokens, output_tokens, cost_estimate, execution_trace,
-               alert_triggered, notification_id, read_at, deleted_at, deleted_by
+               alert_triggered, notification_id, read_at, deleted_at, deleted_by, created_by
         FROM watch_executions
         WHERE id = $1 AND watch_id = $2
     "#;
@@ -1013,7 +1037,7 @@ pub async fn get_execution_by_id_only(
         SELECT id, watch_id, watch_name, mode, workspace_id, session_id,
                started_at, completed_at, status, agent_response, error_message,
                input_tokens, output_tokens, cost_estimate, execution_trace,
-               alert_triggered, notification_id, read_at, deleted_at, deleted_by
+               alert_triggered, notification_id, read_at, deleted_at, deleted_by, created_by
         FROM watch_executions
         WHERE id = $1 AND workspace_id = $2
     "#;
@@ -1037,6 +1061,7 @@ pub async fn create_execution(
     watch_name: &str,
     workspace_id: &str,
     mode: kyomi_core::WatchMode,
+    created_by: &str,
 ) -> Result<kyomi_core::models::WatchExecution> {
     let is_pg = db.is_postgres();
     let mode_str = mode.as_ref();
@@ -1045,13 +1070,13 @@ pub async fn create_execution(
         r#"
         INSERT INTO watch_executions (
             watch_id, watch_name, mode, workspace_id, status,
-            started_at, alert_triggered
+            started_at, alert_triggered, created_by
         )
-        VALUES ($1, $2, $3, $4, 'running', {now}, {false_val})
+        VALUES ($1, $2, $3, $4, 'running', {now}, {false_val}, $5)
         RETURNING id, watch_id, watch_name, mode, workspace_id, session_id,
                   started_at, completed_at, status, agent_response, error_message,
                   input_tokens, output_tokens, cost_estimate, execution_trace,
-                  alert_triggered, notification_id, read_at, deleted_at, deleted_by
+                  alert_triggered, notification_id, read_at, deleted_at, deleted_by, created_by
         "#,
         now = sql_compat::now(is_pg),
         false_val = sql_compat::bool_false(is_pg),
@@ -1064,7 +1089,8 @@ pub async fn create_execution(
         watch_id,
         watch_name,
         mode_str,
-        workspace_id
+        workspace_id,
+        created_by
     )
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to create execution: {e}")))?;
 
@@ -1118,7 +1144,7 @@ pub async fn complete_execution(
         RETURNING id, watch_id, watch_name, mode, workspace_id, session_id,
                   started_at, completed_at, status, agent_response, error_message,
                   input_tokens, output_tokens, cost_estimate, execution_trace,
-                  alert_triggered, notification_id, read_at, deleted_at, deleted_by
+                  alert_triggered, notification_id, read_at, deleted_at, deleted_by, created_by
         "#,
         now = sql_compat::now(is_pg),
     );
@@ -1386,21 +1412,32 @@ pub async fn search_watches(
 // ─── Unread alerts count ────────────────────────────────────────────────────
 
 /// Count unread, non-deleted alerts for a workspace (for sidebar badge).
-pub async fn get_unread_alerts_count(db: &DbPool, workspace_id: &str) -> Result<i64> {
+///
+/// Filters directly on `watch_executions.created_by` — a denormalized
+/// snapshot of the parent watch's owner (see `watch_name`/`mode`/
+/// `workspace_id` for the same pattern). `watch_id` is `ON DELETE SET NULL`,
+/// so a join back to `watches` would silently drop alerts once the parent
+/// watch is deleted. Watches are strictly private, no admin/owner bypass.
+pub async fn get_unread_alerts_count(
+    db: &DbPool,
+    workspace_id: &str,
+    user_id: &str,
+) -> Result<i64> {
     let is_pg = db.is_postgres();
     let sql = format!(
         r#"
         SELECT COUNT(*)
-        FROM watch_executions
-        WHERE workspace_id = $1
-          AND alert_triggered = {true_val}
-          AND read_at IS NULL
-          AND deleted_at IS NULL
+        FROM watch_executions we
+        WHERE we.workspace_id = $1
+          AND we.created_by = $2
+          AND we.alert_triggered = {true_val}
+          AND we.read_at IS NULL
+          AND we.deleted_at IS NULL
         "#,
         true_val = sql_compat::bool_true(is_pg),
     );
 
-    let count: i64 = kyomi_core::db_fetch_scalar!(db, i64, &sql, workspace_id)
+    let count: i64 = kyomi_core::db_fetch_scalar!(db, i64, &sql, workspace_id, user_id)
         .map_err(|e| {
             kyomi_core::Error::Internal(format!("failed to count unread alerts: {e}"))
         })?;
@@ -1412,8 +1449,12 @@ pub async fn get_unread_alerts_count(db: &DbPool, workspace_id: &str) -> Result<
 
 /// Get alerts history (paginated, with total count).
 ///
-/// Filters to alert_triggered=true executions. Optionally filters by watch_id.
-/// Returns `(executions, total_count)` for pagination.
+/// Filters to alert_triggered=true executions owned by `user_id` via the
+/// denormalized `watch_executions.created_by` snapshot column — not a join
+/// to `watches`, since `watch_id` is `ON DELETE SET NULL` and a join would
+/// silently drop alerts once the parent watch is deleted. Alerts are
+/// strictly private to whoever owns the watch. Optionally filters by
+/// watch_id. Returns `(executions, total_count)` for pagination.
 pub async fn get_alerts_history(
     db: &DbPool,
     workspace_id: &str,
@@ -1421,6 +1462,7 @@ pub async fn get_alerts_history(
     limit: i64,
     offset: i64,
     include_deleted: bool,
+    user_id: &str,
 ) -> Result<(Vec<kyomi_core::models::WatchExecution>, i64)> {
     let is_pg = db.is_postgres();
     let true_val = sql_compat::bool_true(is_pg);
@@ -1431,9 +1473,9 @@ pub async fn get_alerts_history(
         "AND we.deleted_at IS NULL"
     };
 
-    // COUNT query — only $1 (workspace_id) and optionally $2 (watch_id)
+    // COUNT query — $1 (workspace_id), $2 (user_id), optionally $3 (watch_id)
     let count_watch_filter = if watch_id.is_some() {
-        "AND we.watch_id = $2"
+        "AND we.watch_id = $3"
     } else {
         ""
     };
@@ -1443,6 +1485,7 @@ pub async fn get_alerts_history(
         SELECT COUNT(*)
         FROM watch_executions we
         WHERE we.workspace_id = $1
+          AND we.created_by = $2
           AND we.alert_triggered = {true_val}
           {deleted_filter}
           {count_watch_filter}
@@ -1454,21 +1497,24 @@ pub async fn get_alerts_history(
         if let Some(wid) = watch_id {
             sqlx::query_scalar(&count_sql)
                 .bind(workspace_id)
+                .bind(user_id)
                 .bind(wid)
                 .fetch_one(p)
                 .await
         } else {
             sqlx::query_scalar(&count_sql)
                 .bind(workspace_id)
+                .bind(user_id)
                 .fetch_one(p)
                 .await
         }
     })
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to count alerts: {e}")))?;
 
-    // SELECT query — $1 (workspace_id), $2 (limit), $3 (offset), optionally $4 (watch_id)
+    // SELECT query — $1 (workspace_id), $2 (user_id), $3 (limit), $4 (offset),
+    // optionally $5 (watch_id)
     let select_watch_filter = if watch_id.is_some() {
-        "AND we.watch_id = $4"
+        "AND we.watch_id = $5"
     } else {
         ""
     };
@@ -1478,14 +1524,16 @@ pub async fn get_alerts_history(
         SELECT we.id, we.watch_id, we.watch_name, we.mode, we.workspace_id, we.session_id,
                we.started_at, we.completed_at, we.status, we.agent_response, we.error_message,
                we.input_tokens, we.output_tokens, we.cost_estimate, we.execution_trace,
-               we.alert_triggered, we.notification_id, we.read_at, we.deleted_at, we.deleted_by
+               we.alert_triggered, we.notification_id, we.read_at, we.deleted_at, we.deleted_by,
+               we.created_by
         FROM watch_executions we
         WHERE we.workspace_id = $1
+          AND we.created_by = $2
           AND we.alert_triggered = {true_val}
           {deleted_filter}
           {select_watch_filter}
         ORDER BY we.started_at DESC
-        LIMIT $2 OFFSET $3
+        LIMIT $3 OFFSET $4
         "#
     );
 
@@ -1494,6 +1542,7 @@ pub async fn get_alerts_history(
         if let Some(wid) = watch_id {
             sqlx::query_as::<_, kyomi_core::models::WatchExecution>(&select_sql)
                 .bind(workspace_id)
+                .bind(user_id)
                 .bind(limit)
                 .bind(offset)
                 .bind(wid)
@@ -1502,6 +1551,7 @@ pub async fn get_alerts_history(
         } else {
             sqlx::query_as::<_, kyomi_core::models::WatchExecution>(&select_sql)
                 .bind(workspace_id)
+                .bind(user_id)
                 .bind(limit)
                 .bind(offset)
                 .fetch_all(p)
@@ -2424,5 +2474,320 @@ mod contract_tests {
     #[test]
     fn format_days_of_week_list() {
         assert_eq!(format_days_of_week("1,3,5"), "Mon, Wed and Fri");
+    }
+}
+
+// ─── Watch privacy tests (KYO-177) ───────────────────────────────────────────
+//
+// Watches and their alert history have no sharing model — they must be
+// strictly private to their creator. These are real sqlite-backed
+// integration tests (not mocks) covering: sync bootstrap filtering, sync
+// delta filtering, alerts-query filtering, and live-broadcast routing.
+
+#[cfg(test)]
+mod privacy_tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn test_pool() -> DbPool {
+        let _ = kyomi_core::constants::load_with_fallback();
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+
+        sqlx::query("PRAGMA foreign_keys=ON")
+            .execute(&pool)
+            .await
+            .expect("enable foreign keys");
+
+        sqlx::migrate!("../../apps/server/migrations-sqlite")
+            .run(&pool)
+            .await
+            .expect("run sqlite migrations");
+
+        DbPool::Sqlite(pool)
+    }
+
+    /// Seed two users ("user-a", "user-b") in one workspace ("ws-1", owned by
+    /// user-a). Returns the pool with fixtures in place.
+    async fn seed_workspace_with_two_users(pool: &DbPool) {
+        let sq = match pool {
+            DbPool::Sqlite(sq) => sq,
+            _ => unreachable!(),
+        };
+
+        sqlx::query("INSERT INTO users (user_id, email) VALUES ('user-a', 'a@test.local')")
+            .execute(sq)
+            .await
+            .expect("insert user-a");
+        sqlx::query("INSERT INTO users (user_id, email) VALUES ('user-b', 'b@test.local')")
+            .execute(sq)
+            .await
+            .expect("insert user-b");
+
+        sqlx::query(
+            "INSERT INTO workspaces (workspace_id, name, owner_user_id) \
+             VALUES ('ws-1', 'Shared Workspace', 'user-a')",
+        )
+        .execute(sq)
+        .await
+        .expect("insert workspace");
+
+        sqlx::query(
+            "INSERT INTO workspace_users (workspace_id, user_id, role, active) \
+             VALUES ('ws-1', 'user-a', 'workspace_admin', 1)",
+        )
+        .execute(sq)
+        .await
+        .expect("insert workspace_users user-a");
+        sqlx::query(
+            "INSERT INTO workspace_users (workspace_id, user_id, role, active) \
+             VALUES ('ws-1', 'user-b', 'user', 1)",
+        )
+        .execute(sq)
+        .await
+        .expect("insert workspace_users user-b");
+    }
+
+    async fn create_test_watch(pool: &DbPool, created_by: &str, name: &str) -> kyomi_core::models::Watch {
+        create_watch(
+            pool,
+            "ws-1",
+            created_by,
+            name,
+            "Check if revenue drops more than 10 percent",
+            "0 9 * * *",
+            "alert",
+            None,
+            None,
+            None,
+            false,
+        )
+        .await
+        .expect("create watch")
+    }
+
+    /// Insert a triggered, unread watch_execution row directly (no service fn
+    /// exists for this — `create_execution`/`complete_execution` don't set
+    /// `alert_triggered`, so tests build the row by hand like the rest of the
+    /// alerts-lifecycle tests in this crate do).
+    async fn insert_triggered_alert(pool: &DbPool, watch_id: &str, created_by: &str) {
+        let sq = match pool {
+            DbPool::Sqlite(sq) => sq,
+            _ => unreachable!(),
+        };
+        sqlx::query(
+            "INSERT INTO watch_executions \
+             (watch_id, workspace_id, status, alert_triggered, started_at, completed_at, created_by) \
+             VALUES ($1, 'ws-1', 'success', 1, datetime('now'), datetime('now'), $2)",
+        )
+        .bind(watch_id)
+        .bind(created_by)
+        .execute(sq)
+        .await
+        .expect("insert triggered alert");
+    }
+
+    // ── list_watches_for_sync ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn list_watches_for_sync_excludes_other_users_watches() {
+        let pool = test_pool().await;
+        seed_workspace_with_two_users(&pool).await;
+
+        let wa = create_test_watch(&pool, "user-a", "A's Watch").await;
+        let wb = create_test_watch(&pool, "user-b", "B's Watch").await;
+
+        let bs_watches = list_watches_for_sync(&pool, "ws-1", "user-b")
+            .await
+            .expect("list_watches_for_sync for user-b");
+
+        assert_eq!(
+            bs_watches.len(),
+            1,
+            "user-b should see exactly their own watch, not user-a's"
+        );
+        let seen_id = bs_watches[0]
+            .get("watch_id")
+            .and_then(|v| v.as_str())
+            .expect("watch_id field");
+        assert_eq!(seen_id, wb.watch_id, "should be user-b's watch");
+        assert_ne!(seen_id, wa.watch_id, "must not leak user-a's watch");
+    }
+
+    // ── sync_log delta filtering ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn sync_delta_excludes_other_users_watch_creation() {
+        let pool = test_pool().await;
+        seed_workspace_with_two_users(&pool).await;
+
+        // B's cursor starts at the current watermark (0 — nothing synced yet).
+        let cursor = sync_log_service::get_latest_sync_id(&pool, "ws-1")
+            .await
+            .expect("get_latest_sync_id");
+
+        // A creates a watch — writes a private sync_log entry owned by A.
+        let wa = create_test_watch(&pool, "user-a", "A's New Watch").await;
+
+        let entries_for_b = sync_log_service::get_entries_since(&pool, "ws-1", cursor, "user-b", 100)
+            .await
+            .expect("get_entries_since for user-b");
+        assert!(
+            entries_for_b
+                .iter()
+                .all(|e| e.entity_id != wa.watch_id),
+            "user-b's delta must not include user-a's private watch creation"
+        );
+
+        // B creates their own watch — B's delta must include it.
+        let wb = create_test_watch(&pool, "user-b", "B's New Watch").await;
+        let entries_for_b_after = sync_log_service::get_entries_since(&pool, "ws-1", cursor, "user-b", 100)
+            .await
+            .expect("get_entries_since for user-b after own create");
+        assert!(
+            entries_for_b_after
+                .iter()
+                .any(|e| e.entity_id == wb.watch_id),
+            "user-b's delta must include their own watch creation"
+        );
+        assert!(
+            entries_for_b_after
+                .iter()
+                .all(|e| e.entity_id != wa.watch_id),
+            "user-b's delta still must not include user-a's watch after B creates their own"
+        );
+    }
+
+    // ── Alerts queries ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn alerts_queries_exclude_other_users_alerts() {
+        let pool = test_pool().await;
+        seed_workspace_with_two_users(&pool).await;
+
+        let wa = create_test_watch(&pool, "user-a", "A's Alert Watch").await;
+        let wb = create_test_watch(&pool, "user-b", "B's Alert Watch").await;
+        insert_triggered_alert(&pool, &wa.watch_id, "user-a").await;
+        insert_triggered_alert(&pool, &wb.watch_id, "user-b").await;
+
+        let count_for_b = get_unread_alerts_count(&pool, "ws-1", "user-b")
+            .await
+            .expect("get_unread_alerts_count for user-b");
+        assert_eq!(
+            count_for_b, 1,
+            "user-b should only see their own watch's alert, not user-a's"
+        );
+
+        let (executions, total) =
+            get_alerts_history(&pool, "ws-1", None, 50, 0, false, "user-b")
+                .await
+                .expect("get_alerts_history for user-b");
+        assert_eq!(total, 1, "total should reflect only user-b's alert");
+        assert_eq!(executions.len(), 1);
+        assert_eq!(
+            executions[0].watch_id.as_deref(),
+            Some(wb.watch_id.as_str()),
+            "the returned alert must belong to user-b's watch"
+        );
+    }
+
+    /// Regression test for the watch_id-join bug: `watch_executions.watch_id`
+    /// is `ON DELETE SET NULL`, so once the parent watch is deleted, a join
+    /// back to `watches` for ownership silently drops the alert — even for
+    /// the watch's own creator. Ownership must be filtered via the
+    /// denormalized `watch_executions.created_by` column instead, which
+    /// survives watch deletion the same way `watch_name`/`workspace_id` do.
+    #[tokio::test]
+    async fn alerts_remain_visible_to_owner_after_watch_deleted() {
+        let pool = test_pool().await;
+        seed_workspace_with_two_users(&pool).await;
+
+        let wa = create_test_watch(&pool, "user-a", "A's Watch To Delete").await;
+        insert_triggered_alert(&pool, &wa.watch_id, "user-a").await;
+
+        // Sanity check: alert is visible before deletion.
+        let count_before = get_unread_alerts_count(&pool, "ws-1", "user-a")
+            .await
+            .expect("get_unread_alerts_count before delete");
+        assert_eq!(count_before, 1, "alert should be visible before watch deletion");
+
+        // Delete the parent watch — this sets watch_executions.watch_id to NULL
+        // via the ON DELETE SET NULL foreign key.
+        delete_watch(&pool, &wa.watch_id, "ws-1")
+            .await
+            .expect("delete_watch");
+
+        let count_after = get_unread_alerts_count(&pool, "ws-1", "user-a")
+            .await
+            .expect("get_unread_alerts_count after delete");
+        assert_eq!(
+            count_after, 1,
+            "alert must still be visible to its creator after the parent watch is deleted"
+        );
+
+        let (executions, total) =
+            get_alerts_history(&pool, "ws-1", None, 50, 0, false, "user-a")
+                .await
+                .expect("get_alerts_history after delete");
+        assert_eq!(
+            total, 1,
+            "alerts history must still include the alert after watch deletion"
+        );
+        assert_eq!(executions.len(), 1);
+        assert_eq!(
+            executions[0].watch_id, None,
+            "watch_id should now be NULL (ON DELETE SET NULL)"
+        );
+        assert_eq!(
+            executions[0].created_by.as_deref(),
+            Some("user-a"),
+            "created_by snapshot must survive watch deletion"
+        );
+    }
+
+    // ── Live broadcast routing ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn broadcast_watch_sync_routes_to_owner_only() {
+        let pool = test_pool().await;
+        seed_workspace_with_two_users(&pool).await;
+
+        let wa = create_test_watch(&pool, "user-a", "A's Broadcast Watch").await;
+
+        let manager = crate::websocket::WebSocketManager::new(None, pool.clone());
+        let (_conn_a, mut rx_a) = manager.connect("user-a").expect("connect user-a");
+        let (_conn_b, mut rx_b) = manager.connect("user-b").expect("connect user-b");
+
+        // Drain the immediate heartbeat each connect() sends.
+        let heartbeat_a = rx_a.try_recv().expect("heartbeat for user-a");
+        assert!(heartbeat_a.contains("heartbeat"));
+        let heartbeat_b = rx_b.try_recv().expect("heartbeat for user-b");
+        assert!(heartbeat_b.contains("heartbeat"));
+
+        crate::websocket::helpers::broadcast_watch_sync(
+            &pool,
+            &manager,
+            &wa.watch_id,
+            "ws-1",
+            SyncActionType::Insert,
+            "user-a",
+        )
+        .await;
+
+        let msg_a = rx_a
+            .try_recv()
+            .expect("owner (user-a) should receive the sync_action broadcast");
+        assert!(msg_a.contains("sync_action"), "message should be a SyncAction: {msg_a}");
+        assert!(msg_a.contains(&wa.watch_id), "message should reference the watch: {msg_a}");
+
+        let result_b = rx_b.try_recv();
+        assert!(
+            result_b.is_err(),
+            "non-owner (user-b) must NOT receive the watch broadcast, got: {result_b:?}"
+        );
     }
 }
