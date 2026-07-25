@@ -72,7 +72,7 @@ pub fn SqlEditorSidebar(
     // components/layout.rs), which mounts once for the whole authed session
     // — SqlEditorPage renders under it, so `use_permissions` is safe here.
     let perms = use_permissions();
-    let is_admin = Signal::derive(move || perms.can(Permission::RefreshCatalog));
+    let can_refresh_catalog = Signal::derive(move || perms.can(Permission::RefreshCatalog));
 
     // ── Tab + close handlers ────────────────────────────────────────────
     let set_catalog_tab = move |_| {
@@ -187,7 +187,7 @@ pub fn SqlEditorSidebar(
                 </div>
                 // Refresh button — catalog tab only, admins only (backend
                 // rejects non-admins; see refresh_catalog's admin gate).
-                <Show when=move || active_tab.get() == SidebarTab::Catalog && is_admin.get()>
+                <Show when=move || active_tab.get() == SidebarTab::Catalog && can_refresh_catalog.get()>
                     <Button
                         variant=ButtonVariant::GhostMuted
                         size=ButtonSize::IconSm

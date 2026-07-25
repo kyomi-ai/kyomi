@@ -6,8 +6,10 @@
 //! Every settings tab uses this for permission-based visibility and feature
 //! gating. `permissions` (KYO-189 P2) is the computed capability set from
 //! `kyomi_auth::permissions::permissions_for` — UI surfaces call
-//! `UserContext::can` / `use_permissions().can` rather than re-deriving
-//! admin/owner status from `workspace_roles`.
+//! `UserContext::can` / `use_permissions().can`. The raw `workspace_roles`
+//! list was removed from this DTO in KYO-189 P3: with no role strings on the
+//! wire, gating a UI surface on a role literal is no longer possible, only
+//! `can(Permission::X)` is.
 
 use std::collections::HashMap;
 
@@ -30,8 +32,6 @@ pub struct UserContext {
     pub name: Option<String>,
     pub workspace_id: Option<String>,
     pub workspace_name: Option<String>,
-    /// Workspace roles as strings, e.g. ["workspace_admin", "user"].
-    pub workspace_roles: Vec<String>,
     pub is_owner: bool,
     /// Subscription tier slug: "free", "team", "cloud", "enterprise", etc.
     pub subscription_tier: String,
@@ -51,40 +51,21 @@ pub struct UserContext {
     /// computed server-side by the same `kyomi_auth::permissions::permissions_for`
     /// every backend authorization gate calls (KYO-189 P1/P2). The client
     /// never derives this itself — it only ever reads what the server sent.
-    /// UI surfaces should gate on `can(Permission::X)`, not on
-    /// `workspace_roles`/`is_owner` directly.
+    /// UI surfaces should gate on `can(Permission::X)`, not on `is_owner`
+    /// directly — there is no raw role list on this DTO to gate on instead
+    /// (KYO-189 P3 removed `workspace_roles`).
     pub permissions: Vec<Permission>,
 }
 
 impl UserContext {
-    /// Whether the user is a workspace admin or the workspace owner.
-    ///
-    /// Single source of truth for the `"workspace_admin"` string literal on
-    /// the frontend — call this instead of re-checking `workspace_roles`
-    /// inline. Deliberately mirrors the backend's admin gate,
-    /// `kyomi_auth::permissions::permissions_for` (KYO-189 P1), which also
-    /// ORs in `is_owner`; use it to hide admin-only UI so it matches what
-    /// the server will actually allow.
-    ///
-    /// Both this helper and the backend mapping's Owner ⊇ Admin behavior
-    /// depend on an owner structurally always holding the `workspace_admin`
-    /// role — see the doc comment on `permissions_for` for the three
-    /// enforcement points that guarantee it. This is still two independent
-    /// implementations of the same OR, one per side of the wire; unifying
-    /// them (shipping `Permission` to the client) is KYO-189 P2, not this
-    /// helper — see KYO-198 for the underlying invariant-fragility concern.
-    pub fn is_workspace_admin(&self) -> bool {
-        self.workspace_roles.iter().any(|r| r == "workspace_admin") || self.is_owner
-    }
-
     /// Whether the user holds `permission` in their active workspace.
     ///
     /// Reads the server-computed `permissions` set — the single source of
-    /// truth shipped by `get_user_context` (KYO-189 P2). UI surfaces should
-    /// call this instead of re-deriving admin/owner status from
-    /// `workspace_roles`/`is_owner`, so the client agrees with whatever the
-    /// corresponding server fn's `ac.require(Permission::X, ...)` actually
-    /// enforces.
+    /// truth shipped by `get_user_context` (KYO-189 P2). This is the only
+    /// authorization check exposed on `UserContext`: there is no
+    /// `workspace_roles` field to re-derive admin/owner status from (KYO-189
+    /// P3), so the client agrees with whatever the corresponding server
+    /// fn's `ac.require(Permission::X, ...)` actually enforces.
     pub fn can(&self, permission: Permission) -> bool {
         self.permissions.contains(&permission)
     }
@@ -167,12 +148,6 @@ pub async fn get_user_context() -> Result<UserContext, ServerFnError> {
         name: auth.name,
         workspace_id: auth.workspace.workspace_id,
         workspace_name: auth.workspace.workspace_name,
-        workspace_roles: auth
-            .workspace
-            .workspace_roles
-            .iter()
-            .map(|r| r.to_string())
-            .collect(),
         is_owner: auth.workspace.is_owner,
         subscription_tier: subscription_tier.to_string(),
         subscription_status: auth.workspace.subscription_status.to_string(),
@@ -273,23 +248,17 @@ fn build_capabilities_map(caps: &kyomi_core::capability::Capabilities) -> HashMa
 mod tests {
     use super::*;
 
-    /// Minimal `UserContext` for role-check tests — only `workspace_roles`
-    /// varies between cases.
-    fn user_context_with_roles(roles: &[&str]) -> UserContext {
-        user_context_with_roles_and_owner(roles, false)
-    }
-
-    /// Minimal `UserContext` for role-check tests — `workspace_roles` and
-    /// `is_owner` both vary between cases.
-    fn user_context_with_roles_and_owner(roles: &[&str], is_owner: bool) -> UserContext {
+    /// Minimal `UserContext` for tests. `is_owner` and `permissions` are the
+    /// only fields that vary between authorization test cases — there is no
+    /// `workspace_roles` to vary anymore (removed in KYO-189 P3).
+    fn base_user_context() -> UserContext {
         UserContext {
             user_id: "user-1".to_string(),
             email: "user@example.com".to_string(),
             name: None,
             workspace_id: Some("ws-1".to_string()),
             workspace_name: Some("Test Workspace".to_string()),
-            workspace_roles: roles.iter().map(|r| r.to_string()).collect(),
-            is_owner,
+            is_owner: false,
             subscription_tier: "free".to_string(),
             subscription_status: "active".to_string(),
             is_personal_mode: false,
@@ -305,7 +274,7 @@ mod tests {
     fn user_context_with_permissions(permissions: &[Permission]) -> UserContext {
         UserContext {
             permissions: permissions.to_vec(),
-            ..user_context_with_roles(&[])
+            ..base_user_context()
         }
     }
 
@@ -319,36 +288,6 @@ mod tests {
     fn can_false_when_permission_absent() {
         let ctx = user_context_with_permissions(&[Permission::ManageTeam]);
         assert!(!ctx.can(Permission::ManageDatasources));
-    }
-
-    #[test]
-    fn is_workspace_admin_true_when_role_present() {
-        let ctx = user_context_with_roles(&["workspace_admin", "user"]);
-        assert!(ctx.is_workspace_admin());
-    }
-
-    #[test]
-    fn is_workspace_admin_false_when_role_absent() {
-        let ctx = user_context_with_roles(&["user"]);
-        assert!(!ctx.is_workspace_admin());
-    }
-
-    #[test]
-    fn is_workspace_admin_false_when_no_roles() {
-        let ctx = user_context_with_roles(&[]);
-        assert!(!ctx.is_workspace_admin());
-    }
-
-    #[test]
-    fn is_workspace_admin_true_when_owner_without_role() {
-        // Workspace owners can lack the explicit `workspace_admin` role but
-        // must still pass — matches the backend's `|| is_owner` gate (e.g.
-        // `refresh_catalog`).
-        let ctx = user_context_with_roles_and_owner(&["workspace_user"], true);
-        assert!(ctx.is_workspace_admin());
-
-        let ctx_no_roles = user_context_with_roles_and_owner(&[], true);
-        assert!(ctx_no_roles.is_workspace_admin());
     }
 
     #[test]

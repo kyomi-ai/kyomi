@@ -105,7 +105,22 @@ pub struct TeamMember {
     pub user_id: String,
     pub email: String,
     pub name: Option<String>,
+    /// Raw DB role token (`workspace_admin` / `workspace_user` / `workspace_viewer`).
     pub role: String,
+    /// Human-readable role label ("Admin" / "Viewer" / "Member"), humanized
+    /// server-side via `humanize_workspace_role` (mirrors
+    /// `InvitationData::role_display`, KYO-169) — the client is `ssr`-gated
+    /// out of `kyomi-core` so it cannot humanize the token itself. This is a
+    /// **pure display string** — render it, never compare it. Display copy
+    /// (wording, i18n) is not a stable classification signal; use
+    /// `is_admin_role` for that.
+    pub role_display: String,
+    /// Whether `role` is the workspace-admin role. Computed server-side by
+    /// comparing the raw DB token against the admin role constant (KYO-189
+    /// P3) — the client never re-derives this from `role` or `role_display`,
+    /// so there is no `"workspace_admin"` string literal, and no dependency
+    /// on `role_display`'s wording, anywhere on the client.
+    pub is_admin_role: bool,
     pub is_owner: bool,
     pub joined_at: String,
 }
@@ -117,7 +132,14 @@ pub struct TeamMember {
 pub struct TeamInvitation {
     pub invitation_id: String,
     pub email: String,
+    /// Raw DB role token (`workspace_admin` / `workspace_user` / `workspace_viewer`).
     pub role: String,
+    /// Human-readable role label ("Admin" / "Viewer" / "Member"), humanized
+    /// server-side via `humanize_workspace_role` — see `TeamMember::role_display`.
+    /// Pure display string — render it, never compare it.
+    pub role_display: String,
+    /// Whether `role` is the workspace-admin role — see `TeamMember::is_admin_role`.
+    pub is_admin_role: bool,
     pub status: String,
     pub created_at: String,
     pub expires_at: String,

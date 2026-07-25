@@ -624,16 +624,18 @@ fn InvitationRow(
     on_cancel: impl Fn(String) + Clone + 'static,
 ) -> impl IntoView {
     let inv_id = invitation.invitation_id.clone();
-    let badge_variant = if invitation.role == "workspace_admin" {
+    // `is_admin_role` is server-computed by comparing the raw role token
+    // against the admin role constant (KYO-189 P3) — a typed bool on the
+    // DTO, not a string the client parses or compares. The badge below
+    // renders its own lowercase "admin"/"user" text (unchanged from before
+    // this refactor), not `role_display`.
+    let is_admin_role = invitation.is_admin_role;
+    let badge_variant = if is_admin_role {
         BadgeVariant::Secondary
     } else {
         BadgeVariant::Default
     };
-    let role_display = if invitation.role == "workspace_admin" {
-        "admin"
-    } else {
-        "user"
-    };
+    let role_label = if is_admin_role { "admin" } else { "user" };
 
     // Format dates
     let created = format_date(&invitation.created_at);
@@ -649,7 +651,7 @@ fn InvitationRow(
                             {invitation.email}
                         </span>
                         <Badge variant=badge_variant class="flex-shrink-0">
-                            {role_display}
+                            {role_label}
                         </Badge>
                     </div>
                     <div class="text-xs text-muted-foreground">
@@ -786,8 +788,11 @@ fn MemberRow(
         .to_string();
     let joined = format_date(&member.joined_at);
 
-    // Map DB role to display role for the select
-    let display_role = if member.role == "workspace_admin" {
+    // Map DB role to the StaticSelect's internal value key. `is_admin_role`
+    // is server-computed by comparing the raw role token against the admin
+    // role constant (KYO-189 P3) — a typed bool, not a string the client
+    // parses or compares against the raw token or its display label.
+    let display_role = if member.is_admin_role {
         "admin"
     } else {
         "user"

@@ -29,6 +29,17 @@ fn map_role_to_db(role: &str) -> &'static str {
     }
 }
 
+/// Whether a raw DB role token is the workspace-admin role.
+///
+/// Compares against the admin role constant, not a display string — this is
+/// the source of `TeamMember::is_admin_role` / `TeamInvitation::is_admin_role`
+/// (KYO-189 P3). The client never sees the raw token comparison; it only
+/// receives the resulting `bool`.
+#[cfg(feature = "ssr")]
+fn is_admin_role(role: &str) -> bool {
+    role == kyomi_core::constants::get().workspace.roles.admin
+}
+
 /// Generate an invitation ID: `inv-{uuid_hex[0..24]}`.
 ///
 /// Mirrors `generate_invitation_id()` in `apps/server/src/routes/workspaces.rs`.
@@ -74,6 +85,8 @@ pub async fn list_workspace_members() -> Result<Vec<TeamMember>, ServerFnError> 
             email: m.email.clone(),
             name: m.name.clone(),
             role: m.role.clone(),
+            role_display: kyomi_core::constants::humanize_workspace_role(&m.role).to_string(),
+            is_admin_role: is_admin_role(&m.role),
             is_owner: m.user_id == workspace.owner_user_id,
             joined_at: m.wu_created_at.to_rfc3339(),
         })
@@ -170,13 +183,20 @@ pub async fn list_workspace_invitations() -> Result<Vec<TeamInvitation>, ServerF
 
     let result = invitations
         .iter()
-        .map(|inv| TeamInvitation {
-            invitation_id: inv.invitation_id.clone(),
-            email: inv.email.clone(),
-            role: inv.role.to_string(),
-            status: inv.status.to_string(),
-            created_at: inv.created_at.to_rfc3339(),
-            expires_at: inv.expires_at.to_rfc3339(),
+        .map(|inv| {
+            let role = inv.role.to_string();
+            let role_display = kyomi_core::constants::humanize_workspace_role(&role).to_string();
+            let admin_role = is_admin_role(&role);
+            TeamInvitation {
+                invitation_id: inv.invitation_id.clone(),
+                email: inv.email.clone(),
+                role,
+                role_display,
+                is_admin_role: admin_role,
+                status: inv.status.to_string(),
+                created_at: inv.created_at.to_rfc3339(),
+                expires_at: inv.expires_at.to_rfc3339(),
+            }
         })
         .collect();
 

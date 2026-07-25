@@ -331,12 +331,12 @@ pub fn ConnectSetupPage() -> impl IntoView {
             {move || Suspend::new(async move {
                 // Every server_fns::connect fn gates on
                 // `ac.require(Permission::ManageConnect, ...)` — mirror that here.
-                let is_admin = match user_ctx_resource.await {
+                let can_manage_connect = match user_ctx_resource.await {
                     Ok(ctx) => ctx.can(Permission::ManageConnect),
                     Err(_) => false,
                 };
 
-                if !is_admin {
+                if !can_manage_connect {
                     return view! {
                         <AdminRequired/>
                     }.into_any();
