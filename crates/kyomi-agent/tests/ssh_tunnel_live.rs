@@ -48,7 +48,8 @@ async fn ssh_tunnel_end_to_end_encrypt_decrypt_connect() {
     );
 
     // 3. Decrypt before the driver — what every provider-build chokepoint does.
-    let decrypted = kyomi_auth::credential_service::decrypt_connection_config_secrets(&config, &enc_key);
+    let decrypted = kyomi_auth::credential_service::decrypt_connection_config_secrets(&config, &enc_key)
+        .expect("decrypt should succeed with the correct key");
     assert_eq!(
         decrypted["ssh_private_key"].as_str().unwrap(),
         private_key_pem,

@@ -242,25 +242,38 @@ pub(crate) fn looks_encrypted(s: &str) -> bool {
 
 /// Decrypt `s` with `key` if it looks like our ciphertext; otherwise return
 /// it unchanged, treating it as legacy plaintext or a non-secret placeholder.
-fn decrypt_or_passthrough(field: &str, s: &str, key: &[u8; 32]) -> String {
+///
+/// # Errors
+///
+/// Returns [`kyomi_core::Error::CredentialDecryptionFailed`] if `s` passed
+/// [`looks_encrypted`] (so it really is Kyomi ciphertext) but failed to
+/// decrypt — a rotated/mismatched encryption key or corrupted/tampered data.
+/// That condition is never caller-recoverable and must never be handed to a
+/// datasource driver as if it were the plaintext secret (KYO-221). The
+/// `!looks_encrypted` passthrough above is unaffected — it remains the
+/// deliberate legacy-plaintext path.
+fn decrypt_or_passthrough(field: &str, s: &str, key: &[u8; 32]) -> kyomi_core::Result<String> {
     if !looks_encrypted(s) {
-        return s.to_string();
+        return Ok(s.to_string());
     }
 
     match crate::encryption::decrypt(s, key) {
-        Ok(plaintext) => plaintext,
+        Ok(plaintext) => Ok(plaintext),
         Err(e) => {
-            // Looked like our ciphertext but failed to decrypt (wrong key,
-            // corrupted data). Log and pass the raw value through rather
-            // than erroring — callers building a datasource provider will
-            // simply fail to authenticate, which surfaces the problem
-            // without crashing the indexing/query path.
-            tracing::warn!(
+            // Looked like our ciphertext but failed to decrypt (wrong/rotated
+            // key, corrupted data) — never a legacy-plaintext case, and never
+            // something the caller can recover from. Must fail loudly rather
+            // than passing the ciphertext through as if it were the secret;
+            // never log the ciphertext or plaintext, field name and error
+            // only.
+            tracing::error!(
                 field,
                 error = %e,
-                "connection_config field looked encrypted but failed to decrypt; passing through raw value"
+                "connection_config field looked encrypted but failed to decrypt — check the encryption key"
             );
-            s.to_string()
+            Err(kyomi_core::Error::CredentialDecryptionFailed(format!(
+                "credential could not be decrypted — check the encryption key (field: {field})"
+            )))
         }
     }
 }
@@ -276,15 +289,23 @@ fn decrypt_or_passthrough(field: &str, s: &str, key: &[u8; 32]) -> String {
 /// Call this immediately before building any datasource provider —
 /// `connection_config` is encrypted at rest, but every driver must receive
 /// plaintext.
-pub fn decrypt_connection_config_secrets(config: &Value, key: &[u8; 32]) -> Value {
+///
+/// # Errors
+///
+/// Returns [`kyomi_core::Error::CredentialDecryptionFailed`], identifying the
+/// field, if any field looks like Kyomi ciphertext but fails to decrypt (see
+/// [`decrypt_or_passthrough`]). No partial config containing ciphertext is
+/// ever returned — the first undecryptable field short-circuits the whole
+/// call.
+pub fn decrypt_connection_config_secrets(config: &Value, key: &[u8; 32]) -> kyomi_core::Result<Value> {
     let Some(obj) = config.as_object() else {
-        return config.clone();
+        return Ok(config.clone());
     };
 
     let mut result = obj.clone();
     for &field in COMMON_SENSITIVE {
         if let Some(Value::String(s)) = result.get(field) {
-            let decrypted = decrypt_or_passthrough(field, s, key);
+            let decrypted = decrypt_or_passthrough(field, s, key)?;
             result.insert(field.to_string(), Value::String(decrypted));
         }
     }
@@ -292,7 +313,7 @@ pub fn decrypt_connection_config_secrets(config: &Value, key: &[u8; 32]) -> Valu
     // Decrypt indexing_credentials — stored as an encrypted JSON string,
     // restore to a Value::Object for the datasource driver.
     if let Some(Value::String(s)) = result.get("indexing_credentials") {
-        let decrypted = decrypt_or_passthrough("indexing_credentials", s, key);
+        let decrypted = decrypt_or_passthrough("indexing_credentials", s, key)?;
         match serde_json::from_str::<Value>(&decrypted) {
             Ok(obj @ Value::Object(_)) => {
                 result.insert("indexing_credentials".to_string(), obj);
@@ -304,7 +325,7 @@ pub fn decrypt_connection_config_secrets(config: &Value, key: &[u8; 32]) -> Valu
         }
     }
 
-    Value::Object(result)
+    Ok(Value::Object(result))
 }
 
 /// Decrypt a datasource's `connection_config` secrets AND an optional
@@ -324,17 +345,25 @@ pub fn decrypt_connection_config_secrets(config: &Value, key: &[u8; 32]) -> Valu
 /// a datasource provider — consolidating both decryptions into one call keeps
 /// callout-heavy server_fns under the service-callout lint budget (see
 /// `scripts/lint/check-server-fns.sh`).
+///
+/// # Errors
+///
+/// Returns [`kyomi_core::Error::CredentialDecryptionFailed`] if
+/// `connection_config` fails to decrypt — see
+/// [`decrypt_connection_config_secrets`]. `encrypted_credentials` failing to
+/// decrypt is deliberately **not** an error here (see above): it degrades to
+/// an empty object, matching this function's existing documented contract.
 pub fn decrypt_provider_secrets(
     connection_config: &Value,
     encrypted_credentials: Option<&str>,
     key: &[u8; 32],
-) -> (Value, Value) {
-    let plaintext_config = decrypt_connection_config_secrets(connection_config, key);
+) -> kyomi_core::Result<(Value, Value)> {
+    let plaintext_config = decrypt_connection_config_secrets(connection_config, key)?;
     let plaintext_credentials = match encrypted_credentials {
         Some(enc) => crate::encryption::decrypt_json(enc, key).unwrap_or_else(|_| serde_json::json!({})),
         None => serde_json::json!({}),
     };
-    (plaintext_config, plaintext_credentials)
+    Ok((plaintext_config, plaintext_credentials))
 }
 
 /// Replace a field value with [`MASKED_VALUE`] if it is a non-empty string.
@@ -805,7 +834,7 @@ mod tests {
         assert!(looks_encrypted(config["ssh_private_key"].as_str().unwrap()));
         assert!(looks_encrypted(config["shared_password"].as_str().unwrap()));
 
-        let decrypted = decrypt_connection_config_secrets(&config, &key);
+        let decrypted = decrypt_connection_config_secrets(&config, &key).unwrap();
 
         assert_eq!(
             decrypted["ssh_private_key"],
@@ -826,7 +855,7 @@ mod tests {
             "shared_password": "legacy-plaintext-password"
         });
 
-        let decrypted = decrypt_connection_config_secrets(&config, &key);
+        let decrypted = decrypt_connection_config_secrets(&config, &key).unwrap();
 
         assert_eq!(decrypted["shared_password"], "legacy-plaintext-password");
     }
@@ -836,7 +865,7 @@ mod tests {
         let key = test_key();
         let config = json!({ "shared_password": MASKED_VALUE });
 
-        let decrypted = decrypt_connection_config_secrets(&config, &key);
+        let decrypted = decrypt_connection_config_secrets(&config, &key).unwrap();
 
         assert_eq!(decrypted["shared_password"], MASKED_VALUE);
     }
@@ -845,7 +874,127 @@ mod tests {
     fn decrypt_connection_config_secrets_handles_non_object() {
         let key = test_key();
         let config = json!("not an object");
-        assert_eq!(decrypt_connection_config_secrets(&config, &key), config);
+        assert_eq!(decrypt_connection_config_secrets(&config, &key).unwrap(), config);
+    }
+
+    // -- KYO-221: decrypt failure must error, never pass through ciphertext --
+
+    #[test]
+    fn decrypt_or_passthrough_wrong_key_errors_and_does_not_return_ciphertext() {
+        let key_a = test_key();
+        let mut key_b = [0u8; 32];
+        key_b[..16].copy_from_slice(b"other-test-key-1");
+        key_b[16..].copy_from_slice(b"2345678901234567");
+        assert_ne!(key_a, key_b, "test fixture sanity: keys must differ");
+
+        let ciphertext = encryption::encrypt("real-shared-pass", &key_a).unwrap();
+
+        let err = decrypt_or_passthrough("shared_password", &ciphertext, &key_b)
+            .expect_err("decrypting with the wrong key must error, not fall back to the raw value");
+
+        // The whole point of KYO-221: the ciphertext must never come back out
+        // disguised as a successfully-resolved value.
+        assert!(
+            matches!(err, kyomi_core::Error::CredentialDecryptionFailed(_)),
+            "wrong-key failure must surface as CredentialDecryptionFailed, got: {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            !msg.contains(&ciphertext),
+            "error message must never contain the ciphertext: {msg}"
+        );
+        assert!(
+            msg.contains("check the encryption key"),
+            "message must point at the encryption key, distinct from an auth failure: {msg}"
+        );
+        assert!(!msg.contains("authentication"), "must not read like an auth failure: {msg}");
+    }
+
+    #[test]
+    fn decrypt_or_passthrough_legacy_plaintext_passes_through_unchanged_no_error() {
+        // The regression guard: `looks_encrypted("hunter2")` is false, so this
+        // must take the deliberate legacy-plaintext passthrough — never an
+        // error, and the value must come back byte-for-byte unchanged.
+        let key = test_key();
+        assert!(!looks_encrypted("hunter2"));
+
+        let result = decrypt_or_passthrough("shared_password", "hunter2", &key);
+
+        assert_eq!(result.unwrap(), "hunter2");
+    }
+
+    #[test]
+    fn decrypt_connection_config_secrets_legacy_plaintext_field_passes_through_unchanged() {
+        // Same regression guard at the `decrypt_connection_config_secrets`
+        // level (the actual pre-provider-construction entry point).
+        let key = test_key();
+        let config = json!({ "host": "db.example.com", "shared_password": "hunter2" });
+
+        let decrypted = decrypt_connection_config_secrets(&config, &key).unwrap();
+
+        assert_eq!(decrypted["shared_password"], "hunter2");
+    }
+
+    #[test]
+    fn decrypt_or_passthrough_round_trip_with_correct_key_returns_plaintext() {
+        let key = test_key();
+        let ciphertext = encryption::encrypt("correct-key-plaintext", &key).unwrap();
+
+        let result = decrypt_or_passthrough("shared_password", &ciphertext, &key);
+
+        assert_eq!(result.unwrap(), "correct-key-plaintext");
+    }
+
+    #[test]
+    fn decrypt_or_passthrough_tampered_tag_errors() {
+        // Flip a byte inside the AEAD tag (the last 16 bytes of the decoded
+        // payload) so the ciphertext still passes `looks_encrypted` (correct
+        // version byte, correct minimum length) but AEAD verification must
+        // reject it — the same error arm as a wrong key.
+        let key = test_key();
+        let ciphertext = encryption::encrypt("tamper-me", &key).unwrap();
+
+        let mut bytes = URL_SAFE.decode(&ciphertext).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xFF;
+        let tampered = URL_SAFE.encode(&bytes);
+        assert!(looks_encrypted(&tampered), "tampered value must still look like our ciphertext");
+
+        let err = decrypt_or_passthrough("shared_password", &tampered, &key)
+            .expect_err("tag-tampered ciphertext must error, not decrypt to garbage or pass through");
+
+        assert!(matches!(err, kyomi_core::Error::CredentialDecryptionFailed(_)));
+    }
+
+    #[test]
+    fn decrypt_connection_config_secrets_one_bad_field_errors_and_identifies_it() {
+        let key_a = test_key();
+        let mut key_b = [0u8; 32];
+        key_b[..16].copy_from_slice(b"other-test-key-1");
+        key_b[16..].copy_from_slice(b"2345678901234567");
+
+        // shared_password is encrypted with a DIFFERENT key than the one
+        // used to decrypt — everything else in the config is fine.
+        let bad_ciphertext = encryption::encrypt("will-not-decrypt", &key_a).unwrap();
+        let good_ciphertext = encryption::encrypt("real-ssh-key", &key_b).unwrap();
+        let config = json!({
+            "host": "db.example.com",
+            "shared_password": bad_ciphertext,
+            "ssh_private_key": good_ciphertext,
+        });
+
+        let err = decrypt_connection_config_secrets(&config, &key_b)
+            .expect_err("one undecryptable field must fail the whole call");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("shared_password"),
+            "error must identify which field failed to decrypt: {msg}"
+        );
+        // No partial/successful `Value` exists to inspect — `?` short-circuits
+        // before any ciphertext could be inserted into a returned config.
+        // (If this compiled as `Value` instead of `Result<Value, _>`, that
+        // alone would mean the fix regressed — see the type signature above.)
     }
 
     // -- end-to-end-ish: finalize then decrypt round trip for a fresh SSH key ---
@@ -870,7 +1019,7 @@ mod tests {
         assert!(looks_encrypted(stored));
 
         // What the driver receives just before provider creation is plaintext again.
-        let for_driver = decrypt_connection_config_secrets(&connection_config, &key);
+        let for_driver = decrypt_connection_config_secrets(&connection_config, &key).unwrap();
         assert_eq!(for_driver["ssh_private_key"], pem);
     }
 
@@ -886,7 +1035,7 @@ mod tests {
         let encrypted_creds = encryption::encrypt_json(&creds, &key).unwrap();
 
         let (config, credentials) =
-            decrypt_provider_secrets(&connection_config, Some(&encrypted_creds), &key);
+            decrypt_provider_secrets(&connection_config, Some(&encrypted_creds), &key).unwrap();
 
         assert_eq!(config["shared_password"], "s3cr3t");
         assert_eq!(config["host"], "db.example.com");
@@ -898,7 +1047,7 @@ mod tests {
         let key = test_key();
         let connection_config = json!({ "host": "db.example.com" });
 
-        let (config, credentials) = decrypt_provider_secrets(&connection_config, None, &key);
+        let (config, credentials) = decrypt_provider_secrets(&connection_config, None, &key).unwrap();
 
         assert_eq!(config["host"], "db.example.com");
         assert_eq!(credentials, json!({}));
@@ -910,7 +1059,7 @@ mod tests {
         let connection_config = json!({ "host": "db.example.com" });
 
         let (_, credentials) =
-            decrypt_provider_secrets(&connection_config, Some("not valid ciphertext"), &key);
+            decrypt_provider_secrets(&connection_config, Some("not valid ciphertext"), &key).unwrap();
 
         assert_eq!(credentials, json!({}));
     }
@@ -1029,7 +1178,7 @@ mod tests {
 
         finalize_connection_config_secrets(&mut config, None, &key).unwrap();
 
-        let decrypted = decrypt_connection_config_secrets(&config, &key);
+        let decrypted = decrypt_connection_config_secrets(&config, &key).unwrap();
         assert_eq!(decrypted["indexing_credentials"], ic);
         assert_eq!(decrypted["host"], "db.example.com");
     }

@@ -414,8 +414,23 @@ impl CatalogRefreshScheduler {
         // Decrypt connection_config secrets before reading indexing_credentials.
         // The DB stores them as encrypted strings; get_indexing_credentials needs
         // the decrypted JSON object to work correctly.
+        //
+        // A decrypt failure here (wrong/rotated encryption key) is reported as
+        // a failed refresh for THIS datasource only — it must not abort the
+        // hourly refresh loop for every other datasource (KYO-221).
         let decrypted_config =
-            decrypt_connection_config_secrets(connection_config, &self.encryption_key);
+            match decrypt_connection_config_secrets(connection_config, &self.encryption_key) {
+                Ok(config) => config,
+                Err(e) => {
+                    warn!(
+                        workspace_id,
+                        datasource = datasource_name,
+                        error = %e,
+                        "Skipping datasource refresh: credential could not be decrypted"
+                    );
+                    return RefreshResult::Failed;
+                }
+            };
 
         // Get indexing credentials
         let (_user_email, indexing_creds) = get_indexing_credentials(&decrypted_config);
@@ -1454,7 +1469,7 @@ mod tests {
         assert!(email_before.is_none());
 
         // 4. Decrypt (simulate what the scheduler should do before reading)
-        let decrypted = decrypt_connection_config_secrets(&config, &key);
+        let decrypted = decrypt_connection_config_secrets(&config, &key).unwrap();
 
         // After decryption, indexing_credentials should be an object again
         assert!(

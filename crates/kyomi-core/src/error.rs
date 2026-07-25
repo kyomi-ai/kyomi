@@ -40,6 +40,18 @@ pub enum Error {
     #[error("{0}")]
     DatasourceConnection(String),
 
+    /// A stored credential field looked like Kyomi's ciphertext format
+    /// (passed `credential_service::looks_encrypted`) but failed to decrypt —
+    /// a rotated/mismatched `DATASOURCE_ENCRYPTION_KEY`, or corrupted/tampered
+    /// data. This is a **server configuration problem**, never something the
+    /// request caller did wrong, and it must never be confused with the
+    /// external datasource rejecting the (would-be) credential — so its
+    /// message is deliberately worded to point at the encryption key rather
+    /// than reading like an authentication failure. `Display` is prefix-free,
+    /// same rationale as [`Error::DatasourceConnection`].
+    #[error("{0}")]
+    CredentialDecryptionFailed(String),
+
     #[error("internal: {0}")]
     Internal(String),
 
@@ -106,6 +118,13 @@ impl IntoResponse for Error {
             // Client-actionable (bad credentials / wrong host / unreachable):
             // surface the full message so the caller can fix the config.
             Error::DatasourceConnection(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
+            // Server misconfiguration (wrong/rotated encryption key), not a
+            // client mistake — 500, but the message is already logged at the
+            // decrypt call site (`error!`), so it's surfaced here verbatim
+            // rather than re-logged or swallowed like `Error::Internal`.
+            Error::CredentialDecryptionFailed(msg) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, msg.clone())
+            }
             Error::Internal(msg) => {
                 tracing::error!("internal error: {msg}");
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal server error".into())
@@ -148,6 +167,22 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "Connection test failed — check datasource credentials and connectivity"
+        );
+    }
+
+    #[test]
+    fn credential_decryption_failed_display_is_prefix_free() {
+        // KYO-221: this variant's whole purpose is to read as a distinct,
+        // operator-legible message ("check the encryption key") rather than
+        // an authentication failure — a `credential_decryption_failed: `
+        // prefix would blur that distinction, so `Display` must not add one.
+        let err = Error::CredentialDecryptionFailed(
+            "credential could not be decrypted — check the encryption key (field: shared_password)"
+                .into(),
+        );
+        assert_eq!(
+            err.to_string(),
+            "credential could not be decrypted — check the encryption key (field: shared_password)"
         );
     }
 }

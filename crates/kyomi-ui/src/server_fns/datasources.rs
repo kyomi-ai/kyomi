@@ -409,10 +409,19 @@ pub async fn test_datasource_standalone(
     // `credential_service::decrypt_connection_config_secrets`) and protects
     // against any future path that resupplies an already-encrypted field.
     let encryption_key = ac.encryption_key()?;
-    let connection_config = kyomi_auth::credential_service::decrypt_connection_config_secrets(
+    let connection_config = match kyomi_auth::credential_service::decrypt_connection_config_secrets(
         &connection_config,
         &encryption_key,
-    );
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "credential decrypt failed before connection test");
+            return Ok(TestConnectionResult {
+                success: false,
+                message: e.to_string(),
+            });
+        }
+    };
 
     let provider = match tokio::time::timeout(
         kyomi_datasource_server::DATASOURCE_TIMEOUT_CONNECT,
@@ -503,11 +512,20 @@ pub async fn test_existing_datasource(
     // encrypted `COMMON_SENSITIVE` fields (e.g. `ssh_private_key`) — the
     // driver always needs plaintext. The stored per-user credential blob
     // (if any) needs the same treatment.
-    let (decrypted_config, credentials) = kyomi_auth::credential_service::decrypt_provider_secrets(
+    let (decrypted_config, credentials) = match kyomi_auth::credential_service::decrypt_provider_secrets(
         &ds.connection_config,
         user_cred.as_ref().map(|c| c.credentials.as_str()),
         &encryption_key,
-    );
+    ) {
+        Ok(pair) => pair,
+        Err(e) => {
+            tracing::warn!(error = %e, "credential decrypt failed before connection test");
+            return Ok(TestConnectionResult {
+                success: false,
+                message: e.to_string(),
+            });
+        }
+    };
 
     let provider = match tokio::time::timeout(
         kyomi_datasource_server::DATASOURCE_TIMEOUT_CONNECT,
@@ -646,11 +664,21 @@ pub async fn discover_datasource_resources(
     // overlaid with caller-provided `credentials` (missing/undecryptable
     // stored credentials yield an empty object, so the overlay falls back to
     // whatever the caller provided).
-    let (connection_config, stored_creds) = kyomi_auth::credential_service::decrypt_provider_secrets(
+    let (connection_config, stored_creds) = match kyomi_auth::credential_service::decrypt_provider_secrets(
         &connection_config,
         stored_cred_str.as_deref(),
         &encryption_key,
-    );
+    ) {
+        Ok(pair) => pair,
+        Err(e) => {
+            tracing::warn!(error = %e, "credential decrypt failed before resource discovery");
+            return Ok(DiscoverResourcesResult {
+                success: false,
+                resources: std::collections::HashMap::new(),
+                message: e.to_string(),
+            });
+        }
+    };
     let resolved_creds = overlay_credentials(stored_creds, &credentials);
 
     let provider = match tokio::time::timeout(
