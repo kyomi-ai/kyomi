@@ -391,38 +391,48 @@ view! {
 
 Flagged in KYO-14 review — four `DynSelect` instances gated by reactive closures caused disposal panic risk on OAuth connect.
 
-### Add `Effect::new` re-fetch when auth mode toggles in an open modal
+### Use the shared OAuth-status re-fetch hook when auth mode toggles
 
-When a datasource modal supports multiple auth modes (e.g. `service_account` / `kyomi_oauth` / `enterprise_oauth`), the OAuth status panel must re-fetch status when the user switches modes. Without an `Effect::new` subscribing to the auth mode signal, the panel shows stale data from the previously-fetched mode.
+When a datasource modal supports multiple auth modes (e.g. `service_account` / `kyomi_oauth` / `enterprise_oauth`), the OAuth status panel must re-fetch status when the user switches modes. Without this, the panel shows stale data from the previously-fetched mode.
 
-**Rule:** Any `AuthModeSection` component that displays OAuth status must include an `Effect::new` that subscribes to the auth mode signal, resets state to "disconnected" while in-flight, and fetches the correct status for the new mode. Skip the fetch for modes that don't use OAuth (e.g. `service_account`).
+**Rule:** Any new provider's `*AuthModeSection` component must call the shared `use_oauth_status_refetch` hook, passing a mapping fn (`fn(&str) -> Option<OAuthStatusSource>`) that resolves the current auth mode to its OAuth status source; modes that don't use OAuth (e.g. `service_account`) map to `None`. Do not hand-roll another `Effect::new` for this — the `auth_mode_sections_do_not_hand_roll_oauth_status_effects` guard test fails the build if one is added.
 
 ```rust
-// WRONG — status fetched only on modal open, not on mode switch
-// User switches from kyomi_oauth (connected) to enterprise_oauth (not configured)
-// → panel still shows "Connected: user@example.com" from the kyomi_oauth fetch
-
-// RIGHT — Effect re-fetches on mode change
+// WRONG — hand-rolled Effect, now a guard-test failure
 Effect::new(move |_| {
     let mode = bq_auth_mode.get();
-    let current_slug = slug.get();
-    if mode == "service_account" || current_slug.is_empty() { return; }
+    let slug_val = slug.get();
+    if mode == "service_account" || slug_val.is_empty() { return; }
     set_oauth_connected.set(false);
-    set_oauth_email.set(String::new());
+    set_oauth_email.set(None);
     set_oauth_expired.set(false);
     spawn_local(async move {
-        // fetch status for the correct mode
-        let result = match mode.as_str() {
-            "kyomi_oauth" => get_google_oauth_status().await,
-            "enterprise_oauth" => get_datasource_oauth_status(/*...*/).await,
-            _ => return,
-        };
-        // update signals from result...
+        // fetch status for the correct mode...
     });
 });
+
+// RIGHT — shared hook + a per-provider mapping fn
+fn bigquery_oauth_source(mode: &str) -> Option<OAuthStatusSource> {
+    match mode {
+        "kyomi_oauth" => Some(OAuthStatusSource::GoogleAccount),
+        "enterprise_oauth" => Some(OAuthStatusSource::Datasource("bigquery-enterprise")),
+        _ => None,
+    }
+}
+
+use_oauth_status_refetch(
+    bq_auth_mode,
+    slug,
+    OAuthStatusSetters {
+        connected: set_oauth_connected,
+        email: set_oauth_email,
+        expired: set_oauth_expired,
+    },
+    bigquery_oauth_source,
+);
 ```
 
-This pattern was independently flagged in KYO-13 (BigQuery) and KYO-17 (Databricks) reviews. The BigQuery implementation is the canonical template.
+This pattern was independently flagged in KYO-13 (BigQuery) and KYO-17 (Databricks) reviews, and recurred a third time in Synapse (KYO-197) because each fix copy-pasted the Effect instead of sharing it. That third recurrence is what motivated extracting `use_oauth_status_refetch`.
 
 ## Email Templates
 
