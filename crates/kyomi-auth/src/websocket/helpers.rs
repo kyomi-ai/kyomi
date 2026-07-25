@@ -823,11 +823,27 @@ pub async fn broadcast_watch_sync(
     let data = if matches!(action, SyncActionType::Delete) {
         None
     } else {
-        crate::watch_service::get_watch(db, watch_id, workspace_id, owner_user_id)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|w| serde_json::to_value(&w).ok())
+        match crate::watch_service::get_watch(db, watch_id, workspace_id, owner_user_id).await {
+            Ok(Some(watch)) => match serde_json::to_value(&watch) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    tracing::error!(
+                        %watch_id,
+                        error = %e,
+                        "watch sync: failed to serialize watch; skipping broadcast"
+                    );
+                    return;
+                }
+            },
+            Ok(None) => {
+                tracing::warn!(%watch_id, "watch sync: watch not found; skipping broadcast");
+                return;
+            }
+            Err(e) => {
+                tracing::error!(%watch_id, error = %e, "watch sync: fetch failed; skipping broadcast");
+                return;
+            }
+        }
     };
 
     let sync_action = SyncAction {

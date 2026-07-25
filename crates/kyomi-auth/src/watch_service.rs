@@ -557,7 +557,15 @@ pub async fn create_watch(
 
     // Sync log — best-effort: log a warning and continue on failure.
     {
-        let snapshot = serde_json::to_value(&watch).ok();
+        let snapshot = serde_json::to_value(&watch)
+            .map_err(|e| {
+                tracing::error!(
+                    watch_id = %watch.watch_id,
+                    error = %e,
+                    "failed to serialize watch for sync log entry"
+                );
+            })
+            .ok();
         if let Err(e) = sync_log_service::write_sync_entry(
             db,
             sync_log_service::SyncEntryParams {
@@ -896,7 +904,15 @@ pub async fn update_watch(
 
     // Sync log — best-effort: log a warning and continue on failure.
     {
-        let snapshot = serde_json::to_value(&watch).ok();
+        let snapshot = serde_json::to_value(&watch)
+            .map_err(|e| {
+                tracing::error!(
+                    watch_id = %watch_id,
+                    error = %e,
+                    "failed to serialize watch for sync log entry"
+                );
+            })
+            .ok();
         if let Err(e) = sync_log_service::write_sync_entry(
             db,
             sync_log_service::SyncEntryParams {
@@ -3043,6 +3059,160 @@ mod privacy_tests {
         assert!(
             result_b.is_err(),
             "non-owner (user-b) must NOT receive the watch broadcast, got: {result_b:?}"
+        );
+    }
+
+    /// KYO-218 regression guard: an Upsert broadcast for a watch that exists
+    /// must carry the full payload — `data` must be `Some` and the nested
+    /// snapshot must round-trip back to the watch that was fetched.
+    #[tokio::test]
+    async fn broadcast_watch_sync_upsert_includes_full_payload() {
+        let pool = test_pool().await;
+        seed_workspace_with_two_users(&pool).await;
+
+        let wa = create_test_watch(&pool, "user-a", "A's Payload Watch").await;
+
+        let manager = crate::websocket::WebSocketManager::new(None, pool.clone());
+        let (_conn_a, mut rx_a) = manager.connect("user-a").expect("connect user-a");
+        rx_a.try_recv().expect("heartbeat for user-a");
+
+        crate::websocket::helpers::broadcast_watch_sync(
+            &pool,
+            &manager,
+            &wa.watch_id,
+            "ws-1",
+            SyncActionType::Insert,
+            "user-a",
+        )
+        .await;
+
+        let msg_a = rx_a
+            .try_recv()
+            .expect("owner (user-a) should receive the sync_action broadcast");
+        let envelope: serde_json::Value =
+            serde_json::from_str(&msg_a).expect("broadcast message should be valid JSON");
+        let sync_action = envelope
+            .get("data")
+            .expect("message envelope should carry a `data` field");
+        assert_eq!(
+            sync_action.get("action").and_then(|v| v.as_str()),
+            Some("insert"),
+            "sync action should be an insert: {sync_action}"
+        );
+
+        let payload = sync_action
+            .get("data")
+            .expect("sync action should carry a `data` field");
+        assert!(
+            !payload.is_null(),
+            "Upsert broadcast for an existing watch must not have a null payload: {sync_action}"
+        );
+
+        let round_tripped: kyomi_core::models::Watch = serde_json::from_value(payload.clone())
+            .expect("payload should deserialize back into a Watch");
+        assert_eq!(round_tripped.watch_id, wa.watch_id);
+        assert_eq!(round_tripped.name, wa.name);
+    }
+
+    /// KYO-218 regression guard: an Upsert broadcast for a watch that does
+    /// NOT exist (deleted between the mutation and the broadcast, or a bad
+    /// ID) must send no message at all rather than an Upsert with `data:
+    /// None` — a payload-less Upsert is wire-indistinguishable from a
+    /// Delete.
+    #[tokio::test]
+    async fn broadcast_watch_sync_upsert_for_missing_watch_sends_nothing() {
+        let pool = test_pool().await;
+        seed_workspace_with_two_users(&pool).await;
+
+        let manager = crate::websocket::WebSocketManager::new(None, pool.clone());
+        let (_conn_a, mut rx_a) = manager.connect("user-a").expect("connect user-a");
+        rx_a.try_recv().expect("heartbeat for user-a");
+
+        crate::websocket::helpers::broadcast_watch_sync(
+            &pool,
+            &manager,
+            "watch-does-not-exist",
+            "ws-1",
+            SyncActionType::Insert,
+            "user-a",
+        )
+        .await;
+
+        let result_a = rx_a.try_recv();
+        assert!(
+            result_a.is_err(),
+            "no message should be sent for an Upsert of a nonexistent watch, got: {result_a:?}"
+        );
+    }
+
+    /// Regression guard for the fix itself: a Delete broadcast must still
+    /// carry `data: None`. The fix must only suppress the broadcast for
+    /// non-Delete actions when the fetch/serialize fails — it must not
+    /// touch the Delete branch.
+    #[tokio::test]
+    async fn broadcast_watch_sync_delete_still_sends_null_payload() {
+        let pool = test_pool().await;
+        seed_workspace_with_two_users(&pool).await;
+
+        let wa = create_test_watch(&pool, "user-a", "A's Watch To Delete Broadcast").await;
+
+        let manager = crate::websocket::WebSocketManager::new(None, pool.clone());
+        let (_conn_a, mut rx_a) = manager.connect("user-a").expect("connect user-a");
+        rx_a.try_recv().expect("heartbeat for user-a");
+
+        crate::websocket::helpers::broadcast_watch_sync(
+            &pool,
+            &manager,
+            &wa.watch_id,
+            "ws-1",
+            SyncActionType::Delete,
+            "user-a",
+        )
+        .await;
+
+        let msg_a = rx_a
+            .try_recv()
+            .expect("owner (user-a) should receive the Delete sync_action broadcast");
+        let envelope: serde_json::Value =
+            serde_json::from_str(&msg_a).expect("broadcast message should be valid JSON");
+        let sync_action = envelope
+            .get("data")
+            .expect("message envelope should carry a `data` field");
+        assert_eq!(
+            sync_action.get("action").and_then(|v| v.as_str()),
+            Some("delete"),
+            "sync action should be a delete: {sync_action}"
+        );
+        assert_eq!(
+            sync_action.get("data"),
+            Some(&serde_json::Value::Null),
+            "Delete broadcasts must still carry data: None: {sync_action}"
+        );
+    }
+
+    /// KYO-218: `create_watch`'s `write_sync_entry` call must produce a
+    /// `sync_log` row with a non-null `data` payload when the watch
+    /// serializes without error — locking in the persisted-log half of the
+    /// fix (the live-broadcast half is covered by the tests above).
+    #[tokio::test]
+    async fn create_watch_sync_log_entry_has_non_null_data() {
+        let pool = test_pool().await;
+        seed_workspace_with_two_users(&pool).await;
+
+        let wa = create_test_watch(&pool, "user-a", "A's Sync Log Watch").await;
+
+        let entries = sync_log_service::get_entries_since(&pool, "ws-1", 0, "user-a", 50)
+            .await
+            .expect("get_entries_since");
+
+        let entry = entries
+            .iter()
+            .find(|e| e.entity_id == wa.watch_id)
+            .expect("sync_log should contain an entry for the created watch");
+
+        assert!(
+            entry.data.is_some(),
+            "sync_log row for a watch that serialized successfully must have non-null data: {entry:?}"
         );
     }
 
