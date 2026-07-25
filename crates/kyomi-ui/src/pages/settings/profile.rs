@@ -18,51 +18,23 @@ use crate::server_fns::profile::*;
 use crate::types::{DashboardSummary, ProfileData};
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Palette data — matches apps/frontend/src/config/chartPalettes.js
+// Palette data — ids match apps/frontend/src/config/chartPalettes.js and the
+// match arms in `kyomi_chart_theme::kyomi_palette`, which is the single
+// source of truth for the actual colors. Colors are intentionally NOT
+// duplicated here — see `ChartPaletteCard` below, which calls
+// `kyomi_chart_theme::kyomi_palette(id, is_dark)` at render time.
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct PaletteInfo {
     id: &'static str,
     name: &'static str,
-    colors: &'static [&'static str],
 }
 
 const PALETTES: &[PaletteInfo] = &[
-    PaletteInfo {
-        id: "kyomi",
-        name: "Kyomi",
-        // Amber-anchored editorial warm — Kyomi signature palette.
-        // Slot 2 is shown here as the light-mode navy; dark mode lifts it
-        // to #5A87C2 automatically at render time.
-        colors: &[
-            "#D97706", "#1E3A5F", "#3D8A5A", "#7C2D12", "#2D7A8A", "#A16207",
-            "#7E22CE", "#6B8A4D", "#0891B2", "#9F1239", "#CA8A04", "#4D5A8A",
-        ],
-    },
-    PaletteInfo {
-        id: "balanced",
-        name: "Balanced",
-        colors: &[
-            "#1A75C9", "#B8405A", "#3D8A5A", "#D9952D", "#2D7A8A", "#C9734D",
-            "#4D5A8A", "#99C94D", "#8A5A7A", "#D9B370", "#70B8D9", "#6B8A4D",
-        ],
-    },
-    PaletteInfo {
-        id: "vibrant",
-        name: "Vibrant",
-        colors: &[
-            "#1E88C7", "#D92849", "#28C75A", "#E8B733", "#28C7A8", "#E87333",
-            "#3355D9", "#A8D928", "#C728A8", "#D97328", "#28A8D9", "#73A828",
-        ],
-    },
-    PaletteInfo {
-        id: "accessible",
-        name: "Accessible",
-        colors: &[
-            "#2D5F7A", "#A83D52", "#3D7A52", "#C9A642", "#3D8A8A", "#E89970",
-            "#5C6D99", "#B8D96B", "#996B8A", "#B87752", "#85B8D9", "#85996B",
-        ],
-    },
+    PaletteInfo { id: "kyomi", name: "Kyomi" },
+    PaletteInfo { id: "balanced", name: "Balanced" },
+    PaletteInfo { id: "vibrant", name: "Vibrant" },
+    PaletteInfo { id: "accessible", name: "Accessible" },
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -397,6 +369,18 @@ fn ChartPaletteCard(data: ProfileData) -> impl IntoView {
         }
     });
 
+    // Swatches are sourced from `kyomi_chart_theme::kyomi_palette` — the same
+    // function every chart-rendering path uses — rather than a local color
+    // copy. `is_dark` is derived with a reactive `.get()` (not
+    // `.get_untracked()`) so toggling the theme updates the swatches live,
+    // instead of freezing whatever mode was active on first render.
+    let theme_state = crate::components::theme::use_theme();
+    let is_dark = Signal::derive(move || {
+        theme_state
+            .map(|s| s.effective.get() == "dark")
+            .unwrap_or(false)
+    });
+
     view! {
         <Card>
             <CardHeader>
@@ -413,8 +397,8 @@ fn ChartPaletteCard(data: ProfileData) -> impl IntoView {
                     {PALETTES.iter().map(|p| {
                         let id = p.id.to_string();
                         let id_for_click = p.id.to_string();
+                        let id_for_colors = p.id;
                         let name = p.name;
-                        let colors = p.colors;
                         view! {
                             <button
                                 class=move || {
@@ -450,14 +434,19 @@ fn ChartPaletteCard(data: ProfileData) -> impl IntoView {
                                     }}
                                 </div>
                                 <div class="flex flex-wrap gap-1">
-                                    {colors.iter().map(|color| {
-                                        view! {
-                                            <div
-                                                class="w-8 h-8 rounded-md border border-border"
-                                                style=format!("background-color: {color}")
-                                            />
-                                        }
-                                    }).collect_view()}
+                                    {move || {
+                                        kyomi_chart_theme::kyomi_palette(id_for_colors, is_dark.get())
+                                            .into_iter()
+                                            .map(|color| {
+                                                view! {
+                                                    <div
+                                                        class="w-8 h-8 rounded-md border border-border"
+                                                        style=format!("background-color: {color}")
+                                                    />
+                                                }
+                                            })
+                                            .collect_view()
+                                    }}
                                 </div>
                             </button>
                         }
@@ -916,5 +905,47 @@ mod tests_part3 {
             src.contains("user_ctx.refetch()"),
             "Chart palette card must refetch user_context after successful save (KYO-129 Part 3)"
         );
+    }
+}
+
+#[cfg(all(test, feature = "ssr"))]
+mod tests_kyo_228 {
+    //! KYO-228: `PALETTES` here only carries ids/names — the colors come
+    //! from `kyomi_chart_theme::kyomi_palette` at render time. These tests
+    //! guard against a typo'd id silently collapsing to the `kyomi`
+    //! fallback (`kyomi_palette` falls back to `"kyomi"` for unknown
+    //! names), which would otherwise render four identical pickers instead
+    //! of erroring.
+
+    use super::PALETTES;
+
+    #[test]
+    fn every_non_kyomi_id_resolves_to_a_genuinely_distinct_palette() {
+        // Comparing a non-"kyomi" id against the kyomi palette is the
+        // meaningful assertion here: if `balanced`/`vibrant`/`accessible`
+        // had a typo'd id, `kyomi_palette` would silently fall back to the
+        // "kyomi" palette and this equality would incorrectly pass — so we
+        // assert they are DIFFERENT from "kyomi", not equal to themselves.
+        for is_dark in [false, true] {
+            let kyomi = kyomi_chart_theme::kyomi_palette("kyomi", is_dark);
+            for p in PALETTES.iter().filter(|p| p.id != "kyomi") {
+                let colors = kyomi_chart_theme::kyomi_palette(p.id, is_dark);
+                assert_ne!(
+                    colors, kyomi,
+                    "palette id '{}' (is_dark={}) resolved to the same colors \
+                     as the 'kyomi' fallback — check for a typo'd id in PALETTES",
+                    p.id, is_dark
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn palette_ids_match_the_known_kyomi_palette_match_arms() {
+        // `kyomi_chart_theme::kyomi_palette` only has explicit match arms
+        // for these four names; anything else silently falls back to
+        // "kyomi". Locks the exact id set this page is allowed to offer.
+        let ids: Vec<&str> = PALETTES.iter().map(|p| p.id).collect();
+        assert_eq!(ids, vec!["kyomi", "balanced", "vibrant", "accessible"]);
     }
 }
