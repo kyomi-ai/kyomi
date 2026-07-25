@@ -265,6 +265,15 @@ pub async fn resolve_indexing_credentials(
         "SELECT user_id FROM users WHERE email = $1",
         &email
     )
+    .map_err(|e| {
+        // `email` is intentionally omitted (PII) — this is an indexing path,
+        // not an auth path. `datasource_config_id` is enough to correlate.
+        warn!(
+            datasource_config_id = ctx.datasource_config_id,
+            error = %e,
+            "failed to look up user for catalog indexing credential resolution"
+        );
+    })
     .ok()
     .flatten();
 
@@ -279,6 +288,14 @@ pub async fn resolve_indexing_credentials(
         &ctx.datasource_config_id,
     )
     .await
+    .map_err(|e| {
+        warn!(
+            user_id,
+            datasource_config_id = ctx.datasource_config_id,
+            error = %e,
+            "failed to fetch stored credentials for catalog indexing"
+        );
+    })
     .ok()
     .flatten();
 
@@ -286,7 +303,22 @@ pub async fn resolve_indexing_credentials(
 
     // Decrypt the stored credentials
     match kyomi_auth::encryption::decrypt(&cred_record.credentials, encryption_key) {
-        Ok(ref plaintext) => serde_json::from_str(plaintext).ok(),
+        Ok(ref plaintext) => match serde_json::from_str::<Value>(plaintext) {
+            Ok(value) => Some(value),
+            Err(e) => {
+                // Decryption succeeded (key is right, ciphertext intact) but the
+                // plaintext isn't valid JSON — a corruption/schema-drift signal
+                // that must not be confused with the decrypt-failure branch below.
+                // NEVER log `plaintext` here — it is decrypted credential material.
+                warn!(
+                    user_id,
+                    datasource_config_id = ctx.datasource_config_id,
+                    error = %e,
+                    "decrypted credentials failed to parse for catalog indexing"
+                );
+                None
+            }
+        },
         Err(e) => {
             warn!(
                 user_id,
@@ -659,6 +691,322 @@ mod tests {
     use kyomi_datasource_server::{DatasourceProvider, QueryResult};
     use kyomi_embed::EmbeddingService;
     use serde_json::json;
+    use std::sync::{Arc, Mutex};
+
+    // ─── Log capture for KYO-217 credential-resolution warnings ────────────
+    //
+    // There is no `tracing-test` in this workspace and we were told not to add
+    // a new dependency for this. `tracing-subscriber` is already a workspace
+    // dependency (used by kyomi-core, apps/server, apps/desktop) — this wires
+    // it in as a dev-dependency for kyomi-agent and uses its `fmt` layer with a
+    // custom `MakeWriter` to capture formatted log lines into memory so tests
+    // can assert on them directly, instead of only asserting on return values.
+
+    #[derive(Clone, Default)]
+    struct CapturingWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl CapturingWriter {
+        fn contents(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().expect("lock poisoned")).into_owned()
+        }
+    }
+
+    impl std::io::Write for CapturingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("lock poisoned").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturingWriter {
+        type Writer = CapturingWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Installs a capturing `tracing` subscriber as the thread-local default
+    /// for the duration of the returned guard. `#[tokio::test]` uses a
+    /// current-thread runtime by default, so the thread-local dispatcher
+    /// stays active across `.await` points in the test body.
+    fn capture_logs() -> (CapturingWriter, tracing::subscriber::DefaultGuard) {
+        let writer = CapturingWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer.clone())
+            .with_ansi(false)
+            .without_time()
+            .with_target(false)
+            // Scope capture to WARN and above. `DbPool::connect` itself emits
+            // an unrelated INFO "SQLite pool connected" line — without this
+            // filter the "no warning at all" test below sees that line and
+            // false-fails even though `resolve_indexing_credentials` logged
+            // nothing.
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+        (writer, guard)
+    }
+
+    /// Seeds the FK chain `resolve_indexing_credentials` walks: a user, a
+    /// workspace they own, and a datasource config to attach credentials to.
+    async fn seed_credential_resolution_rows(sq: &sqlx::SqlitePool, user_id: &str, email: &str) {
+        sqlx::query("INSERT INTO users (user_id, email) VALUES (?, ?)")
+            .bind(user_id)
+            .bind(email)
+            .execute(sq)
+            .await
+            .expect("insert user");
+        sqlx::query(
+            "INSERT INTO workspaces (workspace_id, name, owner_user_id) \
+             VALUES ('ws-cred', 'WS', ?)",
+        )
+        .bind(user_id)
+        .execute(sq)
+        .await
+        .expect("insert workspace");
+        sqlx::query(
+            "INSERT INTO datasource_configs (id, workspace_id, name, datasource_type, slug) \
+             VALUES ('ds-cred', 'ws-cred', 'DS', 'postgres', 'ds-cred')",
+        )
+        .execute(sq)
+        .await
+        .expect("insert datasource_config");
+    }
+
+    fn cred_resolution_ctx(key: [u8; 32]) -> IndexerContext {
+        IndexerContext {
+            workspace_id: "ws-cred".to_string(),
+            datasource_config_id: "ds-cred".to_string(),
+            connection_config: json!({}),
+            encryption_key: Arc::new(key),
+        }
+    }
+
+    /// KYO-217 regression: the `users` lookup query itself can fail (pool
+    /// exhaustion, connection blip, transient Postgres error) — distinct from
+    /// "email not found," which is a normal `Ok(None)`. Proven by dropping
+    /// the `users` table so `SELECT user_id FROM users WHERE email = $1`
+    /// itself errors, rather than merely returning zero rows: an empty
+    /// result would silently take the same "no credentials" path and prove
+    /// nothing about this failure mode.
+    #[tokio::test]
+    async fn users_lookup_query_failure_returns_none_and_warns_without_leaking_email() {
+        let (writer, _guard) = capture_logs();
+
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+
+        // No rows seeded — the `users` lookup is the very first DB step in
+        // `resolve_indexing_credentials`, so nothing else needs to exist for
+        // this failure mode. Dropping the table with no FK-dependent rows
+        // present (unlike the seeded fixture, which would trip SQLite's
+        // "FOREIGN KEY constraint failed" on a referenced parent table)
+        // gives a clean, genuine query error.
+        sqlx::query("DROP TABLE users")
+            .execute(sq)
+            .await
+            .expect("drop users table");
+
+        let ctx = cred_resolution_ctx([2u8; 32]);
+        let result =
+            resolve_indexing_credentials(&db, &ctx, Some("u-lookup-fail@test.local"), None).await;
+
+        assert!(
+            result.is_none(),
+            "a failed user lookup must not resolve credentials"
+        );
+
+        let logs = writer.contents();
+        assert!(
+            logs.contains("failed to look up user for catalog indexing credential resolution"),
+            "expected the users-lookup warning, got logs: {logs}"
+        );
+        assert!(
+            !logs.contains("u-lookup-fail@test.local"),
+            "the user's email is PII and must never appear in this indexing-path log, \
+             got logs: {logs}"
+        );
+    }
+
+    /// KYO-217 regression: `get_user_credential`'s query can fail
+    /// independently of the (successful) users lookup that precedes it —
+    /// same operational shape as the case above, one query later. Proven by
+    /// dropping `user_datasource_credentials` so its SELECT itself errors.
+    #[tokio::test]
+    async fn get_user_credential_query_failure_returns_none_and_warns() {
+        let (writer, _guard) = capture_logs();
+
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        seed_credential_resolution_rows(sq, "u-cred-fail", "u-cred-fail@test.local").await;
+
+        // Force a genuine query error, not an empty result. The user row
+        // resolved fine above; only the credential-fetch query fails.
+        sqlx::query("DROP TABLE user_datasource_credentials")
+            .execute(sq)
+            .await
+            .expect("drop user_datasource_credentials table");
+
+        let ctx = cred_resolution_ctx([3u8; 32]);
+        let result =
+            resolve_indexing_credentials(&db, &ctx, Some("u-cred-fail@test.local"), None).await;
+
+        assert!(
+            result.is_none(),
+            "a failed credential fetch must not resolve credentials"
+        );
+
+        let logs = writer.contents();
+        assert!(
+            logs.contains("failed to fetch stored credentials for catalog indexing"),
+            "expected the credential-fetch warning, got logs: {logs}"
+        );
+    }
+
+    /// KYO-217 case 1: decryption succeeds but the plaintext isn't valid JSON.
+    ///
+    /// This is the sharpest of the three failure modes — the key is right and
+    /// the ciphertext is intact, so a silent `None` here hides schema drift or
+    /// corruption. Must return `None` AND emit a warning distinguishable from
+    /// the decrypt-failure warning below it.
+    #[tokio::test]
+    async fn parse_failure_returns_none_and_warns_distinctly_from_decrypt_failure() {
+        let (writer, _guard) = capture_logs();
+
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        seed_credential_resolution_rows(sq, "u-parse", "u-parse@test.local").await;
+
+        let key = [7u8; 32];
+        let encrypted =
+            kyomi_auth::encryption::encrypt("this is not json {{{", &key).expect("encrypt");
+        sqlx::query(
+            "INSERT INTO user_datasource_credentials \
+             (user_id, datasource_config_id, workspace_id, credentials) \
+             VALUES (?, 'ds-cred', 'ws-cred', ?)",
+        )
+        .bind("u-parse")
+        .bind(&encrypted)
+        .execute(sq)
+        .await
+        .expect("insert credential");
+
+        let ctx = cred_resolution_ctx(key);
+        let result =
+            resolve_indexing_credentials(&db, &ctx, Some("u-parse@test.local"), None).await;
+
+        assert!(
+            result.is_none(),
+            "decrypted-but-unparseable credentials must not resolve"
+        );
+
+        let logs = writer.contents();
+        assert!(
+            logs.contains("decrypted credentials failed to parse for catalog indexing"),
+            "expected the parse-failure warning, got logs: {logs}"
+        );
+        assert!(
+            !logs.contains("failed to decrypt stored credentials for catalog indexing"),
+            "parse failure must not also emit the decrypt-failure message — \
+             the two must stay distinguishable, got logs: {logs}"
+        );
+        assert!(
+            logs.contains("ds-cred"),
+            "warning must identify which datasource_config_id (and thus provider) \
+             failed, got logs: {logs}"
+        );
+    }
+
+    /// KYO-217 case 2 (regression guard): decryption itself fails. The
+    /// existing decrypt-failure warning must still fire, and must stay
+    /// distinct from the new parse-failure message added alongside it —
+    /// this is what stops the two from merging into one indistinguishable
+    /// warning in a future edit.
+    #[tokio::test]
+    async fn decrypt_failure_returns_none_and_keeps_existing_warning() {
+        let (writer, _guard) = capture_logs();
+
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        seed_credential_resolution_rows(sq, "u-decrypt", "u-decrypt@test.local").await;
+
+        // Too short to be a valid AES-256-GCM payload (version + nonce + tag) —
+        // `kyomi_auth::encryption::decrypt` rejects it before ever touching JSON.
+        sqlx::query(
+            "INSERT INTO user_datasource_credentials \
+             (user_id, datasource_config_id, workspace_id, credentials) \
+             VALUES ('u-decrypt', 'ds-cred', 'ws-cred', 'short')",
+        )
+        .execute(sq)
+        .await
+        .expect("insert credential");
+
+        let ctx = cred_resolution_ctx([9u8; 32]);
+        let result =
+            resolve_indexing_credentials(&db, &ctx, Some("u-decrypt@test.local"), None).await;
+
+        assert!(result.is_none(), "undecryptable credentials must not resolve");
+
+        let logs = writer.contents();
+        assert!(
+            logs.contains("failed to decrypt stored credentials for catalog indexing"),
+            "expected the existing decrypt-failure warning, got logs: {logs}"
+        );
+        assert!(
+            !logs.contains("decrypted credentials failed to parse for catalog indexing"),
+            "decrypt failure must not also emit the parse-failure message, got logs: {logs}"
+        );
+    }
+
+    /// KYO-217 case 3 (most important): a user with genuinely no stored
+    /// credential row is a normal, expected condition — not a failure. It
+    /// must return `None` with NO warning at all, or this fix turns routine
+    /// "user hasn't connected this datasource" cases into permanent log noise.
+    #[tokio::test]
+    async fn no_credential_row_returns_none_without_any_warning() {
+        let (writer, _guard) = capture_logs();
+
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        seed_credential_resolution_rows(sq, "u-none", "u-none@test.local").await;
+        // Deliberately no INSERT into user_datasource_credentials.
+
+        let ctx = cred_resolution_ctx([1u8; 32]);
+        let result = resolve_indexing_credentials(&db, &ctx, Some("u-none@test.local"), None).await;
+
+        assert!(result.is_none(), "no stored credentials should resolve to None");
+
+        let logs = writer.contents();
+        assert!(
+            logs.trim().is_empty(),
+            "no credential row is expected/routine and must not log anything, got logs: {logs}"
+        );
+    }
 
     /// Minimal provider stub. The mock indexer overrides all catalog SQL, so
     /// only `test_connection`/`close` are ever exercised.
