@@ -35,6 +35,7 @@ use kyomi_embed::EmbeddingService;
 
 use crate::alert::deliver_watch_alert;
 use crate::execution::{execute_agent_chat, AgentExecutionConfig};
+use crate::text_utils::truncate_preview;
 use crate::tools::WATCH_TOOLS;
 
 // ---------------------------------------------------------------------------
@@ -511,11 +512,7 @@ pub async fn get_recent_alerts_for_watch(
             .agent_response
             .as_deref()
             .unwrap_or("(no message)");
-        let truncated = if message.len() > 500 {
-            format!("{}...", &message[..500])
-        } else {
-            message.to_string()
-        };
+        let truncated = truncate_preview(message, 500);
 
         alert_lines.push(format!(
             "**{timestamp} ({relative})** - Status: {status}\n{truncated}"

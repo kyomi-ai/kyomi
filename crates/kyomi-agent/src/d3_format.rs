@@ -142,6 +142,8 @@ fn strip_trailing_zeros(s: &str) -> String {
 
 /// Add comma grouping to the integer part of a formatted number.
 fn add_commas(formatted: &str) -> String {
+    // Safe: `dot_pos` comes from `str::find('.')` on a single-byte ASCII
+    // delimiter — find() only ever returns valid char-boundary offsets. See KYO-211.
     let (integer_part, decimal_part) = if let Some(dot_pos) = formatted.find('.') {
         (&formatted[..dot_pos], Some(&formatted[dot_pos..]))
     } else {
