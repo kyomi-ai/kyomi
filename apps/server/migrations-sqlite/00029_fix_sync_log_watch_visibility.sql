@@ -1,0 +1,52 @@
+-- KYO-237: correct the KYO-173 backfill's mis-classification of historical
+-- `watch` sync_log rows as workspace-wide.
+--
+-- 00024_add_sync_log_visibility.sql grouped `watch` with
+-- `workspace_settings` and backfilled every historical watch row to
+-- is_workspace_visible = 1, owner_user_id = NULL. That is wrong: watches
+-- have no sharing model and are strictly private to their creator (see
+-- watch_service::list_watches_for_sync, broadcast_watch_sync, and every
+-- write-time sync_log entry watch_service.rs writes, which all use
+-- owner_user_id = Some(created_by), is_workspace_visible = false). Every
+-- workspace member whose delta cursor spanned the 2026-07-24 migration
+-- boundary was receiving every other member's pre-migration watch payloads
+-- (name, prompt, schedule, queries, alert_emails) via
+-- sync_log_service::get_entries_since's `is_workspace_visible = TRUE OR
+-- owner_user_id = $3` filter.
+--
+-- Do not edit 00024 in place -- it has already applied and sqlx checksums
+-- it. This migration corrects the affected rows instead.
+--
+-- Owner extraction: `watch.created_by` (crates/kyomi-core/src/models/watch.rs)
+-- serializes as a plain string field, not a nested object -- unlike
+-- chat_session's `created_by.user_id`. So the scalar json_extract path is
+-- correct here; do not copy the nested-path pattern used for chat_session
+-- in the original migration.
+--
+-- NULL data (all historical `Delete` rows, and any row predating KYO-218's
+-- guarantee that non-Delete payloads are never null) yields a NULL
+-- owner_user_id via json_extract. Combined with is_workspace_visible = 0,
+-- such a row becomes visible to nobody. That's the deliberate safe
+-- direction -- we cannot recover the true owner from a null payload, and
+-- hiding the row from everyone is strictly better than guessing wrong.
+--
+-- `workspace_settings` is untouched -- it genuinely has no owner and is
+-- correctly workspace-wide.
+--
+-- Guard: `AND owner_user_id IS NULL`. Every watch sync_log write since
+-- create_watch/update_watch/delete_watch existed
+-- (crates/kyomi-auth/src/watch_service.rs:577,924,979) sets
+-- owner_user_id = Some(created_by) unconditionally -- insert, update, and
+-- delete alike, even though delete's `data` is always NULL. Only the
+-- buggy 00024 backfill ever produced a watch row with a NULL
+-- owner_user_id. Without this guard, re-deriving owner_user_id from
+-- json_extract(data, '$.created_by') for every watch row clobbers
+-- already-correct Delete rows (data is NULL for deletes) back to NULL,
+-- making an owner's own deletion invisible to their own delta sync. The
+-- guard scopes this migration to exactly the rows the original backfill
+-- corrupted and leaves every correctly-written row alone.
+UPDATE sync_log
+   SET is_workspace_visible = 0,
+       owner_user_id = json_extract(data, '$.created_by')
+ WHERE entity_type = 'watch'
+   AND owner_user_id IS NULL;

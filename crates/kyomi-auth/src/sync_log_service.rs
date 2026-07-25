@@ -929,4 +929,258 @@ mod tests {
         let sync_ids: Vec<i64> = entries.iter().map(|e| e.sync_id).collect();
         assert_eq!(sync_ids, vec![sid1, sid2, sid3]);
     }
+
+    // ─── KYO-237: watch backfill visibility fix ───────────────────────────
+
+    /// Apply an on-disk migration file's SQL directly against a pool,
+    /// outside the sqlx migration tracker. Used to exercise the *actual*
+    /// KYO-237 fix migration file against a hand-corrupted row, so this
+    /// test breaks if the shipped migration's SQL is ever changed to
+    /// something that no longer fixes the leak.
+    async fn apply_migration_file(sq: &sqlx::SqlitePool, path: &str) {
+        let sql = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("read migration file {path}: {e}"));
+        // Strip comment-only lines, then split the remaining SQL on `;` —
+        // statements in these migration files span multiple lines.
+        let without_comments: String = sql
+            .lines()
+            .filter(|line| !line.trim().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for statement in without_comments.split(';') {
+            let statement = statement.trim();
+            if statement.is_empty() {
+                continue;
+            }
+            sqlx::query(statement)
+                .execute(sq)
+                .await
+                .unwrap_or_else(|e| panic!("apply migration statement {statement:?}: {e}"));
+        }
+    }
+
+    /// KYO-237: a `sync_log` watch row written before the KYO-173 backfill
+    /// migration ran was mis-classified as workspace-wide
+    /// (`is_workspace_visible = true, owner_user_id = NULL`) — leaking the
+    /// owner's watch payload to every workspace member on a delta sync that
+    /// spans the migration boundary.
+    ///
+    /// This test seeds a `sync_log` row the way `watch_service::create_watch`
+    /// writes it (owner-private), hand-corrupts it into the exact pre-fix
+    /// leaked state the buggy 20260724000000/00024 migration produced, then
+    /// applies the real `00029_fix_sync_log_watch_visibility.sql` file
+    /// (read from disk, not reimplemented) and asserts both halves of the
+    /// fix: the non-owner stops seeing the row, and the owner still does.
+    #[tokio::test]
+    async fn kyo_237_fix_migration_corrects_leaked_historical_watch_row() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+
+        seed_user(sq, "user-a", "a@test.local").await;
+        seed_user(sq, "user-b", "b@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+        seed_workspace_member(sq, "ws-1", "user-b", "user").await;
+        seed_watch(sq, "watch-1", "ws-1", "user-a").await;
+
+        // Write the sync_log row the way create_watch/update_watch/
+        // delete_watch actually write it today: owner-private.
+        let sid = write_sync_entry(
+            &db,
+            SyncEntryParams {
+                entity_type: "watch",
+                entity_id: "watch-1",
+                workspace_id: "ws-1",
+                action: SyncActionType::Insert,
+                data: Some(serde_json::json!({
+                    "watch_id": "watch-1",
+                    "created_by": "user-a",
+                    "name": "A's Private Watch",
+                })),
+                owner_user_id: Some("user-a"),
+                is_workspace_visible: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Hand-corrupt the row into the exact state the buggy
+        // 20260724000000/00024 backfill produced for pre-migration watch
+        // rows (grouping `watch` with `workspace_settings`).
+        sqlx::query(
+            "UPDATE sync_log SET is_workspace_visible = 1, owner_user_id = NULL \
+             WHERE entity_type = 'watch' AND entity_id = 'watch-1'",
+        )
+        .execute(sq)
+        .await
+        .expect("simulate pre-fix leaked backfill state");
+
+        // Sanity check: the corrupted state must actually reproduce the
+        // leak, or this test would pass vacuously.
+        let leaked_before_fix = get_entries_since(&db, "ws-1", 0, "user-b", 100)
+            .await
+            .unwrap();
+        assert_eq!(
+            leaked_before_fix.iter().map(|e| e.sync_id).collect::<Vec<_>>(),
+            vec![sid],
+            "corrupted pre-fix state must reproduce the leak to a non-owner \
+             (sanity check) — without this, the test below is meaningless"
+        );
+
+        // Apply the real fix migration file.
+        apply_migration_file(
+            sq,
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../apps/server/migrations-sqlite/00029_fix_sync_log_watch_visibility.sql"
+            ),
+        )
+        .await;
+
+        // Non-owner (user-b) must no longer receive the historical row.
+        let after_fix_b = get_entries_since(&db, "ws-1", 0, "user-b", 100)
+            .await
+            .unwrap();
+        assert!(
+            after_fix_b.is_empty(),
+            "non-owner must not see the corrected historical watch row: {after_fix_b:?}"
+        );
+
+        // Owner (user-a) must still receive it.
+        let after_fix_a = get_entries_since(&db, "ws-1", 0, "user-a", 100)
+            .await
+            .unwrap();
+        assert_eq!(
+            after_fix_a.iter().map(|e| e.sync_id).collect::<Vec<_>>(),
+            vec![sid],
+            "owner must still see their own historical watch row after the fix: {after_fix_a:?}"
+        );
+    }
+
+    /// KYO-237 regression: the fix migration's `UPDATE` must not clobber
+    /// watch rows that were already written correctly.
+    ///
+    /// `delete_watch` (`watch_service.rs:979`) writes Delete rows with
+    /// `owner_user_id: Some(&created_by)` (explicit, correct) and
+    /// `data: None` (deletes never carry a payload) — this has been true
+    /// since the original 20260724000000/00024 migration shipped. An
+    /// unguarded `UPDATE ... SET owner_user_id = data->>'created_by' WHERE
+    /// entity_type = 'watch'` re-derives the owner from `data` for *every*
+    /// watch row, including this one — and since `data` is NULL for
+    /// deletes, that overwrites the correct `owner_user_id` with NULL,
+    /// making the row invisible to everyone (including the real owner).
+    ///
+    /// This test seeds a correctly-written Delete row alongside a
+    /// corrupted one (mirroring real post-20260724 traffic sitting next to
+    /// pre-migration leaked rows) and asserts the fix migration leaves the
+    /// correct row completely untouched.
+    #[tokio::test]
+    async fn kyo_237_fix_migration_leaves_correctly_written_delete_rows_untouched() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+
+        seed_user(sq, "user-a", "a@test.local").await;
+        seed_user(sq, "user-b", "b@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+        seed_workspace_member(sq, "ws-1", "user-b", "user").await;
+        seed_watch(sq, "watch-deleted", "ws-1", "user-a").await;
+        seed_watch(sq, "watch-leaked", "ws-1", "user-a").await;
+
+        // Correctly-written Delete row (post-20260724 write path):
+        // owner_user_id explicitly set, data always None.
+        let good_sid = write_sync_entry(
+            &db,
+            SyncEntryParams {
+                entity_type: "watch",
+                entity_id: "watch-deleted",
+                workspace_id: "ws-1",
+                action: SyncActionType::Delete,
+                data: None,
+                owner_user_id: Some("user-a"),
+                is_workspace_visible: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        // A genuinely-corrupted historical row, alongside the correct one —
+        // the migration must fix this one and leave the other alone.
+        let leaked_sid = write_sync_entry(
+            &db,
+            SyncEntryParams {
+                entity_type: "watch",
+                entity_id: "watch-leaked",
+                workspace_id: "ws-1",
+                action: SyncActionType::Insert,
+                data: Some(serde_json::json!({
+                    "watch_id": "watch-leaked",
+                    "created_by": "user-a",
+                })),
+                owner_user_id: Some("user-a"),
+                is_workspace_visible: false,
+            },
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE sync_log SET is_workspace_visible = 1, owner_user_id = NULL \
+             WHERE entity_type = 'watch' AND entity_id = 'watch-leaked'",
+        )
+        .execute(sq)
+        .await
+        .expect("simulate pre-fix leaked backfill state");
+
+        // Sanity check: before the migration runs, the owner can see their
+        // own correctly-written Delete row.
+        let before = get_entries_since(&db, "ws-1", 0, "user-a", 100)
+            .await
+            .unwrap();
+        assert!(
+            before.iter().any(|e| e.sync_id == good_sid),
+            "sanity check: owner must see the correctly-written Delete row \
+             before the migration runs: {before:?}"
+        );
+
+        apply_migration_file(
+            sq,
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../apps/server/migrations-sqlite/00029_fix_sync_log_watch_visibility.sql"
+            ),
+        )
+        .await;
+
+        // The correctly-written Delete row must be untouched: the owner
+        // must still see it after the migration runs. An unguarded
+        // migration nulls out its owner_user_id, making it vanish from
+        // every user's delta sync, including the owner's.
+        let after_owner = get_entries_since(&db, "ws-1", 0, "user-a", 100)
+            .await
+            .unwrap();
+        let after_owner_ids: Vec<i64> = after_owner.iter().map(|e| e.sync_id).collect();
+        assert!(
+            after_owner_ids.contains(&good_sid),
+            "migration must not clobber an already-correct Delete row's \
+             owner_user_id — owner can no longer see their own deletion: {after_owner:?}"
+        );
+        // Both rows are owned by user-a, so the owner legitimately sees
+        // both after the fix (the leaked row's owner_user_id is correctly
+        // re-derived, not made workspace-visible).
+        assert!(
+            after_owner_ids.contains(&leaked_sid),
+            "owner must still see the (now correctly re-scoped) leaked row: {after_owner:?}"
+        );
+
+        // The corrupted row must still be fixed for a *non-owner*: user-b
+        // must no longer receive it (this migration still does its job on
+        // the row it's actually meant to correct), and must never have
+        // been able to see the correctly-written Delete row either.
+        let after_non_owner = get_entries_since(&db, "ws-1", 0, "user-b", 100)
+            .await
+            .unwrap();
+        assert!(
+            after_non_owner.is_empty(),
+            "non-owner must see neither the correctly-written Delete row \
+             nor the (now-fixed) leaked row: {after_non_owner:?}"
+        );
+    }
 }
