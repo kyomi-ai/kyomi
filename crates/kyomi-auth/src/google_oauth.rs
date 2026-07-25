@@ -526,12 +526,10 @@ pub async fn google_oauth_status_service(
 }
 
 /// Result of `google_oauth_disconnect_service`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct GoogleOAuthDisconnectResult {
-    pub success: bool,
-    pub already_disconnected: bool,
-    pub disconnected_email: Option<String>,
-}
+///
+/// Defined in `kyomi_types` because it also crosses into the WASM client as
+/// a server_fn response — see `kyomi_types::datasource_contracts`.
+pub use kyomi_types::GoogleOAuthDisconnectResult;
 
 /// Disconnect Google OAuth from a user account.
 ///
@@ -586,18 +584,16 @@ pub async fn google_oauth_disconnect_service(
 }
 
 /// A single Google Cloud project.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct GoogleProject {
-    pub project_id: String,
-    pub name: String,
-}
+///
+/// Defined in `kyomi_types` because it also crosses into the WASM client as
+/// a server_fn response — see `kyomi_types::datasource_contracts`.
+pub use kyomi_types::GoogleProject;
 
 /// Result of `google_oauth_projects_service`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct GoogleOAuthProjectsResult {
-    pub projects: Vec<GoogleProject>,
-    pub message: Option<String>,
-}
+///
+/// Defined in `kyomi_types` because it also crosses into the WASM client as
+/// a server_fn response — see `kyomi_types::datasource_contracts`.
+pub use kyomi_types::GoogleOAuthProjectsResult;
 
 /// List Google Cloud projects accessible to the authenticated user.
 ///

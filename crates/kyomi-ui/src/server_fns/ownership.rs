@@ -18,6 +18,11 @@ use serde::{Deserialize, Serialize};
 /// This is a slimmer type than `OwnershipTransferData` in `types.rs` — it
 /// includes the workspace name (resolved from the workspace record) and
 /// only the fields the page actually needs.
+///
+/// Not a duplicate of `kyomi_core::models::OwnershipTransfer`: that one is
+/// the full `sqlx::FromRow` DB row for the `ownership_transfers` table;
+/// this is a page-view DTO with `workspace_name`/`from_user_email` resolved
+/// by a join, and no other DB-row fields.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OwnershipTransfer {
     pub transfer_id: String,

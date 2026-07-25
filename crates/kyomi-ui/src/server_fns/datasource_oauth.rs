@@ -36,26 +36,13 @@ pub struct GoogleOAuthStatus {
 }
 
 /// A single Google Cloud project returned by `get_google_oauth_projects`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct GoogleProject {
-    pub project_id: String,
-    pub name: String,
-}
+pub use kyomi_types::GoogleProject;
 
 /// Project list returned by `get_google_oauth_projects`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct GoogleOAuthProjectsResult {
-    pub projects: Vec<GoogleProject>,
-    pub message: Option<String>,
-}
+pub use kyomi_types::GoogleOAuthProjectsResult;
 
 /// Result of disconnecting a Google OAuth account.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct GoogleOAuthDisconnectResult {
-    pub success: bool,
-    pub already_disconnected: bool,
-    pub disconnected_email: Option<String>,
-}
+pub use kyomi_types::GoogleOAuthDisconnectResult;
 
 /// Connection status for a user's per-datasource OAuth account.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -69,15 +56,15 @@ pub struct DatasourceOAuthStatus {
 }
 
 /// Result of disconnecting per-datasource OAuth credentials.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct DatasourceOAuthDisconnectResult {
-    pub success: bool,
-    pub already_disconnected: bool,
-}
+pub use kyomi_types::DatasourceOAuthDisconnectResult;
 
 // ---------------------------------------------------------------------------
 // From conversions — server-side only (kyomi_auth is an ssr-only dep)
 // ---------------------------------------------------------------------------
+//
+// `GoogleOAuthStatus`/`DatasourceOAuthStatus` are shadow types of the
+// differently-named `GoogleOAuthStatusResult`/`DatasourceOAuthStatusResult`
+// server types, so they still need an explicit conversion.
 
 #[cfg(feature = "ssr")]
 impl From<kyomi_auth::google_oauth::GoogleOAuthStatusResult> for GoogleOAuthStatus {
@@ -94,34 +81,6 @@ impl From<kyomi_auth::google_oauth::GoogleOAuthStatusResult> for GoogleOAuthStat
 }
 
 #[cfg(feature = "ssr")]
-impl From<kyomi_auth::google_oauth::GoogleProject> for GoogleProject {
-    fn from(p: kyomi_auth::google_oauth::GoogleProject) -> Self {
-        Self { project_id: p.project_id, name: p.name }
-    }
-}
-
-#[cfg(feature = "ssr")]
-impl From<kyomi_auth::google_oauth::GoogleOAuthProjectsResult> for GoogleOAuthProjectsResult {
-    fn from(r: kyomi_auth::google_oauth::GoogleOAuthProjectsResult) -> Self {
-        Self {
-            projects: r.projects.into_iter().map(Into::into).collect(),
-            message: r.message,
-        }
-    }
-}
-
-#[cfg(feature = "ssr")]
-impl From<kyomi_auth::google_oauth::GoogleOAuthDisconnectResult> for GoogleOAuthDisconnectResult {
-    fn from(r: kyomi_auth::google_oauth::GoogleOAuthDisconnectResult) -> Self {
-        Self {
-            success: r.success,
-            already_disconnected: r.already_disconnected,
-            disconnected_email: r.disconnected_email,
-        }
-    }
-}
-
-#[cfg(feature = "ssr")]
 impl From<kyomi_auth::datasource_oauth::DatasourceOAuthStatusResult> for DatasourceOAuthStatus {
     fn from(r: kyomi_auth::datasource_oauth::DatasourceOAuthStatusResult) -> Self {
         Self {
@@ -132,15 +91,6 @@ impl From<kyomi_auth::datasource_oauth::DatasourceOAuthStatusResult> for Datasou
             connect_url: r.connect_url,
             disconnect_url: r.disconnect_url,
         }
-    }
-}
-
-#[cfg(feature = "ssr")]
-impl From<kyomi_auth::datasource_oauth::DatasourceOAuthDisconnectResult>
-    for DatasourceOAuthDisconnectResult
-{
-    fn from(r: kyomi_auth::datasource_oauth::DatasourceOAuthDisconnectResult) -> Self {
-        Self { success: r.success, already_disconnected: r.already_disconnected }
     }
 }
 
@@ -212,7 +162,6 @@ pub async fn get_google_oauth_projects() -> Result<GoogleOAuthProjectsResult, Se
         tracing::error!(error = %e, "google_oauth_projects_service error");
         ServerFnError::new(format!("{e}"))
     })
-    .map(Into::into)
 }
 
 /// Disconnect the Google OAuth account from the authenticated user.
@@ -235,7 +184,6 @@ pub async fn disconnect_google_oauth() -> Result<GoogleOAuthDisconnectResult, Se
     google_oauth_disconnect_service(ac.db(), &ac.auth.user_id, &encryption_key)
         .await
         .into_sfn()
-        .map(Into::into)
 }
 
 /// Get the OAuth connection status for a per-datasource provider.
@@ -309,5 +257,4 @@ pub async fn disconnect_datasource_oauth(
     )
     .await
     .into_sfn()
-    .map(Into::into)
 }

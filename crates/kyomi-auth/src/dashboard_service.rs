@@ -106,6 +106,10 @@ pub enum SearchSort {
 }
 
 /// A dashboard search result with computed fields.
+///
+/// Not a duplicate of `kyomi_knowledge::vector_search::DashboardSearchResult`:
+/// that is a minimal id/title/description/score vector-search hit; this is
+/// the full dashboard record with popularity and view counts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DashboardSearchResult {
     pub dashboard_id: String,

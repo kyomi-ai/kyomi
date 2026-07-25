@@ -97,6 +97,10 @@ struct CacheEntry<T: Send + Sync + 'static> {
 /// every call site. Consumers grab the handle once via
 /// `expect_context::<QueryCache>()` and pass it around like any other
 /// `Copy` leptos signal.
+///
+/// Not a duplicate of `kyomi_core::models::QueryCache`: that is the DB row
+/// for the `query_cache` table, entirely unrelated to this in-browser
+/// reactive cache handle.
 #[derive(Clone, Copy)]
 pub struct QueryCache {
     inner: StoredValue<CacheMap>,
