@@ -1,0 +1,103 @@
+# =============================================================================
+# cargo-audit configuration
+# =============================================================================
+# Read automatically by `cargo audit` (and by the "Dependency Audit" CI job).
+#
+# Every entry in `ignore` below is a RUSTSEC advisory that is real but that we
+# cannot currently act on, either because no patched version exists or because
+# the vulnerable crate reaches us transitively through a dependency that has
+# not yet released against a fixed version.
+#
+# RULES FOR THIS FILE
+#   1. An ignore is a dated, justified exception — never a way to silence a
+#      finding we could actually fix. If a fix exists, take the fix.
+#   2. Every entry states: what reaches it, why we cannot move, and what has to
+#      change upstream before it can be removed.
+#   3. Re-check the whole list whenever `cargo update` runs. Entries whose
+#      blocker has cleared must be removed in the same PR that clears them.
+#
+# Last full review: 2026-07-25
+# =============================================================================
+
+[advisories]
+ignore = [
+    # -------------------------------------------------------------------------
+    # quick-xml 0.38.4 — no upstream release exists that we can reach
+    # -------------------------------------------------------------------------
+    # Path: citationberg 0.6.1 <- hayagriva 0.9.1 <- typst-library 0.14.2
+    #       <- typst / typst-as-lib <- kyomi-agent (PDF report rendering).
+    #
+    # Patched in quick-xml >= 0.41.0, but citationberg 0.7.0 (its latest
+    # release, verified against crates.io 2026-07-25) still declares
+    # `quick-xml = "^0.38.1"`, and hayagriva 0.10.1 declares
+    # `citationberg = "^0.7.0"`. Bumping typst 0.14 -> 0.15 therefore does NOT
+    # move quick-xml off 0.38.x — it only changes which old version we pin.
+    #
+    # Impact is bounded: this copy of quick-xml only ever parses CSL citation
+    # style files that ship inside typst itself. It never sees user input.
+    #
+    # Remove when: citationberg releases against quick-xml >= 0.41.
+    "RUSTSEC-2026-0194", # quadratic run time checking a start tag for duplicate attribute names
+    "RUSTSEC-2026-0195", # unbounded namespace-declaration allocation in NsReader (memory-exhaustion DoS)
+
+    # -------------------------------------------------------------------------
+    # rsa 0.9.10 — no patched version exists, at all
+    # -------------------------------------------------------------------------
+    # Marvin Attack: potential key recovery through timing sidechannels.
+    # The advisory lists NO patched versions; the RustCrypto fix landed only in
+    # the 0.10.0-rc line, which is still pre-release.
+    #
+    # Reaches us through five independent paths, none of which we control:
+    #   sqlx-mysql, jsonwebtoken, crypto-glue (webauthn-rs / passkeys),
+    #   superboring (web-push-native), and ssh-key (russh).
+    #
+    # Remove when: rsa 0.10 ships stable AND the crates above adopt it.
+    "RUSTSEC-2023-0071", # Marvin Attack: potential key recovery through timing sidechannels
+
+    # -------------------------------------------------------------------------
+    # russh 0.54.5 / russh-cryptovec 0.52.0 — deliberate pin, see KYO-212
+    # -------------------------------------------------------------------------
+    # Path: kyomi-datasource 1.6.0 (`ssh` feature) <- SSH tunnel support.
+    #
+    # Patched in russh >= 0.60.3, but ~/repos/kyomi-connect pins `russh = "0.54"`
+    # on purpose (see the comment above the dependency in that repo's root
+    # Cargo.toml). russh >= 0.55 moved to the pre-release RustCrypto generation
+    # (`generic-array ^1.3.3`, `rsa =0.10.0-rc.18`), while `crypto-glue 0.1.17`
+    # — which webauthn-rs pulls in for passkeys — still requires
+    # `generic-array =0.14.7` and `rsa ^0.9.10`. Both verified against
+    # crates.io on 2026-07-25.
+    #
+    # This is the one entry in this file that is OURS to fix rather than
+    # upstream's. It needs a kyomi-connect change plus a republish, and the
+    # coexistence question has to be settled empirically first.
+    #
+    # Remove when: KYO-212 lands (russh bumped in kyomi-connect,
+    # kyomi-datasource republished, `cargo update -p kyomi-datasource` here).
+    "RUSTSEC-2026-0154", # russh: unbounded 32-bit allocation
+    "RUSTSEC-2026-0153", # russh-cryptovec: unchecked CryptoVec allocation and growth handling
+
+    # -------------------------------------------------------------------------
+    # rustls-webpki 0.101.7 — upstream dead end
+    # -------------------------------------------------------------------------
+    # Path: rustls 0.21.12 <- tokio-rustls 0.24.1 <- tiberius 0.12.3
+    #       <- kyomi-datasource (SQL Server driver).
+    #
+    # Patched in rustls-webpki >= 0.103.12/0.103.13, which requires rustls
+    # >= 0.23. tiberius 0.12.3 is its latest release (verified 2026-07-25) and
+    # still declares `tokio-rustls = "^0.24.0"`, pinning rustls to 0.21.
+    #
+    # Note this is the *SQL Server* TLS stack only. Kyomi's own HTTP/TLS paths
+    # use a current rustls (rustls-webpki 0.103.13 is also in the tree).
+    #
+    # Remove when: tiberius releases against tokio-rustls >= 0.26 / rustls
+    # >= 0.23, or kyomi-connect switches its SQL Server driver off tiberius.
+    "RUSTSEC-2026-0098", # name constraints for URI names were incorrectly accepted
+    "RUSTSEC-2026-0099", # name constraints were accepted for certificates asserting a wildcard name
+    "RUSTSEC-2026-0104", # reachable panic in certificate revocation list parsing
+]
+
+# Informational advisories (unmaintained / unsound / yanked) are reported but do
+# not fail the build. Most of the current crop are the gtk-rs GTK3 bindings
+# pulled in by tauri for the desktop app, which we do not control. Promote this
+# to a failure only alongside a plan to clear them.
+informational_warnings = ["unmaintained", "unsound", "yanked"]

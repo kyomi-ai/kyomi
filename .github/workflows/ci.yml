@@ -2,11 +2,12 @@
 # Kyomi — CI (Pull Request Checks)
 # =============================================================================
 # Runs on every PR to main, including new pushes to existing PRs.
-# Three jobs:
+# Four jobs:
 #   1. lint-policy (fast, ~5s) — rejects new #[allow(...)] suppressions AND
 #      runs the server_fn/REST divergence linter across the full tree
 #   2. trivy-scan (~30s) — Trivy filesystem vulnerability scanner (HIGH/CRITICAL)
-#   3. clippy (slow, ~2-5min) — full workspace clippy + compilation check + unit tests
+#   3. cargo-audit (fast, ~15s) — RUSTSEC advisories against Cargo.lock
+#   4. clippy (slow, ~2-5min) — full workspace clippy + compilation check + unit tests
 # =============================================================================
 
 name: CI
@@ -92,6 +93,29 @@ jobs:
           exit-code: '1'
           ignore-unfixed: true
           format: 'table'
+
+  # ---------------------------------------------------------------------------
+  # Security: RUSTSEC advisory audit of Cargo.lock
+  #
+  # Trivy (above) scans the filesystem but does not surface RUSTSEC advisories
+  # for the Rust dependency graph — eleven of them accumulated undetected
+  # before this job existed. cargo-audit reads Cargo.lock directly,
+  # so it needs no toolchain and no compilation (~15s).
+  #
+  # Known-unfixable advisories are ignored via .cargo/audit.toml, where each
+  # one carries a justification and the upstream condition for removing it.
+  # Do NOT add an ignore there to make this job green — take the fix.
+  # ---------------------------------------------------------------------------
+  cargo-audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: taiki-e/install-action@cargo-audit
+
+      - name: cargo audit
+        run: cargo audit
 
   # ---------------------------------------------------------------------------
   # Slow check: cargo clippy (compiles + lints the entire workspace)
