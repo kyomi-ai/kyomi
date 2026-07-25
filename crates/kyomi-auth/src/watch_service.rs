@@ -1659,10 +1659,18 @@ pub async fn get_alerts_history(
 // ─── Alert lifecycle ────────────────────────────────────────────────────────
 
 /// Mark an alert as read (set `read_at` to now).
+///
+/// Owner-scoped on `watch_executions.created_by` (KYO-204) — the same
+/// denormalized-column pattern used by `get_alerts_history` /
+/// `get_execution_by_id_only`. A non-owner's call zero-rows-affects
+/// silently rather than erroring: this matches the pre-existing
+/// already-read no-op behaviour and is the enumeration-safe outcome (an
+/// error here would double as an oracle for which `execution_id`s exist).
 pub async fn mark_alert_read(
     db: &DbPool,
     execution_id: i32,
     workspace_id: &str,
+    user_id: &str,
 ) -> Result<()> {
     let is_pg = db.is_postgres();
     let sql = format!(
@@ -1671,6 +1679,7 @@ pub async fn mark_alert_read(
         SET read_at = {now}
         WHERE id = $1
           AND workspace_id = $2
+          AND created_by = $3
           AND alert_triggered = {true_val}
           AND read_at IS NULL
         "#,
@@ -1678,7 +1687,7 @@ pub async fn mark_alert_read(
         true_val = sql_compat::bool_true(is_pg),
     );
 
-    let result = kyomi_core::db_execute!(db, &sql, execution_id, workspace_id)
+    let result = kyomi_core::db_execute!(db, &sql, execution_id, workspace_id, user_id)
         .map_err(|e| {
             kyomi_core::Error::Internal(format!("failed to mark alert read: {e}"))
         })?;
@@ -1690,10 +1699,14 @@ pub async fn mark_alert_read(
 }
 
 /// Mark an alert as unread (clear `read_at`).
+///
+/// Owner-scoped on `watch_executions.created_by` (KYO-204) — see
+/// `mark_alert_read` doc comment for the zero-rows-affected rationale.
 pub async fn mark_alert_unread(
     db: &DbPool,
     execution_id: i32,
     workspace_id: &str,
+    user_id: &str,
 ) -> Result<()> {
     let is_pg = db.is_postgres();
     let sql = format!(
@@ -1702,13 +1715,14 @@ pub async fn mark_alert_unread(
         SET read_at = NULL
         WHERE id = $1
           AND workspace_id = $2
+          AND created_by = $3
           AND alert_triggered = {true_val}
           AND read_at IS NOT NULL
         "#,
         true_val = sql_compat::bool_true(is_pg),
     );
 
-    let result = kyomi_core::db_execute!(db, &sql, execution_id, workspace_id)
+    let result = kyomi_core::db_execute!(db, &sql, execution_id, workspace_id, user_id)
         .map_err(|e| {
             kyomi_core::Error::Internal(format!("failed to mark alert unread: {e}"))
         })?;
@@ -1720,6 +1734,14 @@ pub async fn mark_alert_unread(
 }
 
 /// Soft-delete an alert (set `deleted_at` and `deleted_by`).
+///
+/// Owner-scoped on `watch_executions.created_by` (KYO-204). Previously
+/// `user_id` was bound only for the `deleted_by` audit column and did not
+/// gate the `WHERE` clause, so any workspace member could soft-delete
+/// another member's alert by guessing its (sequential) `execution_id`.
+/// Zero rows affected still returns `NotFound`, matching the pre-existing
+/// contract — a non-owner now lands there naturally, which is exactly
+/// right (never `Forbidden`, which would confirm the row exists).
 pub async fn delete_alert(
     db: &DbPool,
     execution_id: i32,
@@ -1733,6 +1755,7 @@ pub async fn delete_alert(
         SET deleted_at = {now}, deleted_by = $3
         WHERE id = $1
           AND workspace_id = $2
+          AND created_by = $3
           AND alert_triggered = {true_val}
         "#,
         now = sql_compat::now(is_pg),
@@ -1755,10 +1778,14 @@ pub async fn delete_alert(
 }
 
 /// Restore a soft-deleted alert (clear `deleted_at` and `deleted_by`).
+///
+/// Owner-scoped on `watch_executions.created_by` (KYO-204) — see
+/// `delete_alert` doc comment for the `NotFound`-on-zero-rows rationale.
 pub async fn restore_alert(
     db: &DbPool,
     execution_id: i32,
     workspace_id: &str,
+    user_id: &str,
 ) -> Result<()> {
     let is_pg = db.is_postgres();
     let sql = format!(
@@ -1767,12 +1794,13 @@ pub async fn restore_alert(
         SET deleted_at = NULL, deleted_by = NULL
         WHERE id = $1
           AND workspace_id = $2
+          AND created_by = $3
           AND alert_triggered = {true_val}
         "#,
         true_val = sql_compat::bool_true(is_pg),
     );
 
-    let result = kyomi_core::db_execute!(db, &sql, execution_id, workspace_id)
+    let result = kyomi_core::db_execute!(db, &sql, execution_id, workspace_id, user_id)
         .map_err(|e| {
             kyomi_core::Error::Internal(format!("failed to restore alert: {e}"))
         })?;
@@ -1790,6 +1818,23 @@ pub async fn restore_alert(
 // ─── Bulk operations ────────────────────────────────────────────────────────
 
 /// Soft-delete multiple alerts at once. Returns the number of rows affected.
+///
+/// Owner-scoped on `watch_executions.created_by` (KYO-204). Previously
+/// `user_id` was bound only for the `deleted_by` audit column and did not
+/// gate the `WHERE` clause, so any workspace member could soft-delete
+/// another member's alerts by guessing their (sequential) `execution_id`s
+/// — this was in fact a more convenient attack surface than the
+/// single-alert `delete_alert`, since a whole ID range could be swept in
+/// one call.
+///
+/// The returned count reflects only rows the caller actually owns —
+/// non-owned ids in the batch are silently filtered out by the `WHERE`
+/// clause, not treated as an error. This is deliberate: a mixed batch is
+/// the normal shape for a UI "select all" action (a user's own alerts
+/// mixed with, say, a stale client-side selection), not an attack, and
+/// failing the whole batch on a single non-owned id would be a worse user
+/// experience for no security benefit. Callers must not treat
+/// `count < execution_ids.len()` as an error condition.
 pub async fn bulk_delete_alerts(
     db: &DbPool,
     execution_ids: &[i32],
@@ -1813,6 +1858,7 @@ pub async fn bulk_delete_alerts(
         SET deleted_at = {now}, deleted_by = $2
         WHERE id IN ({ids})
           AND workspace_id = $1
+          AND created_by = $2
           AND alert_triggered = {true_val}
           AND deleted_at IS NULL
         "#,
@@ -1838,10 +1884,17 @@ pub async fn bulk_delete_alerts(
 }
 
 /// Mark multiple alerts as read at once. Returns the number of rows affected.
+///
+/// Owner-scoped on `watch_executions.created_by` (KYO-204) — see
+/// `bulk_delete_alerts` doc comment for the mixed-batch-count rationale:
+/// non-owned ids are silently filtered out, not treated as an error, so
+/// callers must not treat `count < execution_ids.len()` as an error
+/// condition.
 pub async fn bulk_mark_alerts_read(
     db: &DbPool,
     execution_ids: &[i32],
     workspace_id: &str,
+    user_id: &str,
 ) -> Result<u64> {
     if execution_ids.is_empty() {
         return Ok(0);
@@ -1850,7 +1903,7 @@ pub async fn bulk_mark_alerts_read(
     let is_pg = db.is_postgres();
 
     let placeholders: Vec<String> = (0..execution_ids.len())
-        .map(|i| format!("${}", i + 2)) // $1 = workspace_id
+        .map(|i| format!("${}", i + 3)) // $1 = workspace_id, $2 = user_id
         .collect();
 
     let sql = format!(
@@ -1859,6 +1912,7 @@ pub async fn bulk_mark_alerts_read(
         SET read_at = {now}
         WHERE id IN ({ids})
           AND workspace_id = $1
+          AND created_by = $2
           AND alert_triggered = {true_val}
           AND read_at IS NULL
         "#,
@@ -1869,7 +1923,7 @@ pub async fn bulk_mark_alerts_read(
 
     // Dynamic SQL with variable-length bind chain — identical for both backends.
     let count = kyomi_core::db_with_pool!(db, |p| {
-        let mut query = sqlx::query(&sql).bind(workspace_id);
+        let mut query = sqlx::query(&sql).bind(workspace_id).bind(user_id);
         for id in execution_ids {
             query = query.bind(id);
         }
@@ -1884,10 +1938,17 @@ pub async fn bulk_mark_alerts_read(
 }
 
 /// Mark multiple alerts as unread at once. Returns the number of rows affected.
+///
+/// Owner-scoped on `watch_executions.created_by` (KYO-204) — see
+/// `bulk_delete_alerts` doc comment for the mixed-batch-count rationale:
+/// non-owned ids are silently filtered out, not treated as an error, so
+/// callers must not treat `count < execution_ids.len()` as an error
+/// condition.
 pub async fn bulk_mark_alerts_unread(
     db: &DbPool,
     execution_ids: &[i32],
     workspace_id: &str,
+    user_id: &str,
 ) -> Result<u64> {
     if execution_ids.is_empty() {
         return Ok(0);
@@ -1896,7 +1957,7 @@ pub async fn bulk_mark_alerts_unread(
     let is_pg = db.is_postgres();
 
     let placeholders: Vec<String> = (0..execution_ids.len())
-        .map(|i| format!("${}", i + 2)) // $1 = workspace_id
+        .map(|i| format!("${}", i + 3)) // $1 = workspace_id, $2 = user_id
         .collect();
 
     let sql = format!(
@@ -1905,6 +1966,7 @@ pub async fn bulk_mark_alerts_unread(
         SET read_at = NULL
         WHERE id IN ({ids})
           AND workspace_id = $1
+          AND created_by = $2
           AND alert_triggered = {true_val}
           AND read_at IS NOT NULL
         "#,
@@ -1914,7 +1976,7 @@ pub async fn bulk_mark_alerts_unread(
 
     // Dynamic SQL with variable-length bind chain — identical for both backends.
     let count = kyomi_core::db_with_pool!(db, |p| {
-        let mut query = sqlx::query(&sql).bind(workspace_id);
+        let mut query = sqlx::query(&sql).bind(workspace_id).bind(user_id);
         for id in execution_ids {
             query = query.bind(id);
         }
@@ -2684,22 +2746,26 @@ mod privacy_tests {
     /// Insert a triggered, unread watch_execution row directly (no service fn
     /// exists for this — `create_execution`/`complete_execution` don't set
     /// `alert_triggered`, so tests build the row by hand like the rest of the
-    /// alerts-lifecycle tests in this crate do).
-    async fn insert_triggered_alert(pool: &DbPool, watch_id: &str, created_by: &str) {
+    /// alerts-lifecycle tests in this crate do). Returns the new execution's
+    /// `id`, needed by the alert-lifecycle (mark read/unread, delete/restore,
+    /// bulk) tests to address the row.
+    async fn insert_triggered_alert(pool: &DbPool, watch_id: &str, created_by: &str) -> i32 {
         let sq = match pool {
             DbPool::Sqlite(sq) => sq,
             _ => unreachable!(),
         };
-        sqlx::query(
+        let row: (i32,) = sqlx::query_as(
             "INSERT INTO watch_executions \
              (watch_id, workspace_id, status, alert_triggered, started_at, completed_at, created_by) \
-             VALUES ($1, 'ws-1', 'success', 1, datetime('now'), datetime('now'), $2)",
+             VALUES ($1, 'ws-1', 'success', 1, datetime('now'), datetime('now'), $2) \
+             RETURNING id",
         )
         .bind(watch_id)
         .bind(created_by)
-        .execute(sq)
+        .fetch_one(sq)
         .await
         .expect("insert triggered alert");
+        row.0
     }
 
     // ── list_watches_for_sync ────────────────────────────────────────────
@@ -3288,6 +3354,452 @@ mod privacy_tests {
                 .iter()
                 .any(|m| m.content.contains("Revenue is stable this week")),
             "owner's session must contain the alert's agent_response"
+        );
+    }
+
+    // ── Alert mutation IDOR guards (KYO-204) ─────────────────────────────
+    //
+    // `mark_alert_read`, `mark_alert_unread`, `delete_alert`, `restore_alert`,
+    // `bulk_delete_alerts`, `bulk_mark_alerts_read`, and
+    // `bulk_mark_alerts_unread` all previously scoped their `WHERE` clause on
+    // `workspace_id` alone (any `user_id` bind was for an audit column only,
+    // e.g. `deleted_by`), so any workspace member could mutate another
+    // member's alerts by guessing a sequential `execution_id`. All seven now
+    // filter on `watch_executions.created_by`, matching the read-path
+    // precedent set by `get_alerts_history` / `get_execution_by_id_only`
+    // (KYO-179). `bulk_delete_alerts` was not in the original ticket's gap
+    // table — it was found to have the identical defect while auditing
+    // `delete_alert`'s callers, and is covered here alongside the other six.
+    //
+    // Every non-owner test asserts both the call's own contract (error, or
+    // `Ok` with zero/partial rows affected — per that function's existing
+    // zero-rows behaviour) AND that the target row is genuinely unchanged,
+    // re-read via the already-privacy-scoped `get_execution_by_id_only` as
+    // the owner. A fix that mutates the row and then merely reports failure
+    // would still pass a return-value-only assertion.
+
+    #[tokio::test]
+    async fn mark_alert_read_rejects_non_owner_and_leaves_alert_unchanged() {
+        let pool = test_pool().await;
+        seed_workspace_with_two_users(&pool).await;
+
+        let wa = create_test_watch(&pool, "user-a", "A's Alert Watch").await;
+        let execution_id = insert_triggered_alert(&pool, &wa.watch_id, "user-a").await;
+
+        mark_alert_read(&pool, execution_id, "ws-1", "user-b")
+            .await
+            .expect("mark_alert_read must not error for a non-owner (silent no-op)");
+
+        let refetched = get_execution_by_id_only(&pool, execution_id, "ws-1", "user-a")
+            .await
+            .expect("get_execution_by_id_only as owner")
+            .expect("execution must still exist");
+        assert!(
+            refetched.read_at.is_none(),
+            "user-b's mark_alert_read must not have marked user-a's alert as read"
+        );
+    }
+
+    #[tokio::test]
+    async fn mark_alert_unread_rejects_non_owner_and_leaves_alert_unchanged() {
+        let pool = test_pool().await;
+        seed_workspace_with_two_users(&pool).await;
+
+        let wa = create_test_watch(&pool, "user-a", "A's Alert Watch").await;
+        let execution_id = insert_triggered_alert(&pool, &wa.watch_id, "user-a").await;
+
+        // Owner marks it read first so there's a read_at value to protect.
+        mark_alert_read(&pool, execution_id, "ws-1", "user-a")
+            .await
+            .expect("owner's mark_alert_read must succeed");
+        let read_at_before = get_execution_by_id_only(&pool, execution_id, "ws-1", "user-a")
+            .await
+            .expect("get_execution_by_id_only as owner")
+            .expect("execution must exist")
+            .read_at
+            .expect("read_at must be set after owner marks read");
+
+        mark_alert_unread(&pool, execution_id, "ws-1", "user-b")
+            .await
+            .expect("mark_alert_unread must not error for a non-owner (silent no-op)");
+
+        let refetched = get_execution_by_id_only(&pool, execution_id, "ws-1", "user-a")
+            .await
+            .expect("get_execution_by_id_only as owner")
+            .expect("execution must still exist");
+        assert_eq!(
+            refetched.read_at,
+            Some(read_at_before),
+            "user-b's mark_alert_unread must not have cleared user-a's read_at"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_alert_rejects_non_owner_and_leaves_alert_unchanged() {
+        let pool = test_pool().await;
+        seed_workspace_with_two_users(&pool).await;
+
+        let wa = create_test_watch(&pool, "user-a", "A's Alert Watch").await;
+        let execution_id = insert_triggered_alert(&pool, &wa.watch_id, "user-a").await;
+
+        let result = delete_alert(&pool, execution_id, "ws-1", "user-b").await;
+        assert!(
+            matches!(result, Err(kyomi_core::Error::NotFound(_))),
+            "user-b's delete of user-a's alert must fail with NotFound, got: {result:?}"
+        );
+
+        let refetched = get_execution_by_id_only(&pool, execution_id, "ws-1", "user-a")
+            .await
+            .expect("get_execution_by_id_only as owner")
+            .expect("execution must still exist");
+        assert!(
+            refetched.deleted_at.is_none(),
+            "alert must not be soft-deleted by a non-owner"
+        );
+        assert!(
+            refetched.deleted_by.is_none(),
+            "deleted_by must not be set by a non-owner"
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_alert_rejects_non_owner_and_leaves_alert_unchanged() {
+        let pool = test_pool().await;
+        seed_workspace_with_two_users(&pool).await;
+
+        let wa = create_test_watch(&pool, "user-a", "A's Alert Watch").await;
+        let execution_id = insert_triggered_alert(&pool, &wa.watch_id, "user-a").await;
+
+        // Owner deletes it first so there's a deleted state to protect.
+        delete_alert(&pool, execution_id, "ws-1", "user-a")
+            .await
+            .expect("owner's delete_alert must succeed");
+        let deleted_state = get_execution_by_id_only(&pool, execution_id, "ws-1", "user-a")
+            .await
+            .expect("get_execution_by_id_only as owner")
+            .expect("execution must exist");
+        let deleted_at_before = deleted_state
+            .deleted_at
+            .expect("deleted_at must be set after owner deletes");
+        let deleted_by_before = deleted_state.deleted_by.clone();
+        assert_eq!(deleted_by_before.as_deref(), Some("user-a"));
+
+        let result = restore_alert(&pool, execution_id, "ws-1", "user-b").await;
+        assert!(
+            matches!(result, Err(kyomi_core::Error::NotFound(_))),
+            "user-b's restore of user-a's alert must fail with NotFound, got: {result:?}"
+        );
+
+        let refetched = get_execution_by_id_only(&pool, execution_id, "ws-1", "user-a")
+            .await
+            .expect("get_execution_by_id_only as owner")
+            .expect("execution must still exist");
+        assert_eq!(
+            refetched.deleted_at,
+            Some(deleted_at_before),
+            "deleted_at must be unchanged by a non-owner's restore attempt"
+        );
+        assert_eq!(
+            refetched.deleted_by, deleted_by_before,
+            "deleted_by must be unchanged by a non-owner's restore attempt"
+        );
+    }
+
+    #[tokio::test]
+    async fn bulk_delete_alerts_rejects_non_owner_and_leaves_alert_unchanged() {
+        let pool = test_pool().await;
+        seed_workspace_with_two_users(&pool).await;
+
+        let wa = create_test_watch(&pool, "user-a", "A's Alert Watch").await;
+        let execution_id = insert_triggered_alert(&pool, &wa.watch_id, "user-a").await;
+
+        let count = bulk_delete_alerts(&pool, &[execution_id], "ws-1", "user-b")
+            .await
+            .expect("bulk_delete_alerts must not error for a non-owner batch");
+        assert_eq!(
+            count, 0,
+            "bulk_delete_alerts must not affect any rows for a non-owned id"
+        );
+
+        let refetched = get_execution_by_id_only(&pool, execution_id, "ws-1", "user-a")
+            .await
+            .expect("get_execution_by_id_only as owner")
+            .expect("execution must still exist");
+        assert!(
+            refetched.deleted_at.is_none(),
+            "alert must not be soft-deleted by a non-owner's bulk delete"
+        );
+    }
+
+    #[tokio::test]
+    async fn bulk_mark_alerts_read_rejects_non_owner_and_leaves_alert_unchanged() {
+        let pool = test_pool().await;
+        seed_workspace_with_two_users(&pool).await;
+
+        let wa = create_test_watch(&pool, "user-a", "A's Alert Watch").await;
+        let execution_id = insert_triggered_alert(&pool, &wa.watch_id, "user-a").await;
+
+        let count = bulk_mark_alerts_read(&pool, &[execution_id], "ws-1", "user-b")
+            .await
+            .expect("bulk_mark_alerts_read must not error for a non-owner batch");
+        assert_eq!(
+            count, 0,
+            "bulk_mark_alerts_read must not affect any rows for a non-owned id"
+        );
+
+        let refetched = get_execution_by_id_only(&pool, execution_id, "ws-1", "user-a")
+            .await
+            .expect("get_execution_by_id_only as owner")
+            .expect("execution must still exist");
+        assert!(
+            refetched.read_at.is_none(),
+            "alert must not be marked read by a non-owner's bulk mark-read"
+        );
+    }
+
+    #[tokio::test]
+    async fn bulk_mark_alerts_unread_rejects_non_owner_and_leaves_alert_unchanged() {
+        let pool = test_pool().await;
+        seed_workspace_with_two_users(&pool).await;
+
+        let wa = create_test_watch(&pool, "user-a", "A's Alert Watch").await;
+        let execution_id = insert_triggered_alert(&pool, &wa.watch_id, "user-a").await;
+
+        mark_alert_read(&pool, execution_id, "ws-1", "user-a")
+            .await
+            .expect("owner's mark_alert_read must succeed");
+        let read_at_before = get_execution_by_id_only(&pool, execution_id, "ws-1", "user-a")
+            .await
+            .expect("get_execution_by_id_only as owner")
+            .expect("execution must exist")
+            .read_at
+            .expect("read_at must be set");
+
+        let count = bulk_mark_alerts_unread(&pool, &[execution_id], "ws-1", "user-b")
+            .await
+            .expect("bulk_mark_alerts_unread must not error for a non-owner batch");
+        assert_eq!(
+            count, 0,
+            "bulk_mark_alerts_unread must not affect any rows for a non-owned id"
+        );
+
+        let refetched = get_execution_by_id_only(&pool, execution_id, "ws-1", "user-a")
+            .await
+            .expect("get_execution_by_id_only as owner")
+            .expect("execution must still exist");
+        assert_eq!(
+            refetched.read_at,
+            Some(read_at_before),
+            "read_at must be unchanged by a non-owner's bulk mark-unread"
+        );
+    }
+
+    #[tokio::test]
+    async fn owner_can_still_mark_delete_restore_and_bulk_mutate_their_own_alerts() {
+        let pool = test_pool().await;
+        seed_workspace_with_two_users(&pool).await;
+
+        let wa = create_test_watch(&pool, "user-a", "A's Lifecycle Watch").await;
+
+        // mark_alert_read / mark_alert_unread as owner.
+        let exec1 = insert_triggered_alert(&pool, &wa.watch_id, "user-a").await;
+        mark_alert_read(&pool, exec1, "ws-1", "user-a")
+            .await
+            .expect("owner's mark_alert_read must succeed");
+        let after_read = get_execution_by_id_only(&pool, exec1, "ws-1", "user-a")
+            .await
+            .expect("get_execution_by_id_only")
+            .expect("execution must exist");
+        assert!(
+            after_read.read_at.is_some(),
+            "owner's mark_alert_read must take effect"
+        );
+
+        mark_alert_unread(&pool, exec1, "ws-1", "user-a")
+            .await
+            .expect("owner's mark_alert_unread must succeed");
+        let after_unread = get_execution_by_id_only(&pool, exec1, "ws-1", "user-a")
+            .await
+            .expect("get_execution_by_id_only")
+            .expect("execution must exist");
+        assert!(
+            after_unread.read_at.is_none(),
+            "owner's mark_alert_unread must take effect"
+        );
+
+        // delete_alert / restore_alert as owner.
+        let exec2 = insert_triggered_alert(&pool, &wa.watch_id, "user-a").await;
+        delete_alert(&pool, exec2, "ws-1", "user-a")
+            .await
+            .expect("owner's delete_alert must succeed");
+        let after_delete = get_execution_by_id_only(&pool, exec2, "ws-1", "user-a")
+            .await
+            .expect("get_execution_by_id_only")
+            .expect("execution must exist");
+        assert!(
+            after_delete.deleted_at.is_some(),
+            "owner's delete_alert must take effect"
+        );
+        assert_eq!(after_delete.deleted_by.as_deref(), Some("user-a"));
+
+        restore_alert(&pool, exec2, "ws-1", "user-a")
+            .await
+            .expect("owner's restore_alert must succeed");
+        let after_restore = get_execution_by_id_only(&pool, exec2, "ws-1", "user-a")
+            .await
+            .expect("get_execution_by_id_only")
+            .expect("execution must exist");
+        assert!(
+            after_restore.deleted_at.is_none(),
+            "owner's restore_alert must take effect"
+        );
+        assert!(after_restore.deleted_by.is_none());
+
+        // Bulk ops as owner.
+        let exec3 = insert_triggered_alert(&pool, &wa.watch_id, "user-a").await;
+        let exec4 = insert_triggered_alert(&pool, &wa.watch_id, "user-a").await;
+
+        let read_count = bulk_mark_alerts_read(&pool, &[exec3, exec4], "ws-1", "user-a")
+            .await
+            .expect("owner's bulk_mark_alerts_read must succeed");
+        assert_eq!(
+            read_count, 2,
+            "owner's bulk_mark_alerts_read must affect both rows"
+        );
+
+        let unread_count = bulk_mark_alerts_unread(&pool, &[exec3, exec4], "ws-1", "user-a")
+            .await
+            .expect("owner's bulk_mark_alerts_unread must succeed");
+        assert_eq!(
+            unread_count, 2,
+            "owner's bulk_mark_alerts_unread must affect both rows"
+        );
+
+        let delete_count = bulk_delete_alerts(&pool, &[exec3, exec4], "ws-1", "user-a")
+            .await
+            .expect("owner's bulk_delete_alerts must succeed");
+        assert_eq!(
+            delete_count, 2,
+            "owner's bulk_delete_alerts must affect both rows"
+        );
+    }
+
+    #[tokio::test]
+    async fn bulk_delete_alerts_mixed_batch_affects_only_callers_own_alert() {
+        let pool = test_pool().await;
+        seed_workspace_with_two_users(&pool).await;
+
+        let wa = create_test_watch(&pool, "user-a", "A's Watch").await;
+        let wb = create_test_watch(&pool, "user-b", "B's Watch").await;
+        let exec_a = insert_triggered_alert(&pool, &wa.watch_id, "user-a").await;
+        let exec_b = insert_triggered_alert(&pool, &wb.watch_id, "user-b").await;
+
+        let count = bulk_delete_alerts(&pool, &[exec_a, exec_b], "ws-1", "user-b")
+            .await
+            .expect("bulk_delete_alerts for a mixed batch must not error");
+        assert_eq!(
+            count, 1,
+            "mixed batch must only affect the caller's own alert"
+        );
+
+        let a_state = get_execution_by_id_only(&pool, exec_a, "ws-1", "user-a")
+            .await
+            .expect("get_execution_by_id_only for A")
+            .expect("A's execution must still exist");
+        assert!(
+            a_state.deleted_at.is_none(),
+            "A's alert must be untouched by B's mixed-batch delete"
+        );
+
+        let b_state = get_execution_by_id_only(&pool, exec_b, "ws-1", "user-b")
+            .await
+            .expect("get_execution_by_id_only for B")
+            .expect("B's execution must still exist");
+        assert!(
+            b_state.deleted_at.is_some(),
+            "B's own alert must have been deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn bulk_mark_alerts_read_mixed_batch_affects_only_callers_own_alert() {
+        let pool = test_pool().await;
+        seed_workspace_with_two_users(&pool).await;
+
+        let wa = create_test_watch(&pool, "user-a", "A's Watch").await;
+        let wb = create_test_watch(&pool, "user-b", "B's Watch").await;
+        let exec_a = insert_triggered_alert(&pool, &wa.watch_id, "user-a").await;
+        let exec_b = insert_triggered_alert(&pool, &wb.watch_id, "user-b").await;
+
+        let count = bulk_mark_alerts_read(&pool, &[exec_a, exec_b], "ws-1", "user-b")
+            .await
+            .expect("bulk_mark_alerts_read for a mixed batch must not error");
+        assert_eq!(
+            count, 1,
+            "mixed batch must only affect the caller's own alert"
+        );
+
+        let a_state = get_execution_by_id_only(&pool, exec_a, "ws-1", "user-a")
+            .await
+            .expect("get_execution_by_id_only for A")
+            .expect("A's execution must still exist");
+        assert!(
+            a_state.read_at.is_none(),
+            "A's alert must be untouched by B's mixed-batch mark-read"
+        );
+
+        let b_state = get_execution_by_id_only(&pool, exec_b, "ws-1", "user-b")
+            .await
+            .expect("get_execution_by_id_only for B")
+            .expect("B's execution must still exist");
+        assert!(
+            b_state.read_at.is_some(),
+            "B's own alert must have been marked read"
+        );
+    }
+
+    #[tokio::test]
+    async fn bulk_mark_alerts_unread_mixed_batch_affects_only_callers_own_alert() {
+        let pool = test_pool().await;
+        seed_workspace_with_two_users(&pool).await;
+
+        let wa = create_test_watch(&pool, "user-a", "A's Watch").await;
+        let wb = create_test_watch(&pool, "user-b", "B's Watch").await;
+        let exec_a = insert_triggered_alert(&pool, &wa.watch_id, "user-a").await;
+        let exec_b = insert_triggered_alert(&pool, &wb.watch_id, "user-b").await;
+
+        // Both start read so there's an unread transition to protect/apply.
+        mark_alert_read(&pool, exec_a, "ws-1", "user-a")
+            .await
+            .expect("owner's mark_alert_read for A must succeed");
+        mark_alert_read(&pool, exec_b, "ws-1", "user-b")
+            .await
+            .expect("owner's mark_alert_read for B must succeed");
+
+        let count = bulk_mark_alerts_unread(&pool, &[exec_a, exec_b], "ws-1", "user-b")
+            .await
+            .expect("bulk_mark_alerts_unread for a mixed batch must not error");
+        assert_eq!(
+            count, 1,
+            "mixed batch must only affect the caller's own alert"
+        );
+
+        let a_state = get_execution_by_id_only(&pool, exec_a, "ws-1", "user-a")
+            .await
+            .expect("get_execution_by_id_only for A")
+            .expect("A's execution must still exist");
+        assert!(
+            a_state.read_at.is_some(),
+            "A's alert must still be read — untouched by B's mixed-batch mark-unread"
+        );
+
+        let b_state = get_execution_by_id_only(&pool, exec_b, "ws-1", "user-b")
+            .await
+            .expect("get_execution_by_id_only for B")
+            .expect("B's execution must still exist");
+        assert!(
+            b_state.read_at.is_none(),
+            "B's own alert must have been marked unread"
         );
     }
 }
