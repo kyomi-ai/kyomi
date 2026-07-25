@@ -41,6 +41,10 @@ pub struct ColumnSearchResult {
 }
 
 /// A learning hit from vector search.
+///
+/// Not a duplicate of `kyomi_auth::learning_service::LearningSearchResult`:
+/// that flattens a whole `LearningRecord` plus four hybrid-search scores;
+/// this is a minimal id/insight/title/score hit.
 #[derive(Debug, Clone)]
 pub struct LearningSearchResult {
     pub learning_id: String,
@@ -62,6 +66,10 @@ pub struct QueryHistorySearchResult {
 }
 
 /// A dashboard hit from vector search.
+///
+/// Not a duplicate of `kyomi_auth::dashboard_service::DashboardSearchResult`:
+/// that is a full dashboard record with popularity/view counts for the
+/// dashboards search page; this is a minimal id/title/description/score hit.
 #[derive(Debug, Clone)]
 pub struct DashboardSearchResult {
     pub dashboard_id: String,

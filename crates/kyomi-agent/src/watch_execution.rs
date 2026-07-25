@@ -27,7 +27,7 @@ use tracing::{error, info, warn};
 
 use kyomi_auth::websocket::helpers as ws_helpers;
 use kyomi_auth::websocket::WebSocketManager;
-use kyomi_auth::{chat_service, learning_service, watch_service};
+use kyomi_auth::{chat_service, learning_service, user_service, watch_service};
 use kyomi_core::models::Watch;
 use kyomi_core::platform::PlatformRegistry;
 use kyomi_core::{capability, DbPool, KVPool, WatchMode};
@@ -1009,6 +1009,29 @@ async fn execute_watch_inner(
         ));
     }
 
+    // Resolve the creator's current workspace role so it can be threaded
+    // into the agent's ToolContext (gates admin-only tools, e.g. analytics
+    // site management). Membership was just confirmed active above, so a
+    // `None` result here means membership was revoked in the narrow window
+    // between that check and this lookup — treat it as an error rather
+    // than silently running the agent as a non-admin, which would mask a
+    // real race instead of surfacing it.
+    let creator_workspace_roles = vec![
+        user_service::get_workspace_user(db, &watch.workspace_id, &watch.created_by)
+            .await
+            .map_err(|e| {
+                kyomi_core::Error::Internal(format!(
+                    "failed to load watch creator's workspace role: {e}"
+                ))
+            })?
+            .ok_or_else(|| {
+                kyomi_core::Error::Internal(
+                    "Watch creator's workspace membership disappeared between checks".into(),
+                )
+            })?
+            .role,
+    ];
+
     // Send WebSocket state update: running (after validation checks pass)
     ws_helpers::send_watch_state_update(ws_manager, &watch.created_by, &watch.watch_id, "running")
         .await;
@@ -1184,6 +1207,7 @@ async fn execute_watch_inner(
         conversation_history: None,
         user_display_name: "Kyomi Watch".to_string(),
         context_window: 0,
+        workspace_roles: creator_workspace_roles.clone(),
     };
 
     let lazy_embedding = kyomi_embed::LazyEmbedding::loaded(embedding.clone());
@@ -1290,6 +1314,7 @@ async fn execute_watch_inner(
                         conversation_history: None,
                         user_display_name: "Kyomi Watch".to_string(),
                         context_window: 0,
+                        workspace_roles: creator_workspace_roles.clone(),
                     };
 
                     let lazy_embedding_retry = kyomi_embed::LazyEmbedding::loaded(embedding.clone());

@@ -67,6 +67,10 @@ pub struct LearningRecord {
 }
 
 /// A learning record with search scores (hybrid search result).
+///
+/// Not a duplicate of `kyomi_knowledge::vector_search::LearningSearchResult`:
+/// that is a minimal id/insight/title/score vector-search hit; this
+/// flattens a whole `LearningRecord` plus four hybrid-search scores.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LearningSearchResult {
     #[serde(flatten)]

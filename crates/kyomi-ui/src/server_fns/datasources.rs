@@ -37,33 +37,7 @@ pub struct DatasourceTypeInfo {
 }
 
 /// A freshly generated SSH keypair for a datasource's SSH tunnel.
-///
-/// Mirrors `kyomi_auth::ssh_keygen::GeneratedSshKey` — kept as a local type
-/// (rather than re-exported) because `kyomi-auth` is an `ssr`-only optional
-/// dependency and this type must also be visible to the WASM client for
-/// deserializing the server_fn response.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct GeneratedSshKey {
-    /// OpenSSH public key line (`ssh-ed25519 AAAA... `), plaintext.
-    pub public_key: String,
-    /// OpenSSH private key PEM, **plaintext**. The client holds this in
-    /// memory only long enough to submit it back as
-    /// `connection_config.ssh_private_key` on save — `create_datasource` /
-    /// `update_datasource_settings` encrypt it with the workspace encryption
-    /// key before it is ever written to the database (see
-    /// `credential_service::finalize_connection_config_secrets`).
-    pub private_key: String,
-}
-
-#[cfg(feature = "ssr")]
-impl From<kyomi_auth::ssh_keygen::GeneratedSshKey> for GeneratedSshKey {
-    fn from(key: kyomi_auth::ssh_keygen::GeneratedSshKey) -> Self {
-        Self {
-            public_key: key.public_key,
-            private_key: key.private_key,
-        }
-    }
-}
+pub use kyomi_types::GeneratedSshKey;
 
 // ─── Server Functions ───────────────────────────────────────────────────────
 
@@ -163,7 +137,7 @@ pub async fn generate_ssh_key() -> Result<GeneratedSshKey, ServerFnError> {
 
     let generated = kyomi_auth::ssh_keygen::generate_ssh_keypair().into_sfn()?;
 
-    Ok(generated.into())
+    Ok(generated)
 }
 
 // ─── Modal Server Functions ─────────────────────────────────────────────────

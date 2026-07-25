@@ -9,6 +9,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// A cached SQL query from the `query_cache` table.
+///
+/// Not a duplicate of `kyomi_ui::query_cache::QueryCache`: that is an
+/// unrelated Leptos reactive cache handle (`StoredValue`-backed) for
+/// in-browser chart data, sharing only a name with this DB row.
 #[derive(Debug, Clone, sqlx::FromRow, Serialize, Deserialize)]
 pub struct QueryCache {
     /// Primary key — SHA-256 hash of the SQL query (64-char hex string).

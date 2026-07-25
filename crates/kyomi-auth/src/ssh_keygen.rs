@@ -17,21 +17,10 @@ use ssh_key::rand_core::OsRng;
 use ssh_key::{Algorithm, LineEnding, PrivateKey};
 
 /// A freshly generated SSH keypair, ready for use.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct GeneratedSshKey {
-    /// OpenSSH public key line (`ssh-ed25519 AAAA... `), plaintext.
-    ///
-    /// Shown to the user so they can add it to their server's
-    /// `~/.ssh/authorized_keys`.
-    pub public_key: String,
-
-    /// OpenSSH private key PEM, **plaintext**. The caller is responsible for
-    /// encrypting it before persisting it as part of a datasource's
-    /// `connection_config` (handled by
-    /// [`crate::credential_service::finalize_connection_config_secrets`] on
-    /// the save path).
-    pub private_key: String,
-}
+///
+/// Defined in `kyomi_types` because it also crosses into the WASM client as
+/// a server_fn response — see `kyomi_types::datasource_contracts`.
+pub use kyomi_types::GeneratedSshKey;
 
 /// Generate a new Ed25519 SSH keypair for an SSH tunnel.
 ///
