@@ -538,6 +538,7 @@ impl AgentTool for UpdateWatchTool {
             &ctx.db,
             watch_id,
             &ctx.workspace_id,
+            &ctx.user_id,
             &updates,
         )
         .await
@@ -769,6 +770,7 @@ impl AgentTool for DeleteWatchTool {
             &ctx.db,
             watch_id,
             &ctx.workspace_id,
+            &ctx.user_id,
         )
         .await
         {
@@ -860,6 +862,7 @@ impl AgentTool for GetWatchInfoTool {
             &ctx.db,
             watch_id,
             &ctx.workspace_id,
+            &ctx.user_id,
         )
         .await?;
 
@@ -877,6 +880,7 @@ impl AgentTool for GetWatchInfoTool {
             &ctx.db,
             watch_id,
             &ctx.workspace_id,
+            &ctx.user_id,
             5,
         )
         .await?;
@@ -1004,6 +1008,7 @@ impl AgentTool for TriggerWatchTool {
             &ctx.db,
             watch_id,
             &ctx.workspace_id,
+            &ctx.user_id,
         )
         .await?;
 
@@ -1032,6 +1037,7 @@ impl AgentTool for TriggerWatchTool {
             &ctx.db,
             watch_id,
             &ctx.workspace_id,
+            &ctx.user_id,
         )
         .await?;
 

@@ -257,7 +257,7 @@ pub async fn create_watch(config: WatchConfig) -> Result<WatchListItem, ServerFn
 pub async fn get_watch(watch_id: String) -> Result<WatchListItem, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    let watch = kyomi_auth::watch_service::get_watch(ac.db(), &watch_id, &ac.ws_id)
+    let watch = kyomi_auth::watch_service::get_watch(ac.db(), &watch_id, &ac.ws_id, &ac.auth.user_id)
         .await
         .into_sfn()?
         .ok_or_else(|| ServerFnError::new("Watch not found"))?;
@@ -340,14 +340,20 @@ pub async fn update_watch(
     // Track the owner so the live-sync broadcast below can route privately —
     // watches have no sharing model, so this always goes to `created_by`.
     let created_by = if has_updates {
-        let updated = kyomi_auth::watch_service::update_watch(ac.db(), &watch_id, &ac.ws_id, &updates)
-            .await
-            .into_sfn()?;
+        let updated = kyomi_auth::watch_service::update_watch(
+            ac.db(),
+            &watch_id,
+            &ac.ws_id,
+            &ac.auth.user_id,
+            &updates,
+        )
+        .await
+        .into_sfn()?;
         updated.created_by
     } else {
         // Slack-only update path — no field update call was made, so fetch
         // the current watch to learn its owner.
-        kyomi_auth::watch_service::get_watch(ac.db(), &watch_id, &ac.ws_id)
+        kyomi_auth::watch_service::get_watch(ac.db(), &watch_id, &ac.ws_id, &ac.auth.user_id)
             .await
             .into_sfn()?
             .ok_or_else(|| ServerFnError::new("Watch not found"))?
@@ -396,9 +402,10 @@ pub async fn update_watch(
 pub async fn delete_watch(watch_id: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    let created_by = kyomi_auth::watch_service::delete_watch(ac.db(), &watch_id, &ac.ws_id)
-        .await
-        .into_sfn()?;
+    let created_by =
+        kyomi_auth::watch_service::delete_watch(ac.db(), &watch_id, &ac.ws_id, &ac.auth.user_id)
+            .await
+            .into_sfn()?;
 
     if let Some(ws_manager) = &ac.ctx.ws_manager {
         kyomi_auth::websocket::helpers::broadcast_watch_sync(
@@ -417,14 +424,20 @@ pub async fn delete_watch(watch_id: String) -> Result<(), ServerFnError> {
 pub async fn toggle_watch(watch_id: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    let watch = kyomi_auth::watch_service::get_watch(ac.db(), &watch_id, &ac.ws_id)
+    let watch = kyomi_auth::watch_service::get_watch(ac.db(), &watch_id, &ac.ws_id, &ac.auth.user_id)
         .await
         .into_sfn()?
         .ok_or_else(|| ServerFnError::new("Watch not found"))?;
 
-    kyomi_auth::watch_service::toggle_watch(ac.db(), &watch_id, &ac.ws_id, !watch.enabled)
-        .await
-        .into_sfn()?;
+    kyomi_auth::watch_service::toggle_watch(
+        ac.db(),
+        &watch_id,
+        &ac.ws_id,
+        &ac.auth.user_id,
+        !watch.enabled,
+    )
+    .await
+    .into_sfn()?;
 
     if let Some(ws_manager) = &ac.ctx.ws_manager {
         kyomi_auth::websocket::helpers::broadcast_watch_sync(
@@ -446,10 +459,14 @@ pub async fn run_watch_now(watch_id: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
     // Rate limit and concurrency check
-    let (can_run, reason) =
-        kyomi_auth::watch_service::can_run_watch_now(ac.db(), &watch_id, &ac.ws_id)
-            .await
-            .into_sfn()?;
+    let (can_run, reason) = kyomi_auth::watch_service::can_run_watch_now(
+        ac.db(),
+        &watch_id,
+        &ac.ws_id,
+        &ac.auth.user_id,
+    )
+    .await
+    .into_sfn()?;
 
     if !can_run {
         return Err(ServerFnError::new(reason));
@@ -521,10 +538,15 @@ pub async fn get_watch_executions(
 
     let limit = limit.unwrap_or(20).clamp(1, 100) as u32;
 
-    let executions =
-        kyomi_auth::watch_service::get_executions(ac.db(), &watch_id, &ac.ws_id, limit)
-            .await
-            .into_sfn()?;
+    let executions = kyomi_auth::watch_service::get_executions(
+        ac.db(),
+        &watch_id,
+        &ac.ws_id,
+        &ac.auth.user_id,
+        limit,
+    )
+    .await
+    .into_sfn()?;
 
     Ok(executions.iter().map(|e| execution_to_item(e, false)).collect())
 }
@@ -540,11 +562,16 @@ pub async fn get_watch_execution(
 ) -> Result<WatchExecutionItem, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    let execution =
-        kyomi_auth::watch_service::get_execution_by_id(ac.db(), &watch_id, execution_id, &ac.ws_id)
-            .await
-            .into_sfn()?
-            .ok_or_else(|| ServerFnError::new("Execution not found"))?;
+    let execution = kyomi_auth::watch_service::get_execution_by_id(
+        ac.db(),
+        &watch_id,
+        execution_id,
+        &ac.ws_id,
+        &ac.auth.user_id,
+    )
+    .await
+    .into_sfn()?
+    .ok_or_else(|| ServerFnError::new("Execution not found"))?;
 
     Ok(execution_to_item(&execution, true))
 }
@@ -778,15 +805,20 @@ pub async fn get_last_execution(
     let ac = AuthenticatedContext::extract().await?;
 
     // Verify watch exists and belongs to workspace
-    kyomi_auth::watch_service::get_watch(ac.db(), &watch_id, &ac.ws_id)
+    kyomi_auth::watch_service::get_watch(ac.db(), &watch_id, &ac.ws_id, &ac.auth.user_id)
         .await
         .into_sfn()?
         .ok_or_else(|| ServerFnError::new("Watch not found"))?;
 
-    let executions =
-        kyomi_auth::watch_service::get_executions(ac.db(), &watch_id, &ac.ws_id, 1)
-            .await
-            .into_sfn()?;
+    let executions = kyomi_auth::watch_service::get_executions(
+        ac.db(),
+        &watch_id,
+        &ac.ws_id,
+        &ac.auth.user_id,
+        1,
+    )
+    .await
+    .into_sfn()?;
 
     Ok(executions.first().map(|e| execution_to_item(e, true)))
 }
@@ -807,11 +839,16 @@ pub async fn get_thinking_events(
 ) -> Result<serde_json::Value, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    let execution =
-        kyomi_auth::watch_service::get_execution_by_id(ac.db(), &watch_id, execution_id, &ac.ws_id)
-            .await
-            .into_sfn()?
-            .ok_or_else(|| ServerFnError::new("Execution not found"))?;
+    let execution = kyomi_auth::watch_service::get_execution_by_id(
+        ac.db(),
+        &watch_id,
+        execution_id,
+        &ac.ws_id,
+        &ac.auth.user_id,
+    )
+    .await
+    .into_sfn()?
+    .ok_or_else(|| ServerFnError::new("Execution not found"))?;
 
     let mut thinking_events = serde_json::Value::Array(Vec::new());
 

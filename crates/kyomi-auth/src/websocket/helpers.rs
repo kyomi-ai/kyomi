@@ -850,7 +850,7 @@ pub async fn broadcast_watch_sync(
     let data = if matches!(action, SyncActionType::Delete) {
         None
     } else {
-        crate::watch_service::get_watch(db, watch_id, workspace_id)
+        crate::watch_service::get_watch(db, watch_id, workspace_id, owner_user_id)
             .await
             .ok()
             .flatten()

@@ -581,11 +581,19 @@ pub async fn create_watch(
 
 // ─── Get watch ──────────────────────────────────────────────────────────────
 
-/// Fetch a watch by ID within a workspace.
+/// Fetch a watch by ID, scoped to both workspace and owner.
+///
+/// Watches have no sharing model — they are strictly private to their
+/// creator (KYO-177/KYO-179) — so this filters on `created_by` in addition
+/// to `workspace_id`. A workspace member who is not the owner gets `None`,
+/// identical to a watch that doesn't exist, so callers must never leak
+/// existence via a different error type (see `Error::Forbidden` note on
+/// callers below).
 pub async fn get_watch(
     db: &DbPool,
     watch_id: &str,
     workspace_id: &str,
+    user_id: &str,
 ) -> Result<Option<kyomi_core::models::Watch>> {
     let sql = r#"
         SELECT watch_id, workspace_id, created_by, name, prompt, schedule,
@@ -593,7 +601,7 @@ pub async fn get_watch(
                alert_emails_enabled, enabled, last_run_at, last_run_status,
                next_run_at, created_at, updated_at
         FROM watches
-        WHERE watch_id = $1 AND workspace_id = $2
+        WHERE watch_id = $1 AND workspace_id = $2 AND created_by = $3
     "#;
 
     let watch = kyomi_core::db_fetch_optional!(
@@ -601,7 +609,8 @@ pub async fn get_watch(
         kyomi_core::models::Watch,
         sql,
         watch_id,
-        workspace_id
+        workspace_id,
+        user_id
     )
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to get watch: {e}")))?;
 
@@ -698,14 +707,21 @@ pub async fn list_enabled_watches(db: &DbPool) -> Result<Vec<kyomi_core::models:
 /// Uses dynamic UPDATE with `param_idx` tracking (same pattern as
 /// `chat_service.rs:670–716`). Recalculates `next_run_at` when the
 /// schedule changes, and sets/clears it on enable/disable.
+///
+/// Owner-scoped: the initial fetch and the `UPDATE` itself both filter on
+/// `created_by = user_id`. The `UPDATE`-level guard is defence-in-depth —
+/// it closes the TOCTOU window between the fetch and the write, so even a
+/// racing ownership change (or a bug in the fetch gate) can't let a
+/// non-owner's write land.
 pub async fn update_watch(
     db: &DbPool,
     watch_id: &str,
     workspace_id: &str,
+    user_id: &str,
     updates: &WatchUpdate,
 ) -> Result<kyomi_core::models::Watch> {
     // Fetch current watch for schedule-dependent logic
-    let current = get_watch(db, watch_id, workspace_id).await?;
+    let current = get_watch(db, watch_id, workspace_id, user_id).await?;
     let current = current.ok_or_else(|| {
         kyomi_core::Error::NotFound(format!("Watch {watch_id} not found"))
     })?;
@@ -747,7 +763,7 @@ pub async fn update_watch(
 
     // Build dynamic UPDATE
     let mut set_parts: Vec<String> = Vec::new();
-    let mut param_idx = 3u32; // $1 = watch_id, $2 = workspace_id
+    let mut param_idx = 4u32; // $1 = watch_id, $2 = workspace_id, $3 = user_id (created_by)
 
     if updates.name.is_some() {
         set_parts.push(format!("name = ${param_idx}"));
@@ -799,7 +815,7 @@ pub async fn update_watch(
     }
 
     let sql = format!(
-        r#"UPDATE watches SET {} WHERE watch_id = $1 AND workspace_id = $2
+        r#"UPDATE watches SET {} WHERE watch_id = $1 AND workspace_id = $2 AND created_by = $3
            RETURNING watch_id, workspace_id, created_by, name, prompt, schedule, mode,
                      datasource_hints, queries, alert_emails,
                      alert_emails_enabled, enabled, last_run_at, last_run_status,
@@ -854,11 +870,20 @@ pub async fn update_watch(
     let watch = kyomi_core::db_with_pool!(db, |p| {
         let q = sqlx::query_as::<_, kyomi_core::models::Watch>(&sql)
             .bind(watch_id)
-            .bind(workspace_id);
+            .bind(workspace_id)
+            .bind(user_id);
         bind_update_params!(q).fetch_one(p).await
     })
-    .map_err(|e| {
-        kyomi_core::Error::Internal(format!("failed to update watch: {e}"))
+    .map_err(|e| match e {
+        // fetch_one on a zero-row result means the created_by guard hit —
+        // i.e. the caller isn't the owner. The earlier get_watch() call
+        // already returned NotFound for a non-owner in the common case;
+        // this only fires if ownership changed between the fetch and the
+        // write (the TOCTOU window this guard exists to close).
+        sqlx::Error::RowNotFound => {
+            kyomi_core::Error::NotFound(format!("Watch {watch_id} not found"))
+        }
+        e => kyomi_core::Error::Internal(format!("failed to update watch: {e}")),
     })?;
 
     tracing::info!(watch_id = %watch_id, "Updated watch");
@@ -889,21 +914,29 @@ pub async fn update_watch(
 
 // ─── Delete watch ───────────────────────────────────────────────────────────
 
-/// Delete a watch by ID within a workspace.
+/// Delete a watch by ID, scoped to both workspace and owner.
 ///
 /// Returns the deleted watch's `created_by` (the owner) so callers can route
 /// the private live-sync broadcast correctly. Watches have no sharing model —
-/// only the creator may ever see them — so there is no workspace-wide
-/// notification of the deletion, and no separate SELECT is needed to recover
-/// the owner: `RETURNING created_by` gets it from the same statement.
-pub async fn delete_watch(db: &DbPool, watch_id: &str, workspace_id: &str) -> Result<String> {
+/// only the creator may ever delete them — so the `DELETE` filters on
+/// `created_by = user_id` directly (no separate ownership check needed: a
+/// non-owner's delete simply matches zero rows and falls through to the
+/// same `NotFound` a nonexistent watch_id would produce), and no separate
+/// SELECT is needed to recover the owner: `RETURNING created_by` gets it
+/// from the same statement.
+pub async fn delete_watch(
+    db: &DbPool,
+    watch_id: &str,
+    workspace_id: &str,
+    user_id: &str,
+) -> Result<String> {
     let sql = r#"
-        DELETE FROM watches WHERE watch_id = $1 AND workspace_id = $2
+        DELETE FROM watches WHERE watch_id = $1 AND workspace_id = $2 AND created_by = $3
         RETURNING created_by AS value
     "#;
 
     let deleted: Option<StringRow> =
-        kyomi_core::db_fetch_optional!(db, StringRow, sql, watch_id, workspace_id)
+        kyomi_core::db_fetch_optional!(db, StringRow, sql, watch_id, workspace_id, user_id)
             .map_err(|e| kyomi_core::Error::Internal(format!("failed to delete watch: {e}")))?;
 
     let created_by = deleted
@@ -940,12 +973,14 @@ pub async fn toggle_watch(
     db: &DbPool,
     watch_id: &str,
     workspace_id: &str,
+    user_id: &str,
     enabled: bool,
 ) -> Result<kyomi_core::models::Watch> {
     update_watch(
         db,
         watch_id,
         workspace_id,
+        user_id,
         &WatchUpdate {
             enabled: Some(enabled),
             ..Default::default()
@@ -961,15 +996,24 @@ pub async fn get_executions(
     db: &DbPool,
     watch_id: &str,
     workspace_id: &str,
+    user_id: &str,
     limit: u32,
 ) -> Result<Vec<kyomi_core::models::WatchExecution>> {
-    // Verify watch belongs to workspace
-    let watch = get_watch(db, watch_id, workspace_id).await?;
+    // Verify watch belongs to workspace AND is owned by the caller — this
+    // is the sole authorization gate for the unscoped `watch_id`-only query
+    // below (see the comment on that query for why it doesn't need its own
+    // `created_by` filter).
+    let watch = get_watch(db, watch_id, workspace_id, user_id).await?;
     if watch.is_none() {
         return Ok(Vec::new());
     }
 
     let limit_i64 = limit as i64;
+    // Deliberately keyed on `watch_id` alone (no `workspace_id`/`created_by`
+    // filter here): the `get_watch` call above has already established that
+    // `watch_id` belongs to `workspace_id` AND is owned by `user_id`. This
+    // guard must not be removed — without it, this query would return
+    // execution history for any watch_id regardless of caller.
     let sql = r#"
         SELECT id, watch_id, watch_name, mode, workspace_id, session_id,
                started_at, completed_at, status, agent_response, error_message,
@@ -999,13 +1043,22 @@ pub async fn get_execution_by_id(
     watch_id: &str,
     execution_id: i32,
     workspace_id: &str,
+    user_id: &str,
 ) -> Result<Option<kyomi_core::models::WatchExecution>> {
-    // Verify watch belongs to workspace
-    let watch = get_watch(db, watch_id, workspace_id).await?;
+    // Verify watch belongs to workspace AND is owned by the caller — this
+    // is the sole authorization gate for the unscoped `watch_id`-only query
+    // below (see the comment on that query for why it doesn't need its own
+    // `created_by` filter).
+    let watch = get_watch(db, watch_id, workspace_id, user_id).await?;
     if watch.is_none() {
         return Ok(None);
     }
 
+    // Deliberately keyed on `id`/`watch_id` alone (no `workspace_id`/
+    // `created_by` filter here): the `get_watch` call above has already
+    // established that `watch_id` belongs to `workspace_id` AND is owned by
+    // `user_id`. This guard must not be removed — without it, this query
+    // would return an execution for any watch_id regardless of caller.
     let sql = r#"
         SELECT id, watch_id, watch_name, mode, workspace_id, session_id,
                started_at, completed_at, status, agent_response, error_message,
@@ -1028,10 +1081,29 @@ pub async fn get_execution_by_id(
 }
 
 /// Get a specific execution by ID only (works even if watch is deleted).
+///
+/// Owner-scoped directly on `watch_executions.created_by` (KYO-179 review
+/// gap). This function exists specifically so callers can look up an
+/// execution/alert *without* going through `get_watch` first — its whole
+/// purpose is to work after the parent watch has been deleted, which is
+/// exactly why `watch_executions.created_by` was denormalized onto this
+/// table in `20260725000000_add_created_by_to_watch_executions.sql`: once
+/// `watch_id` goes `NULL` (`ON DELETE SET NULL`), there is no `watches` row
+/// left to join back to for an ownership check. `created_by` is populated
+/// for every execution at creation time from the owning watch
+/// (`execute_watch` passes `watch.created_by` into `create_execution`), and
+/// is backfilled for pre-existing rows by that same migration, so filtering
+/// on it directly is both correct and matches the pattern already used by
+/// `list_alerts` (`we.workspace_id = $1 AND we.created_by = $2`) and by
+/// `get_execution_by_id` (which gates via `get_watch`, itself filtered on
+/// `created_by`). `execution_id` is a sequential integer and therefore
+/// trivially enumerable — a non-owner must get `None`, never a `Forbidden`
+/// that would confirm the ID exists.
 pub async fn get_execution_by_id_only(
     db: &DbPool,
     execution_id: i32,
     workspace_id: &str,
+    user_id: &str,
 ) -> Result<Option<kyomi_core::models::WatchExecution>> {
     let sql = r#"
         SELECT id, watch_id, watch_name, mode, workspace_id, session_id,
@@ -1039,7 +1111,7 @@ pub async fn get_execution_by_id_only(
                input_tokens, output_tokens, cost_estimate, execution_trace,
                alert_triggered, notification_id, read_at, deleted_at, deleted_by, created_by
         FROM watch_executions
-        WHERE id = $1 AND workspace_id = $2
+        WHERE id = $1 AND workspace_id = $2 AND created_by = $3
     "#;
 
     let execution = kyomi_core::db_fetch_optional!(
@@ -1047,7 +1119,8 @@ pub async fn get_execution_by_id_only(
         kyomi_core::models::WatchExecution,
         sql,
         execution_id,
-        workspace_id
+        workspace_id,
+        user_id
     )
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to get execution: {e}")))?;
 
@@ -1204,15 +1277,20 @@ pub async fn fail_execution_minimal(
 /// Check if a watch can be manually executed now.
 ///
 /// Returns `(can_run, reason)`. If `can_run` is false, `reason` explains why.
+///
+/// `get_watch` is now owner-scoped (KYO-179), so this doubles as the
+/// authorization gate for manual runs — a non-owner gets "Watch not found",
+/// same as a nonexistent watch_id.
 pub async fn can_run_watch_now(
     db: &DbPool,
     watch_id: &str,
     workspace_id: &str,
+    user_id: &str,
 ) -> Result<(bool, String)> {
     let is_pg = db.is_postgres();
 
-    // Verify watch exists
-    let watch = get_watch(db, watch_id, workspace_id).await?;
+    // Verify watch exists and is owned by the caller
+    let watch = get_watch(db, watch_id, workspace_id, user_id).await?;
     if watch.is_none() {
         return Ok((false, "Watch not found".into()));
     }
@@ -1854,7 +1932,15 @@ pub async fn create_chat_session_from_alert(
     execution_id: i32,
 ) -> Result<String> {
     // 1. Get the execution (works even if the watch has been deleted).
-    let execution = get_execution_by_id_only(db, execution_id, workspace_id)
+    // Owner-gated on watch_executions.created_by (KYO-179) — this is the
+    // sole authorization check for the whole function. Everything below
+    // (watch_name, alert_title, watch_prompt, agent_response, and the
+    // session_id used to pull thinking_events in step 4) is derived from
+    // this `execution` row, so gating it here closes the leak for the rest
+    // of the function. A non-owner's execution_id gets NotFound, never
+    // Forbidden — execution_id is a sequential integer and trivially
+    // enumerable, so a Forbidden would confirm the row exists.
+    let execution = get_execution_by_id_only(db, execution_id, workspace_id, user_id)
         .await?
         .ok_or_else(|| kyomi_core::Error::NotFound("Alert not found".into()))?;
 
@@ -1890,13 +1976,23 @@ pub async fn create_chat_session_from_alert(
 
     // 3. Fallback: fetch from the live watch when the trace lacks a prompt.
     if let (None, Some(wid)) = (&watch_prompt, &execution.watch_id) {
-        let watch = get_watch(db, wid, workspace_id).await?;
+        let watch = get_watch(db, wid, workspace_id, user_id).await?;
         watch_prompt = watch.map(|w| w.prompt);
     }
 
     let watch_prompt = watch_prompt.unwrap_or_else(|| "(Watch has been deleted)".to_string());
 
     // 4. Load thinking events from the execution's session messages.
+    //
+    // chat_service::get_session_messages() filters only on `session_id` —
+    // it has no user/owner scoping of its own. That is safe here ONLY
+    // because `session_id` is read from `execution`, and `execution` was
+    // already fetched through the owner-gated `get_execution_by_id_only`
+    // above: a non-owner never reaches this line (the function returns
+    // NotFound in step 1), so `session_id` can never belong to another
+    // user's execution. If this session_id is ever sourced from anywhere
+    // other than the gated `execution` row, it must get its own ownership
+    // check — do not assume get_session_messages is safe on its own.
     let mut thinking_events: Option<serde_json::Value> = None;
 
     if let Some(ref session_id) = execution.session_id {
@@ -2717,7 +2813,7 @@ mod privacy_tests {
 
         // Delete the parent watch — this sets watch_executions.watch_id to NULL
         // via the ON DELETE SET NULL foreign key.
-        delete_watch(&pool, &wa.watch_id, "ws-1")
+        delete_watch(&pool, &wa.watch_id, "ws-1", "user-a")
             .await
             .expect("delete_watch");
 
@@ -2788,6 +2884,317 @@ mod privacy_tests {
         assert!(
             result_b.is_err(),
             "non-owner (user-b) must NOT receive the watch broadcast, got: {result_b:?}"
+        );
+    }
+
+    // ── IDOR guards on single-record watch operations (KYO-179) ─────────
+    //
+    // Watches are strictly private to their creator. These tests cover
+    // get_watch / update_watch / delete_watch / toggle_watch /
+    // get_executions being scoped on ownership, not just workspace_id, and
+    // confirm owner behaviour is completely unaffected.
+
+    #[tokio::test]
+    async fn get_watch_returns_none_for_non_owner() {
+        let pool = test_pool().await;
+        seed_workspace_with_two_users(&pool).await;
+
+        let wa = create_test_watch(&pool, "user-a", "A's Private Watch").await;
+
+        let result = get_watch(&pool, &wa.watch_id, "ws-1", "user-b")
+            .await
+            .expect("get_watch should not error for a non-owner");
+        assert!(
+            result.is_none(),
+            "user-b must not be able to fetch user-a's watch by ID"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_watch_rejects_non_owner_and_leaves_watch_unchanged() {
+        let pool = test_pool().await;
+        seed_workspace_with_two_users(&pool).await;
+
+        let wa = create_test_watch(&pool, "user-a", "A's Watch").await;
+
+        let attempted_update = WatchUpdate {
+            name: Some("Hijacked Name".to_string()),
+            prompt: Some("Hijacked prompt with enough characters".to_string()),
+            ..Default::default()
+        };
+
+        let result = update_watch(&pool, &wa.watch_id, "ws-1", "user-b", &attempted_update).await;
+        assert!(
+            matches!(result, Err(kyomi_core::Error::NotFound(_))),
+            "user-b's update of user-a's watch must fail with NotFound, got: {result:?}"
+        );
+
+        // Re-fetch as the owner — every field must be unchanged and the
+        // watch must still exist.
+        let refetched = get_watch(&pool, &wa.watch_id, "ws-1", "user-a")
+            .await
+            .expect("get_watch as owner")
+            .expect("watch must still exist");
+        assert_eq!(refetched.name, wa.name, "name must be unchanged");
+        assert_eq!(refetched.prompt, wa.prompt, "prompt must be unchanged");
+    }
+
+    #[tokio::test]
+    async fn delete_watch_rejects_non_owner_and_leaves_watch_intact() {
+        let pool = test_pool().await;
+        seed_workspace_with_two_users(&pool).await;
+
+        let wa = create_test_watch(&pool, "user-a", "A's Watch To Keep").await;
+
+        let result = delete_watch(&pool, &wa.watch_id, "ws-1", "user-b").await;
+        assert!(
+            matches!(result, Err(kyomi_core::Error::NotFound(_))),
+            "user-b's delete of user-a's watch must fail with NotFound, got: {result:?}"
+        );
+
+        let still_exists = get_watch(&pool, &wa.watch_id, "ws-1", "user-a")
+            .await
+            .expect("get_watch as owner")
+            .is_some();
+        assert!(
+            still_exists,
+            "watch must still exist after a non-owner's delete attempt"
+        );
+    }
+
+    #[tokio::test]
+    async fn toggle_watch_rejects_non_owner_and_leaves_enabled_unchanged() {
+        let pool = test_pool().await;
+        seed_workspace_with_two_users(&pool).await;
+
+        let wa = create_test_watch(&pool, "user-a", "A's Toggle Watch").await;
+        assert!(wa.enabled, "sanity check: watches are created enabled");
+
+        let result = toggle_watch(&pool, &wa.watch_id, "ws-1", "user-b", false).await;
+        assert!(
+            matches!(result, Err(kyomi_core::Error::NotFound(_))),
+            "user-b's toggle of user-a's watch must fail with NotFound, got: {result:?}"
+        );
+
+        let refetched = get_watch(&pool, &wa.watch_id, "ws-1", "user-a")
+            .await
+            .expect("get_watch as owner")
+            .expect("watch must still exist");
+        assert!(
+            refetched.enabled,
+            "enabled state must be unchanged by a non-owner's toggle attempt"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_executions_returns_empty_for_non_owner() {
+        let pool = test_pool().await;
+        seed_workspace_with_two_users(&pool).await;
+
+        let wa = create_test_watch(&pool, "user-a", "A's Execution Watch").await;
+        insert_triggered_alert(&pool, &wa.watch_id, "user-a").await;
+
+        let executions = get_executions(&pool, &wa.watch_id, "ws-1", "user-b", 20)
+            .await
+            .expect("get_executions should not error for a non-owner");
+        assert!(
+            executions.is_empty(),
+            "user-b must not see execution history for user-a's watch"
+        );
+    }
+
+    #[tokio::test]
+    async fn owner_can_still_get_update_toggle_and_delete_their_own_watch() {
+        let pool = test_pool().await;
+        seed_workspace_with_two_users(&pool).await;
+
+        let wa = create_test_watch(&pool, "user-a", "A's Own Watch").await;
+
+        // get_watch as owner succeeds.
+        let fetched = get_watch(&pool, &wa.watch_id, "ws-1", "user-a")
+            .await
+            .expect("get_watch as owner")
+            .expect("owner must be able to fetch their own watch");
+        assert_eq!(fetched.watch_id, wa.watch_id);
+
+        // update_watch as owner actually changes the field.
+        let update = WatchUpdate {
+            name: Some("A's Renamed Watch".to_string()),
+            ..Default::default()
+        };
+        let updated = update_watch(&pool, &wa.watch_id, "ws-1", "user-a", &update)
+            .await
+            .expect("owner's update_watch must succeed");
+        assert_eq!(updated.name, "A's Renamed Watch", "owner's update must take effect");
+
+        // toggle_watch as owner succeeds and flips enabled.
+        let toggled = toggle_watch(&pool, &wa.watch_id, "ws-1", "user-a", false)
+            .await
+            .expect("owner's toggle_watch must succeed");
+        assert!(!toggled.enabled, "owner's toggle must take effect");
+
+        // delete_watch as owner succeeds.
+        let deleted_owner = delete_watch(&pool, &wa.watch_id, "ws-1", "user-a")
+            .await
+            .expect("owner's delete_watch must succeed");
+        assert_eq!(deleted_owner, "user-a");
+
+        let gone = get_watch(&pool, &wa.watch_id, "ws-1", "user-a")
+            .await
+            .expect("get_watch after delete");
+        assert!(gone.is_none(), "watch must be gone after owner deletes it");
+    }
+
+    // ── create_chat_session_from_alert (KYO-179 review gap) ─────────────
+    //
+    // `get_execution_by_id_only` is the primary, un-gated-until-now data
+    // source for `continue_alert_in_chat` — the fallback `get_watch` call
+    // was fixed in the first pass, but this path (reachable with nothing
+    // but a guessed sequential `execution_id`) was not. These tests cover
+    // the fix directly, including that no durable side effect (a chat
+    // session owned by the attacker) is created on rejection.
+
+    /// Insert a triggered alert execution carrying identifiable content in
+    /// `agent_response` and `execution_trace` (watch_prompt/alert_title), so
+    /// leak-detection assertions have something concrete to check for.
+    /// Returns the new execution's `id`.
+    async fn insert_triggered_alert_with_content(
+        pool: &DbPool,
+        watch_id: &str,
+        created_by: &str,
+        agent_response: &str,
+        watch_prompt: &str,
+        alert_title: &str,
+    ) -> i32 {
+        let sq = match pool {
+            DbPool::Sqlite(sq) => sq,
+            _ => unreachable!(),
+        };
+        let execution_trace = serde_json::json!({
+            "watch_prompt": watch_prompt,
+            "alert_title": alert_title,
+        });
+        let row: (i32,) = sqlx::query_as(
+            "INSERT INTO watch_executions \
+             (watch_id, workspace_id, status, alert_triggered, started_at, completed_at, \
+              created_by, agent_response, execution_trace) \
+             VALUES ($1, 'ws-1', 'success', 1, datetime('now'), datetime('now'), $2, $3, $4) \
+             RETURNING id",
+        )
+        .bind(watch_id)
+        .bind(created_by)
+        .bind(agent_response)
+        .bind(execution_trace.to_string())
+        .fetch_one(sq)
+        .await
+        .expect("insert triggered alert with content");
+        row.0
+    }
+
+    #[tokio::test]
+    async fn create_chat_session_from_alert_rejects_non_owner_and_leaks_nothing() {
+        let pool = test_pool().await;
+        seed_workspace_with_two_users(&pool).await;
+
+        let wa = create_test_watch(&pool, "user-a", "A's Secret Revenue Watch").await;
+        let execution_id = insert_triggered_alert_with_content(
+            &pool,
+            &wa.watch_id,
+            "user-a",
+            "SECRET: APAC revenue dropped 42 percent",
+            "Check if revenue drops more than 10 percent in APAC",
+            "Revenue Alert",
+        )
+        .await;
+
+        let encryption_key = &[0u8; 32];
+
+        // user-b guesses user-a's execution_id (a sequential integer).
+        let result =
+            create_chat_session_from_alert(&pool, encryption_key, "user-b", "ws-1", execution_id)
+                .await;
+        assert!(
+            matches!(result, Err(kyomi_core::Error::NotFound(_))),
+            "user-b must not be able to continue user-a's alert in chat, got: {result:?}"
+        );
+
+        let sq = match &pool {
+            DbPool::Sqlite(sq) => sq,
+            _ => unreachable!(),
+        };
+
+        // No chat session must exist for user-b as a side effect of the
+        // rejected attempt — the leak this test guards against is durable
+        // persistence into an attacker-owned session, not just the return
+        // value.
+        let session_count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM chat_sessions WHERE user_id = 'user-b'")
+                .fetch_one(sq)
+                .await
+                .expect("count chat_sessions for user-b");
+        assert_eq!(
+            session_count.0, 0,
+            "a rejected alert-to-chat attempt must not create any chat session for the attacker"
+        );
+
+        // No message content must have been persisted anywhere user-b's
+        // sessions could read it back from.
+        let leaked_messages: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM chat_messages cm \
+             JOIN chat_sessions cs ON cm.session_id = cs.session_id \
+             WHERE cs.user_id = 'user-b'",
+        )
+        .fetch_one(sq)
+        .await
+        .expect("count chat_messages for user-b's sessions");
+        assert_eq!(
+            leaked_messages.0, 0,
+            "no message content must have been persisted into any session owned by user-b"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_chat_session_from_alert_succeeds_for_owner() {
+        let pool = test_pool().await;
+        seed_workspace_with_two_users(&pool).await;
+
+        let wa = create_test_watch(&pool, "user-a", "A's Own Alert Watch").await;
+        let execution_id = insert_triggered_alert_with_content(
+            &pool,
+            &wa.watch_id,
+            "user-a",
+            "Revenue is stable this week",
+            "Check if revenue drops more than 10 percent",
+            "Revenue Alert",
+        )
+        .await;
+
+        let encryption_key = &[0u8; 32];
+
+        let session_id =
+            create_chat_session_from_alert(&pool, encryption_key, "user-a", "ws-1", execution_id)
+                .await
+                .expect("owner's continue-alert-in-chat must succeed");
+
+        let session = chat_service::get_session(&pool, &session_id)
+            .await
+            .expect("get_session")
+            .expect("session must exist");
+        assert_eq!(session.user_id, "user-a", "session must be owned by the caller");
+        assert!(
+            session.title.as_deref().unwrap_or_default().contains("Revenue Alert"),
+            "session title must reflect the alert, got: {:?}",
+            session.title
+        );
+
+        let messages = chat_service::get_session_messages(&pool, encryption_key, &session_id, 10)
+            .await
+            .expect("get_session_messages");
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.content.contains("Revenue is stable this week")),
+            "owner's session must contain the alert's agent_response"
         );
     }
 }
