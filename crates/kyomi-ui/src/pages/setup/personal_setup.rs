@@ -17,7 +17,7 @@ use phosphor_leptos::Icon;
 use leptos_router::hooks::use_navigate;
 
 use crate::components::{
-    Button, ButtonVariant, Card, CardContent, CardDescription, CardHeader, CardTitle, Spinner,
+    Button, ButtonVariant, Card, CardContent, CardDescription, CardHeader, CardTitle,
 };
 use crate::server_fns::setup::check_has_datasources;
 
@@ -46,12 +46,17 @@ pub fn PersonalSetupPage() -> impl IntoView {
 
 // ─── Loading State ───────────────────────────────────────────────────────────
 
-/// Full-screen centered loading spinner shown while the server function resolves.
+/// Full-screen branded loading state shown while the server function resolves.
 #[component]
 fn LoadingState() -> impl IntoView {
     view! {
         <div class="min-h-screen bg-background flex items-center justify-center">
-            <Spinner class="text-muted-foreground"/>
+            // Branded moment — DESIGN.md Loading State Pattern
+            <img
+                src="/kyomi_animated_logo.svg"
+                alt="Processing"
+                class="w-12 h-12"
+            />
         </div>
     }
 }

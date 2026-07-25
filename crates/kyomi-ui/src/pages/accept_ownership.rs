@@ -219,11 +219,14 @@ pub fn AcceptOwnershipPage() -> impl IntoView {
                                 }
                                 PageState::Processing { .. } => {
                                     view! {
-                                        <div class="text-center py-8">
-                                            <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-muted mb-4">
-                                                <crate::components::Spinner class="h-8 w-8" />
-                                            </div>
-                                            <p class="text-muted-foreground mt-4">"Processing..."</p>
+                                        <div class="text-center py-8 space-y-4">
+                                            // Branded moment — DESIGN.md Loading State Pattern
+                                            <img
+                                                src="/kyomi_animated_logo.svg"
+                                                alt="Processing"
+                                                class="w-12 h-12 mx-auto"
+                                            />
+                                            <p class="text-muted-foreground">"Processing..."</p>
                                         </div>
                                     }.into_any()
                                 }
@@ -255,9 +258,14 @@ pub fn AcceptOwnershipPage() -> impl IntoView {
 
 fn loading_view() -> impl IntoView {
     view! {
-        <div class="text-center py-8">
-            {spinner_xl()}
-            <p class="text-muted-foreground mt-4">"Please wait..."</p>
+        <div class="text-center py-8 space-y-4">
+            // Branded moment — DESIGN.md Loading State Pattern
+            <img
+                src="/kyomi_animated_logo.svg"
+                alt="Processing"
+                class="w-12 h-12 mx-auto"
+            />
+            <p class="text-muted-foreground">"Please wait..."</p>
         </div>
     }
 }
@@ -477,21 +485,6 @@ fn format_date_script(iso_date: String) -> impl IntoView {
 // ─────────────────────────────────────────────────────────────────────────────
 // SVG icons — inline to avoid npm/lucide dependency
 // ─────────────────────────────────────────────────────────────────────────────
-
-/// Spinner (Loader2) — xl size for loading states.
-fn spinner_xl() -> impl IntoView {
-    view! {
-        <svg
-            class="animate-spin h-12 w-12 text-primary mx-auto"
-            xmlns="http://www.w3.org/2000/svg"
-            width="24" height="24" viewBox="0 0 24 24"
-            fill="none" stroke="currentColor"
-            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
-        >
-            <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-        </svg>
-    }
-}
 
 /// Spinner (Loader2) — sm size for inside buttons.
 fn spinner_sm() -> impl IntoView {
