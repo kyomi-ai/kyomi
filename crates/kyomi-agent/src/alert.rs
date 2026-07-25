@@ -15,6 +15,7 @@
 
 use std::sync::{Arc, LazyLock};
 
+use crate::text_utils::truncate_preview;
 use crate::tools::QueryContext;
 use kyomi_auth::email_service::EmailService;
 use kyomi_core::platform::PlatformRegistry;
@@ -252,30 +253,6 @@ pub async fn deliver_watch_alert(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Truncate a message to `max_chars` characters (Unicode-safe) and append "..." if truncated.
-fn truncate_preview(message: &str, max_chars: usize) -> String {
-    if message.len() <= max_chars {
-        // Fast path: ASCII-only or short enough
-        let char_count = message.chars().count();
-        if char_count <= max_chars {
-            return message.to_string();
-        }
-    }
-
-    // Unicode-safe truncation
-    let boundary = message
-        .char_indices()
-        .nth(max_chars)
-        .map(|(i, _)| i)
-        .unwrap_or(message.len());
-
-    if boundary >= message.len() {
-        message.to_string()
-    } else {
-        format!("{}...", &message[..boundary])
-    }
-}
-
 /// Build a VAPID config from the application config, if VAPID keys are configured.
 ///
 /// Returns `None` if either `vapid_private_key` or `vapid_contact` is not set.
@@ -506,6 +483,9 @@ async fn process_message_for_email(
                 EMAIL_CARD_LIGHT_RGB,
             ).await {
                 Ok(light_png) => {
+                    // Safe: uuid::Uuid::new_v4().to_string() is always ASCII
+                    // hex + hyphens, so byte index 8 is always a char
+                    // boundary. See KYO-211.
                     let uid = &uuid::Uuid::new_v4().to_string()[..8];
                     let cid_light = format!("chart_{idx}_light_{uid}");
 
@@ -1172,40 +1152,10 @@ mod tests {
     use super::*;
 
     // -- Preview truncation --
-
-    #[test]
-    fn preview_truncation_short_message() {
-        let message = "Short message";
-        let preview = truncate_preview(message, 200);
-        assert_eq!(preview, "Short message");
-    }
-
-    #[test]
-    fn preview_truncation_long_message() {
-        let message = "A".repeat(300);
-        let preview = truncate_preview(&message, 200);
-        assert_eq!(preview.len(), 203); // 200 'A's + "..."
-        assert!(preview.ends_with("..."));
-    }
-
-    #[test]
-    fn preview_truncation_unicode() {
-        // Each of these is a multi-byte character
-        let message = "日".repeat(250);
-        let preview = truncate_preview(&message, 200);
-        // Should truncate at 200 chars (not bytes), then add "..."
-        assert!(preview.ends_with("..."));
-        // Count characters (excluding "...")
-        let content = preview.trim_end_matches("...");
-        assert_eq!(content.chars().count(), 200);
-    }
-
-    #[test]
-    fn preview_exact_length() {
-        let message = "A".repeat(200);
-        let preview = truncate_preview(&message, 200);
-        assert_eq!(preview, message); // No truncation needed
-    }
+    //
+    // `truncate_preview` itself moved to `crate::text_utils` (KYO-211, shared
+    // across alert.rs / watch.rs / watch_execution.rs) along with its unit
+    // tests. See `crate::text_utils::tests` for coverage.
 
     // -- Email template building --
 
@@ -1772,20 +1722,6 @@ mod tests {
         );
         // Case-insensitive: should show "You configured" since emails match
         assert!(html.contains("You configured"));
-    }
-
-    // -- Preview truncation edge cases --
-
-    #[test]
-    fn preview_empty_string() {
-        let preview = truncate_preview("", 200);
-        assert_eq!(preview, "");
-    }
-
-    #[test]
-    fn preview_one_char_max() {
-        let preview = truncate_preview("Hello", 1);
-        assert_eq!(preview, "H...");
     }
 
     #[test]

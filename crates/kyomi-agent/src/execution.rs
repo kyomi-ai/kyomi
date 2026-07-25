@@ -922,6 +922,8 @@ async fn generate_dashboard_summary_inner(
     );
 
     let max = crate::compaction::floor_char_boundary(content, 4000);
+    // Safe: floor_char_boundary walks back from max_bytes to the nearest
+    // non-continuation byte, so `max` is always a valid char boundary. See KYO-211.
     let truncated_content = &content[..max];
     let user_message = format!("Title: {title}\n\nContent:\n{truncated_content}");
 
@@ -936,6 +938,8 @@ async fn generate_dashboard_summary_inner(
     if summary.is_empty() { return Ok(()); }
     if summary.len() > 200 {
         let boundary = crate::compaction::floor_char_boundary(&summary, 200);
+        // Safe: floor_char_boundary walks back from max_bytes to the nearest
+        // non-continuation byte, so `boundary` is always a valid char boundary. See KYO-211.
         summary.truncate(boundary);
         if let Some(last_space) = summary.rfind(' ') { summary.truncate(last_space); }
     }

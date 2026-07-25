@@ -107,6 +107,10 @@ fn extract_section(content: &str, section_name: &str) -> Option<String> {
         if let Some(start_idx) = content.find(pattern.as_str()) {
             let section_content = &content[start_idx..];
             // Find the next ## heading to delimit the section
+            // Safe: `pattern.len()` is the byte length of the exact substring
+            // `find()` just matched at the start of `section_content`, and
+            // `end_offset` is itself a `find()` result — both are valid
+            // char-boundary offsets, and their sum lands on one too. See KYO-211.
             if let Some(end_offset) = section_content[pattern.len()..].find("\n## ") {
                 return Some(section_content[..pattern.len() + end_offset].to_string());
             }

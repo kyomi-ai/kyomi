@@ -6,6 +6,7 @@ use async_trait::async_trait;
 
 use kyomi_auth::websocket::helpers as ws_helpers;
 
+use crate::text_utils::truncate_preview;
 use crate::tools::{AgentTool, ToolContext};
 use crate::types::ToolAnnotations;
 
@@ -689,11 +690,7 @@ impl AgentTool for SearchWatchesTool {
             .map(|w| {
                 let schedule_display =
                     kyomi_auth::watch_service::describe_cron(&w.schedule);
-                let prompt_truncated = if w.prompt.len() > 200 {
-                    format!("{}...", &w.prompt[..200])
-                } else {
-                    w.prompt.clone()
-                };
+                let prompt_truncated = truncate_preview(&w.prompt, 200);
 
                 serde_json::json!({
                     "watch_id": w.watch_id,
@@ -914,13 +911,10 @@ impl AgentTool for GetWatchInfoTool {
                     });
 
                 // Truncate agent_response to 500 chars
-                let agent_response = exec.agent_response.as_deref().map(|r| {
-                    if r.len() > 500 {
-                        format!("{}...", &r[..500])
-                    } else {
-                        r.to_string()
-                    }
-                });
+                let agent_response = exec
+                    .agent_response
+                    .as_deref()
+                    .map(|r| truncate_preview(r, 500));
 
                 serde_json::json!({
                     "timestamp": exec.started_at.to_rfc3339(),

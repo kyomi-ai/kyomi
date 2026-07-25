@@ -664,6 +664,8 @@ fn clean_thought(thought: &str) -> Option<CleanedThought> {
             .last()
             .map(|(i, c)| i + c.len_utf8())
             .unwrap_or(200);
+        // Safe: `boundary` is a char's own end offset (i + c.len_utf8()),
+        // always a valid UTF-8 boundary. See KYO-211.
         cleaned = format!("{}...", &cleaned[..boundary]);
         Some(full)
     } else {

@@ -273,6 +273,9 @@ async fn store_chart_context(
 
     match ctx.kv.set(&kv_key, &context_json, Some(CHART_CONTEXT_TTL_SECS)).await {
         Ok(()) => {
+            // Safe: chart_context_id is uuid::Uuid::new_v4().to_string() (line
+            // above), always ASCII hex + hyphens, so byte index 8 is always a
+            // char boundary. See KYO-211.
             tracing::debug!(
                 id = &chart_context_id[..8],
                 "Stored chart context for deep-link"
