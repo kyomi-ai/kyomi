@@ -361,4 +361,572 @@ mod tests {
         let ts = "2026-04-26T07:34:56-05:00";
         assert_eq!(normalise_timestamp(ts), ts);
     }
+
+    // ─── Integration tests (async, in-memory SQLite) ─────────────────────────
+
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn test_pool() -> DbPool {
+        let _ = kyomi_core::constants::load_with_fallback();
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+
+        sqlx::query("PRAGMA foreign_keys=ON")
+            .execute(&pool)
+            .await
+            .expect("enable foreign keys");
+
+        sqlx::migrate!("../../apps/server/migrations-sqlite")
+            .run(&pool)
+            .await
+            .expect("run sqlite migrations");
+
+        DbPool::Sqlite(pool)
+    }
+
+    fn sqlite_pool(db: &DbPool) -> &sqlx::SqlitePool {
+        match db {
+            DbPool::Sqlite(sq) => sq,
+            _ => panic!("test requires sqlite pool"),
+        }
+    }
+
+    async fn seed_user(sq: &sqlx::SqlitePool, user_id: &str, email: &str) {
+        sqlx::query("INSERT INTO users (user_id, email) VALUES ($1, $2)")
+            .bind(user_id)
+            .bind(email)
+            .execute(sq)
+            .await
+            .expect("insert user");
+    }
+
+    async fn seed_workspace(sq: &sqlx::SqlitePool, workspace_id: &str, owner_user_id: &str) {
+        sqlx::query(
+            "INSERT INTO workspaces (workspace_id, name, owner_user_id) VALUES ($1, $2, $3)",
+        )
+        .bind(workspace_id)
+        .bind(format!("Workspace {workspace_id}"))
+        .bind(owner_user_id)
+        .execute(sq)
+        .await
+        .expect("insert workspace");
+    }
+
+    async fn seed_workspace_member(
+        sq: &sqlx::SqlitePool,
+        workspace_id: &str,
+        user_id: &str,
+        role: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO workspace_users (workspace_id, user_id, role) VALUES ($1, $2, $3)",
+        )
+        .bind(workspace_id)
+        .bind(user_id)
+        .bind(role)
+        .execute(sq)
+        .await
+        .expect("insert workspace member");
+    }
+
+    async fn seed_dashboard(
+        sq: &sqlx::SqlitePool,
+        dashboard_id: &str,
+        user_id: &str,
+        workspace_id: &str,
+        doc_type: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO dashboards (dashboard_id, user_id, workspace_id, title, doc_type) \
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(dashboard_id)
+        .bind(user_id)
+        .bind(workspace_id)
+        .bind(format!("Dashboard {dashboard_id}"))
+        .bind(doc_type)
+        .execute(sq)
+        .await
+        .expect("insert dashboard");
+    }
+
+    async fn seed_chat_session(
+        sq: &sqlx::SqlitePool,
+        session_id: &str,
+        user_id: &str,
+        workspace_id: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO chat_sessions (session_id, user_id, workspace_id) VALUES ($1, $2, $3)",
+        )
+        .bind(session_id)
+        .bind(user_id)
+        .bind(workspace_id)
+        .execute(sq)
+        .await
+        .expect("insert chat session");
+    }
+
+    async fn seed_watch(
+        sq: &sqlx::SqlitePool,
+        watch_id: &str,
+        workspace_id: &str,
+        created_by: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO watches (watch_id, workspace_id, created_by, name, prompt, schedule) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(watch_id)
+        .bind(workspace_id)
+        .bind(created_by)
+        .bind(format!("Watch {watch_id}"))
+        .bind("test prompt")
+        .bind("daily")
+        .execute(sq)
+        .await
+        .expect("insert watch");
+    }
+
+    async fn seed_collection(
+        sq: &sqlx::SqlitePool,
+        collection_id: &str,
+        workspace_id: &str,
+        created_by: &str,
+        is_public: bool,
+    ) {
+        sqlx::query(
+            "INSERT INTO collections (id, workspace_id, name, created_by, is_public) \
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(collection_id)
+        .bind(workspace_id)
+        .bind(format!("Collection {collection_id}"))
+        .bind(created_by)
+        .bind(if is_public { 1 } else { 0 })
+        .execute(sq)
+        .await
+        .expect("insert collection");
+    }
+
+    async fn seed_collection_dashboard(
+        sq: &sqlx::SqlitePool,
+        collection_id: &str,
+        dashboard_id: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO collection_dashboards (collection_id, dashboard_id) VALUES ($1, $2)",
+        )
+        .bind(collection_id)
+        .bind(dashboard_id)
+        .execute(sq)
+        .await
+        .expect("insert collection dashboard");
+    }
+
+    #[tokio::test]
+    async fn test_get_entries_since_returns_only_visible_and_owned_entries() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+
+        seed_user(sq, "user-a", "a@test.local").await;
+        seed_user(sq, "user-b", "b@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+        seed_workspace_member(sq, "ws-1", "user-b", "user").await;
+
+        // Seed backing entities for sync entry references.
+        seed_dashboard(sq, "dash-priv-a", "user-a", "ws-1", "dashboard").await;
+        seed_dashboard(sq, "dash-priv-b", "user-a", "ws-1", "dashboard").await;
+        seed_chat_session(sq, "chat-priv-a", "user-a", "ws-1").await;
+        seed_dashboard(sq, "dash-pub", "user-a", "ws-1", "dashboard").await;
+        seed_collection(sq, "col-pub", "ws-1", "user-a", true).await;
+        seed_collection_dashboard(sq, "col-pub", "dash-pub").await;
+        seed_watch(sq, "watch-1", "ws-1", "user-a").await;
+        seed_dashboard(sq, "dash-priv-userb", "user-b", "ws-1", "dashboard").await;
+
+        // 1. Private dashboard owned by user-a, not visible
+        let sid1 = write_sync_entry(
+            &db,
+            SyncEntryParams {
+                entity_type: "dashboard",
+                entity_id: "dash-priv-a",
+                workspace_id: "ws-1",
+                action: SyncActionType::Insert,
+                data: None,
+                owner_user_id: Some("user-a"),
+                is_workspace_visible: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        // 2. Private dashboard owned by user-a, not visible
+        let sid2 = write_sync_entry(
+            &db,
+            SyncEntryParams {
+                entity_type: "dashboard",
+                entity_id: "dash-priv-b",
+                workspace_id: "ws-1",
+                action: SyncActionType::Insert,
+                data: None,
+                owner_user_id: Some("user-a"),
+                is_workspace_visible: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        // 3. Private chat owned by user-a, not visible
+        let sid3 = write_sync_entry(
+            &db,
+            SyncEntryParams {
+                entity_type: "chat_session",
+                entity_id: "chat-priv-a",
+                workspace_id: "ws-1",
+                action: SyncActionType::Insert,
+                data: None,
+                owner_user_id: Some("user-a"),
+                is_workspace_visible: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        // 4. Public-collection dashboard, visible
+        let sid4 = write_sync_entry(
+            &db,
+            SyncEntryParams {
+                entity_type: "dashboard",
+                entity_id: "dash-pub",
+                workspace_id: "ws-1",
+                action: SyncActionType::Insert,
+                data: None,
+                owner_user_id: Some("user-a"),
+                is_workspace_visible: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        // 5. Workspace watch, no owner, visible
+        let sid5 = write_sync_entry(
+            &db,
+            SyncEntryParams {
+                entity_type: "watch",
+                entity_id: "watch-1",
+                workspace_id: "ws-1",
+                action: SyncActionType::Insert,
+                data: None,
+                owner_user_id: None,
+                is_workspace_visible: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        // 6. Private dashboard owned by user-b, not visible
+        let sid6 = write_sync_entry(
+            &db,
+            SyncEntryParams {
+                entity_type: "dashboard",
+                entity_id: "dash-priv-userb",
+                workspace_id: "ws-1",
+                action: SyncActionType::Insert,
+                data: None,
+                owner_user_id: Some("user-b"),
+                is_workspace_visible: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        // user-b should see: public-collection dashboard (sid4), watch (sid5),
+        // and their own private dashboard (sid6).
+        let entries = get_entries_since(&db, "ws-1", 0, "user-b", 100)
+            .await
+            .unwrap();
+
+        let sync_ids: Vec<i64> = entries.iter().map(|e| e.sync_id).collect();
+        assert_eq!(sync_ids, vec![sid4, sid5, sid6]);
+    }
+
+    #[tokio::test]
+    async fn test_get_entries_since_respects_since_sync_id_cursor() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+
+        seed_user(sq, "user-a", "a@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+        seed_watch(sq, "watch-1", "ws-1", "user-a").await;
+        seed_watch(sq, "watch-2", "ws-1", "user-a").await;
+        seed_watch(sq, "watch-3", "ws-1", "user-a").await;
+
+        let _sid1 = write_sync_entry(
+            &db,
+            SyncEntryParams {
+                entity_type: "watch",
+                entity_id: "watch-1",
+                workspace_id: "ws-1",
+                action: SyncActionType::Insert,
+                data: None,
+                owner_user_id: None,
+                is_workspace_visible: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        let sid2 = write_sync_entry(
+            &db,
+            SyncEntryParams {
+                entity_type: "watch",
+                entity_id: "watch-2",
+                workspace_id: "ws-1",
+                action: SyncActionType::Insert,
+                data: None,
+                owner_user_id: None,
+                is_workspace_visible: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        let sid3 = write_sync_entry(
+            &db,
+            SyncEntryParams {
+                entity_type: "watch",
+                entity_id: "watch-3",
+                workspace_id: "ws-1",
+                action: SyncActionType::Insert,
+                data: None,
+                owner_user_id: None,
+                is_workspace_visible: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Cursor at sid2 — should return only entry with sync_id > sid2.
+        let entries = get_entries_since(&db, "ws-1", sid2, "user-a", 100)
+            .await
+            .unwrap();
+
+        let sync_ids: Vec<i64> = entries.iter().map(|e| e.sync_id).collect();
+        assert_eq!(sync_ids, vec![sid3]);
+    }
+
+    #[tokio::test]
+    async fn test_get_entries_since_empty_for_different_workspace() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+
+        seed_user(sq, "user-a", "a@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+        seed_watch(sq, "watch-1", "ws-1", "user-a").await;
+
+        write_sync_entry(
+            &db,
+            SyncEntryParams {
+                entity_type: "watch",
+                entity_id: "watch-1",
+                workspace_id: "ws-1",
+                action: SyncActionType::Insert,
+                data: None,
+                owner_user_id: None,
+                is_workspace_visible: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Querying a different workspace should return empty.
+        let entries = get_entries_since(&db, "ws-2", 0, "user-a", 100)
+            .await
+            .unwrap();
+
+        assert!(entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_visibility_transition_add_to_public_collection() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+
+        seed_user(sq, "user-a", "a@test.local").await;
+        seed_user(sq, "user-b", "b@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+        seed_workspace_member(sq, "ws-1", "user-b", "user").await;
+        seed_dashboard(sq, "dash-1", "user-a", "ws-1", "dashboard").await;
+        seed_collection(sq, "col-pub", "ws-1", "user-a", true).await;
+        seed_collection_dashboard(sq, "col-pub", "dash-1").await;
+
+        // Entry 1: private dashboard (not visible to user-b).
+        let sid1 = write_sync_entry(
+            &db,
+            SyncEntryParams {
+                entity_type: "dashboard",
+                entity_id: "dash-1",
+                workspace_id: "ws-1",
+                action: SyncActionType::Insert,
+                data: None,
+                owner_user_id: Some("user-a"),
+                is_workspace_visible: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Entry 2: dashboard added to public collection (now visible).
+        let sid2 = write_sync_entry(
+            &db,
+            SyncEntryParams {
+                entity_type: "dashboard",
+                entity_id: "dash-1",
+                workspace_id: "ws-1",
+                action: SyncActionType::Update,
+                data: None,
+                owner_user_id: Some("user-a"),
+                is_workspace_visible: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        // user-b should see only the update (sid2), not the private insert (sid1).
+        let entries = get_entries_since(&db, "ws-1", 0, "user-b", 100)
+            .await
+            .unwrap();
+
+        let sync_ids: Vec<i64> = entries.iter().map(|e| e.sync_id).collect();
+        assert_eq!(sync_ids, vec![sid2]);
+    }
+
+    #[tokio::test]
+    async fn test_visibility_transition_remove_from_public_collection() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+
+        seed_user(sq, "user-a", "a@test.local").await;
+        seed_user(sq, "user-b", "b@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+        seed_workspace_member(sq, "ws-1", "user-b", "user").await;
+        seed_dashboard(sq, "dash-1", "user-a", "ws-1", "dashboard").await;
+        seed_collection(sq, "col-pub", "ws-1", "user-a", true).await;
+        seed_collection_dashboard(sq, "col-pub", "dash-1").await;
+
+        // Entry 1: public dashboard (visible to everyone).
+        let sid1 = write_sync_entry(
+            &db,
+            SyncEntryParams {
+                entity_type: "dashboard",
+                entity_id: "dash-1",
+                workspace_id: "ws-1",
+                action: SyncActionType::Insert,
+                data: None,
+                owner_user_id: Some("user-a"),
+                is_workspace_visible: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Entry 2: dashboard removed from public collection (no longer visible).
+        let sid2 = write_sync_entry(
+            &db,
+            SyncEntryParams {
+                entity_type: "dashboard",
+                entity_id: "dash-1",
+                workspace_id: "ws-1",
+                action: SyncActionType::Delete,
+                data: None,
+                owner_user_id: Some("user-a"),
+                is_workspace_visible: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        // user-b should see only the public insert (sid1), not the private delete (sid2).
+        let entries_b = get_entries_since(&db, "ws-1", 0, "user-b", 100)
+            .await
+            .unwrap();
+        let sync_ids_b: Vec<i64> = entries_b.iter().map(|e| e.sync_id).collect();
+        assert_eq!(sync_ids_b, vec![sid1]);
+
+        // user-a (owner) should see both entries.
+        let entries_a = get_entries_since(&db, "ws-1", 0, "user-a", 100)
+            .await
+            .unwrap();
+        let sync_ids_a: Vec<i64> = entries_a.iter().map(|e| e.sync_id).collect();
+        assert_eq!(sync_ids_a, vec![sid1, sid2]);
+    }
+
+    #[tokio::test]
+    async fn test_owner_always_sees_own_entries_regardless_of_visibility() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+
+        seed_user(sq, "user-a", "a@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+        seed_dashboard(sq, "dash-1", "user-a", "ws-1", "dashboard").await;
+        seed_dashboard(sq, "dash-2", "user-a", "ws-1", "knowledge").await;
+        seed_chat_session(sq, "chat-1", "user-a", "ws-1").await;
+
+        let sid1 = write_sync_entry(
+            &db,
+            SyncEntryParams {
+                entity_type: "dashboard",
+                entity_id: "dash-1",
+                workspace_id: "ws-1",
+                action: SyncActionType::Insert,
+                data: None,
+                owner_user_id: Some("user-a"),
+                is_workspace_visible: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let sid2 = write_sync_entry(
+            &db,
+            SyncEntryParams {
+                entity_type: "dashboard",
+                entity_id: "dash-2",
+                workspace_id: "ws-1",
+                action: SyncActionType::Insert,
+                data: None,
+                owner_user_id: Some("user-a"),
+                is_workspace_visible: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let sid3 = write_sync_entry(
+            &db,
+            SyncEntryParams {
+                entity_type: "chat_session",
+                entity_id: "chat-1",
+                workspace_id: "ws-1",
+                action: SyncActionType::Insert,
+                data: None,
+                owner_user_id: Some("user-a"),
+                is_workspace_visible: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        // user-a (owner) should see all their own private entries.
+        let entries = get_entries_since(&db, "ws-1", 0, "user-a", 100)
+            .await
+            .unwrap();
+
+        let sync_ids: Vec<i64> = entries.iter().map(|e| e.sync_id).collect();
+        assert_eq!(sync_ids, vec![sid1, sid2, sid3]);
+    }
 }
