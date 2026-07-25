@@ -62,7 +62,7 @@ pub async fn build_system_prompt(
     };
 
     // Build document list for system prompt injection.
-    let documents = match build_documents_text(db, workspace_id).await {
+    let documents = match build_documents_text(db, workspace_id, user_id).await {
         Ok(text) if !text.is_empty() => format!(
             "\n\n## Documents\n\n\
              Your workspace has knowledge documents and dashboards organized in collections. \
@@ -265,20 +265,42 @@ struct DocumentRow {
 /// then alphabetically by title. A document appearing in multiple
 /// collections is only listed once (under its first collection).
 ///
+/// Only includes documents `user_id` is authorized to see: those they own,
+/// or that belong to at least one public collection — matching the same
+/// [`kyomi_auth::dashboard_service::visibility_predicate`] used by
+/// `search_dashboards` and the dashboards page. `workspace_id` alone is not
+/// an authorization boundary.
+///
+/// The joined collection name is independently gated by the same
+/// created-by/public rule [`kyomi_auth::collection_service::list_collections`]
+/// uses: a document's *other* collection memberships (ones `user_id` isn't
+/// allowed to know exist) must never surface their name, even when the
+/// document itself is visible via a different, visible membership.
+///
 /// Returns an empty string if no documents exist.
-async fn build_documents_text(db: &DbPool, workspace_id: &str) -> kyomi_core::Result<String> {
-    let rows: Vec<DocumentRow> = kyomi_core::db_fetch_all!(
-        db,
-        DocumentRow,
+async fn build_documents_text(
+    db: &DbPool,
+    workspace_id: &str,
+    user_id: &str,
+) -> kyomi_core::Result<String> {
+    let is_pg = db.is_postgres();
+    // $1 = workspace_id, $2 = user_id (consumed by both the dashboard
+    // visibility predicate and the collection-visibility ON clause below).
+    let vis_pred = kyomi_auth::dashboard_service::visibility_predicate(2, is_pg);
+    let collection_bool_true = kyomi_core::sql_compat::bool_true(is_pg);
+    let sql = format!(
         "SELECT d.dashboard_id, d.title, d.doc_type, d.updated_at, \
-                c.name AS collection_name \
+                oc.name AS collection_name \
          FROM dashboards d \
-         LEFT JOIN collection_dashboards cd ON cd.dashboard_id = d.dashboard_id \
-         LEFT JOIN collections c ON c.id = cd.collection_id \
+         LEFT JOIN collection_dashboards ocd ON ocd.dashboard_id = d.dashboard_id \
+         LEFT JOIN collections oc ON oc.id = ocd.collection_id \
+             AND (oc.created_by = $2 OR oc.is_public = {collection_bool_true}) \
          WHERE d.workspace_id = $1 \
-         ORDER BY d.doc_type, c.name NULLS LAST, d.title",
-        workspace_id
-    )?;
+         {vis_pred} \
+         ORDER BY d.doc_type, oc.name NULLS LAST, d.title"
+    );
+    let rows: Vec<DocumentRow> =
+        kyomi_core::db_fetch_all!(db, DocumentRow, &sql, workspace_id, user_id)?;
 
     if rows.is_empty() {
         return Ok(String::new());
@@ -1041,5 +1063,239 @@ mod tests {
     fn shared_conversation_section_is_non_empty() {
         assert!(!SHARED_CONVERSATION_SECTION.is_empty());
         assert!(SHARED_CONVERSATION_SECTION.len() > 100);
+    }
+
+    // -- Regression: KYO-182 system-prompt document leak --------------------
+
+    /// Regression for KYO-182: `build_documents_text` selected every
+    /// dashboard/knowledge document in the workspace with only a
+    /// `workspace_id` filter, so the `<workspace_documents>` block injected
+    /// into every message leaked other members' private document titles,
+    /// owning collection names, and update times. The fix applies
+    /// [`kyomi_auth::dashboard_service::visibility_predicate`] — the same
+    /// predicate `search_dashboards` and the dashboards page already use —
+    /// so a member only sees their own docs plus docs in public collections.
+    ///
+    /// Also covers the follow-up finding in review: gating *which documents*
+    /// appear is not enough — the joined *collection name* must be
+    /// independently gated too. A document filed in BOTH a foreign private
+    /// collection and a visible one must still render under the visible
+    /// collection's name (or "Uncollected" if the only membership is
+    /// invisible), never under the private collection's name, even though
+    /// the document itself is legitimately visible.
+    #[tokio::test]
+    async fn build_documents_text_excludes_other_users_private_docs() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+
+        // Seed FK parents: users -> workspace.
+        sqlx::query("INSERT INTO users (user_id, email) VALUES ('user-a', 'a@test.local')")
+            .execute(sq)
+            .await
+            .expect("insert user A");
+        sqlx::query("INSERT INTO users (user_id, email) VALUES ('user-b', 'b@test.local')")
+            .execute(sq)
+            .await
+            .expect("insert user B");
+        sqlx::query(
+            "INSERT INTO workspaces (workspace_id, name, owner_user_id) \
+             VALUES ('ws1', 'WS', 'user-a')",
+        )
+        .execute(sq)
+        .await
+        .expect("insert workspace");
+
+        // Collections, all created by A: one public, two private ("A Secret
+        // Collection" and "Team Docs" is the public counterpart used for the
+        // multi-membership scenario below).
+        sqlx::query(
+            "INSERT INTO collections (id, workspace_id, name, is_public, created_by) \
+             VALUES ('col-public', 'ws1', 'Public Collection', 1, 'user-a')",
+        )
+        .execute(sq)
+        .await
+        .expect("insert public collection");
+        sqlx::query(
+            "INSERT INTO collections (id, workspace_id, name, is_public, created_by) \
+             VALUES ('col-secret', 'ws1', 'A Secret Collection', 0, 'user-a')",
+        )
+        .execute(sq)
+        .await
+        .expect("insert private collection");
+        sqlx::query(
+            "INSERT INTO collections (id, workspace_id, name, is_public, created_by) \
+             VALUES ('col-team-docs', 'ws1', 'Team Docs', 1, 'user-a')",
+        )
+        .execute(sq)
+        .await
+        .expect("insert second public collection");
+
+        // A owns two private docs (not in any collection) and one doc in the
+        // public collection. One of the private docs is also filed in A's
+        // private collection.
+        for (id, title) in [
+            ("doc-a-private-1", "A Private Doc One"),
+            ("doc-a-private-2", "A Private Doc Two"),
+        ] {
+            sqlx::query(
+                "INSERT INTO dashboards (dashboard_id, user_id, workspace_id, title) \
+                 VALUES ($1, 'user-a', 'ws1', $2)",
+            )
+            .bind(id)
+            .bind(title)
+            .execute(sq)
+            .await
+            .expect("insert A private doc");
+        }
+        sqlx::query(
+            "INSERT INTO dashboards (dashboard_id, user_id, workspace_id, title) \
+             VALUES ('doc-a-public', 'user-a', 'ws1', 'A Public Doc')",
+        )
+        .execute(sq)
+        .await
+        .expect("insert A public-collection doc");
+        sqlx::query(
+            "INSERT INTO collection_dashboards (collection_id, dashboard_id) \
+             VALUES ('col-public', 'doc-a-public')",
+        )
+        .execute(sq)
+        .await
+        .expect("link A public doc to public collection");
+        sqlx::query(
+            "INSERT INTO collection_dashboards (collection_id, dashboard_id) \
+             VALUES ('col-secret', 'doc-a-private-1')",
+        )
+        .execute(sq)
+        .await
+        .expect("link A private doc to private collection");
+
+        // A owns a doc filed in BOTH the private collection and a public
+        // collection ("Team Docs"). A viewer authorized only via the public
+        // membership must see the doc, resolved under "Team Docs", and must
+        // never learn the private collection's name from this doc either.
+        sqlx::query(
+            "INSERT INTO dashboards (dashboard_id, user_id, workspace_id, title) \
+             VALUES ('doc-a-multi', 'user-a', 'ws1', 'A Multi Membership Doc')",
+        )
+        .execute(sq)
+        .await
+        .expect("insert A multi-membership doc");
+        sqlx::query(
+            "INSERT INTO collection_dashboards (collection_id, dashboard_id) \
+             VALUES ('col-secret', 'doc-a-multi')",
+        )
+        .execute(sq)
+        .await
+        .expect("link A multi-membership doc to private collection");
+        sqlx::query(
+            "INSERT INTO collection_dashboards (collection_id, dashboard_id) \
+             VALUES ('col-team-docs', 'doc-a-multi')",
+        )
+        .execute(sq)
+        .await
+        .expect("link A multi-membership doc to public collection");
+
+        // B owns one private doc, plus a doc whose ONLY collection membership
+        // is A's private collection — B can see the doc (they own it) but
+        // must never learn the private collection's name; it must render as
+        // Uncollected, not silently dropped.
+        sqlx::query(
+            "INSERT INTO dashboards (dashboard_id, user_id, workspace_id, title) \
+             VALUES ('doc-b-private', 'user-b', 'ws1', 'B Private Doc')",
+        )
+        .execute(sq)
+        .await
+        .expect("insert B private doc");
+        sqlx::query(
+            "INSERT INTO dashboards (dashboard_id, user_id, workspace_id, title) \
+             VALUES ('doc-b-in-foreign-private', 'user-b', 'ws1', 'B Doc In Foreign Private Collection')",
+        )
+        .execute(sq)
+        .await
+        .expect("insert B doc filed only in A's private collection");
+        sqlx::query(
+            "INSERT INTO collection_dashboards (collection_id, dashboard_id) \
+             VALUES ('col-secret', 'doc-b-in-foreign-private')",
+        )
+        .execute(sq)
+        .await
+        .expect("link B doc to A's private collection");
+
+        // B must see only their own docs plus the public-collection docs —
+        // never A's private docs or the name of A's private collection.
+        let text_for_b = build_documents_text(&db, "ws1", "user-b")
+            .await
+            .expect("build_documents_text for B");
+        assert!(
+            text_for_b.contains("B Private Doc"),
+            "B must see their own document; got: {text_for_b}"
+        );
+        assert!(
+            text_for_b.contains("A Public Doc"),
+            "B must see docs in a public collection; got: {text_for_b}"
+        );
+        assert!(
+            !text_for_b.contains("A Private Doc One"),
+            "B must NOT see A's private document; got: {text_for_b}"
+        );
+        assert!(
+            !text_for_b.contains("A Private Doc Two"),
+            "B must NOT see A's private document; got: {text_for_b}"
+        );
+        assert!(
+            !text_for_b.contains("A Secret Collection"),
+            "B must NOT see the name of A's private collection; got: {text_for_b}"
+        );
+
+        // Multi-membership doc: visible via the public membership, must not
+        // be silently dropped, and must resolve to the public collection's
+        // name — never the private one it's also filed under.
+        assert!(
+            text_for_b.contains("A Multi Membership Doc"),
+            "B must see the doc via its public membership, not drop it; got: {text_for_b}"
+        );
+        assert!(
+            text_for_b.contains("Team Docs"),
+            "B must see the doc resolved under the public collection it's also filed in; \
+             got: {text_for_b}"
+        );
+
+        // Doc whose only membership is an invisible (foreign private)
+        // collection: must still appear, filed as Uncollected, never under
+        // the private collection's name.
+        assert!(
+            text_for_b.contains("B Doc In Foreign Private Collection"),
+            "B must see their own document even though its only collection \
+             membership is invisible to them; got: {text_for_b}"
+        );
+        let uncollected_pos = text_for_b.find("Uncollected").unwrap_or_else(|| {
+            panic!("output must have an Uncollected section; got: {text_for_b}")
+        });
+        let doc_pos = text_for_b
+            .find("B Doc In Foreign Private Collection")
+            .expect("doc title must be present");
+        assert!(
+            doc_pos > uncollected_pos,
+            "doc with only an invisible collection membership must be listed \
+             under Uncollected, not under any named collection; got: {text_for_b}"
+        );
+
+        // A must still see their own private docs (the fix isn't filtering
+        // everything out — only enforcing the visibility predicate).
+        let text_for_a = build_documents_text(&db, "ws1", "user-a")
+            .await
+            .expect("build_documents_text for A");
+        assert!(
+            text_for_a.contains("A Private Doc One"),
+            "A must see their own private document; got: {text_for_a}"
+        );
+        assert!(
+            text_for_a.contains("A Private Doc Two"),
+            "A must see their own private document; got: {text_for_a}"
+        );
     }
 }

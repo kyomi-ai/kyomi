@@ -499,7 +499,15 @@ pub async fn link_google_account(code: String) -> Result<LinkResult, ServerFnErr
 
 *Standards for encryption, authentication, credential handling, and input validation.*
 
-*(No entries yet.)*
+### `workspace_id` is not an authorization boundary for `dashboards` reads
+
+`dashboards` rows are visible to a user only if they own the row or it belongs to a public collection — that check lives in `kyomi_auth::dashboard_service::visibility_predicate`. A query that filters on `workspace_id` alone returns every member's private documents, not just the requesting user's.
+
+**Rule:** Every query that reads `dashboards` rows on behalf of a user must apply `visibility_predicate`, not just the user-facing list/search endpoints. This includes anything feeding the LLM system prompt or tool output, background jobs, and sync/export paths — any consumer that renders titles, content, or metadata back to a specific user or agent turn scoped to a user.
+
+Gating the row is not sufficient on its own: any `JOIN`ed metadata pulled alongside a visible row — most notably a dashboard's `collections` name via `collection_dashboards` — needs its own independent visibility check (mirror `collection_service::list_collections`'s `created_by = $user OR is_public` rule in the `JOIN`'s `ON` clause, not the `WHERE`). A document can be visible through one collection membership while also belonging to a second, invisible one; without gating the join itself, `ORDER BY`/dedup logic can surface the invisible collection's name for a document the viewer is otherwise allowed to see.
+
+Flagged in KYO-182: the agent's system-prompt document list (`build_documents_text`) selected every dashboard in the workspace with only `WHERE d.workspace_id = $1`, so every member's private document titles, collection names, and update times were injected into every other member's chat and freely recited by the agent — while `search_dashboards` and the dashboards page were correctly filtered. The first fix pass gated which documents appeared but left the joined collection name unfiltered, still leaking a private collection's name for any document that also had a visible membership. Same root cause as KYO-172 (sync-engine leak): a code path that reads `dashboards` (and its joined metadata) outside the shared visibility check.
 
 ## Code Organization
 
