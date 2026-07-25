@@ -125,6 +125,7 @@ fn auth_post(base: &str, path: &str, token: &str) -> reqwest::RequestBuilder {
 // 1. Feedback auth tests
 // ===========================================================================
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn submit_feedback_returns_401_without_auth() {
     let base = base_url().await;
@@ -150,6 +151,7 @@ async fn submit_feedback_returns_401_without_auth() {
     );
 }
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn list_feedback_returns_401_without_auth() {
     let base = base_url().await;
@@ -171,6 +173,7 @@ async fn list_feedback_returns_401_without_auth() {
 // 2. Feedback submit — response shape
 // ===========================================================================
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn submit_feedback_returns_correct_response_shape() {
     let ctx = setup_auth_context("submit-shape").await;
@@ -222,6 +225,7 @@ async fn submit_feedback_returns_correct_response_shape() {
 // 3. Feedback submit — validation (short description)
 // ===========================================================================
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn submit_feedback_rejects_short_description() {
     let ctx = setup_auth_context("submit-short").await;
@@ -268,6 +272,7 @@ async fn submit_feedback_rejects_short_description() {
 // 4. Feedback submit — invalid type rejected
 // ===========================================================================
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn submit_feedback_rejects_invalid_type() {
     let ctx = setup_auth_context("submit-badtype").await;
@@ -308,6 +313,7 @@ async fn submit_feedback_rejects_invalid_type() {
 // 5. Feedback submit — all valid types accepted
 // ===========================================================================
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn submit_feedback_accepts_all_valid_types() {
     let ctx = setup_auth_context("submit-types").await;
@@ -350,6 +356,7 @@ async fn submit_feedback_accepts_all_valid_types() {
 // 6. Feedback list — response shape
 // ===========================================================================
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn list_feedback_returns_correct_response_shape() {
     let ctx = setup_auth_context("list-shape").await;
@@ -835,6 +842,7 @@ async fn subscribe_normalizes_email_to_lowercase() {
 // 14. Feedback submit with screenshot stored in context
 // ===========================================================================
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn submit_feedback_with_screenshot_stores_in_context() {
     let ctx = setup_auth_context("submit-screenshot").await;
@@ -926,6 +934,7 @@ async fn unsubscribe_does_not_require_auth() {
 // 17. Submit feedback — feedback_id format check
 // ===========================================================================
 
+#[ignore = "KYO-236: quarantined. KYO-253 — asserts against a REST route deleted in KYO-73 (routes/*.rs -> server_fns/*.rs); this endpoint no longer exists in kyomi_server::build_service()"]
 #[tokio::test]
 async fn submit_feedback_returns_feedback_id_with_correct_prefix() {
     let ctx = setup_auth_context("fb-id-fmt").await;

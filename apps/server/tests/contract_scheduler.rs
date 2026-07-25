@@ -15,6 +15,17 @@
 // Section 1: Scheduler Redis lock tests
 // ===========================================================================
 
+// KYO-236: quarantined. `kyomi_core::redis::create_pool()` has no
+// connection timeout on its initial-connect retries (redis-rs
+// `ConnectionManager` default: 6 retries × exponential backoff, no
+// per-attempt timeout) — when Redis is unreachable, as it always is in CI
+// (no Redis service is configured; `kv_store::create_kv_store` already
+// falls back to an in-memory store for the app's real functional paths),
+// this "gracefully skip if unavailable" test takes 5-6+ minutes to reach
+// its own `Err` branch before skipping, for zero signal every single CI
+// run. Tracked in KYO-252 (fix `create_pool`'s timeout) — re-enable this
+// test once that lands, or once CI grows a real Redis service.
+#[ignore = "requires local Redis; create_pool() takes 5-6+ min to fail without one — see KYO-252"]
 #[tokio::test]
 async fn scheduler_redis_lock_acquire_and_release() {
     let redis_url = std::env::var("REDIS_URL")

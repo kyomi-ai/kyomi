@@ -7,7 +7,9 @@
 #      runs the server_fn/REST divergence linter across the full tree
 #   2. trivy-scan (~30s) — Trivy filesystem vulnerability scanner (HIGH/CRITICAL)
 #   3. cargo-audit (fast, ~15s) — RUSTSEC advisories against Cargo.lock
-#   4. clippy (slow, ~2-5min) — full workspace clippy + compilation check + unit tests
+#   4. clippy (slow) — full workspace clippy + compilation check + unit and
+#      integration tests (apps/server/tests/ — needs the postgres service
+#      below; KYO-236)
 # =============================================================================
 
 name: CI
@@ -125,6 +127,28 @@ jobs:
     runs-on: ubuntu-latest
     env:
       SCCACHE_GHA_ENABLED: "true"
+    # postgres backs the apps/server/tests/ contract-test suite (KYO-236).
+    # Credentials/db name match kyomi-core's Config::test_config() default
+    # so the cargo test step below needs no DATABASE_URL override. Redis is
+    # NOT needed here — kv_store::create_kv_store() falls back to an
+    # in-memory KV store when REDIS_URL is unset. The one test that talks to
+    # Redis directly (scheduler_redis_lock_acquire_and_release) is disabled
+    # via #[ignore] pending KYO-252 — it does not skip gracefully without
+    # Redis, it hangs 5-6 minutes before reaching its own error branch.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg15
+        env:
+          POSTGRES_USER: kyomi_test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: kyomi_test
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
 
@@ -188,10 +212,10 @@ jobs:
           RUSTC_WRAPPER: ${{ env.SCCACHE_AVAILABLE == 'true' && 'sccache' || '' }}
         run: cargo clippy --locked -p kyomi-ui --target wasm32-unknown-unknown --features hydrate -- -D warnings
 
-      - name: cargo test (unit tests)
+      - name: cargo test (unit + integration tests)
         env:
           RUSTC_WRAPPER: ${{ env.SCCACHE_AVAILABLE == 'true' && 'sccache' || '' }}
-        run: cargo test --locked --workspace --lib --bins --exclude kyomi-desktop --exclude kyomi-datasource-server
+        run: cargo test --locked --workspace --lib --bins --tests --exclude kyomi-desktop --exclude kyomi-datasource-server
 
       - name: sccache stats
         if: always()

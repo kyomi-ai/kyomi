@@ -282,6 +282,7 @@ async fn health_v1_alias_matches_api_health_shape() {
 // returns HTML — not the former JSON API info.  We only assert a 200 status
 // and an HTML content-type.
 
+#[ignore = "KYO-236: quarantined. KYO-255 — needs a real trunk+tailwind build of crates/kyomi-ui/dist/, which CI does not produce"]
 #[tokio::test]
 async fn root_returns_200_html() {
     let base = base_url().await;
@@ -334,6 +335,7 @@ async fn has_security_headers() {
     );
 }
 
+#[ignore = "KYO-236: quarantined. KYO-257 — needs FRONTEND_URL=https://... set in the test environment for apply_runtime_overrides() to enable HSTS"]
 #[tokio::test]
 async fn has_hsts_header_when_not_demo() {
     let base = base_url().await;
