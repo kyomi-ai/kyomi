@@ -634,7 +634,7 @@ pub async fn get_unread_alerts_count() -> Result<i64, ServerFnError> {
 pub async fn mark_alert_read(execution_id: i32) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    kyomi_auth::watch_service::mark_alert_read(ac.db(), execution_id, &ac.ws_id)
+    kyomi_auth::watch_service::mark_alert_read(ac.db(), execution_id, &ac.ws_id, &ac.auth.user_id)
         .await
         .into_sfn()
 }
@@ -647,7 +647,7 @@ pub async fn mark_alert_read(execution_id: i32) -> Result<(), ServerFnError> {
 pub async fn mark_alert_unread(execution_id: i32) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    kyomi_auth::watch_service::mark_alert_unread(ac.db(), execution_id, &ac.ws_id)
+    kyomi_auth::watch_service::mark_alert_unread(ac.db(), execution_id, &ac.ws_id, &ac.auth.user_id)
         .await
         .into_sfn()
 }
@@ -673,7 +673,7 @@ pub async fn delete_alert(execution_id: i32) -> Result<(), ServerFnError> {
 pub async fn restore_alert(execution_id: i32) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    kyomi_auth::watch_service::restore_alert(ac.db(), execution_id, &ac.ws_id)
+    kyomi_auth::watch_service::restore_alert(ac.db(), execution_id, &ac.ws_id, &ac.auth.user_id)
         .await
         .into_sfn()
 }
@@ -733,9 +733,14 @@ pub async fn bulk_mark_alerts_read(execution_ids: Vec<i32>) -> Result<(), Server
         ));
     }
 
-    kyomi_auth::watch_service::bulk_mark_alerts_read(ac.db(), &unique_ids, &ac.ws_id)
-        .await
-        .into_sfn()?;
+    kyomi_auth::watch_service::bulk_mark_alerts_read(
+        ac.db(),
+        &unique_ids,
+        &ac.ws_id,
+        &ac.auth.user_id,
+    )
+    .await
+    .into_sfn()?;
 
     Ok(())
 }
@@ -764,9 +769,14 @@ pub async fn bulk_mark_alerts_unread(execution_ids: Vec<i32>) -> Result<(), Serv
         ));
     }
 
-    kyomi_auth::watch_service::bulk_mark_alerts_unread(ac.db(), &unique_ids, &ac.ws_id)
-        .await
-        .into_sfn()?;
+    kyomi_auth::watch_service::bulk_mark_alerts_unread(
+        ac.db(),
+        &unique_ids,
+        &ac.ws_id,
+        &ac.auth.user_id,
+    )
+    .await
+    .into_sfn()?;
 
     Ok(())
 }
