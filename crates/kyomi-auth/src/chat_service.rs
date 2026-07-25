@@ -2141,3 +2141,142 @@ pub async fn get_thinking_event_detail(
         None => Ok(None),
     }
 }
+
+// ─── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    // Regression coverage for KYO-200: `thinking_event_details` existed only
+    // as a Postgres migration (20260608000000_create_thinking_event_details.sql)
+    // with no SQLite counterpart until migrations-sqlite/00027. Before that
+    // migration existed, `store_thinking_event_details` failed with
+    // "no such table: thinking_event_details" on every self-hosted agent run.
+
+    async fn test_pool() -> DbPool {
+        let _ = kyomi_core::constants::load_with_fallback();
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+
+        sqlx::query("PRAGMA foreign_keys=ON")
+            .execute(&pool)
+            .await
+            .expect("enable foreign keys");
+
+        sqlx::migrate!("../../apps/server/migrations-sqlite")
+            .run(&pool)
+            .await
+            .expect("run sqlite migrations");
+
+        DbPool::Sqlite(pool)
+    }
+
+    fn sqlite_pool(db: &DbPool) -> &sqlx::SqlitePool {
+        match db {
+            DbPool::Sqlite(sq) => sq,
+            _ => panic!("test requires sqlite pool"),
+        }
+    }
+
+    fn test_key() -> [u8; 32] {
+        let mut key = [0u8; 32];
+        key[..16].copy_from_slice(b"test-key-1234567");
+        key[16..].copy_from_slice(b"8901234567890123");
+        key
+    }
+
+    async fn seed_user(sq: &sqlx::SqlitePool, user_id: &str, email: &str) {
+        sqlx::query("INSERT INTO users (user_id, email) VALUES ($1, $2)")
+            .bind(user_id)
+            .bind(email)
+            .execute(sq)
+            .await
+            .expect("insert user");
+    }
+
+    async fn seed_workspace(sq: &sqlx::SqlitePool, workspace_id: &str, owner_user_id: &str) {
+        sqlx::query(
+            "INSERT INTO workspaces (workspace_id, name, owner_user_id) VALUES ($1, $2, $3)",
+        )
+        .bind(workspace_id)
+        .bind(format!("Workspace {workspace_id}"))
+        .bind(owner_user_id)
+        .execute(sq)
+        .await
+        .expect("insert workspace");
+    }
+
+    async fn seed_chat_session(
+        sq: &sqlx::SqlitePool,
+        session_id: &str,
+        user_id: &str,
+        workspace_id: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO chat_sessions (session_id, user_id, workspace_id) VALUES ($1, $2, $3)",
+        )
+        .bind(session_id)
+        .bind(user_id)
+        .bind(workspace_id)
+        .execute(sq)
+        .await
+        .expect("insert chat session");
+    }
+
+    async fn seed_chat_message(sq: &sqlx::SqlitePool, message_id: &str, session_id: &str) {
+        sqlx::query(
+            "INSERT INTO chat_messages (message_id, session_id, role, content) \
+             VALUES ($1, $2, 'assistant', '')",
+        )
+        .bind(message_id)
+        .bind(session_id)
+        .execute(sq)
+        .await
+        .expect("insert chat message");
+    }
+
+    #[tokio::test]
+    async fn store_and_fetch_thinking_event_detail_roundtrip_on_sqlite() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        let key = test_key();
+
+        seed_user(sq, "user-1", "user1@example.com").await;
+        seed_workspace(sq, "ws-1", "user-1").await;
+        seed_chat_session(sq, "session-1", "user-1", "ws-1").await;
+        seed_chat_message(sq, "message-1", "session-1").await;
+
+        let mut full_texts = std::collections::HashMap::new();
+        full_texts.insert(
+            "event-1".to_string(),
+            "the full untruncated reasoning text".to_string(),
+        );
+
+        store_thinking_event_details(&db, &key, "message-1", &full_texts)
+            .await
+            .expect("store thinking event details on sqlite");
+
+        let fetched =
+            get_thinking_event_detail(&db, &key, "message-1", "event-1", "user-1", "ws-1")
+                .await
+                .expect("fetch thinking event detail on sqlite");
+
+        assert_eq!(
+            fetched,
+            Some("the full untruncated reasoning text".to_string())
+        );
+
+        // Wrong workspace must not see the detail (authorization join clause).
+        let wrong_workspace =
+            get_thinking_event_detail(&db, &key, "message-1", "event-1", "user-1", "ws-2")
+                .await
+                .expect("query with wrong workspace should not error");
+        assert_eq!(wrong_workspace, None);
+    }
+}

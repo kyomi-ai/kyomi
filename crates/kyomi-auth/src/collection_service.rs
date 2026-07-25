@@ -693,4 +693,117 @@ mod tests {
         assert_eq!(json["dashboard_id"], "dash-1");
         assert_eq!(json["position"], 0);
     }
+
+    // ─── Integration tests (async, in-memory SQLite) ─────────────────────────
+    //
+    // Regression coverage for KYO-200: `doc_type` was added to `collections`
+    // on Postgres (20260410000001_collection_doc_type.sql) but had no SQLite
+    // counterpart until migrations-sqlite/00026_collection_doc_type.sql. Both
+    // `create_collection` (unconditional `doc_type` insert) and
+    // `list_collections` (`doc_type` filter) failed with
+    // "no such column: doc_type" on SQLite before that migration existed.
+
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn test_pool() -> DbPool {
+        let _ = kyomi_core::constants::load_with_fallback();
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+
+        sqlx::query("PRAGMA foreign_keys=ON")
+            .execute(&pool)
+            .await
+            .expect("enable foreign keys");
+
+        sqlx::migrate!("../../apps/server/migrations-sqlite")
+            .run(&pool)
+            .await
+            .expect("run sqlite migrations");
+
+        DbPool::Sqlite(pool)
+    }
+
+    fn sqlite_pool(db: &DbPool) -> &sqlx::SqlitePool {
+        match db {
+            DbPool::Sqlite(sq) => sq,
+            _ => panic!("test requires sqlite pool"),
+        }
+    }
+
+    async fn seed_user(sq: &sqlx::SqlitePool, user_id: &str, email: &str) {
+        sqlx::query("INSERT INTO users (user_id, email) VALUES ($1, $2)")
+            .bind(user_id)
+            .bind(email)
+            .execute(sq)
+            .await
+            .expect("insert user");
+    }
+
+    async fn seed_workspace(sq: &sqlx::SqlitePool, workspace_id: &str, owner_user_id: &str) {
+        sqlx::query(
+            "INSERT INTO workspaces (workspace_id, name, owner_user_id) VALUES ($1, $2, $3)",
+        )
+        .bind(workspace_id)
+        .bind(format!("Workspace {workspace_id}"))
+        .bind(owner_user_id)
+        .execute(sq)
+        .await
+        .expect("insert workspace");
+    }
+
+    #[tokio::test]
+    async fn create_and_list_collections_filters_by_doc_type_on_sqlite() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+
+        seed_user(sq, "user-1", "user1@example.com").await;
+        seed_workspace(sq, "ws-1", "user-1").await;
+
+        let dashboard_collection = create_collection(NewCollectionParams {
+            db: &db,
+            workspace_id: "ws-1",
+            name: "Dashboards Folder",
+            description: None,
+            color: None,
+            is_public: false,
+            doc_type: "dashboard",
+            created_by: "user-1",
+        })
+        .await
+        .expect("create dashboard collection on sqlite");
+
+        let knowledge_collection = create_collection(NewCollectionParams {
+            db: &db,
+            workspace_id: "ws-1",
+            name: "Knowledge Folder",
+            description: None,
+            color: None,
+            is_public: false,
+            doc_type: "knowledge",
+            created_by: "user-1",
+        })
+        .await
+        .expect("create knowledge collection on sqlite");
+
+        let dashboards_only = list_collections(&db, "ws-1", "user-1", Some("dashboard"))
+            .await
+            .expect("list dashboard-scoped collections on sqlite");
+        assert_eq!(dashboards_only.len(), 1);
+        assert_eq!(dashboards_only[0].id, dashboard_collection.id);
+
+        let knowledge_only = list_collections(&db, "ws-1", "user-1", Some("knowledge"))
+            .await
+            .expect("list knowledge-scoped collections on sqlite");
+        assert_eq!(knowledge_only.len(), 1);
+        assert_eq!(knowledge_only[0].id, knowledge_collection.id);
+
+        let unfiltered = list_collections(&db, "ws-1", "user-1", None)
+            .await
+            .expect("list all collections on sqlite");
+        assert_eq!(unfiltered.len(), 2);
+    }
 }
