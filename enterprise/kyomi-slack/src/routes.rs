@@ -45,6 +45,7 @@ use kyomi_auth::{
     encryption,
     middleware::AuthUser,
     redis_ops,
+    user_service,
 };
 use kyomi_core::{capability, DbPool};
 
@@ -1927,6 +1928,36 @@ async fn run_slack_query(
     // UUID and the server_fn passes it via user_message_id).
     let user_message_id = uuid::Uuid::new_v4().to_string();
 
+    // Resolve the Slack-linked Kyomi user's current workspace role so it
+    // can be threaded into the agent's ToolContext (gates admin-only
+    // tools). A genuine DB error is propagated (we don't know the answer,
+    // so we can't proceed). But `resolve_slack_context` only confirms a
+    // `platform_user_links` row exists, not that workspace membership is
+    // still active — pre-existing behavior here already runs the query
+    // for any resolved link regardless of membership state. Failing hard
+    // on a stale link would newly deny a path that previously worked
+    // (scope of KYO-190 is fixing the *role input*, not changing who can
+    // use the Slack integration), so a missing/inactive membership row
+    // logs a warning and falls back to no roles — i.e. non-admin, which
+    // is the only role we can respect without a confirmed active row.
+    let user_roles = match user_service::get_workspace_user(db, workspace_id, user_id)
+        .await
+        .map_err(|e| {
+            kyomi_core::Error::Internal(format!(
+                "failed to load Slack user's workspace role: {e}"
+            ))
+        })? {
+        Some(wu) => vec![wu.role],
+        None => {
+            warn!(
+                %user_id,
+                %workspace_id,
+                "Slack user has no active workspace membership row; running with no workspace roles (non-admin)"
+            );
+            Vec::new()
+        }
+    };
+
     // Build agent execution config.
     let agent_config = kyomi_agent::execution::AgentExecutionConfig {
         session_id: session_id.to_string(),
@@ -1950,6 +1981,7 @@ async fn run_slack_query(
         conversation_history: None,
         user_display_name: "Kyomi Slack".to_string(),
         context_window: 0,
+        workspace_roles: user_roles,
     };
 
     let result = kyomi_agent::execution::execute_agent_chat(
