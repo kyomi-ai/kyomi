@@ -7,6 +7,7 @@ pub mod cron;
 pub mod feedback_context;
 pub mod json;
 pub mod oauth_popup;
+pub mod permissions;
 pub mod stripe;
 pub mod time;
 pub mod webauthn;
