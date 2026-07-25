@@ -8,6 +8,19 @@
 
 use chrono::{DateTime, Utc};
 use kyomi_core::enums::TransferStatus;
+
+/// Build a `StripeService` from application config when Stripe is configured.
+/// Returns `None` for self-hosted installs without Stripe keys.
+fn stripe_from_config(
+    config: &kyomi_core::Config,
+) -> Option<crate::stripe_service::StripeService> {
+    config.stripe_secret_key.as_ref().map(|sk| {
+        crate::stripe_service::StripeService::new(
+            sk,
+            config.stripe_webhook_secret.as_deref().unwrap_or_default(),
+        )
+    })
+}
 use kyomi_core::models::{
     OwnershipTransfer, Workspace, WorkspaceInvitation, WorkspaceUser,
 };
@@ -705,6 +718,7 @@ pub async fn accept_invitation_for_user(
     pool: &DbPool,
     invitation_id: &str,
     user_id: &str,
+    config: Option<&kyomi_core::Config>,
 ) -> kyomi_core::Result<()> {
     let invitation = get_invitation(pool, invitation_id)
         .await?
@@ -722,7 +736,30 @@ pub async fn accept_invitation_for_user(
 
     let db_role = invitation.role.as_ref();
     create_workspace_user(pool, &invitation.workspace_id, user_id, db_role).await?;
+
+    if let Some(config) = config
+        && let Some(stripe) = stripe_from_config(config)
+    {
+        let user_count = count_workspace_users(pool, &invitation.workspace_id).await?;
+        crate::billing_service::update_billing_users(
+            pool,
+            &stripe,
+            &invitation.workspace_id,
+            user_count,
+            1,
+        )
+        .await?;
+    }
+
     Ok(())
+}
+
+/// Shared context for invitation acceptance operations.
+pub struct AcceptInvitationCtx<'a> {
+    pub db: &'a DbPool,
+    pub kv: &'a KVPool,
+    pub jwt_secret: &'a str,
+    pub config: Option<&'a kyomi_core::Config>,
 }
 
 /// Accept an invitation, then switch the user into the workspace they just
@@ -739,16 +776,15 @@ pub async fn accept_invitation_for_user(
 /// Reuses `crate::session::switch_active_workspace` (KYO-170) — no duplicated
 /// JWT/cookie logic.
 pub async fn accept_invitation_and_switch(
-    db: &DbPool,
-    kv: &KVPool,
-    jwt_secret: &str,
+    ctx: &AcceptInvitationCtx<'_>,
     invitation_id: &str,
     user_id: &str,
     joined_workspace_id: &str,
     device_info: &crate::token_service::DeviceInfo,
 ) -> kyomi_core::Result<Option<crate::session::AuthenticatedSession>> {
+    let AcceptInvitationCtx { db, kv, jwt_secret, config } = ctx;
     // Acceptance first — its failure is a genuine error and must propagate.
-    accept_invitation_for_user(db, invitation_id, user_id).await?;
+    accept_invitation_for_user(db, invitation_id, user_id, *config).await?;
 
     // Best-effort switch: acceptance is already committed, so from here we never
     // turn a successful join into a failure.
@@ -1034,6 +1070,7 @@ pub async fn remove_workspace_member(
     owner_user_id: &str,
     requesting_user_id: &str,
     target_user_id: &str,
+    config: Option<&kyomi_core::Config>,
 ) -> kyomi_core::Result<()> {
     if target_user_id == owner_user_id {
         return Err(kyomi_core::Error::BadRequest(
@@ -1067,6 +1104,21 @@ pub async fn remove_workspace_member(
     )?;
 
     remove_member(pool, workspace_id, target_user_id).await?;
+
+    if let Some(config) = config
+        && let Some(stripe) = stripe_from_config(config)
+    {
+        let user_count = count_workspace_users(pool, workspace_id).await?;
+        crate::billing_service::update_billing_users(
+            pool,
+            &stripe,
+            workspace_id,
+            user_count,
+            -1,
+        )
+        .await?;
+    }
+
     Ok(())
 }
 
@@ -1297,12 +1349,12 @@ mod tests {
         seed_invitation(&pool, "inv-cas-3").await;
 
         // First accept succeeds.
-        accept_invitation_for_user(&pool, "inv-cas-3", "user-1")
+        accept_invitation_for_user(&pool, "inv-cas-3", "user-1", None)
             .await
             .unwrap();
 
         // Second accept returns Conflict.
-        let err = accept_invitation_for_user(&pool, "inv-cas-3", "user-1")
+        let err = accept_invitation_for_user(&pool, "inv-cas-3", "user-1", None)
             .await
             .unwrap_err();
 

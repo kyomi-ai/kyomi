@@ -158,6 +158,7 @@ pub async fn remove_member(user_id: String) -> Result<(), ServerFnError> {
         &workspace.owner_user_id,
         &ac.auth.user_id,
         &user_id,
+        Some(&ac.ctx.config),
     )
     .await
     .into_sfn()?;

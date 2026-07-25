@@ -312,6 +312,7 @@ async fn signup_smtp_less_new_user(
             db,
             &inv.invitation_id,
             &user.user_id,
+            config,
         )
         .await?;
         crate::user_service::update_last_workspace(db, &user.user_id, &inv.workspace_id).await?;

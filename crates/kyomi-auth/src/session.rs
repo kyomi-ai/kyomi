@@ -332,7 +332,7 @@ mod tests {
 
         // Accept — mirrors what accept_invitation (the server fn) calls before
         // performing the KYO-171 switch.
-        crate::workspace_service::accept_invitation_for_user(&pool, "inv-1", "user-1")
+        crate::workspace_service::accept_invitation_for_user(&pool, "inv-1", "user-1", None)
             .await
             .expect("accept invitation");
 
@@ -441,10 +441,14 @@ mod tests {
             oauth_client_id: None,
         };
 
+        let accept_ctx = crate::workspace_service::AcceptInvitationCtx {
+            db: &pool,
+            kv: &kv,
+            jwt_secret: "test-secret",
+            config: None,
+        };
         let sess = crate::workspace_service::accept_invitation_and_switch(
-            &pool,
-            &kv,
-            "test-secret",
+            &accept_ctx,
             "inv-2",
             "user-1",
             "ws-joined",
