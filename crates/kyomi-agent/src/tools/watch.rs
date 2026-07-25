@@ -248,18 +248,18 @@ impl AgentTool for CreateWatchTool {
             Err(e) => return Err(e),
         };
 
-        // Broadcast watch creation to workspace members.
-        // Broadcast to all workspace members including the actor's other tabs —
-        // same-user multi-tab sync requires this. QueryCache is stale-while-
-        // revalidate so the actor's own tab refetches silently (no flash).
-        ws_helpers::send_watch_update(
+        // Watches are strictly private to their creator (KYO-177/KYO-180) —
+        // route the live-sync broadcast to the owner only. `send_to_user` fans
+        // out to all of the owner's own connections, so same-user multi-tab
+        // sync still works; it is only *other* workspace members who no
+        // longer receive the event.
+        ws_helpers::broadcast_watch_sync(
+            &ctx.db,
             &ctx.ws_manager,
-            &ctx.workspace_id,
             &watch.watch_id,
-            "created",
-            &ctx.user_id,
-            &ctx.user_display_name,
-            None,
+            &ctx.workspace_id,
+            kyomi_types::sync::SyncActionType::Insert,
+            &watch.created_by,
         )
         .await;
 
@@ -557,18 +557,18 @@ impl AgentTool for UpdateWatchTool {
             Err(e) => return Err(e),
         };
 
-        // Broadcast watch update to workspace members.
-        // Broadcast to all workspace members including the actor's other tabs —
-        // same-user multi-tab sync requires this. QueryCache is stale-while-
-        // revalidate so the actor's own tab refetches silently (no flash).
-        ws_helpers::send_watch_update(
+        // Watches are strictly private to their creator (KYO-177/KYO-180) —
+        // route the live-sync broadcast to the owner only. `send_to_user` fans
+        // out to all of the owner's own connections, so same-user multi-tab
+        // sync still works; it is only *other* workspace members who no
+        // longer receive the event.
+        ws_helpers::broadcast_watch_sync(
+            &ctx.db,
             &ctx.ws_manager,
-            &ctx.workspace_id,
             &watch.watch_id,
-            "updated",
-            &ctx.user_id,
-            &ctx.user_display_name,
-            None,
+            &ctx.workspace_id,
+            kyomi_types::sync::SyncActionType::Update,
+            &watch.created_by,
         )
         .await;
 
@@ -783,19 +783,19 @@ impl AgentTool for DeleteWatchTool {
         )
         .await
         {
-            Ok(_created_by) => {
-                // Broadcast watch deletion to workspace members.
-                // Broadcast to all workspace members including the actor's other tabs —
-                // same-user multi-tab sync requires this. QueryCache is stale-while-
-                // revalidate so the actor's own tab refetches silently (no flash).
-                ws_helpers::send_watch_update(
+            Ok(created_by) => {
+                // Watches are strictly private to their creator (KYO-177/KYO-180) —
+                // route the live-sync broadcast to the owner only. `send_to_user`
+                // fans out to all of the owner's own connections, so same-user
+                // multi-tab sync still works; it is only *other* workspace
+                // members who no longer receive the event.
+                ws_helpers::broadcast_watch_sync(
+                    &ctx.db,
                     &ctx.ws_manager,
-                    &ctx.workspace_id,
                     watch_id,
-                    "deleted",
-                    &ctx.user_id,
-                    &ctx.user_display_name,
-                    None,
+                    &ctx.workspace_id,
+                    kyomi_types::sync::SyncActionType::Delete,
+                    &created_by,
                 )
                 .await;
 
@@ -1115,6 +1115,262 @@ impl AgentTool for TriggerWatchTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Live broadcast routing (KYO-180) ────────────────────────────────
+    //
+    // KYO-177 made watches strictly private to their creator and fixed the
+    // UI server-fn path (`crates/kyomi-ui/src/server_fns/watches.rs`) to
+    // route live-sync broadcasts to the owner only via
+    // `broadcast_watch_sync` / `send_to_user`. The AI-agent tool path here
+    // was missed and kept calling the old `send_watch_update` helper, which
+    // broadcasts to every connected workspace member — leaking a private
+    // watch's content to bystanders whenever a watch is created, updated,
+    // or deleted through chat instead of the Watches page. These tests
+    // exercise the real tool `execute()` path end-to-end (real sqlite DB,
+    // real `WebSocketManager`) and assert the non-owner receives nothing.
+
+    mod broadcast_routing {
+        use std::sync::Arc;
+
+        use sqlx::sqlite::SqlitePoolOptions;
+
+        use kyomi_auth::websocket::WebSocketManager;
+        use kyomi_core::DbPool;
+
+        use super::*;
+
+        async fn test_pool() -> DbPool {
+            let _ = kyomi_core::constants::load_with_fallback();
+
+            let pool = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect("sqlite::memory:")
+                .await
+                .expect("connect in-memory sqlite");
+
+            sqlx::query("PRAGMA foreign_keys=ON")
+                .execute(&pool)
+                .await
+                .expect("enable foreign keys");
+
+            sqlx::migrate!("../../apps/server/migrations-sqlite")
+                .run(&pool)
+                .await
+                .expect("run sqlite migrations");
+
+            DbPool::Sqlite(pool)
+        }
+
+        /// Seed two users ("user-a", "user-b") in one workspace ("ws-1",
+        /// owned by user-a). Mirrors the fixture in
+        /// `kyomi_auth::watch_service::privacy_tests`.
+        async fn seed_workspace_with_two_users(pool: &DbPool) {
+            let sq = match pool {
+                DbPool::Sqlite(sq) => sq,
+                _ => unreachable!(),
+            };
+
+            sqlx::query("INSERT INTO users (user_id, email) VALUES ('user-a', 'a@test.local')")
+                .execute(sq)
+                .await
+                .expect("insert user-a");
+            sqlx::query("INSERT INTO users (user_id, email) VALUES ('user-b', 'b@test.local')")
+                .execute(sq)
+                .await
+                .expect("insert user-b");
+
+            sqlx::query(
+                "INSERT INTO workspaces (workspace_id, name, owner_user_id) \
+                 VALUES ('ws-1', 'Shared Workspace', 'user-a')",
+            )
+            .execute(sq)
+            .await
+            .expect("insert workspace");
+
+            sqlx::query(
+                "INSERT INTO workspace_users (workspace_id, user_id, role, active) \
+                 VALUES ('ws-1', 'user-a', 'workspace_admin', 1)",
+            )
+            .execute(sq)
+            .await
+            .expect("insert workspace_users user-a");
+            sqlx::query(
+                "INSERT INTO workspace_users (workspace_id, user_id, role, active) \
+                 VALUES ('ws-1', 'user-b', 'user', 1)",
+            )
+            .execute(sq)
+            .await
+            .expect("insert workspace_users user-b");
+        }
+
+        /// Build a `ToolContext` for user-a acting in ws-1, wired to the
+        /// given (real) `WebSocketManager` and (real) sqlite pool so the
+        /// tool's broadcast call routes through actual connections.
+        fn build_ctx(pool: DbPool, ws_manager: &WebSocketManager) -> ToolContext {
+            ToolContext {
+                db: pool,
+                kv: kyomi_core::kv_store_memory::InMemoryKVStore::new_pool(),
+                user_id: "user-a".to_string(),
+                workspace_id: "ws-1".to_string(),
+                encryption_key: Arc::new([0u8; 32]),
+                embedding: kyomi_embed::LazyEmbedding::new(),
+                ws_manager: ws_manager.clone(),
+                config: Arc::new(kyomi_core::Config::test_config()),
+                session_id: None,
+                supports_mcp_apps: false,
+                workspace_roles: Vec::new(),
+                connect_registry: None,
+                platforms: Arc::new(kyomi_core::platform::PlatformRegistry::new()),
+                user_display_name: "User A".to_string(),
+            }
+        }
+
+        #[tokio::test]
+        async fn create_watch_tool_broadcasts_to_owner_only() {
+            let pool = test_pool().await;
+            seed_workspace_with_two_users(&pool).await;
+
+            let manager = WebSocketManager::new(None, pool.clone());
+            let (_conn_a, mut rx_a) = manager.connect("user-a").expect("connect user-a");
+            let (_conn_b, mut rx_b) = manager.connect("user-b").expect("connect user-b");
+            rx_a.try_recv().expect("heartbeat for user-a");
+            rx_b.try_recv().expect("heartbeat for user-b");
+
+            let ctx = build_ctx(pool, &manager);
+
+            let args = serde_json::json!({
+                "name": "Agent-created watch",
+                "prompt": "Check if revenue drops more than 10 percent",
+                "schedule": "0 9 * * *",
+                "mode": "alert",
+                "verified_no_duplicates": true,
+            });
+
+            let result = CreateWatchTool
+                .execute(args, &ctx)
+                .await
+                .expect("create_watch tool execution");
+            let parsed: serde_json::Value =
+                serde_json::from_str(&result).expect("tool result is JSON");
+            assert_eq!(parsed["success"], serde_json::json!(true), "{result}");
+
+            let msg_a = rx_a
+                .try_recv()
+                .expect("owner (user-a) should receive the sync_action broadcast");
+            assert!(msg_a.contains("sync_action"), "message should be a SyncAction: {msg_a}");
+
+            let result_b = rx_b.try_recv();
+            assert!(
+                result_b.is_err(),
+                "non-owner (user-b) must NOT receive the watch broadcast, got: {result_b:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn update_watch_tool_broadcasts_to_owner_only() {
+            let pool = test_pool().await;
+            seed_workspace_with_two_users(&pool).await;
+
+            let watch = kyomi_auth::watch_service::create_watch(
+                &pool,
+                "ws-1",
+                "user-a",
+                "Pre-existing watch",
+                "Check if revenue drops more than 10 percent",
+                "0 9 * * *",
+                "alert",
+                None,
+                None,
+                None,
+                false,
+            )
+            .await
+            .expect("seed watch");
+
+            let manager = WebSocketManager::new(None, pool.clone());
+            let (_conn_a, mut rx_a) = manager.connect("user-a").expect("connect user-a");
+            let (_conn_b, mut rx_b) = manager.connect("user-b").expect("connect user-b");
+            rx_a.try_recv().expect("heartbeat for user-a");
+            rx_b.try_recv().expect("heartbeat for user-b");
+
+            let ctx = build_ctx(pool, &manager);
+
+            let args = serde_json::json!({
+                "watch_id": watch.watch_id,
+                "name": "Renamed via agent",
+            });
+
+            let result = UpdateWatchTool
+                .execute(args, &ctx)
+                .await
+                .expect("update_watch tool execution");
+            let parsed: serde_json::Value =
+                serde_json::from_str(&result).expect("tool result is JSON");
+            assert_eq!(parsed["success"], serde_json::json!(true), "{result}");
+
+            let msg_a = rx_a
+                .try_recv()
+                .expect("owner (user-a) should receive the sync_action broadcast");
+            assert!(msg_a.contains("sync_action"), "message should be a SyncAction: {msg_a}");
+
+            let result_b = rx_b.try_recv();
+            assert!(
+                result_b.is_err(),
+                "non-owner (user-b) must NOT receive the watch broadcast, got: {result_b:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn delete_watch_tool_broadcasts_to_owner_only() {
+            let pool = test_pool().await;
+            seed_workspace_with_two_users(&pool).await;
+
+            let watch = kyomi_auth::watch_service::create_watch(
+                &pool,
+                "ws-1",
+                "user-a",
+                "Watch to delete",
+                "Check if revenue drops more than 10 percent",
+                "0 9 * * *",
+                "alert",
+                None,
+                None,
+                None,
+                false,
+            )
+            .await
+            .expect("seed watch");
+
+            let manager = WebSocketManager::new(None, pool.clone());
+            let (_conn_a, mut rx_a) = manager.connect("user-a").expect("connect user-a");
+            let (_conn_b, mut rx_b) = manager.connect("user-b").expect("connect user-b");
+            rx_a.try_recv().expect("heartbeat for user-a");
+            rx_b.try_recv().expect("heartbeat for user-b");
+
+            let ctx = build_ctx(pool, &manager);
+
+            let args = serde_json::json!({ "watch_id": watch.watch_id });
+
+            let result = DeleteWatchTool
+                .execute(args, &ctx)
+                .await
+                .expect("delete_watch tool execution");
+            let parsed: serde_json::Value =
+                serde_json::from_str(&result).expect("tool result is JSON");
+            assert_eq!(parsed["success"], serde_json::json!(true), "{result}");
+
+            let msg_a = rx_a
+                .try_recv()
+                .expect("owner (user-a) should receive the sync_action broadcast");
+            assert!(msg_a.contains("sync_action"), "message should be a SyncAction: {msg_a}");
+
+            let result_b = rx_b.try_recv();
+            assert!(
+                result_b.is_err(),
+                "non-owner (user-b) must NOT receive the watch broadcast, got: {result_b:?}"
+            );
+        }
+    }
 
     // -- CreateWatchTool ----------------------------------------------------
 

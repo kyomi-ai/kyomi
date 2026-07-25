@@ -730,33 +730,6 @@ pub async fn send_datasource_update(
 }
 
 // ---------------------------------------------------------------------------
-// Watch CRUD events
-// ---------------------------------------------------------------------------
-
-/// Broadcast a watch_update to all workspace members (except the actor).
-pub async fn send_watch_update(
-    manager: &WebSocketManager,
-    workspace_id: &str,
-    watch_id: &str,
-    action: &str,
-    changed_by: &str,
-    changed_by_name: &str,
-    exclude_user_id: Option<&str>,
-) {
-    let msg = WebSocketMessage::new(MessageType::WatchUpdate)
-        .with_data(serde_json::json!({
-            "action": action,
-            "watch_id": watch_id,
-            "changed_by": changed_by,
-            "changed_by_name": changed_by_name,
-        }));
-
-    manager
-        .broadcast_to_workspace(workspace_id, msg, exclude_user_id)
-        .await;
-}
-
-// ---------------------------------------------------------------------------
 // Live sync broadcasts
 // ---------------------------------------------------------------------------
 
