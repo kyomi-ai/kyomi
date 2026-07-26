@@ -43,11 +43,8 @@ pub struct Capabilities {
     pub credits_limit: f64,
     pub credits_exhausted: bool,
 
-    // AI features (gated by credits_exhausted)
+    // AI chat (gated by credits_exhausted)
     pub ai_chat_enabled: bool,
-    pub ai_sql_generation_enabled: bool,
-    pub ai_autocomplete_enabled: bool,
-    pub ai_chart_copilot_enabled: bool,
 
     // BigQuery
     pub bigquery_access_level: String,
@@ -179,7 +176,7 @@ pub fn compute_capabilities(workspace: &Workspace) -> Capabilities {
     let tier = get_subscription_tier(workspace);
     let credits = get_credits_info(workspace, tier);
 
-    // AI features are enabled when credits are not exhausted
+    // AI chat is enabled when credits are not exhausted
     let ai_enabled = !credits.exhausted;
 
     Capabilities {
@@ -190,11 +187,8 @@ pub fn compute_capabilities(workspace: &Workspace) -> Capabilities {
         credits_limit: credits.limit_usd,
         credits_exhausted: credits.exhausted,
 
-        // AI features gated by credits only
+        // AI chat gated by credits only
         ai_chat_enabled: ai_enabled,
-        ai_sql_generation_enabled: ai_enabled,
-        ai_autocomplete_enabled: ai_enabled,
-        ai_chart_copilot_enabled: ai_enabled,
 
         // BigQuery
         bigquery_access_level: "full".to_string(),
@@ -236,7 +230,7 @@ pub fn compute_capabilities_with_credits(
 ) -> Capabilities {
     let tier = get_subscription_tier(workspace);
 
-    // AI features are enabled when credits are not exhausted
+    // AI chat is enabled when credits are not exhausted
     let ai_enabled = !credits.exhausted;
 
     Capabilities {
@@ -247,11 +241,8 @@ pub fn compute_capabilities_with_credits(
         credits_limit: credits.limit_usd,
         credits_exhausted: credits.exhausted,
 
-        // AI features gated by credits only
+        // AI chat gated by credits only
         ai_chat_enabled: ai_enabled,
-        ai_sql_generation_enabled: ai_enabled,
-        ai_autocomplete_enabled: ai_enabled,
-        ai_chart_copilot_enabled: ai_enabled,
 
         // BigQuery
         bigquery_access_level: "full".to_string(),
@@ -293,11 +284,8 @@ pub fn compute_capabilities_self_hosted() -> Capabilities {
         credits_limit: 999_999.0,
         credits_exhausted: false,
 
-        // All AI features enabled
+        // AI chat enabled
         ai_chat_enabled: true,
-        ai_sql_generation_enabled: true,
-        ai_autocomplete_enabled: true,
-        ai_chart_copilot_enabled: true,
 
         // BigQuery
         bigquery_access_level: "full".to_string(),
@@ -545,9 +533,6 @@ mod tests {
 
         assert!(caps.credits_exhausted);
         assert!(!caps.ai_chat_enabled);
-        assert!(!caps.ai_sql_generation_enabled);
-        assert!(!caps.ai_autocomplete_enabled);
-        assert!(!caps.ai_chart_copilot_enabled);
     }
 
     #[test]
@@ -565,9 +550,6 @@ mod tests {
             "credits_limit",
             "credits_exhausted",
             "ai_chat_enabled",
-            "ai_sql_generation_enabled",
-            "ai_autocomplete_enabled",
-            "ai_chart_copilot_enabled",
             "bigquery_access_level",
             "multi_user_enabled",
             "user_management_enabled",
@@ -630,7 +612,6 @@ mod tests {
 
         assert!(caps.credits_exhausted);
         assert!(!caps.ai_chat_enabled);
-        assert!(!caps.ai_sql_generation_enabled);
     }
 
     #[test]
@@ -641,11 +622,8 @@ mod tests {
         assert!(!caps.billing_enabled);
         assert!(!caps.credits_exhausted);
 
-        // All AI features enabled
+        // AI chat enabled
         assert!(caps.ai_chat_enabled);
-        assert!(caps.ai_sql_generation_enabled);
-        assert!(caps.ai_autocomplete_enabled);
-        assert!(caps.ai_chart_copilot_enabled);
 
         // BigQuery
         assert_eq!(caps.bigquery_access_level, "full");
