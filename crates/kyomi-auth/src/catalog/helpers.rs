@@ -179,18 +179,53 @@ pub async fn archive_missing_tables(
 ///
 /// The column is VARCHAR(50) with values: 'idle', 'running', 'failed'.
 /// Progress details are stored in `catalog_refresh_progress` (json column).
+///
+/// `error` is a human-readable failure reason, set whenever `status` is
+/// `"failed"` and a specific cause is known (KYO-126). It is written as a
+/// top-level `"error"` key in the stored envelope — a sibling of
+/// `"progress"`, not nested inside it — because `get_catalog_refresh_status`
+/// (`kyomi-ui/src/server_fns/sql_editor.rs`) and the settings page's refresh
+/// poller already read `envelope.get("error")` directly on the whole
+/// `catalog_refresh_progress` column value. Before this parameter existed,
+/// every caller passed `None` here implicitly (there was no such field), so
+/// that lookup always missed and the poller fell back to a generic message
+/// even when a concrete failure reason was available.
+///
+/// ### Known limitation: workspace-scoped concurrency (KYO-126)
+///
+/// `catalog_refresh_status` and `catalog_refresh_progress` are columns on
+/// `workspaces`, not on `datasource_configs` — every datasource in a
+/// workspace shares the same pair of columns, and this function is the sole
+/// writer of both. [`index_started_within`] guards against a *single*
+/// datasource's refresh double-running, but it keys off
+/// `datasource_config_id`, not `workspace_id`, so two *different*
+/// datasources in the same workspace can legitimately refresh at the same
+/// time. If datasource A's run fails here (writing `"failed"` + A's reason)
+/// and datasource B's run then finishes and calls this function with
+/// `"idle"`, B's write silently overwrites A's failure — there is no
+/// history, so nothing records that A ever failed. `attribute_refresh_failure`
+/// (`kyomi-ui/src/server_fns/datasources.rs`) guards against
+/// *misattributing* a still-present failure to the wrong datasource, but it
+/// cannot protect a failure that has already been clobbered by a later
+/// write: by the time it reads the row, the failing status may simply be
+/// gone, and the datasource whose refresh actually failed will show a clean
+/// "idle" Catalog tab.
+///
+/// This is a pre-existing limitation of the workspace-scoped column, not
+/// something callers can work around locally (no ordering discipline
+/// between concurrent callers changes the fact that only one status/reason
+/// pair can be stored at a time). Fixing it properly requires a schema
+/// change — e.g. moving `catalog_refresh_status`/`catalog_refresh_progress`
+/// onto `datasource_configs` — tracked separately, not attempted here.
 pub async fn update_workspace_status(
     db: &DbPool,
     workspace_id: &str,
     datasource_config_id: &str,
     status: &str,
     progress: Option<Value>,
+    error: Option<&str>,
 ) -> Result<()> {
-    let progress_json = serde_json::json!({
-        "datasource_config_id": datasource_config_id,
-        "updated_at": Utc::now().to_rfc3339(),
-        "progress": progress,
-    });
+    let progress_json = build_progress_envelope(datasource_config_id, progress.as_ref(), error);
 
     let is_pg = db.is_postgres();
     let json_cast = if is_pg { "::json" } else { "" };
@@ -204,6 +239,26 @@ pub async fn update_workspace_status(
         })?;
 
     Ok(())
+}
+
+/// Build the JSON envelope stored in `workspaces.catalog_refresh_progress`.
+///
+/// Extracted from [`update_workspace_status`] so the shape — in particular,
+/// `"error"` living as a top-level sibling of `"progress"` rather than
+/// nested inside it — is directly testable. This is the exact shape
+/// `get_catalog_refresh_status` and the settings page's refresh poller read
+/// (KYO-126): both call `envelope.get("error")` on the whole column value.
+fn build_progress_envelope(
+    datasource_config_id: &str,
+    progress: Option<&Value>,
+    error: Option<&str>,
+) -> Value {
+    serde_json::json!({
+        "datasource_config_id": datasource_config_id,
+        "updated_at": Utc::now().to_rfc3339(),
+        "progress": progress,
+        "error": error,
+    })
 }
 
 /// Update the datasource's last_catalog_refresh timestamp.
@@ -633,6 +688,43 @@ async fn generate_and_store_embeddings(params: GenerateEmbeddingsParams<'_>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── build_progress_envelope (KYO-126) ────────────────────────────────
+
+    #[test]
+    fn envelope_puts_error_as_top_level_sibling_of_progress() {
+        // This is the exact shape `get_catalog_refresh_status`
+        // (kyomi-ui/src/server_fns/sql_editor.rs) and the settings page's
+        // refresh poller read: `envelope.get("error")` directly on the
+        // whole `catalog_refresh_progress` column value, not nested under
+        // `envelope["progress"]["error"]`. Before this field existed, no
+        // caller ever populated an "error" key at all, so that lookup
+        // always missed regardless of what the caller passed as `progress`.
+        let envelope = build_progress_envelope(
+            "ds-1",
+            Some(&serde_json::json!({"processed": 3})),
+            Some("permission denied for schema analytics"),
+        );
+
+        assert_eq!(
+            envelope.get("error").and_then(|v| v.as_str()),
+            Some("permission denied for schema analytics")
+        );
+        assert_eq!(
+            envelope.get("progress"),
+            Some(&serde_json::json!({"processed": 3}))
+        );
+        assert_eq!(
+            envelope.get("datasource_config_id").and_then(|v| v.as_str()),
+            Some("ds-1")
+        );
+    }
+
+    #[test]
+    fn envelope_error_is_null_when_none() {
+        let envelope = build_progress_envelope("ds-1", None, None);
+        assert!(envelope.get("error").is_some_and(|v| v.is_null()));
+    }
 
     #[test]
     fn extract_schema_signature_from_metadata() {

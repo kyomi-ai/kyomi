@@ -7254,6 +7254,44 @@ fn EditModeCatalogTab(
                             <AlertDescription>{e.to_string()}</AlertDescription>
                         </Alert>
                     })}
+
+                    // Persistent last-refresh-failed notice (KYO-126). Unlike
+                    // the transient toast the poller fires while a manual
+                    // refresh is being watched, this renders from
+                    // `CatalogStatsResult` any time the page loads — so a
+                    // background/initial index failure (nobody was polling)
+                    // still leaves a visible trace. `refresh_failed` is
+                    // already attributed to this datasource server-side
+                    // (`attribute_refresh_failure`), so a failure on another
+                    // datasource in the same workspace never renders here.
+                    //
+                    // Suppressed while the transient "Refresh error" Alert
+                    // above is showing a result from the same manual refresh
+                    // — otherwise a failed manual refresh stacks two error
+                    // Alerts describing the same failure. Once the poller's
+                    // action result clears (e.g. the user starts another
+                    // refresh), this persistent notice reappears if the
+                    // underlying `stats.refresh_failed` is still true.
+                    {move || {
+                        if refresh_action.value().get().and_then(|r| r.err()).is_some() {
+                            return None;
+                        }
+                        stats
+                            .get()
+                            .filter(|s| s.refresh_failed)
+                            .map(|s| {
+                                let reason = s.refresh_failure_reason.unwrap_or_else(|| {
+                                    "Catalog refresh failed — search and AI table discovery \
+                                     may be unavailable until the next successful refresh."
+                                        .to_string()
+                                });
+                                view! {
+                                    <Alert variant=AlertVariant::Error class="mt-3">
+                                        <AlertDescription>{reason}</AlertDescription>
+                                    </Alert>
+                                }
+                            })
+                    }}
                 </div>
             </div>
 
