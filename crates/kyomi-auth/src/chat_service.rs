@@ -1074,6 +1074,158 @@ pub async fn update_session_title(
     update_session(db, session_id, Some(title), None, None).await
 }
 
+/// Flip a chat session's `shared` flag and persist the matching `sync_log`
+/// entry/entries (see [`write_shared_sync_log`]) so an offline workspace
+/// member converges to the new visibility state on their next delta sync
+/// even when the live broadcast
+/// (`websocket::helpers::broadcast_chat_session_sync` /
+/// `broadcast_chat_session_unshare`) never reaches them.
+///
+/// Callers (`share_session` / `unshare_session` server fns) keep their own
+/// ownership check and, for unshare, the Slack-channel guard — this
+/// function owns only the `UPDATE` statement (both directions, including
+/// `shared_at`) and the sync_log write. Returns whether a row was actually
+/// updated.
+pub async fn set_session_shared(
+    db: &DbPool,
+    session_id: &str,
+    shared: bool,
+) -> kyomi_core::Result<bool> {
+    let is_pg = db.is_postgres();
+
+    let rows_affected = if shared {
+        let true_lit = kyomi_core::sql_compat::bool_true(is_pg);
+        let now = Utc::now();
+        let sql = format!(
+            "UPDATE chat_sessions SET shared = {true_lit}, shared_at = $1 WHERE session_id = $2"
+        );
+        kyomi_core::db_execute!(db, &sql, now, session_id)
+            .map_err(|e| kyomi_core::Error::Internal(format!("failed to share session: {e}")))?
+            .rows_affected()
+    } else {
+        let false_lit = kyomi_core::sql_compat::bool_false(is_pg);
+        let sql = format!(
+            "UPDATE chat_sessions SET shared = {false_lit}, shared_at = NULL WHERE session_id = $1"
+        );
+        kyomi_core::db_execute!(db, &sql, session_id)
+            .map_err(|e| kyomi_core::Error::Internal(format!("failed to unshare session: {e}")))?
+            .rows_affected()
+    };
+
+    if rows_affected == 0 {
+        return Ok(false);
+    }
+
+    write_shared_sync_log(db, session_id, shared).await;
+
+    Ok(true)
+}
+
+/// Persist the `sync_log` row(s) for a chat session share/unshare
+/// transition, so an offline workspace member converges to the
+/// post-transition visibility on their next delta sync
+/// (`sync_log_service::get_entries_since`) even though the live broadcast
+/// never reached them.
+///
+/// Mirrors `collection_service::write_visibility_sync_log` (KYO-238),
+/// which solved the identical shape for dashboards — see that function's
+/// doc comment for the full rationale behind the `is_workspace_visible`
+/// values below; the same reasoning applies verbatim to chat sessions.
+///
+/// Sharing (`shared = true`) writes one `Update` row, fresh snapshot,
+/// `is_workspace_visible: true` — every member's delta picks it up,
+/// including the owner's own (a harmless idempotent re-apply of a
+/// snapshot they already have).
+///
+/// Unsharing (`shared = false`) writes two rows, **atomically, in one
+/// transaction** (via `sync_log_service::write_sync_entries_in_transaction`),
+/// in order:
+/// 1. `Delete`, `data: None`, `is_workspace_visible: true`. `true` is not
+///    a mistake for a row about to go private: it is the row's OLD
+///    (pre-transition) state, and `get_entries_since` only admits a row
+///    when `is_workspace_visible = TRUE OR owner_user_id = requester` — a
+///    `false` row here would be invisible to every non-owner and the
+///    eviction would never reach an offline member.
+/// 2. `Update`, `data: Some(fresh snapshot)`, `is_workspace_visible:
+///    false`, scoped to the owner via `owner_user_id`. Applied *after*
+///    the Delete in `sync_id` order, so the owner's own delta ends with
+///    the session intact instead of self-evicted by row 1.
+///
+/// The transaction matters because these two rows are not independently
+/// self-consistent: if only the `Delete` half landed (a transient error
+/// between the two sequential inserts is entirely plausible), that row
+/// alone is workspace-visible and would evict the *owner's own* cache on
+/// their own next delta, with no compensating `Update` ever arriving.
+/// Wrapping both in one transaction restores the ordinary, recoverable
+/// failure mode: no rows at all means "not converged yet", not "converged
+/// to the wrong state".
+///
+/// Never writes an `Update`/`Insert`-type row with `data: None` — that is
+/// the wire protocol's Delete signal (KYO-218/KYO-245). If the snapshot
+/// can't be fetched, the write is skipped entirely and a warning is
+/// logged; a missing sync_log row means "not converged yet", which is the
+/// only safe failure mode here.
+async fn write_shared_sync_log(db: &DbPool, session_id: &str, shared: bool) {
+    let Some((workspace_id, snapshot)) = fetch_session_snapshot(db, session_id).await else {
+        tracing::warn!(
+            session_id,
+            "chat session visibility sync log: snapshot unavailable; skipping write"
+        );
+        return;
+    };
+
+    let owner_user_id = snapshot
+        .get("created_by")
+        .and_then(|cb| cb.get("user_id"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let Some(owner_user_id) = owner_user_id else {
+        tracing::warn!(
+            session_id,
+            "chat session visibility sync log: snapshot missing owner user id; skipping write"
+        );
+        return;
+    };
+
+    let update_entry = sync_log_service::SyncEntryParams {
+        entity_type: entity_types::CHAT_SESSION,
+        entity_id: session_id,
+        workspace_id: &workspace_id,
+        action: SyncActionType::Update,
+        data: Some(snapshot),
+        owner_user_id: Some(&owner_user_id),
+        is_workspace_visible: shared,
+    };
+
+    let result = if shared {
+        sync_log_service::write_sync_entries_in_transaction(
+            db,
+            std::slice::from_ref(&update_entry),
+        )
+        .await
+    } else {
+        let delete_entry = sync_log_service::SyncEntryParams {
+            entity_type: entity_types::CHAT_SESSION,
+            entity_id: session_id,
+            workspace_id: &workspace_id,
+            action: SyncActionType::Delete,
+            data: None,
+            owner_user_id: Some(&owner_user_id),
+            is_workspace_visible: true,
+        };
+        sync_log_service::write_sync_entries_in_transaction(db, &[delete_entry, update_entry])
+            .await
+    };
+
+    if let Err(e) = result {
+        tracing::warn!(
+            error = %e, session_id,
+            "failed to write chat session visibility sync log entries"
+        );
+    }
+}
+
 /// Delete a session (owner + optional workspace check, cascades messages).
 pub async fn delete_session(
     db: &DbPool,
@@ -2577,6 +2729,118 @@ mod tests {
         assert!(
             !ids.contains(&"sess-other-ws"),
             "sync list scoped to ws-1 must not include a session from ws-2; got {ids:?}"
+        );
+    }
+
+    // ── KYO-258: set_session_shared persists sync_log for offline members ──
+
+    async fn seed_two_users_one_workspace(sq: &sqlx::SqlitePool) {
+        seed_user(sq, "user-a", "user-a@test.local").await;
+        seed_user(sq, "user-b", "user-b@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+
+        sqlx::query(
+            "INSERT INTO workspace_users (workspace_id, user_id, role, active) \
+             VALUES ('ws-1', 'user-a', 'workspace_admin', 1)",
+        )
+        .execute(sq)
+        .await
+        .expect("insert workspace_users user-a");
+        sqlx::query(
+            "INSERT INTO workspace_users (workspace_id, user_id, role, active) \
+             VALUES ('ws-1', 'user-b', 'user', 1)",
+        )
+        .execute(sq)
+        .await
+        .expect("insert workspace_users user-b");
+    }
+
+    #[tokio::test]
+    async fn offline_non_owner_converges_via_delta_after_session_shared() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        seed_two_users_one_workspace(sq).await;
+        seed_chat_session(sq, SeedSession::new("sess-1", "user-a", "ws-1", "Private")).await;
+
+        // user-b's last-synced cursor, captured before the transition —
+        // simulates being offline while it happens.
+        let cursor = sync_log_service::get_latest_sync_id(&db, "ws-1")
+            .await
+            .expect("cursor");
+
+        let updated = set_session_shared(&db, "sess-1", true)
+            .await
+            .expect("set_session_shared(true) should succeed");
+        assert!(updated, "sharing an existing session must report a row updated");
+        // Deliberately no call to broadcast_chat_session_sync — user-b was
+        // offline and never received a live push.
+
+        let entries = sync_log_service::get_entries_since(&db, "ws-1", cursor, "user-b", 50)
+            .await
+            .expect("get_entries_since for user-b");
+
+        let entry = entries
+            .iter()
+            .find(|e| e.entity_id == "sess-1")
+            .expect("offline non-owner's delta must include the newly-shared session");
+        assert!(matches!(entry.action, SyncActionType::Update));
+        assert!(
+            entry.data.is_some(),
+            "delta entry must carry the snapshot so the client can render it: {entry:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn offline_members_converge_via_delta_after_session_unshared() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        seed_two_users_one_workspace(sq).await;
+        seed_chat_session(
+            sq,
+            SeedSession::new("sess-1", "user-a", "ws-1", "Shared").shared(true),
+        )
+        .await;
+
+        let cursor = sync_log_service::get_latest_sync_id(&db, "ws-1")
+            .await
+            .expect("cursor");
+
+        let updated = set_session_shared(&db, "sess-1", false)
+            .await
+            .expect("set_session_shared(false) should succeed");
+        assert!(updated, "unsharing an existing session must report a row updated");
+        // No live broadcast fired — both members were offline.
+
+        let non_owner_entries =
+            sync_log_service::get_entries_since(&db, "ws-1", cursor, "user-b", 50)
+                .await
+                .expect("get_entries_since for user-b");
+        assert_eq!(
+            non_owner_entries.len(),
+            1,
+            "offline non-owner must see exactly the eviction, nothing else: {non_owner_entries:?}"
+        );
+        assert!(matches!(non_owner_entries[0].action, SyncActionType::Delete));
+        assert_eq!(non_owner_entries[0].entity_id, "sess-1");
+
+        let owner_entries = sync_log_service::get_entries_since(&db, "ws-1", cursor, "user-a", 50)
+            .await
+            .expect("get_entries_since for user-a");
+        assert_eq!(
+            owner_entries.len(),
+            2,
+            "offline owner's delta must contain both the eviction row and the \
+             follow-up snapshot that restores it: {owner_entries:?}"
+        );
+        assert!(matches!(owner_entries[0].action, SyncActionType::Delete));
+        assert!(matches!(owner_entries[1].action, SyncActionType::Update));
+        assert!(
+            owner_entries[1].data.is_some(),
+            "owner's restoring update must carry the fresh snapshot: {owner_entries:?}"
+        );
+        assert!(
+            owner_entries[0].sync_id < owner_entries[1].sync_id,
+            "Delete must be applied before Update, or the owner ends up evicted too"
         );
     }
 }
