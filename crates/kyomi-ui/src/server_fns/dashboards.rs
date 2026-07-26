@@ -166,8 +166,7 @@ pub async fn list_dashboards(
 
 /// Convert a `DashboardSearchResult` to a `DashboardListItem`.
 ///
-/// Shared by both `list_dashboards` and `list_knowledge_docs` to avoid
-/// duplicating the 13-field mapping.
+/// Used by `list_dashboards` to avoid duplicating the 13-field mapping.
 #[cfg(feature = "ssr")]
 pub(crate) fn map_search_result_to_list_item(
     r: kyomi_auth::dashboard_service::DashboardSearchResult,

@@ -250,21 +250,6 @@ pub async fn create_watch(config: WatchConfig) -> Result<WatchListItem, ServerFn
     Ok(item)
 }
 
-/// Get a single watch by ID.
-///
-/// Mirrors `GET /watches/{watch_id}` in `apps/server/src/routes/watches.rs`.
-#[server(prefix = "/leptos-api")]
-pub async fn get_watch(watch_id: String) -> Result<WatchListItem, ServerFnError> {
-    let ac = AuthenticatedContext::extract().await?;
-
-    let watch = kyomi_auth::watch_service::get_watch(ac.db(), &watch_id, &ac.ws_id, &ac.auth.user_id)
-        .await
-        .into_sfn()?
-        .ok_or_else(|| ServerFnError::new("Watch not found"))?;
-
-    Ok(watch_to_item(ac.db(), &watch).await)
-}
-
 /// Update a watch with partial fields.
 ///
 /// Mirrors `PATCH /watches/{watch_id}` in `apps/server/src/routes/watches.rs`.
@@ -802,35 +787,6 @@ pub async fn continue_alert_in_chat(execution_id: i32) -> Result<String, ServerF
     )
     .await
     .into_sfn()
-}
-
-/// Get the most recent execution for a watch.
-///
-/// Mirrors `GET /watches/{watch_id}/last-execution` in
-/// `apps/server/src/routes/watches.rs`.
-#[server(prefix = "/leptos-api")]
-pub async fn get_last_execution(
-    watch_id: String,
-) -> Result<Option<WatchExecutionItem>, ServerFnError> {
-    let ac = AuthenticatedContext::extract().await?;
-
-    // Verify watch exists and belongs to workspace
-    kyomi_auth::watch_service::get_watch(ac.db(), &watch_id, &ac.ws_id, &ac.auth.user_id)
-        .await
-        .into_sfn()?
-        .ok_or_else(|| ServerFnError::new("Watch not found"))?;
-
-    let executions = kyomi_auth::watch_service::get_executions(
-        ac.db(),
-        &watch_id,
-        &ac.ws_id,
-        &ac.auth.user_id,
-        1,
-    )
-    .await
-    .into_sfn()?;
-
-    Ok(executions.first().map(|e| execution_to_item(e, true)))
 }
 
 /// Get thinking events for a specific execution.
