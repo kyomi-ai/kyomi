@@ -10,7 +10,6 @@
 //! ## Endpoints
 //!
 //! ### Session CRUD (Task 3.1)
-//! - `list_chat_sessions`    — list sessions (owned + shared)
 //! - `get_session_messages`  — get messages for a session
 //! - `update_session_title`  — rename a session
 //! - `delete_chat_session`   — delete a session
@@ -255,34 +254,6 @@ pub async fn get_websocket_config() -> Result<WebSocketConfig, ServerFnError> {
 // ─────────────────────────────────────────────────────────────────────────────
 // Task 3.1: Session CRUD Server Functions
 // ─────────────────────────────────────────────────────────────────────────────
-
-/// List chat sessions (owned + shared) in the current workspace.
-///
-/// When `pinned_only` is true, filters to sessions with at least one pinned
-/// message. Returns up to 200 sessions, ordered by most recently updated.
-///
-/// Mirrors `GET /chat/sessions` in `apps/server/src/routes/chat.rs`.
-#[server(prefix = "/leptos-api")]
-pub async fn list_chat_sessions(pinned_only: bool) -> Result<Vec<ChatSessionItem>, ServerFnError> {
-    let ac = AuthenticatedContext::extract().await?;
-
-    let sessions = kyomi_auth::chat_service::get_user_sessions(
-        ac.db(),
-        &ac.auth.user_id,
-        &ac.ws_id,
-        200,   // limit (matches default_session_limit clamped to max)
-        0,     // offset
-        pinned_only,
-        "chat", // session_type
-    )
-    .await
-    .into_sfn()?;
-
-    Ok(sessions
-        .into_iter()
-        .map(session_list_item_to_chat_session_item)
-        .collect())
-}
 
 /// Get messages for a chat session, including session metadata.
 ///

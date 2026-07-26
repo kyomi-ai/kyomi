@@ -1274,30 +1274,3 @@ fn generate_chartml_with_rules(
 
     Ok(serde_yaml::to_string(&spec).unwrap_or_default())
 }
-
-// ---------------------------------------------------------------------------
-// Task 6.1: WebSocket connection info (user_id + workspace_id for WS URL)
-// ---------------------------------------------------------------------------
-
-/// Connection info needed to build the WebSocket URL on the client side.
-///
-/// The WebSocket connects to `/ws/{workspace_id}_{user_id}?token=...`
-/// and needs both IDs.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct WsConnectionInfo {
-    pub user_id: String,
-    pub workspace_id: String,
-}
-
-/// Return the current user's ID and workspace ID for WebSocket connection.
-///
-/// Called once when the SQL Editor page mounts to set up the streaming handler.
-#[server(prefix = "/leptos-api")]
-pub async fn get_ws_connection_info() -> Result<WsConnectionInfo, ServerFnError> {
-    let ac = AuthenticatedContext::extract().await?;
-
-    Ok(WsConnectionInfo {
-        user_id: ac.auth.user_id.clone(),
-        workspace_id: ac.ws_id.clone(),
-    })
-}

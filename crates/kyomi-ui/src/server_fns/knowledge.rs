@@ -8,49 +8,9 @@
 
 use leptos::prelude::*;
 
-use crate::server_fns::dashboards::DashboardListItem;
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Knowledge document CRUD
 // ─────────────────────────────────────────────────────────────────────────────
-
-/// List or search knowledge documents in the current workspace.
-///
-/// Delegates to `dashboard_service::search_dashboards` with
-/// `doc_type = Knowledge`.
-#[server(prefix = "/leptos-api")]
-pub async fn list_knowledge_docs(
-    query: Option<String>,
-    sort_by: Option<String>,
-    limit: Option<i64>,
-) -> Result<Vec<DashboardListItem>, ServerFnError> {
-    let ac = AuthenticatedContext::extract().await?;
-
-    let sort = match sort_by.as_deref() {
-        Some("popularity") => kyomi_auth::dashboard_service::SearchSort::Popularity,
-        Some("created") => kyomi_auth::dashboard_service::SearchSort::Created,
-        _ => kyomi_auth::dashboard_service::SearchSort::Recent,
-    };
-
-    let limit = limit.unwrap_or(50).clamp(1, 100);
-
-    let results = kyomi_auth::dashboard_service::search_dashboards(
-        ac.db(),
-        &ac.ws_id,
-        &ac.auth.user_id,
-        query.as_deref(),
-        Some(kyomi_core::models::DocType::Knowledge),
-        sort,
-        limit,
-    )
-    .await
-    .into_sfn()?;
-
-    Ok(results
-        .into_iter()
-        .map(super::dashboards::map_search_result_to_list_item)
-        .collect())
-}
 
 /// Create a new knowledge document. Returns the new document ID.
 ///
