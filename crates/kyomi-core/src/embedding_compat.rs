@@ -29,6 +29,18 @@ pub fn bytes_to_embedding(bytes: &[u8]) -> Vec<f32> {
         .collect()
 }
 
+/// Convert stored embedding bytes into a [`pgvector::Vector`] for binding a
+/// `vector` column on Postgres.
+///
+/// There is no SQLite equivalent — the raw `&[u8]` bytes are bound directly
+/// as a BLOB there, since `pgvector::Vector` only implements sqlx's `Encode`
+/// for the Postgres backend. Callers still branch on `DbPool` to bind the
+/// right value; this only removes the repeated `Vector::from(bytes_to_embedding(...))`
+/// at each Postgres call site.
+pub fn bytes_to_pg_vector(bytes: &[u8]) -> pgvector::Vector {
+    pgvector::Vector::from(bytes_to_embedding(bytes))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -56,5 +68,13 @@ mod tests {
         let bytes = embedding_to_bytes(&embedding);
         assert_eq!(bytes.len(), 384 * 4);
         assert_eq!(bytes.len(), 1536);
+    }
+
+    #[test]
+    fn bytes_to_pg_vector_roundtrips() {
+        let original = vec![1.0f32, -2.5, 0.0, 3.14159];
+        let bytes = embedding_to_bytes(&original);
+        let vec: Vec<f32> = bytes_to_pg_vector(&bytes).into();
+        assert_eq!(vec, original);
     }
 }

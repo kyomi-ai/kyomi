@@ -172,6 +172,26 @@ pub fn full_table_name_expr(is_pg: bool) -> &'static str {
     }
 }
 
+/// Embedding bind-parameter placeholder for a `vector` column.
+/// Postgres: `$5::vector`, SQLite: `$5` (embeddings stored as raw BLOB, no cast needed)
+pub fn embedding_placeholder(is_pg: bool, param: &str) -> String {
+    if is_pg {
+        format!("{param}::vector")
+    } else {
+        param.to_string()
+    }
+}
+
+/// Enum type cast for a bind parameter.
+/// Postgres: `$6::learning_scope`, SQLite: `$6` (enums stored as plain TEXT)
+pub fn enum_cast(is_pg: bool, param: &str, enum_name: &str) -> String {
+    if is_pg {
+        format!("{param}::{enum_name}")
+    } else {
+        param.to_string()
+    }
+}
+
 /// Same as [`full_table_name_expr`] but with a table alias prefix on the columns.
 ///
 /// E.g. `full_table_name_expr_prefixed(true, "dtc")` produces
@@ -294,6 +314,18 @@ mod tests {
     fn test_ago_seconds_param() {
         assert_eq!(ago_seconds_param(true, "ts", "$1"), "ts < NOW() - make_interval(secs => $1::double precision)");
         assert_eq!(ago_seconds_param(false, "ts", "$1"), "ts < datetime('now', '-' || $1 || ' seconds')");
+    }
+
+    #[test]
+    fn test_embedding_placeholder() {
+        assert_eq!(embedding_placeholder(true, "$5"), "$5::vector");
+        assert_eq!(embedding_placeholder(false, "$5"), "$5");
+    }
+
+    #[test]
+    fn test_enum_cast() {
+        assert_eq!(enum_cast(true, "$6", "learning_scope"), "$6::learning_scope");
+        assert_eq!(enum_cast(false, "$6", "learning_scope"), "$6");
     }
 
     #[test]

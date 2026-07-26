@@ -18,7 +18,7 @@
 //! embeddings. The legacy pgvector functions remain as fallback during migration.
 
 use chrono::{DateTime, Utc};
-use kyomi_core::embedding_compat::{bytes_to_embedding, embedding_to_bytes};
+use kyomi_core::embedding_compat::{bytes_to_pg_vector, embedding_to_bytes};
 use kyomi_core::sql_compat;
 use kyomi_core::{db_execute, DbPool, Result};
 use pgvector::Vector;
@@ -135,61 +135,65 @@ pub async fn save_learning(params: SaveLearningParams<'_>) -> Result<String> {
 
     let learning_id = Uuid::new_v4().to_string();
 
+    let is_pg = db.is_postgres();
+    let sql = format!(
+        r#"
+        INSERT INTO agent_learnings
+            (learning_id, workspace_id, insight, context, embedding, enabled, scope,
+             learned_from_session, learned_from_user, created_at, times_used,
+             datasource_config_id, learning_type, reference_queries, structured_metadata)
+        VALUES ($1, $2, $3, $4, {embedding}, {enabled}, {scope_cast}, $7, $8, {now}, 0, $9, $10, $11, $12)
+        "#,
+        embedding = sql_compat::embedding_placeholder(is_pg, "$5"),
+        enabled = sql_compat::bool_true(is_pg),
+        scope_cast = sql_compat::enum_cast(is_pg, "$6", "learning_scope"),
+        now = sql_compat::now(is_pg),
+    );
+
+    // The embedding is the only bind that differs by type across backends —
+    // `pgvector::Vector` only implements sqlx's `Encode` for Postgres, so the
+    // raw bytes are bound directly for SQLite. Everything else (including the
+    // JSON columns, which delegate to `serde_json::Value`'s own cross-backend
+    // `Encode`/`Type` impls) is identical between arms.
     match db {
         kyomi_core::db::DbPool::Postgres(pg) => {
-            let vec = Vector::from(bytes_to_embedding(&embedding_bytes));
-            sqlx::query(
-                r#"
-                INSERT INTO agent_learnings
-                    (learning_id, workspace_id, insight, context, embedding, enabled, scope,
-                     learned_from_session, learned_from_user, created_at, times_used,
-                     datasource_config_id, learning_type, reference_queries, structured_metadata)
-                VALUES ($1, $2, $3, $4, $5::vector, TRUE, $6::learning_scope, $7, $8, NOW(), 0, $9, $10, $11, $12)
-                "#,
-            )
-            .bind(&learning_id)
-            .bind(workspace_id)
-            .bind(insight)
-            .bind(context)
-            .bind(&vec)
-            .bind(scope)
-            .bind(session_id)
-            .bind(user_id)
-            .bind(datasource_config_id)
-            .bind(learning_type)
-            .bind(&ref_queries_val)
-            .bind(&structured_meta_val)
-            .execute(pg)
-            .await
-            .map_err(|e| kyomi_core::Error::Internal(format!("failed to save learning: {e}")))?;
+            sqlx::query(&sql)
+                .bind(&learning_id)
+                .bind(workspace_id)
+                .bind(insight)
+                .bind(context)
+                .bind(bytes_to_pg_vector(&embedding_bytes))
+                .bind(scope)
+                .bind(session_id)
+                .bind(user_id)
+                .bind(datasource_config_id)
+                .bind(learning_type)
+                .bind(&ref_queries_val)
+                .bind(&structured_meta_val)
+                .execute(pg)
+                .await
+                .map(|_| ())
         }
         kyomi_core::db::DbPool::Sqlite(sq) => {
-            sqlx::query(
-                r#"
-                INSERT INTO agent_learnings
-                    (learning_id, workspace_id, insight, context, embedding, enabled, scope,
-                     learned_from_session, learned_from_user, created_at, times_used,
-                     datasource_config_id, learning_type, reference_queries, structured_metadata)
-                VALUES ($1, $2, $3, $4, $5, 1, $6, $7, $8, datetime('now'), 0, $9, $10, $11, $12)
-                "#,
-            )
-            .bind(&learning_id)
-            .bind(workspace_id)
-            .bind(insight)
-            .bind(context)
-            .bind(&embedding_bytes)
-            .bind(scope)
-            .bind(session_id)
-            .bind(user_id)
-            .bind(datasource_config_id)
-            .bind(learning_type)
-            .bind(ref_queries_val.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default()))
-            .bind(structured_meta_val.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default()))
-            .execute(sq)
-            .await
-            .map_err(|e| kyomi_core::Error::Internal(format!("failed to save learning: {e}")))?;
+            sqlx::query(&sql)
+                .bind(&learning_id)
+                .bind(workspace_id)
+                .bind(insight)
+                .bind(context)
+                .bind(&embedding_bytes)
+                .bind(scope)
+                .bind(session_id)
+                .bind(user_id)
+                .bind(datasource_config_id)
+                .bind(learning_type)
+                .bind(&ref_queries_val)
+                .bind(&structured_meta_val)
+                .execute(sq)
+                .await
+                .map(|_| ())
         }
     }
+    .map_err(|e| kyomi_core::Error::Internal(format!("failed to save learning: {e}")))?;
 
     tracing::info!(learning_id = %learning_id, "Saved new learning");
     Ok(learning_id)
@@ -391,32 +395,28 @@ pub async fn update_learning(
         let embedding_vec = embedding_svc.embed_one(insight)?;
         let embedding_bytes = embedding_to_bytes(&embedding_vec);
 
+        let sql = format!(
+            "UPDATE agent_learnings SET insight = $1, embedding = {} WHERE learning_id = $3 AND workspace_id = $4",
+            sql_compat::embedding_placeholder(db.is_postgres(), "$2"),
+        );
+
         match db {
-            kyomi_core::db::DbPool::Postgres(pg) => {
-                let vec = Vector::from(bytes_to_embedding(&embedding_bytes));
-                sqlx::query(
-                    "UPDATE agent_learnings SET insight = $1, embedding = $2::vector WHERE learning_id = $3 AND workspace_id = $4",
-                )
+            kyomi_core::db::DbPool::Postgres(pg) => sqlx::query(&sql)
                 .bind(insight)
-                .bind(&vec)
+                .bind(bytes_to_pg_vector(&embedding_bytes))
                 .bind(learning_id)
                 .bind(workspace_id)
                 .execute(pg)
                 .await
-                .map(|_| ())
-            }
-            kyomi_core::db::DbPool::Sqlite(sq) => {
-                sqlx::query(
-                    "UPDATE agent_learnings SET insight = $1, embedding = $2 WHERE learning_id = $3 AND workspace_id = $4",
-                )
+                .map(|_| ()),
+            kyomi_core::db::DbPool::Sqlite(sq) => sqlx::query(&sql)
                 .bind(insight)
                 .bind(&embedding_bytes)
                 .bind(learning_id)
                 .bind(workspace_id)
                 .execute(sq)
                 .await
-                .map(|_| ())
-            }
+                .map(|_| ()),
         }
         .map_err(|e| kyomi_core::Error::Internal(format!("update insight failed: {e}")))?;
     }
@@ -482,31 +482,22 @@ pub async fn update_learning(
             Some(reference_queries.clone())
         };
 
-        match db {
-            kyomi_core::db::DbPool::Postgres(pg) => {
-                sqlx::query(
-                    "UPDATE agent_learnings SET reference_queries = $1 WHERE learning_id = $2 AND workspace_id = $3",
-                )
-                .bind(&rq_val)
-                .bind(learning_id)
-                .bind(workspace_id)
-                .execute(pg)
-                .await
-                .map(|_| ())
-            }
-            kyomi_core::db::DbPool::Sqlite(sq) => {
-                let rq_str = rq_val.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default());
-                sqlx::query(
-                    "UPDATE agent_learnings SET reference_queries = $1 WHERE learning_id = $2 AND workspace_id = $3",
-                )
-                .bind(&rq_str)
-                .bind(learning_id)
-                .bind(workspace_id)
-                .execute(sq)
-                .await
-                .map(|_| ())
-            }
-        }
+        // Unlike the other blocks in this file, the SQL text here is already
+        // identical between backends — the only past divergence was the bind
+        // value (Postgres bound the `Value` directly; SQLite re-serialized it
+        // to a `String`). That re-serialization was unnecessary:
+        // `serde_json::Value` implements sqlx's `Type`/`Encode` for both
+        // Postgres (native json/jsonb) and SQLite (delegates to `Json<T>`,
+        // stored as TEXT) — the same delegation `get_learning_by_id` already
+        // relies on to decode this column on both backends. `Option<Value>`
+        // binds SQL NULL for `None` on both, exactly as before.
+        db_execute!(
+            db,
+            "UPDATE agent_learnings SET reference_queries = $1 WHERE learning_id = $2 AND workspace_id = $3",
+            &rq_val,
+            learning_id,
+            workspace_id
+        )
         .map_err(|e| kyomi_core::Error::Internal(format!("update reference_queries failed: {e}")))?;
     }
 
@@ -1352,4 +1343,283 @@ pub async fn get_learning_by_id(
     .map_err(|e| kyomi_core::Error::Internal(format!("get learning failed: {e}")))?;
 
     Ok(row)
+}
+
+// ─── Tests ──────────────────────────────────────────────────────────────────
+//
+// These exercise the SQLite arm of the blocks converted to shared
+// `sql_compat` helpers in KYO-195 (`save_learning`'s INSERT, the insight/
+// embedding UPDATE, and the reference_queries UPDATE). They are the
+// regression net for the SQLite side of that conversion — the Postgres
+// side (embedding bind via `pgvector::Vector`, `::learning_scope` enum
+// cast) cannot be exercised here and was verified by code inspection only;
+// see the KYO-195 summary for what remains unverified against real Postgres.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    /// Build an in-memory SQLite pool with migrations applied.
+    async fn test_pool() -> DbPool {
+        let _ = kyomi_core::constants::load_with_fallback();
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+
+        sqlx::query("PRAGMA foreign_keys=ON")
+            .execute(&pool)
+            .await
+            .expect("enable foreign keys");
+
+        sqlx::migrate!("../../apps/server/migrations-sqlite")
+            .run(&pool)
+            .await
+            .expect("run sqlite migrations");
+
+        DbPool::Sqlite(pool)
+    }
+
+    fn sqlite_pool(db: &DbPool) -> &sqlx::SqlitePool {
+        match db {
+            DbPool::Sqlite(sq) => sq,
+            _ => panic!("test requires sqlite pool"),
+        }
+    }
+
+    async fn seed_user(sq: &sqlx::SqlitePool, user_id: &str, email: &str) {
+        sqlx::query("INSERT INTO users (user_id, email) VALUES ($1, $2)")
+            .bind(user_id)
+            .bind(email)
+            .execute(sq)
+            .await
+            .expect("insert user");
+    }
+
+    async fn seed_workspace(sq: &sqlx::SqlitePool, workspace_id: &str, owner_user_id: &str) {
+        sqlx::query("INSERT INTO workspaces (workspace_id, name, owner_user_id) VALUES ($1, $2, $3)")
+            .bind(workspace_id)
+            .bind(format!("Workspace {workspace_id}"))
+            .bind(owner_user_id)
+            .execute(sq)
+            .await
+            .expect("insert workspace");
+    }
+
+    /// Seed a user + workspace and return the ready-to-use pool.
+    async fn seeded_pool(workspace_id: &str) -> DbPool {
+        let pool = test_pool().await;
+        let sq = sqlite_pool(&pool);
+        seed_user(sq, "user-1", "user-1@test.local").await;
+        seed_workspace(sq, workspace_id, "user-1").await;
+        pool
+    }
+
+    async fn raw_embedding(sq: &sqlx::SqlitePool, learning_id: &str) -> Vec<u8> {
+        sqlx::query_scalar::<_, Vec<u8>>("SELECT embedding FROM agent_learnings WHERE learning_id = $1")
+            .bind(learning_id)
+            .fetch_one(sq)
+            .await
+            .expect("fetch embedding")
+    }
+
+    #[tokio::test]
+    async fn save_learning_stores_embedding_bool_and_scope() {
+        let pool = seeded_pool("ws-save-1").await;
+        let embedding_svc = kyomi_embed::EmbeddingService::new().expect("load embedding model");
+
+        let learning_id = save_learning(SaveLearningParams {
+            db: &pool,
+            embedding_svc: &embedding_svc,
+            workspace_id: "ws-save-1",
+            user_id: "user-1",
+            session_id: "session-1",
+            insight: "Always filter by workspace_id",
+            context: Some("observed in review"),
+            scope: "workspace",
+            datasource_config_id: None,
+            learning_type: "learning",
+            reference_queries: None,
+            structured_metadata: None,
+        })
+        .await
+        .expect("save_learning");
+
+        let record = get_learning_by_id(&pool, &learning_id, "ws-save-1")
+            .await
+            .expect("get_learning_by_id")
+            .expect("learning exists");
+
+        assert_eq!(record.insight, "Always filter by workspace_id");
+        assert_eq!(record.scope, "workspace");
+        assert!(record.enabled, "enabled should be TRUE/1 for a new learning");
+        assert!(record.reference_queries.is_none());
+
+        // BGE-small-en-v1.5 produces 384-dim embeddings — the stored BLOB
+        // must be exactly 384 * 4 bytes (little-endian f32), proving the
+        // shared `embedding_placeholder`/bind path didn't corrupt or resize
+        // the vector on the way in.
+        let sq = sqlite_pool(&pool);
+        let bytes = raw_embedding(sq, &learning_id).await;
+        assert_eq!(bytes.len(), 384 * 4);
+    }
+
+    #[tokio::test]
+    async fn save_learning_rejects_invalid_scope() {
+        let pool = seeded_pool("ws-save-2").await;
+        let embedding_svc = kyomi_embed::EmbeddingService::new().expect("load embedding model");
+
+        let err = save_learning(SaveLearningParams {
+            db: &pool,
+            embedding_svc: &embedding_svc,
+            workspace_id: "ws-save-2",
+            user_id: "user-1",
+            session_id: "session-1",
+            insight: "irrelevant",
+            context: None,
+            scope: "not-a-real-scope",
+            datasource_config_id: None,
+            learning_type: "learning",
+            reference_queries: None,
+            structured_metadata: None,
+        })
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("invalid scope"), "error: {err}");
+    }
+
+    #[tokio::test]
+    async fn update_learning_regenerates_embedding_on_insight_change() {
+        let pool = seeded_pool("ws-update-1").await;
+        let embedding_svc = kyomi_embed::EmbeddingService::new().expect("load embedding model");
+
+        let learning_id = save_learning(SaveLearningParams {
+            db: &pool,
+            embedding_svc: &embedding_svc,
+            workspace_id: "ws-update-1",
+            user_id: "user-1",
+            session_id: "session-1",
+            insight: "Original insight",
+            context: None,
+            scope: "workspace",
+            datasource_config_id: None,
+            learning_type: "learning",
+            reference_queries: None,
+            structured_metadata: None,
+        })
+        .await
+        .expect("save_learning");
+
+        let sq = sqlite_pool(&pool);
+        let embedding_before = raw_embedding(sq, &learning_id).await;
+
+        update_learning(
+            &pool,
+            &embedding_svc,
+            &learning_id,
+            "ws-update-1",
+            &LearningUpdates {
+                insight: Some("A completely different insight about SQL joins".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("update_learning");
+
+        let record = get_learning_by_id(&pool, &learning_id, "ws-update-1")
+            .await
+            .expect("get_learning_by_id")
+            .expect("learning exists");
+        assert_eq!(record.insight, "A completely different insight about SQL joins");
+
+        let embedding_after = raw_embedding(sq, &learning_id).await;
+        assert_eq!(embedding_after.len(), 384 * 4);
+        assert_ne!(
+            embedding_before, embedding_after,
+            "embedding must be regenerated when insight changes"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_learning_reference_queries_roundtrips_and_clears() {
+        let pool = seeded_pool("ws-update-2").await;
+        let embedding_svc = kyomi_embed::EmbeddingService::new().expect("load embedding model");
+
+        let learning_id = save_learning(SaveLearningParams {
+            db: &pool,
+            embedding_svc: &embedding_svc,
+            workspace_id: "ws-update-2",
+            user_id: "user-1",
+            session_id: "session-1",
+            insight: "Some insight",
+            context: None,
+            scope: "workspace",
+            datasource_config_id: None,
+            learning_type: "learning",
+            reference_queries: None,
+            structured_metadata: None,
+        })
+        .await
+        .expect("save_learning");
+
+        let queries = json!([{"sql": "SELECT 1", "datasource_slug": "warehouse"}]);
+        update_learning(
+            &pool,
+            &embedding_svc,
+            &learning_id,
+            "ws-update-2",
+            &LearningUpdates {
+                reference_queries: Some(queries.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("update_learning (set reference_queries)");
+
+        let record = get_learning_by_id(&pool, &learning_id, "ws-update-2")
+            .await
+            .expect("get_learning_by_id")
+            .expect("learning exists");
+        assert_eq!(
+            record.reference_queries,
+            Some(queries),
+            "reference_queries must round-trip through the shared Option<Value> bind"
+        );
+
+        // An empty array is the "clear" sentinel — it must persist as SQL
+        // NULL, not the JSON literal `null` or `[]`.
+        update_learning(
+            &pool,
+            &embedding_svc,
+            &learning_id,
+            "ws-update-2",
+            &LearningUpdates {
+                reference_queries: Some(json!([])),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("update_learning (clear reference_queries)");
+
+        let record = get_learning_by_id(&pool, &learning_id, "ws-update-2")
+            .await
+            .expect("get_learning_by_id")
+            .expect("learning exists");
+        assert!(
+            record.reference_queries.is_none(),
+            "empty array must clear to NULL, not persist as a JSON value"
+        );
+
+        let raw: Option<String> =
+            sqlx::query_scalar("SELECT reference_queries FROM agent_learnings WHERE learning_id = $1")
+                .bind(&learning_id)
+                .fetch_one(sqlite_pool(&pool))
+                .await
+                .expect("fetch raw reference_queries");
+        assert!(raw.is_none(), "column must be SQL NULL, not the string \"null\"");
+    }
 }
