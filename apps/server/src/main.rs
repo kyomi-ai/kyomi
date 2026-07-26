@@ -534,9 +534,13 @@ async fn serve() {
         tracing::info!("Sync log pruning started (startup + 24h interval, 30-day retention)");
     }
 
-    // Register Leptos server functions before building the router.
-    kyomi_ui::register_server_functions();
-
+    // Leptos server functions self-register with the Axum server_fn registry
+    // via `inventory` (see the `#[server]` macro) — no explicit call is
+    // needed here. KYO-191 measured, under the production build profile
+    // (`lto = true`, `codegen-units = 1`, `strip = true`), that an explicit
+    // `register_explicit::<T>()` sweep registered zero functions beyond what
+    // `inventory` already provided, and removed it. Do not re-add one; see
+    // `kyomi_ui::server_fn_registration_tests` for the regression guard.
     tracing::info!(
         count = leptos::server_fn::axum::server_fn_paths().count(),
         "Leptos server functions registered"
