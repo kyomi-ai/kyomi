@@ -176,11 +176,8 @@ fn free_tier_capabilities() -> kyomi_core::capability::Capabilities {
         credits_limit: 0.0,
         credits_exhausted: true,
 
-        // AI features disabled — no credits
+        // AI chat disabled — no credits
         ai_chat_enabled: false,
-        ai_sql_generation_enabled: false,
-        ai_autocomplete_enabled: false,
-        ai_chart_copilot_enabled: false,
 
         // BigQuery — keep in sync with compute_capabilities() in capability.rs
         bigquery_access_level: "full".to_string(),
@@ -216,11 +213,8 @@ fn free_tier_capabilities() -> kyomi_core::capability::Capabilities {
 fn build_capabilities_map(caps: &kyomi_core::capability::Capabilities) -> HashMap<String, bool> {
     let mut map = HashMap::new();
 
-    // AI features
+    // AI chat
     map.insert("ai_chat_enabled".into(), caps.ai_chat_enabled);
-    map.insert("ai_sql_generation_enabled".into(), caps.ai_sql_generation_enabled);
-    map.insert("ai_autocomplete_enabled".into(), caps.ai_autocomplete_enabled);
-    map.insert("ai_chart_copilot_enabled".into(), caps.ai_chart_copilot_enabled);
 
     // Organization features
     map.insert("multi_user_enabled".into(), caps.multi_user_enabled);
@@ -299,9 +293,6 @@ mod tests {
         // Verify all expected keys are present.
         let expected_keys = [
             "ai_chat_enabled",
-            "ai_sql_generation_enabled",
-            "ai_autocomplete_enabled",
-            "ai_chart_copilot_enabled",
             "multi_user_enabled",
             "user_management_enabled",
             "dashboard_sharing_enabled",
@@ -344,9 +335,8 @@ mod tests {
         assert!(caps.billing_enabled, "SaaS free tier should show billing UI");
         assert!(caps.credits_exhausted, "No credits by default");
 
-        // AI features off
+        // AI chat off
         assert!(!caps.ai_chat_enabled);
-        assert!(!caps.ai_sql_generation_enabled);
 
         // Premium features off
         assert!(!caps.multi_user_enabled);
