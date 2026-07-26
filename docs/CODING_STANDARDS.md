@@ -42,7 +42,39 @@ Flagged across 3 reviews in May 2026: KYO-37 (`serde_json::Error` discarded), KY
 
 *Standards specific to Leptos components, reactivity, SSR/hydration, and frontend architecture.*
 
+### Enforcement status — read this before trusting any rule below
+
+Every anti-pattern in this section carries an **Enforcement:** line stating whether CI will catch a violation. There are **three** tiers, not two, and only **one** of the six patterns actually blocks a merge:
+
+| Pattern | Enforcement |
+|---|---|
+| Bare `.set()` / `.update()` in deferred contexts | **blocking** — `scripts/lint/check-disposal-safety.sh` Rule A; fails CI |
+| Bare `.get()` in `Signal::derive` / `Memo::new` | **advisory** — same script, Rule B; prints `WARN:B` but **exits 0** |
+| Raw `spawn_local` for user-triggered mutations | **review-only** |
+| `.get()` inside `<Show>` children | **review-only** |
+| Reactive closure branches gating effect-owning components | **review-only** |
+| Eager signal reads in `ChildrenFn` / `Arc<dyn Fn() -> AnyView>` | **review-only** |
+
+**Do not read "the disposal-safety lint covers this" as "CI will stop me."** Only Rule A does. The script's exit logic (`case "$line" in *:WARN*) ;;`) deliberately excludes `WARN`-tagged findings from the failure path, so a Rule B hit is reported and ignored. As of 2026-07-26 the tree carries **422** live `WARN:B` findings and the lint still exits 0 — which is itself the proof that Rule B is not a gate.
+
+Rule B is advisory *by design*, not by accident: it cannot distinguish a derive that genuinely mixes Layout-scoped and page-scoped signals from one that only reads same-scope signals, so its false-positive rate is high (of the candidates inspected during the 2026-07-25 sweep, all were false positives). Gating on it would fail every build. Making it blocking requires the same syntax-tree awareness the four review-only patterns need — see below.
+
+**Why the four have no tooling at all.** They are *structural*: catching them requires knowing where an expression sits in the syntax tree, which the existing pure-bash-and-awk lint cannot do. `.get()` inside a `<Show>`'s **children** is a bug; the identical token inside its `when=` prop is correct and ubiquitous — a proximity grep over `<Show` returns 221 hits, nearly all legitimate. Likewise, `spawn_local` in an `on:click` handler is a bug, but in a WebSocket handler or a `!Send` browser-API call it is explicitly sanctioned. A regex rule here would be noisy enough to get suppressed, which is worse than no rule.
+
+An AST-aware linter (Dylint or a clippy plugin) *could* enforce them, and was evaluated and declined: it requires a pinned nightly toolchain, which the repo does not currently have — there is no `rust-toolchain.toml` and CI runs `dtolnay/rust-toolchain@stable`. That is a new ongoing maintenance commitment, judged not worth it for these four patterns.
+
+**The cost of that trade, recorded honestly so it can be reopened with data rather than re-argued:**
+
+- *Where blocking, the class is dead.* A 2026-07-25 sweep of `crates/kyomi-ui/src` found 132 `spawn_local` blocks containing 318 guarded `try_set`/`try_update` calls and **zero** unguarded ones. Before Rule A existed, this panic class took 12+ tickets fixed one at a time. Rule A is the only pattern here with that record, and it is the only blocking one.
+- *Where review-only, it is not.* The `Effect` auth-mode pattern was documented after being caught twice (KYO-13, KYO-17) and still went missing a fourth time in `SynapseAuthModeSection` (KYO-197). KYO-226 and KYO-227 then found **28** raw `spawn_local` user-triggered mutations across 10 files — i.e. the pattern this document calls "the #1 source of WASM panics" is precisely the one with no gate.
+
+If that second count keeps climbing, revisit the Dylint decision.
+
+*Numbers above are point-in-time measurements from the dates given, not continuously verified. Re-measure before relying on them for a decision.*
+
 ### Never use raw `spawn_local` for user-triggered mutations — use `Action`
+
+**Enforcement: review-only.** No lint catches this — distinguishing a user-triggered mutation from a sanctioned `spawn_local` needs AST awareness. See *Enforcement status* above.
 
 **This is the #1 source of WASM panics in the codebase.** Raw `spawn_local` spawns a detached future that outlives the component scope. When the user navigates away mid-async, the future completes and accesses disposed signals → panic at `reactive_graph/src/traits.rs:361`.
 
@@ -150,6 +182,8 @@ let handle_toggle = move |_| {
 
 ### Never mix signal lifetimes in `Signal::derive` without `try_get()`
 
+**Enforcement: advisory — this does NOT fail the build.** `scripts/lint/check-disposal-safety.sh` Rule B prints a `WARN:B` line for a bare `.get()` inside `Signal::derive` / `Memo::new`, but `WARN`-tagged findings are excluded from the script's failure path, so CI exits 0 regardless. Rule B cannot tell a genuinely mixed-lifetime derive from a same-scope one, so it is intentionally non-blocking. Treat it as a prompt to check the derive yourself, not as a guarantee. See *Enforcement status* above.
+
 A `Signal::derive` that subscribes to BOTH a long-lived signal (Layout-scoped, e.g. `SyncStore` data) AND a page-scoped signal (e.g. search/sort/filter) creates a disposal race. When the user navigates away, the page-scoped signals are disposed — but the Layout-scoped signal can still trigger re-evaluation of the derive (e.g. via a WebSocket sync update), causing it to call `.get()` on the disposed page signals → panic.
 
 **Rule:** If a `Signal::derive` reads from signals with different lifetimes, use `.try_get()` for the shorter-lived ones. Return a sensible default (empty vec, default sort, etc.) if they're disposed.
@@ -176,6 +210,8 @@ let filtered = Signal::derive(move || {
 **This is the root cause of most "reactive value already disposed" panics.** The previous 12+ tickets for this panic class were fixed one-by-one; this pattern prevents the entire class.
 
 ### Use `.try_set()` / `.try_update()` in ALL deferred execution contexts
+
+**Enforcement: blocking.** `scripts/lint/check-disposal-safety.sh` Rule A catches bare `.set()` / `.update()` inside `spawn_local` and other deferred callbacks, and **fails CI**. This is the only pattern in this section that stops a merge. Escape hatch, requiring a ≥5-character justification: `// lint-allow: disposal-safe=<why>`. See *Enforcement status* above.
 
 Signal writes inside `spawn_local`, `spawn_scoped`, `Closure::new`, `set_timeout`, or any callback that outlives the reactive scope must use `.try_set()` / `.try_update()` instead of `.set()` / `.update()`. The same applies to `Callback::run()` — use `Callback::try_run()` when the callback is invoked inside an Action's async block or any deferred context, because the component that created the callback may have been unmounted. The user may navigate away before the callback fires, disposing the signal or stored value — `.set()` / `Callback::run()` panics, `.try_set()` / `Callback::try_run()` silently returns `false` / `None`.
 
@@ -306,6 +342,8 @@ view! {
 
 ### Never read signals eagerly inside `ChildrenFn` / `Arc<dyn Fn() -> AnyView>` closures that share scope with inputs
 
+**Enforcement: review-only.** No lint catches this — it requires knowing that a `.get()` sits inside a `ChildrenFn` body. See *Enforcement status* above.
+
 If a `ChildrenFn` closure (used by `Modal` footer, `Transition` fallback, etc.) reads a signal with `.get()`, every signal change re-executes the entire closure and rebuilds its DOM. If the Modal/component re-renders children alongside the footer, this destroys any `<input>` elements in the body — causing focus loss on every keystroke.
 
 **Rule:** Never call `.get()` on a signal directly inside a `ChildrenFn` closure if that signal is also written by an `<input>` in the component's body. Instead, use `Signal::derive` to create fine-grained derived signals that only update the specific prop (e.g. `disabled`) without rebuilding the DOM.
@@ -336,6 +374,8 @@ let footer: Arc<dyn Fn() -> AnyView> = Arc::new(move || {
 
 ### Never call `.get()` on signals inside `<Show>` children — pass Signals as props
 
+**Enforcement: review-only.** No lint catches this — `.get()` in a `<Show>`'s `when=` prop is correct while the same call in its children is a bug, and only an AST can tell them apart. See *Enforcement status* above.
+
 In Leptos 0.7, `<Show>` wraps children in a reactive closure: `move || if when() { children() } else { fallback }`. Any `.get()` call inside `children()` subscribes the **parent reactive scope** to that signal. When the signal changes, the parent scope re-runs, calling `children()` again — destroying and recreating all child components, even if the `when` condition hasn't changed. This causes visible DOM flashing and destroys internal component state (timers, scroll position, expanded/collapsed state).
 
 **Rule:** Never call `.get()` on signals inside a `<Show>` children block. Instead, create `Signal::derive` closures *outside* the `<Show>` and pass them as `Signal<T>` props to child components. If the child component only accepts plain values (not Signals), refactor it to accept `Signal<T>` props so it can be created once and reactively update.
@@ -363,6 +403,8 @@ let active_signal = Signal::derive(is_active_fn);
 Flagged in KYO-38 rework — the `AgentThinking` component flashed on every tool call because `thinking_state.get()` inside `<Show>` children caused full component re-creation on each thinking event.
 
 ### Use `<Show>` for conditional component rendering, not reactive closure branches
+
+**Enforcement: review-only.** No lint catches this — it requires knowing that the component inside a reactive branch owns a reactive scope. See *Enforcement status* above.
 
 When a reactive closure (`{move || { ... }.into_any()}`) conditionally renders a component that owns its own reactive scope (e.g., `DynSelect` → `Popover` → `Effect::new`), the branch switch destroys and recreates the component's internal signals. If the component's `Effect` fires during disposal, it accesses dead signals → panic. The Leptos `<Show>` component handles component lifecycle correctly — it mounts/unmounts through the framework's ownership tree.
 

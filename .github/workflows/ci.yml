@@ -64,7 +64,7 @@ jobs:
         run: ./scripts/lint/check-server-fns.sh
 
       # --------------------------------------------------------------------
-      # Signal disposal safety lint (KYO-289).
+      # Signal disposal safety lint (introduced by PR #34).
       #
       # Blocks bare .set()/.update() inside spawn_local/deferred contexts
       # (must use .try_set()/.try_update() to avoid WASM panics when
