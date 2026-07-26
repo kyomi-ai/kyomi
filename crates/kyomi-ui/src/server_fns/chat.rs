@@ -799,10 +799,9 @@ pub async fn send_chat_message(
 /// Share a session with the workspace (makes it visible to all members).
 ///
 /// Only the session owner can share. Sets `shared = true` and records
-/// `shared_at` timestamp.
-///
-/// Mirrors `POST /chat/sessions/{session_id}/share` in
-/// `apps/server/src/routes/chat.rs`.
+/// `shared_at` timestamp via `chat_service::set_session_shared`, which also
+/// persists the visibility transition to `sync_log` so an offline
+/// workspace member converges on their next delta sync.
 #[server(prefix = "/leptos-api")]
 pub async fn share_session(session_id: String) -> Result<(), ServerFnError> {
     let auth = extract_auth().await?;
@@ -828,15 +827,9 @@ pub async fn share_session(session_id: String) -> Result<(), ServerFnError> {
         ));
     }
 
-    let now = chrono::Utc::now();
-
-    kyomi_core::db_execute!(
-        &ctx.db,
-        "UPDATE chat_sessions SET shared = true, shared_at = $1 WHERE session_id = $2",
-        &now,
-        &session_id
-    )
-    .into_sfn()?;
+    kyomi_auth::chat_service::set_session_shared(&ctx.db, &session_id, true)
+        .await
+        .into_sfn()?;
 
     tracing::info!(
         session_id = %session_id,
@@ -859,10 +852,9 @@ pub async fn share_session(session_id: String) -> Result<(), ServerFnError> {
 /// Make a session private (removes workspace-wide visibility).
 ///
 /// Only the session owner can unshare. Blocks unsharing Slack channel
-/// conversations (they're visible on the platform).
-///
-/// Mirrors `POST /chat/sessions/{session_id}/unshare` in
-/// `apps/server/src/routes/chat.rs`.
+/// conversations (they're visible on the platform). Delegates the
+/// `shared` flip and matching `sync_log` write to
+/// `chat_service::set_session_shared`.
 #[server(prefix = "/leptos-api")]
 pub async fn unshare_session(session_id: String) -> Result<(), ServerFnError> {
     let auth = extract_auth().await?;
@@ -907,12 +899,9 @@ pub async fn unshare_session(session_id: String) -> Result<(), ServerFnError> {
         }
     }
 
-    kyomi_core::db_execute!(
-        &ctx.db,
-        "UPDATE chat_sessions SET shared = false, shared_at = NULL WHERE session_id = $1",
-        &session_id
-    )
-    .into_sfn()?;
+    kyomi_auth::chat_service::set_session_shared(&ctx.db, &session_id, false)
+        .await
+        .into_sfn()?;
 
     tracing::info!(
         session_id = %session_id,
