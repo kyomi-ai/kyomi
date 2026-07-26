@@ -54,24 +54,11 @@ pub struct WatchChannel {
 /// Checks whether:
 /// 1. The workspace has the Slack app installed (workspace_integrations table)
 /// 2. The user has linked their Slack account (platform_user_links table)
-/// 3. The user's workspace tier supports Slack integration
-///
-/// Returns 403-equivalent error if the workspace tier lacks the capability.
 #[server(prefix = "/leptos-api")]
 pub async fn get_slack_status() -> Result<SlackStatus, ServerFnError> {
     use super::{AuthenticatedContext, IntoServerFnError};
 
     let ac = AuthenticatedContext::extract().await?;
-
-    // Check tier capability — mirrors require_slack_capability() in routes.rs
-    if !kyomi_core::capability::has_capability(
-        ac.auth.workspace.subscription_tier,
-        "slack_integration",
-    ) {
-        return Err(ServerFnError::new(
-            "Slack integration requires an active Kyomi Cloud subscription.",
-        ));
-    }
 
     // Check workspace Slack installation via platform tables
     let ws_config =
@@ -219,16 +206,6 @@ pub async fn get_slack_channels() -> Result<Vec<SlackChannel>, ServerFnError> {
     use super::{AuthenticatedContext, IntoServerFnError};
 
     let ac = AuthenticatedContext::extract().await?;
-
-    // Check tier capability
-    if !kyomi_core::capability::has_capability(
-        ac.auth.workspace.subscription_tier,
-        "slack_integration",
-    ) {
-        return Err(ServerFnError::new(
-            "Slack integration requires an active Kyomi Cloud subscription.",
-        ));
-    }
 
     let encryption_key = ac.encryption_key()?;
 

@@ -23,7 +23,7 @@
 //! ## Architecture
 //!
 //! - JWT authentication via `Authorization: Bearer <token>` header
-//! - Capability gating: requires "mcp_access" (Starter/Pro/Team/Enterprise)
+//! - MCP access is available to every tier — not gated by subscription
 //! - Zero AI budget cost — client-side LLM, we just execute tools
 
 use std::convert::Infallible;
@@ -47,7 +47,6 @@ use tokio::sync::mpsc;
 
 use kyomi_agent::tools::{create_default_registry, ToolContext, ToolFilter, ToolRegistry};
 use kyomi_auth::middleware::AuthUser;
-use kyomi_core::capability;
 
 use crate::state::AppState;
 
@@ -199,29 +198,6 @@ async fn mcp_www_authenticate_layer(request: Request, next: Next) -> Response {
     response
 }
 
-// ===========================================================================
-// Capability check
-// ===========================================================================
-
-/// Check that the workspace has MCP access capability.
-///
-/// Returns HTTP 402 (Payment Required) if the workspace tier doesn't include MCP.
-/// This matches the Python behavior exactly.
-fn check_mcp_capability(user: &AuthUser, self_hosted: bool) -> Result<(), Box<Response>> {
-    if self_hosted {
-        return Ok(());
-    }
-    let tier = user.workspace.subscription_tier;
-    if !capability::has_capability(tier, "mcp_access") {
-        let body = json!({
-            "detail": "MCP access requires Starter, Pro, Team, or Enterprise plan. \
-                       Please upgrade at https://kyomi.ai/pricing"
-        });
-        return Err(Box::new((StatusCode::PAYMENT_REQUIRED, Json(body)).into_response()));
-    }
-    Ok(())
-}
-
 /// MCP Apps extension identifier per the ext-apps spec (2026-01-26).
 ///
 /// Clients that support MCP Apps declare this in their `initialize` capabilities:
@@ -277,9 +253,6 @@ async fn handle_mcp_request(
     headers: HeaderMap,
     Json(request): Json<JsonRpcRequest>,
 ) -> Result<Response, Response> {
-    // Check MCP capability (Starter/Pro/Team/Enterprise)
-    check_mcp_capability(&user, state.config.self_hosted).map_err(|e| *e)?;
-
     let workspace_id = get_workspace_id(&user).map_err(IntoResponse::into_response)?;
     let msg_id = request.id.clone();
     let params = request.params.unwrap_or(Value::Null);
@@ -416,8 +389,6 @@ async fn handle_mcp_sse(
     user: AuthUser,
     headers: HeaderMap,
 ) -> Result<Response, Response> {
-    check_mcp_capability(&user, state.config.self_hosted).map_err(|e| *e)?;
-
     // GET SSE requires a session ID header
     let session_id_str = headers
         .get(MCP_SESSION_ID_HEADER)
@@ -482,11 +453,11 @@ async fn handle_mcp_sse(
 /// Extracts `Mcp-Session-Id` header and removes the session.
 async fn handle_mcp_delete(
     State(state): State<AppState>,
-    user: AuthUser,
+    // `AuthUser` is unused in the body but stays in the signature: as an axum
+    // extractor it still runs auth on every DELETE /mcp request.
+    _user: AuthUser,
     headers: HeaderMap,
 ) -> Result<StatusCode, Response> {
-    check_mcp_capability(&user, state.config.self_hosted).map_err(|e| *e)?;
-
     if let Some(session_id_value) = headers.get(MCP_SESSION_ID_HEADER) {
         let session_id = session_id_value.to_str().unwrap_or("");
         state.mcp_sessions.remove_session(session_id).await;
@@ -1044,45 +1015,6 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Capability checking
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn mcp_capability_allowed_for_free_tier() {
-        let user = test_auth_user("free");
-        let result = check_mcp_capability(&user, false);
-        assert!(result.is_ok(), "Free tier has MCP access");
-    }
-
-    #[test]
-    fn mcp_capability_allowed_for_starter() {
-        let user = test_auth_user("starter");
-        let result = check_mcp_capability(&user, false);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn mcp_capability_allowed_for_pro() {
-        let user = test_auth_user("pro");
-        let result = check_mcp_capability(&user, false);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn mcp_capability_allowed_for_team() {
-        let user = test_auth_user("team");
-        let result = check_mcp_capability(&user, false);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn mcp_capability_allowed_for_enterprise() {
-        let user = test_auth_user("enterprise");
-        let result = check_mcp_capability(&user, false);
-        assert!(result.is_ok());
-    }
-
-    // -----------------------------------------------------------------------
     // tools/call response shapes
     // -----------------------------------------------------------------------
 
@@ -1247,43 +1179,4 @@ mod tests {
             .contains("Documentation not found"));
     }
 
-    // -----------------------------------------------------------------------
-    // Test helpers
-    // -----------------------------------------------------------------------
-
-    /// Create a test AuthUser with the given subscription tier.
-    fn test_auth_user(tier: &str) -> AuthUser {
-        use kyomi_auth::middleware::WorkspaceContext;
-
-        let subscription_tier = match tier {
-            "free" => kyomi_core::SubscriptionTier::Free,
-            "basic" => kyomi_core::SubscriptionTier::Basic,
-            "starter" => kyomi_core::SubscriptionTier::Starter,
-            "pro" => kyomi_core::SubscriptionTier::Pro,
-            "team" => kyomi_core::SubscriptionTier::Team,
-            "enterprise" => kyomi_core::SubscriptionTier::Enterprise,
-            _ => kyomi_core::SubscriptionTier::Free,
-        };
-
-        AuthUser {
-            user_id: "user-test".to_string(),
-            email: "test@test.com".to_string(),
-            name: Some("Test User".to_string()),
-            roles: vec![],
-            active: true,
-            verified: true,
-            workspace: WorkspaceContext {
-                workspace_id: Some("ws-test".to_string()),
-                workspace_name: Some("Test Workspace".to_string()),
-                workspace_roles: vec![],
-                workspace_status: Some(kyomi_core::WorkspaceStatus::Active),
-                subscription_tier,
-                subscription_status: kyomi_core::enums::SubscriptionStatus::Active,
-                trial_ends_at: None,
-                is_owner: true,
-            },
-            token_exp: None,
-            token_jti: None,
-        }
-    }
 }

@@ -4,13 +4,14 @@
 //!
 //! This is the Rust equivalent of Python's `capability_service.py`.
 //! It is the **single source of truth** for determining what features
-//! are available to a workspace based on subscription tier and credits.
+//! are available to a workspace based on credits and deployment mode
+//! (SaaS vs self-hosted). The Cloud-plan billing migration flattened
+//! subscription tiers, so tier is no longer a gating input.
 //!
 //! ## Phase 4 simplifications
 //!
 //! - No `BillingService` integration — uses `workspace.ai_credits_used_usd`
 //!   directly with hardcoded credit budgets.
-//! - No async DB queries for `has_capability` — operates on a `&Workspace`.
 
 use serde::Serialize;
 
@@ -166,41 +167,6 @@ pub fn get_user_limit(workspace: &Workspace, tier: SubscriptionTier) -> i32 {
     workspace.user_limit.unwrap_or(UNLIMITED_USER_LIMIT)
 }
 
-/// Check if a tier has a specific premium capability.
-///
-/// Cloud plan — all capabilities are available to all tiers.
-/// The tier and capability parameters are kept for backward compatibility.
-pub fn has_capability(tier: SubscriptionTier, capability: &str) -> bool {
-    let _ = (tier, capability);
-    true
-}
-
-// ─── Limit helpers ───────────────────────────────────────────────────────────
-
-/// Catalog refresh limit per hour.
-///
-/// Cloud plan — all tiers get the same limit.
-fn get_catalog_refresh_limit(tier: SubscriptionTier) -> i32 {
-    let _ = tier;
-    5
-}
-
-/// Maximum dashboards. `0` means unlimited (Python convention).
-///
-/// Cloud plan — unlimited for all tiers.
-fn get_dashboard_limit(tier: SubscriptionTier) -> i32 {
-    let _ = tier;
-    0
-}
-
-/// Query history retention in days. `0` means unlimited (Python convention).
-///
-/// Cloud plan — unlimited for all tiers.
-fn get_query_history_retention(tier: SubscriptionTier) -> i32 {
-    let _ = tier;
-    0
-}
-
 // ─── Main entry point ────────────────────────────────────────────────────────
 
 /// Compute the full capabilities for a workspace.
@@ -242,10 +208,10 @@ pub fn compute_capabilities(workspace: &Workspace) -> Capabilities {
         export_enabled: true,
         api_access_enabled: true,
 
-        // Limits
-        catalog_refresh_limit_per_hour: get_catalog_refresh_limit(tier),
-        max_dashboards: get_dashboard_limit(tier),
-        query_history_retention_days: get_query_history_retention(tier),
+        // Limits — Cloud plan values are the same for all tiers.
+        catalog_refresh_limit_per_hour: 5,
+        max_dashboards: 0, // unlimited
+        query_history_retention_days: 0, // unlimited
         user_limit: get_user_limit(workspace, tier),
 
         // Cloud plan — all premium flags enabled
@@ -299,10 +265,10 @@ pub fn compute_capabilities_with_credits(
         export_enabled: true,
         api_access_enabled: true,
 
-        // Limits
-        catalog_refresh_limit_per_hour: get_catalog_refresh_limit(tier),
-        max_dashboards: get_dashboard_limit(tier),
-        query_history_retention_days: get_query_history_retention(tier),
+        // Limits — Cloud plan values are the same for all tiers.
+        catalog_refresh_limit_per_hour: 5,
+        max_dashboards: 0, // unlimited
+        query_history_retention_days: 0, // unlimited
         user_limit: get_user_limit(workspace, tier),
 
         // Cloud plan — all premium flags enabled
@@ -346,7 +312,7 @@ pub fn compute_capabilities_self_hosted() -> Capabilities {
         api_access_enabled: true,
 
         // Limits — unlimited (0 = unlimited by convention). Self-hosted gets
-        // unlimited catalog refresh (0); Cloud SaaS uses 5 — see get_catalog_refresh_limit().
+        // unlimited catalog refresh (0); Cloud SaaS uses 5 (see compute_capabilities()).
         catalog_refresh_limit_per_hour: 0,
         max_dashboards: 0,
         query_history_retention_days: 0,
@@ -505,28 +471,6 @@ mod tests {
         assert_eq!(get_user_limit(&ws, SubscriptionTier::Free), 10);
         assert_eq!(get_user_limit(&ws, SubscriptionTier::Team), 10);
         assert_eq!(get_user_limit(&ws, SubscriptionTier::Enterprise), 10);
-    }
-
-    #[test]
-    fn test_has_capability_cloud_plan() {
-        use SubscriptionTier::*;
-        // Cloud plan — all capabilities available to all tiers
-        assert!(has_capability(Free, "kyomi_watch"));
-        assert!(has_capability(Free, "slack_integration"));
-        assert!(has_capability(Free, "multi_user"));
-        assert!(has_capability(Free, "dashboard_sharing"));
-        assert!(has_capability(Free, "api_access"));
-        assert!(has_capability(Free, "mcp_access"));
-        assert!(has_capability(Free, "pdf_export"));
-        assert!(has_capability(Pro, "kyomi_watch"));
-        assert!(has_capability(Pro, "slack_integration"));
-        assert!(has_capability(Enterprise, "kyomi_watch"));
-    }
-
-    #[test]
-    fn test_has_capability_unknown() {
-        // Unknown capabilities are still available
-        assert!(has_capability(SubscriptionTier::Free, "some_random_thing"));
     }
 
     #[test]
