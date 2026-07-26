@@ -29,11 +29,28 @@ use kyomi_types::Permission;
 
 pub use kyomi_types::DatasourceInfo;
 
+/// A single auth mode usable for headless catalog-indexing credentials, with
+/// its label carried alongside the id so the client never has to re-derive
+/// (or hardcode) the display name.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AuthModeOption {
+    pub mode_id: String,
+    pub display_name: String,
+}
+
 /// A datasource type from the registry.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DatasourceTypeInfo {
     pub type_id: String,
     pub display_name: String,
+    /// Auth modes usable for headless catalog-indexing credentials — a
+    /// strict subset of the type's full (connection) auth modes. Interactive
+    /// OAuth modes and credential-less modes (e.g. flaredb's `none`) are
+    /// excluded server-side; see
+    /// `kyomi_core::datasource_registry::DatasourceTypeMetadata::indexing_auth_modes`.
+    /// Empty means the indexing-credentials selector should stay hidden for
+    /// this type.
+    pub indexing_auth_modes: Vec<AuthModeOption>,
 }
 
 /// A freshly generated SSH keypair for a datasource's SSH tunnel.
@@ -75,6 +92,13 @@ pub async fn get_datasource_types() -> Result<Vec<DatasourceTypeInfo>, ServerFnE
         .map(|(_, meta)| DatasourceTypeInfo {
             type_id: meta.type_id.to_string(),
             display_name: meta.display_name.to_string(),
+            indexing_auth_modes: meta
+                .indexing_auth_modes()
+                .map(|m| AuthModeOption {
+                    mode_id: m.mode_id.clone(),
+                    display_name: m.display_name.clone(),
+                })
+                .collect(),
         })
         .collect();
 

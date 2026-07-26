@@ -99,6 +99,14 @@ pub struct AuthModeConfig {
 
     /// `true` if workspace can share credentials for this auth mode.
     pub supports_shared_credentials: bool,
+
+    /// Whether this mode can authenticate a *headless* background catalog-indexing
+    /// run. Interactive OAuth modes cannot: there is no user session to complete the
+    /// flow. Modes with no credentials at all (`none`) have nothing to store, so the
+    /// indexing credential form has nothing to offer.
+    ///
+    /// Rust-side only — there is no Python counterpart for this field.
+    pub supports_headless_indexing: bool,
 }
 
 impl AuthModeConfig {
@@ -147,6 +155,7 @@ fn password_auth_mode(is_default: bool, supports_shared: bool) -> AuthModeConfig
         sensitive_fields: vec!["password".into()],
         is_default,
         supports_shared_credentials: supports_shared,
+        supports_headless_indexing: true,
     }
 }
 
@@ -173,6 +182,7 @@ fn global_oauth_auth_mode(oauth_provider: &str, is_default: bool) -> AuthModeCon
         sensitive_fields: vec![],
         is_default,
         supports_shared_credentials: false,
+        supports_headless_indexing: false,
     }
 }
 
@@ -208,6 +218,7 @@ fn enterprise_oauth_auth_mode(
         sensitive_fields: vec!["oauth_token".into()],
         is_default,
         supports_shared_credentials: false,
+        supports_headless_indexing: false,
     }
 }
 
@@ -247,6 +258,7 @@ fn oauth_auth_mode(
         sensitive_fields: vec!["oauth_token".into()],
         is_default,
         supports_shared_credentials: false,
+        supports_headless_indexing: false,
     }
 }
 
@@ -265,6 +277,7 @@ fn service_account_auth_mode(is_default: bool) -> AuthModeConfig {
         sensitive_fields: vec![],
         is_default,
         supports_shared_credentials: true,
+        supports_headless_indexing: true,
     }
 }
 
@@ -289,6 +302,7 @@ fn token_auth_mode(
         sensitive_fields: vec![token_field.into()],
         is_default,
         supports_shared_credentials: supports_shared,
+        supports_headless_indexing: true,
     }
 }
 
@@ -443,6 +457,17 @@ impl DatasourceTypeMetadata {
     /// Get list of all auth mode IDs for this datasource.
     pub fn get_auth_mode_ids(&self) -> Vec<&str> {
         self.auth_modes.iter().map(|m| m.mode_id.as_str()).collect()
+    }
+
+    /// Auth modes usable for headless catalog-indexing credentials.
+    ///
+    /// This is a strict subset of `auth_modes`: interactive OAuth modes are
+    /// excluded because there is no user session for a background job to
+    /// complete the flow with, and modes with no credentials at all (`none`)
+    /// have nothing for the indexing credential form to collect. See
+    /// [`AuthModeConfig::supports_headless_indexing`].
+    pub fn indexing_auth_modes(&self) -> impl Iterator<Item = &AuthModeConfig> {
+        self.auth_modes.iter().filter(|m| m.supports_headless_indexing)
     }
 }
 
@@ -734,6 +759,7 @@ static SYNAPSE_META: LazyLock<DatasourceTypeMetadata> =
                 sensitive_fields: vec!["password".into()],
                 is_default: true,
                 supports_shared_credentials: true,
+                supports_headless_indexing: true,
             },
             // Service Principal - Azure AD app registration
             AuthModeConfig {
@@ -753,6 +779,7 @@ static SYNAPSE_META: LazyLock<DatasourceTypeMetadata> =
                 sensitive_fields: vec!["client_secret".into()],
                 is_default: false,
                 supports_shared_credentials: true,
+                supports_headless_indexing: true,
             },
             // Microsoft OAuth
             oauth_auth_mode(
@@ -805,6 +832,7 @@ static FLAREDB_META: LazyLock<DatasourceTypeMetadata> =
                 sensitive_fields: vec![],
                 is_default: true,
                 supports_shared_credentials: false,
+                supports_headless_indexing: false,
             },
         ]),
         catalog_container_label: "schema",
@@ -1249,6 +1277,73 @@ mod tests {
                 meta.supports_ssh_tunnel, expected,
                 "supports_ssh_tunnel mismatch for {type_id}"
             );
+        }
+    }
+
+    // --- Headless indexing auth modes (KYO-187) ---
+
+    #[test]
+    fn indexing_auth_modes_match_legacy_client_hardcoded_table() {
+        // Mirrors the table that `get_indexing_auth_modes` in
+        // `kyomi-ui/src/pages/settings/datasources.rs` used to hardcode before
+        // KYO-187 moved this knowledge into the registry. This is the whole
+        // safety property of that migration: the derived list must exactly
+        // equal what the old client-side `match` produced, including
+        // flaredb's empty list (its only auth mode, `none`, has no
+        // credentials and cannot back a headless indexing run).
+        let expected: &[(&str, &[(&str, &str)])] = &[
+            ("bigquery", &[("service_account", "Service Account")]),
+            ("clickhouse", &[("password", "Password")]),
+            ("snowflake", &[("password", "Password")]),
+            ("databricks", &[("token", "Personal Access Token")]),
+            ("redshift", &[("password", "Password")]),
+            ("postgres", &[("password", "Password")]),
+            ("mysql", &[("password", "Password")]),
+            ("sqlserver", &[("password", "Password")]),
+            (
+                "synapse",
+                &[
+                    ("sql", "SQL Authentication"),
+                    ("service_principal", "Service Principal"),
+                ],
+            ),
+            ("flaredb", &[]),
+        ];
+
+        assert_eq!(
+            expected.len(),
+            ALL_TYPES.len(),
+            "test table must cover every registered type"
+        );
+
+        for (type_id, expected_modes) in expected {
+            let meta = get_metadata_by_str(type_id)
+                .unwrap_or_else(|| panic!("unknown datasource type {type_id}"));
+            let actual: Vec<(&str, &str)> = meta
+                .indexing_auth_modes()
+                .map(|m| (m.mode_id.as_str(), m.display_name.as_str()))
+                .collect();
+            assert_eq!(
+                &actual, expected_modes,
+                "indexing auth modes mismatch for {type_id}"
+            );
+        }
+    }
+
+    #[test]
+    fn indexing_auth_modes_excludes_oauth_by_construction() {
+        // The filter is `supports_headless_indexing`, not an allowlist of
+        // known-safe mode_ids -- so a future OAuth mode added to any type
+        // (e.g. a new enterprise_oauth variant) can never silently appear in
+        // the indexing selector just by existing in `auth_modes`.
+        for (type_id, meta) in all_metadata() {
+            for mode in meta.indexing_auth_modes() {
+                assert!(
+                    !mode.requires_oauth(),
+                    "{type_id}'s indexing_auth_modes yielded an OAuth mode: {:?}",
+                    mode.mode_id
+                );
+            }
         }
     }
 
