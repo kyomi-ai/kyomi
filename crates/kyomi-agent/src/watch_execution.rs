@@ -1033,7 +1033,7 @@ async fn execute_watch_inner(
     ws_helpers::send_watch_state_update(ws_manager, &watch.created_by, &watch.watch_id, "running")
         .await;
 
-    // 5. Check capability and AI budget
+    // 5. Check AI budget
     let workspace: Option<kyomi_core::models::Workspace> = kyomi_core::db_fetch_optional!(
         db, kyomi_core::models::Workspace,
         "SELECT workspace_id, name, domain, \
@@ -1067,12 +1067,6 @@ async fn execute_watch_inner(
     })?;
 
     let tier = capability::get_subscription_tier(&workspace);
-    if !capability::has_capability(tier, "kyomi_watch") {
-        return Err(kyomi_core::Error::Internal(
-            "Workspace no longer has Kyomi Watch capability (subscription may have changed)".into(),
-        ));
-    }
-
     let credits_info = capability::get_credits_info(&workspace, tier);
     if credits_info.exhausted {
         return Err(kyomi_core::Error::Internal(

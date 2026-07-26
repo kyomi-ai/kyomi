@@ -48,7 +48,7 @@ use kyomi_auth::{
     redis_ops,
     user_service,
 };
-use kyomi_core::{capability, enums::WorkspaceRole, DbPool};
+use kyomi_core::{enums::WorkspaceRole, DbPool};
 use kyomi_types::Permission;
 
 use crate::client::{self as slack_client, SlackClient, SLACK_TIMEZONE_CACHE_HOURS};
@@ -138,16 +138,6 @@ struct ConnectInitiateQuery {
 // ===========================================================================
 // Helpers
 // ===========================================================================
-
-/// Reject users whose workspace does not have the `slack_integration` capability.
-fn require_slack_capability(user: &AuthUser) -> Result<(), kyomi_core::Error> {
-    if !capability::has_capability(user.workspace.subscription_tier, "slack_integration") {
-        return Err(kyomi_core::Error::Forbidden(
-            "Slack integration requires an active Kyomi Cloud subscription.".into(),
-        ));
-    }
-    Ok(())
-}
 
 /// Reject non-workspace-admin users with 403.
 ///
@@ -309,7 +299,7 @@ async fn delete_slack_user_link(
 
 /// `GET /install` — Get Slack OAuth URL for installing the Kyomi app.
 ///
-/// Requires workspace admin role and Team tier or higher.
+/// Requires workspace admin role.
 async fn get_install_url(
     State(state): State<SlackState>,
     user: AuthUser,
@@ -332,7 +322,6 @@ async fn get_install_url(
         }
     }
     require_workspace_admin(&user)?;
-    require_slack_capability(&user)?;
     let workspace_id = get_workspace_id(&user)?;
     let (client_id, _) = get_slack_config(&state.config)?;
 
@@ -471,13 +460,12 @@ async fn handle_oauth_callback(
 
 /// `DELETE /uninstall` — Remove Slack integration for a workspace.
 ///
-/// Requires workspace admin role and Team tier or higher.
+/// Requires workspace admin role.
 async fn uninstall_slack(
     State(state): State<SlackState>,
     user: AuthUser,
 ) -> Result<Json<serde_json::Value>, kyomi_core::Error> {
     require_workspace_admin(&user)?;
-    require_slack_capability(&user)?;
     let workspace_id = get_workspace_id(&user)?;
 
     // Check workspace has Slack installed
@@ -749,7 +737,6 @@ async fn get_slack_status(
     State(state): State<SlackState>,
     user: AuthUser,
 ) -> Result<Json<SlackStatusResponse>, kyomi_core::Error> {
-    require_slack_capability(&user)?;
     let workspace_id = get_workspace_id(&user)?;
 
     // Check workspace Slack installation from platform tables
@@ -802,7 +789,6 @@ async fn list_channels(
     State(state): State<SlackState>,
     user: AuthUser,
 ) -> Result<Json<ChannelsResponse>, kyomi_core::Error> {
-    require_slack_capability(&user)?;
     let workspace_id = get_workspace_id(&user)?;
 
     // Get bot token from platform tables
@@ -1484,19 +1470,6 @@ async fn handle_app_mention(
             }
         };
 
-    // Check capability (team tier required for Slack integration).
-    if !capability::has_capability(ctx.subscription_tier, "slack_integration") {
-        post_slack_error(
-            &ctx.bot_token,
-            channel_id,
-            slack_user_id,
-            "Slack integration requires an active Kyomi Cloud subscription.",
-            &state.slack_client,
-        )
-        .await;
-        return Ok(());
-    }
-
     // Find or create a chat session for this Slack thread.
     let (session_id, is_new_session) = find_or_create_slack_session(
         &state.db,
@@ -1614,19 +1587,6 @@ async fn handle_direct_message(
             }
         };
 
-    // Check capability.
-    if !capability::has_capability(ctx.subscription_tier, "slack_integration") {
-        post_slack_error(
-            &ctx.bot_token,
-            channel_id,
-            slack_user_id,
-            "Slack integration requires an active Kyomi Cloud subscription.",
-            &state.slack_client,
-        )
-        .await;
-        return Ok(());
-    }
-
     // Find or create a chat session for this DM thread.
     let (session_id, is_new_session) = find_or_create_slack_session(
         &state.db,
@@ -1702,7 +1662,6 @@ struct SlackContext {
     workspace_id: String,
     user_id: String,
     bot_token: String,
-    subscription_tier: kyomi_core::SubscriptionTier,
 }
 
 /// Resolve workspace, user, and decrypted bot token from Slack identifiers.
@@ -1733,26 +1692,10 @@ async fn resolve_slack_context(
         .map_err(|e| format!("DB error looking up platform user: {e}"))?
         .ok_or_else(|| format!("Slack user {slack_user_id} not connected to Kyomi workspace"))?;
 
-    // Look up subscription tier for capability checks.
-    #[derive(sqlx::FromRow)]
-    struct TierRow { subscription_tier: String }
-    let tier_row: Option<TierRow> = kyomi_core::db_fetch_optional!(
-        db, TierRow,
-        "SELECT subscription_tier FROM workspaces WHERE workspace_id = $1",
-        &workspace_id
-    ).map_err(|e| format!("DB error looking up tier: {e}"))?;
-    let tier_str = tier_row
-        .ok_or_else(|| "Workspace not found".to_string())?
-        .subscription_tier;
-    let subscription_tier: kyomi_core::SubscriptionTier = tier_str
-        .parse()
-        .map_err(|e: String| format!("Invalid tier: {e}"))?;
-
     Ok(SlackContext {
         workspace_id,
         user_id,
         bot_token,
-        subscription_tier,
     })
 }
 
