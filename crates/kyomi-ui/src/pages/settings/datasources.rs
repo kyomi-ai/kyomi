@@ -6584,21 +6584,6 @@ fn CreateModeCatalogPicker(
 // Edit-Mode Catalog Tab
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn get_indexing_auth_modes(ds_type: &str) -> &[(&str, &str)] {
-    match ds_type {
-        "bigquery" => &[("service_account", "Service Account")],
-        "synapse" => &[
-            ("sql", "SQL Authentication"),
-            ("service_principal", "Service Principal"),
-        ],
-        "snowflake" | "postgres" | "clickhouse" | "mysql" | "sqlserver" | "redshift" => {
-            &[("password", "Password")]
-        }
-        "databricks" => &[("token", "Personal Access Token")],
-        _ => &[],
-    }
-}
-
 fn view_service_account_form(
     json_signal: ReadSignal<String>,
     set_json_signal: WriteSignal<String>,
@@ -6837,6 +6822,16 @@ fn EditModeCatalogTab(
     set_indexing_tenant_id: WriteSignal<String>,
     set_indexing_creds_unchanged: WriteSignal<bool>,
 ) -> impl IntoView {
+    // ── Datasource-type registry data (KYO-187) ────────────────────────────
+    // Which auth modes the "Catalog Indexing Credentials" selector below
+    // offers is registry-owned (`DatasourceTypeMetadata::indexing_auth_modes`),
+    // not a client-side match on the type string — see
+    // `get_datasource_types`. `use_query` is the shared list-query cache
+    // (Layout-scoped, no deps), so this doesn't add a second ad-hoc fetch
+    // mechanism: it's the same hook `DatasourcesPage` uses for the
+    // datasource list itself.
+    let datasource_types = use_query("datasource-types", || (), |_: ()| get_datasource_types());
+
     // ── Load catalog stats on mount ──────────────────────────────────────
     // Input: datasource_id
     let stats_action = Action::new(|ds_id: &String| {
@@ -7626,7 +7621,34 @@ fn EditModeCatalogTab(
 
                             {move || {
                                 let ds_type_val = datasource_type.get();
-                                let auth_modes = get_indexing_auth_modes(&ds_type_val);
+
+                                // Which auth modes to offer comes from the registry (via
+                                // `get_datasource_types`), not a client-side match — see
+                                // `DatasourceTypeMetadata::indexing_auth_modes`. `None` is
+                                // "still loading" (the `use_query` fetch hasn't resolved
+                                // yet); render nothing rather than a false "not available"
+                                // warning that would flash on every mount.
+                                let types_result = match datasource_types.get() {
+                                    Some(result) => result,
+                                    None => return view! { <div></div> }.into_any(),
+                                };
+                                let all_types = match types_result {
+                                    Ok(types) => types,
+                                    Err(_) => {
+                                        return view! {
+                                            <Alert variant=AlertVariant::Warning>
+                                                <AlertDescription>
+                                                    "Failed to load indexing credential options. Please refresh and try again."
+                                                </AlertDescription>
+                                            </Alert>
+                                        }.into_any();
+                                    }
+                                };
+                                let auth_modes: Vec<AuthModeOption> = all_types
+                                    .into_iter()
+                                    .find(|t| t.type_id == ds_type_val)
+                                    .map(|t| t.indexing_auth_modes)
+                                    .unwrap_or_default();
 
                                 if auth_modes.is_empty() {
                                     return view! {
@@ -7640,7 +7662,7 @@ fn EditModeCatalogTab(
 
                                 let current_type = indexing_creds_type.get();
                                 if current_type.is_empty() {
-                                    set_indexing_creds_type.set(auth_modes[0].0.to_string());
+                                    set_indexing_creds_type.set(auth_modes[0].mode_id.clone());
                                 }
 
                                 view! {
@@ -7649,9 +7671,9 @@ fn EditModeCatalogTab(
                                             <div class="space-y-2">
                                                 <label class="text-sm font-medium text-foreground">"Authentication Method"</label>
                                                 <div class="flex flex-wrap gap-2">
-                                                    {auth_modes.iter().map(|(value, label)| {
-                                                        let value = value.to_string();
-                                                        let label = label.to_string();
+                                                    {auth_modes.iter().map(|mode| {
+                                                        let value = mode.mode_id.clone();
+                                                        let label = mode.display_name.clone();
                                                         let value_for_click = value.clone();
                                                         view! {
                                                             <button
@@ -8120,6 +8142,21 @@ mod tests {
         );
     }
 
+    // ── KYO-187: indexing auth modes come from the registry ────────────
+    //
+    // `get_indexing_auth_modes` used to be a client-side `match ds_type {
+    // "bigquery" => ..., "databricks" => ..., ..., _ => &[] }` hardcoded in
+    // this file — a fifth provider silently got the empty `_` arm (no
+    // indexing credentials UI at all) until someone remembered to add a case
+    // here too. KYO-187 deleted that function and made
+    // `EditModeCatalogTab` source its auth-mode list from the registry via
+    // `get_datasource_types()` / `DatasourceTypeInfo::indexing_auth_modes`.
+    // The registry-level exhaustiveness check lives in
+    // `indexing_auth_modes_match_legacy_client_hardcoded_table`
+    // (kyomi-core); this test covers the UI wiring specifically — that the
+    // component still reads from the server payload and that nobody has
+    // reintroduced a local hardcoded mapping.
+
     /// The marker that opens this very `mod tests` block. Slicing `SRC` up
     /// to this marker yields only the production code above it — required
     /// because `SRC` is `include_str!`-ed from this same file, so counting
@@ -8128,6 +8165,61 @@ mod tests {
     /// below, this doc comment) and the assertion could never pass no
     /// matter what the production code does.
     const MOD_TESTS_MARKER: &str = "#[cfg(all(test, feature = \"ssr\"))]\nmod tests {";
+
+    #[test]
+    fn edit_mode_catalog_tab_sources_indexing_auth_modes_from_the_registry() {
+        // `MOD_TESTS_MARKER` here is the *actual* `#[cfg(...)]\nmod tests {`
+        // code text (a real newline, unescaped quotes), so it matches only
+        // the real block opening below — not this const's own string
+        // literal, which is textually different (escaped `\"` / `\n`).
+        // `EditModeCatalogTab` is the last item before that block, so this
+        // slice is exactly the function body.
+        let f = extract_between(SRC, "fn EditModeCatalogTab(", MOD_TESTS_MARKER);
+
+        assert!(
+            f.contains("get_datasource_types()"),
+            "EditModeCatalogTab must fetch its auth-mode options via get_datasource_types() \
+             (the registry-backed query) — without this call it has no server-derived source \
+             for indexing_auth_modes at all"
+        );
+        assert!(
+            f.contains(".indexing_auth_modes"),
+            "EditModeCatalogTab must read the per-type mode list off \
+             DatasourceTypeInfo::indexing_auth_modes returned by get_datasource_types() — \
+             this is the registry-derived replacement for the deleted \
+             get_indexing_auth_modes(ds_type) client-side match"
+        );
+        assert!(
+            !f.contains("fn get_indexing_auth_modes"),
+            "get_indexing_auth_modes must not be reintroduced — KYO-187 deleted it because its \
+             hardcoded match ds_type {{ \"bigquery\" => ..., \"databricks\" => ..., _ => &[] }} \
+             silently gave any new datasource type an empty indexing-auth-modes list until a \
+             human remembered to add a case here; the registry is the single source of truth now"
+        );
+
+        // Scoped to just the auth-modes-resolution closure, not the whole
+        // component: EditModeCatalogTab legitimately contains other
+        // `"bigquery" =>` / `"databricks" =>` arms elsewhere (e.g. field
+        // labels like "Datasets" / "Catalogs to Index") that have nothing to
+        // do with indexing auth modes. Widening this check to the whole
+        // component would false-positive on those.
+        let resolve_modes = extract_between(
+            f,
+            "let auth_modes: Vec<AuthModeOption> = all_types",
+            "let current_type = indexing_creds_type.get();",
+        );
+        for type_id_arm in ["\"bigquery\" =>", "\"databricks\" =>", "\"synapse\" =>"] {
+            assert!(
+                !resolve_modes.contains(type_id_arm),
+                "the indexing-auth-modes resolution in EditModeCatalogTab must not contain a \
+                 `{type_id_arm}` match arm — that shape is the KYO-187 regression pattern: a \
+                 client-side match on datasource type string hardcoding which auth modes are \
+                 offered, silently drifting out of sync with the registry (and defaulting new \
+                 types to no indexing credentials at all via a `_ => &[]` arm) instead of \
+                 reading DatasourceTypeInfo::indexing_auth_modes"
+            );
+        }
+    }
 
     /// `use_analytics_access` must be called exactly once, at the list
     /// level in `DatasourcesContent` — never per row. Calling it inside
