@@ -29,269 +29,99 @@ pub mod arrow_fetch;
 
 pub use app::App;
 
-/// Register all server functions with the Leptos runtime.
-///
-/// Must be called once at server startup before building the Axum router.
-/// This makes server function endpoints available for the WASM client to call.
-#[cfg(feature = "ssr")]
-pub fn register_server_functions() {
-    use leptos::server_fn::axum::register_explicit;
+// KYO-191: server functions self-register with `server_fn`'s Axum registry
+// via `inventory` — the `#[server]` macro emits an `inventory::submit!` for
+// every function, and `server_fn::axum::server_fn_paths()` reads that
+// registry lazily on first access (see `initialize_server_fn_map!` in
+// `server_fn::axum`). Explicit `register_explicit::<T>()` calls (formerly
+// 195 of them, in a `register_server_functions()` here) were deleted after
+// measuring, under the real production build profile (`lto = true`,
+// `codegen-units = 1`, `strip = true`, `panic = "abort"`), that they added
+// zero functions beyond what `inventory` already registered on its own.
+// `server_fn`'s own docs say explicit registration is only needed for a WASM
+// server target or an environment `inventory` can't instrument — neither
+// applies to this binary. See `server_fn_registry_is_populated_via_inventory`
+// below for the regression guard that replaced it.
+#[cfg(all(test, feature = "ssr"))]
+mod server_fn_registration_tests {
+    //! KYO-191 deleted `register_server_functions()` (195 explicit
+    //! `register_explicit::<T>()` calls) after measuring that `inventory`'s
+    //! link-section statics already register every server function on their
+    //! own — explicit registration was a no-op under the production build
+    //! profile. Deleting that belt-and-braces mechanism removes the one
+    //! thing that used to guarantee (by construction) that a function
+    //! existed in the registry. Without a replacement, a broken registry —
+    //! e.g. from a future toolchain/linker change, or a `#[server]` fn
+    //! defined somewhere `inventory`'s macro can't see — would silently
+    //! manifest as every server function 404ing at runtime, with nothing at
+    //! boot to explain why.
+    //!
+    //! This test is that replacement. It asserts the registry is populated
+    //! with a plausible number of entries, and spot-checks several of the
+    //! 12 functions the ticket found missing from the old explicit list
+    //! (`logout`, `generate_ssh_key`, `get_catalog_refresh_status`) so a
+    //! regression in exactly the class of function this ticket was worried
+    //! about would fail loudly here instead of 404ing in production.
 
-    use server_fns::ai::*;
-    register_explicit::<GetWorkspaceAiConfig>();
-    register_explicit::<UpdateWorkspaceAiConfig>();
-    register_explicit::<TestWorkspaceAiConfig>();
+    /// Registered paths carry a numeric hash suffix appended directly after
+    /// the function name with no separator (see
+    /// `server_fn_macro::ServerFnCall::server_fn_url`, which concatenates
+    /// prefix + fn name + hash). That means `/leptos-api/logout` is a
+    /// textual prefix of `/leptos-api/logout_all_sessions`, so a naive
+    /// `starts_with` check on `"/leptos-api/logout"` would pass even if only
+    /// `logout_all_sessions` were ever registered and plain `logout` were
+    /// missing. Require that the byte immediately following the function
+    /// name is an ASCII digit (the start of the hash) rather than another
+    /// identifier character, so the two can't be confused for each other.
+    fn has_registered_path_for(paths: &[String], leptos_api_fn_name: &str) -> bool {
+        let prefix = format!("/leptos-api/{leptos_api_fn_name}");
+        paths.iter().any(|path| {
+            path.strip_prefix(prefix.as_str())
+                .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+        })
+    }
 
-    use server_fns::auth::*;
-    register_explicit::<GetAuthConfig>();
-    register_explicit::<LoginWithPassword>();
-    register_explicit::<SignupStart>();
-    register_explicit::<SignupComplete>();
-    register_explicit::<GoogleOauthCallback>();
-    register_explicit::<GoogleLinkCallback>();
-    register_explicit::<DatasourceOauthCallback>();
-    register_explicit::<ResendVerification>();
-    register_explicit::<VerifyEmail>();
-    register_explicit::<RecoveryStart>();
-    register_explicit::<RecoveryVerify>();
-    register_explicit::<RecoverySetPassword>();
-    register_explicit::<PasskeyLoginStart>();
-    register_explicit::<PasskeyLoginComplete>();
-    register_explicit::<PasskeyRegisterStart>();
-    register_explicit::<PasskeyRegisterComplete>();
-    register_explicit::<PasskeySignupComplete>();
-    register_explicit::<PasskeyRecoveryVerify>();
+    #[test]
+    fn server_fn_registry_is_populated_via_inventory() {
+        let paths: Vec<String> = leptos::server_fn::axum::server_fn_paths()
+            .map(|(path, _method)| path.to_string())
+            .collect();
 
-    use server_fns::datasource_oauth::*;
-    register_explicit::<GetGoogleOauthStatus>();
-    register_explicit::<GetGoogleOauthProjects>();
-    register_explicit::<DisconnectGoogleOauth>();
-    register_explicit::<GetDatasourceOauthStatus>();
-    register_explicit::<DisconnectDatasourceOauth>();
+        // A floor, not an exact expectation: KYO-191 measured 206 registered
+        // functions under the production profile at the time this test was
+        // written. Hardcoding 206 would fail this test the next time anyone
+        // adds a server function; 150 is comfortably below that while still
+        // catching "the registry came back empty or near-empty."
+        assert!(
+            paths.len() >= 150,
+            "expected the inventory-populated server_fn registry to contain \
+             at least 150 entries (a floor, not the exact count — KYO-191 \
+             measured 206 under the production profile), got {}. A \
+             collapsed registry means every server function 404s at \
+             runtime with no signal at boot.",
+            paths.len()
+        );
 
-    use server_fns::context::*;
-    register_explicit::<GetUserContext>();
+        // Spot-check functions KYO-191 found missing from the old explicit
+        // registration list, to prove `inventory` covers exactly the case
+        // that list was added to guard against.
+        for fn_name in ["logout", "generate_ssh_key", "get_catalog_refresh_status"] {
+            assert!(
+                has_registered_path_for(&paths, fn_name),
+                "expected a registered `/leptos-api/{fn_name}...` path — this \
+                 was one of the 12 functions KYO-191 found missing from the \
+                 (now-deleted) explicit registration list"
+            );
+        }
 
-    use server_fns::profile::*;
-    register_explicit::<GetProfile>();
-    register_explicit::<GetDashboards>();
-    register_explicit::<GetPendingInvitations>();
-    register_explicit::<UpdateProfileName>();
-    register_explicit::<UpdateTheme>();
-    register_explicit::<UpdateLandingPage>();
-    register_explicit::<UpdateDefaultDashboard>();
-    register_explicit::<UpdateQueryRetention>();
-    register_explicit::<UpdateChartPalette>();
-    register_explicit::<AcceptInvitation>();
-    register_explicit::<DeclineInvitation>();
-
-    use server_fns::security::*;
-    register_explicit::<HasPassword>();
-    register_explicit::<SetPassword>();
-    register_explicit::<ChangePassword>();
-    register_explicit::<GetTotpStatus>();
-    register_explicit::<SetupTotp>();
-    register_explicit::<EnableTotp>();
-    register_explicit::<DisableTotp>();
-    register_explicit::<GetSessions>();
-    register_explicit::<RevokeSession>();
-    register_explicit::<LogoutAllSessions>();
-    register_explicit::<ListPasskeys>();
-    register_explicit::<StartPasskeyRegistration>();
-    register_explicit::<CompletePasskeyRegistration>();
-    register_explicit::<DeletePasskey>();
-    register_explicit::<RenamePasskey>();
-
-    use server_fns::sidebar::*;
-    register_explicit::<GetRecentSessions>();
-    register_explicit::<GetSidebarUser>();
-
-    use server_fns::usage::*;
-    register_explicit::<GetAiUsageStatus>();
-
-    use server_fns::analytics::*;
-    register_explicit::<ListAnalyticsSites>();
-    register_explicit::<GetAnalyticsUsage>();
-    register_explicit::<CreateAnalyticsSite>();
-    register_explicit::<UpdateAnalyticsSite>();
-    register_explicit::<DeleteAnalyticsSite>();
-
-    use server_fns::team::*;
-    register_explicit::<ListWorkspaceMembers>();
-    register_explicit::<UpdateMemberRole>();
-    register_explicit::<RemoveMember>();
-    register_explicit::<ListWorkspaceInvitations>();
-    register_explicit::<InviteMember>();
-    register_explicit::<CancelInvitation>();
-    register_explicit::<ListOwnershipTransfers>();
-    register_explicit::<CancelOwnershipTransfer>();
-
-    use server_fns::chat::*;
-    register_explicit::<GetChartContext>();
-    register_explicit::<StoreChartContextForAsk>();
-    register_explicit::<GetWebsocketConfig>();
-    register_explicit::<ListChatSessions>();
-    register_explicit::<GetSessionMessages>();
-    register_explicit::<UpdateSessionTitle>();
-    register_explicit::<DeleteChatSession>();
-    register_explicit::<BulkDeleteSessions>();
-    register_explicit::<SearchChatMessages>();
-    register_explicit::<SendChatMessage>();
-    register_explicit::<ShareSession>();
-    register_explicit::<UnshareSession>();
-    register_explicit::<MarkSessionRead>();
-    register_explicit::<ToggleMessagePin>();
-    register_explicit::<UpdateMessageContent>();
-
-    use server_fns::copilot::*;
-    register_explicit::<CreateCopilotSession>();
-    register_explicit::<SendCopilotMessage>();
-    register_explicit::<DeleteCopilotSession>();
-
-    use server_fns::collections::*;
-    register_explicit::<ListCollections>();
-    register_explicit::<CreateCollection>();
-    register_explicit::<UpdateCollection>();
-    register_explicit::<DeleteCollection>();
-    register_explicit::<AddDashboardToCollection>();
-    register_explicit::<RemoveDashboardFromCollection>();
-
-    use server_fns::dashboards::*;
-    register_explicit::<ListDashboards>();
-    register_explicit::<GetDashboard>();
-    register_explicit::<CreateDashboard>();
-    register_explicit::<UpdateDashboard>();
-    register_explicit::<DeleteDashboard>();
-    register_explicit::<ListVersions>();
-    register_explicit::<GetVersion>();
-    register_explicit::<DiffVersions>();
-    register_explicit::<RestoreVersion>();
-    register_explicit::<GetUserDefaultDashboard>();
-    register_explicit::<SetUserDefaultDashboard>();
-    register_explicit::<GetWorkspaceDefaultDashboard>();
-    register_explicit::<SetWorkspaceDefaultDashboard>();
-
-    use server_fns::sql_editor::*;
-    register_explicit::<DryRunSql>();
-    register_explicit::<ListQueryHistory>();
-    register_explicit::<SaveQueryHistory>();
-    register_explicit::<UpdateQueryHistory>();
-    register_explicit::<DeleteQueryHistory>();
-    register_explicit::<GetCatalogTree>();
-    register_explicit::<SearchCatalog>();
-    register_explicit::<RefreshCatalog>();
-    register_explicit::<GetTableInfo>();
-    register_explicit::<GenerateChartFromResults>();
-    register_explicit::<GetWsConnectionInfo>();
-
-    use server_fns::datasources::*;
-    register_explicit::<ListDatasources>();
-    register_explicit::<GetDatasourceTypes>();
-    register_explicit::<ToggleDatasource>();
-    register_explicit::<DeleteDatasource>();
-    register_explicit::<CreateDatasourceModal>();
-    register_explicit::<UpdateDatasourceSettings>();
-    register_explicit::<SaveDatasourceCredentials>();
-    register_explicit::<GetDatasourceSettings>();
-    register_explicit::<TestDatasourceStandalone>();
-    register_explicit::<TestExistingDatasource>();
-    register_explicit::<DiscoverDatasourceResources>();
-    register_explicit::<GetCatalogStats>();
-
-    use server_fns::billing::*;
-    register_explicit::<GetSubscriptionInfo>();
-    register_explicit::<GetInvoices>();
-    register_explicit::<CreateCheckout>();
-    register_explicit::<CancelSubscription>();
-    register_explicit::<ReactivateSubscription>();
-    register_explicit::<CreatePortalSession>();
-    register_explicit::<PurchaseAiBundle>();
-    register_explicit::<PurchaseAnalyticsBundle>();
-    register_explicit::<GetStripePublishableKey>();
-    register_explicit::<GetCheckoutSessionStatus>();
-    register_explicit::<UpdateUserLimit>();
-
-    use server_fns::workspace::*;
-    register_explicit::<GetWorkspaceSettings>();
-    register_explicit::<UpdateWorkspaceName>();
-    register_explicit::<UpdateWorkspaceModel>();
-    register_explicit::<UpdateWorkspaceChartmlConfig>();
-    register_explicit::<ListMyWorkspaces>();
-    register_explicit::<SwitchWorkspace>();
-
-    use server_fns::knowledge::*;
-    register_explicit::<ListKnowledgeDocs>();
-    register_explicit::<CreateKnowledgeDoc>();
-    register_explicit::<DeleteKnowledgeDoc>();
-
-    use server_fns::watches::*;
-    register_explicit::<ListWatches>();
-    register_explicit::<CreateWatch>();
-    register_explicit::<GetWatch>();
-    register_explicit::<UpdateWatch>();
-    register_explicit::<DeleteWatch>();
-    register_explicit::<ToggleWatch>();
-    register_explicit::<RunWatchNow>();
-    register_explicit::<GetWatchExecutions>();
-    register_explicit::<GetWatchExecution>();
-    register_explicit::<GetAlerts>();
-    register_explicit::<GetUnreadAlertsCount>();
-    register_explicit::<MarkAlertRead>();
-    register_explicit::<MarkAlertUnread>();
-    register_explicit::<DeleteAlert>();
-    register_explicit::<RestoreAlert>();
-    register_explicit::<BulkDeleteAlerts>();
-    register_explicit::<BulkMarkAlertsRead>();
-    register_explicit::<BulkMarkAlertsUnread>();
-    register_explicit::<ContinueAlertInChat>();
-    register_explicit::<GetLastExecution>();
-    register_explicit::<GetThinkingEvents>();
-
-    use server_fns::onboarding::*;
-    register_explicit::<AcceptTerms>();
-    register_explicit::<GetOnboardingState>();
-    register_explicit::<CreateSampleDatasource>();
-    register_explicit::<CheckSampleDatasourceAvailable>();
-    register_explicit::<GetOauthConnectUrl>();
-
-    use server_fns::home::*;
-    register_explicit::<GetLandingConfig>();
-
-    use server_fns::unsubscribe::*;
-    register_explicit::<UnsubscribeEmail>();
-
-    use server_fns::ownership::*;
-    register_explicit::<GetOwnershipTransfer>();
-    register_explicit::<AcceptOwnershipTransfer>();
-    register_explicit::<DeclineOwnershipTransfer>();
-
-    use server_fns::setup::*;
-    register_explicit::<CheckHasDatasources>();
-
-    use server_fns::connect::*;
-    register_explicit::<ListConnectDatasources>();
-    register_explicit::<CreateConnectDatasource>();
-    register_explicit::<RotateConnectToken>();
-
-    use server_fns::feedback::*;
-    register_explicit::<SubmitFeedback>();
-
-    #[cfg(feature = "slack")]
-    {
-        use server_fns::slack::*;
-        register_explicit::<GetSlackStatus>();
-        register_explicit::<SlackConnect>();
-        register_explicit::<SlackDisconnect>();
-        register_explicit::<GetSlackChannels>();
-        register_explicit::<GetDefaultWatchChannel>();
-        register_explicit::<SetDefaultWatchChannel>();
-
-        // Workspace-level Slack server functions
-        use server_fns::workspace::{
-            GetWorkspaceSlackStatus, GetSlackInstallUrl, UninstallWorkspaceSlack,
-        };
-        register_explicit::<GetWorkspaceSlackStatus>();
-        register_explicit::<GetSlackInstallUrl>();
-        register_explicit::<UninstallWorkspaceSlack>();
+        // `logout` and `logout_all_sessions` share a textual prefix; assert
+        // the longer one is independently registered so the check above
+        // can't have silently passed on `logout_all_sessions` alone.
+        assert!(
+            has_registered_path_for(&paths, "logout_all_sessions"),
+            "expected `logout_all_sessions` to be registered independently \
+             of `logout`"
+        );
     }
 }
+
