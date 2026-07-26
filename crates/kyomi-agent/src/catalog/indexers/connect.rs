@@ -8,7 +8,7 @@
 //! result into the shared caching pipeline.
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use kyomi_core::DbPool;
 use kyomi_embed::EmbeddingService;
 use serde_json::Value;
@@ -118,18 +118,17 @@ impl CatalogIndexer for ConnectIndexer {
                 error = %e,
                 "Connection test failed during Connect catalog indexing"
             );
+            let reason = "Connection test failed — is the Connect binary running?";
             let _ = update_workspace_status(
-                db, &ctx.workspace_id, &ctx.datasource_config_id, "failed", None,
+                db, &ctx.workspace_id, &ctx.datasource_config_id, "failed", None, Some(reason),
             ).await;
-            return CatalogIndexResult::error(
-                "Connection test failed — is the Connect binary running?",
-            )
-            .with_times(&start_time.to_rfc3339(), &Utc::now().to_rfc3339())
-            .with_ids(&ctx.datasource_config_id, &ctx.workspace_id);
+            return CatalogIndexResult::error(reason)
+                .with_times(&start_time.to_rfc3339(), &Utc::now().to_rfc3339())
+                .with_ids(&ctx.datasource_config_id, &ctx.workspace_id);
         }
 
         let _ = update_workspace_status(
-            db, &ctx.workspace_id, &ctx.datasource_config_id, "running", None,
+            db, &ctx.workspace_id, &ctx.datasource_config_id, "running", None, None,
         ).await;
 
         // Resolve the configured container scope (KYO-162). An explicit empty
@@ -164,117 +163,177 @@ impl CatalogIndexer for ConnectIndexer {
                         error = %e,
                         "discover_catalog command failed"
                     );
+                    let msg = format!("Catalog discovery failed: {e}");
                     let _ = update_workspace_status(
                         db, &ctx.workspace_id, &ctx.datasource_config_id, "failed", None,
+                        Some(&msg),
                     ).await;
-                    return CatalogIndexResult::error(&format!("Catalog discovery failed: {e}"))
+                    return CatalogIndexResult::error(&msg)
                         .with_times(&start_time.to_rfc3339(), &Utc::now().to_rfc3339())
                         .with_ids(&ctx.datasource_config_id, &ctx.workspace_id);
                 }
             }
         };
 
-        let total_tables: usize = catalog_result.containers.iter().map(|c| c.tables.len()).sum();
-        info!(
-            datasource_config_id = ctx.datasource_config_id,
-            containers = catalog_result.containers.len(),
-            total_tables,
-            "Connect catalog discovered"
-        );
+        process_discovered_catalog(ProcessDiscoveredCatalogParams {
+            db,
+            embedding,
+            ctx,
+            catalog_result,
+            explicit_empty,
+            start_time,
+        })
+        .await
+    }
+}
 
-        let mut tables_indexed = 0usize;
-        let mut seen_table_ids = HashSet::new();
+/// Parameters for [`process_discovered_catalog`].
+struct ProcessDiscoveredCatalogParams<'a> {
+    db: &'a DbPool,
+    embedding: &'a EmbeddingService,
+    ctx: &'a IndexerContext,
+    catalog_result: CatalogResult,
+    explicit_empty: bool,
+    start_time: DateTime<Utc>,
+}
 
-        for container in &catalog_result.containers {
-            for table in &container.tables {
-                let columns: Vec<ColumnEntry> = table
-                    .columns
-                    .iter()
-                    .map(|col| ColumnEntry {
-                        name: col.name.clone(),
-                        col_type: Some(col.native_type.clone()),
-                        native_type: Some(col.native_type.clone()),
-                        description: col.description.clone(),
-                    })
-                    .collect();
+/// Cache the tables in a discovered Connect catalog, archive whatever's no
+/// longer present, and decide the run's final workspace status.
+///
+/// Split out from [`ConnectIndexer::index_catalog`] so this logic — which
+/// includes the KYO-126 `nothing_found` decision below — is unit-testable
+/// against a plain [`CatalogResult`] value and an in-memory DB, without
+/// needing a live Connect WebSocket connection through [`ConnectRegistry`].
+/// `discover_catalog` itself (and its `Err` handling, which already maps a
+/// discovery failure to `"failed"` with the agent's real message) stays in
+/// `index_catalog` — this function only runs once discovery has already
+/// succeeded.
+async fn process_discovered_catalog(params: ProcessDiscoveredCatalogParams<'_>) -> CatalogIndexResult {
+    let ProcessDiscoveredCatalogParams {
+        db,
+        embedding,
+        ctx,
+        catalog_result,
+        explicit_empty,
+        start_time,
+    } = params;
 
-                let project_id = "";
-                let dataset_id = container.name.as_str();
-                let table_name = table.name.as_str();
-                let table_type = table.native_type.as_deref().unwrap_or("TABLE");
-                let full_table_id = format!("{}.{}", container.name, table.name);
-                let archive_id =
-                    kyomi_core::build_full_table_name(project_id, dataset_id, table_name);
-                seen_table_ids.insert(archive_id);
+    let total_tables: usize = catalog_result.containers.iter().map(|c| c.tables.len()).sum();
+    info!(
+        datasource_config_id = ctx.datasource_config_id,
+        containers = catalog_result.containers.len(),
+        total_tables,
+        "Connect catalog discovered"
+    );
 
-                let cached = cache_table(CacheTableParams {
-                    db,
-                    embedding,
-                    ctx,
-                    project_id,
-                    dataset_id,
-                    table_name,
-                    table_type,
-                    columns: &columns,
-                    full_table_id: &full_table_id,
+    let mut tables_indexed = 0usize;
+    let mut seen_table_ids = HashSet::new();
+
+    for container in &catalog_result.containers {
+        for table in &container.tables {
+            let columns: Vec<ColumnEntry> = table
+                .columns
+                .iter()
+                .map(|col| ColumnEntry {
+                    name: col.name.clone(),
+                    col_type: Some(col.native_type.clone()),
+                    native_type: Some(col.native_type.clone()),
+                    description: col.description.clone(),
                 })
-                .await;
+                .collect();
 
-                if cached {
-                    tables_indexed += 1;
-                }
+            let project_id = "";
+            let dataset_id = container.name.as_str();
+            let table_name = table.name.as_str();
+            let table_type = table.native_type.as_deref().unwrap_or("TABLE");
+            let full_table_id = format!("{}.{}", container.name, table.name);
+            let archive_id = kyomi_core::build_full_table_name(project_id, dataset_id, table_name);
+            seen_table_ids.insert(archive_id);
+
+            let cached = cache_table(CacheTableParams {
+                db,
+                embedding,
+                ctx,
+                project_id,
+                dataset_id,
+                table_name,
+                table_type,
+                columns: &columns,
+                full_table_id: &full_table_id,
+            })
+            .await;
+
+            if cached {
+                tables_indexed += 1;
             }
         }
-
-        // Archive missing tables — guard against empty discovery. As on the
-        // direct path, an *explicit empty selection* is exempt from the guard:
-        // the user intentionally cleared the scope, so stale tables should be
-        // archived rather than preserved.
-        let nothing_found =
-            seen_table_ids.is_empty() && tables_indexed == 0 && !explicit_empty;
-        let tables_archived = if nothing_found {
-            warn!(
-                datasource_config_id = ctx.datasource_config_id,
-                "No tables found via Connect — preserving existing catalog"
-            );
-            0
-        } else {
-            archive_missing_tables(
-                db,
-                &ctx.workspace_id,
-                &ctx.datasource_config_id,
-                &seen_table_ids,
-            )
-            .await
-            .unwrap_or_default()
-            .len()
-        };
-
-        let _ = update_datasource_last_refresh(db, &ctx.datasource_config_id).await;
-        let _ = update_workspace_status(
-            db, &ctx.workspace_id, &ctx.datasource_config_id, "idle", None,
-        ).await;
-
-        let end_time = Utc::now();
-
-        info!(
-            datasource_config_id = ctx.datasource_config_id,
-            tables_indexed,
-            tables_archived,
-            elapsed_secs = (end_time - start_time).num_seconds(),
-            "Connect catalog indexing complete"
-        );
-
-        if nothing_found {
-            CatalogIndexResult::error("No tables discovered — existing catalog preserved")
-                .with_times(&start_time.to_rfc3339(), &end_time.to_rfc3339())
-                .with_ids(&ctx.datasource_config_id, &ctx.workspace_id)
-        } else {
-            CatalogIndexResult::completed(tables_indexed, tables_archived)
-                .with_times(&start_time.to_rfc3339(), &end_time.to_rfc3339())
-                .with_ids(&ctx.datasource_config_id, &ctx.workspace_id)
-        }
     }
+
+    // Archive missing tables — guard against empty discovery. As on the
+    // direct path, an *explicit empty selection* is exempt from the guard:
+    // the user intentionally cleared the scope, so stale tables should be
+    // archived rather than preserved.
+    let nothing_found = seen_table_ids.is_empty() && tables_indexed == 0 && !explicit_empty;
+    let tables_archived = if nothing_found {
+        warn!(
+            datasource_config_id = ctx.datasource_config_id,
+            "No tables found via Connect — preserving existing catalog"
+        );
+        0
+    } else {
+        archive_missing_tables(
+            db,
+            &ctx.workspace_id,
+            &ctx.datasource_config_id,
+            &seen_table_ids,
+        )
+        .await
+        .unwrap_or_default()
+        .len()
+    };
+
+    let _ = update_datasource_last_refresh(db, &ctx.datasource_config_id).await;
+
+    // `nothing_found` on this path can no longer be blamed on a hidden
+    // permission error: the agent-side fix (kyomi-connect PR #16) makes a
+    // genuine permission denial surface as a real `Err` from
+    // `discover_catalog`, which `index_catalog` already catches and maps to
+    // `"failed"` with the agent's own message before this function is ever
+    // called. By the time execution reaches here, discovery itself
+    // succeeded — `nothing_found` means the selected containers were read
+    // successfully and simply contain no cacheable tables. Reporting that
+    // as `"idle"` restores the pre-KYO-126 behavior for this path, which was
+    // never the reported bug here: mapping it to `"failed"` instead would
+    // leave a freshly-connected or legitimately empty Connect datasource
+    // stuck behind a permanent red alert with nothing to fix. See KYO-126's
+    // review notes for why this differs from the direct SQL path
+    // (`resolve_final_status`), which still needs to distinguish the two
+    // because its per-container errors are visible here on the Connect path
+    // but aren't there.
+    let _ = update_workspace_status(
+        db,
+        &ctx.workspace_id,
+        &ctx.datasource_config_id,
+        "idle",
+        None,
+        None,
+    )
+    .await;
+
+    let end_time = Utc::now();
+
+    info!(
+        datasource_config_id = ctx.datasource_config_id,
+        tables_indexed,
+        tables_archived,
+        nothing_found,
+        elapsed_secs = (end_time - start_time).num_seconds(),
+        "Connect catalog indexing complete"
+    );
+
+    CatalogIndexResult::completed(tables_indexed, tables_archived)
+        .with_times(&start_time.to_rfc3339(), &end_time.to_rfc3339())
+        .with_ids(&ctx.datasource_config_id, &ctx.workspace_id)
 }
 
 #[cfg(test)]
@@ -367,5 +426,164 @@ mod tests {
         let scope = vec!["missing".to_string()];
         let c = filter_catalog_to_scope(catalog(&["public"]), Some(&scope));
         assert!(c.containers.is_empty());
+    }
+
+    // ── process_discovered_catalog (KYO-126, second pass) ─────────────────
+    //
+    // A permission denial on the Connect path is now surfaced by
+    // `discover_catalog` returning a real `Err` (agent-side fix,
+    // kyomi-connect PR #16) — already handled, unchanged, in
+    // `index_catalog`'s discovery match arm, and not exercised here since it
+    // requires a live Connect WebSocket connection through `ConnectRegistry`
+    // (Redis-backed), not a plain value these tests can construct.
+    //
+    // What these tests lock in is the actual code change: once discovery
+    // has succeeded, `nothing_found` must report `"idle"`, never `"failed"`
+    // — a genuinely empty (but reachable) Connect datasource must not show
+    // a permanent red alert.
+
+    async fn seed_connect_fixture(sq: &sqlx::SqlitePool, suffix: &str) -> IndexerContext {
+        let user_id = format!("u-connect-{suffix}");
+        let workspace_id = format!("ws-connect-{suffix}");
+        let datasource_config_id = format!("ds-connect-{suffix}");
+
+        sqlx::query("INSERT INTO users (user_id, email) VALUES (?, ?)")
+            .bind(&user_id)
+            .bind(format!("{user_id}@test.local"))
+            .execute(sq)
+            .await
+            .expect("insert user");
+        sqlx::query("INSERT INTO workspaces (workspace_id, name, owner_user_id) VALUES (?, 'WS', ?)")
+            .bind(&workspace_id)
+            .bind(&user_id)
+            .execute(sq)
+            .await
+            .expect("insert workspace");
+        sqlx::query(
+            "INSERT INTO datasource_configs (id, workspace_id, name, datasource_type, slug) \
+             VALUES (?, ?, 'Connect DS', 'postgres', ?)",
+        )
+        .bind(&datasource_config_id)
+        .bind(&workspace_id)
+        .bind(format!("connect-{suffix}"))
+        .execute(sq)
+        .await
+        .expect("insert datasource_config");
+
+        IndexerContext {
+            workspace_id,
+            datasource_config_id,
+            connection_config: json!({}),
+            encryption_key: std::sync::Arc::new([0u8; 32]),
+        }
+    }
+
+    async fn workspace_status(sq: &sqlx::SqlitePool, workspace_id: &str) -> String {
+        sqlx::query_scalar("SELECT catalog_refresh_status FROM workspaces WHERE workspace_id = ?")
+            .bind(workspace_id)
+            .fetch_one(sq)
+            .await
+            .expect("read workspace status")
+    }
+
+    /// KYO-126, second pass: a Connect catalog that discovers zero tables
+    /// (not an explicit empty selection) must report `"idle"`, not
+    /// `"failed"`. Before this fix, `connect_resolve_status` mapped this
+    /// unconditionally to `"failed"` — indistinguishable from a real
+    /// permission error, which now has its own `Err` path with a real
+    /// message instead.
+    #[tokio::test]
+    async fn nothing_found_reports_idle_not_failed() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        let ctx = seed_connect_fixture(sq, "empty").await;
+        let embedding = EmbeddingService::new().expect("load embedding model");
+
+        let result = process_discovered_catalog(ProcessDiscoveredCatalogParams {
+            db: &db,
+            embedding: &embedding,
+            ctx: &ctx,
+            catalog_result: CatalogResult { containers: Vec::new() },
+            explicit_empty: false,
+            start_time: Utc::now(),
+        })
+        .await;
+
+        assert_eq!(result.status, "completed");
+        assert_eq!(result.tables_indexed, 0);
+
+        assert_eq!(
+            workspace_status(sq, &ctx.workspace_id).await,
+            "idle",
+            "a genuinely empty (but reachable) Connect catalog must not be reported as failed"
+        );
+    }
+
+    /// Companion sanity check: when the catalog actually has tables, they
+    /// get cached and the run still reports `"idle"`/`"completed"` — the
+    /// fix only changes the *empty* case, not the normal path.
+    #[tokio::test]
+    async fn tables_found_are_cached_and_reports_idle() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        let ctx = seed_connect_fixture(sq, "withtables").await;
+        let embedding = EmbeddingService::new().expect("load embedding model");
+
+        let catalog_result = CatalogResult {
+            containers: vec![kyomi_core::connect_protocol::CatalogContainer {
+                name: "public".to_string(),
+                tables: vec![kyomi_core::connect_protocol::CatalogTable {
+                    name: "orders".to_string(),
+                    native_type: Some("BASE TABLE".to_string()),
+                    columns: vec![kyomi_core::connect_protocol::CatalogColumn {
+                        name: "id".to_string(),
+                        native_type: "int4".to_string(),
+                        description: None,
+                    }],
+                }],
+            }],
+        };
+
+        let result = process_discovered_catalog(ProcessDiscoveredCatalogParams {
+            db: &db,
+            embedding: &embedding,
+            ctx: &ctx,
+            catalog_result,
+            explicit_empty: false,
+            start_time: Utc::now(),
+        })
+        .await;
+
+        assert_eq!(result.status, "completed");
+
+        // Not `result.tables_indexed` — `cache_table` only counts a table as
+        // "indexed" once embedding storage also succeeds, and pgvector
+        // storage is unsupported on the in-memory SQLite pool this test runs
+        // against. The cache row itself is written regardless, so assert on
+        // that directly (same reasoning as
+        // `databricks_shaped_partial_schema_failure_still_completes` in
+        // `catalog::traits::tests`, which hits the same environment
+        // limitation).
+        let cached_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM datasource_table_cache WHERE datasource_config_id = ? AND is_archived = 0",
+        )
+        .bind(&ctx.datasource_config_id)
+        .fetch_one(sq)
+        .await
+        .expect("count cached tables");
+        assert_eq!(cached_rows, 1, "the discovered table must be cached");
+
+        assert_eq!(
+            workspace_status(sq, &ctx.workspace_id).await,
+            "idle"
+        );
     }
 }

@@ -15,7 +15,7 @@ use kyomi_datasource_server::DatasourceProvider;
 use kyomi_embed::EmbeddingService;
 use serde_json::Value;
 
-use super::{extract_rows_from_batch, sql_escape};
+use super::{ensure_query_ok, extract_rows_from_batch, sql_escape};
 use crate::catalog::traits::{
     index_catalog_sql, CatalogIndexer, SQLCatalogIndexer,
 };
@@ -93,6 +93,7 @@ impl SQLCatalogIndexer for SnowflakeIndexer {
         let result = provider
             .execute_query("SHOW DATABASES", None, None, false, None)
             .await?;
+        ensure_query_ok(&result, "discovering databases")?;
 
         // SHOW DATABASES returns: (created_on, name, is_default, is_current, ...)
         let rows = extract_rows_from_batch(&result);
@@ -139,6 +140,7 @@ impl SQLCatalogIndexer for SnowflakeIndexer {
         );
 
         let result = provider.execute_query(&sql, None, None, false, None).await?;
+        ensure_query_ok(&result, &format!("listing tables in database '{container_name}'"))?;
         let rows = extract_rows_from_batch(&result);
 
         Ok(rows
@@ -188,6 +190,10 @@ impl SQLCatalogIndexer for SnowflakeIndexer {
         );
 
         let result = provider.execute_query(&sql, None, None, false, None).await?;
+        ensure_query_ok(
+            &result,
+            &format!("listing columns for '{container_name}.{table_name}'"),
+        )?;
         let rows = extract_rows_from_batch(&result);
 
         Ok(rows

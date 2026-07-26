@@ -105,6 +105,41 @@ pub trait SQLCatalogIndexer: Send + Sync {
         max_tables: Option<usize>,
     ) -> Result<Vec<TableEntry>>;
 
+    /// Like [`get_tables_in_container`], but also returns any partial-failure
+    /// messages the indexer accumulated while producing the table list.
+    ///
+    /// Default implementation: delegate to `get_tables_in_container` and
+    /// report zero partial failures. This is correct for every indexer whose
+    /// container listing is a single query (Postgres, MySQL, ClickHouse,
+    /// Snowflake, Redshift, SQL Server, Synapse, FlareDb) — a failure there
+    /// naturally becomes the `Err` case that `index_catalog_sql`'s caller
+    /// already handles (recorded in `errors`, container skipped).
+    ///
+    /// Override this when `get_tables_in_container`'s implementation
+    /// internally loops over sub-containers (Databricks: catalog -> schemas
+    /// -> tables) and must tolerate an individual sub-container failing
+    /// without aborting the whole container. Swallowing such a failure with
+    /// only a log and no return path makes a fully permission-denied
+    /// container indistinguishable from a genuinely empty one to the
+    /// `nothing_found` check below — the exact silent-success bug KYO-126
+    /// exists to fix, reappearing one level down (KYO-126, second pass).
+    /// Returning the messages here lets [`index_catalog_sql`] fold them into
+    /// the same `errors` accumulator every other indexer's `Err` path
+    /// already feeds, so [`resolve_final_status`] can see them.
+    ///
+    /// [`get_tables_in_container`]: SQLCatalogIndexer::get_tables_in_container
+    async fn get_tables_in_container_with_partial_failures(
+        &self,
+        provider: &dyn DatasourceProvider,
+        container_name: &str,
+        max_tables: Option<usize>,
+    ) -> Result<(Vec<TableEntry>, Vec<String>)> {
+        let tables = self
+            .get_tables_in_container(provider, container_name, max_tables)
+            .await?;
+        Ok((tables, Vec::new()))
+    }
+
     /// Get column metadata for a specific table.
     ///
     /// Returns column entries with name, type, native_type, and description.
@@ -363,6 +398,7 @@ pub async fn index_catalog_sql(
         &ctx.datasource_config_id,
         "running",
         None,
+        None,
     )
     .await;
 
@@ -389,6 +425,7 @@ pub async fn index_catalog_sql(
             &ctx.datasource_config_id,
             "idle",
             None,
+            None,
         )
         .await;
 
@@ -404,11 +441,10 @@ pub async fn index_catalog_sql(
     ) {
         Ok(config) => config,
         Err(e) => {
-            let result = CatalogIndexResult::error(&format!(
-                "Failed to decrypt connection_config: {e}"
-            ))
-            .with_times(&start_time.to_rfc3339(), &Utc::now().to_rfc3339())
-            .with_ids(&ctx.datasource_config_id, &ctx.workspace_id);
+            let msg = format!("Failed to decrypt connection_config: {e}");
+            let result = CatalogIndexResult::error(&msg)
+                .with_times(&start_time.to_rfc3339(), &Utc::now().to_rfc3339())
+                .with_ids(&ctx.datasource_config_id, &ctx.workspace_id);
 
             let _ = update_workspace_status(
                 db,
@@ -416,6 +452,7 @@ pub async fn index_catalog_sql(
                 &ctx.datasource_config_id,
                 "failed",
                 None,
+                Some(&msg),
             )
             .await;
 
@@ -428,11 +465,10 @@ pub async fn index_catalog_sql(
     {
         Ok(p) => p,
         Err(e) => {
-            let result = CatalogIndexResult::error(&format!(
-                "Failed to create provider: {e}"
-            ))
-            .with_times(&start_time.to_rfc3339(), &Utc::now().to_rfc3339())
-            .with_ids(&ctx.datasource_config_id, &ctx.workspace_id);
+            let msg = format!("Failed to create provider: {e}");
+            let result = CatalogIndexResult::error(&msg)
+                .with_times(&start_time.to_rfc3339(), &Utc::now().to_rfc3339())
+                .with_ids(&ctx.datasource_config_id, &ctx.workspace_id);
 
             let _ = update_workspace_status(
                 db,
@@ -440,6 +476,7 @@ pub async fn index_catalog_sql(
                 &ctx.datasource_config_id,
                 "failed",
                 None,
+                Some(&msg),
             )
             .await;
 
@@ -450,11 +487,10 @@ pub async fn index_catalog_sql(
     // Test connection
     if let Err(e) = provider.test_connection().await {
         provider.close().await;
-        let result = CatalogIndexResult::error(&format!(
-            "Connection test failed: {e}"
-        ))
-        .with_times(&start_time.to_rfc3339(), &Utc::now().to_rfc3339())
-        .with_ids(&ctx.datasource_config_id, &ctx.workspace_id);
+        let msg = format!("Connection test failed: {e}");
+        let result = CatalogIndexResult::error(&msg)
+            .with_times(&start_time.to_rfc3339(), &Utc::now().to_rfc3339())
+            .with_ids(&ctx.datasource_config_id, &ctx.workspace_id);
 
         let _ = update_workspace_status(
             db,
@@ -462,6 +498,7 @@ pub async fn index_catalog_sql(
             &ctx.datasource_config_id,
             "failed",
             None,
+            Some(&msg),
         )
         .await;
 
@@ -473,12 +510,10 @@ pub async fn index_catalog_sql(
         Ok(c) => c,
         Err(e) => {
             provider.close().await;
-            let result = CatalogIndexResult::error(&format!(
-                "Failed to discover {}: {e}",
-                indexer.container_label()
-            ))
-            .with_times(&start_time.to_rfc3339(), &Utc::now().to_rfc3339())
-            .with_ids(&ctx.datasource_config_id, &ctx.workspace_id);
+            let msg = format!("Failed to discover {}: {e}", indexer.container_label());
+            let result = CatalogIndexResult::error(&msg)
+                .with_times(&start_time.to_rfc3339(), &Utc::now().to_rfc3339())
+                .with_ids(&ctx.datasource_config_id, &ctx.workspace_id);
 
             let _ = update_workspace_status(
                 db,
@@ -486,6 +521,7 @@ pub async fn index_catalog_sql(
                 &ctx.datasource_config_id,
                 "failed",
                 None,
+                Some(&msg),
             )
             .await;
 
@@ -519,14 +555,23 @@ pub async fn index_catalog_sql(
         .is_some();
 
     for container in &containers {
-        // Get tables in container
-        let tables = match indexer
-            .get_tables_in_container(provider.as_ref(), container, max_tables_per_dataset)
+        // Get tables in container. `_with_partial_failures` also surfaces
+        // any sub-container errors the indexer tolerated internally (e.g.
+        // Databricks: one permission-denied schema out of several in a
+        // catalog) — see the trait method's doc comment. Every other
+        // indexer's default implementation reports zero partial failures,
+        // so this is a no-op for them.
+        let (tables, partial_failures) = match indexer
+            .get_tables_in_container_with_partial_failures(
+                provider.as_ref(),
+                container,
+                max_tables_per_dataset,
+            )
             .await
         {
-            Ok(t) => {
+            Ok((t, partial_failures)) => {
                 any_container_succeeded = true;
-                t
+                (t, partial_failures)
             }
             Err(e) => {
                 let msg = format!(
@@ -539,6 +584,11 @@ pub async fn index_catalog_sql(
                 continue;
             }
         };
+
+        // Already logged by the indexer at the point of failure (it has
+        // richer context — e.g. which sub-schema) — fold straight into the
+        // shared accumulator without a second log line.
+        errors.extend(partial_failures);
 
         for table in &tables {
             // Skip hidden transform tables (e.g. _sessions, _visitors) for analytics datasources
@@ -654,13 +704,18 @@ pub async fn index_catalog_sql(
     // Update datasource last refresh time
     let _ = update_datasource_last_refresh(db, &ctx.datasource_config_id).await;
 
-    // Update workspace status to idle
+    // Update workspace status. A container set that yields zero tables is
+    // only a failure if at least one discovery error occurred along the
+    // way (KYO-126) — a container that is accessible but genuinely empty
+    // must still report `idle`. See `resolve_final_status`.
+    let (final_status, failure_reason) = resolve_final_status(nothing_found, &errors);
     let _ = update_workspace_status(
         db,
         &ctx.workspace_id,
         &ctx.datasource_config_id,
-        "idle",
+        final_status,
         None,
+        failure_reason.as_deref(),
     )
     .await;
 
@@ -703,6 +758,42 @@ pub async fn index_catalog_sql(
     result
 }
 
+/// Determine the final `workspaces.catalog_refresh_status` value and (when
+/// applicable) a failure reason, from the outcome of a SQL catalog indexing
+/// run.
+///
+/// KYO-126: before this function existed, `index_catalog_sql` unconditionally
+/// wrote `"idle"` at the end of every run — including one where every
+/// container's discovery query failed (e.g. the role lacks permission to
+/// read the catalog) and zero tables were found. That made a total
+/// discovery failure indistinguishable from a healthy, empty datasource.
+///
+/// This function draws the line at whether any discovery error was
+/// observed:
+/// - `nothing_found` + at least one error → the zero tables are *caused by*
+///   a real failure: report `"failed"` with a reason built from the
+///   collected errors.
+/// - `nothing_found` with no errors → every container query genuinely
+///   succeeded and simply returned no tables (or the user configured zero
+///   containers) — this is not a failure and must keep reporting `"idle"`,
+///   or a legitimately empty-but-accessible schema would wrongly show as a
+///   broken datasource.
+/// - not `nothing_found` → normal completion, `"idle"`, regardless of
+///   whether some individual tables/containers errored along the way (partial
+///   success is still success; those errors are already surfaced via
+///   `CatalogIndexResult::errors`).
+fn resolve_final_status(nothing_found: bool, errors: &[String]) -> (&'static str, Option<String>) {
+    if !nothing_found || errors.is_empty() {
+        return ("idle", None);
+    }
+
+    let reason = match errors.len() {
+        1 => errors[0].clone(),
+        n => format!("{} (+{} more error{})", errors[0], n - 1, if n == 2 { "" } else { "s" }),
+    };
+    ("failed", Some(reason))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -712,6 +803,58 @@ mod tests {
     use kyomi_embed::EmbeddingService;
     use serde_json::json;
     use std::sync::{Arc, Mutex};
+
+    // ── resolve_final_status (KYO-126) ───────────────────────────────────
+
+    #[test]
+    fn errored_and_empty_reports_failed_with_reason() {
+        let errors = vec!["Failed to list tables in schema 'public': permission denied".to_string()];
+        let (status, reason) = resolve_final_status(true, &errors);
+        assert_eq!(status, "failed");
+        assert_eq!(
+            reason,
+            Some("Failed to list tables in schema 'public': permission denied".to_string())
+        );
+    }
+
+    #[test]
+    fn errored_and_empty_with_multiple_errors_reports_count() {
+        let errors = vec![
+            "Failed to list tables in schema 'a': permission denied".to_string(),
+            "Failed to list tables in schema 'b': permission denied".to_string(),
+        ];
+        let (status, reason) = resolve_final_status(true, &errors);
+        assert_eq!(status, "failed");
+        assert_eq!(
+            reason,
+            Some(
+                "Failed to list tables in schema 'a': permission denied (+1 more error)"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn empty_without_errors_reports_idle() {
+        // Regression guard (KYO-126): an accessible datasource that
+        // genuinely has zero tables (or where the user configured zero
+        // containers) must not be reported as failed.
+        let (status, reason) = resolve_final_status(true, &[]);
+        assert_eq!(status, "idle");
+        assert_eq!(reason, None);
+    }
+
+    #[test]
+    fn not_nothing_found_reports_idle_even_with_partial_errors() {
+        // A normal completion where some individual tables/containers
+        // errored but at least one table was still indexed is a partial
+        // success, not a failure — those errors are already surfaced via
+        // `CatalogIndexResult::errors`.
+        let errors = vec!["Failed to get columns for public.weird_table: timeout".to_string()];
+        let (status, reason) = resolve_final_status(false, &errors);
+        assert_eq!(status, "idle");
+        assert_eq!(reason, None);
+    }
 
     // ─── Log capture for KYO-217 credential-resolution warnings ────────────
     //
@@ -1197,6 +1340,255 @@ mod tests {
         assert_eq!(
             visible, 2,
             "both tables should remain visible in the catalog after refresh"
+        );
+    }
+
+    // ── get_tables_in_container_with_partial_failures wiring (KYO-126, second pass) ──
+    //
+    // Databricks-shaped mock: overrides `get_tables_in_container_with_partial_failures`
+    // directly (bypassing SQL entirely) to prove that whatever an indexer
+    // returns through this channel actually reaches `errors` and, from there,
+    // `resolve_final_status` — independent of Databricks' own SQL plumbing,
+    // which is unit-tested separately in `indexers::databricks`.
+    struct MockPartialFailureIndexer {
+        tables: Vec<TableEntry>,
+        partial_failures: Vec<String>,
+    }
+
+    #[async_trait]
+    impl SQLCatalogIndexer for MockPartialFailureIndexer {
+        fn container_label(&self) -> &str {
+            "catalog"
+        }
+
+        fn container_config_key(&self) -> &str {
+            "catalog_catalogs"
+        }
+
+        async fn create_provider(
+            &self,
+            _connection_config: &Value,
+            _credentials: &Value,
+        ) -> Result<Box<dyn DatasourceProvider>> {
+            Ok(Box::new(MockProvider))
+        }
+
+        async fn discover_all_containers(
+            &self,
+            _provider: &dyn DatasourceProvider,
+        ) -> Result<Vec<String>> {
+            Ok(vec!["main".to_string()])
+        }
+
+        async fn get_tables_in_container(
+            &self,
+            _provider: &dyn DatasourceProvider,
+            _container_name: &str,
+            _max_tables: Option<usize>,
+        ) -> Result<Vec<TableEntry>> {
+            Ok(self.tables.clone())
+        }
+
+        async fn get_tables_in_container_with_partial_failures(
+            &self,
+            _provider: &dyn DatasourceProvider,
+            _container_name: &str,
+            _max_tables: Option<usize>,
+        ) -> Result<(Vec<TableEntry>, Vec<String>)> {
+            Ok((self.tables.clone(), self.partial_failures.clone()))
+        }
+
+        async fn get_table_columns(
+            &self,
+            _provider: &dyn DatasourceProvider,
+            _container_name: &str,
+            _table_name: &str,
+        ) -> Result<Vec<ColumnEntry>> {
+            Ok(vec![ColumnEntry {
+                name: "id".to_string(),
+                col_type: Some("number".to_string()),
+                native_type: Some("INTEGER".to_string()),
+                description: None,
+            }])
+        }
+    }
+
+    /// Seeds the same FK chain as `redshift_refresh_does_not_archive_freshly_cached_tables`,
+    /// parameterized so the two new tests below don't collide on row IDs.
+    async fn seed_partial_failure_fixture(sq: &sqlx::SqlitePool, suffix: &str) -> IndexerContext {
+        let user_id = format!("u-pf-{suffix}");
+        let workspace_id = format!("ws-pf-{suffix}");
+        let datasource_config_id = format!("ds-pf-{suffix}");
+
+        sqlx::query("INSERT INTO users (user_id, email) VALUES (?, ?)")
+            .bind(&user_id)
+            .bind(format!("{user_id}@test.local"))
+            .execute(sq)
+            .await
+            .expect("insert user");
+        sqlx::query("INSERT INTO workspaces (workspace_id, name, owner_user_id) VALUES (?, 'WS', ?)")
+            .bind(&workspace_id)
+            .bind(&user_id)
+            .execute(sq)
+            .await
+            .expect("insert workspace");
+        sqlx::query(
+            "INSERT INTO datasource_configs (id, workspace_id, name, datasource_type, slug) \
+             VALUES (?, ?, 'DB', 'databricks', ?)",
+        )
+        .bind(&datasource_config_id)
+        .bind(&workspace_id)
+        .bind(format!("db-{suffix}"))
+        .execute(sq)
+        .await
+        .expect("insert datasource_config");
+
+        IndexerContext {
+            workspace_id,
+            datasource_config_id,
+            connection_config: json!({}),
+            encryption_key: std::sync::Arc::new([0u8; 32]),
+        }
+    }
+
+    /// KYO-126, second pass: a Databricks-shaped catalog where every schema
+    /// is permission-denied must end up `"failed"` on the workspace status
+    /// column with a real reason, not `"idle"`. Before this fix, the
+    /// per-schema failures never reached `errors` at all — the container
+    /// call returned `Ok(vec![])`, `resolve_final_status(true, &[])` always
+    /// resolves to `("idle", None)` regardless of how the emptiness arose.
+    #[tokio::test]
+    async fn databricks_shaped_all_schemas_failing_reports_failed_not_idle() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        let ctx = seed_partial_failure_fixture(sq, "allfail").await;
+        let embedding = EmbeddingService::new().expect("load embedding model");
+        let credentials = json!({ "token": "x" });
+
+        let indexer = MockPartialFailureIndexer {
+            tables: Vec::new(),
+            partial_failures: vec![
+                "Failed to list tables in schema 'main.sales': permission denied".to_string(),
+                "Failed to list tables in schema 'main.marketing': permission denied".to_string(),
+            ],
+        };
+
+        let result = index_catalog_sql(
+            &indexer,
+            &ctx,
+            &db,
+            &embedding,
+            None,
+            Some(&credentials),
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            result.errors.as_ref().map(Vec::len),
+            Some(2),
+            "both per-schema partial failures must reach the errors accumulator"
+        );
+
+        // The workspace-scoped status column is what the UI actually reads
+        // (`CatalogIndexResult::status` is always "error" whenever nothing
+        // is found, successful-empty or genuinely-failed alike — see
+        // `resolve_final_status`'s doc comment for why that distinction
+        // lives in the workspace column instead).
+        let status: String = sqlx::query_scalar(
+            "SELECT catalog_refresh_status FROM workspaces WHERE workspace_id = ?",
+        )
+        .bind(&ctx.workspace_id)
+        .fetch_one(sq)
+        .await
+        .expect("read workspace status");
+        assert_eq!(
+            status, "failed",
+            "a catalog where every schema is permission-denied must surface as failed"
+        );
+    }
+
+    /// Companion regression guard: a Databricks-shaped catalog where only
+    /// SOME schemas fail (others yield real tables) must still complete
+    /// normally — one bad schema must not turn the whole catalog red. This
+    /// is the "one bad apple" behavior the KYO-126 fix is required to
+    /// preserve, not just the failure case above.
+    #[tokio::test]
+    async fn databricks_shaped_partial_schema_failure_still_completes() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        let ctx = seed_partial_failure_fixture(sq, "partial").await;
+        let embedding = EmbeddingService::new().expect("load embedding model");
+        let credentials = json!({ "token": "x" });
+
+        let indexer = MockPartialFailureIndexer {
+            tables: vec![TableEntry {
+                name: "orders".to_string(),
+                table_type: Some("TABLE".to_string()),
+                dataset_override: Some("main.sales".to_string()),
+            }],
+            partial_failures: vec![
+                "Failed to list tables in schema 'main.marketing': permission denied".to_string(),
+            ],
+        };
+
+        let result = index_catalog_sql(
+            &indexer,
+            &ctx,
+            &db,
+            &embedding,
+            None,
+            Some(&credentials),
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            result.errors.as_deref().map(<[String]>::len),
+            Some(1),
+            "the one partial failure must still surface in the result on an otherwise-successful run"
+        );
+
+        // Not `result.tables_indexed` — `cache_table` only counts a table as
+        // "indexed" if embedding storage also succeeds, and pgvector storage
+        // is unsupported on the in-memory SQLite pool this test runs
+        // against (see `redshift_refresh_does_not_archive_freshly_cached_tables`
+        // above, which has the same property and asserts on the cache row
+        // directly for the same reason). What actually decides
+        // `nothing_found` — and therefore this test's point, that one bad
+        // schema doesn't fail the whole catalog — is `seen_table_ids`, which
+        // is populated as soon as a table is discovered, independent of
+        // whether its embeddings could be stored.
+        let cached_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM datasource_table_cache WHERE datasource_config_id = ? AND is_archived = 0",
+        )
+        .bind(&ctx.datasource_config_id)
+        .fetch_one(sq)
+        .await
+        .expect("count cached tables");
+        assert_eq!(
+            cached_rows, 1,
+            "the accessible schema's table must still be cached despite the other schema's failure"
+        );
+
+        let status: String = sqlx::query_scalar(
+            "SELECT catalog_refresh_status FROM workspaces WHERE workspace_id = ?",
+        )
+        .bind(&ctx.workspace_id)
+        .fetch_one(sq)
+        .await
+        .expect("read workspace status");
+        assert_eq!(
+            status, "idle",
+            "partial success (one bad schema, others fine) must not be reported as failed"
         );
     }
 }

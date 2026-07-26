@@ -15,7 +15,10 @@ use kyomi_datasource_server::DatasourceProvider;
 use kyomi_embed::EmbeddingService;
 use serde_json::Value;
 
-use super::{extract_rows_from_batch, is_tsql_system_schema, sql_escape, TSQL_SYSTEM_SCHEMAS};
+use super::{
+    ensure_query_ok, extract_rows_from_batch, is_tsql_system_schema, sql_escape,
+    TSQL_SYSTEM_SCHEMAS,
+};
 use crate::catalog::traits::{
     index_catalog_sql, CatalogIndexer, SQLCatalogIndexer,
 };
@@ -83,6 +86,7 @@ impl SQLCatalogIndexer for SqlServerIndexer {
         );
 
         let result = provider.execute_query(&sql, None, None, false, None).await?;
+        ensure_query_ok(&result, "discovering schemas")?;
         let rows = extract_rows_from_batch(&result);
 
         Ok(rows
@@ -120,6 +124,7 @@ impl SQLCatalogIndexer for SqlServerIndexer {
         );
 
         let result = provider.execute_query(&sql, None, None, false, None).await?;
+        ensure_query_ok(&result, &format!("listing tables in schema '{container_name}'"))?;
         let rows = extract_rows_from_batch(&result);
 
         Ok(rows
@@ -157,6 +162,10 @@ impl SQLCatalogIndexer for SqlServerIndexer {
         );
 
         let result = provider.execute_query(&sql, None, None, false, None).await?;
+        ensure_query_ok(
+            &result,
+            &format!("listing columns for '{container_name}.{table_name}'"),
+        )?;
         let rows = extract_rows_from_batch(&result);
 
         Ok(rows

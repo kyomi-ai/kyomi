@@ -67,6 +67,7 @@ impl UserDatasetIndexer {
                 "total_projects": project_ids.len(),
                 "processed": 0,
             })),
+            None,
         )
         .await;
 
@@ -124,6 +125,7 @@ impl UserDatasetIndexer {
                             datasource_config_id,
                             "idle",
                             None,
+                            None,
                         )
                         .await;
 
@@ -155,6 +157,7 @@ impl UserDatasetIndexer {
                     "processed": i + 1,
                     "tables_indexed": tables_indexed,
                 })),
+                None,
             )
             .await;
         }
@@ -194,6 +197,7 @@ impl UserDatasetIndexer {
             workspace_id,
             datasource_config_id,
             "idle",
+            None,
             None,
         )
         .await;
