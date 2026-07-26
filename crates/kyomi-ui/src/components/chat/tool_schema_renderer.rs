@@ -10,6 +10,8 @@ use leptos::tachys::view::any_view::AnyView;
 use phosphor_leptos::Icon;
 use serde_json::Value;
 
+use kyomi_types::truncate_preview;
+
 use crate::utils::cron::{describe_cron, get_tz_offset_minutes};
 
 // ---------------------------------------------------------------------------
@@ -19,6 +21,24 @@ use crate::utils::cron::{describe_cron, get_tz_offset_minutes};
 /// Extract a string field from a JSON value.
 fn str_field<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(Value::as_str)
+}
+
+/// Truncate a `create_dashboard` / `modify_dashboard` tool-call `content`
+/// argument to at most 100 characters for the thinking-tracker preview.
+///
+/// This is LLM-generated tool-call input, not restricted to ASCII (KYO-241).
+fn dashboard_content_preview(content: &str) -> String {
+    truncate_preview(content, 100)
+}
+
+/// Truncate ChartML spec documentation to at most 2000 characters for the
+/// "View content" detail block in the chat thinking tracker.
+///
+/// ChartML spec docs contain confirmed non-ASCII content (`→`, `⚠️`, `❌`),
+/// so this must cut on a character boundary, not a raw byte offset
+/// (KYO-241).
+fn chartml_spec_content_preview(content: &str) -> String {
+    truncate_preview(content, 2000)
 }
 
 /// Extract a u64 field from a JSON value.
@@ -1101,12 +1121,12 @@ fn render_get_chartml_spec(schema: &Value) -> impl IntoView {
                             <span class="font-medium">{msg}</span>
                         </div>
                         {content.map(|c| {
-                            let len = c.len();
-                            let preview = if len > 2000 { format!("{}...", &c[..2000]) } else { c };
+                            let char_count = c.chars().count();
+                            let preview = chartml_spec_content_preview(&c);
                             view! {
                                 <details class="text-xs">
                                     <summary class="cursor-pointer text-success-foreground hover:text-success-foreground">
-                                        {format!("View content ({} chars)", len)}
+                                        {format!("View content ({} chars)", char_count)}
                                     </summary>
                                     <pre class="mt-2 p-2 bg-success/10 rounded text-xs overflow-x-auto max-h-40 overflow-y-auto text-success-foreground">{preview}</pre>
                                 </details>
@@ -1326,9 +1346,7 @@ fn render_create_dashboard(schema: &Value) -> impl IntoView {
         <div class="space-y-2">
             {input.map(|inp| {
                 let title = str_field(inp, "title").unwrap_or("").to_string();
-                let content = str_field(inp, "content").map(|c| {
-                    if c.len() > 100 { format!("{}...", &c[..100]) } else { c.to_string() }
-                });
+                let content = str_field(inp, "content").map(dashboard_content_preview);
                 let verified = bool_field(inp, "verified_no_duplicates").unwrap_or(false);
                 view! {
                     <div>
@@ -1381,9 +1399,7 @@ fn render_modify_dashboard(schema: &Value) -> impl IntoView {
             {input.map(|inp| {
                 let dash_id = str_field(inp, "dashboard_id").unwrap_or("").to_string();
                 let title = str_field(inp, "title").map(String::from);
-                let content = str_field(inp, "content").map(|c| {
-                    if c.len() > 100 { format!("{}...", &c[..100]) } else { c.to_string() }
-                });
+                let content = str_field(inp, "content").map(dashboard_content_preview);
                 let change_summary = str_field(inp, "change_summary").map(String::from);
                 view! {
                     <div>
@@ -2280,5 +2296,103 @@ pub fn render_tool_schema(schema: Value) -> impl IntoView {
 
         // Unknown tool — render generic with tool name
         _ => render_generic(&schema).into_any(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! KYO-241: `dashboard_content_preview` truncates LLM-authored tool-call
+    //! arguments, and `chartml_spec_content_preview` truncates ChartML spec
+    //! docs — both confirmed to contain non-ASCII content (the spec docs
+    //! use `→`, `⚠️`, `❌`). The old `&c[..N]` byte-slices panicked whenever
+    //! byte offset N landed inside a multi-byte UTF-8 character. Every input
+    //! below is constructed so the OLD cut point falls strictly inside a
+    //! multi-byte character — reverting either function to byte-slicing
+    //! panics on these exact inputs.
+
+    use super::*;
+
+    // -- dashboard_content_preview (max_chars = 100, old cut point byte 100) --
+
+    #[test]
+    fn dashboard_preview_cjk_mid_char_byte_boundary_does_not_panic() {
+        // 99 ASCII bytes + one 3-byte CJK char: the char occupies bytes
+        // 99..102, so byte offset 100 (the old `&c[..100]` cut point) lands
+        // on its middle byte.
+        let content = format!("{}{}{}", "a".repeat(99), "日", "b".repeat(10));
+        assert!(
+            !content.is_char_boundary(100),
+            "test input must cut mid-character at byte 100"
+        );
+
+        let preview = dashboard_content_preview(&content);
+
+        assert!(preview.ends_with("..."));
+        let trimmed = preview.trim_end_matches("...");
+        assert_eq!(trimmed.chars().count(), 100, "must keep exactly 100 characters");
+    }
+
+    #[test]
+    fn dashboard_preview_emoji_mid_char_byte_boundary_does_not_panic() {
+        // 99 ASCII bytes + a run of 4-byte emoji: the first emoji occupies
+        // bytes 99..103, straddling byte offset 100.
+        let content = format!("{}{}", "a".repeat(99), "🎉".repeat(10));
+        assert!(
+            !content.is_char_boundary(100),
+            "test input must cut mid-character at byte 100"
+        );
+
+        let preview = dashboard_content_preview(&content);
+
+        assert!(preview.ends_with("..."));
+        let trimmed = preview.trim_end_matches("...");
+        assert_eq!(trimmed.chars().count(), 100, "must keep exactly 100 characters");
+    }
+
+    #[test]
+    fn dashboard_preview_short_content_is_unchanged() {
+        let content = "Short dashboard content";
+        assert_eq!(dashboard_content_preview(content), content);
+    }
+
+    // -- chartml_spec_content_preview (max_chars = 2000, old cut point byte 2000) --
+
+    #[test]
+    fn chartml_spec_preview_confirmed_arrow_char_mid_boundary_does_not_panic() {
+        // 1999 ASCII bytes + "→" (confirmed present in chartml spec docs,
+        // a 3-byte char): occupies bytes 1999..2002, straddling byte
+        // offset 2000, the old `&c[..2000]` cut point.
+        let content = format!("{}{}{}", "a".repeat(1999), "→", "b".repeat(10));
+        assert!(
+            !content.is_char_boundary(2000),
+            "test input must cut mid-character at byte 2000"
+        );
+
+        let preview = chartml_spec_content_preview(&content);
+
+        assert!(preview.ends_with("..."));
+        let trimmed = preview.trim_end_matches("...");
+        assert_eq!(trimmed.chars().count(), 2000, "must keep exactly 2000 characters");
+    }
+
+    #[test]
+    fn chartml_spec_preview_cjk_mid_char_byte_boundary_does_not_panic() {
+        let content = format!("{}{}{}", "a".repeat(1999), "日", "b".repeat(10));
+        assert!(
+            !content.is_char_boundary(2000),
+            "test input must cut mid-character at byte 2000"
+        );
+
+        let preview = chartml_spec_content_preview(&content);
+
+        assert!(preview.ends_with("..."));
+        let trimmed = preview.trim_end_matches("...");
+        assert_eq!(trimmed.chars().count(), 2000, "must keep exactly 2000 characters");
+    }
+
+    #[test]
+    fn chartml_spec_preview_short_content_is_unchanged() {
+        let content = "type: bar\ndata: test";
+        assert_eq!(chartml_spec_content_preview(content), content);
     }
 }

@@ -3,12 +3,14 @@
 pub mod datasource_contracts;
 pub mod permission;
 pub mod sync;
+pub mod text;
 pub mod websocket;
 pub use datasource_contracts::{
     DatasourceOAuthDisconnectResult, GeneratedSshKey, GoogleOAuthDisconnectResult,
     GoogleOAuthProjectsResult, GoogleProject,
 };
 pub use permission::Permission;
+pub use text::truncate_preview;
 pub use websocket::{MessageType, WebSocketMessage};
 
 use serde::{Deserialize, Serialize};
