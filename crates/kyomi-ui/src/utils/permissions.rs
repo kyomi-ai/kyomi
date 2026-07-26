@@ -53,3 +53,143 @@ pub fn use_permissions() -> Permissions {
             .unwrap_or_default()
     }))
 }
+
+/// Why (or whether) the current user may use analytics settings.
+///
+/// Returned by [`analytics_access`] / [`use_analytics_access`]. See
+/// [`analytics_access`] for the precedence rules.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AnalyticsAccess {
+    /// The analytics tab, the "Analytics Settings" datasource-row link, and
+    /// the analytics page's content should all render normally.
+    Allowed,
+    /// Analytics requires Postgres + ClickHouse, unavailable on self-hosted
+    /// SQLite deployments — regardless of permissions or billing state.
+    SelfHosted,
+    /// The workspace doesn't have billing enabled, so there's no analytics
+    /// entitlement to manage.
+    BillingDisabled,
+    /// The user lacks `Permission::ManageAnalytics` in their active
+    /// workspace.
+    Denied,
+}
+
+/// The single "may this user use analytics?" decision (KYO-260).
+///
+/// Before this existed, the question was answered independently in three
+/// places with three different subsets of these conditions: the Settings
+/// tab bar (`settings_shell.rs`) checked all three correctly, but the
+/// "Analytics Settings" link on the datasources page (`datasources.rs`)
+/// gated only on `ds.is_analytics` — a datasource *type*, not a permission
+/// — and the analytics page itself (`analytics.rs`) guarded only on
+/// `is_self_hosted`. A non-admin workspace member could see and click the
+/// link, land on a page with no permission guard, and get an empty shell
+/// because every server fn behind it silently rejected them. Consolidating
+/// the decision here means every consumer sees the same answer and a
+/// future new condition only needs to be added once.
+///
+/// Precedence — self-hosted is checked first so a self-hosted *admin*'s
+/// message is unchanged from before this fix ("not available in
+/// self-hosted mode"), even though they would also fail the (on
+/// self-hosted, irrelevant) billing check.
+pub fn analytics_access(ctx: &UserContext) -> AnalyticsAccess {
+    if ctx.is_self_hosted {
+        AnalyticsAccess::SelfHosted
+    } else if !ctx.can(Permission::ManageAnalytics) {
+        AnalyticsAccess::Denied
+    } else if !ctx.billing_enabled {
+        AnalyticsAccess::BillingDisabled
+    } else {
+        AnalyticsAccess::Allowed
+    }
+}
+
+/// Reactive wrapper around [`analytics_access`] over the shared
+/// `UserContext` resource (KYO-260), mirroring [`use_permissions`].
+///
+/// Fails closed to `Denied` while the resource is loading, errored, or
+/// absent — a page gating on this must never treat "we don't know yet" as
+/// permission to render analytics content.
+pub fn use_analytics_access() -> Signal<AnalyticsAccess> {
+    let user_ctx = expect_context::<LocalResource<Result<UserContext, ServerFnError>>>();
+    Signal::derive(move || {
+        user_ctx
+            .get()
+            .and_then(|r| r.ok())
+            .map(|ctx| analytics_access(&ctx))
+            .unwrap_or(AnalyticsAccess::Denied)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    /// Minimal `UserContext` fixture, built the way `settings_shell.rs`'s
+    /// `ctx()` test helper is — only the fields `analytics_access` reads
+    /// vary between cases; everything else is a neutral default.
+    fn ctx(is_self_hosted: bool, billing_enabled: bool, permissions: Vec<Permission>) -> UserContext {
+        UserContext {
+            user_id: "user-1".to_string(),
+            email: "user@example.com".to_string(),
+            name: None,
+            workspace_id: Some("ws-1".to_string()),
+            workspace_name: Some("Test Workspace".to_string()),
+            is_owner: false,
+            subscription_tier: "free".to_string(),
+            subscription_status: "active".to_string(),
+            is_personal_mode: false,
+            is_self_hosted,
+            billing_enabled,
+            capabilities: HashMap::new(),
+            chart_palette: "balanced".to_string(),
+            permissions,
+        }
+    }
+
+    #[test]
+    fn allowed_for_non_self_hosted_admin_with_billing() {
+        let access = analytics_access(&ctx(false, true, vec![Permission::ManageAnalytics]));
+        assert_eq!(access, AnalyticsAccess::Allowed);
+    }
+
+    #[test]
+    fn self_hosted_for_self_hosted_admin() {
+        // Precedence case: self-hosted wins even though this admin also
+        // holds ManageAnalytics and billing_enabled is true — the
+        // self-hosted message must be unchanged from before KYO-260.
+        let access = analytics_access(&ctx(true, true, vec![Permission::ManageAnalytics]));
+        assert_eq!(access, AnalyticsAccess::SelfHosted);
+    }
+
+    #[test]
+    fn self_hosted_wins_over_denied_and_billing_disabled() {
+        // A self-hosted non-admin with billing disabled must still report
+        // SelfHosted, not Denied or BillingDisabled — self-hosted is
+        // checked first regardless of the other two conditions.
+        let access = analytics_access(&ctx(true, false, vec![]));
+        assert_eq!(access, AnalyticsAccess::SelfHosted);
+    }
+
+    #[test]
+    fn denied_for_non_admin() {
+        let access = analytics_access(&ctx(false, true, vec![]));
+        assert_eq!(access, AnalyticsAccess::Denied);
+    }
+
+    #[test]
+    fn denied_takes_precedence_over_billing_disabled_for_non_admin() {
+        // Precedence case: a non-admin with billing disabled must report
+        // Denied (permission is checked first), not BillingDisabled.
+        let access = analytics_access(&ctx(false, false, vec![]));
+        assert_eq!(access, AnalyticsAccess::Denied);
+    }
+
+    #[test]
+    fn billing_disabled_for_admin_without_billing() {
+        let access = analytics_access(&ctx(false, false, vec![Permission::ManageAnalytics]));
+        assert_eq!(access, AnalyticsAccess::BillingDisabled);
+    }
+}
