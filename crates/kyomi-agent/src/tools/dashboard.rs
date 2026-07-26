@@ -117,11 +117,13 @@ impl AgentTool for SearchDashboardsTool {
         // Count documents matching the same filter the search used, so the
         // total reported to the agent is consistent with the result set
         // (e.g. filtering to doc_type=knowledge should count knowledge docs,
-        // not dashboards).
+        // not dashboards). Scoped to ctx.user_id's visibility — see
+        // get_document_count's doc comment (KYO-181).
         let total_workspace_documents = kyomi_auth::dashboard_service::get_document_count(
             &ctx.db,
             &ctx.workspace_id,
             doc_type_filter,
+            &ctx.user_id,
         )
         .await?;
 

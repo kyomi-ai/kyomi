@@ -1026,32 +1026,55 @@ pub async fn get_dashboard_count(
     Ok(count)
 }
 
-/// Count documents in a workspace, optionally filtered by `doc_type`.
+/// Count documents in a workspace, visibility-scoped to `user_id` and
+/// optionally filtered by `doc_type`.
 ///
-/// Unlike `get_dashboard_count` (which always counts `doc_type='dashboard'`
-/// for tier-limit checks), this counts documents of any type — or only the
-/// specified type when `doc_type_filter` is `Some`. Used by the agent's
-/// search tools to report a total that matches the filter the caller used.
+/// The count only includes rows `user_id` may actually see — the same
+/// `visibility_predicate` used by [`search_dashboards`] (owned by `user_id`,
+/// or a member of a public collection). This exists because the caller
+/// (the `search_dashboards` agent tool) surfaces the number directly to the
+/// requesting user as `total_workspace_documents`, both in chat and over
+/// MCP; an unfiltered workspace-wide count would let a member infer the
+/// existence and volume of other members' private dashboards and knowledge
+/// docs (KYO-181), and would also be inconsistent with the result set the
+/// caller can actually see, since that result set is itself
+/// visibility-filtered.
+///
+/// Unlike `get_dashboard_count` (which always counts `doc_type='dashboard'`,
+/// unfiltered by visibility, across the whole workspace), this counts
+/// documents of any type — or only the specified type when `doc_type_filter`
+/// is `Some`. `get_dashboard_count`'s unfiltered count is intentional: its
+/// sole caller uses it for a free-tier *limit* check (`count >=
+/// FREE_TIER_DASHBOARD_LIMIT`), which must count every dashboard in the
+/// workspace regardless of who is asking — the number itself is never
+/// rendered back to a user, only a pass/fail decision. That is a different
+/// contract from this function, whose return value is displayed as-is.
+///
+/// Never widen this function to drop the visibility filter — see KYO-181
+/// and the "workspace_id is not an authorization boundary for dashboards
+/// reads" rule in `docs/CODING_STANDARDS.md`.
 pub async fn get_document_count(
     db: &DbPool,
     workspace_id: &str,
     doc_type_filter: Option<DocType>,
+    user_id: &str,
 ) -> Result<i64> {
+    let is_pg = db.is_postgres();
+
     let count: i64 = if let Some(dt) = doc_type_filter {
-        db_fetch_scalar!(
-            db,
-            i64,
-            "SELECT COUNT(*) FROM dashboards WHERE workspace_id = $1 AND doc_type = $2",
-            workspace_id,
-            dt.as_str()
-        )
+        // $1 = workspace_id, $2 = doc_type, so the visibility predicate's
+        // user_id bind is $3.
+        let vis = visibility_predicate(3, is_pg);
+        let sql = format!(
+            "SELECT COUNT(*) FROM dashboards d WHERE d.workspace_id = $1 AND d.doc_type = $2{vis}"
+        );
+        db_fetch_scalar!(db, i64, &sql, workspace_id, dt.as_str(), user_id)
     } else {
-        db_fetch_scalar!(
-            db,
-            i64,
-            "SELECT COUNT(*) FROM dashboards WHERE workspace_id = $1",
-            workspace_id
-        )
+        // $1 = workspace_id only, so the visibility predicate's user_id
+        // bind is $2.
+        let vis = visibility_predicate(2, is_pg);
+        let sql = format!("SELECT COUNT(*) FROM dashboards d WHERE d.workspace_id = $1{vis}");
+        db_fetch_scalar!(db, i64, &sql, workspace_id, user_id)
     }
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to count documents: {e}")))?;
 
@@ -2445,5 +2468,192 @@ visualize:
         let sql = visibility_predicate(2, false);
         assert!(sql.contains("d.user_id = $2"));
         assert!(sql.contains("c.is_public = 1"));
+    }
+
+    // ── get_document_count visibility (KYO-181) ──────────────────────────
+    //
+    // Integration tests (async, in-memory SQLite). `search_dashboards`
+    // already applies `visibility_predicate` to its result rows; these
+    // tests lock in that the *count* fed alongside those results
+    // (`total_workspace_documents` in the `search_dashboards` agent tool)
+    // is scoped the same way, rather than counting every row in the
+    // workspace regardless of ownership or collection membership.
+
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn test_pool() -> DbPool {
+        let _ = kyomi_core::constants::load_with_fallback();
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+
+        sqlx::query("PRAGMA foreign_keys=ON")
+            .execute(&pool)
+            .await
+            .expect("enable foreign keys");
+
+        sqlx::migrate!("../../apps/server/migrations-sqlite")
+            .run(&pool)
+            .await
+            .expect("run sqlite migrations");
+
+        DbPool::Sqlite(pool)
+    }
+
+    fn sqlite_pool(db: &DbPool) -> &sqlx::SqlitePool {
+        match db {
+            DbPool::Sqlite(sq) => sq,
+            _ => panic!("test requires sqlite pool"),
+        }
+    }
+
+    async fn seed_user(sq: &sqlx::SqlitePool, user_id: &str, email: &str) {
+        sqlx::query("INSERT INTO users (user_id, email) VALUES ($1, $2)")
+            .bind(user_id)
+            .bind(email)
+            .execute(sq)
+            .await
+            .expect("insert user");
+    }
+
+    async fn seed_workspace(sq: &sqlx::SqlitePool, workspace_id: &str, owner_user_id: &str) {
+        sqlx::query(
+            "INSERT INTO workspaces (workspace_id, name, owner_user_id) VALUES ($1, $2, $3)",
+        )
+        .bind(workspace_id)
+        .bind(format!("Workspace {workspace_id}"))
+        .bind(owner_user_id)
+        .execute(sq)
+        .await
+        .expect("insert workspace");
+    }
+
+    /// Seeds the KYO-181 scenario: user-a owns 3 private docs plus 1 doc
+    /// that is a member of a public collection; user-b owns 1 private doc.
+    /// Five rows total. Split across `doc_type` (2 dashboard, 3 knowledge)
+    /// so a `doc_type_filter` test exercises the filtered SQL branch (and
+    /// its different visibility-predicate bind index) too, not just the
+    /// unfiltered one.
+    async fn seed_kyo_181_scenario(db: &DbPool) -> String {
+        let sq = sqlite_pool(db);
+        seed_user(sq, "user-a", "a@test.local").await;
+        seed_user(sq, "user-b", "b@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+
+        // user-a: 3 private docs (2 dashboard, 1 knowledge).
+        create_dashboard(
+            db, "user-a", "ws-1", "A Private Dash 1", "# content",
+            DocType::Dashboard, None,
+        )
+        .await
+        .expect("create a-private-dash-1");
+        create_dashboard(
+            db, "user-a", "ws-1", "A Private Dash 2", "# content",
+            DocType::Dashboard, None,
+        )
+        .await
+        .expect("create a-private-dash-2");
+        create_dashboard(
+            db, "user-a", "ws-1", "A Private Knowledge", "private notes",
+            DocType::Knowledge, None,
+        )
+        .await
+        .expect("create a-private-knowledge");
+
+        // user-a: 1 more knowledge doc, made visible workspace-wide via a
+        // public collection.
+        let public_doc_id = create_dashboard(
+            db, "user-a", "ws-1", "A Public Knowledge", "public notes",
+            DocType::Knowledge, None,
+        )
+        .await
+        .expect("create a-public-knowledge");
+
+        let collection = crate::collection_service::create_collection(
+            crate::collection_service::NewCollectionParams {
+                db,
+                workspace_id: "ws-1",
+                name: "Public Folder",
+                description: None,
+                color: None,
+                is_public: true,
+                doc_type: "knowledge",
+                created_by: "user-a",
+            },
+        )
+        .await
+        .expect("create public collection");
+
+        crate::collection_service::add_dashboard(
+            db, &collection.id, &public_doc_id, "ws-1", "user-a", None,
+        )
+        .await
+        .expect("add public doc to collection");
+
+        // user-b: 1 private dashboard doc.
+        create_dashboard(
+            db, "user-b", "ws-1", "B Private Dash", "# content",
+            DocType::Dashboard, None,
+        )
+        .await
+        .expect("create b-private-dash");
+
+        public_doc_id
+    }
+
+    #[tokio::test]
+    async fn get_document_count_scopes_to_visibility_not_raw_workspace_total() {
+        let db = test_pool().await;
+        seed_kyo_181_scenario(&db).await;
+
+        // user-b sees only their own doc plus the one visible through the
+        // public collection — not all 5 rows in the workspace.
+        let count_b = get_document_count(&db, "ws-1", None, "user-b")
+            .await
+            .expect("count for user-b");
+        assert_eq!(
+            count_b, 2,
+            "user-b should see their own doc plus the public one, not all 5 workspace rows"
+        );
+
+        // user-a owns all 4 of their own docs, so they see all of them.
+        let count_a = get_document_count(&db, "ws-1", None, "user-a")
+            .await
+            .expect("count for user-a");
+        assert_eq!(count_a, 4, "user-a should see all 4 of their own docs");
+    }
+
+    #[tokio::test]
+    async fn get_document_count_with_doc_type_filter_scopes_to_visibility() {
+        let db = test_pool().await;
+        seed_kyo_181_scenario(&db).await;
+
+        // Exercises the `Some(doc_type_filter)` SQL branch, whose
+        // visibility-predicate bind index ($3) differs from the unfiltered
+        // branch's ($2) — a wrong index here would error or silently
+        // filter on the wrong column.
+        let knowledge_b = get_document_count(&db, "ws-1", Some(DocType::Knowledge), "user-b")
+            .await
+            .expect("knowledge count for user-b");
+        assert_eq!(
+            knowledge_b, 1,
+            "user-b should see only the public knowledge doc, not user-a's private one"
+        );
+
+        let knowledge_a = get_document_count(&db, "ws-1", Some(DocType::Knowledge), "user-a")
+            .await
+            .expect("knowledge count for user-a");
+        assert_eq!(knowledge_a, 2, "user-a should see both of their own knowledge docs");
+
+        let dashboard_b = get_document_count(&db, "ws-1", Some(DocType::Dashboard), "user-b")
+            .await
+            .expect("dashboard count for user-b");
+        assert_eq!(
+            dashboard_b, 1,
+            "user-b should see only their own dashboard-type doc"
+        );
     }
 }
