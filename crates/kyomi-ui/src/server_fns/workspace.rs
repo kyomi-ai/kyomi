@@ -23,7 +23,7 @@ pub struct WorkspaceSummary {
     pub name: String,              // "Workspace" fallback applied server-side
     pub member_count: i64,
     pub subscription_tier: String, // snake_case tier ("team", "enterprise", ...)
-    pub role: String,              // humanized ("Admin"/"Viewer"/"Member")
+    pub role: String,              // humanized ("Admin"/"Member")
     pub is_active: bool,           // true for the caller's current JWT workspace
 }
 

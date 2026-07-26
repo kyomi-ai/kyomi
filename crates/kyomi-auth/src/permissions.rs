@@ -156,11 +156,12 @@ mod tests {
         assert_eq!(permissions_for(&auth), BTreeSet::new());
     }
 
-    #[test]
-    fn viewer_holds_no_permissions() {
-        let auth = auth_user(&[WorkspaceRole::WorkspaceViewer], false);
-        assert_eq!(permissions_for(&auth), BTreeSet::new());
-    }
+    // KYO-183 removed `WorkspaceRole::WorkspaceViewer`. This test used to
+    // have a `viewer_holds_no_permissions` sibling asserting the same
+    // `BTreeSet::new()` outcome for the (now-gone) viewer role; with only
+    // `WorkspaceAdmin`/`WorkspaceUser` left, that sibling would be a
+    // byte-for-byte duplicate of this test, so it was deleted rather than
+    // rewritten to assert the same thing twice under different names.
 
     /// Even if the structural invariant documented on `permissions_for`
     /// were ever violated (owner without the `workspace_admin` role), the

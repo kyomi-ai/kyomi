@@ -15,8 +15,8 @@ use crate::components::toast::{toast_error, toast_success};
 use crate::server_fns::profile::{accept_invitation, decline_invitation, get_pending_invitations};
 use crate::types::InvitationData;
 
-/// Indefinite article for a humanized role label — "an Admin", "a Member",
-/// "a Viewer". Fixes KYO-169: the previous inline check compared the RAW token
+/// Indefinite article for a humanized role label — "an Admin", "a Member".
+/// Fixes KYO-169: the previous inline check compared the RAW token
 /// (`workspace_admin`) against `"admin"` and never matched, so admin invites
 /// always rendered "a" instead of "an".
 fn role_article(role_label: &str) -> &'static str {

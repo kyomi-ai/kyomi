@@ -311,7 +311,6 @@ impl FromStr for WorkspaceStatus {
 pub enum WorkspaceRole {
     WorkspaceAdmin,
     WorkspaceUser,
-    WorkspaceViewer,
 }
 
 impl_sqlx_varchar_enum!(WorkspaceRole);
@@ -328,7 +327,6 @@ impl AsRef<str> for WorkspaceRole {
         match self {
             Self::WorkspaceAdmin => &roles.admin,
             Self::WorkspaceUser => &roles.user,
-            Self::WorkspaceViewer => &roles.viewer,
         }
     }
 }
@@ -341,8 +339,6 @@ impl FromStr for WorkspaceRole {
             Ok(Self::WorkspaceAdmin)
         } else if s == roles.user {
             Ok(Self::WorkspaceUser)
-        } else if s == roles.viewer {
-            Ok(Self::WorkspaceViewer)
         } else {
             Err(format!("unknown WorkspaceRole: {s}"))
         }
@@ -877,6 +873,19 @@ mod tests {
         assert_eq!(json, "\"workspace_admin\"");
         let back: WorkspaceRole = serde_json::from_str(&json).unwrap();
         assert_eq!(back, r);
+    }
+
+    #[test]
+    fn test_workspace_role_from_str_rejects_removed_viewer_variant() {
+        // KYO-183 removed the never-assignable `WorkspaceViewer` variant.
+        // A migration backfills any lingering `workspace_viewer` DB rows to
+        // `workspace_user` (see apps/server/migrations/20260726010000_...
+        // and migrations-sqlite/00030_...) precisely because this parse is
+        // now a hard `Err`, not a silent fallback -- this test documents
+        // that the break is intentional and proves the migration is
+        // load-bearing rather than decorative.
+        let _ = crate::constants::load_with_fallback();
+        assert!("workspace_viewer".parse::<WorkspaceRole>().is_err());
     }
 
     #[test]

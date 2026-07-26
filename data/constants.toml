@@ -96,7 +96,6 @@ window_seconds = 60
 [workspace.roles]
 admin = "workspace_admin"
 user = "workspace_user"
-viewer = "workspace_viewer"
 
 [websocket.message_types]
 chat_stream = "chat_stream"
