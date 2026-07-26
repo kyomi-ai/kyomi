@@ -48,7 +48,7 @@ async fn refresh_token(
     .to_string();
 
     // Rate limit check
-    let device = crate::helpers::extract_device_info(&headers);
+    let device = kyomi_auth::request_meta::extract_device_info(&headers);
     let ip = device.ip_address.as_deref().unwrap_or("0.0.0.0");
     let rate_result = rate_limiter::check_rate_limit(&state.kv, ip, "refresh", None).await?;
     if !rate_result.allowed {

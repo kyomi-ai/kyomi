@@ -25,8 +25,8 @@ use kyomi_auth::{
     middleware::AuthUser,
     rate_limiter,
     redis_ops,
+    request_meta,
     session,
-    token_service::DeviceInfo,
     user_service,
     websocket::helpers as ws_helpers,
 };
@@ -62,30 +62,8 @@ pub fn routes() -> Router<AppState> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn extract_device_info(headers: &HeaderMap) -> DeviceInfo {
-    let user_agent = headers
-        .get("user-agent")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
-    let ip_address = extract_client_ip(headers);
-
-    let country_code = headers
-        .get("cf-ipcountry")
-        .and_then(|v| v.to_str().ok())
-        .filter(|s| *s != "XX")
-        .map(|s| s.to_uppercase());
-
-    DeviceInfo {
-        user_agent,
-        ip_address: Some(ip_address),
-        country_code,
-        oauth_client_id: None,
-    }
-}
-
 fn extract_client_ip(headers: &HeaderMap) -> String {
-    crate::helpers::extract_client_ip(headers, None)
+    request_meta::extract_client_ip(headers, None)
 }
 
 use kyomi_core::TERMS_VERSION;
@@ -316,7 +294,7 @@ async fn google_callback(
                 .await?;
 
             // Create authenticated session
-            let device = extract_device_info(&headers);
+            let device = request_meta::extract_device_info(&headers);
             let sess = session::create_authenticated_session(
                 &state.db,
                 &state.kv,
@@ -429,7 +407,7 @@ async fn accept_terms(
         .await?;
 
         // Create authenticated session
-        let device = extract_device_info(&headers);
+        let device = request_meta::extract_device_info(&headers);
         let sess = session::create_authenticated_session(
             &state.db,
             &state.kv,
@@ -475,7 +453,7 @@ async fn accept_terms(
             .ok_or_else(|| kyomi_core::Error::NotFound("User not found".into()))?;
 
         // Create authenticated session
-        let device = extract_device_info(&headers);
+        let device = request_meta::extract_device_info(&headers);
         let sess = session::create_authenticated_session(
             &state.db,
             &state.kv,

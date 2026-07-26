@@ -46,6 +46,7 @@ pub mod permissions;
 pub mod push_service;
 pub mod rate_limiter;
 pub mod redis_ops;
+pub mod request_meta;
 pub mod security_service;
 pub mod session;
 // Slack client and helpers moved to enterprise/kyomi-slack crate (Phase 12).

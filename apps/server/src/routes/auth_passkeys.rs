@@ -59,7 +59,7 @@ pub fn routes() -> Router<AppState> {
 // ---------------------------------------------------------------------------
 
 fn extract_client_ip(headers: &HeaderMap) -> String {
-    crate::helpers::extract_client_ip(headers, None)
+    kyomi_auth::request_meta::extract_client_ip(headers, None)
 }
 
 /// Terms of service version — matches Python's hardcoded version.
@@ -501,7 +501,7 @@ async fn register_complete(
 
     if is_signup {
         // Auto-login for signup flow
-        let device = crate::helpers::extract_device_info(&headers);
+        let device = kyomi_auth::request_meta::extract_device_info(&headers);
         let sess = session::create_authenticated_session(
             &state.db,
             &state.kv,
@@ -756,7 +756,7 @@ async fn login_complete(
     }
 
     // Create authenticated session
-    let device = crate::helpers::extract_device_info(&headers);
+    let device = kyomi_auth::request_meta::extract_device_info(&headers);
     let sess = session::create_authenticated_session(
         &state.db,
         &state.kv,

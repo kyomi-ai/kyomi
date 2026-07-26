@@ -22,7 +22,7 @@ use axum::{
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use kyomi_auth::{jwt, redis_ops, token_service, user_service};
+use kyomi_auth::{jwt, redis_ops, request_meta, token_service, user_service};
 
 use crate::state::AppState;
 
@@ -882,36 +882,43 @@ fn validate_redirect_uri(
 }
 
 /// Extract device info from request headers (for refresh token storage).
+///
+/// Wraps the canonical `kyomi_auth::request_meta::extract_device_info` and
+/// attaches the registered OAuth `client_id` this refresh token was issued
+/// to — MCP client token storage needs to record which client requested the
+/// token, which the generic extractor has no way to know. It now only adds
+/// the one field the canonical version doesn't have.
+///
+/// # Behaviour changed here by KYO-194 — three ways, deliberately
+///
+/// This used to be a full standalone reimplementation. Consolidating onto
+/// the canonical extractor changed what gets recorded for MCP refresh
+/// tokens. None of these were incidental:
+///
+/// 1. **Header precedence flipped.** The old code read `X-Forwarded-For`
+///    first and fell back to `X-Real-IP`. The canonical order is the
+///    reverse. This is a **security fix**, not a regression: nginx
+///    *overwrites* `X-Real-IP` from `$remote_addr`, so a client cannot
+///    forge it, whereas it only *appends* to `X-Forwarded-For`, so a client
+///    can inject a fake first entry. The old order preferred the spoofable
+///    header, meaning an attacker could choose the IP recorded against
+///    their own refresh token.
+/// 2. **Malformed values are now rejected.** The old code stored whatever
+///    string the header held; the canonical version validates with
+///    `IpAddr::parse()` and skips anything that isn't a valid IPv4/IPv6
+///    address.
+/// 3. **`ip_address` is never `None` now.** The old code produced
+///    `Option<String>` and left it `None` when neither header was present;
+///    the canonical version returns the sentinel `Some("unknown")`. Note
+///    this sentinel was *already* reachable for ordinary login/signup
+///    sessions before KYO-194 — `helpers::extract_device_info` has always
+///    wrapped `extract_client_ip`'s `"unknown"` fallback in `Some` — so
+///    this aligns the MCP path with existing behaviour rather than
+///    introducing a new shape. See KYO-276 for the display consequence.
 fn extract_device_info(headers: &HeaderMap, oauth_client_id: Option<&str>) -> token_service::DeviceInfo {
-    let user_agent = headers
-        .get("user-agent")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
-    let ip_address = headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|xff| xff.split(',').next())
-        .map(|s| s.trim().to_string())
-        .or_else(|| {
-            headers
-                .get("x-real-ip")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.trim().to_string())
-        });
-
-    let country_code = headers
-        .get("cf-ipcountry")
-        .and_then(|v| v.to_str().ok())
-        .filter(|s| *s != "XX")
-        .map(|s| s.to_uppercase());
-
-    token_service::DeviceInfo {
-        user_agent,
-        ip_address,
-        country_code,
-        oauth_client_id: oauth_client_id.map(|s| s.to_string()),
-    }
+    let mut device_info = request_meta::extract_device_info(headers);
+    device_info.oauth_client_id = oauth_client_id.map(|s| s.to_string());
+    device_info
 }
 
 // ===========================================================================
