@@ -21,7 +21,7 @@ pub struct WorkspaceInvitation {
     /// Email address of the invitee.
     pub email: String,
 
-    /// Role to assign: workspace_admin, workspace_user, workspace_viewer.
+    /// Role to assign: workspace_admin, workspace_user.
     pub role: WorkspaceRole,
 
     /// User ID of the person who sent the invitation.

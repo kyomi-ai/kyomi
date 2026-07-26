@@ -35,9 +35,9 @@ pub struct InvitationData {
     pub invitation_id: String,
     pub workspace_id: String,
     pub email: String,
-    /// Raw DB role token (`workspace_admin` / `workspace_user` / `workspace_viewer`).
+    /// Raw DB role token (`workspace_admin` / `workspace_user`).
     pub role: String,
-    /// Human-readable role label ("Admin" / "Viewer" / "Member"), humanized
+    /// Human-readable role label ("Admin" / "Member"), humanized
     /// server-side via `humanize_workspace_role` — the client is `ssr`-gated
     /// out of `kyomi-core` so it cannot humanize the token itself.
     pub role_display: String,
@@ -105,9 +105,9 @@ pub struct TeamMember {
     pub user_id: String,
     pub email: String,
     pub name: Option<String>,
-    /// Raw DB role token (`workspace_admin` / `workspace_user` / `workspace_viewer`).
+    /// Raw DB role token (`workspace_admin` / `workspace_user`).
     pub role: String,
-    /// Human-readable role label ("Admin" / "Viewer" / "Member"), humanized
+    /// Human-readable role label ("Admin" / "Member"), humanized
     /// server-side via `humanize_workspace_role` (mirrors
     /// `InvitationData::role_display`, KYO-169) — the client is `ssr`-gated
     /// out of `kyomi-core` so it cannot humanize the token itself. This is a
@@ -132,9 +132,9 @@ pub struct TeamMember {
 pub struct TeamInvitation {
     pub invitation_id: String,
     pub email: String,
-    /// Raw DB role token (`workspace_admin` / `workspace_user` / `workspace_viewer`).
+    /// Raw DB role token (`workspace_admin` / `workspace_user`).
     pub role: String,
-    /// Human-readable role label ("Admin" / "Viewer" / "Member"), humanized
+    /// Human-readable role label ("Admin" / "Member"), humanized
     /// server-side via `humanize_workspace_role` — see `TeamMember::role_display`.
     /// Pure display string — render it, never compare it.
     pub role_display: String,

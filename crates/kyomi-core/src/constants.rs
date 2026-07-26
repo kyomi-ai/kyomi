@@ -296,7 +296,6 @@ pub struct WorkspaceConstants {
 pub struct WorkspaceRoleConstants {
     pub admin: String,
     pub user: String,
-    pub viewer: String,
 }
 
 /// Map a stored DB workspace-role token (e.g. `workspace_admin`) to a
@@ -306,12 +305,12 @@ pub struct WorkspaceRoleConstants {
 /// `"Member"`, mirroring the generic non-admin wording the invitation
 /// email uses (note: `kyomi-auth::email_service` matches on a separate
 /// UI-level role string, so it shares the outcome, not this mechanism).
+/// This fallback is also what absorbs any stray legacy `workspace_viewer`
+/// value left over from before KYO-183 removed that role.
 pub fn humanize_workspace_role(role: &str) -> &'static str {
     let roles = &get().workspace.roles;
     if role == roles.admin {
         "Admin"
-    } else if role == roles.viewer {
-        "Viewer"
     } else {
         "Member"
     }
@@ -366,7 +365,6 @@ mod tests {
         assert_eq!(constants.rate_limits.login.ip_capacity, 10);
         assert_eq!(constants.workspace.roles.admin, "workspace_admin");
         assert_eq!(constants.workspace.roles.user, "workspace_user");
-        assert_eq!(constants.workspace.roles.viewer, "workspace_viewer");
         assert_eq!(
             constants.websocket.message_types.get("chat_stream"),
             Some(&"chat_stream".to_string())
@@ -384,13 +382,16 @@ mod tests {
 
         assert_eq!(humanize_workspace_role(&roles.admin), "Admin");
         assert_eq!(humanize_workspace_role(&roles.user), "Member");
-        assert_eq!(humanize_workspace_role(&roles.viewer), "Viewer");
     }
 
     #[test]
     fn humanize_workspace_role_falls_back_to_member_for_unknown_value() {
         let _ = load_with_fallback();
 
+        // Also covers the KYO-183 removed `workspace_viewer` role: any
+        // legacy row still holding that string must display as "Member",
+        // not panic or show a stale "Viewer" label.
         assert_eq!(humanize_workspace_role("some_unrecognized_role"), "Member");
+        assert_eq!(humanize_workspace_role("workspace_viewer"), "Member");
     }
 }

@@ -1469,12 +1469,12 @@ mod tests {
         assert_eq!(ctx.workspace_roles, vec![WorkspaceRole::WorkspaceUser]);
     }
 
-    #[tokio::test]
-    async fn build_tool_context_viewer_role_is_not_workspace_admin() {
-        let ctx = test_tool_context_for_roles(vec![WorkspaceRole::WorkspaceViewer]).await;
-        assert!(!ctx.is_workspace_admin());
-        assert_eq!(ctx.workspace_roles, vec![WorkspaceRole::WorkspaceViewer]);
-    }
+    // KYO-183 removed `WorkspaceRole::WorkspaceViewer`. This test used to
+    // assert that a viewer-role context also reports `is_workspace_admin()
+    // == false`; with only `WorkspaceAdmin`/`WorkspaceUser` left, rewriting
+    // it to use `WorkspaceUser` would make it a byte-for-byte duplicate of
+    // `build_tool_context_member_role_is_not_workspace_admin` above, so it
+    // was deleted rather than kept as a second copy of the same assertion.
 
     #[tokio::test]
     async fn build_tool_context_no_roles_is_not_workspace_admin() {
