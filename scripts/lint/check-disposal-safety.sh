@@ -1,11 +1,25 @@
 #!/usr/bin/env bash
 # ------------------------------------------------------------------------------
-# scripts/lint/check-disposal-safety.sh — Leptos signal disposal safety (KYO-289)
+# scripts/lint/check-disposal-safety.sh — Leptos signal disposal safety
+#
+# Introduced by PR #34 (commit 9c20d8f0). That commit's message cites
+# "KYO-289", an identifier from an earlier issue-numbering scheme that no
+# longer resolves — cite the PR, not that ID. Enforcement status of this and
+# the four sibling patterns it does NOT cover is documented in
+# docs/CODING_STANDARDS.md § "Enforcement status" (KYO-199).
 #
 # Static lint that blocks two patterns known to cause "reactive value already
 # disposed" WASM panics in Leptos:
 #
+# NOTE: the two rules are NOT equally strict, despite reading symmetrically
+# below. Rule A FAILS the build; Rule B only WARNS and exits 0 (see the
+# `*:WARN*)` case in the reporting loop near the bottom of this file). Rule B
+# cannot distinguish a genuinely mixed-lifetime derive from a same-scope one,
+# so gating on it would fail every build — it is advisory by design. Do not
+# "fix" that asymmetry without addressing the false-positive rate first.
+#
 #   Rule A — bare .set() / .update() inside spawn_local or deferred callbacks
+#     [BLOCKING — sets exit status 1]
 #     spawn_local spawns a detached future that outlives the component. If
 #     the user navigates away before it completes, .set() on a disposed
 #     signal panics. Use .try_set() / .try_update() instead.
@@ -13,6 +27,7 @@
 #     Deferred contexts also include gloo_timers Timeout/Interval callbacks.
 #
 #   Rule B — bare .get() inside Signal::derive / Memo::new closures
+#     [ADVISORY — prints WARN:B, does NOT affect exit status]
 #     A derive that subscribes to Layout-scoped signals (SyncStore) AND
 #     reads page-scoped signals via .get() will panic when the page is
 #     disposed and a sync update re-evaluates the derive. Use .try_get()
@@ -25,7 +40,8 @@
 #   check-disposal-safety.sh                 run against full tree
 #   check-disposal-safety.sh <file>...       run against the listed files only
 #
-# Exit codes: 0 clean, 1 violations found, 2 usage error.
+# Exit codes: 0 no Rule A violations (Rule B warnings do not affect this),
+#             1 Rule A violations found, 2 usage error.
 #
 # Pure bash + awk. No Rust toolchain required.
 # ------------------------------------------------------------------------------
