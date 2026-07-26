@@ -12,6 +12,8 @@
 //! - Security: hidden in personal mode
 //! - Workspace: admin only, hidden in personal mode
 //! - Data Sources: always visible
+//! - AI: self-hosted only, and admin only (`Permission::ManageAiConfig` —
+//!   the same permission `ai.rs`'s workspace AI server functions enforce)
 //! - Analytics: admin only, hidden in self-hosted
 //! - Usage: self-hosted only (SaaS hides usage — AI is included)
 //! - Billing: owner only, hidden in self-hosted
@@ -60,6 +62,7 @@ fn visible_tabs(ctx: &UserContext) -> Vec<&'static str> {
     let can_manage_workspace_settings = ctx.can(Permission::ManageWorkspaceSettings);
     let can_manage_analytics = ctx.can(Permission::ManageAnalytics);
     let can_manage_team = ctx.can(Permission::ManageTeam);
+    let can_manage_ai_config = ctx.can(Permission::ManageAiConfig);
     let multi_user = ctx.capabilities.get("multi_user_enabled").copied().unwrap_or(false);
     let is_team_tier = matches!(ctx.subscription_tier.as_str(), "team" | "enterprise" | "cloud");
 
@@ -81,8 +84,10 @@ fn visible_tabs(ctx: &UserContext) -> Vec<&'static str> {
     // datasources: always visible
     tabs.push("datasources");
 
-    // ai: self-hosted only (SaaS uses Kyomi-managed AI, no user configuration)
-    if ctx.is_self_hosted {
+    // ai: self-hosted only (SaaS uses Kyomi-managed AI, no user configuration),
+    // and requires ManageAiConfig — the same permission the AI page's
+    // workspace AI server functions enforce (server_fns/ai.rs).
+    if ctx.is_self_hosted && can_manage_ai_config {
         tabs.push("ai");
     }
 
@@ -215,5 +220,55 @@ pub fn SettingsShell() -> impl IntoView {
                 <Outlet/>
             </div>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    /// Minimal `UserContext` fixture for `visible_tabs` tests — only
+    /// `is_self_hosted` and `permissions` vary between cases; every other
+    /// field is a neutral default that doesn't affect the "ai" tab's
+    /// visibility rule.
+    fn ctx(is_self_hosted: bool, permissions: Vec<Permission>) -> UserContext {
+        UserContext {
+            user_id: "user-1".to_string(),
+            email: "user@example.com".to_string(),
+            name: None,
+            workspace_id: Some("ws-1".to_string()),
+            workspace_name: Some("Test Workspace".to_string()),
+            is_owner: false,
+            subscription_tier: "free".to_string(),
+            subscription_status: "active".to_string(),
+            is_personal_mode: false,
+            is_self_hosted,
+            billing_enabled: false,
+            capabilities: HashMap::new(),
+            chart_palette: "balanced".to_string(),
+            permissions,
+        }
+    }
+
+    #[test]
+    fn ai_tab_visible_for_self_hosted_admin() {
+        let tabs = visible_tabs(&ctx(true, vec![Permission::ManageAiConfig]));
+        assert!(tabs.contains(&"ai"), "expected \"ai\" tab for self-hosted admin, got {tabs:?}");
+    }
+
+    #[test]
+    fn ai_tab_hidden_for_self_hosted_non_admin() {
+        let tabs = visible_tabs(&ctx(true, vec![]));
+        assert!(!tabs.contains(&"ai"), "expected no \"ai\" tab for self-hosted non-admin, got {tabs:?}");
+    }
+
+    #[test]
+    fn ai_tab_hidden_for_saas_admin() {
+        // Unchanged behavior: SaaS never shows the AI tab, even for an admin
+        // who holds ManageAiConfig (e.g. for BYOK config elsewhere).
+        let tabs = visible_tabs(&ctx(false, vec![Permission::ManageAiConfig]));
+        assert!(!tabs.contains(&"ai"), "expected no \"ai\" tab on SaaS, got {tabs:?}");
     }
 }
