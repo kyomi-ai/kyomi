@@ -27,6 +27,7 @@ use leptos_router::hooks::use_location;
 use kyomi_types::Permission;
 
 use crate::server_fns::context::UserContext;
+use crate::utils::permissions::{analytics_access, AnalyticsAccess};
 
 /// Settings tab definition.
 struct SettingsTab {
@@ -60,7 +61,6 @@ const TABS: &[SettingsTab] = &[
 /// even though today's role mapping happens to grant all three together.
 fn visible_tabs(ctx: &UserContext) -> Vec<&'static str> {
     let can_manage_workspace_settings = ctx.can(Permission::ManageWorkspaceSettings);
-    let can_manage_analytics = ctx.can(Permission::ManageAnalytics);
     let can_manage_team = ctx.can(Permission::ManageTeam);
     let can_manage_ai_config = ctx.can(Permission::ManageAiConfig);
     let multi_user = ctx.capabilities.get("multi_user_enabled").copied().unwrap_or(false);
@@ -91,8 +91,10 @@ fn visible_tabs(ctx: &UserContext) -> Vec<&'static str> {
         tabs.push("ai");
     }
 
-    // analytics: requires ManageAnalytics, not self-hosted, billing enabled
-    if can_manage_analytics && !ctx.is_self_hosted && ctx.billing_enabled {
+    // analytics: gated by the shared analytics_access predicate (KYO-260) —
+    // the same precedence the "Analytics Settings" datasource-row link and
+    // the analytics page's own guard consume, so all three agree.
+    if matches!(analytics_access(ctx), AnalyticsAccess::Allowed) {
         tabs.push("analytics");
     }
 
@@ -270,5 +272,29 @@ mod tests {
         // who holds ManageAiConfig (e.g. for BYOK config elsewhere).
         let tabs = visible_tabs(&ctx(false, vec![Permission::ManageAiConfig]));
         assert!(!tabs.contains(&"ai"), "expected no \"ai\" tab on SaaS, got {tabs:?}");
+    }
+
+    /// A minimal `ctx()` helper doesn't set `billing_enabled`, which the
+    /// analytics tab now requires via `analytics_access` (KYO-260) — build
+    /// the fixture inline so these two tests can flip that field too.
+    fn ctx_with_billing(is_self_hosted: bool, billing_enabled: bool, permissions: Vec<Permission>) -> UserContext {
+        UserContext {
+            billing_enabled,
+            ..ctx(is_self_hosted, permissions)
+        }
+    }
+
+    #[test]
+    fn analytics_tab_visible_for_non_self_hosted_admin_with_billing() {
+        let tabs = visible_tabs(&ctx_with_billing(false, true, vec![Permission::ManageAnalytics]));
+        assert!(tabs.contains(&"analytics"), "expected \"analytics\" tab for non-self-hosted admin with billing, got {tabs:?}");
+    }
+
+    #[test]
+    fn analytics_tab_hidden_for_member() {
+        // A member lacks ManageAnalytics — same KYO-260 predicate that
+        // gates the datasources-page link and the analytics page itself.
+        let tabs = visible_tabs(&ctx_with_billing(false, true, vec![]));
+        assert!(!tabs.contains(&"analytics"), "expected no \"analytics\" tab for a member, got {tabs:?}");
     }
 }

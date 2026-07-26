@@ -38,7 +38,7 @@ use crate::server_fns::datasource_oauth::{
     get_google_oauth_projects,
 };
 use crate::utils::json::config_bool;
-use crate::utils::permissions::use_permissions;
+use crate::utils::permissions::{use_analytics_access, use_permissions, AnalyticsAccess};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -229,6 +229,15 @@ fn DatasourcesContent(
     // member (see `docs/DATASOURCE_ARCHITECTURE.md` §5.2).
     let perms = use_permissions();
     let is_admin = Signal::derive(move || perms.can(Permission::ManageDatasources));
+
+    // ── Analytics access gating (KYO-260) ────────────────────────────────
+    // Whether the caller may reach `/settings/analytics` — same
+    // `analytics_access` predicate the Settings tab bar and the analytics
+    // page's own guard consume. Computed once here (reactive, not
+    // per-row) via the shared hook, and threaded down to `DatasourceRow`
+    // exactly like `is_admin` above — the hook must not be invoked again
+    // inside the row/list loop.
+    let analytics_access = use_analytics_access();
 
     // ── Modal state ──────────────────────────────────────────────────────
     // None = closed, Some(None) = create mode, Some(Some(id)) = edit mode
@@ -446,6 +455,7 @@ fn DatasourcesContent(
                                     oauth_connecting=oauth_connecting
                                     set_oauth_connecting=set_oauth_connecting
                                     is_admin=is_admin
+                                    analytics_access=analytics_access
                                 />
                             </For>
                         </div>
@@ -498,6 +508,11 @@ fn DatasourceRow(
     /// (`delete_datasource` → `Permission::ManageDatasources`). Passed as a
     /// `Signal` (not snapshotted) per CODING_STANDARDS.md.
     is_admin: Signal<bool>,
+    /// Whether the caller may reach `/settings/analytics` — gates the
+    /// "Analytics Settings" link on analytics datasource rows (KYO-260).
+    /// Computed once at the list level by the shared analytics-access hook
+    /// and passed as a `Signal`, mirroring `is_admin` above.
+    analytics_access: Signal<AnalyticsAccess>,
 ) -> impl IntoView {
     // ── Toggle state ────────────────────────────────────────────────────
     let ds_for_toggle = ds.clone();
@@ -784,16 +799,26 @@ fn DatasourceRow(
                 // Settings button — opens modal (or analytics settings link for analytics datasources)
                 {if ds.is_analytics {
                     view! {
-                        <ButtonLink
-                            href="/settings/analytics"
-                            variant=ButtonVariant::Outline
-                            size=ButtonSize::Sm
-                        >
-                            <span class="h-4 w-4 sm:mr-1 inline-flex items-center justify-center">
-                                <Icon icon=phosphor_leptos::PULSE/>
-                            </span>
-                            <span class="hidden sm:inline">"Analytics Settings"</span>
-                        </ButtonLink>
+                        // The link is only rendered when the caller can actually use
+                        // the page it routes to (KYO-260) — otherwise a non-admin
+                        // member sees nothing in this slot (they still have the
+                        // enable/disable Switch and credential-action button above).
+                        // `<Show>` (not `.then()`) because `analytics_access` is a
+                        // reactive Signal, unlike the static `ds.is_analytics` check
+                        // that selects this branch — same distinction as the delete
+                        // button's `<Show>` below.
+                        <Show when=move || matches!(analytics_access.get(), AnalyticsAccess::Allowed)>
+                            <ButtonLink
+                                href="/settings/analytics"
+                                variant=ButtonVariant::Outline
+                                size=ButtonSize::Sm
+                            >
+                                <span class="h-4 w-4 sm:mr-1 inline-flex items-center justify-center">
+                                    <Icon icon=phosphor_leptos::PULSE/>
+                                </span>
+                                <span class="hidden sm:inline">"Analytics Settings"</span>
+                            </ButtonLink>
+                        </Show>
                     }.into_any()
                 } else {
                     view! {
@@ -8051,5 +8076,83 @@ mod tests {
                  re-fetch (KYO-197) cannot update the OAuth status panel"
             );
         }
+    }
+
+    // ── KYO-260: analytics-link permission gating ──────────────────────
+    //
+    // The "Analytics Settings" link on an analytics-typed datasource row
+    // used to be gated only on `ds.is_analytics` (a datasource *type*),
+    // with no check on whether the viewer could actually use the page it
+    // routes to. A non-admin member could click through to
+    // `/settings/analytics` and land on an empty shell, because that
+    // page's own guard only checked `is_self_hosted`. The fix threads a
+    // single `analytics_access` Signal — computed once at the list level
+    // via `use_analytics_access()`, the same predicate the Settings tab
+    // bar and `analytics.rs` now consume — down into `DatasourceRow`,
+    // which gates the link with `<Show>`.
+
+    #[test]
+    fn datasource_row_accepts_analytics_access_prop() {
+        let f = extract_between(SRC, "fn DatasourceRow(", "fn DatasourceModal(");
+        assert!(
+            f.contains("analytics_access: Signal<AnalyticsAccess>"),
+            "DatasourceRow must accept an analytics_access: Signal<AnalyticsAccess> prop \
+             (KYO-260) — without it, the row has no way to gate the Analytics Settings link \
+             on anything but the static ds.is_analytics check"
+        );
+    }
+
+    #[test]
+    fn analytics_settings_link_is_gated_by_a_reactive_show() {
+        let f = extract_between(SRC, "fn DatasourceRow(", "fn DatasourceModal(");
+        let branch = extract_between(f, "if ds.is_analytics {", "} else {");
+        assert!(
+            branch.contains("<Show") && branch.contains("analytics_access.get()"),
+            "the analytics-row \"Analytics Settings\" link must be wrapped in a <Show> \
+             gated on the reactive analytics_access signal (KYO-260) — a plain `.then()` \
+             would bake in whatever access level was true when the row first rendered, \
+             not react to a later-resolving UserContext"
+        );
+        assert!(
+            branch.contains("AnalyticsAccess::Allowed"),
+            "the gate must specifically require AnalyticsAccess::Allowed, not just any \
+             resolved access value"
+        );
+    }
+
+    /// The marker that opens this very `mod tests` block. Slicing `SRC` up
+    /// to this marker yields only the production code above it — required
+    /// because `SRC` is `include_str!`-ed from this same file, so counting
+    /// matches against the *whole* file would also count this test's own
+    /// source text (the assertion message, the search-string literal
+    /// below, this doc comment) and the assertion could never pass no
+    /// matter what the production code does.
+    const MOD_TESTS_MARKER: &str = "#[cfg(all(test, feature = \"ssr\"))]\nmod tests {";
+
+    /// `use_analytics_access` must be called exactly once, at the list
+    /// level in `DatasourcesContent` — never per row. Calling it inside
+    /// `DatasourceRow` would create a separate resource subscription per
+    /// rendered row instead of sharing the one computed by the parent.
+    #[test]
+    fn use_analytics_access_is_called_once_at_the_list_level() {
+        let production_src = SRC
+            .split(MOD_TESTS_MARKER)
+            .next()
+            .expect("MOD_TESTS_MARKER must appear in datasources.rs");
+
+        let count = production_src.matches("use_analytics_access(").count();
+        assert_eq!(
+            count, 1,
+            "use_analytics_access() must be called exactly once (in DatasourcesContent), \
+             found {count} call sites in production code — DatasourceRow must receive it as \
+             a prop, not call the hook itself"
+        );
+
+        let row = extract_between(production_src, "fn DatasourceRow(", "fn DatasourceModal(");
+        assert!(
+            !row.contains("use_analytics_access("),
+            "DatasourceRow must not call use_analytics_access() itself — it must receive \
+             the already-computed Signal as the analytics_access prop"
+        );
     }
 }

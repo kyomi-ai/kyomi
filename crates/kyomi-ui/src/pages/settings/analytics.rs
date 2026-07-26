@@ -21,6 +21,7 @@ use crate::components::{
 };
 use crate::server_fns::analytics::*;
 use crate::server_fns::context::UserContext;
+use crate::utils::permissions::{analytics_access, AnalyticsAccess};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -61,21 +62,56 @@ pub fn AnalyticsPage() -> impl IntoView {
             <h2 class="text-xl font-display text-foreground mb-6">"Analytics"</h2>
             <Transition fallback=move || view! { <AnalyticsLoadingSkeleton/> }>
                 {move || Suspend::new(async move {
-                    let is_self_hosted = user_ctx.await
-                        .map(|ctx| ctx.is_self_hosted)
-                        .unwrap_or(false);
+                    // Single guard for this page (KYO-260) — matches the same
+                    // analytics_access precedence the Settings tab bar and the
+                    // datasources-page "Analytics Settings" link consume. An
+                    // `Err` from user_ctx fails closed to Denied — it must never
+                    // fall through to the sites content below.
+                    let access = match user_ctx.await {
+                        Ok(ctx) => analytics_access(&ctx),
+                        Err(_) => AnalyticsAccess::Denied,
+                    };
 
-                    if is_self_hosted {
-                        return view! {
-                            <Card>
-                                <CardContent>
-                                    <p class="text-muted-foreground py-6">
-                                        "Analytics requires a Postgres and ClickHouse configuration. \
-                                         Not available in self-hosted mode with SQLite."
-                                    </p>
-                                </CardContent>
-                            </Card>
-                        }.into_any();
+                    match access {
+                        AnalyticsAccess::SelfHosted => {
+                            return view! {
+                                <Card>
+                                    <CardContent>
+                                        <p class="text-muted-foreground py-6">
+                                            "Analytics requires a Postgres and ClickHouse configuration. \
+                                             Not available in self-hosted mode with SQLite."
+                                        </p>
+                                    </CardContent>
+                                </Card>
+                            }.into_any();
+                        }
+                        AnalyticsAccess::Denied => {
+                            return view! {
+                                <Card>
+                                    <CardContent>
+                                        <div class="py-6 text-center space-y-2">
+                                            <p class="text-foreground font-medium">"Analytics is admin-only"</p>
+                                            <p class="text-muted-foreground text-sm">
+                                                "Only workspace admins can manage analytics sites. \
+                                                 Contact a workspace admin if you need access."
+                                            </p>
+                                        </div>
+                                    </CardContent>
+                                </Card>
+                            }.into_any();
+                        }
+                        AnalyticsAccess::BillingDisabled => {
+                            return view! {
+                                <Card>
+                                    <CardContent>
+                                        <p class="text-muted-foreground py-6">
+                                            "Analytics is not available for this workspace."
+                                        </p>
+                                    </CardContent>
+                                </Card>
+                            }.into_any();
+                        }
+                        AnalyticsAccess::Allowed => {}
                     }
 
                     match sites_resource.await {
@@ -695,5 +731,124 @@ fn CopyButton(text: String) -> impl IntoView {
                 }
             }}
         </button>
+    }
+}
+
+#[cfg(all(test, feature = "ssr"))]
+mod tests {
+    //! KYO-260 compile-time sanity checks. This file is a Leptos view tree —
+    //! its reactive `Suspend` branching can't be exercised as a plain unit
+    //! test — so, following the precedent in `datasources.rs` and
+    //! `profile.rs` (`tests_part3`), these assert against the source text
+    //! itself.
+    //!
+    //! Before this fix, `AnalyticsPage` guarded only on `is_self_hosted`,
+    //! so a non-admin member who reached `/settings/analytics` (via the
+    //! datasources-page link, which had its own independent gating bug)
+    //! saw an empty shell: every server fn behind the page silently
+    //! rejected them, and nothing on the page said why. These tests lock
+    //! in that the page now has exactly one guard, and that the guard
+    //! covers the denied path explicitly rather than falling through to
+    //! the sites content.
+
+    const SRC: &str = include_str!("analytics.rs");
+
+    /// Returns the source slice from the first occurrence of `start` up to
+    /// (but not including) the first occurrence of `end` that follows it.
+    /// Panics with a clear message if either marker is missing — a missing
+    /// marker means the code it was anchoring has been renamed or removed.
+    fn extract_between<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
+        let start_pos = src
+            .find(start)
+            .unwrap_or_else(|| panic!("marker not found in analytics.rs: {start:?}"));
+        let end_pos = src[start_pos..]
+            .find(end)
+            .map(|i| start_pos + i)
+            .unwrap_or_else(|| panic!("end marker not found after {start:?} in analytics.rs: {end:?}"));
+        &src[start_pos..end_pos]
+    }
+
+    /// The marker that opens this very `mod tests` block. Slicing `SRC`
+    /// up to this marker yields only the production code above it —
+    /// required because `SRC` is `include_str!`-ed from this same file, so
+    /// counting matches against the *whole* file would also count this
+    /// test's own source text (the search-string literal below, this doc
+    /// comment) and the assertion could never pass no matter what the
+    /// production code does.
+    const MOD_TESTS_MARKER: &str = "#[cfg(all(test, feature = \"ssr\"))]\nmod tests {";
+
+    /// There must be exactly one `Suspend::new` guard block in this file.
+    /// A second, independent guard would mean the "what does this page
+    /// render?" decision is split across two places again — the exact
+    /// drift KYO-260 fixes.
+    #[test]
+    fn there_is_exactly_one_suspend_guard_block() {
+        let production_src = SRC
+            .split(MOD_TESTS_MARKER)
+            .next()
+            .expect("MOD_TESTS_MARKER must appear in analytics.rs");
+
+        let count = production_src.matches("Suspend::new(").count();
+        assert_eq!(
+            count, 1,
+            "AnalyticsPage must have exactly one Suspend guard block, found {count} in \
+             production code — a second guard reintroduces the KYO-260 drift"
+        );
+    }
+
+    /// The guard must fail closed: an `Err` from `user_ctx.await` must map
+    /// to `AnalyticsAccess::Denied`, never fall through to the sites
+    /// content path.
+    #[test]
+    fn user_ctx_error_fails_closed_to_denied() {
+        let guard = extract_between(SRC, "let access = match user_ctx.await {", "};");
+        assert!(
+            guard.contains("Err(_) => AnalyticsAccess::Denied"),
+            "an errored user_ctx must resolve to AnalyticsAccess::Denied, not fall through \
+             to the sites content — found: {guard:?}"
+        );
+    }
+
+    /// The `Denied` arm must actually short-circuit with `return` and
+    /// render an explicit access-denied message — not silently continue to
+    /// `sites_resource.await`, which is what produced the empty-shell bug
+    /// this ticket fixes.
+    #[test]
+    fn denied_access_renders_explicit_message_and_returns() {
+        let arm = extract_between(
+            SRC,
+            "AnalyticsAccess::Denied => {",
+            "AnalyticsAccess::BillingDisabled => {",
+        );
+        assert!(
+            arm.contains("return view! {"),
+            "the Denied arm must return early — falling through would still reach \
+             sites_resource.await and re-create the empty-shell bug"
+        );
+        assert!(
+            arm.contains("Analytics is admin-only"),
+            "the Denied arm must render an explicit access-denied heading, not an empty page"
+        );
+    }
+
+    /// The `Allowed` arm must be a no-op that lets control fall through to
+    /// the existing `sites_resource.await` content path unchanged — the
+    /// ticket's requirement that the allowed path is untouched.
+    #[test]
+    fn allowed_access_falls_through_to_sites_content() {
+        const ALLOWED_ARM_MARKER: &str = "AnalyticsAccess::Allowed => {}";
+        let arm = extract_between(SRC, ALLOWED_ARM_MARKER, "match sites_resource.await {");
+        // extract_between's slice includes the start marker itself, so strip
+        // it off before checking what comes *between* the no-op Allowed arm
+        // and the pre-existing sites_resource match — otherwise the marker's
+        // own letters would always fail the whitespace/brace check below.
+        let between = arm.strip_prefix(ALLOWED_ARM_MARKER).unwrap_or_else(|| {
+            panic!("extract_between did not return a slice starting with the marker it was given: {arm:?}")
+        });
+        assert!(
+            between.trim().chars().all(|c| c == '}' || c.is_whitespace()),
+            "the Allowed arm must fall through directly to sites_resource.await with no \
+             extra logic in between — found: {between:?}"
+        );
     }
 }
