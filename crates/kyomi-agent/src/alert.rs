@@ -15,9 +15,9 @@
 
 use std::sync::{Arc, LazyLock};
 
-use crate::text_utils::truncate_preview;
 use crate::tools::QueryContext;
 use kyomi_auth::email_service::EmailService;
+use kyomi_types::truncate_preview;
 use kyomi_core::platform::PlatformRegistry;
 use kyomi_auth::websocket::helpers as ws_helpers;
 use kyomi_auth::websocket::WebSocketManager;
@@ -1156,9 +1156,10 @@ mod tests {
 
     // -- Preview truncation --
     //
-    // `truncate_preview` itself moved to `crate::text_utils` (KYO-211, shared
-    // across alert.rs / watch.rs / watch_execution.rs) along with its unit
-    // tests. See `crate::text_utils::tests` for coverage.
+    // `truncate_preview` lives in `kyomi_types::text` (originally introduced
+    // here in KYO-211, moved to `kyomi-types` in KYO-241 so `kyomi-auth` and
+    // the WASM-side `kyomi-ui` can share it too). See
+    // `kyomi_types::text::tests` for coverage.
 
     // -- Email template building --
 

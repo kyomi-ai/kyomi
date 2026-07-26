@@ -7,6 +7,7 @@
 use chrono::{DateTime, Utc};
 use kyomi_core::models::PushSubscription;
 use kyomi_core::DbPool;
+use kyomi_types::truncate_preview;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 use url::Url;
@@ -409,12 +410,14 @@ pub async fn cleanup_stale(db: &DbPool) {
 }
 
 /// Truncate an endpoint URL for logging (show first 60 chars).
+///
+/// Endpoint host is allowlist-validated (see `endpoint_host_is_allowed`), but
+/// the path is not — a non-ASCII path byte-sliced at a raw offset could land
+/// mid-character and panic. Values read back from the `push_subscriptions`
+/// table (see the startup-purge caller above) may also predate that
+/// validation entirely. `truncate_preview` cuts on character boundaries.
 fn truncate_endpoint(endpoint: &str) -> String {
-    if endpoint.len() <= 60 {
-        endpoint.to_string()
-    } else {
-        format!("{}...", &endpoint[..60])
-    }
+    truncate_preview(endpoint, 60)
 }
 
 #[cfg(test)]
@@ -838,5 +841,61 @@ mod tests {
             survives_sweep, 0,
             "the Rust sweep must remove a row the SQL migration alone would have kept"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // truncate_endpoint (KYO-241) — byte-slicing at a raw offset panics
+    // once the path (unvalidated by `endpoint_host_is_allowed`, see the
+    // doc comment on `truncate_endpoint`) contains multi-byte UTF-8.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn truncate_endpoint_short_is_unchanged() {
+        let endpoint = "https://fcm.googleapis.com/fcm/send/abc";
+        assert_eq!(truncate_endpoint(endpoint), endpoint);
+    }
+
+    #[test]
+    fn truncate_endpoint_mid_multibyte_path_char_does_not_panic() {
+        // Host passes `endpoint_host_is_allowed` (it's a real allowlisted
+        // host); the path is attacker- or device-controlled and contains a
+        // 3-byte CJK character. 36 ASCII prefix bytes + 23 ASCII filler
+        // bytes = 59 bytes, so the 3-byte CJK char occupies bytes 59-61 —
+        // straddling byte offset 60, the old `&endpoint[..60]` cut point.
+        // Pre-fix this panicked with "byte index 60 is not a char boundary".
+        let prefix = "https://fcm.googleapis.com/fcm/send/"; // 36 bytes
+        assert_eq!(prefix.len(), 36);
+        let endpoint = format!("{prefix}{}固{}", "a".repeat(23), "b".repeat(10));
+        assert!(
+            !endpoint.is_char_boundary(60),
+            "test input must cut mid-character at byte 60 to exercise the old panic"
+        );
+
+        let truncated = truncate_endpoint(&endpoint);
+
+        assert!(truncated.ends_with("..."));
+        let content = truncated.trim_end_matches("...");
+        assert_eq!(content.chars().count(), 60, "must keep exactly 60 characters");
+    }
+
+    #[test]
+    fn truncate_endpoint_emoji_path_does_not_panic() {
+        // 36 ASCII prefix bytes + 23 ASCII filler bytes = 59 bytes, so the
+        // first 4-byte emoji occupies bytes 59-63 — straddling byte offset
+        // 60, the old `&endpoint[..60]` cut point.
+        let endpoint = format!(
+            "https://fcm.googleapis.com/fcm/send/{}🎉🎉🎉",
+            "x".repeat(23)
+        );
+        assert!(
+            !endpoint.is_char_boundary(60),
+            "test input must cut mid-character at byte 60 to exercise the old panic"
+        );
+
+        let truncated = truncate_endpoint(&endpoint);
+
+        assert!(truncated.ends_with("..."));
+        let content = truncated.trim_end_matches("...");
+        assert_eq!(content.chars().count(), 60, "must keep exactly 60 characters");
     }
 }

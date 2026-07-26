@@ -5,8 +5,8 @@
 use async_trait::async_trait;
 
 use kyomi_auth::websocket::helpers as ws_helpers;
+use kyomi_types::truncate_preview;
 
-use crate::text_utils::truncate_preview;
 use crate::tools::{AgentTool, ToolContext};
 use crate::types::ToolAnnotations;
 

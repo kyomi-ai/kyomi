@@ -12,6 +12,7 @@
 //! response type.
 
 use kyomi_core::{Config, DbPool};
+use kyomi_types::truncate_preview;
 
 use crate::middleware::AuthUser;
 
@@ -479,6 +480,48 @@ async fn send_slim_slack_notification(
     Ok(())
 }
 
+/// Truncate a user-submitted feedback description for the Slack webhook
+/// payload: descriptions of 1500 characters or fewer pass through
+/// unchanged; longer ones are cut to 1497 characters plus the appended
+/// `"..."` (1500 total).
+///
+/// The guard (1500) and the keep-count (1497) are deliberately different —
+/// that's the original behavior this preserves, not an off-by-three bug.
+/// Do not collapse this to `truncate_preview(description, 1500)`: that
+/// would keep 1500 characters and append `"..."`, growing the payload to
+/// 1503 chars, which is a real (if minor) behavior change from what shipped
+/// before KYO-241.
+///
+/// `description` is only length-validated before this point (see
+/// [`FeedbackInput`] validation in [`submit_feedback`]), not restricted to
+/// ASCII, so it can contain any Unicode content a user types. Extracted into
+/// its own function so it's unit-testable without invoking the full
+/// webhook-send path, which requires a configured `slack_feedback_webhook_url`
+/// and makes a real HTTP POST.
+fn slack_description_preview(description: &str) -> String {
+    if description.chars().count() > 1500 {
+        truncate_preview(description, 1497)
+    } else {
+        description.to_string()
+    }
+}
+
+/// Truncate a user-submitted feedback description for the support email
+/// body: descriptions of 2000 characters or fewer pass through unchanged;
+/// longer ones are cut to 1997 characters plus the appended `"..."` (2000
+/// total).
+///
+/// See [`slack_description_preview`] for why the guard (2000) and
+/// keep-count (1997) are deliberately different values, not an off-by-three
+/// bug.
+fn email_description_preview(description: &str) -> String {
+    if description.chars().count() > 2000 {
+        truncate_preview(description, 1997)
+    } else {
+        description.to_string()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Background Slack notification (full fallback)
 // ---------------------------------------------------------------------------
@@ -514,11 +557,7 @@ async fn send_feedback_slack_notification(
     };
 
     // Truncate description for Slack (max 1500 chars)
-    let truncated_desc = if description.len() > 1500 {
-        format!("{}...", &description[..1497])
-    } else {
-        description.to_string()
-    };
+    let truncated_desc = slack_description_preview(description);
 
     let workspace_display = workspace_name.unwrap_or("(no workspace)");
 
@@ -877,11 +916,7 @@ async fn send_feedback_email_notification(
     let subject = format!("New {} feedback from {}", feedback_type, user_email);
 
     // Truncate description for email
-    let truncated_desc = if description.len() > 2000 {
-        format!("{}...", &description[..1997])
-    } else {
-        description.to_string()
-    };
+    let truncated_desc = email_description_preview(description);
 
     // Build context HTML rows
     let mut context_rows = String::new();
@@ -1090,4 +1125,174 @@ fn html_escape(s: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
+}
+
+#[cfg(test)]
+mod tests {
+    //! KYO-241: `description` is user-submitted feedback text, validated only
+    //! for length (see `FeedbackInput` validation), never restricted to
+    //! ASCII. The old `&description[..N]` byte-slices panicked whenever the
+    //! byte at offset N landed inside a multi-byte UTF-8 character. Every
+    //! input below is constructed so the OLD cut point falls strictly inside
+    //! a multi-byte character — reverting `slack_description_preview` or
+    //! `email_description_preview` to byte-slicing panics on these exact
+    //! inputs.
+
+    use super::*;
+
+    // -- Slack path (max_chars = 1497, old cut point byte offset 1497) ------
+
+    #[test]
+    fn slack_preview_cjk_mid_char_byte_boundary_does_not_panic() {
+        // 1496 ASCII bytes + one 3-byte CJK char: the char occupies bytes
+        // 1496..1499, so byte offset 1497 (the old `&description[..1497]`
+        // cut point) lands on its middle byte.
+        let description = format!("{}{}{}", "a".repeat(1496), "日", "b".repeat(10));
+        assert!(
+            !description.is_char_boundary(1497),
+            "test input must cut mid-character at byte 1497"
+        );
+
+        let preview = slack_description_preview(&description);
+
+        assert!(preview.ends_with("..."));
+        let content = preview.trim_end_matches("...");
+        assert_eq!(content.chars().count(), 1497, "must keep exactly 1497 characters");
+    }
+
+    #[test]
+    fn slack_preview_emoji_mid_char_byte_boundary_does_not_panic() {
+        // 1496 ASCII bytes + a run of 4-byte emoji: the first emoji occupies
+        // bytes 1496..1500, straddling byte offset 1497.
+        let description = format!("{}{}", "a".repeat(1496), "🎉".repeat(10));
+        assert!(
+            !description.is_char_boundary(1497),
+            "test input must cut mid-character at byte 1497"
+        );
+
+        let preview = slack_description_preview(&description);
+
+        assert!(preview.ends_with("..."));
+        let content = preview.trim_end_matches("...");
+        assert_eq!(content.chars().count(), 1497, "must keep exactly 1497 characters");
+    }
+
+    #[test]
+    fn slack_preview_short_description_is_unchanged() {
+        let description = "Short feedback";
+        assert_eq!(slack_description_preview(description), description);
+    }
+
+    // -- Guard-vs-keep-count boundary (the defect a reviewer caught: guard
+    // 1500 and keep-count 1497 were collapsed into a single 1497 call,
+    // silently truncating 1498-1500 char descriptions that should have
+    // passed through whole) --------------------------------------------
+
+    #[test]
+    fn slack_preview_exactly_at_guard_1500_chars_is_unchanged() {
+        let description = "a".repeat(1500);
+        assert_eq!(
+            slack_description_preview(&description),
+            description,
+            "a description of exactly 1500 chars must pass through whole"
+        );
+    }
+
+    #[test]
+    fn slack_preview_one_over_guard_1501_chars_truncates_to_1497_plus_ellipsis() {
+        let description = "a".repeat(1501);
+        let preview = slack_description_preview(&description);
+        assert_eq!(preview, format!("{}...", "a".repeat(1497)));
+    }
+
+    #[test]
+    fn slack_preview_multibyte_exactly_at_guard_1500_chars_is_unchanged() {
+        // 1500 CJK characters is 4500 bytes — if the guard counted bytes
+        // (the original bug this test pins), this would incorrectly
+        // truncate. It must not: the guard counts characters.
+        let description = "日".repeat(1500);
+        assert_eq!(description.chars().count(), 1500);
+        assert_eq!(
+            slack_description_preview(&description),
+            description,
+            "a 1500-char multi-byte description must pass through whole"
+        );
+    }
+
+    // -- Email path (max_chars = 1997, old cut point byte offset 1997) ------
+
+    #[test]
+    fn email_preview_cjk_mid_char_byte_boundary_does_not_panic() {
+        // 1996 ASCII bytes + one 3-byte CJK char: the char occupies bytes
+        // 1996..1999, so byte offset 1997 (the old `&description[..1997]`
+        // cut point) lands on its middle byte.
+        let description = format!("{}{}{}", "a".repeat(1996), "日", "b".repeat(10));
+        assert!(
+            !description.is_char_boundary(1997),
+            "test input must cut mid-character at byte 1997"
+        );
+
+        let preview = email_description_preview(&description);
+
+        assert!(preview.ends_with("..."));
+        let content = preview.trim_end_matches("...");
+        assert_eq!(content.chars().count(), 1997, "must keep exactly 1997 characters");
+    }
+
+    #[test]
+    fn email_preview_emoji_mid_char_byte_boundary_does_not_panic() {
+        // 1996 ASCII bytes + a run of 4-byte emoji: the first emoji occupies
+        // bytes 1996..2000, straddling byte offset 1997.
+        let description = format!("{}{}", "a".repeat(1996), "🎉".repeat(10));
+        assert!(
+            !description.is_char_boundary(1997),
+            "test input must cut mid-character at byte 1997"
+        );
+
+        let preview = email_description_preview(&description);
+
+        assert!(preview.ends_with("..."));
+        let content = preview.trim_end_matches("...");
+        assert_eq!(content.chars().count(), 1997, "must keep exactly 1997 characters");
+    }
+
+    #[test]
+    fn email_preview_short_description_is_unchanged() {
+        let description = "Short feedback";
+        assert_eq!(email_description_preview(description), description);
+    }
+
+    // -- Guard-vs-keep-count boundary (same defect class as the Slack path
+    // above: guard 2000, keep-count 1997) -------------------------------
+
+    #[test]
+    fn email_preview_exactly_at_guard_2000_chars_is_unchanged() {
+        let description = "a".repeat(2000);
+        assert_eq!(
+            email_description_preview(&description),
+            description,
+            "a description of exactly 2000 chars must pass through whole"
+        );
+    }
+
+    #[test]
+    fn email_preview_one_over_guard_2001_chars_truncates_to_1997_plus_ellipsis() {
+        let description = "a".repeat(2001);
+        let preview = email_description_preview(&description);
+        assert_eq!(preview, format!("{}...", "a".repeat(1997)));
+    }
+
+    #[test]
+    fn email_preview_multibyte_exactly_at_guard_2000_chars_is_unchanged() {
+        // 2000 CJK characters is 6000 bytes — if the guard counted bytes,
+        // this would incorrectly truncate. It must not: the guard counts
+        // characters.
+        let description = "日".repeat(2000);
+        assert_eq!(description.chars().count(), 2000);
+        assert_eq!(
+            email_description_preview(&description),
+            description,
+            "a 2000-char multi-byte description must pass through whole"
+        );
+    }
 }

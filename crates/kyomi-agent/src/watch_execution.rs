@@ -32,10 +32,10 @@ use kyomi_core::models::Watch;
 use kyomi_core::platform::PlatformRegistry;
 use kyomi_core::{capability, DbPool, KVPool, WatchMode};
 use kyomi_embed::EmbeddingService;
+use kyomi_types::truncate_preview;
 
 use crate::alert::deliver_watch_alert;
 use crate::execution::{execute_agent_chat, AgentExecutionConfig};
-use crate::text_utils::truncate_preview;
 use crate::tools::WATCH_TOOLS;
 
 // ---------------------------------------------------------------------------

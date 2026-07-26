@@ -1,11 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Shared Unicode-safe string helpers for the agent crate.
+//! Shared Unicode-safe string helpers.
 //!
 //! `&str[..N]` is a **byte** slice in Rust. If `N` falls in the middle of a
 //! multi-byte UTF-8 character, indexing panics at runtime with
 //! `byte index N is not a char boundary`. This module centralizes the safe
-//! alternative so no call site has to reimplement it (see KYO-211).
+//! alternative so no call site has to reimplement it.
+//!
+//! Originally introduced in `kyomi-agent` (KYO-211) for three call sites in
+//! that crate. Moved here (KYO-241) because a further six unsafe byte-slice
+//! truncation sites were found across `kyomi-auth` and `kyomi-ui` — the
+//! latter is a WASM client crate that cannot depend on `kyomi-core` or
+//! `kyomi-agent`, so `kyomi-types` is the only crate reachable from both the
+//! client and every server crate. Do not add another copy of this function;
+//! import it from here.
 
 /// Truncate `message` to at most `max_chars` **characters** (Unicode-safe)
 /// and append `"..."` if truncation occurred.
@@ -13,7 +21,7 @@
 /// Unlike `&message[..N]`, this never panics on multi-byte UTF-8 content —
 /// the cut point is always a character boundary, found via `char_indices`
 /// rather than a raw byte offset.
-pub(crate) fn truncate_preview(message: &str, max_chars: usize) -> String {
+pub fn truncate_preview(message: &str, max_chars: usize) -> String {
     match message.char_indices().nth(max_chars) {
         // There is a character at index `max_chars` — `boundary` is its byte
         // offset, i.e. the byte offset of the first char to drop. Slicing
@@ -28,7 +36,7 @@ pub(crate) fn truncate_preview(message: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
 
-    // -- Callers' existing behavior (moved from alert.rs) --------------------
+    // -- Callers' existing behavior (moved from alert.rs, KYO-211) -----------
 
     #[test]
     fn short_message_is_unchanged() {
