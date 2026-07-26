@@ -1250,65 +1250,105 @@ pub(crate) fn set_session_cookies(sess: &kyomi_auth::session::AuthenticatedSessi
 
 /// Extract the client IP from request headers.
 ///
-/// Mirrors `apps/server/src/helpers.rs::extract_client_ip` — checks
-/// `X-Real-IP`, then `X-Forwarded-For`, falling back to `"unknown"`.
+/// Delegates to the canonical `kyomi_auth::request_meta::extract_client_ip`
+/// (KYO-194 — this used to be a full standalone reimplementation with no
+/// `peer_addr` parameter at all, so the TCP-peer fallback was unreachable
+/// from any Leptos server fn; see `extract_client_ip_from_leptos_server_fn_path`
+/// in the test module below).
 ///
-/// Note: The canonical `extract_client_ip` in `helpers.rs` also accepts a
-/// `peer_addr: Option<SocketAddr>` for TCP peer fallback. That parameter is
-/// not available in Leptos server functions without additional extractor setup.
-/// In production (behind nginx), `X-Real-IP` is always set, so this omission
-/// is safe. In local dev without a reverse proxy, rate limiting will key all
-/// requests to `"unknown"`.
+/// No peer address is available here without extending the server-fn
+/// extraction path (`leptos_axum::extract`) to pull `ConnectInfo<SocketAddr>`
+/// — out of scope for this consolidation — so `None` is passed explicitly.
+/// In production (behind nginx), `X-Real-IP` is always set, so this is safe;
+/// in local dev without a reverse proxy, rate limiting keys all requests to
+/// `"unknown"`, same as before this change.
 #[cfg(feature = "ssr")]
 pub(crate) fn extract_client_ip(headers: &axum::http::HeaderMap) -> String {
-    use std::net::IpAddr;
-
-    // 1. X-Real-IP — trustworthy: set by nginx from TCP peer ($remote_addr).
-    if let Some(real_ip) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
-        let ip = real_ip.trim();
-        if !ip.is_empty() && ip.parse::<IpAddr>().is_ok() {
-            return ip.to_string();
-        }
-    }
-
-    // 2. X-Forwarded-For — less reliable: nginx appends but doesn't replace,
-    //    so clients can inject fake first entries. Use first entry as fallback.
-    if let Some(xff) = headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        && let Some(first_ip) = xff.split(',').next()
-    {
-        let ip = first_ip.trim();
-        if !ip.is_empty() && ip.parse::<IpAddr>().is_ok() {
-            return ip.to_string();
-        }
-    }
-
-    "unknown".to_string()
+    kyomi_auth::request_meta::extract_client_ip(headers, None)
 }
 
 /// Extract device info from request headers.
 ///
-/// Mirrors `apps/server/src/helpers.rs::extract_device_info`.
+/// Delegates to the canonical `kyomi_auth::request_meta::extract_device_info`.
 #[cfg(feature = "ssr")]
 pub(crate) fn extract_device_info(headers: &axum::http::HeaderMap) -> kyomi_auth::token_service::DeviceInfo {
-    let user_agent = headers
-        .get("user-agent")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+    kyomi_auth::request_meta::extract_device_info(headers)
+}
 
-    let ip_address = extract_client_ip(headers);
+#[cfg(all(test, feature = "ssr"))]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-    let country_code = headers
-        .get("cf-ipcountry")
-        .and_then(|v| v.to_str().ok())
-        .filter(|s| *s != "XX")
-        .map(|s| s.to_uppercase());
+    /// KYO-194: pins the two halves of this file's `extract_client_ip`
+    /// situation, and is deliberately explicit about which half is *not*
+    /// yet fixed.
+    ///
+    /// **What this asserts, and why each half matters:**
+    ///
+    /// 1. `super::extract_client_ip` — the wrapper actually used by every
+    ///    server fn in this crate — still returns `"unknown"` when no IP
+    ///    header is present, because it passes `peer_addr: None`. That is
+    ///    the *current, unchanged* limitation: rate limiting in local dev
+    ///    without a reverse proxy keys every request to one shared bucket.
+    ///    KYO-194 did **not** close this; it made it visible by forcing the
+    ///    `None` to be written at the call site. Asserting it here means a
+    ///    future change that wires in a real `SocketAddr` has to update
+    ///    this test, rather than silently changing rate-limit behaviour.
+    /// 2. The canonical `kyomi_auth::request_meta::extract_client_ip` does
+    ///    honour a supplied peer address. Before KYO-194 this file held a
+    ///    copy with no `peer_addr` parameter at all, so the capability did
+    ///    not exist on this path in any form. Now it exists and is one
+    ///    argument away.
+    ///
+    /// Note the first assertion is the load-bearing one: it exercises the
+    /// wrapper, so it would fail if the wrapper were ever regressed back
+    /// into a standalone reimplementation that got the header precedence or
+    /// the `"unknown"` fallback wrong. An earlier version of this test
+    /// called only the canonical function and would have passed regardless
+    /// of what the wrapper did.
+    #[test]
+    fn extract_client_ip_from_leptos_server_fn_path() {
+        let headers = axum::http::HeaderMap::new();
 
-    kyomi_auth::token_service::DeviceInfo {
-        user_agent,
-        ip_address: Some(ip_address),
-        country_code,
-        oauth_client_id: None,
+        // 1. The wrapper this crate actually calls: no peer address is
+        //    threaded through the server-fn extraction path today.
+        assert_eq!(
+            super::extract_client_ip(&headers),
+            "unknown",
+            "server-fn wrapper passes peer_addr: None, so with no IP headers \
+             this must still be the shared \"unknown\" bucket"
+        );
+
+        // 2. The canonical function reached from here does support the
+        //    fallback, so closing the gap above is now a one-argument change.
+        let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), 54321);
+        assert_eq!(
+            kyomi_auth::request_meta::extract_client_ip(&headers, Some(peer)),
+            "203.0.113.7"
+        );
+    }
+
+    /// Guards the wrapper's delegation to canonical header handling — the
+    /// precedence and validation rules, exercised through
+    /// `super::extract_client_ip` rather than the canonical function, so a
+    /// regression to a hand-rolled copy in this file would fail here.
+    #[test]
+    fn server_fn_wrapper_honours_canonical_header_rules() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-forwarded-for", "8.8.8.8".parse().unwrap());
+        headers.insert("x-real-ip", "1.2.3.4".parse().unwrap());
+        assert_eq!(
+            super::extract_client_ip(&headers),
+            "1.2.3.4",
+            "unspoofable X-Real-IP must win over client-appendable X-Forwarded-For"
+        );
+
+        let mut bad = axum::http::HeaderMap::new();
+        bad.insert("x-real-ip", "not-an-ip".parse().unwrap());
+        assert_eq!(
+            super::extract_client_ip(&bad),
+            "unknown",
+            "malformed header values must be rejected, not stored verbatim"
+        );
     }
 }

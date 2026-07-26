@@ -61,7 +61,7 @@ fn parse_provider(provider: &str) -> Result<OAuthProvider, kyomi_core::Error> {
 }
 
 fn extract_client_ip(headers: &HeaderMap) -> String {
-    crate::helpers::extract_client_ip(headers, None)
+    kyomi_auth::request_meta::extract_client_ip(headers, None)
 }
 
 /// Load a datasource config by slug and workspace.

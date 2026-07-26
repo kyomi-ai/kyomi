@@ -67,7 +67,7 @@ async fn check_subscribe_rate_limit(
 // ---------------------------------------------------------------------------
 
 fn extract_client_ip(headers: &HeaderMap) -> String {
-    crate::helpers::extract_client_ip(headers, None)
+    kyomi_auth::request_meta::extract_client_ip(headers, None)
 }
 
 // ---------------------------------------------------------------------------
