@@ -767,14 +767,31 @@ pub async fn broadcast_dashboard_sync(
     let (entity_type, data) = if matches!(action, SyncActionType::Delete) {
         (entity_types::DASHBOARD.to_string(), None)
     } else {
-        let snapshot = crate::dashboard_service::fetch_dashboard_snapshot(db, dashboard_id, user_id).await;
-        let et = snapshot
-            .as_ref()
-            .and_then(|s| s.get("doc_type"))
-            .and_then(|v| v.as_str())
-            .unwrap_or(entity_types::DASHBOARD)
-            .to_string();
-        (et, snapshot)
+        match crate::dashboard_service::fetch_dashboard_snapshot(db, dashboard_id, user_id).await {
+            Ok(Some(snapshot)) => {
+                let et = snapshot
+                    .get("doc_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(entity_types::DASHBOARD)
+                    .to_string();
+                (et, Some(snapshot))
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    dashboard_id,
+                    "dashboard sync: snapshot unavailable; skipping broadcast"
+                );
+                return;
+            }
+            Err(e) => {
+                tracing::error!(
+                    dashboard_id,
+                    error = %e,
+                    "dashboard sync: fetch failed; skipping broadcast"
+                );
+                return;
+            }
+        }
     };
 
     let sync_action = SyncAction {
@@ -815,13 +832,14 @@ pub async fn broadcast_dashboard_sync(
 ///
 /// Fetches the snapshot with `owner_user_id` as the requesting user, which
 /// always satisfies `dashboard_service::visibility_predicate` regardless of
-/// collection state (the owner clause is unconditional). If the snapshot
-/// comes back `None` — the row was deleted mid-transition, or the DB error
-/// `fetch_dashboard_snapshot` swallows (KYO-245, not fixed here) — no sync
-/// action is emitted at all. That's recoverable: the caller's matching
-/// `sync_log` write (see `collection_service::write_visibility_sync_log`)
-/// still lets an offline member converge on their next delta sync. Emitting
-/// a non-`Delete` action with `data: None` is not recoverable the same way
+/// collection state (the owner clause is unconditional). If the row is
+/// genuinely gone (deleted mid-transition) or the fetch itself fails, no
+/// sync action is emitted at all — distinguished in logs via
+/// [`dashboard_service::fetch_dashboard_snapshot`]'s `Result` (KYO-245).
+/// That's recoverable either way: the caller's matching `sync_log` write
+/// (see `collection_service::write_visibility_sync_log`) still lets an
+/// offline member converge on their next delta sync. Emitting a
+/// non-`Delete` action with `data: None` is not recoverable the same way
 /// (KYO-218), so this never does that.
 pub async fn broadcast_dashboard_visibility_change(
     db: &kyomi_core::DbPool,
@@ -833,15 +851,31 @@ pub async fn broadcast_dashboard_visibility_change(
 ) {
     use kyomi_types::sync::{SyncAction, SyncActionType, entity_types};
 
-    let Some(snapshot) =
-        crate::dashboard_service::fetch_dashboard_snapshot(db, dashboard_id, owner_user_id).await
-    else {
-        tracing::warn!(
-            dashboard_id,
-            now_public,
-            "dashboard visibility broadcast: snapshot unavailable; skipping broadcast"
-        );
-        return;
+    let snapshot = match crate::dashboard_service::fetch_dashboard_snapshot(
+        db,
+        dashboard_id,
+        owner_user_id,
+    )
+    .await
+    {
+        Ok(Some(snapshot)) => snapshot,
+        Ok(None) => {
+            tracing::warn!(
+                dashboard_id,
+                now_public,
+                "dashboard visibility broadcast: snapshot unavailable; skipping broadcast"
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::error!(
+                dashboard_id,
+                now_public,
+                error = %e,
+                "dashboard visibility broadcast: fetch failed; skipping broadcast"
+            );
+            return;
+        }
     };
 
     let entity_type = snapshot
