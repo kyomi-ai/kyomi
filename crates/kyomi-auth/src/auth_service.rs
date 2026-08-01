@@ -1532,9 +1532,14 @@ pub async fn passkey_signup_complete_service(
         return Ok(Err("Name is required".to_string()));
     }
 
-    // Verify token
+    // Verify token. Must be "signup" — the type minted for this exact URL
+    // (`/auth/passkey-signup`, see `auth_passkeys.rs`) — not
+    // "email_verification", which is minted by the separate *password*
+    // signup flow. Accepting "email_verification" here (KYO-282) meant a
+    // password-signup verification link would also validate on the
+    // passkey-signup page, letting one flow's token complete the other.
     let email =
-        crate::token_service::verify_verification_token(db, token, "email_verification").await?;
+        crate::token_service::verify_verification_token(db, token, "signup").await?;
     let Some(email) = email else {
         return Ok(Err(
             "Invalid or expired signup link. Please request a new one.".to_string(),
@@ -1628,8 +1633,13 @@ pub async fn passkey_recovery_verify_service(
 ) -> kyomi_core::Result<Result<(String, String, String), String>> {
     // Returns Ok((challenge_id, creation_challenge, email)) or Err(message)
 
+    // Verify token. Must be "passkey_recovery" — the type actually minted
+    // for this URL (`/auth/recover-passkey/complete`, see
+    // `auth_passkeys.rs`). The old literal, "recovery", was never minted
+    // anywhere in the workspace (KYO-282), so this verifier rejected every
+    // token from its own flow.
     let email =
-        crate::token_service::verify_verification_token(db, token, "recovery").await?;
+        crate::token_service::verify_verification_token(db, token, "passkey_recovery").await?;
     let Some(email) = email else {
         return Ok(Err(
             "Invalid or expired recovery link. Please request a new one.".to_string(),
@@ -2182,5 +2192,186 @@ mod tests {
             msg.contains("registration failed"),
             "expected a WebAuthn verification failure, got: {msg}"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Verification-token type binding (KYO-282)
+    // -----------------------------------------------------------------
+    //
+    // `token_service::verify_verification_token` filters strictly on
+    // `token_type` — a mismatch between the type a token was minted with
+    // and the type a verifier checks for is indistinguishable from "no
+    // such token" and is silently rejected. That's what let the passkey
+    // signup and passkey recovery verifiers ship checking a type nothing
+    // ever minted for their URL: nothing tied mint and verify together.
+    //
+    // Each test below mints a token with `create_verification_token`
+    // using the exact type string that flow's real minting call site
+    // uses, then drives the real verifying service function and asserts
+    // it accepts its own type and rejects all three other flows' types.
+
+    const TOKEN_TYPE_PASSWORD_SIGNUP: &str = "email_verification";
+    const TOKEN_TYPE_PASSWORD_RECOVERY: &str = "account_recovery";
+    const TOKEN_TYPE_PASSKEY_SIGNUP: &str = "signup";
+    const TOKEN_TYPE_PASSKEY_RECOVERY: &str = "passkey_recovery";
+
+    const ALL_VERIFICATION_TOKEN_TYPES: [&str; 4] = [
+        TOKEN_TYPE_PASSWORD_SIGNUP,
+        TOKEN_TYPE_PASSWORD_RECOVERY,
+        TOKEN_TYPE_PASSKEY_SIGNUP,
+        TOKEN_TYPE_PASSKEY_RECOVERY,
+    ];
+
+    async fn mint_token(db: &DbPool, email: &str, token_type: &str) -> String {
+        crate::token_service::create_verification_token(db, email, token_type)
+            .await
+            .expect("mint verification token")
+    }
+
+    #[tokio::test]
+    async fn password_signup_verify_only_accepts_its_own_token_type() {
+        for &token_type in &ALL_VERIFICATION_TOKEN_TYPES {
+            let db = test_pool().await;
+            let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+            let device = test_device();
+            let email = "signup-binding@example.com";
+
+            crate::user_service::create_user(&db, email, None, false)
+                .await
+                .expect("create user");
+
+            let token = mint_token(&db, email, token_type).await;
+
+            let result = signup_complete_service(SignupCompleteParams {
+                db: &db,
+                kv: &kv,
+                jwt_secret: "test-secret",
+                token: &token,
+                name: "Test User",
+                password: "password123",
+                terms_accepted: true,
+                marketing_consent: false,
+                device: &device,
+                config: None,
+            })
+            .await
+            .expect("service call should not error");
+
+            if token_type == TOKEN_TYPE_PASSWORD_SIGNUP {
+                assert!(
+                    matches!(result, SignupCompleteServiceResult::Success(_)),
+                    "password signup must accept its own token type ({token_type})"
+                );
+            } else {
+                assert!(
+                    matches!(result, SignupCompleteServiceResult::InvalidToken),
+                    "password signup must reject token type {token_type}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn password_recovery_verify_only_accepts_its_own_token_type() {
+        for &token_type in &ALL_VERIFICATION_TOKEN_TYPES {
+            let db = test_pool().await;
+            let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+            let email = "recovery-binding@example.com";
+
+            crate::user_service::create_user(&db, email, Some("Test User"), true)
+                .await
+                .expect("create user");
+
+            let token = mint_token(&db, email, token_type).await;
+
+            let result = recovery_verify_service(&db, &kv, &token)
+                .await
+                .expect("service call should not error");
+
+            if token_type == TOKEN_TYPE_PASSWORD_RECOVERY {
+                assert!(
+                    matches!(result, RecoveryVerifyServiceResult::Success { .. }),
+                    "password recovery must accept its own token type ({token_type})"
+                );
+            } else {
+                assert!(
+                    matches!(result, RecoveryVerifyServiceResult::InvalidToken),
+                    "password recovery must reject token type {token_type}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn passkey_signup_verify_only_accepts_its_own_token_type() {
+        for &token_type in &ALL_VERIFICATION_TOKEN_TYPES {
+            let db = test_pool().await;
+            let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+            let webauthn = test_webauthn();
+            let email = "passkey-signup-binding@example.com";
+
+            crate::user_service::create_user(&db, email, None, false)
+                .await
+                .expect("create user");
+
+            let token = mint_token(&db, email, token_type).await;
+
+            let result = passkey_signup_complete_service(PasskeySignupCompleteParams {
+                db: &db,
+                kv: &kv,
+                webauthn: &webauthn,
+                token: &token,
+                name: "Test User",
+                terms_accepted: true,
+                marketing_consent: false,
+                config: None,
+            })
+            .await
+            .expect("service call should not error");
+
+            if token_type == TOKEN_TYPE_PASSKEY_SIGNUP {
+                assert!(
+                    matches!(result, Ok((_, _))),
+                    "passkey signup must accept its own token type ({token_type}), got {result:?}"
+                );
+            } else {
+                assert!(
+                    matches!(&result, Err(msg) if msg.contains("Invalid or expired")),
+                    "passkey signup must reject token type {token_type}, got {result:?}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn passkey_recovery_verify_only_accepts_its_own_token_type() {
+        for &token_type in &ALL_VERIFICATION_TOKEN_TYPES {
+            let db = test_pool().await;
+            let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+            let webauthn = test_webauthn();
+            let email = "passkey-recovery-binding@example.com";
+
+            crate::user_service::create_user(&db, email, Some("Test User"), true)
+                .await
+                .expect("create user");
+
+            let token = mint_token(&db, email, token_type).await;
+
+            let result = passkey_recovery_verify_service(&db, &kv, &webauthn, &token)
+                .await
+                .expect("service call should not error");
+
+            if token_type == TOKEN_TYPE_PASSKEY_RECOVERY {
+                assert!(
+                    matches!(result, Ok((_, _, _))),
+                    "passkey recovery must accept its own token type ({token_type}), got {result:?}"
+                );
+            } else {
+                assert!(
+                    matches!(&result, Err(msg) if msg.contains("Invalid or expired")),
+                    "passkey recovery must reject token type {token_type}, got {result:?}"
+                );
+            }
+        }
     }
 }
