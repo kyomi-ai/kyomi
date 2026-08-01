@@ -276,6 +276,7 @@ pub async fn start_passkey_registration(
         "user_name": display_name,
         "user_id": user_id,
         "device_name": device_name,
+        "purpose": crate::webauthn_challenge_purpose::PASSKEY_ADD_DEVICE,
     });
     crate::redis_ops::store_webauthn_challenge(kv, &challenge_id, &challenge_data).await?;
 
@@ -302,6 +303,19 @@ pub async fn complete_passkey_registration(
         .ok_or_else(|| kyomi_core::Error::Internal("Invalid or expired challenge".into()))?;
 
     crate::redis_ops::delete_webauthn_challenge(kv, challenge_id).await?;
+
+    // Reject a challenge minted by any other flow (KYO-279) — e.g. an
+    // unauthenticated signup/recovery challenge replayed here to attach an
+    // attacker-controlled passkey to an authenticated session's account.
+    // Same rejection as "not found" so this can't be used to probe purpose.
+    if !crate::webauthn_challenge_purpose::has_purpose(
+        &challenge_data,
+        &[crate::webauthn_challenge_purpose::PASSKEY_ADD_DEVICE],
+    ) {
+        return Err(kyomi_core::Error::Internal(
+            "Invalid or expired challenge".into(),
+        ));
+    }
 
     let challenge_user_id = challenge_data["user_id"].as_str().unwrap_or("");
     if challenge_user_id != user_id {
@@ -350,4 +364,220 @@ pub async fn complete_passkey_registration(
     .await?;
 
     Ok(device_name)
+}
+
+// ---------------------------------------------------------------------------
+// Tests — WebAuthn challenge purpose binding (KYO-279)
+// ---------------------------------------------------------------------------
+//
+// `complete_passkey_registration` is the authenticated add-device consumer.
+// These exercise it directly against an in-memory KV store and an in-memory
+// (migrated) SQLite pool. `REGISTER_CREDENTIAL_JSON` is a structurally-valid
+// capture from webauthn-rs-core's own `test_registration_yk` fixture — real
+// JSON shape, cryptographically inert against our test RP config — so a
+// challenge that clears both the purpose gate and the user-match check
+// always fails *later*, at real WebAuthn verification, which is exactly
+// what proves those gates, specifically, let it through.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    const REGISTER_CREDENTIAL_JSON: &str = r#"
+    {
+        "id":"0xYE4bQ_HZM51-XYwp7WHJu8RfeA2Oz3_9HnNIZAKqRTz9gsUlF3QO7EqcJ0pgLSwDcq6cL1_aQpTtKLeGu6Ig",
+        "rawId":"0xYE4bQ_HZM51-XYwp7WHJu8RfeA2Oz3_9HnNIZAKqRTz9gsUlF3QO7EqcJ0pgLSwDcq6cL1_aQpTtKLeGu6Ig",
+        "response":{
+             "attestationObject":"o2NmbXRoZmlkby11MmZnYXR0U3RtdKJjc2lnWEcwRQIhALjRb43YFcbJ3V9WiYPpIrZkhgzAM6KTR8KIjwCXejBCAiAO5Lvp1VW4dYBhBDv7HZIrxZb1SwKKYOLfFRXykRxMqGN4NWOBWQLBMIICvTCCAaWgAwIBAgIEGKxGwDANBgkqhkiG9w0BAQsFADAuMSwwKgYDVQQDEyNZdWJpY28gVTJGIFJvb3QgQ0EgU2VyaWFsIDQ1NzIwMDYzMTAgFw0xNDA4MDEwMDAwMDBaGA8yMDUwMDkwNDAwMDAwMFowbjELMAkGA1UEBhMCU0UxEjAQBgNVBAoMCVl1YmljbyBBQjEiMCAGA1UECwwZQXV0aGVudGljYXRvciBBdHRlc3RhdGlvbjEnMCUGA1UEAwweWXViaWNvIFUyRiBFRSBTZXJpYWwgNDEzOTQzNDg4MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEeeo7LHxJcBBiIwzSP-tg5SkxcdSD8QC-hZ1rD4OXAwG1Rs3Ubs_K4-PzD4Hp7WK9Jo1MHr03s7y-kqjCrutOOqNsMGowIgYJKwYBBAGCxAoCBBUxLjMuNi4xLjQuMS40MTQ4Mi4xLjcwEwYLKwYBBAGC5RwCAQEEBAMCBSAwIQYLKwYBBAGC5RwBAQQEEgQQy2lIHo_3QDmT7AonKaFUqDAMBgNVHRMBAf8EAjAAMA0GCSqGSIb3DQEBCwUAA4IBAQCXnQOX2GD4LuFdMRx5brr7Ivqn4ITZurTGG7tX8-a0wYpIN7hcPE7b5IND9Nal2bHO2orh_tSRKSFzBY5e4cvda9rAdVfGoOjTaCW6FZ5_ta2M2vgEhoz5Do8fiuoXwBa1XCp61JfIlPtx11PXm5pIS2w3bXI7mY0uHUMGvxAzta74zKXLslaLaSQibSKjWKt9h-SsXy4JGqcVefOlaQlJfXL1Tga6wcO0QTu6Xq-Uw7ZPNPnrpBrLauKDd202RlN4SP7ohL3d9bG6V5hUz_3OusNEBZUn5W3VmPj1ZnFavkMB3RkRMOa58MZAORJT4imAPzrvJ0vtv94_y71C6tZ5aGF1dGhEYXRhWMQSyhe0mvIolDbzA-AWYDCiHlJdJm4gkmdDOAGo_UBxoEEAAAAAAAAAAAAAAAAAAAAAAAAAAABA0xYE4bQ_HZM51-XYwp7WHJu8RfeA2Oz3_9HnNIZAKqRTz9gsUlF3QO7EqcJ0pgLSwDcq6cL1_aQpTtKLeGu6IqUBAgMmIAEhWCCe1KvqpcVWN416_QZc8vJynt3uo3_WeJ2R4uj6kJbaiiJYIDC5ssxxummKviGgLoP9ZLFb836A9XfRO7op18QY3i5m",
+             "clientDataJSON":"eyJjaGFsbGVuZ2UiOiJBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBIiwiY2xpZW50RXh0ZW5zaW9ucyI6e30sImhhc2hBbGdvcml0aG0iOiJTSEEtMjU2Iiwib3JpZ2luIjoiaHR0cDovLzEyNy4wLjAuMTo4MDgwIiwidHlwZSI6IndlYmF1dGhuLmNyZWF0ZSJ9"
+        },
+        "type":"public-key"}
+    "#;
+
+    async fn test_pool() -> DbPool {
+        let _ = kyomi_core::constants::load_with_fallback();
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+
+        sqlx::query("PRAGMA foreign_keys=ON")
+            .execute(&pool)
+            .await
+            .expect("enable foreign keys");
+
+        sqlx::migrate!("../../apps/server/migrations-sqlite")
+            .run(&pool)
+            .await
+            .expect("run sqlite migrations");
+
+        DbPool::Sqlite(pool)
+    }
+
+    fn test_webauthn() -> Webauthn {
+        crate::webauthn::build_webauthn(
+            "localhost",
+            "Kyomi Test",
+            &url::Url::parse("http://localhost:8080").unwrap(),
+        )
+        .expect("build webauthn")
+    }
+
+    fn test_credential() -> RegisterPublicKeyCredential {
+        serde_json::from_str(REGISTER_CREDENTIAL_JSON).expect("parse fixture credential")
+    }
+
+    async fn complete_with(
+        purpose_field: Option<&str>,
+        challenge_user_id: &str,
+        authenticated_user_id: &str,
+        include_registration_state: bool,
+    ) -> kyomi_core::Result<String> {
+        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+        let pool = test_pool().await;
+        let webauthn = test_webauthn();
+
+        let challenge_id = "add-device-challenge-1".to_string();
+        let mut challenge_data = serde_json::json!({
+            "email": "user@example.com",
+            "user_id": challenge_user_id,
+            "device_name": "Test Device",
+        });
+        if include_registration_state {
+            let (_ccr, reg_state) = crate::webauthn::start_registration(
+                &webauthn,
+                Uuid::new_v4(),
+                "user@example.com",
+                "User",
+                None,
+            )
+            .expect("start registration");
+            challenge_data["registration_state"] =
+                serde_json::to_value(&reg_state).expect("serialize reg state");
+        }
+        if let Some(p) = purpose_field {
+            challenge_data["purpose"] = serde_json::json!(p);
+        }
+        crate::redis_ops::store_webauthn_challenge(&kv, &challenge_id, &challenge_data)
+            .await
+            .expect("store challenge");
+
+        let credential = test_credential();
+        complete_passkey_registration(
+            &pool,
+            &kv,
+            &webauthn,
+            authenticated_user_id,
+            &challenge_id,
+            &credential,
+        )
+        .await
+    }
+
+    fn assert_invalid_or_expired_challenge(result: kyomi_core::Result<String>) {
+        match result {
+            Err(kyomi_core::Error::Internal(msg)) => {
+                assert_eq!(msg, "Invalid or expired challenge");
+            }
+            other => panic!(
+                "expected Error::Internal(\"Invalid or expired challenge\"), got {other:?}"
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_challenge_minted_for_login() {
+        let result = complete_with(
+            Some(crate::webauthn_challenge_purpose::PASSKEY_LOGIN),
+            "u1",
+            "u1",
+            false,
+        )
+        .await;
+        assert_invalid_or_expired_challenge(result);
+    }
+
+    #[tokio::test]
+    async fn rejects_challenge_minted_for_signup() {
+        let result = complete_with(
+            Some(crate::webauthn_challenge_purpose::PASSKEY_SIGNUP),
+            "u1",
+            "u1",
+            false,
+        )
+        .await;
+        assert_invalid_or_expired_challenge(result);
+    }
+
+    #[tokio::test]
+    async fn rejects_challenge_minted_for_recovery() {
+        let result = complete_with(
+            Some(crate::webauthn_challenge_purpose::PASSKEY_RECOVERY),
+            "u1",
+            "u1",
+            false,
+        )
+        .await;
+        assert_invalid_or_expired_challenge(result);
+    }
+
+    #[tokio::test]
+    async fn rejects_missing_purpose() {
+        let result = complete_with(None, "u1", "u1", false).await;
+        assert_invalid_or_expired_challenge(result);
+    }
+
+    #[tokio::test]
+    async fn rejects_unknown_purpose() {
+        let result = complete_with(Some("bogus"), "u1", "u1", false).await;
+        assert_invalid_or_expired_challenge(result);
+    }
+
+    #[tokio::test]
+    async fn accepts_its_own_purpose() {
+        // Correct purpose (and matching user_id) clears both gates;
+        // verification then fails for an unrelated reason (fixture
+        // credential doesn't match this reg_state) — a *different* error
+        // than either gate's rejection, proving neither gate blocked it.
+        let result = complete_with(
+            Some(crate::webauthn_challenge_purpose::PASSKEY_ADD_DEVICE),
+            "u1",
+            "u1",
+            true,
+        )
+        .await;
+        let err = result.expect_err("fixture credential must fail real verification");
+        let msg = err.to_string();
+        assert_ne!(msg, "internal: Invalid or expired challenge");
+        assert_ne!(msg, "internal: Challenge does not match authenticated user");
+        assert!(
+            msg.contains("registration failed"),
+            "expected a WebAuthn verification failure, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn still_rejects_user_id_mismatch_with_correct_purpose() {
+        // The pre-existing ownership check (KYO-279 keeps this, purpose is
+        // additive) must still reject when the purpose is correct but the
+        // challenge belongs to a different user than the authenticated
+        // caller.
+        let result = complete_with(
+            Some(crate::webauthn_challenge_purpose::PASSKEY_ADD_DEVICE),
+            "victim-user-id",
+            "attacker-user-id",
+            false,
+        )
+        .await;
+        match result {
+            Err(kyomi_core::Error::Internal(msg)) => {
+                assert_eq!(msg, "Challenge does not match authenticated user");
+            }
+            other => panic!(
+                "expected Error::Internal(\"Challenge does not match authenticated user\"), got {other:?}"
+            ),
+        }
+    }
 }

@@ -299,7 +299,12 @@ pub fn PasskeySignupCompletePage() -> impl IntoView {
                                         </Alert>
                                     })}
 
-                                    <Button size=ButtonSize::Lg class="w-full">
+                                    // `button_type="submit"` is required: `Button` defaults to
+                                    // `type="button"` so buttons don't accidentally submit, but
+                                    // this one is the submit control for the `on:submit` form
+                                    // above. Without it the handler never fires and the button
+                                    // is silently inert (KYO-281).
+                                    <Button size=ButtonSize::Lg class="w-full" button_type="submit">
                                         "Create Account"
                                     </Button>
 
