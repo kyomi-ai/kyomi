@@ -64,6 +64,7 @@ pub mod watch_service;
 pub mod workspace_ai_config;
 pub mod workspace_secrets;
 pub mod webauthn;
+pub mod webauthn_challenge_purpose;
 pub mod websocket;
 pub mod workspace_service;
 

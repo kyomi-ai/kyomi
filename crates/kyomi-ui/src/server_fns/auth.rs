@@ -903,6 +903,7 @@ pub async fn passkey_login_start() -> Result<PasskeyLoginStartResult, ServerFnEr
     let challenge_data = serde_json::json!({
         "discoverable_state": disc_state_json,
         "discoverable": true,
+        "purpose": kyomi_auth::webauthn_challenge_purpose::PASSKEY_LOGIN,
     });
     kyomi_auth::redis_ops::store_webauthn_challenge(&kv, &challenge_id, &challenge_data)
         .await
@@ -985,86 +986,6 @@ pub async fn passkey_login_complete(
         PasskeyLoginServiceResult::AuthFailed => {
             Err(ServerFnError::new("Authentication failed"))
         }
-    }
-}
-
-/// Start passkey registration — create or find user and generate a WebAuthn challenge.
-///
-/// Public endpoint — no authentication required.
-/// Mirrors `POST /auth/passkeys/register/start` in `apps/server/src/routes/auth_passkeys.rs`.
-///
-/// Delegates all orchestration to `kyomi_auth::auth_service::passkey_register_start_service`.
-/// For existing unverified users: resends verification email.
-#[server(prefix = "/leptos-api")]
-pub async fn passkey_register_start(
-    email: String,
-    name: Option<String>,
-    device_name: String,
-) -> Result<PasskeyRegisterStartResult, ServerFnError> {
-    use kyomi_auth::auth_service::{
-        passkey_register_start_service, PasskeyRegisterStartServiceResult,
-    };
-
-    let ctx = extract_context()?;
-    let webauthn = ctx
-        .webauthn
-        .as_ref()
-        .ok_or_else(|| ServerFnError::new("WebAuthn not configured"))?;
-    let kv = ctx
-        .kv
-        .clone()
-        .ok_or_else(|| ServerFnError::new("KV store not available"))?;
-    let headers: axum::http::HeaderMap = leptos_axum::extract()
-        .await
-        .map_err(|e| ServerFnError::new(format!("Failed to extract headers: {e}")))?;
-    let ip = extract_client_ip(&headers);
-
-    let email_lower = email.to_lowercase();
-    let email_trimmed = email_lower.trim();
-    let name_str = name.unwrap_or_default();
-    let device_name_str = if device_name.trim().is_empty() {
-        "Unknown Device".to_string()
-    } else {
-        device_name.trim().to_string()
-    };
-
-    let result = passkey_register_start_service(kyomi_auth::auth_service::PasskeyRegisterStartParams {
-        db: &ctx.db,
-        kv: &kv,
-        webauthn,
-        email: email_trimmed,
-        name: &name_str,
-        device_name: &device_name_str,
-        ip: &ip,
-        self_hosted: ctx.config.self_hosted,
-        smtp_configured: ctx.config.smtp_configured(),
-        frontend_url: &ctx.config.frontend_url,
-    })
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "passkey_register_start_service error");
-        ServerFnError::new("Internal server error")
-    })?;
-
-    match result {
-        PasskeyRegisterStartServiceResult::Success {
-            challenge_id,
-            creation_challenge,
-        } => Ok(PasskeyRegisterStartResult {
-            challenge_id,
-            creation_challenge,
-        }),
-        PasskeyRegisterStartServiceResult::RateLimited { retry_after_secs } => {
-            Err(ServerFnError::new(format!(
-                "Rate limited. Try again in {retry_after_secs} seconds"
-            )))
-        }
-        PasskeyRegisterStartServiceResult::UnverifiedEmail => Err(ServerFnError::new(
-            "Please verify your email before registering a passkey.",
-        )),
-        PasskeyRegisterStartServiceResult::VerificationEmailSent => Err(ServerFnError::new(
-            "Please check your email to verify your account before registering a passkey.",
-        )),
     }
 }
 
