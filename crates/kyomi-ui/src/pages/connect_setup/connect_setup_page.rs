@@ -681,10 +681,17 @@ fn CreateStep(
             </div>
 
             // Submit button
+            //
+            // `button_type="submit"` is required: `Button` defaults to
+            // `type="button"` so buttons don't accidentally submit, but
+            // this one is the submit control for the `on:submit` form
+            // above. Without it the handler never fires and the button
+            // is silently inert (KYO-281).
             <Button
                 size=ButtonSize::Lg
                 class="w-full"
                 disabled=Signal::derive(move || creating.get() || new_name.get().trim().is_empty())
+                button_type="submit"
             >
                 {move || {
                     if creating.get() {
