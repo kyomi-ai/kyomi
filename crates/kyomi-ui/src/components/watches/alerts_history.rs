@@ -51,67 +51,51 @@ fn AlertDropdownMenu(
     is_unread: bool,
     /// Alert execution ID.
     alert_id: i32,
-    /// Callback to handle "Continue in Chat" with the session_id.
-    on_continue_chat: Callback<String>,
+    /// Shared per-mutation-kind `Action`s, owned by `AlertsHistory`'s stable
+    /// outer scope — NOT declared per-row here. A per-row `Action` would live
+    /// inside the `<Transition>` children closure, which is disposed and
+    /// rebuilt every time `alerts_resource` refetches — and every one of
+    /// these mutations triggers exactly that refetch via
+    /// `query_cache.invalidate("alerts")`. A per-row `Action` completing
+    /// after a *different* row's mutation lands would be silently dropped:
+    /// its `Effect` no longer exists to run. See code review discussion on
+    /// KYO-226. These four are `Copy` and passed down as props instead.
+    continue_chat_action: Action<i32, Result<String, ServerFnError>>,
+    mark_unread_action: Action<i32, Result<(), ServerFnError>>,
+    delete_action: Action<i32, Result<(), ServerFnError>>,
+    restore_action: Action<i32, Result<(), ServerFnError>>,
 ) -> impl IntoView {
-    let query_cache = expect_context::<QueryCache>();
     let (is_open, set_is_open) = signal(false);
     let trigger_ref = NodeRef::<leptos::html::Div>::new();
 
-    let (action_pending, set_action_pending) = signal(false);
-
-    // Continue in Chat handler — use try_set for signals that may be
-    // disposed if the user navigates away while the async op is in flight.
+    // `continue_chat_action` is shared across every row, so dispatching from
+    // two rows concurrently would let the second dispatch's write to
+    // `.value()` land before the first row's `Effect` (owned by
+    // `AlertsHistory`) has run — see the top-level `Effect` for this action.
+    // The `pending()`-gated `disabled` below (mirrored on the standalone
+    // button and the mobile menu item) makes double-dispatch structurally
+    // impossible rather than merely unlikely, so this guard is a second,
+    // defence-in-depth check.
     let handle_continue_chat = move |_: web_sys::MouseEvent| {
-        set_action_pending.set(true);
         set_is_open.set(false);
-        leptos::task::spawn_local(async move {
-            match continue_alert_in_chat(alert_id).await {
-                Ok(session_id) => {
-                    on_continue_chat.run(session_id);
-                }
-                Err(e) => {
-                    leptos::logging::error!("Failed to continue in chat: {e}");
-                }
-            }
-            set_action_pending.try_set(false);
-        });
+        if !continue_chat_action.pending().get_untracked() {
+            continue_chat_action.dispatch(alert_id);
+        }
     };
 
-    // Mark as unread handler
     let handle_mark_unread = move |_: web_sys::MouseEvent| {
         set_is_open.set(false);
-        leptos::task::spawn_local(async move {
-            if let Err(e) = mark_alert_unread(alert_id).await {
-                leptos::logging::error!("Failed to mark unread: {e}");
-            }
-            query_cache.try_invalidate("alerts");
-            query_cache.try_invalidate("unread_alerts");
-        });
+        mark_unread_action.dispatch(alert_id);
     };
 
-    // Delete handler
     let handle_delete = move |_: web_sys::MouseEvent| {
         set_is_open.set(false);
-        leptos::task::spawn_local(async move {
-            if let Err(e) = delete_alert(alert_id).await {
-                leptos::logging::error!("Failed to delete alert: {e}");
-            }
-            query_cache.try_invalidate("alerts");
-            query_cache.try_invalidate("unread_alerts");
-        });
+        delete_action.dispatch(alert_id);
     };
 
-    // Restore handler
     let handle_restore = move |_: web_sys::MouseEvent| {
         set_is_open.set(false);
-        leptos::task::spawn_local(async move {
-            if let Err(e) = restore_alert(alert_id).await {
-                leptos::logging::error!("Failed to restore alert: {e}");
-            }
-            query_cache.try_invalidate("alerts");
-            query_cache.try_invalidate("unread_alerts");
-        });
+        restore_action.dispatch(alert_id);
     };
 
     view! {
@@ -119,7 +103,7 @@ fn AlertDropdownMenu(
             <button
                 class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 text-foreground hover:bg-secondary hover:text-accent-foreground h-8 rounded-md px-3 text-xs"
                 on:click=move |_| set_is_open.update(|v| *v = !*v)
-                disabled=action_pending
+                disabled=Signal::derive(move || continue_chat_action.pending().get())
             >
                 <Icon icon=phosphor_leptos::DOTS_THREE_VERTICAL attr:class="h-4 w-4" />
             </button>
@@ -134,6 +118,7 @@ fn AlertDropdownMenu(
             // Continue in Chat — visible in dropdown on mobile
             <button
                 class="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 px-2 text-sm outline-none transition-colors hover:bg-secondary hover:text-accent-foreground sm:hidden"
+                disabled=Signal::derive(move || continue_chat_action.pending().get())
                 on:click=handle_continue_chat
             >
                 <Icon icon=phosphor_leptos::CHATS attr:class="h-4 w-4 mr-2" />
@@ -343,7 +328,6 @@ pub fn AlertsHistory(
     let show_deleted = RwSignal::new(false);
     let page = RwSignal::new(0i64);
     let selected_alerts = RwSignal::new(HashSet::<i32>::new());
-    let (bulk_action_pending, set_bulk_action_pending) = signal(false);
 
     // ── Resources ────────────────────────────────────────────────────────
     // Backed by the Layout-level QueryCache so both `watches` and `alerts`
@@ -462,41 +446,161 @@ pub fn AlertsHistory(
         });
     };
 
+    // ── Per-row actions (shared across rows) ──────────────────────────────
+    // Declared here, in `AlertsHistory`'s stable top-level scope — NOT inside
+    // the per-row `.map()` further down, which lives inside `<Transition>`'s
+    // reactive children closure and is disposed + rebuilt every time
+    // `alerts_resource` refetches. Every one of these four mutations
+    // triggers exactly that refetch via `query_cache.invalidate("alerts")`,
+    // so a per-row `Action` would be disposed the instant ANY row's mutation
+    // (including a different row's, or a bulk action) completed — silently
+    // dropping an in-flight result. One shared `Action` per mutation kind,
+    // scoped like the bulk actions below, survives refetches.
+    //
+    // `mark_unread`/`delete`/`restore` are safe to share across concurrent
+    // dispatches from different rows: their `Effect`s are alert-id-agnostic
+    // (generic error log + blanket cache invalidation), so even if two
+    // completions raced, neither write is meaningfully "lost" — the other's
+    // `invalidate("alerts")` still refetches the state left by both.
+    //
+    // `continue_chat` is different: losing a completion means losing a
+    // navigation (the server already created a chat session). Rather than
+    // thread `alert_id` through the Action's output to reconstruct which row
+    // resolved, dispatch is serialized — every trigger point (the dropdown's
+    // "..." button, its mobile menu item, and the standalone desktop button)
+    // is disabled while `continue_chat_action.pending()`, which makes a
+    // second concurrent dispatch structurally impossible rather than merely
+    // unlikely. A fully independent per-row in-flight state (so two
+    // different alerts' "Continue in Chat" could run at once) would need
+    // per-row `Action` instances that survive refetch — i.e. a keyed
+    // `<For each=... key=|a| a.id>` — which is a larger structural change
+    // than this ticket scoped.
+    let continue_chat_action: Action<i32, Result<String, ServerFnError>> =
+        Action::new(move |id: &i32| {
+            let alert_id = *id;
+            async move { continue_alert_in_chat(alert_id).await }
+        });
+    Effect::new(move |_| {
+        if let Some(result) = continue_chat_action.value().get() {
+            match result {
+                Ok(session_id) => on_continue_chat.run(session_id),
+                Err(e) => leptos::logging::error!("Failed to continue in chat: {e}"),
+            }
+        }
+    });
+
+    let mark_unread_action: Action<i32, Result<(), ServerFnError>> =
+        Action::new(move |id: &i32| {
+            let alert_id = *id;
+            async move { mark_alert_unread(alert_id).await }
+        });
+    Effect::new(move |_| {
+        if let Some(result) = mark_unread_action.value().get() {
+            if let Err(e) = result {
+                leptos::logging::error!("Failed to mark unread: {e}");
+            }
+            query_cache.invalidate("alerts");
+            query_cache.invalidate("unread_alerts");
+        }
+    });
+
+    let delete_action: Action<i32, Result<(), ServerFnError>> = Action::new(move |id: &i32| {
+        let alert_id = *id;
+        async move { delete_alert(alert_id).await }
+    });
+    Effect::new(move |_| {
+        if let Some(result) = delete_action.value().get() {
+            if let Err(e) = result {
+                leptos::logging::error!("Failed to delete alert: {e}");
+            }
+            query_cache.invalidate("alerts");
+            query_cache.invalidate("unread_alerts");
+        }
+    });
+
+    let restore_action: Action<i32, Result<(), ServerFnError>> = Action::new(move |id: &i32| {
+        let alert_id = *id;
+        async move { restore_alert(alert_id).await }
+    });
+    Effect::new(move |_| {
+        if let Some(result) = restore_action.value().get() {
+            if let Err(e) = result {
+                leptos::logging::error!("Failed to restore alert: {e}");
+            }
+            query_cache.invalidate("alerts");
+            query_cache.invalidate("unread_alerts");
+        }
+    });
+
     // ── Bulk actions ─────────────────────────────────────────────────────
+    // Each bulk mutation is an `Action` (KYO-226) instead of raw `spawn_local`
+    // — the selected-id list is threaded through as the Action's input so the
+    // eventual write reflects exactly what was dispatched, not whatever
+    // `selected_alerts` happens to hold when the Effect fires. The three
+    // `pending()` signals are OR'd together for the toolbar buttons' disabled
+    // state, matching the old shared `bulk_action_pending` flag that disabled
+    // all three buttons whenever any one bulk action was in flight.
+    let bulk_mark_read_action: Action<Vec<i32>, Result<(), ServerFnError>> =
+        Action::new(move |ids: &Vec<i32>| {
+            let ids = ids.clone();
+            async move { bulk_mark_alerts_read(ids).await }
+        });
+    Effect::new(move |_| {
+        if let Some(result) = bulk_mark_read_action.value().get() {
+            if let Err(e) = result {
+                leptos::logging::error!("Bulk mark read failed: {e}");
+            }
+            selected_alerts.set(HashSet::new());
+            query_cache.invalidate("alerts");
+            query_cache.invalidate("unread_alerts");
+        }
+    });
     let handle_bulk_mark_read = move |_: web_sys::MouseEvent| {
         let ids: Vec<i32> = selected_alerts.get_untracked().into_iter().collect();
         if ids.is_empty() {
             return;
         }
-        set_bulk_action_pending.set(true);
-        leptos::task::spawn_local(async move {
-            if let Err(e) = bulk_mark_alerts_read(ids).await {
-                leptos::logging::error!("Bulk mark read failed: {e}");
-            }
-            selected_alerts.try_set(HashSet::new());
-            set_bulk_action_pending.try_set(false);
-            query_cache.try_invalidate("alerts");
-            query_cache.try_invalidate("unread_alerts");
-        });
+        bulk_mark_read_action.dispatch(ids);
     };
 
+    let bulk_mark_unread_action: Action<Vec<i32>, Result<(), ServerFnError>> =
+        Action::new(move |ids: &Vec<i32>| {
+            let ids = ids.clone();
+            async move { bulk_mark_alerts_unread(ids).await }
+        });
+    Effect::new(move |_| {
+        if let Some(result) = bulk_mark_unread_action.value().get() {
+            if let Err(e) = result {
+                leptos::logging::error!("Bulk mark unread failed: {e}");
+            }
+            selected_alerts.set(HashSet::new());
+            query_cache.invalidate("alerts");
+            query_cache.invalidate("unread_alerts");
+        }
+    });
     let handle_bulk_mark_unread = move |_: web_sys::MouseEvent| {
         let ids: Vec<i32> = selected_alerts.get_untracked().into_iter().collect();
         if ids.is_empty() {
             return;
         }
-        set_bulk_action_pending.set(true);
-        leptos::task::spawn_local(async move {
-            if let Err(e) = bulk_mark_alerts_unread(ids).await {
-                leptos::logging::error!("Bulk mark unread failed: {e}");
-            }
-            selected_alerts.try_set(HashSet::new());
-            set_bulk_action_pending.try_set(false);
-            query_cache.try_invalidate("alerts");
-            query_cache.try_invalidate("unread_alerts");
-        });
+        bulk_mark_unread_action.dispatch(ids);
     };
 
+    let bulk_delete_action: Action<Vec<i32>, Result<(), ServerFnError>> =
+        Action::new(move |ids: &Vec<i32>| {
+            let ids = ids.clone();
+            async move { bulk_delete_alerts(ids).await }
+        });
+    Effect::new(move |_| {
+        if let Some(result) = bulk_delete_action.value().get() {
+            if let Err(e) = result {
+                leptos::logging::error!("Bulk delete failed: {e}");
+            }
+            selected_alerts.set(HashSet::new());
+            query_cache.invalidate("alerts");
+            query_cache.invalidate("unread_alerts");
+        }
+    });
     let handle_bulk_delete = move |_: web_sys::MouseEvent| {
         let ids: Vec<i32> = selected_alerts.get_untracked().into_iter().collect();
         if ids.is_empty() {
@@ -522,24 +626,20 @@ pub fn AlertsHistory(
             }
         }
 
-        set_bulk_action_pending.set(true);
-        leptos::task::spawn_local(async move {
-            if let Err(e) = bulk_delete_alerts(ids).await {
-                leptos::logging::error!("Bulk delete failed: {e}");
-            }
-            selected_alerts.try_set(HashSet::new());
-            set_bulk_action_pending.try_set(false);
-            query_cache.try_invalidate("alerts");
-            query_cache.try_invalidate("unread_alerts");
-        });
+        bulk_delete_action.dispatch(ids);
     };
+
+    // Combined pending state — any in-flight bulk action disables all three
+    // bulk-action buttons, matching the old shared `bulk_action_pending` flag.
+    let bulk_action_pending = Signal::derive(move || {
+        bulk_mark_read_action.pending().get()
+            || bulk_mark_unread_action.pending().get()
+            || bulk_delete_action.pending().get()
+    });
 
     let handle_clear_selection = move |_: web_sys::MouseEvent| {
         selected_alerts.set(HashSet::new());
     };
-
-    // ── Continue in Chat — tracks which alert ID is currently pending ────
-    let (continue_chat_alert_id, set_continue_chat_alert_id) = signal(Option::<i32>::None);
 
     // ── Watch options for the filter dropdown ────────────────────────────
     let watch_options = Memo::new(move |_| {
@@ -666,7 +766,7 @@ pub fn AlertsHistory(
                                     <Button
                                         variant=ButtonVariant::Ghost
                                         size=ButtonSize::Sm
-                                        disabled=bulk_action_pending.get()
+                                        disabled=bulk_action_pending
                                         on:click=handle_bulk_mark_read
                                     >
                                         <Icon icon=phosphor_leptos::ENVELOPE_OPEN attr:class="h-4 w-4 sm:mr-1.5" />
@@ -675,7 +775,7 @@ pub fn AlertsHistory(
                                     <Button
                                         variant=ButtonVariant::Ghost
                                         size=ButtonSize::Sm
-                                        disabled=bulk_action_pending.get()
+                                        disabled=bulk_action_pending
                                         on:click=handle_bulk_mark_unread
                                     >
                                         <Icon icon=phosphor_leptos::ENVELOPE attr:class="h-4 w-4 sm:mr-1.5" />
@@ -684,7 +784,7 @@ pub fn AlertsHistory(
                                     <Button
                                         variant=ButtonVariant::GhostDestructive
                                         size=ButtonSize::Sm
-                                        disabled=bulk_action_pending.get()
+                                        disabled=bulk_action_pending
                                         on:click=handle_bulk_delete
                                     >
                                         <Icon icon=phosphor_leptos::TRASH attr:class="h-4 w-4 sm:mr-1.5" />
@@ -872,29 +972,25 @@ pub fn AlertsHistory(
 
                                                     // Action buttons
                                                     <div class="pr-2 sm:pr-3 flex items-center shrink-0">
-                                                        // Continue in Chat button — hidden on mobile, shown in dropdown instead
+                                                        // Continue in Chat button — hidden on mobile, shown in dropdown instead.
+                                                        // Disabled state and spinner both key off the shared
+                                                        // `continue_chat_action`'s `pending()` (KYO-226 follow-up) rather
+                                                        // than a hand-maintained "which alert id is busy" signal — the
+                                                        // action's own machinery is the single source of truth, and it
+                                                        // can't get stuck the way a manually-reset signal could if its
+                                                        // resetting `Effect` were ever disposed mid-flight.
                                                         <button
                                                             class="hidden sm:inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 text-foreground hover:bg-secondary hover:text-accent-foreground h-8 rounded-md px-3 text-xs"
-                                                            disabled=move || continue_chat_alert_id.get() == Some(alert_id)
+                                                            disabled=Signal::derive(move || continue_chat_action.pending().get())
                                                             title="Continue in Chat"
                                                             on:click=move |_| {
-                                                                set_continue_chat_alert_id.set(Some(alert_id));
-                                                                let on_chat = on_continue_chat;
-                                                                leptos::task::spawn_local(async move {
-                                                                    match continue_alert_in_chat(alert_id).await {
-                                                                        Ok(session_id) => {
-                                                                            on_chat.run(session_id);
-                                                                        }
-                                                                        Err(e) => {
-                                                                            leptos::logging::error!("Failed to continue in chat: {e}");
-                                                                        }
-                                                                    }
-                                                                    set_continue_chat_alert_id.try_set(None);
-                                                                });
+                                                                if !continue_chat_action.pending().get_untracked() {
+                                                                    continue_chat_action.dispatch(alert_id);
+                                                                }
                                                             }
                                                         >
                                                             {move || {
-                                                                if continue_chat_alert_id.get() == Some(alert_id) {
+                                                                if continue_chat_action.pending().get() {
                                                                     view! { <Spinner /> }.into_any()
                                                                 } else {
                                                                     view! { <Icon icon=phosphor_leptos::CHATS attr:class="h-4 w-4" /> }.into_any()
@@ -907,7 +1003,10 @@ pub fn AlertsHistory(
                                                             is_deleted=is_deleted
                                                             is_unread=is_unread
                                                             alert_id=alert_id
-                                                            on_continue_chat=on_continue_chat
+                                                            continue_chat_action=continue_chat_action
+                                                            mark_unread_action=mark_unread_action
+                                                            delete_action=delete_action
+                                                            restore_action=restore_action
                                                         />
                                                     </div>
                                                 </div>
