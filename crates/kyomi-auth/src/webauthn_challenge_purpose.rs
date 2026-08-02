@@ -37,7 +37,10 @@ pub const PASSKEY_SIGNUP: &str = "passkey_signup";
 /// recovery-token-gated account recovery flow.
 ///
 /// Minted by `auth_service::passkey_recovery_verify_service`.
-/// Consumed by `auth_service::passkey_register_complete_service`.
+/// Consumed by `auth_service::passkey_recovery_complete_service` (KYO-284
+/// split this off `passkey_register_complete_service`, which now rejects
+/// this purpose — recovery completion additionally requires the HttpOnly
+/// `recovery_session` cookie minted alongside this challenge).
 pub const PASSKEY_RECOVERY: &str = "passkey_recovery";
 
 /// `purpose` for a passkey registration challenge minted on behalf of an

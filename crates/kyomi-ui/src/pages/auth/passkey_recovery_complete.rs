@@ -23,7 +23,7 @@ use crate::components::{
 };
 use crate::pages::auth::auth_layout::AuthLayout;
 use crate::server_fns::auth::{
-    passkey_recovery_verify, passkey_register_complete, LoginResult, PasskeyRecoveryVerifyResult,
+    passkey_recovery_complete, passkey_recovery_verify, LoginResult, PasskeyRecoveryVerifyResult,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -163,8 +163,10 @@ pub fn PasskeyRecoveryCompletePage() -> impl IntoView {
                     }
                 };
 
-            // Step 2: Complete registration on server (auto-login)
-            match passkey_register_complete(challenge_id.clone(), credential_json).await {
+            // Step 2: Complete recovery registration on server (auto-login).
+            // Binds to the recovery_session cookie set by
+            // passkey_recovery_verify — see KYO-284.
+            match passkey_recovery_complete(challenge_id.clone(), credential_json).await {
                 Ok(LoginResult::Success { .. }) => {
                     set_page_state.try_set(PageState::Success);
 
