@@ -461,15 +461,12 @@ pub fn bigquery_access_level(scopes_str: &str) -> &'static str {
 // ---------------------------------------------------------------------------
 
 /// Result of `google_oauth_status_service`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct GoogleOAuthStatusResult {
-    pub connected: bool,
-    pub google_email: Option<String>,
-    pub has_bigquery_scopes: bool,
-    pub needs_bigquery_connect: bool,
-    pub token_expired: bool,
-    pub has_refresh_token: bool,
-}
+///
+/// Defined in `kyomi_types` as `GoogleOAuthStatus` (the canonical wire name)
+/// because it also crosses into the WASM client as a server_fn response —
+/// see `kyomi_types::datasource_contracts`. Re-exported under this
+/// service-return name so existing call sites keep compiling unchanged.
+pub use kyomi_types::GoogleOAuthStatus as GoogleOAuthStatusResult;
 
 /// Get the current Google OAuth connection status for a user.
 ///

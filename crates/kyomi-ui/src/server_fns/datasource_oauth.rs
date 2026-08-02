@@ -15,7 +15,6 @@
 //! - `POST /auth/oauth/{provider}/disconnect`→ `disconnect_datasource_oauth()`
 
 use leptos::prelude::*;
-use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
 use super::{AuthenticatedContext, IntoServerFnError};
@@ -25,15 +24,7 @@ use super::{AuthenticatedContext, IntoServerFnError};
 // ---------------------------------------------------------------------------
 
 /// Connection status for a user's Google OAuth account.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct GoogleOAuthStatus {
-    pub connected: bool,
-    pub google_email: Option<String>,
-    pub has_bigquery_scopes: bool,
-    pub needs_bigquery_connect: bool,
-    pub token_expired: bool,
-    pub has_refresh_token: bool,
-}
+pub use kyomi_types::GoogleOAuthStatus;
 
 /// A single Google Cloud project returned by `get_google_oauth_projects`.
 pub use kyomi_types::GoogleProject;
@@ -45,54 +36,10 @@ pub use kyomi_types::GoogleOAuthProjectsResult;
 pub use kyomi_types::GoogleOAuthDisconnectResult;
 
 /// Connection status for a user's per-datasource OAuth account.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct DatasourceOAuthStatus {
-    pub connected: bool,
-    pub provider_email: Option<String>,
-    pub token_expired: bool,
-    pub needs_reconnect: bool,
-    pub connect_url: String,
-    pub disconnect_url: String,
-}
+pub use kyomi_types::DatasourceOAuthStatus;
 
 /// Result of disconnecting per-datasource OAuth credentials.
 pub use kyomi_types::DatasourceOAuthDisconnectResult;
-
-// ---------------------------------------------------------------------------
-// From conversions — server-side only (kyomi_auth is an ssr-only dep)
-// ---------------------------------------------------------------------------
-//
-// `GoogleOAuthStatus`/`DatasourceOAuthStatus` are shadow types of the
-// differently-named `GoogleOAuthStatusResult`/`DatasourceOAuthStatusResult`
-// server types, so they still need an explicit conversion.
-
-#[cfg(feature = "ssr")]
-impl From<kyomi_auth::google_oauth::GoogleOAuthStatusResult> for GoogleOAuthStatus {
-    fn from(r: kyomi_auth::google_oauth::GoogleOAuthStatusResult) -> Self {
-        Self {
-            connected: r.connected,
-            google_email: r.google_email,
-            has_bigquery_scopes: r.has_bigquery_scopes,
-            needs_bigquery_connect: r.needs_bigquery_connect,
-            token_expired: r.token_expired,
-            has_refresh_token: r.has_refresh_token,
-        }
-    }
-}
-
-#[cfg(feature = "ssr")]
-impl From<kyomi_auth::datasource_oauth::DatasourceOAuthStatusResult> for DatasourceOAuthStatus {
-    fn from(r: kyomi_auth::datasource_oauth::DatasourceOAuthStatusResult) -> Self {
-        Self {
-            connected: r.connected,
-            provider_email: r.provider_email,
-            token_expired: r.token_expired,
-            needs_reconnect: r.needs_reconnect,
-            connect_url: r.connect_url,
-            disconnect_url: r.disconnect_url,
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Server functions
@@ -115,7 +62,6 @@ pub async fn get_google_oauth_status() -> Result<GoogleOAuthStatus, ServerFnErro
     google_oauth_status_service(ac.db(), &ac.auth.user_id, &encryption_key)
         .await
         .into_sfn()
-        .map(Into::into)
 }
 
 /// List Google Cloud projects accessible to the authenticated user.
@@ -220,7 +166,6 @@ pub async fn get_datasource_oauth_status(
     )
     .await
     .into_sfn()
-    .map(Into::into)
 }
 
 /// Disconnect per-datasource OAuth credentials for the authenticated user.
