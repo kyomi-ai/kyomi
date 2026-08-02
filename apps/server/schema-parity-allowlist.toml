@@ -1,0 +1,258 @@
+# Schema-parity allowlist (KYO-206)
+#
+# The `schema_parity` CI check (crates/kyomi-core/tests/schema_parity.rs) runs
+# the *real* embedded sqlx::migrate! chains from crates/kyomi-core/src/db.rs
+# against a scratch Postgres database and a fresh in-memory SQLite database,
+# introspects the resulting schemas, and fails the build if any table or
+# column is present on one backend and not the other (or differs in
+# normalized type class / nullability / default-presence) — unless the
+# specific `table` (or `table` + `column`) pair is listed here.
+#
+# This file exists because two divergences of exactly this shape already
+# shipped to production undetected (KYO-200): `collections.doc_type` and
+# `thinking_event_details` existed only on Postgres, silently breaking
+# self-hosted SQLite deployments.
+#
+# Every entry below must be as narrow as possible (a specific table.column,
+# not a whole table, unless the *entire* table is a one-sided construct) and
+# must carry a `reason` explaining why the divergence is deliberate rather
+# than a bug. Do not add an entry to make this check pass without genuinely
+# verifying the divergence is intentional — that defeats the purpose of the
+# check. If a divergence looks like a bug, fix the migration; don't
+# allowlist it.
+#
+# Omit `column` to waive an entire table (only for tables that exist on one
+# backend by design, with no reasonable per-column analogue on the other).
+
+# ---------------------------------------------------------------------------
+# Postgres full-text search columns (tsvector) — no SQLite analogue.
+#
+# SQLite has no tsvector/GIN equivalent. Full-text search on self-hosted
+# SQLite is implemented per-table via FTS5 virtual tables (see
+# `agent_learnings_fts` below) kept in sync by triggers, or (for tables
+# without an FTS5 mirror) simply not offered on SQLite. These columns are
+# populated by Postgres triggers (agent_learnings_search_vector_update,
+# dashboards_search_vector_update, chat_messages_content_tsv_trigger) defined
+# in apps/server/migrations/20260215000000_baseline.sql and have no SQLite
+# counterpart by design — SQLite migrations explicitly document this via
+# inline "skip ... tsvector column" comments.
+# ---------------------------------------------------------------------------
+
+[[entry]]
+table = "agent_learnings"
+column = "search_vector"
+reason = "Postgres tsvector column populated by agent_learnings_search_vector_update() trigger. SQLite full-text search for agent_learnings is implemented separately via the agent_learnings_fts FTS5 virtual table (see below), not a mirrored column."
+
+[[entry]]
+table = "dashboards"
+column = "search_vector"
+reason = "Postgres tsvector column populated by dashboards_search_vector_update() trigger. No SQLite analogue — apps/server/migrations-sqlite/00001_baseline.sql explicitly documents 'skip search_vector tsvector column'."
+
+[[entry]]
+table = "chat_messages"
+column = "content_tsv"
+reason = "Postgres tsvector column populated by chat_messages_content_tsv_trigger() trigger. No SQLite analogue — apps/server/migrations-sqlite/00001_baseline.sql explicitly documents 'skip content_tsv tsvector column'."
+
+# ---------------------------------------------------------------------------
+# SQLite FTS5 virtual table replacing Postgres tsvector/GIN search for
+# agent_learnings — no Postgres analogue.
+# ---------------------------------------------------------------------------
+
+[[entry]]
+table = "agent_learnings_fts"
+reason = "SQLite FTS5 virtual table (apps/server/migrations-sqlite/00001_baseline.sql) that mirrors agent_learnings.insight/context for full-text search, replacing the Postgres tsvector + GIN index approach (agent_learnings.search_vector). No Postgres analogue by design."
+
+# FTS5 shadow tables. SQLite auto-creates these alongside the virtual table
+# above (external-content mode: content='agent_learnings') to store the
+# inverted index, per-row size accounting, and module config. They are an
+# implementation detail of agent_learnings_fts, not something anyone
+# declared explicitly, and have no Postgres analogue for the same reason
+# agent_learnings_fts itself doesn't.
+
+[[entry]]
+table = "agent_learnings_fts_data"
+reason = "FTS5 shadow table auto-created by SQLite for the agent_learnings_fts virtual table (stores the inverted index segments). No Postgres analogue."
+
+[[entry]]
+table = "agent_learnings_fts_idx"
+reason = "FTS5 shadow table auto-created by SQLite for the agent_learnings_fts virtual table (segment index). No Postgres analogue."
+
+[[entry]]
+table = "agent_learnings_fts_docsize"
+reason = "FTS5 shadow table auto-created by SQLite for the agent_learnings_fts virtual table (per-row size accounting, external-content mode). No Postgres analogue."
+
+[[entry]]
+table = "agent_learnings_fts_config"
+reason = "FTS5 shadow table auto-created by SQLite for the agent_learnings_fts virtual table (module configuration). No Postgres analogue."
+
+# ---------------------------------------------------------------------------
+# Postgres SERIAL/BIGSERIAL integer primary keys vs SQLite
+# `INTEGER PRIMARY KEY AUTOINCREMENT`.
+#
+# These are the two backends' respective idioms for an auto-incrementing
+# integer surrogate key, and they introspect differently in two ways that
+# are NOT bugs:
+#
+#   1. has_default: Postgres SERIAL/BIGSERIAL desugars to
+#      `INTEGER/BIGINT NOT NULL DEFAULT nextval('..._seq')` — a real
+#      column default. SQLite's AUTOINCREMENT is a keyword modifier on the
+#      rowid alias, not a DEFAULT clause, so PRAGMA table_info reports
+#      dflt_value = NULL for it.
+#   2. nullable: an `INTEGER PRIMARY KEY` column in SQLite is a rowid
+#      alias; PRAGMA table_info reports notnull = 0 for it even though the
+#      column can never actually hold NULL (inserting NULL triggers
+#      auto-assignment of a new rowid rather than storing NULL). This is
+#      documented SQLite behavior, not an enforcement gap.
+#
+# Both backends still guarantee a unique, non-null, auto-generated integer
+# identity for these columns — this is a representation difference, not a
+# semantic one.
+# ---------------------------------------------------------------------------
+
+[[entry]]
+table = "api_usage_log"
+column = "id"
+reason = "Postgres SERIAL vs SQLite INTEGER PRIMARY KEY AUTOINCREMENT — see the SERIAL/AUTOINCREMENT note above this section."
+
+[[entry]]
+table = "chartml_validation_log"
+column = "id"
+reason = "Postgres SERIAL vs SQLite INTEGER PRIMARY KEY AUTOINCREMENT — see the SERIAL/AUTOINCREMENT note above this section."
+
+[[entry]]
+table = "column_embeddings"
+column = "id"
+reason = "Postgres SERIAL vs SQLite INTEGER PRIMARY KEY AUTOINCREMENT — see the SERIAL/AUTOINCREMENT note above this section."
+
+[[entry]]
+table = "conversation_discussed"
+column = "id"
+reason = "Postgres SERIAL vs SQLite INTEGER PRIMARY KEY AUTOINCREMENT — see the SERIAL/AUTOINCREMENT note above this section."
+
+[[entry]]
+table = "conversation_read_status"
+column = "id"
+reason = "Postgres SERIAL vs SQLite INTEGER PRIMARY KEY AUTOINCREMENT — see the SERIAL/AUTOINCREMENT note above this section."
+
+[[entry]]
+table = "dashboard_versions"
+column = "version_id"
+reason = "Postgres SERIAL vs SQLite INTEGER PRIMARY KEY AUTOINCREMENT — see the SERIAL/AUTOINCREMENT note above this section."
+
+[[entry]]
+table = "datasource_search_embeddings"
+column = "id"
+reason = "Postgres SERIAL vs SQLite INTEGER PRIMARY KEY AUTOINCREMENT — see the SERIAL/AUTOINCREMENT note above this section."
+
+[[entry]]
+table = "datasource_table_cache"
+column = "id"
+reason = "Postgres SERIAL vs SQLite INTEGER PRIMARY KEY AUTOINCREMENT — see the SERIAL/AUTOINCREMENT note above this section."
+
+[[entry]]
+table = "email_subscribers"
+column = "id"
+reason = "Postgres SERIAL vs SQLite INTEGER PRIMARY KEY AUTOINCREMENT — see the SERIAL/AUTOINCREMENT note above this section."
+
+[[entry]]
+table = "learning_references"
+column = "id"
+reason = "Postgres SERIAL vs SQLite INTEGER PRIMARY KEY AUTOINCREMENT — see the SERIAL/AUTOINCREMENT note above this section."
+
+[[entry]]
+table = "push_subscriptions"
+column = "id"
+reason = "Postgres SERIAL vs SQLite INTEGER PRIMARY KEY AUTOINCREMENT — see the SERIAL/AUTOINCREMENT note above this section."
+
+[[entry]]
+table = "sql_query_search_embeddings"
+column = "id"
+reason = "Postgres SERIAL vs SQLite INTEGER PRIMARY KEY AUTOINCREMENT — see the SERIAL/AUTOINCREMENT note above this section."
+
+[[entry]]
+table = "sync_log"
+column = "sync_id"
+reason = "Postgres BIGSERIAL vs SQLite INTEGER PRIMARY KEY AUTOINCREMENT — see the SERIAL/AUTOINCREMENT note above this section."
+
+[[entry]]
+table = "user_auth_methods"
+column = "id"
+reason = "Postgres SERIAL vs SQLite INTEGER PRIMARY KEY AUTOINCREMENT — see the SERIAL/AUTOINCREMENT note above this section."
+
+[[entry]]
+table = "user_datasource_credentials"
+column = "id"
+reason = "Postgres SERIAL vs SQLite INTEGER PRIMARY KEY AUTOINCREMENT — see the SERIAL/AUTOINCREMENT note above this section."
+
+[[entry]]
+table = "user_datasource_preferences"
+column = "id"
+reason = "Postgres SERIAL vs SQLite INTEGER PRIMARY KEY AUTOINCREMENT — see the SERIAL/AUTOINCREMENT note above this section."
+
+[[entry]]
+table = "watch_executions"
+column = "id"
+reason = "Postgres SERIAL vs SQLite INTEGER PRIMARY KEY AUTOINCREMENT — see the SERIAL/AUTOINCREMENT note above this section."
+
+[[entry]]
+table = "workspace_usage"
+column = "id"
+reason = "Postgres SERIAL vs SQLite INTEGER PRIMARY KEY AUTOINCREMENT — see the SERIAL/AUTOINCREMENT note above this section."
+
+[[entry]]
+table = "workspace_users"
+column = "id"
+reason = "Postgres SERIAL vs SQLite INTEGER PRIMARY KEY AUTOINCREMENT — see the SERIAL/AUTOINCREMENT note above this section."
+
+# ---------------------------------------------------------------------------
+# App-generated primary keys with a redundant (and on SQLite, absent)
+# database-side default.
+#
+# These IDs are always supplied explicitly by the Rust application layer on
+# both backends (never left to the database to generate). Postgres carries
+# a DB-side default as a historical convenience/safety net that the app
+# path never actually exercises; SQLite's migrations never added one.
+# ---------------------------------------------------------------------------
+
+[[entry]]
+table = "datasource_configs"
+column = "id"
+reason = "Postgres default `('ds-' || SUBSTRING(md5(random()::text), 1, 24))` is a redundant safety net — kyomi_core/kyomi_auth always generate and supply the id explicitly on insert (SQLite has no such default and works the same way). See apps/server/migrations/20260215000000_baseline.sql."
+
+[[entry]]
+table = "workspace_knowledge_chunks"
+column = "chunk_id"
+reason = "Postgres `chunk_id uuid DEFAULT gen_random_uuid()` was not touched by 20260315000000_uuid_columns_to_text.sql (that migration only covered agent_learnings, charts, collections, oauth_clients, analytics_sites). The column still classifies as Text on both backends (uuid folds into the Text class) and the application always supplies chunk_id explicitly on insert, so the Postgres default is redundant/dead code exactly like datasource_configs.id above — not a live divergence."
+
+[[entry]]
+table = "ownership_transfers"
+column = "expires_at"
+reason = "Postgres default `(now() + '7 days'::interval)` — SQLite has no INTERVAL arithmetic; apps/server/migrations-sqlite/00001_baseline.sql computes the same 7-day expiry in the Rust application layer before insert instead (see its 'skip INTERVAL default' comment)."
+
+[[entry]]
+table = "workspace_invitations"
+column = "expires_at"
+reason = "Postgres default `(now() + '7 days'::interval)` — SQLite has no INTERVAL arithmetic; apps/server/migrations-sqlite/00001_baseline.sql computes the same 7-day expiry in the Rust application layer before insert instead (see its 'skip INTERVAL default' comment)."
+
+# ---------------------------------------------------------------------------
+# Known drift found while building this check (KYO-206), each with its own
+# ticket. These were deliberately NOT fixed in KYO-206: that PR had to
+# demonstrate this check failing on a real divergence, and fixing the
+# divergences it found would have destroyed the evidence.
+#
+# These two entries are WAIVERS FOR REAL BUGS, not statements that the
+# divergence is acceptable. Each linked ticket's acceptance criteria include
+# deleting its entry from this file — so if you are fixing one of these,
+# remove the entry rather than leaving a stale waiver that would mask a
+# future regression on the same column.
+# ---------------------------------------------------------------------------
+
+[[entry]]
+table = "collections"
+column = "created_by"
+reason = "KNOWN DRIFT — tracked by KYO-293, remove this entry when fixing it. Postgres (20260609000000_add_created_by_to_collections.sql) backfills then sets NOT NULL with no default, so an insert that omits created_by fails loudly. SQLite (00022_add_created_by_to_collections.sql) instead declares `NOT NULL DEFAULT ''`, so the same omission silently inserts an empty, non-FK-checked string on self-hosted instead of failing. SQLite also never adds the `collections_created_by_fkey` FK constraint Postgres has."
+
+[[entry]]
+table = "refresh_tokens"
+column = "family_id"
+reason = "KNOWN DRIFT — tracked by KYO-294, remove this entry when fixing it. Postgres (20260216121703_add_refresh_token_rotation.sql) backfills family_id then runs `ALTER COLUMN family_id SET NOT NULL`. The SQLite migration (00003_refresh_token_rotation.sql) backfills the same way but has no equivalent NOT NULL step, so family_id stays nullable forever on self-hosted — a future code path that fails to set it would silently escape the family-based revocation query (`WHERE family_id = ...`) instead of being rejected at insert time."
