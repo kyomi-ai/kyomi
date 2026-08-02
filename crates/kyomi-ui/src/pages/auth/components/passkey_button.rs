@@ -4,12 +4,23 @@ use leptos::prelude::*;
 use phosphor_leptos::Icon;
 use crate::components::{Button, ButtonSize, ButtonVariant, Spinner};
 
-/// Passkey sign-in button — wraps the design-system `<Button>` with loading/icon.
+/// Passkey button — wraps the design-system `<Button>` with loading/icon.
+///
+/// Shared by the login page's "Sign in with Passkey" action and the signup
+/// page's "Sign up with Passkey" action — the two flows differ only in
+/// label text, so the label is a prop rather than each caller hand-rolling
+/// its own near-duplicate button.
 #[component]
 pub fn PasskeySignInButton(
     #[prop(into)] loading: Signal<bool>,
     #[prop(into)] disabled: Signal<bool>,
     on_click: Callback<()>,
+    /// Resting-state label, e.g. "Sign in with Passkey" or "Sign up with Passkey".
+    #[prop(into, default = "Sign in with Passkey".to_string())]
+    label: String,
+    /// Loading-state label, e.g. "Authenticating..." or "Creating passkey...".
+    #[prop(into, default = "Authenticating...".to_string())]
+    loading_label: String,
 ) -> impl IntoView {
     let is_disabled = Signal::derive(move || loading.get() || disabled.get());
 
@@ -31,12 +42,12 @@ pub fn PasskeySignInButton(
                 if loading.get() {
                     view! {
                         <Spinner class="text-primary-foreground"/>
-                        <span>"Authenticating..."</span>
+                        <span>{loading_label.clone()}</span>
                     }.into_any()
                 } else {
                     view! {
                         <Icon icon=phosphor_leptos::KEY size="20px"/>
-                        <span>"Sign in with Passkey"</span>
+                        <span>{label.clone()}</span>
                     }.into_any()
                 }
             }}

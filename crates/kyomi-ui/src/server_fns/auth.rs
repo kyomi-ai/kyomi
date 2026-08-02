@@ -21,6 +21,14 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "ssr")]
 use super::{extract_context, IntoServerFnError};
 
+/// Generic "check your email" message shared by both signup-start flows
+/// (password and passkey). Deliberately identical regardless of whether the
+/// email is new, unverified, or already registered — see the enumeration-
+/// safety note on `signup_start_service` / `passkey_signup_start_service`.
+#[cfg(feature = "ssr")]
+const SIGNUP_VERIFICATION_MESSAGE: &str =
+    "If this email is not already registered, a verification link has been sent. Please check your inbox.";
+
 /// Auth configuration — which authentication methods are available.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AuthConfig {
@@ -307,7 +315,6 @@ pub async fn signup_start(
     let email = email.trim();
     let ip = extract_client_ip(&headers);
     let device = extract_device_info(&headers);
-    let success_message = "If this email is not already registered, a verification link has been sent. Please check your inbox.";
 
     let result = signup_start_service(kyomi_auth::auth_service::SignupStartParams {
         db: &ctx.db,
@@ -339,7 +346,7 @@ pub async fn signup_start(
             })
         }
         SignupStartServiceResult::VerificationRequired => Ok(SignupResult::VerificationRequired {
-            message: success_message.to_string(),
+            message: SIGNUP_VERIFICATION_MESSAGE.to_string(),
         }),
         SignupStartServiceResult::RateLimited { retry_after_secs } => {
             Ok(SignupResult::RateLimited { retry_after_secs })
@@ -1052,6 +1059,101 @@ pub enum PasskeyRecoveryVerifyResult {
     Error {
         message: String,
     },
+}
+
+/// Result of starting the passkey signup flow.
+///
+/// Mirrors `SignupResult`, with one structural difference: passkey signup
+/// always needs a second step (the WebAuthn ceremony on
+/// `/auth/passkey-signup`), so the self-hosted SMTP-less case can't set
+/// session cookies and redirect home the way `SignupResult::AccountCreated`
+/// does for password signup. `TokenIssued` hands the raw token back instead,
+/// so the client can navigate to `/auth/passkey-signup?token=...` to
+/// complete the ceremony.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum PasskeySignupStartResult {
+    /// SaaS / SMTP-configured flow: verification email sent — or, for an
+    /// already-verified account, deliberately not sent (see
+    /// `passkey_signup_start_service`'s enumeration-safety note). Identical
+    /// across all three account states.
+    VerificationRequired { message: String },
+    /// Self-hosted SMTP-less flow: no email was sent. The client should
+    /// navigate to `/auth/passkey-signup?token={token}` to complete the
+    /// WebAuthn ceremony.
+    TokenIssued { token: String },
+    /// Error during signup (e.g. registration closed).
+    Error { message: String },
+    /// Rate limited.
+    RateLimited { retry_after_secs: u64 },
+}
+
+/// Start the passkey signup flow.
+///
+/// Public endpoint — no authentication required. Mints a `"signup"`
+/// verification token (mirroring the legacy REST route
+/// `POST /api/v1/auth/passkeys/register/start` in
+/// `apps/server/src/routes/auth_passkeys.rs`, which nothing in the Leptos UI
+/// calls) and either emails a link to `/auth/passkey-signup` or, in the
+/// self-hosted SMTP-less case, returns the raw token directly.
+///
+/// Delegates all orchestration to
+/// `kyomi_auth::auth_service::passkey_signup_start_service`.
+#[server(prefix = "/leptos-api")]
+pub async fn passkey_signup_start(
+    email: String,
+    name: Option<String>,
+) -> Result<PasskeySignupStartResult, ServerFnError> {
+    use kyomi_auth::auth_service::{passkey_signup_start_service, PasskeySignupStartServiceResult};
+
+    let ctx = extract_context()?;
+    let headers: axum::http::HeaderMap = leptos_axum::extract()
+        .await
+        .map_err(|e| ServerFnError::new(format!("Failed to extract headers: {e}")))?;
+    let kv = ctx
+        .kv
+        .clone()
+        .ok_or_else(|| ServerFnError::new("KV store not available"))?;
+
+    let email = email.to_lowercase();
+    let email = email.trim();
+    let ip = extract_client_ip(&headers);
+    let name = name.as_deref().map(str::trim).filter(|n| !n.is_empty());
+
+    let result =
+        passkey_signup_start_service(kyomi_auth::auth_service::PasskeySignupStartParams {
+            db: &ctx.db,
+            kv: &kv,
+            email,
+            name,
+            ip: &ip,
+            self_hosted: ctx.config.self_hosted,
+            smtp_configured: ctx.config.smtp_configured(),
+            frontend_url: &ctx.config.frontend_url,
+            slack_feedback_webhook_url: ctx.config.slack_feedback_webhook_url.as_deref(),
+            support_email: &ctx.config.support_email,
+        })
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "passkey_signup_start_service error");
+            ServerFnError::new("Internal server error")
+        })?;
+
+    match result {
+        PasskeySignupStartServiceResult::TokenIssued { token } => {
+            Ok(PasskeySignupStartResult::TokenIssued { token })
+        }
+        PasskeySignupStartServiceResult::VerificationRequired => {
+            Ok(PasskeySignupStartResult::VerificationRequired {
+                message: SIGNUP_VERIFICATION_MESSAGE.to_string(),
+            })
+        }
+        PasskeySignupStartServiceResult::RateLimited { retry_after_secs } => {
+            Ok(PasskeySignupStartResult::RateLimited { retry_after_secs })
+        }
+        PasskeySignupStartServiceResult::Error { message } => {
+            Ok(PasskeySignupStartResult::Error { message })
+        }
+    }
 }
 
 /// Verify a passkey signup token and generate a WebAuthn registration challenge.

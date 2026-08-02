@@ -20,7 +20,8 @@ use crate::pages::auth::auth_layout::AuthLayout;
 use crate::pages::auth::components::{AuthDivider, GoogleSignInButton, PasskeySignInButton};
 use crate::server_fns::auth::{
     get_auth_config, login_with_password, passkey_login_complete, passkey_login_start,
-    resend_verification, signup_start, LoginResult, SignupResult,
+    passkey_signup_start, resend_verification, signup_start, LoginResult,
+    PasskeySignupStartResult, SignupResult,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -153,6 +154,24 @@ pub fn LoginPage(
         },
     );
 
+    // ── Passkey signup action ───────────────────────────────────────────
+    // Unlike the login page's passkey handler, this never touches
+    // navigator.credentials — it only mints a signup token/email link, so
+    // it's a plain server call and can use Action (no !Send browser API
+    // involved). Input tuple: (email, name_opt). Returns (email, result) so
+    // the Effect can navigate to the CheckEmail view using the dispatch-time
+    // email, matching signup_action's pattern above.
+    let passkey_signup_action = Action::new(
+        move |(dispatched_email, name_opt): &(String, Option<String>)| {
+            let dispatched_email = dispatched_email.clone();
+            let name_opt = name_opt.clone();
+            async move {
+                let result = passkey_signup_start(dispatched_email.clone(), name_opt).await;
+                (dispatched_email, result)
+            }
+        },
+    );
+
     // ── Resend verification action ──────────────────────────────────────
     let resend_action = Action::new(move |ver_email: &String| {
         let ver_email = ver_email.clone();
@@ -227,6 +246,45 @@ pub fn LoginPage(
                     set_error.set(Some(message));
                 }
                 Ok(SignupResult::RateLimited { .. }) => {
+                    set_error.set(Some(
+                        "Too many signup attempts. Please try again later.".to_string(),
+                    ));
+                }
+                Err(e) => {
+                    set_error.set(Some(format!("Server error: {}", e)));
+                }
+            }
+        }
+    });
+
+    // ── Effect: react to passkey signup action result ────────────────────
+    // Mirrors the signup_action Effect above. TokenIssued (self-hosted
+    // SMTP-less) navigates straight to the WebAuthn-ceremony page instead
+    // of setting cookies — passkey signup has no one-step AccountCreated
+    // equivalent, see PasskeySignupStartResult's doc comment.
+    Effect::new(move |_| {
+        if let Some((dispatched_email, result)) = passkey_signup_action.value().get() {
+            match result {
+                Ok(PasskeySignupStartResult::TokenIssued { token }) => {
+                    #[cfg(target_arch = "wasm32")]
+                    if let Some(nav) = navigate.try_get_value() {
+                        nav(
+                            &format!("/auth/passkey-signup?token={token}"),
+                            Default::default(),
+                        );
+                    }
+                    let _ = &token; // suppress unused warning on SSR
+                }
+                Ok(PasskeySignupStartResult::VerificationRequired { message }) => {
+                    set_success_msg.set(Some(message));
+                    set_view_state.set(LoginView::CheckEmail {
+                        email: dispatched_email,
+                    });
+                }
+                Ok(PasskeySignupStartResult::Error { message }) => {
+                    set_error.set(Some(message));
+                }
+                Ok(PasskeySignupStartResult::RateLimited { .. }) => {
                     set_error.set(Some(
                         "Too many signup attempts. Please try again later.".to_string(),
                     ));
@@ -544,6 +602,34 @@ pub fn LoginPage(
         }
     };
 
+    // ── Passkey signup click handler ────────────────────────────────────
+    // Uses whatever email/name are already in the signup form. Name is only
+    // ever populated in the self-hosted-no-smtp branch of SignupView (the
+    // SaaS form doesn't collect one) — passed through as `None` otherwise.
+    let on_passkey_signup_click = Callback::new(move |()| {
+        // Double-dispatch guard.
+        if passkey_signup_action.pending().get_untracked() {
+            return;
+        }
+
+        let current_email = signup_email.get_untracked();
+        if current_email.trim().is_empty() {
+            set_error.set(Some("Please enter your email address.".to_string()));
+            return;
+        }
+
+        set_error.set(None);
+
+        let current_name = signup_name.get_untracked();
+        let name_opt = if current_name.trim().is_empty() {
+            None
+        } else {
+            Some(current_name)
+        };
+
+        passkey_signup_action.dispatch((current_email, name_opt));
+    });
+
     // ── Resend verification handler ─────────────────────────────────────
     // Dispatches resend_action; the Effect above handles result state.
     let on_resend_verification = move |_| {
@@ -612,6 +698,7 @@ pub fn LoginPage(
                         }
                         LoginView::Signup => {
                             let signup_loading = Signal::derive(move || signup_action.pending().get());
+                            let passkey_signup_loading = Signal::derive(move || passkey_signup_action.pending().get());
                             view! {
                                 <SignupView
                                     signup_email=signup_email
@@ -626,6 +713,9 @@ pub fn LoginPage(
                                     is_self_hosted_no_smtp=is_self_hosted_no_smtp
                                     on_signup_submit=on_signup_submit
                                     set_view_state=set_view_state
+                                    show_passkey_section=show_passkey_section
+                                    passkey_signup_loading=passkey_signup_loading
+                                    on_passkey_signup_click=on_passkey_signup_click
                                 />
                             }.into_any()
                         }
@@ -967,7 +1057,13 @@ fn SignupView(
     is_self_hosted_no_smtp: impl Fn() -> bool + Copy + Send + Sync + 'static,
     on_signup_submit: impl Fn(leptos::ev::SubmitEvent) + Copy + Send + Sync + 'static,
     set_view_state: WriteSignal<LoginView>,
+    show_passkey_section: impl Fn() -> bool + Copy + Send + Sync + 'static,
+    passkey_signup_loading: Signal<bool>,
+    on_passkey_signup_click: Callback<()>,
 ) -> impl IntoView {
+    let passkey_signup_disabled =
+        Signal::derive(move || signup_email.get().trim().is_empty());
+
     let signup_disabled = move || {
         if is_self_hosted_no_smtp() {
             signup_loading.get()
@@ -981,6 +1077,26 @@ fn SignupView(
 
     view! {
         <div class="space-y-5">
+            // Passkey Sign Up — same visual slot the passkey/Google buttons
+            // occupy on the Credentials view, gated by the same
+            // show_passkey_section condition (WebAuthn availability + the
+            // `passkeys` auth-config flag).
+            <Show when=show_passkey_section>
+                <div class="space-y-3">
+                    <PasskeySignInButton
+                        loading=passkey_signup_loading
+                        disabled=passkey_signup_disabled
+                        on_click=on_passkey_signup_click
+                        label="Sign up with Passkey"
+                        loading_label="Sending signup link..."
+                    />
+                </div>
+            </Show>
+
+            <Show when=show_passkey_section>
+                <AuthDivider text="or sign up with email"/>
+            </Show>
+
             <form on:submit=on_signup_submit class="space-y-5">
                 <div class="space-y-2">
                     <Label html_for="signup-email">"Email address"</Label>
