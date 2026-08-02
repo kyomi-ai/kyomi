@@ -2,12 +2,15 @@
 # Kyomi — CI (Pull Request Checks)
 # =============================================================================
 # Runs on every PR to main, including new pushes to existing PRs.
-# Four jobs:
+# Five jobs:
 #   1. lint-policy (fast, ~5s) — rejects new #[allow(...)] suppressions AND
 #      runs the server_fn/REST divergence linter across the full tree
 #   2. trivy-scan (~30s) — Trivy filesystem vulnerability scanner (HIGH/CRITICAL)
 #   3. cargo-audit (fast, ~15s) — RUSTSEC advisories against Cargo.lock
-#   4. clippy (slow) — full workspace clippy + compilation check + unit and
+#   4. schema-parity (fast — only compiles kyomi-core, not the workspace) —
+#      diffs the Postgres and SQLite migration chains' resulting schemas;
+#      needs its own postgres service (KYO-206)
+#   5. clippy (slow) — full workspace clippy + compilation check + unit and
 #      integration tests (apps/server/tests/ — needs the postgres service
 #      below; KYO-236)
 # =============================================================================
@@ -118,6 +121,82 @@ jobs:
 
       - name: cargo audit
         run: cargo audit
+
+  # ---------------------------------------------------------------------------
+  # Migration schema-parity check (KYO-206)
+  #
+  # Kyomi maintains two parallel migration chains — apps/server/migrations
+  # (Postgres/SaaS) and apps/server/migrations-sqlite (SQLite/self-hosted) —
+  # and nothing else enforces that they converge on the same logical schema.
+  # Two divergences of exactly this shape already shipped to production
+  # undetected (KYO-200): collections.doc_type and thinking_event_details
+  # existed only on Postgres, breaking self-hosted SQLite deployments.
+  #
+  # crates/kyomi-core/tests/schema_parity.rs runs the real embedded
+  # sqlx::migrate! chains from crates/kyomi-core/src/db.rs against a scratch
+  # Postgres database and a fresh in-memory SQLite database, introspects
+  # both resulting schemas, and fails on any divergence not covered by
+  # apps/server/schema-parity-allowlist.toml.
+  #
+  # This is its own job (not folded into `clippy` below) so a schema
+  # divergence surfaces in ~1 minute instead of being gated behind a
+  # ~35-minute full-workspace clippy run. It only compiles kyomi-core (not
+  # the workspace), so it stays fast even without that separation.
+  #
+  # Same postgres service shape as the `clippy` job below (KYO-236) — same
+  # credentials/db name as kyomi-core's Config::test_config() default, so no
+  # DATABASE_URL override is needed. This is a *separate* container from
+  # clippy's: each job gets its own fresh service. The check additionally
+  # creates and drops its own scratch database inside that container rather
+  # than touching the `kyomi_test` database directly, so it stays hermetic
+  # even if a future change makes these jobs share infrastructure (KYO-242).
+  # ---------------------------------------------------------------------------
+  schema-parity:
+    name: Migration Schema Parity
+    runs-on: ubuntu-latest
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+    services:
+      postgres:
+        image: pgvector/pgvector:pg15
+        env:
+          POSTGRES_USER: kyomi_test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: kyomi_test
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Verify sccache can reach GHA cache
+        run: |
+          echo 'fn main(){}' > /tmp/sccache_test.rs
+          if sccache $(rustc --print sysroot)/bin/rustc /tmp/sccache_test.rs --crate-type bin -o /tmp/sccache_test_out; then
+            echo "SCCACHE_AVAILABLE=true" >> $GITHUB_ENV
+            sccache --show-stats 2>&1 | head -5
+          else
+            echo "::warning::sccache GHA cache probe failed (see above), building without cache"
+            echo "SCCACHE_AVAILABLE=false" >> $GITHUB_ENV
+          fi
+          rm -f /tmp/sccache_test.rs /tmp/sccache_test_out
+
+      - name: cargo test (schema parity)
+        env:
+          RUSTC_WRAPPER: ${{ env.SCCACHE_AVAILABLE == 'true' && 'sccache' || '' }}
+        run: cargo test --locked -p kyomi-core --test schema_parity -- --nocapture
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
 
   # ---------------------------------------------------------------------------
   # Slow check: cargo clippy (compiles + lints the entire workspace)
