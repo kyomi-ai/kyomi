@@ -29,6 +29,9 @@ use kyomi_auth::{
     token_service::{self},
     user_service,
     webauthn as wa,
+    webauthn_challenge_purpose::{
+        PASSKEY_ADD_DEVICE, PASSKEY_LOGIN, PASSKEY_RECOVERY, PASSKEY_SIGNUP,
+    },
 };
 use kyomi_core::models::User;
 
@@ -60,6 +63,25 @@ pub fn routes() -> Router<AppState> {
 
 fn extract_client_ip(headers: &HeaderMap) -> String {
     kyomi_auth::request_meta::extract_client_ip(headers, None)
+}
+
+/// Reject a challenge minted by any other flow (KYO-279/KYO-280).
+///
+/// Maps a missing/unrecognised/wrong `purpose` to the same
+/// `BadRequest("Invalid or expired challenge")` these handlers already return
+/// for a challenge that isn't in the KV store, so a purpose mismatch is
+/// indistinguishable from "not found" and cannot be used as an oracle.
+fn require_purpose(
+    challenge_data: &serde_json::Value,
+    allowed: &[&str],
+) -> Result<(), kyomi_core::Error> {
+    if kyomi_auth::webauthn_challenge_purpose::has_purpose(challenge_data, allowed) {
+        Ok(())
+    } else {
+        Err(kyomi_core::Error::BadRequest(
+            "Invalid or expired challenge".into(),
+        ))
+    }
 }
 
 /// Terms of service version — matches Python's hardcoded version.
@@ -388,7 +410,7 @@ async fn signup_complete(
         None, // No existing credentials for new signup
     )?;
 
-    // Store challenge in Redis with is_signup=true for auto-login
+    // Store challenge in Redis, purpose-bound to signup (KYO-279/KYO-280).
     let challenge_id = redis_ops::generate_token();
     let reg_state_json = serde_json::to_value(&reg_state)
         .map_err(|e| kyomi_core::Error::Internal(format!("Serialize reg state: {e}")))?;
@@ -399,7 +421,7 @@ async fn signup_complete(
         "user_name": display_name,
         "user_id": user.user_id,
         "device_name": data.device_name,
-        "is_signup": true,
+        "purpose": PASSKEY_SIGNUP,
     });
     redis_ops::store_webauthn_challenge(&state.kv, &challenge_id, &challenge_data).await?;
 
@@ -434,6 +456,15 @@ async fn register_complete(
     // Delete challenge (prevent replay)
     redis_ops::delete_webauthn_challenge(&state.kv, &data.challenge_id).await?;
 
+    // Reject a challenge minted by any other flow (KYO-279/KYO-280) — deliberately
+    // NOT PASSKEY_RECOVERY: recovery registration has its own handler
+    // (`recovery_register`) which additionally requires an HttpOnly
+    // `recovery_session` cookie. Accepting a recovery-purpose challenge here
+    // would let a caller holding only a `challenge_id` bypass that cookie
+    // gate. Same rejection as "not found" so this can't be used to probe
+    // purpose.
+    require_purpose(&challenge_data, &[PASSKEY_SIGNUP])?;
+
     // Extract challenge state
     let reg_state: PasskeyRegistration = serde_json::from_value(
         challenge_data["registration_state"].clone(),
@@ -449,7 +480,6 @@ async fn register_complete(
     let device_name = challenge_data["device_name"]
         .as_str()
         .unwrap_or("Unknown Device");
-    let is_signup = challenge_data["is_signup"].as_bool().unwrap_or(false);
 
     // Verify the credential with webauthn-rs
     let passkey = wa::finish_registration(
@@ -499,59 +529,34 @@ async fn register_complete(
         .await?
         .ok_or_else(|| kyomi_core::Error::NotFound("User not found".into()))?;
 
-    if is_signup {
-        // Auto-login for signup flow
-        let device = kyomi_auth::request_meta::extract_device_info(&headers);
-        let sess = session::create_authenticated_session(
-            &state.db,
-            &state.kv,
-            &state.config.jwt_secret,
-            &user,
-            &device,
-        )
-        .await?;
+    // The purpose gate above accepts only PASSKEY_SIGNUP, so every challenge
+    // reaching this point is a signup challenge — auto-login unconditionally.
+    let device = kyomi_auth::request_meta::extract_device_info(&headers);
+    let sess = session::create_authenticated_session(
+        &state.db,
+        &state.kv,
+        &state.config.jwt_secret,
+        &user,
+        &device,
+    )
+    .await?;
 
-        let body = serde_json::json!({
-            "success": true,
-            "credential_id": credential_id_b64,
-            "user_email": email,
-            "verified": user.verified,
-            "is_signup": true,
-            "user": {
-                "email": sess.user.email,
-                "name": sess.user.name,
-                "billing_project": sess.user.billing_project,
-            },
-            "access_token": sess.access_token,
-            "refresh_token": sess.refresh_token,
-            "message": "Account created successfully!",
-        });
+    let body = serde_json::json!({
+        "success": true,
+        "credential_id": credential_id_b64,
+        "user_email": email,
+        "verified": user.verified,
+        "user": {
+            "email": sess.user.email,
+            "name": sess.user.name,
+            "billing_project": sess.user.billing_project,
+        },
+        "access_token": sess.access_token,
+        "refresh_token": sess.refresh_token,
+        "message": "Account created successfully!",
+    });
 
-        Ok((sess.cookie_headers, Json(body)))
-    } else {
-        let message = if user.verified {
-            "Passkey registered successfully. You can now sign in."
-        } else {
-            "Passkey registered successfully. Please verify your email to sign in."
-        };
-
-        Ok((
-            HeaderMap::new(),
-            Json(serde_json::json!({
-                "success": true,
-                "credential_id": credential_id_b64,
-                "user_email": email,
-                "verified": user.verified,
-                "is_signup": false,
-                "user": {
-                    "email": user.email,
-                    "name": user.name,
-                    "billing_project": user.billing_project,
-                },
-                "message": message,
-            })),
-        ))
-    }
+    Ok((sess.cookie_headers, Json(body)))
 }
 
 // ---------------------------------------------------------------------------
@@ -591,6 +596,7 @@ async fn login_start(
             "discoverable_state": disc_state_json,
             "email": email_for_challenge,
             "discoverable": true,
+            "purpose": PASSKEY_LOGIN,
         });
         redis_ops::store_webauthn_challenge(&state.kv, &challenge_id, &challenge_data).await?;
 
@@ -611,6 +617,7 @@ async fn login_start(
         "authentication_state": auth_state_json,
         "email": email_for_challenge,
         "discoverable": false,
+        "purpose": PASSKEY_LOGIN,
     });
     redis_ops::store_webauthn_challenge(&state.kv, &challenge_id, &challenge_data).await?;
 
@@ -651,6 +658,17 @@ async fn login_complete(
 
     // Delete challenge (prevent replay)
     redis_ops::delete_webauthn_challenge(&state.kv, &data.challenge_id).await?;
+
+    // Reject a challenge minted by any other flow (KYO-279/KYO-280) — e.g. a
+    // signup, add-device, or recovery registration challenge replayed here to
+    // authenticate as the credential's owner. Same rejection as "not found"
+    // so this can't be used to probe purpose.
+    require_purpose(&challenge_data, &[PASSKEY_LOGIN]).inspect_err(|_| {
+        // Logged, not surfaced — the response stays identical to "not found"
+        // above, which also warns. Symmetric logging keeps a cross-flow replay
+        // attempt as visible as an expired challenge.
+        tracing::warn!(ip = %ip, "Passkey login: challenge minted by another flow");
+    })?;
 
     // Find the user by credential ID
     let cred_id_bytes: &[u8] = data.credential.raw_id.as_ref();
@@ -911,6 +929,7 @@ async fn add_start(
         "user_name": display_name,
         "user_id": user.user_id,
         "device_name": device_name,
+        "purpose": PASSKEY_ADD_DEVICE,
     });
     redis_ops::store_webauthn_challenge(&state.kv, &challenge_id, &challenge_data).await?;
 
@@ -939,6 +958,12 @@ async fn add_complete(
 
     // Delete challenge
     redis_ops::delete_webauthn_challenge(&state.kv, &data.challenge_id).await?;
+
+    // Reject a challenge minted by any other flow (KYO-279/KYO-280) — e.g. an
+    // unauthenticated signup or recovery challenge replayed here to attach an
+    // attacker-controlled passkey to an authenticated session's account.
+    // Same rejection as "not found" so this can't be used to probe purpose.
+    require_purpose(&challenge_data, &[PASSKEY_ADD_DEVICE])?;
 
     // Verify the registration state matches this user
     let challenge_user_id = challenge_data["user_id"].as_str().unwrap_or("");
@@ -1234,6 +1259,7 @@ async fn recovery_verify(
         "user_name": display_name,
         "user_id": user.user_id,
         "device_name": data.device_name,
+        "purpose": PASSKEY_RECOVERY,
     });
     redis_ops::store_webauthn_challenge(&state.kv, &challenge_id, &challenge_data).await?;
 
@@ -1325,6 +1351,13 @@ async fn recovery_register(
     // Always clean up the challenge
     redis_ops::delete_webauthn_challenge(&state.kv, &data.challenge_id).await?;
 
+    // Reject a challenge minted by any other flow (KYO-279/KYO-280) — e.g. a
+    // signup or add-device challenge replayed here to register a passkey
+    // under the recovery session's user without the account's original
+    // consent. Same rejection as "not found" so this can't be used to probe
+    // purpose.
+    require_purpose(&challenge_data, &[PASSKEY_RECOVERY])?;
+
     // Verify challenge email matches recovery session
     let challenge_email = challenge_data["email"].as_str().unwrap_or("");
     if challenge_email != recovery_email {
@@ -1401,7 +1434,10 @@ mod tests {
     use tracing_subscriber::{Layer, Registry};
     use webauthn_rs::prelude::Passkey;
 
-    use super::lookup_recovery_user;
+    use super::{
+        lookup_recovery_user, require_purpose, PASSKEY_ADD_DEVICE, PASSKEY_LOGIN,
+        PASSKEY_RECOVERY, PASSKEY_SIGNUP,
+    };
 
     /// Shared sink that a `CaptureLayer` writes tracing events into.
     type EventLog = Arc<Mutex<Vec<(Level, String)>>>;
@@ -1563,5 +1599,93 @@ mod tests {
 
         assert_eq!(passkey.cred_id().len(), 32);
         assert_eq!(*passkey.cred_algorithm(), webauthn_rs::prelude::COSEAlgorithm::ES256);
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests — WebAuthn challenge purpose binding (KYO-279/KYO-280)
+    // -----------------------------------------------------------------------
+    //
+    // This is the only REST implementation of the passkey subsystem; every
+    // other consumer of `webauthn_challenge_purpose::has_purpose` lives in
+    // `kyomi-auth` and is tested there. `require_purpose` is this file's thin
+    // wrapper mapping a purpose failure onto the same "invalid or expired
+    // challenge" rejection the not-found path already returns — asserting
+    // that equality *is* the security property under test, since a
+    // distinguishable message would let a caller probe which purpose a given
+    // `challenge_id` was minted with.
+
+    /// Assert a purpose-gate rejection: the exact `Error::BadRequest` message
+    /// the "challenge not found" path also uses — no distinguishing oracle.
+    fn assert_invalid_or_expired_challenge(result: Result<(), kyomi_core::Error>) {
+        match result {
+            Err(kyomi_core::Error::BadRequest(msg)) => {
+                assert_eq!(msg, "Invalid or expired challenge");
+            }
+            Err(other) => panic!(
+                "expected Error::BadRequest(\"Invalid or expired challenge\"), got Err({other})"
+            ),
+            Ok(()) => {
+                panic!("expected Error::BadRequest(\"Invalid or expired challenge\"), got Ok")
+            }
+        }
+    }
+
+    #[test]
+    fn require_purpose_accepts_its_own_purpose() {
+        let data = serde_json::json!({"purpose": PASSKEY_LOGIN});
+        assert!(require_purpose(&data, &[PASSKEY_LOGIN]).is_ok());
+    }
+
+    #[test]
+    fn require_purpose_accepts_any_purpose_in_a_multi_value_allowlist() {
+        let data = serde_json::json!({"purpose": PASSKEY_RECOVERY});
+        assert!(require_purpose(&data, &[PASSKEY_SIGNUP, PASSKEY_RECOVERY]).is_ok());
+    }
+
+    #[test]
+    fn require_purpose_rejects_a_purpose_minted_for_a_different_flow() {
+        // Cross-flow confusion in every direction: each real purpose value,
+        // checked against every allowlist that does not contain it.
+        let all = [
+            PASSKEY_LOGIN,
+            PASSKEY_SIGNUP,
+            PASSKEY_RECOVERY,
+            PASSKEY_ADD_DEVICE,
+        ];
+        for minted in all {
+            for allowed in all {
+                if minted == allowed {
+                    continue;
+                }
+                let data = serde_json::json!({"purpose": minted});
+                assert_invalid_or_expired_challenge(require_purpose(&data, &[allowed]));
+            }
+        }
+    }
+
+    #[test]
+    fn require_purpose_rejects_missing_purpose_field() {
+        let data = serde_json::json!({"user_id": "u1"});
+        assert_invalid_or_expired_challenge(require_purpose(&data, &[PASSKEY_LOGIN]));
+    }
+
+    #[test]
+    fn require_purpose_rejects_null_purpose_field() {
+        let data = serde_json::json!({"purpose": null});
+        assert_invalid_or_expired_challenge(require_purpose(&data, &[PASSKEY_LOGIN]));
+    }
+
+    #[test]
+    fn require_purpose_rejects_unrecognised_purpose_value() {
+        let data = serde_json::json!({"purpose": "totally_made_up"});
+        assert_invalid_or_expired_challenge(require_purpose(
+            &data,
+            &[
+                PASSKEY_LOGIN,
+                PASSKEY_SIGNUP,
+                PASSKEY_RECOVERY,
+                PASSKEY_ADD_DEVICE,
+            ],
+        ));
     }
 }
