@@ -748,6 +748,58 @@ pub async fn recovery_start(email: String) -> Result<(), ServerFnError> {
     Ok(())
 }
 
+/// Start the passkey recovery flow by sending a recovery email.
+///
+/// Public endpoint — no authentication required.
+/// Mirrors `POST /auth/passkeys/recovery/request` in
+/// `apps/server/src/routes/auth_passkeys.rs::recovery_request`.
+///
+/// KYO-285: this is the passkey-recovery counterpart to `recovery_start`
+/// above — `/auth/recover-passkey` was previously wired to `recovery_start`
+/// itself, which mints an *account/password* recovery token. Completing that
+/// flow adds a password auth method and silently strips TOTP via
+/// `recover_set_password_service`, without ever getting the user a new
+/// passkey. This calls `passkey_recovery_start_service` instead, which mints
+/// a `"passkey_recovery"` token (15-minute expiry) and sends
+/// `send_passkey_recovery` rather than the account recovery email.
+///
+/// Always returns `Ok(())` to prevent email enumeration — same
+/// enumeration-safety contract as `recovery_start`. Rate-limits on the
+/// `passkey_recovery` bucket and delegates token minting + email dispatch to
+/// `passkey_recovery_start_service`.
+#[server(prefix = "/leptos-api")]
+pub async fn passkey_recovery_start(email: String) -> Result<(), ServerFnError> {
+    let ctx = extract_context()?;
+
+    if ctx.config.self_hosted && !ctx.config.smtp_configured() {
+        return Err(ServerFnError::new(
+            "Passkey recovery requires email. Ask your administrator to configure SMTP.",
+        ));
+    }
+
+    let headers: axum::http::HeaderMap = leptos_axum::extract()
+        .await
+        .map_err(|e| ServerFnError::new(format!("Failed to extract headers: {e}")))?;
+    let kv = ctx
+        .kv
+        .clone()
+        .ok_or_else(|| ServerFnError::new("KV store not available"))?;
+
+    let ip = extract_client_ip(&headers);
+    let email = email.to_lowercase();
+    let email = email.trim();
+
+    kyomi_auth::auth_service::passkey_recovery_start_service(
+        &ctx.db,
+        &kv,
+        &ip,
+        email,
+        &ctx.config.frontend_url,
+    )
+    .await
+    .into_sfn()
+}
+
 /// Verify a recovery token and create a short-lived recovery session.
 ///
 /// Public endpoint — no authentication required.

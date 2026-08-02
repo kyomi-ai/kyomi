@@ -241,15 +241,17 @@ pub async fn signup_start_service(
             } else {
                 // Resend verification email
                 let user_name = user.name.clone().unwrap_or_default();
-                mint_and_send_verification_email(
+                mint_and_send_verification_email(MintVerificationEmailParams {
                     db,
                     email,
-                    &user_name,
-                    &user.user_id,
+                    name: &user_name,
+                    user_id: &user.user_id,
                     frontend_url,
-                    "email_verification",
-                    "/signup/complete",
-                )
+                    token_type: "email_verification",
+                    verification_path: "/signup/complete",
+                    expire_hours: None,
+                    email_kind: VerificationEmailKind::Verification,
+                })
                 .await?;
                 Ok(SignupStartServiceResult::VerificationRequired)
             }
@@ -400,6 +402,39 @@ async fn signup_smtp_less_existing_unverified(
     Ok(SignupStartServiceResult::AccountCreated(Box::new(sess)))
 }
 
+/// Which `EmailService` method `mint_and_send_verification_email` invokes.
+///
+/// Every variant's underlying method has the identical
+/// `(email: &str, name: &str, link: &str) -> bool` signature, so picking a
+/// variant is the only thing that needs to vary between callers — no other
+/// plumbing changes.
+enum VerificationEmailKind {
+    /// `send_verification_email` — signup / resend-verification flows.
+    Verification,
+    /// `send_passkey_recovery` — passkey-only account, lost-authenticator flow.
+    PasskeyRecovery,
+}
+
+/// Parameters for `mint_and_send_verification_email`.
+struct MintVerificationEmailParams<'a> {
+    db: &'a DbPool,
+    email: &'a str,
+    name: &'a str,
+    user_id: &'a str,
+    frontend_url: &'a str,
+    token_type: &'a str,
+    verification_path: &'a str,
+    /// Token lifetime override, in hours. `None` uses
+    /// `create_verification_token_with_expiry`'s default
+    /// (`constants().jwt.email_verification_expire_hours`) — the previous
+    /// fixed behavior of this helper, preserved for the three signup
+    /// callers below. `passkey_recovery_start_service` passes `Some(0.25)`
+    /// (15 minutes) to match the reference REST implementation.
+    expire_hours: Option<f64>,
+    /// Which email to send — see `VerificationEmailKind`.
+    email_kind: VerificationEmailKind,
+}
+
 /// Mint a verification token, build the verification/landing URL, log it,
 /// and send the verification email in the background.
 ///
@@ -407,25 +442,41 @@ async fn signup_smtp_less_existing_unverified(
 /// signup flows below — the brand-new-user and resend-to-existing-unverified
 /// cases, for both password signup ("email_verification" token type,
 /// `/signup/complete` landing page) and passkey signup ("signup" token type,
-/// `/auth/passkey-signup` landing page). Token type and landing path are the
-/// only things that vary between callers; parameterizing them here avoids
-/// four near-identical copies of "mint token, build URL, log, spawn email".
+/// `/auth/passkey-signup` landing page) — and behind `passkey_recovery_start_service`
+/// further down ("passkey_recovery" token type, 15-minute expiry,
+/// `/auth/recover-passkey/complete` landing page, and the
+/// `send_passkey_recovery` email rather than the generic verification one).
+/// Token type, landing path, expiry, and which email to send are the only
+/// things that vary between callers; parameterizing them here avoids four
+/// near-identical copies of "mint token, build URL, log, spawn email".
 async fn mint_and_send_verification_email(
-    db: &DbPool,
-    email: &str,
-    name: &str,
-    user_id: &str,
-    frontend_url: &str,
-    token_type: &str,
-    verification_path: &str,
+    params: MintVerificationEmailParams<'_>,
 ) -> kyomi_core::Result<()> {
-    let raw_token = crate::token_service::create_verification_token(db, email, token_type).await?;
+    let MintVerificationEmailParams {
+        db,
+        email,
+        name,
+        user_id,
+        frontend_url,
+        token_type,
+        verification_path,
+        expire_hours,
+        email_kind,
+    } = params;
+
+    let raw_token = crate::token_service::create_verification_token_with_expiry(
+        db,
+        email,
+        token_type,
+        expire_hours,
+    )
+    .await?;
     let url = format!(
         "{}{verification_path}?token={raw_token}",
         frontend_url.trim_end_matches('/')
     );
     tracing::info!("Verification link ({token_type}) for {email}: {url} (user_id={user_id})");
-    spawn_verification_email(email.to_string(), name.to_string(), url);
+    spawn_verification_email(email.to_string(), name.to_string(), url, email_kind);
     Ok(())
 }
 
@@ -469,15 +520,17 @@ async fn signup_saas_new_user(params: SaasNewUserParams<'_>) -> kyomi_core::Resu
 
     let user = crate::user_service::create_user(db, email, name, false).await?;
 
-    mint_and_send_verification_email(
+    mint_and_send_verification_email(MintVerificationEmailParams {
         db,
         email,
-        name.unwrap_or_default(),
-        &user.user_id,
+        name: name.unwrap_or_default(),
+        user_id: &user.user_id,
         frontend_url,
         token_type,
         verification_path,
-    )
+        expire_hours: None,
+        email_kind: VerificationEmailKind::Verification,
+    })
     .await?;
 
     // Admin notification (Slack + email) — fire-and-forget
@@ -1882,15 +1935,17 @@ pub async fn passkey_signup_start_service(
             } else {
                 // Resend: mint a fresh "signup" token, email a fresh link.
                 let user_name = user.name.clone().unwrap_or_default();
-                mint_and_send_verification_email(
+                mint_and_send_verification_email(MintVerificationEmailParams {
                     db,
                     email,
-                    &user_name,
-                    &user.user_id,
+                    name: &user_name,
+                    user_id: &user.user_id,
                     frontend_url,
-                    "signup",
-                    "/auth/passkey-signup",
-                )
+                    token_type: "signup",
+                    verification_path: "/auth/passkey-signup",
+                    expire_hours: None,
+                    email_kind: VerificationEmailKind::Verification,
+                })
                 .await?;
                 Ok(PasskeySignupStartServiceResult::VerificationRequired)
             }
@@ -2355,11 +2410,112 @@ pub async fn recovery_start_service(
     }))
 }
 
+/// Look up the user for the enumeration-resistant passkey-recovery path.
+///
+/// Returns `None` both when no such user exists and when the lookup fails —
+/// callers must not be able to distinguish those, or the endpoint leaks
+/// account existence. The difference is recorded in the logs instead, so a
+/// database outage on the recovery path is visible to operators rather than
+/// silently returning success to every caller.
+///
+/// Ported from `apps/server/src/routes/auth_passkeys.rs::lookup_recovery_user`
+/// (KYO-286 deletes that REST route once the Leptos path fully replaces it).
+async fn lookup_recovery_user(db: &DbPool, email: &str) -> Option<kyomi_core::models::User> {
+    match crate::user_service::get_user_by_email(db, email).await {
+        Ok(user) => user,
+        Err(e) => {
+            tracing::error!(error = %e, "passkey recovery: user lookup failed");
+            None
+        }
+    }
+}
+
+/// Check rate limit, look up the verified user, and — only if one exists and
+/// is verified — mint a "passkey_recovery" token (15-minute expiry) and email
+/// a recovery link.
+///
+/// KYO-285: this is the fix for `/auth/recover-passkey` being wired to the
+/// *account/password* recovery flow (`recovery_start_service` above). A
+/// passkey-only user who loses their authenticator must get a link that
+/// leads to re-registering a passkey, not one that lets them set a password
+/// — completing the wrong flow silently strips their TOTP via
+/// `recover_set_password_service`'s `remove_auth_method(db, user_id, "totp")`
+/// and never re-establishes a passkey.
+///
+/// Mirrors `POST /auth/passkeys/recovery/request` in
+/// `apps/server/src/routes/auth_passkeys.rs::recovery_request` — the
+/// reference implementation this was ported from. Like that handler (and
+/// like `recovery_start_service` above), the only signal returned to a
+/// caller besides rate-limiting is silence: whether the account exists, is
+/// unverified, or token minting failed are all indistinguishable from the
+/// caller's perspective.
+///
+/// Rate limiting is the one exception: the server_fn wrapper
+/// (`passkey_recovery_start` in `kyomi-ui`) does propagate that `Err`. What
+/// makes the *observed* outcome uniform is the UI — `RecoveryRequestCard`
+/// discards the result and transitions to "Check Your Email" unconditionally.
+/// If you ever surface errors from that call site, the enumeration resistance
+/// has to be re-established here rather than relied on there.
+pub async fn passkey_recovery_start_service(
+    db: &kyomi_core::DbPool,
+    kv: &KVPool,
+    ip: &str,
+    email: &str,
+    frontend_url: &str,
+) -> kyomi_core::Result<()> {
+    let rate = check_rate_limit(kv, ip, "passkey_recovery").await?;
+    if !rate.allowed {
+        return Err(kyomi_core::Error::TooManyRequests(
+            format!("Rate limited. Try again in {} seconds", rate.retry_after_secs),
+            rate.retry_after_secs,
+        ));
+    }
+
+    // Always proceed to Ok(()) below regardless of what happens here — do
+    // the work silently, exactly as the reference REST handler does.
+    let user = lookup_recovery_user(db, email).await;
+
+    if let Some(user) = user
+        && user.verified
+    {
+        let user_name = user.name.clone().unwrap_or_default();
+        if let Err(e) = mint_and_send_verification_email(MintVerificationEmailParams {
+            db,
+            email,
+            name: &user_name,
+            user_id: &user.user_id,
+            frontend_url,
+            token_type: "passkey_recovery",
+            verification_path: "/auth/recover-passkey/complete",
+            expire_hours: Some(0.25),
+            email_kind: VerificationEmailKind::PasskeyRecovery,
+        })
+        .await
+        {
+            tracing::error!(error = %e, "passkey recovery: token creation failed");
+        }
+    }
+
+    Ok(())
+}
+
 /// Send a verification email in a background task (fire-and-forget).
-fn spawn_verification_email(email: String, name: String, url: String) {
+fn spawn_verification_email(
+    email: String,
+    name: String,
+    url: String,
+    kind: VerificationEmailKind,
+) {
     tokio::spawn(async move {
         let email_svc = crate::email_service::EmailService::from_env();
-        let sent = email_svc.send_verification_email(&email, &name, &url).await;
+        let sent = match kind {
+            VerificationEmailKind::Verification => {
+                email_svc.send_verification_email(&email, &name, &url).await
+            }
+            VerificationEmailKind::PasskeyRecovery => {
+                email_svc.send_passkey_recovery(&email, &name, &url).await
+            }
+        };
         if sent {
             tracing::info!("Verification email sent to {email}");
         } else {
@@ -3309,5 +3465,173 @@ mod tests {
                  states must return the same result (email enumeration guard)"
             );
         }
+    }
+
+    // -----------------------------------------------------------------
+    // passkey_recovery_start_service (KYO-285)
+    // -----------------------------------------------------------------
+
+    async fn count_tokens_of_type(db: &DbPool, email: &str, token_type: &str) -> i64 {
+        kyomi_core::db_fetch_scalar!(
+            db,
+            i64,
+            "SELECT COUNT(*) FROM verification_tokens WHERE email = $1 AND token_type = $2",
+            email,
+            token_type
+        )
+        .expect("count verification_tokens")
+    }
+
+    /// The response for an unknown email, an existing-but-unverified email,
+    /// and an existing-verified email must be indistinguishable — otherwise
+    /// the endpoint is an account-enumeration oracle. This is the security
+    /// property the whole flow depends on, so assert it explicitly rather
+    /// than inferring it from the individual mint/no-mint tests below.
+    #[tokio::test]
+    async fn passkey_recovery_start_indistinguishable_across_account_states() {
+        let db = test_pool().await;
+        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+
+        let unknown_email = "passkey-recovery-unknown@example.com";
+        let unverified_email = "passkey-recovery-unverified@example.com";
+        let verified_email = "passkey-recovery-verified@example.com";
+
+        crate::user_service::create_user(&db, unverified_email, Some("Unverified User"), false)
+            .await
+            .expect("create unverified user");
+        crate::user_service::create_user(&db, verified_email, Some("Verified User"), true)
+            .await
+            .expect("create verified user");
+
+        for email in [unknown_email, unverified_email, verified_email] {
+            let result = passkey_recovery_start_service(
+                &db,
+                &kv,
+                "127.0.0.1",
+                email,
+                "https://app.example.com",
+            )
+            .await;
+
+            assert!(
+                matches!(result, Ok(())),
+                "expected Ok(()) for {email} — unknown/unverified/verified account \
+                 states must return the same result (email enumeration guard), got {result:?}"
+            );
+        }
+    }
+
+    /// A verified user's request must mint a token of type
+    /// `"passkey_recovery"` — and, critically, *not* `"account_recovery"`,
+    /// which is the exact KYO-285 bug (`/auth/recover-passkey` was wired to
+    /// the account/password recovery flow).
+    #[tokio::test]
+    async fn passkey_recovery_start_mints_passkey_recovery_token_for_verified_user() {
+        let db = test_pool().await;
+        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+        let email = "passkey-recovery-mint@example.com";
+
+        crate::user_service::create_user(&db, email, Some("Verified User"), true)
+            .await
+            .expect("create verified user");
+
+        passkey_recovery_start_service(&db, &kv, "127.0.0.1", email, "https://app.example.com")
+            .await
+            .expect("service call should not error");
+
+        assert_eq!(
+            count_tokens_of_type(&db, email, "passkey_recovery").await,
+            1,
+            "a verified user's passkey recovery request must mint a \"passkey_recovery\" token"
+        );
+        assert_eq!(
+            count_tokens_of_type(&db, email, "account_recovery").await,
+            0,
+            "passkey recovery must never mint an \"account_recovery\" token — that's the KYO-285 bug"
+        );
+    }
+
+    #[tokio::test]
+    async fn passkey_recovery_start_mints_no_token_for_unverified_user() {
+        let db = test_pool().await;
+        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+        let email = "passkey-recovery-unverified-mint@example.com";
+
+        crate::user_service::create_user(&db, email, Some("Unverified User"), false)
+            .await
+            .expect("create unverified user");
+
+        passkey_recovery_start_service(&db, &kv, "127.0.0.1", email, "https://app.example.com")
+            .await
+            .expect("service call should not error");
+
+        assert_eq!(
+            count_tokens_of_type(&db, email, "passkey_recovery").await,
+            0,
+            "an unverified user's passkey recovery request must not mint a token"
+        );
+    }
+
+    /// The actual KYO-285 bug: completing the *wrong* recovery flow (account
+    /// recovery, wired in by mistake) adds a password auth method and calls
+    /// `remove_auth_method(db, user_id, "totp")`, silently downgrading a
+    /// passkey-only user's account security. Assert directly, at the
+    /// `user_service` level, that starting a *passkey* recovery leaves both
+    /// auth methods exactly as they were beforehand — this locks in the fix
+    /// directly rather than inferring it from `passkey_recovery_start_service`
+    /// simply never calling `remove_auth_method`.
+    #[tokio::test]
+    async fn passkey_recovery_start_leaves_password_and_totp_auth_methods_untouched() {
+        let db = test_pool().await;
+        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+        let email = "passkey-recovery-auth-methods@example.com";
+
+        let user = crate::user_service::create_user(&db, email, Some("Verified User"), true)
+            .await
+            .expect("create verified user");
+
+        crate::user_service::upsert_auth_method(
+            &db,
+            &user.user_id,
+            "totp",
+            &serde_json::json!({"secret": "test-secret"}),
+        )
+        .await
+        .expect("seed totp auth method");
+
+        let password_before = crate::user_service::get_auth_method(&db, &user.user_id, "password")
+            .await
+            .expect("get_auth_method password");
+        let totp_before = crate::user_service::get_auth_method(&db, &user.user_id, "totp")
+            .await
+            .expect("get_auth_method totp");
+        assert!(
+            password_before.is_none(),
+            "sanity check: no password auth method before the call"
+        );
+        assert!(
+            totp_before.is_some(),
+            "sanity check: totp auth method exists before the call"
+        );
+
+        passkey_recovery_start_service(&db, &kv, "127.0.0.1", email, "https://app.example.com")
+            .await
+            .expect("service call should not error");
+
+        let password_after = crate::user_service::get_auth_method(&db, &user.user_id, "password")
+            .await
+            .expect("get_auth_method password");
+        let totp_after = crate::user_service::get_auth_method(&db, &user.user_id, "totp")
+            .await
+            .expect("get_auth_method totp");
+
+        assert!(
+            password_after.is_none(),
+            "passkey recovery must never add a password auth method (KYO-285)"
+        );
+        assert!(
+            totp_after.is_some(),
+            "passkey recovery must never remove the totp auth method (KYO-285)"
+        );
     }
 }
