@@ -6,8 +6,14 @@
 //! workspace context. Complements `user_service.rs` which already has
 //! `get_workspace` and `get_workspace_user` for single-record lookups.
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
-use kyomi_core::enums::TransferStatus;
+use kyomi_core::db::in_clause_placeholders;
+use kyomi_core::enums::{
+    CatalogRefreshStatus, SubscriptionStatus, SubscriptionTier, TransferStatus, WorkspaceRole,
+    WorkspaceStatus,
+};
 
 /// Build a `StripeService` from application config when Stripe is configured.
 /// Returns `None` for self-hosted installs without Stripe keys.
@@ -76,29 +82,198 @@ pub struct UserWorkspaceSummary {
 }
 
 /// Get all workspaces a user belongs to, enriched with member counts.
-/// Reuses `get_user_workspaces` + `count_workspace_users`.
+///
+/// 2 queries total: one JOIN for the memberships (via `get_user_workspaces`),
+/// one grouped query for all member counts.
 pub async fn get_user_workspaces_with_counts(
     pool: &DbPool,
     user_id: &str,
 ) -> kyomi_core::Result<Vec<UserWorkspaceSummary>> {
     let pairs = get_user_workspaces(pool, user_id).await?;
-    let mut out = Vec::with_capacity(pairs.len());
-    for (ws, wu) in pairs {
-        let member_count = count_workspace_users(pool, &ws.workspace_id).await?;
-        out.push(UserWorkspaceSummary {
-            workspace_id: ws.workspace_id,
-            name: ws.name,
-            member_count,
-            subscription_tier: ws.subscription_tier,
-            role: wu.role,
-        });
-    }
+
+    let workspace_ids: Vec<String> = pairs.iter().map(|(ws, _)| ws.workspace_id.clone()).collect();
+    let counts = fetch_member_counts(pool, &workspace_ids).await?;
+
+    let out = pairs
+        .into_iter()
+        .map(|(ws, wu)| {
+            let member_count = counts.get(&ws.workspace_id).copied().unwrap_or(0);
+            UserWorkspaceSummary {
+                workspace_id: ws.workspace_id,
+                name: ws.name,
+                member_count,
+                subscription_tier: ws.subscription_tier,
+                role: wu.role,
+            }
+        })
+        .collect();
     Ok(out)
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct MemberCountRow {
+    workspace_id: String,
+    count: i64,
+}
+
+/// Count active members for a list of workspaces in a single grouped query.
+///
+/// Uses `= ANY($1)` on Postgres and individual placeholders on SQLite,
+/// mirroring `chat_service::fetch_session_counts`. Workspaces with zero
+/// active members are simply absent from the returned map — callers should
+/// default missing entries to `0`.
+async fn fetch_member_counts(
+    pool: &DbPool,
+    workspace_ids: &[String],
+) -> kyomi_core::Result<HashMap<String, i64>> {
+    if workspace_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let is_pg = pool.is_postgres();
+    let bt = sql_compat::bool_true(is_pg);
+
+    let rows: Vec<MemberCountRow> = match pool {
+        DbPool::Postgres(pg) => {
+            let sql = format!(
+                "SELECT workspace_id, COUNT(*) as count FROM workspace_users \
+                 WHERE workspace_id = ANY($1) AND active = {bt} \
+                 GROUP BY workspace_id"
+            );
+            sqlx::query_as::<_, MemberCountRow>(&sql)
+                .bind(workspace_ids)
+                .fetch_all(pg)
+                .await?
+        }
+        DbPool::Sqlite(sq) => {
+            let (in_clause, _) = in_clause_placeholders(workspace_ids.len(), 1);
+            let sql = format!(
+                "SELECT workspace_id, COUNT(*) as count FROM workspace_users \
+                 WHERE workspace_id IN {in_clause} AND active = {bt} \
+                 GROUP BY workspace_id"
+            );
+            let mut query = sqlx::query_as::<_, MemberCountRow>(&sql);
+            for id in workspace_ids {
+                query = query.bind(id);
+            }
+            query.fetch_all(sq).await?
+        }
+    };
+
+    Ok(rows.into_iter().map(|r| (r.workspace_id, r.count)).collect())
+}
+
+/// Combined row shape for the `workspace_users JOIN workspaces` query used by
+/// `get_user_workspaces`.
+///
+/// `Workspace` and `WorkspaceUser` both have `workspace_id` and `created_at`
+/// columns, so the `WorkspaceUser` side is selected with a `wu_` alias
+/// prefix to avoid a same-named-column collision — relying on positional or
+/// duplicate-name resolution instead differs between Postgres and SQLite.
+#[derive(Debug, sqlx::FromRow)]
+struct WorkspaceMembershipRow {
+    // -- workspaces columns (unaliased; field names match column names) --
+    workspace_id: String,
+    name: Option<String>,
+    domain: Option<String>,
+    status: WorkspaceStatus,
+    admin_email: Option<String>,
+    owner_user_id: String,
+    subscription_tier: SubscriptionTier,
+    subscription_status: SubscriptionStatus,
+    billing_cycle: Option<String>,
+    subscription_period_start: Option<DateTime<Utc>>,
+    subscription_period_end: Option<DateTime<Utc>>,
+    trial_ends_at: Option<DateTime<Utc>>,
+    #[sqlx(default)]
+    ai_credits_used_usd: f64,
+    #[sqlx(default)]
+    ai_bundle_balance_usd: f64,
+    #[sqlx(default)]
+    analytics_bundle_events: i64,
+    user_limit: Option<i32>,
+    stripe_customer_id: Option<String>,
+    stripe_subscription_id: Option<String>,
+    settings: Option<serde_json::Value>,
+    business_knowledge: Option<String>,
+    knowledge_updated_at: Option<DateTime<Utc>>,
+    last_catalog_refresh: Option<DateTime<Utc>>,
+    catalog_refresh_status: Option<CatalogRefreshStatus>,
+    catalog_refresh_progress: Option<serde_json::Value>,
+    #[sqlx(default)]
+    catalog_onboarding_completed: bool,
+    catalog_indexed_projects: Option<serde_json::Value>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    // -- workspace_users columns (wu_-aliased to dodge the collision above) --
+    wu_id: i32,
+    wu_workspace_id: String,
+    wu_user_id: String,
+    wu_role: WorkspaceRole,
+    wu_active: bool,
+    wu_created_at: DateTime<Utc>,
+    wu_last_active: Option<DateTime<Utc>>,
+    wu_extra_metadata: Option<serde_json::Value>,
+}
+
+impl WorkspaceMembershipRow {
+    fn into_pair(self) -> (Workspace, WorkspaceUser) {
+        let workspace = Workspace {
+            workspace_id: self.workspace_id,
+            name: self.name,
+            domain: self.domain,
+            status: self.status,
+            admin_email: self.admin_email,
+            owner_user_id: self.owner_user_id,
+            subscription_tier: self.subscription_tier,
+            subscription_status: self.subscription_status,
+            billing_cycle: self.billing_cycle,
+            subscription_period_start: self.subscription_period_start,
+            subscription_period_end: self.subscription_period_end,
+            trial_ends_at: self.trial_ends_at,
+            ai_credits_used_usd: self.ai_credits_used_usd,
+            ai_bundle_balance_usd: self.ai_bundle_balance_usd,
+            analytics_bundle_events: self.analytics_bundle_events,
+            user_limit: self.user_limit,
+            stripe_customer_id: self.stripe_customer_id,
+            stripe_subscription_id: self.stripe_subscription_id,
+            settings: self.settings,
+            business_knowledge: self.business_knowledge,
+            knowledge_updated_at: self.knowledge_updated_at,
+            last_catalog_refresh: self.last_catalog_refresh,
+            catalog_refresh_status: self.catalog_refresh_status,
+            catalog_refresh_progress: self.catalog_refresh_progress,
+            catalog_onboarding_completed: self.catalog_onboarding_completed,
+            catalog_indexed_projects: self.catalog_indexed_projects,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        };
+        let membership = WorkspaceUser {
+            id: self.wu_id,
+            workspace_id: self.wu_workspace_id,
+            user_id: self.wu_user_id,
+            role: self.wu_role,
+            active: self.wu_active,
+            created_at: self.wu_created_at,
+            last_active: self.wu_last_active,
+            extra_metadata: self.wu_extra_metadata,
+        };
+        (workspace, membership)
+    }
 }
 
 /// Get all workspaces a user belongs to (active memberships).
 ///
-/// Returns pairs of (Workspace, WorkspaceUser) for each membership.
+/// Returns pairs of (Workspace, WorkspaceUser) for each membership, ordered
+/// by `wu.created_at ASC`. That ordering is the function's contract and
+/// callers may rely on it — the sidebar switcher renders in this order.
+/// (KYO-201 claimed `get_user_workspace_context` depends on it; it does not
+/// — that function issues its own `ORDER BY created_at ASC LIMIT 1` query
+/// against `workspace_users` and never calls this one.)
+///
+/// A single JOIN query; a membership row whose workspace row is missing is
+/// dropped by the INNER JOIN, matching the previous `if let Some(ws)`
+/// behavior.
 pub async fn get_user_workspaces(
     pool: &DbPool,
     user_id: &str,
@@ -106,28 +281,28 @@ pub async fn get_user_workspaces(
     let is_pg = pool.is_postgres();
     let bt = sql_compat::bool_true(is_pg);
 
-    // Get all active workspace memberships
-    let memberships_sql = format!(
-        "SELECT * FROM workspace_users \
-         WHERE user_id = $1 AND active = {bt} \
-         ORDER BY created_at ASC"
+    let sql = format!(
+        "SELECT \
+           w.workspace_id, w.name, w.domain, w.status, w.admin_email, w.owner_user_id, \
+           w.subscription_tier, w.subscription_status, w.billing_cycle, \
+           w.subscription_period_start, w.subscription_period_end, w.trial_ends_at, \
+           w.ai_credits_used_usd, w.ai_bundle_balance_usd, w.analytics_bundle_events, \
+           w.user_limit, w.stripe_customer_id, w.stripe_subscription_id, w.settings, \
+           w.business_knowledge, w.knowledge_updated_at, w.last_catalog_refresh, \
+           w.catalog_refresh_status, w.catalog_refresh_progress, w.catalog_onboarding_completed, \
+           w.catalog_indexed_projects, w.created_at, w.updated_at, \
+           wu.id AS wu_id, wu.workspace_id AS wu_workspace_id, wu.user_id AS wu_user_id, \
+           wu.role AS wu_role, wu.active AS wu_active, wu.created_at AS wu_created_at, \
+           wu.last_active AS wu_last_active, wu.extra_metadata AS wu_extra_metadata \
+         FROM workspace_users wu \
+         JOIN workspaces w ON w.workspace_id = wu.workspace_id \
+         WHERE wu.user_id = $1 AND wu.active = {bt} \
+         ORDER BY wu.created_at ASC"
     );
-    let memberships = kyomi_core::db_fetch_all!(pool, WorkspaceUser, &memberships_sql, user_id)?;
+    let rows =
+        kyomi_core::db_fetch_all!(pool, WorkspaceMembershipRow, &sql, user_id)?;
 
-    let mut results = Vec::with_capacity(memberships.len());
-    for wu in memberships {
-        let ws = kyomi_core::db_fetch_optional!(
-            pool, Workspace,
-            "SELECT * FROM workspaces WHERE workspace_id = $1",
-            &wu.workspace_id
-        )?;
-
-        if let Some(ws) = ws {
-            results.push((ws, wu));
-        }
-    }
-
-    Ok(results)
+    Ok(rows.into_iter().map(WorkspaceMembershipRow::into_pair).collect())
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -1274,6 +1449,88 @@ mod tests {
         DbPool::Sqlite(pool)
     }
 
+    /// Build an in-memory SQLite pool with migrations applied and FK
+    /// enforcement explicitly turned OFF (sqlx defaults it on). Used only
+    /// by the orphan-membership test, which needs to insert a
+    /// `workspace_users` row whose `workspace_id` doesn't exist in
+    /// `workspaces` — impossible with FK enforcement on.
+    async fn test_pool_no_fk() -> DbPool {
+        let _ = kyomi_core::constants::load_with_fallback();
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+
+        sqlx::migrate!("../../apps/server/migrations-sqlite")
+            .run(&pool)
+            .await
+            .expect("run sqlite migrations");
+
+        sqlx::query("PRAGMA foreign_keys=OFF")
+            .execute(&pool)
+            .await
+            .expect("disable foreign keys");
+
+        DbPool::Sqlite(pool)
+    }
+
+    async fn seed_user(pool: &DbPool, user_id: &str, email: &str) {
+        let sq = match pool {
+            DbPool::Sqlite(sq) => sq,
+            _ => panic!("test requires sqlite pool"),
+        };
+        sqlx::query("INSERT INTO users (user_id, email) VALUES (?1, ?2)")
+            .bind(user_id)
+            .bind(email)
+            .execute(sq)
+            .await
+            .expect("insert user");
+    }
+
+    async fn seed_workspace(pool: &DbPool, workspace_id: &str, owner_user_id: &str) {
+        let sq = match pool {
+            DbPool::Sqlite(sq) => sq,
+            _ => panic!("test requires sqlite pool"),
+        };
+        sqlx::query(
+            "INSERT INTO workspaces (workspace_id, name, owner_user_id) VALUES (?1, ?2, ?3)",
+        )
+        .bind(workspace_id)
+        .bind(format!("Workspace {workspace_id}"))
+        .bind(owner_user_id)
+        .execute(sq)
+        .await
+        .expect("insert workspace");
+    }
+
+    /// Insert an active or inactive `workspace_users` membership at an
+    /// explicit `created_at`, so ordering can be asserted deterministically.
+    async fn seed_membership(
+        pool: &DbPool,
+        workspace_id: &str,
+        user_id: &str,
+        active: bool,
+        created_at: &str,
+    ) {
+        let sq = match pool {
+            DbPool::Sqlite(sq) => sq,
+            _ => panic!("test requires sqlite pool"),
+        };
+        sqlx::query(
+            "INSERT INTO workspace_users (workspace_id, user_id, role, active, created_at) \
+             VALUES (?1, ?2, 'workspace_user', ?3, ?4)",
+        )
+        .bind(workspace_id)
+        .bind(user_id)
+        .bind(active)
+        .bind(created_at)
+        .execute(sq)
+        .await
+        .expect("insert membership");
+    }
+
     /// Insert a user, workspace, and workspace_invitation for testing.
     async fn seed_invitation(pool: &DbPool, invitation_id: &str) {
         let sq = match pool {
@@ -1364,5 +1621,109 @@ mod tests {
             }
             other => panic!("expected Conflict error, got: {other:?}"),
         }
+    }
+
+    // -- get_user_workspaces (KYO-201: N+1 -> single JOIN) --
+
+    #[tokio::test]
+    async fn get_user_workspaces_orders_by_created_at_and_excludes_inactive() {
+        let pool = test_pool().await;
+        seed_user(&pool, "user-a", "a@test.local").await;
+        seed_workspace(&pool, "ws-second", "user-a").await;
+        seed_workspace(&pool, "ws-first", "user-a").await;
+        seed_workspace(&pool, "ws-inactive", "user-a").await;
+
+        // Inserted out of created_at order on purpose — the JOIN's
+        // `ORDER BY wu.created_at ASC` must still sort them correctly.
+        seed_membership(&pool, "ws-second", "user-a", true, "2026-01-01 00:00:00").await;
+        seed_membership(&pool, "ws-first", "user-a", true, "2026-01-02 00:00:00").await;
+        // Later created_at, but inactive — must be excluded entirely.
+        seed_membership(&pool, "ws-inactive", "user-a", false, "2026-01-03 00:00:00").await;
+
+        let pairs = get_user_workspaces(&pool, "user-a").await.unwrap();
+
+        let ids: Vec<&str> = pairs.iter().map(|(ws, _)| ws.workspace_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["ws-second", "ws-first"],
+            "expected created_at ASC order with the inactive membership excluded"
+        );
+        for (ws, wu) in &pairs {
+            assert_eq!(ws.workspace_id, wu.workspace_id, "workspace/membership pair mismatch");
+            assert!(wu.active, "only active memberships should be returned");
+        }
+    }
+
+    #[tokio::test]
+    async fn get_user_workspaces_skips_membership_with_missing_workspace() {
+        // Uses the no-FK pool so an orphan workspace_users row (pointing at
+        // a workspace that doesn't exist) can actually be inserted — this
+        // asserts the INNER JOIN drops it, matching the pre-JOIN
+        // `if let Some(ws) = ...` behavior, so a future LEFT JOIN regression
+        // would be caught here.
+        let pool = test_pool_no_fk().await;
+        seed_user(&pool, "user-b", "b@test.local").await;
+        seed_workspace(&pool, "ws-real", "user-b").await;
+
+        seed_membership(&pool, "ws-real", "user-b", true, "2026-01-01 00:00:00").await;
+        seed_membership(&pool, "ws-missing", "user-b", true, "2026-01-02 00:00:00").await;
+
+        let pairs = get_user_workspaces(&pool, "user-b").await.unwrap();
+
+        assert_eq!(pairs.len(), 1, "orphan membership must be dropped by the JOIN");
+        assert_eq!(pairs[0].0.workspace_id, "ws-real");
+    }
+
+    #[tokio::test]
+    async fn get_user_workspaces_returns_empty_for_user_with_no_memberships() {
+        let pool = test_pool().await;
+        seed_user(&pool, "user-lonely", "lonely@test.local").await;
+
+        let pairs = get_user_workspaces(&pool, "user-lonely").await.unwrap();
+        assert!(pairs.is_empty());
+    }
+
+    // -- get_user_workspaces_with_counts (KYO-201: 1+2N -> 2 queries) --
+
+    #[tokio::test]
+    async fn get_user_workspaces_with_counts_returns_correct_member_counts() {
+        let pool = test_pool().await;
+        seed_user(&pool, "user-c", "c@test.local").await;
+        seed_user(&pool, "user-d", "d@test.local").await;
+        seed_user(&pool, "user-e", "e@test.local").await;
+        seed_workspace(&pool, "ws-multi", "user-c").await;
+        seed_workspace(&pool, "ws-solo", "user-c").await;
+
+        // ws-multi: 2 active members (user-c, user-d) + 1 inactive (user-e,
+        // must not count).
+        seed_membership(&pool, "ws-multi", "user-c", true, "2026-01-01 00:00:00").await;
+        seed_membership(&pool, "ws-multi", "user-d", true, "2026-01-01 00:00:01").await;
+        seed_membership(&pool, "ws-multi", "user-e", false, "2026-01-01 00:00:02").await;
+        // ws-solo: 1 active member (user-c only).
+        seed_membership(&pool, "ws-solo", "user-c", true, "2026-01-02 00:00:00").await;
+
+        let summaries = get_user_workspaces_with_counts(&pool, "user-c").await.unwrap();
+        assert_eq!(summaries.len(), 2);
+
+        let multi = summaries
+            .iter()
+            .find(|s| s.workspace_id == "ws-multi")
+            .expect("ws-multi present");
+        assert_eq!(multi.member_count, 2);
+
+        let solo = summaries
+            .iter()
+            .find(|s| s.workspace_id == "ws-solo")
+            .expect("ws-solo present");
+        assert_eq!(solo.member_count, 1);
+    }
+
+    #[tokio::test]
+    async fn get_user_workspaces_with_counts_returns_empty_without_erroring() {
+        let pool = test_pool().await;
+        seed_user(&pool, "user-empty", "empty@test.local").await;
+
+        let summaries = get_user_workspaces_with_counts(&pool, "user-empty").await.unwrap();
+        assert!(summaries.is_empty());
     }
 }
