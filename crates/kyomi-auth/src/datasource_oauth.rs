@@ -704,15 +704,13 @@ async fn resolve_datasource_id(
 }
 
 /// Result of `datasource_oauth_status_service`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct DatasourceOAuthStatusResult {
-    pub connected: bool,
-    pub provider_email: Option<String>,
-    pub token_expired: bool,
-    pub needs_reconnect: bool,
-    pub connect_url: String,
-    pub disconnect_url: String,
-}
+///
+/// Defined in `kyomi_types` as `DatasourceOAuthStatus` (the canonical wire
+/// name) because it also crosses into the WASM client as a server_fn
+/// response — see `kyomi_types::datasource_contracts`. Re-exported under
+/// this service-return name so existing call sites keep compiling
+/// unchanged.
+pub use kyomi_types::DatasourceOAuthStatus as DatasourceOAuthStatusResult;
 
 /// Get the OAuth connection status for a specific datasource and user.
 ///
