@@ -13,7 +13,7 @@ use crate::components::{
     ButtonVariant, Label, Spinner, INPUT_CLASS,
 };
 use crate::pages::auth::auth_layout::AuthLayout;
-use crate::server_fns::auth::recovery_start;
+use crate::server_fns::auth::{passkey_recovery_start, recovery_start};
 
 /// Which recovery flow this card represents. Controls the icon and title.
 #[derive(Clone, Copy, PartialEq)]
@@ -51,7 +51,13 @@ pub fn RecoveryRequestCard(kind: RecoveryKind) -> impl IntoView {
         set_error.set(None);
 
         leptos::task::spawn_local(async move {
-            let _ = recovery_start(current_email).await;
+            // Deliberately ignore the result of either call — the card
+            // always transitions to "Check Your Email" regardless of
+            // outcome (enumeration resistance; see the module doc comment).
+            let _ = match kind {
+                RecoveryKind::Account => recovery_start(current_email).await,
+                RecoveryKind::Passkey => passkey_recovery_start(current_email).await,
+            };
             set_submitted.try_set(true);
             set_loading.try_set(false);
         });
