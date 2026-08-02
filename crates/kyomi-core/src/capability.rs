@@ -314,6 +314,55 @@ pub fn compute_capabilities_self_hosted() -> Capabilities {
     }
 }
 
+/// Compute minimal free-tier capabilities for SaaS users without a workspace.
+///
+/// Grants only the baseline feature set — no premium flags, no multi-user,
+/// billing enabled (so they can upgrade), and conservative limits. This is
+/// the default for an unauthenticated-workspace SaaS user; callers must
+/// never substitute [`compute_capabilities_self_hosted`] here, as that
+/// grants enterprise permissions to such users.
+///
+/// Relocated verbatim from `kyomi-ui/src/server_fns/context.rs` in KYO-225 —
+/// this crate's module doc calls it the single source of truth for
+/// `Capabilities`, so a fourth constructor living in a UI crate was a defect.
+pub fn compute_capabilities_free_tier() -> Capabilities {
+    Capabilities {
+        subscription_tier: SubscriptionTier::Free,
+        subscription_status: SubscriptionStatus::Active,
+        billing_enabled: true, // SaaS — allow user to see billing/upgrade
+        credits_remaining: 0.0,
+        credits_limit: 0.0,
+        credits_exhausted: true,
+
+        // AI chat disabled — no credits
+        ai_chat_enabled: false,
+
+        // BigQuery
+        bigquery_access_level: "full".to_string(),
+
+        // Organization features — disabled for free tier
+        multi_user_enabled: false,
+        user_management_enabled: false,
+        dashboard_sharing_enabled: false,
+
+        // Data features
+        export_enabled: true,
+        api_access_enabled: false,
+
+        // Free-tier limits
+        catalog_refresh_limit_per_hour: 1,
+        max_dashboards: 5,
+        query_history_retention_days: 7,
+        user_limit: 1,
+
+        // Premium flags — all disabled
+        kyomi_watch_enabled: false,
+        slack_integration_enabled: false,
+        mcp_access_enabled: true, // MCP is available to all tiers
+        pdf_export_enabled: false,
+    }
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -652,5 +701,135 @@ mod tests {
         // Credits — effectively unlimited
         assert!((caps.credits_remaining - 999_999.0).abs() < f64::EPSILON);
         assert!((caps.credits_limit - 999_999.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn free_tier_capabilities_are_restrictive() {
+        let caps = compute_capabilities_free_tier();
+
+        assert_eq!(caps.subscription_tier, SubscriptionTier::Free);
+        assert!(caps.billing_enabled, "SaaS free tier should show billing UI");
+        assert!(caps.credits_exhausted, "No credits by default");
+
+        // AI chat off
+        assert!(!caps.ai_chat_enabled);
+
+        // Premium features off
+        assert!(!caps.multi_user_enabled);
+        assert!(!caps.kyomi_watch_enabled);
+        assert!(!caps.slack_integration_enabled);
+        assert!(!caps.pdf_export_enabled);
+
+        // Data features
+        assert!(caps.export_enabled, "export is included in free tier");
+
+        // MCP available to all tiers
+        assert!(caps.mcp_access_enabled);
+
+        // Free-tier limits
+        assert_eq!(caps.max_dashboards, 5);
+        assert_eq!(caps.user_limit, 1);
+        assert_eq!(caps.catalog_refresh_limit_per_hour, 1);
+    }
+
+    /// The invariant the `context.rs` call site's warning exists to protect:
+    /// an unauthenticated-workspace SaaS user (free tier) must never receive
+    /// a capability that self-hosted mode grants — that would be the exact
+    /// "enterprise permissions to unauthenticated-workspace SaaS users" leak
+    /// the warning calls out.
+    ///
+    /// `billing_enabled` and `credits_exhausted` are deliberately excluded:
+    /// `billing_enabled` is a UI-visibility toggle (free tier shows a billing
+    /// upsell; self-hosted has no billing at all), and `credits_exhausted`
+    /// uses inverted true-means-restricted semantics. Neither is a capability
+    /// grant, so "permissive" doesn't apply to them the same way as the
+    /// feature-gating flags below.
+    ///
+    /// Flags are enumerated individually rather than looped so that adding a
+    /// new boolean to `Capabilities` does not silently start passing this
+    /// test without a human deciding which side of the invariant it belongs
+    /// on.
+    #[test]
+    fn free_tier_never_grants_more_than_self_hosted() {
+        let free = compute_capabilities_free_tier();
+        let self_hosted = compute_capabilities_self_hosted();
+
+        // `bool` is `Ord` with `false < true`, so `<=` is exactly "free tier
+        // does not grant more than self-hosted" for each flag.
+        assert!(free.ai_chat_enabled <= self_hosted.ai_chat_enabled);
+        assert!(free.multi_user_enabled <= self_hosted.multi_user_enabled);
+        assert!(free.user_management_enabled <= self_hosted.user_management_enabled);
+        assert!(free.dashboard_sharing_enabled <= self_hosted.dashboard_sharing_enabled);
+        assert!(free.export_enabled <= self_hosted.export_enabled);
+        assert!(free.api_access_enabled <= self_hosted.api_access_enabled);
+        assert!(free.kyomi_watch_enabled <= self_hosted.kyomi_watch_enabled);
+        assert!(free.slack_integration_enabled <= self_hosted.slack_integration_enabled);
+        assert!(free.mcp_access_enabled <= self_hosted.mcp_access_enabled);
+        assert!(free.pdf_export_enabled <= self_hosted.pdf_export_enabled);
+
+        // And strictly less overall, not merely "not more": self-hosted
+        // grants capabilities free tier has none of, so the two sets are not
+        // accidentally identical.
+        assert!(!free.ai_chat_enabled && self_hosted.ai_chat_enabled);
+        assert!(!free.multi_user_enabled && self_hosted.multi_user_enabled);
+        assert!(!free.user_management_enabled && self_hosted.user_management_enabled);
+        assert!(!free.dashboard_sharing_enabled && self_hosted.dashboard_sharing_enabled);
+        assert!(!free.api_access_enabled && self_hosted.api_access_enabled);
+        assert!(!free.kyomi_watch_enabled && self_hosted.kyomi_watch_enabled);
+        assert!(!free.slack_integration_enabled && self_hosted.slack_integration_enabled);
+        assert!(!free.pdf_export_enabled && self_hosted.pdf_export_enabled);
+    }
+
+    /// The four limits that deliberately differ from `compute_capabilities()`
+    /// / `compute_capabilities_self_hosted()`'s unlimited (`0`) convention.
+    /// If a future "simplification" collapses free tier toward the unlimited
+    /// default, this fails loudly instead of silently granting unlimited
+    /// dashboards/history/refreshes/seats to unauthenticated-workspace users.
+    #[test]
+    fn free_tier_limits_differ_from_unlimited_defaults() {
+        let caps = compute_capabilities_free_tier();
+
+        assert_eq!(caps.max_dashboards, 5);
+        assert_eq!(caps.query_history_retention_days, 7);
+        assert_eq!(caps.catalog_refresh_limit_per_hour, 1);
+        assert_eq!(caps.user_limit, 1);
+    }
+
+    /// Every one of the 21 `Capabilities` field values, pinned against the
+    /// literal that lived at `kyomi-ui/src/server_fns/context.rs:168` before
+    /// KYO-225 relocated it here (verified via `git show
+    /// main:crates/kyomi-ui/src/server_fns/context.rs`). Proves the
+    /// relocation changed nothing.
+    #[test]
+    fn free_tier_capabilities_match_pre_relocation_literal() {
+        let caps = compute_capabilities_free_tier();
+
+        assert_eq!(caps.subscription_tier, SubscriptionTier::Free);
+        assert_eq!(caps.subscription_status, SubscriptionStatus::Active);
+        assert!(caps.billing_enabled);
+        assert_eq!(caps.credits_remaining, 0.0);
+        assert_eq!(caps.credits_limit, 0.0);
+        assert!(caps.credits_exhausted);
+
+        assert!(!caps.ai_chat_enabled);
+
+        assert_eq!(caps.bigquery_access_level, "full");
+
+        assert!(!caps.multi_user_enabled);
+        assert!(!caps.user_management_enabled);
+        assert!(!caps.dashboard_sharing_enabled);
+
+        assert!(caps.export_enabled);
+        assert!(!caps.api_access_enabled);
+
+        assert_eq!(caps.catalog_refresh_limit_per_hour, 1);
+        assert_eq!(caps.max_dashboards, 5);
+        assert_eq!(caps.query_history_retention_days, 7);
+        assert_eq!(caps.user_limit, 1);
+
+        assert!(!caps.kyomi_watch_enabled);
+        assert!(!caps.slack_integration_enabled);
+        assert!(caps.mcp_access_enabled);
+        assert!(!caps.pdf_export_enabled);
     }
 }

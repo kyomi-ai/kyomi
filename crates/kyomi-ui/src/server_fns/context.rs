@@ -84,7 +84,7 @@ pub async fn get_user_context() -> Result<UserContext, ServerFnError> {
     let workspace_id = auth.workspace.workspace_id.as_deref();
     let subscription_tier = auth.workspace.subscription_tier;
 
-    // Compute capabilities from the workspace (mirrors apps/server/src/routes/workspaces.rs).
+    // Compute capabilities from the workspace.
     let capabilities = if ctx.config.self_hosted {
         kyomi_core::capability::compute_capabilities_self_hosted()
     } else if let Some(ws_id) = workspace_id {
@@ -99,7 +99,7 @@ pub async fn get_user_context() -> Result<UserContext, ServerFnError> {
         // No workspace in SaaS mode — return minimal free-tier defaults.
         // Do NOT use compute_capabilities_self_hosted here; that grants
         // enterprise permissions to unauthenticated-workspace SaaS users.
-        free_tier_capabilities()
+        kyomi_core::capability::compute_capabilities_free_tier()
     };
 
     // Flatten Capabilities struct into a HashMap<String, bool> for the frontend.
@@ -158,51 +158,6 @@ pub async fn get_user_context() -> Result<UserContext, ServerFnError> {
         chart_palette,
         permissions,
     })
-}
-
-/// Minimal free-tier capabilities for SaaS users without a workspace.
-///
-/// Grants only the baseline feature set — no premium flags, no multi-user,
-/// billing enabled (so they can upgrade), and conservative limits.
-#[cfg(feature = "ssr")]
-fn free_tier_capabilities() -> kyomi_core::capability::Capabilities {
-    use kyomi_core::enums::{SubscriptionStatus, SubscriptionTier};
-
-    kyomi_core::capability::Capabilities {
-        subscription_tier: SubscriptionTier::Free,
-        subscription_status: SubscriptionStatus::Active,
-        billing_enabled: true, // SaaS — allow user to see billing/upgrade
-        credits_remaining: 0.0,
-        credits_limit: 0.0,
-        credits_exhausted: true,
-
-        // AI chat disabled — no credits
-        ai_chat_enabled: false,
-
-        // BigQuery — keep in sync with compute_capabilities() in capability.rs
-        bigquery_access_level: "full".to_string(),
-
-        // Organization features — disabled for free tier
-        multi_user_enabled: false,
-        user_management_enabled: false,
-        dashboard_sharing_enabled: false,
-
-        // Data features — keep in sync with compute_capabilities() in capability.rs
-        export_enabled: true,
-        api_access_enabled: false,
-
-        // Free-tier limits
-        catalog_refresh_limit_per_hour: 1,
-        max_dashboards: 5,
-        query_history_retention_days: 7,
-        user_limit: 1,
-
-        // Premium flags — all disabled
-        kyomi_watch_enabled: false,
-        slack_integration_enabled: false,
-        mcp_access_enabled: true, // MCP is available to all tiers
-        pdf_export_enabled: false,
-    }
 }
 
 /// Convert the Capabilities struct into a HashMap<String, bool> for the frontend.
@@ -325,34 +280,5 @@ mod tests {
 
         assert!(!map["billing_enabled"]);
         assert!(!map["credits_exhausted"]);
-    }
-
-    #[test]
-    fn free_tier_capabilities_are_restrictive() {
-        let caps = free_tier_capabilities();
-
-        assert_eq!(caps.subscription_tier, kyomi_core::enums::SubscriptionTier::Free);
-        assert!(caps.billing_enabled, "SaaS free tier should show billing UI");
-        assert!(caps.credits_exhausted, "No credits by default");
-
-        // AI chat off
-        assert!(!caps.ai_chat_enabled);
-
-        // Premium features off
-        assert!(!caps.multi_user_enabled);
-        assert!(!caps.kyomi_watch_enabled);
-        assert!(!caps.slack_integration_enabled);
-        assert!(!caps.pdf_export_enabled);
-
-        // Data features
-        assert!(caps.export_enabled, "export is included in free tier");
-
-        // MCP available to all tiers
-        assert!(caps.mcp_access_enabled);
-
-        // Free-tier limits
-        assert_eq!(caps.max_dashboards, 5);
-        assert_eq!(caps.user_limit, 1);
-        assert_eq!(caps.catalog_refresh_limit_per_hour, 1);
     }
 }
