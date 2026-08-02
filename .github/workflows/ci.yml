@@ -189,6 +189,14 @@ jobs:
           fi
           rm -f /tmp/sccache_test.rs /tmp/sccache_test_out
 
+      # .cargo/config.toml sets `-C link-arg=-fuse-ld=mold` for local dev
+      # between these markers. mold isn't installed on the runner, so clang
+      # fails with "invalid linker name" on the first build-script link if
+      # this isn't stripped. The `clippy` job below does the same — keep
+      # them in step.
+      - name: Strip local-dev mold linker config
+        run: sed -i '/# BEGIN_LOCAL_DEV_LINKER/,/# END_LOCAL_DEV_LINKER/d' .cargo/config.toml
+
       - name: cargo test (schema parity)
         env:
           RUSTC_WRAPPER: ${{ env.SCCACHE_AVAILABLE == 'true' && 'sccache' || '' }}
