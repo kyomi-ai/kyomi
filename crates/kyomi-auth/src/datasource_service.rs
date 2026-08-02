@@ -13,6 +13,7 @@
 //! from overwriting tokens set by OAuth callbacks.
 
 use chrono::{DateTime, Utc};
+use kyomi_core::db::in_clause_placeholders;
 use kyomi_core::models::datasource::{
     DatasourceConfig, UserDatasourceCredential, UserDatasourcePreference,
 };
@@ -1379,34 +1380,91 @@ pub async fn list_datasources_with_status(
     Ok(result)
 }
 
+#[derive(Debug, sqlx::FromRow)]
+struct TableCountRow {
+    datasource_config_id: String,
+    count: i64,
+}
+
+/// Fetch cached (non-archived) table counts for a list of datasource ids in
+/// a single grouped query.
+///
+/// Uses `= ANY($1)` on Postgres and individual placeholders on SQLite,
+/// mirroring `chat_service::fetch_session_counts`. A datasource with zero
+/// cached tables is simply absent from the returned rows.
+async fn fetch_table_counts(
+    db: &DbPool,
+    ds_ids: &[String],
+    bf: &str,
+) -> Result<Vec<TableCountRow>, sqlx::Error> {
+    if ds_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    match db {
+        DbPool::Postgres(pg) => {
+            let sql = format!(
+                "SELECT datasource_config_id, COUNT(*) as count FROM datasource_table_cache \
+                 WHERE datasource_config_id = ANY($1) AND is_archived = {bf} \
+                 GROUP BY datasource_config_id"
+            );
+            sqlx::query_as::<_, TableCountRow>(&sql)
+                .bind(ds_ids)
+                .fetch_all(pg)
+                .await
+        }
+        DbPool::Sqlite(sq) => {
+            let (in_clause, _) = in_clause_placeholders(ds_ids.len(), 1);
+            let sql = format!(
+                "SELECT datasource_config_id, COUNT(*) as count FROM datasource_table_cache \
+                 WHERE datasource_config_id IN {in_clause} AND is_archived = {bf} \
+                 GROUP BY datasource_config_id"
+            );
+            let mut query = sqlx::query_as::<_, TableCountRow>(&sql);
+            for id in ds_ids {
+                query = query.bind(id);
+            }
+            query.fetch_all(sq).await
+        }
+    }
+}
+
 /// Fetch catalog status (table count + last indexed) for all datasources.
+///
+/// Every datasource gets an entry, including ones with zero cached tables.
+/// A count-query failure is non-fatal: it's logged and every datasource
+/// falls back to a `0` count (but still keeps its real `last_catalog_refresh`)
+/// rather than propagating the error or dropping entries.
 async fn fetch_catalog_statuses(
     db: &DbPool,
     datasources: &[DatasourceConfig],
 ) -> std::collections::HashMap<String, (i64, Option<DateTime<Utc>>)> {
-    let mut result = std::collections::HashMap::new();
+    // Seed every datasource with a 0 count first, so callers always get an
+    // entry regardless of whether the grouped query below finds a row or
+    // fails outright.
+    let mut result: std::collections::HashMap<String, (i64, Option<DateTime<Utc>>)> = datasources
+        .iter()
+        .map(|ds| (ds.id.clone(), (0i64, ds.last_catalog_refresh)))
+        .collect();
 
+    let ds_ids: Vec<String> = datasources.iter().map(|ds| ds.id.clone()).collect();
     let is_pg = db.is_postgres();
     let bf = sql_compat::bool_false(is_pg);
 
-    for ds in datasources {
-        let sql = format!(
-            "SELECT COUNT(*) FROM datasource_table_cache \
-             WHERE datasource_config_id = $1 AND is_archived = {bf}"
-        );
-        let table_count: i64 = match kyomi_core::db_fetch_scalar!(db, i64, &sql, &ds.id) {
-            Ok(n) => n,
-            Err(e) => {
-                tracing::warn!(
-                    datasource_id = %ds.id,
-                    error = %e,
-                    "failed to count cached tables for datasource; defaulting to 0"
-                );
-                0
+    match fetch_table_counts(db, &ds_ids, bf).await {
+        Ok(rows) => {
+            for row in rows {
+                if let Some(entry) = result.get_mut(&row.datasource_config_id) {
+                    entry.0 = row.count;
+                }
             }
-        };
-
-        result.insert(ds.id.clone(), (table_count, ds.last_catalog_refresh));
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "failed to fetch cached table counts for datasources; defaulting all to 0"
+            );
+        }
     }
 
     result
@@ -1699,6 +1757,7 @@ pub async fn get_datasource_settings_detail(
 mod tests {
     use super::*;
     use serde_json::json;
+    use sqlx::sqlite::SqlitePoolOptions;
 
     // -- generate_slug tests --
 
@@ -1871,5 +1930,173 @@ mod tests {
             assert!(!obj.contains_key(k), "leaked secret field: {k}");
         }
         assert_eq!(obj.len(), 4);
+    }
+
+    // -- fetch_catalog_statuses (KYO-201: N+1 -> single grouped query) --
+
+    /// Build an in-memory SQLite pool with migrations applied.
+    async fn test_pool() -> DbPool {
+        let _ = kyomi_core::constants::load_with_fallback();
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+
+        sqlx::query("PRAGMA foreign_keys=ON")
+            .execute(&pool)
+            .await
+            .expect("enable foreign keys");
+
+        sqlx::migrate!("../../apps/server/migrations-sqlite")
+            .run(&pool)
+            .await
+            .expect("run sqlite migrations");
+
+        DbPool::Sqlite(pool)
+    }
+
+    async fn seed_workspace_and_owner(pool: &DbPool, workspace_id: &str, owner_user_id: &str) {
+        let sq = match pool {
+            DbPool::Sqlite(sq) => sq,
+            _ => panic!("test requires sqlite pool"),
+        };
+        sqlx::query("INSERT INTO users (user_id, email) VALUES (?1, ?2)")
+            .bind(owner_user_id)
+            .bind(format!("{owner_user_id}@test.local"))
+            .execute(sq)
+            .await
+            .expect("insert owner user");
+        sqlx::query(
+            "INSERT INTO workspaces (workspace_id, name, owner_user_id) VALUES (?1, ?2, ?3)",
+        )
+        .bind(workspace_id)
+        .bind(format!("Workspace {workspace_id}"))
+        .bind(owner_user_id)
+        .execute(sq)
+        .await
+        .expect("insert workspace");
+    }
+
+    async fn seed_datasource(
+        pool: &DbPool,
+        id: &str,
+        workspace_id: &str,
+        slug: &str,
+        last_catalog_refresh: Option<&str>,
+    ) {
+        let sq = match pool {
+            DbPool::Sqlite(sq) => sq,
+            _ => panic!("test requires sqlite pool"),
+        };
+        sqlx::query(
+            "INSERT INTO datasource_configs \
+             (id, workspace_id, name, datasource_type, connection_config, slug, last_catalog_refresh) \
+             VALUES (?1, ?2, ?3, 'postgres', '{}', ?4, ?5)",
+        )
+        .bind(id)
+        .bind(workspace_id)
+        .bind(format!("Datasource {id}"))
+        .bind(slug)
+        .bind(last_catalog_refresh)
+        .execute(sq)
+        .await
+        .expect("insert datasource");
+    }
+
+    async fn seed_table_cache_row(
+        pool: &DbPool,
+        datasource_config_id: &str,
+        workspace_id: &str,
+        table_id: &str,
+        is_archived: bool,
+    ) {
+        let sq = match pool {
+            DbPool::Sqlite(sq) => sq,
+            _ => panic!("test requires sqlite pool"),
+        };
+        sqlx::query(
+            "INSERT INTO datasource_table_cache \
+             (workspace_id, project_id, dataset_id, table_id, table_metadata, is_archived, datasource_config_id) \
+             VALUES (?1, 'proj', 'dataset', ?2, '{}', ?3, ?4)",
+        )
+        .bind(workspace_id)
+        .bind(table_id)
+        .bind(is_archived)
+        .bind(datasource_config_id)
+        .execute(sq)
+        .await
+        .expect("insert table cache row");
+    }
+
+    #[tokio::test]
+    async fn fetch_catalog_statuses_covers_every_datasource_including_zero_tables() {
+        let pool = test_pool().await;
+        seed_workspace_and_owner(&pool, "ws-1", "owner-1").await;
+        seed_datasource(&pool, "ds-a", "ws-1", "ds-a", Some("2026-01-05 12:00:00")).await;
+        seed_datasource(&pool, "ds-b", "ws-1", "ds-b", None).await;
+
+        // ds-a: 2 non-archived + 1 archived (archived must not count).
+        seed_table_cache_row(&pool, "ds-a", "ws-1", "table1", false).await;
+        seed_table_cache_row(&pool, "ds-a", "ws-1", "table2", false).await;
+        seed_table_cache_row(&pool, "ds-a", "ws-1", "table3", true).await;
+        // ds-b: no cache rows at all.
+
+        let datasources = list_datasources(&pool, "ws-1", true).await.unwrap();
+        assert_eq!(datasources.len(), 2, "sanity: both datasources listed");
+
+        let statuses = fetch_catalog_statuses(&pool, &datasources).await;
+        assert_eq!(statuses.len(), 2, "every datasource must get an entry");
+
+        let ds_a = datasources.iter().find(|d| d.id == "ds-a").unwrap();
+        let ds_b = datasources.iter().find(|d| d.id == "ds-b").unwrap();
+
+        let (count_a, refresh_a) = statuses.get("ds-a").expect("ds-a entry present");
+        assert_eq!(*count_a, 2, "archived row must not be counted");
+        assert_eq!(*refresh_a, ds_a.last_catalog_refresh);
+
+        let (count_b, refresh_b) = statuses
+            .get("ds-b")
+            .expect("ds-b entry present even with zero cached tables");
+        assert_eq!(*count_b, 0);
+        assert_eq!(*refresh_b, ds_b.last_catalog_refresh);
+        assert!(refresh_b.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_catalog_statuses_empty_input_returns_empty_without_erroring() {
+        let pool = test_pool().await;
+        let statuses = fetch_catalog_statuses(&pool, &[]).await;
+        assert!(statuses.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fetch_catalog_statuses_query_failure_is_non_fatal_and_defaults_to_zero() {
+        let pool = test_pool().await;
+        seed_workspace_and_owner(&pool, "ws-1", "owner-1").await;
+        seed_datasource(&pool, "ds-a", "ws-1", "ds-a", Some("2026-01-05 12:00:00")).await;
+        seed_table_cache_row(&pool, "ds-a", "ws-1", "table1", false).await;
+
+        let datasources = list_datasources(&pool, "ws-1", true).await.unwrap();
+
+        // Force the grouped count query to fail by dropping the table it
+        // reads from, simulating a transient DB error.
+        if let DbPool::Sqlite(sq) = &pool {
+            sqlx::query("DROP TABLE datasource_table_cache")
+                .execute(sq)
+                .await
+                .expect("drop table to simulate query failure");
+        }
+
+        let statuses = fetch_catalog_statuses(&pool, &datasources).await;
+
+        // Non-fatal: still one entry per datasource, count defaulted to 0,
+        // but the real last_catalog_refresh is preserved (it doesn't come
+        // from the failed query).
+        assert_eq!(statuses.len(), 1);
+        let (count, refresh) = statuses.get("ds-a").expect("entry still present on failure");
+        assert_eq!(*count, 0);
+        assert!(refresh.is_some(), "last_catalog_refresh should survive the query failure");
     }
 }
