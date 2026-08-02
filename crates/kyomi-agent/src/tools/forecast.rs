@@ -670,7 +670,7 @@ mod tests {
     #[test]
     fn test_json_value_to_f64() {
         assert_eq!(json_value_to_f64(&serde_json::json!(42.0)), Ok(42.0));
-        assert_eq!(json_value_to_f64(&serde_json::json!("3.14")), Ok(3.14));
+        assert_eq!(json_value_to_f64(&serde_json::json!("3.5")), Ok(3.5));
         assert!(json_value_to_f64(&serde_json::json!(null)).is_err());
         assert!(json_value_to_f64(&serde_json::json!("abc")).is_err());
     }

@@ -650,7 +650,7 @@ mod tests {
 
     #[test]
     fn test_verify_tampered_payload() {
-        let key = generate_signed_key("abcd1234", "ws_test", &vec!["a.com".into()], TEST_SECRET);
+        let key = generate_signed_key("abcd1234", "ws_test", &["a.com".into()], TEST_SECRET);
 
         // Tamper with the payload portion (before the dot)
         let dot_pos = key.find('.').unwrap();
@@ -664,7 +664,7 @@ mod tests {
 
     #[test]
     fn test_verify_wrong_secret() {
-        let key = generate_signed_key("abcd1234", "ws_test", &vec!["a.com".into()], TEST_SECRET);
+        let key = generate_signed_key("abcd1234", "ws_test", &["a.com".into()], TEST_SECRET);
 
         let result = verify_signed_key(&key, "wrong-secret");
         assert!(

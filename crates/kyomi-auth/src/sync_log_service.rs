@@ -799,6 +799,12 @@ mod tests {
 
         let sync_ids: Vec<i64> = entries.iter().map(|e| e.sync_id).collect();
         assert_eq!(sync_ids, vec![sid4, sid5, sid6]);
+
+        // Explicitly confirm the private/invisible entries were excluded, not
+        // just absent because the equality check above happens to be exact.
+        assert!(!sync_ids.contains(&sid1), "private dashboard owned by user-a must not leak to user-b");
+        assert!(!sync_ids.contains(&sid2), "private dashboard owned by user-a must not leak to user-b");
+        assert!(!sync_ids.contains(&sid3), "private chat owned by user-a must not leak to user-b");
     }
 
     #[tokio::test]
@@ -950,6 +956,7 @@ mod tests {
 
         let sync_ids: Vec<i64> = entries.iter().map(|e| e.sync_id).collect();
         assert_eq!(sync_ids, vec![sid2]);
+        assert!(!sync_ids.contains(&sid1), "private insert must not leak to user-b");
     }
 
     #[tokio::test]

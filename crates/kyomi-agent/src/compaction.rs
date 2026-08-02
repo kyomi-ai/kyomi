@@ -453,7 +453,7 @@ mod tests {
         assert_eq!(MESSAGES_TO_KEEP, 6);
 
         // Threshold should be less than 200K context window.
-        assert!(COMPACTION_TOKEN_THRESHOLD < 200_000);
+        const { assert!(COMPACTION_TOKEN_THRESHOLD < 200_000) };
         // MESSAGES_TO_KEEP should be even (pairs of user+assistant).
         assert_eq!(MESSAGES_TO_KEEP % 2, 0);
     }

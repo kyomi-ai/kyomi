@@ -294,6 +294,17 @@ jobs:
           RUSTC_WRAPPER: ${{ env.SCCACHE_AVAILABLE == 'true' && 'sccache' || '' }}
         run: cargo clippy --locked --workspace --exclude kyomi-desktop -- -D warnings
 
+      # Lints test/bench targets too (the step above only covers lib+bin).
+      # unwrap_used is allowed here because a panic on unwrap() in a test IS
+      # the assertion — denying it in test code would force a pointless
+      # rewrite of ~1000+ legitimate test unwraps. Everything else is still
+      # denied, so production code (previous step) stays fully covered and
+      # test code is covered by everything except this one lint.
+      - name: cargo clippy (all targets, incl. tests)
+        env:
+          RUSTC_WRAPPER: ${{ env.SCCACHE_AVAILABLE == 'true' && 'sccache' || '' }}
+        run: cargo clippy --locked --workspace --exclude kyomi-desktop --all-targets -- -D warnings -A clippy::unwrap_used
+
       - name: cargo clippy (kyomi-ui, wasm32)
         env:
           RUSTC_WRAPPER: ${{ env.SCCACHE_AVAILABLE == 'true' && 'sccache' || '' }}

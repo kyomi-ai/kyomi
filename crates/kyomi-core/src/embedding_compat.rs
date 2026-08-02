@@ -47,7 +47,7 @@ mod tests {
 
     #[test]
     fn roundtrip_conversion() {
-        let original = vec![1.0f32, -2.5, 0.0, 3.14159, f32::MIN, f32::MAX];
+        let original = vec![1.0f32, -2.5, 0.0, 3.5, f32::MIN, f32::MAX];
         let bytes = embedding_to_bytes(&original);
         assert_eq!(bytes.len(), original.len() * 4);
         let restored = bytes_to_embedding(&bytes);
@@ -72,7 +72,7 @@ mod tests {
 
     #[test]
     fn bytes_to_pg_vector_roundtrips() {
-        let original = vec![1.0f32, -2.5, 0.0, 3.14159];
+        let original = vec![1.0f32, -2.5, 0.0, 3.5];
         let bytes = embedding_to_bytes(&original);
         let vec: Vec<f32> = bytes_to_pg_vector(&bytes).into();
         assert_eq!(vec, original);
