@@ -11,6 +11,7 @@
 //! - Uses Card, Button, Alert, Label, INPUT_CLASS
 
 use leptos::prelude::*;
+use leptos::server_fn::ServerFnError;
 use phosphor_leptos::Icon;
 use crate::components::{
     Alert, AlertDescription, AlertVariant, Button, ButtonVariant, Card, CardContent,
@@ -41,9 +42,6 @@ pub fn TwoFactorAuth() -> impl IntoView {
     let current_view = RwSignal::new(View::Status);
     let verification_code = RwSignal::new(String::new());
     let setup_data = RwSignal::new(Option::<crate::server_fns::security::TotpSetup>::None);
-    let setup_loading = RwSignal::new(false);
-    let enable_loading = RwSignal::new(false);
-    let disable_loading = RwSignal::new(false);
     let error = RwSignal::new(Option::<String>::None);
     let success = RwSignal::new(Option::<String>::None);
     let copied = RwSignal::new(false);
@@ -57,24 +55,75 @@ pub fn TwoFactorAuth() -> impl IntoView {
             .unwrap_or(false)
     };
 
-    // ── Handlers ─────────────────────────────────────────────────────────
-    let handle_setup = move |_| {
-        setup_loading.set(true);
-        error.set(None);
-        success.set(None);
-
-        leptos::task::spawn_local(async move {
-            match setup_totp().await {
+    // ── Actions ──────────────────────────────────────────────────────────
+    // Each mutation is an `Action` (KYO-227) rather than raw `spawn_local` —
+    // the reactive fallout lives in `Effect`s that stop running once the
+    // component's scope is gone, instead of `try_set` calls scattered
+    // through a detached future. See KYO-226 (`alerts_history.rs`) for the
+    // pattern this follows.
+    let setup_action: Action<(), Result<crate::server_fns::security::TotpSetup, ServerFnError>> =
+        Action::new(move |(): &()| async move { setup_totp().await });
+    Effect::new(move |_| {
+        if let Some(result) = setup_action.value().get() {
+            match result {
                 Ok(data) => {
-                    setup_data.try_set(Some(data));
-                    current_view.try_set(View::Setup);
+                    setup_data.set(Some(data));
+                    current_view.set(View::Setup);
                 }
                 Err(e) => {
-                    error.try_set(Some(e.to_string()));
+                    error.set(Some(e.to_string()));
                 }
             }
-            setup_loading.try_set(false);
+        }
+    });
+
+    // Verification code is threaded through as the Action's input, captured
+    // at dispatch time in `handle_enable` below — not read live inside the
+    // async body or the Effect, which could observe a value the user typed
+    // after the request was already sent.
+    let enable_action: Action<String, Result<String, ServerFnError>> =
+        Action::new(move |code: &String| {
+            let code = code.clone();
+            async move { enable_totp(code).await }
         });
+    Effect::new(move |_| {
+        if let Some(result) = enable_action.value().get() {
+            match result {
+                Ok(message) => {
+                    success.set(Some(message));
+                    current_view.set(View::Status);
+                    setup_data.set(None);
+                    verification_code.set(String::new());
+                    totp_status.refetch();
+                }
+                Err(e) => {
+                    error.set(Some(e.to_string()));
+                }
+            }
+        }
+    });
+
+    let disable_action: Action<(), Result<String, ServerFnError>> =
+        Action::new(move |(): &()| async move { disable_totp().await });
+    Effect::new(move |_| {
+        if let Some(result) = disable_action.value().get() {
+            match result {
+                Ok(message) => {
+                    success.set(Some(message));
+                    totp_status.refetch();
+                }
+                Err(e) => {
+                    error.set(Some(e.to_string()));
+                }
+            }
+        }
+    });
+
+    // ── Handlers ─────────────────────────────────────────────────────────
+    let handle_setup = move |_| {
+        error.set(None);
+        success.set(None);
+        setup_action.dispatch(());
     };
 
     let handle_enable = move |_| {
@@ -84,43 +133,14 @@ pub fn TwoFactorAuth() -> impl IntoView {
             return;
         }
 
-        enable_loading.set(true);
         error.set(None);
-
-        leptos::task::spawn_local(async move {
-            match enable_totp(code).await {
-                Ok(message) => {
-                    success.try_set(Some(message));
-                    current_view.try_set(View::Status);
-                    setup_data.try_set(None);
-                    verification_code.try_set(String::new());
-                    totp_status.refetch();
-                }
-                Err(e) => {
-                    error.try_set(Some(e.to_string()));
-                }
-            }
-            enable_loading.try_set(false);
-        });
+        enable_action.dispatch(code);
     };
 
     let handle_disable = move |_| {
-        disable_loading.set(true);
         error.set(None);
         success.set(None);
-
-        leptos::task::spawn_local(async move {
-            match disable_totp().await {
-                Ok(message) => {
-                    success.try_set(Some(message));
-                    totp_status.refetch();
-                }
-                Err(e) => {
-                    error.try_set(Some(e.to_string()));
-                }
-            }
-            disable_loading.try_set(false);
-        });
+        disable_action.dispatch(());
     };
 
     let handle_cancel = move |_| {
@@ -136,6 +156,10 @@ pub fn TwoFactorAuth() -> impl IntoView {
         };
         let secret = data.secret.clone();
 
+        // Exempt from the Action conversion: this future calls the
+        // clipboard API via `JsFuture` and awaits `gloo_timers`, both
+        // `!Send` browser APIs on wasm32 — `Action::new` requires a `Send`
+        // future, so this stays `spawn_local` (KYO-227 scope).
         #[cfg(target_arch = "wasm32")]
         {
             leptos::task::spawn_local(async move {
@@ -211,22 +235,22 @@ pub fn TwoFactorAuth() -> impl IntoView {
                                     when=move || is_enabled()
                                     fallback=move || view! {
                                         <Button
-                                            attr:disabled=move || setup_loading.get()
+                                            attr:disabled=move || setup_action.pending().get()
                                             on:click=handle_setup
                                         >
                                             <Icon icon=phosphor_leptos::SHIELD size="16px"/>
                                             <span>
-                                                {move || if setup_loading.get() { "Setting up..." } else { "Setup 2FA" }}
+                                                {move || if setup_action.pending().get() { "Setting up..." } else { "Setup 2FA" }}
                                             </span>
                                         </Button>
                                     }
                                 >
                                     <Button
                                         variant=ButtonVariant::Outline
-                                        attr:disabled=move || disable_loading.get()
+                                        attr:disabled=move || disable_action.pending().get()
                                         on:click=handle_disable
                                     >
-                                        {move || if disable_loading.get() { "Disabling..." } else { "Disable 2FA" }}
+                                        {move || if disable_action.pending().get() { "Disabling..." } else { "Disable 2FA" }}
                                     </Button>
                                 </Show>
                             </div>
@@ -329,11 +353,11 @@ pub fn TwoFactorAuth() -> impl IntoView {
                                             <Button
                                                 class="flex-1"
                                                 attr:disabled=move || {
-                                                    enable_loading.get() || verification_code.get().len() != 6
+                                                    enable_action.pending().get() || verification_code.get().len() != 6
                                                 }
                                                 on:click=handle_enable
                                             >
-                                                {move || if enable_loading.get() { "Enabling..." } else { "Enable 2FA" }}
+                                                {move || if enable_action.pending().get() { "Enabling..." } else { "Enable 2FA" }}
                                             </Button>
                                         </div>
                                     </div>

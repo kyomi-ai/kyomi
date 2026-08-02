@@ -14,6 +14,7 @@
 //! - Tip alert when only one passkey is registered
 
 use leptos::prelude::*;
+use leptos::server_fn::ServerFnError;
 use phosphor_leptos::{Icon, IconWeight};
 use crate::components::{
     Alert, AlertDescription, AlertVariant, Button, ButtonSize, ButtonVariant, Card, CardContent,
@@ -387,7 +388,6 @@ pub fn PasskeyManager() -> impl IntoView {
     let rename_modal_open = RwSignal::new(false);
     let rename_credential_id = RwSignal::new(Option::<String>::None);
     let rename_device_name = RwSignal::new(String::new());
-    let rename_loading = RwSignal::new(false);
 
     // Add passkey modal state
     let add_modal_open = RwSignal::new(false);
@@ -435,6 +435,61 @@ pub fn PasskeyManager() -> impl IntoView {
         }
     });
 
+    // ── Actions ──────────────────────────────────────────────────────────
+    // `rename_passkey` and `delete_passkey` are plain server fns with no
+    // `!Send` involvement, so both are `Action`s (KYO-227) — reactive
+    // fallout lives in `Effect`s that stop running once the component's
+    // scope is gone, instead of `try_set` calls scattered through a
+    // detached future. `handle_add_passkey` below stays on `spawn_local`:
+    // it drives WebAuthn's `navigator.credentials.create()` via `JsFuture`,
+    // which is `!Send` and can't be awaited inside `Action::new`.
+    let rename_action: Action<(String, String), Result<String, ServerFnError>> =
+        Action::new(move |(cred_id, name): &(String, String)| {
+            let cred_id = cred_id.clone();
+            let name = name.clone();
+            async move { rename_passkey(cred_id, name).await }
+        });
+    Effect::new(move |_| {
+        if let Some(result) = rename_action.value().get() {
+            match result {
+                Ok(message) => {
+                    success.set(Some(message));
+                    rename_modal_open.set(false);
+                    rename_credential_id.set(None);
+                    rename_device_name.set(String::new());
+                    // Reload passkeys
+                    loading.set(true);
+                    passkeys_resource.refetch();
+                }
+                Err(e) => {
+                    error.set(Some(e.to_string()));
+                }
+            }
+        }
+    });
+
+    // `cred_id` is the Action's input, threaded from `on_confirm_delete`'s
+    // dispatch below — not read live inside the async body or the Effect.
+    let delete_action: Action<String, Result<String, ServerFnError>> =
+        Action::new(move |cred_id: &String| {
+            let cred_id = cred_id.clone();
+            async move { delete_passkey(cred_id).await }
+        });
+    Effect::new(move |_| {
+        if let Some(result) = delete_action.value().get() {
+            match result {
+                Ok(message) => {
+                    success.set(Some(message));
+                    passkeys_resource.refetch();
+                }
+                Err(e) => {
+                    error.set(Some(e.to_string()));
+                    loading.set(false);
+                }
+            }
+        }
+    });
+
     // ── Refresh handler ──────────────────────────────────────────────────
     let handle_refresh = move |_| {
         loading.set(true);
@@ -450,6 +505,11 @@ pub fn PasskeyManager() -> impl IntoView {
 
         let device_name = add_device_name.get_untracked();
 
+        // Exempt from the Action conversion: `add_passkey_flow` calls
+        // `browser_create_credential`, which drives WebAuthn via
+        // `navigator.credentials.create()` awaited through `JsFuture` — a
+        // `!Send` browser API on wasm32. `Action::new` requires a `Send`
+        // future, so this stays `spawn_local` (KYO-227 scope).
         leptos::task::spawn_local(async move {
             let result = add_passkey_flow(&device_name).await;
 
@@ -484,27 +544,10 @@ pub fn PasskeyManager() -> impl IntoView {
             None => return,
         };
 
-        rename_loading.set(true);
         error.set(None);
         success.set(None);
 
-        leptos::task::spawn_local(async move {
-            match rename_passkey(cred_id, name.trim().to_string()).await {
-                Ok(msg) => {
-                    success.try_set(Some(msg));
-                    rename_modal_open.try_set(false);
-                    rename_credential_id.try_set(None);
-                    rename_device_name.try_set(String::new());
-                    // Reload passkeys
-                    loading.try_set(true);
-                    passkeys_resource.refetch();
-                }
-                Err(e) => {
-                    error.try_set(Some(e.to_string()));
-                }
-            }
-            rename_loading.try_set(false);
-        });
+        rename_action.dispatch((cred_id, name.trim().to_string()));
     };
 
     // ── Delete flow ──────────────────────────────────────────────────────
@@ -530,18 +573,7 @@ pub fn PasskeyManager() -> impl IntoView {
         error.set(None);
         success.set(None);
 
-        leptos::task::spawn_local(async move {
-            match delete_passkey(cred_id).await {
-                Ok(msg) => {
-                    success.try_set(Some(msg));
-                    passkeys_resource.refetch();
-                }
-                Err(e) => {
-                    error.try_set(Some(e.to_string()));
-                    loading.try_set(false);
-                }
-            }
-        });
+        delete_action.dispatch(cred_id);
     });
 
     let on_cancel_delete = Callback::new(move |()| {
@@ -822,7 +854,7 @@ pub fn PasskeyManager() -> impl IntoView {
                 <div class="flex justify-end gap-3 pt-4">
                     <Button
                         variant=ButtonVariant::Outline
-                        disabled=rename_loading.get_untracked()
+                        disabled=rename_action.pending().get_untracked()
                         on:click=move |_| {
                             rename_modal_open.set(false);
                             rename_credential_id.set(None);
@@ -832,10 +864,10 @@ pub fn PasskeyManager() -> impl IntoView {
                         "Cancel"
                     </Button>
                     <Button
-                        disabled=rename_loading.get_untracked()
+                        disabled=rename_action.pending().get_untracked()
                         on:click=handle_rename
                     >
-                        {move || if rename_loading.get() { "Saving..." } else { "Save" }}
+                        {move || if rename_action.pending().get() { "Saving..." } else { "Save" }}
                     </Button>
                 </div>
             </div>
