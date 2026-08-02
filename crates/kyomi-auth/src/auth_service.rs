@@ -1442,65 +1442,32 @@ pub async fn passkey_login_complete_service(
 // Passkey register complete
 // ---------------------------------------------------------------------------
 
-/// Full passkey-register-complete orchestration.
+/// Verify a completed WebAuthn registration ceremony and persist the
+/// resulting passkey credential.
 ///
-/// Returns an `AuthenticatedSession` on success (auto-login after registration).
-pub async fn passkey_register_complete_service(
-    db: &DbPool,
-    kv: &KVPool,
-    jwt_secret: &str,
+/// Shared by `passkey_register_complete_service` and
+/// `passkey_recovery_complete_service` (KYO-284). Before this extraction,
+/// the verify-and-store sequence below — `finish_registration` → cred-id
+/// base64 encoding → passkey serialization → counter extraction →
+/// `add_passkey_to_user` — was duplicated byte-for-byte between the two
+/// services. That's precisely the failure mode that produced
+/// KYO-279/281/282 in this subsystem: a future fix to one copy (e.g. the
+/// counter-extraction fallback, or a new validation step) silently missing
+/// the other.
+///
+/// Returns the base64url (no padding) encoded credential id on success.
+async fn verify_and_store_passkey(
     webauthn: &webauthn_rs::Webauthn,
-    challenge_id: &str,
-    credential_json: &str,
-    device: &DeviceInfo,
-) -> kyomi_core::Result<AuthenticatedSession> {
+    credential: &webauthn_rs::prelude::RegisterPublicKeyCredential,
+    reg_state: &webauthn_rs::prelude::PasskeyRegistration,
+    db: &DbPool,
+    user_id: &str,
+    device_name: &str,
+) -> kyomi_core::Result<String> {
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-    use webauthn_rs::prelude::*;
-
-    let credential: RegisterPublicKeyCredential =
-        serde_json::from_str(credential_json)
-            .map_err(|e| kyomi_core::Error::Internal(format!("Invalid credential JSON: {e}")))?;
-
-    // Get and delete challenge
-    let challenge_data = crate::redis_ops::get_webauthn_challenge(kv, challenge_id)
-        .await?
-        .ok_or_else(|| {
-            kyomi_core::Error::Internal("Invalid or expired challenge".into())
-        })?;
-    crate::redis_ops::delete_webauthn_challenge(kv, challenge_id).await?;
-
-    // Reject a challenge minted by any other flow (KYO-279) — e.g. a passkey
-    // login challenge, or an authenticated add-device challenge, replayed
-    // here to attach an attacker-controlled passkey to a victim account.
-    // Same rejection as "not found" so this can't be used to probe purpose.
-    if !crate::webauthn_challenge_purpose::has_purpose(
-        &challenge_data,
-        &[
-            crate::webauthn_challenge_purpose::PASSKEY_SIGNUP,
-            crate::webauthn_challenge_purpose::PASSKEY_RECOVERY,
-        ],
-    ) {
-        return Err(kyomi_core::Error::Internal(
-            "Invalid or expired challenge".into(),
-        ));
-    }
-
-    // Extract challenge state
-    let reg_state: PasskeyRegistration =
-        serde_json::from_value(challenge_data["registration_state"].clone())
-            .map_err(|e| kyomi_core::Error::Internal(format!("Deserialize reg state: {e}")))?;
-    let email = challenge_data["email"]
-        .as_str()
-        .ok_or_else(|| kyomi_core::Error::Internal("Missing email in challenge".into()))?;
-    let user_id = challenge_data["user_id"]
-        .as_str()
-        .ok_or_else(|| kyomi_core::Error::Internal("Missing user_id in challenge".into()))?;
-    let device_name = challenge_data["device_name"]
-        .as_str()
-        .unwrap_or("Unknown Device");
 
     // Verify credential
-    let passkey = crate::webauthn::finish_registration(webauthn, &credential, &reg_state)
+    let passkey = crate::webauthn::finish_registration(webauthn, credential, reg_state)
         .map_err(|e| kyomi_core::Error::Internal(e.to_string()))?;
 
     // Extract and encode credential ID
@@ -1532,6 +1499,73 @@ pub async fn passkey_register_complete_service(
     )
     .await?;
 
+    Ok(credential_id_b64)
+}
+
+/// Full passkey-register-complete orchestration.
+///
+/// Returns an `AuthenticatedSession` on success (auto-login after registration).
+///
+/// Signup only (KYO-284) — see the purpose gate below. Recovery completion
+/// has its own service, [`passkey_recovery_complete_service`].
+pub async fn passkey_register_complete_service(
+    db: &DbPool,
+    kv: &KVPool,
+    jwt_secret: &str,
+    webauthn: &webauthn_rs::Webauthn,
+    challenge_id: &str,
+    credential_json: &str,
+    device: &DeviceInfo,
+) -> kyomi_core::Result<AuthenticatedSession> {
+    use webauthn_rs::prelude::*;
+
+    let credential: RegisterPublicKeyCredential =
+        serde_json::from_str(credential_json)
+            .map_err(|e| kyomi_core::Error::Internal(format!("Invalid credential JSON: {e}")))?;
+
+    // Get and delete challenge
+    let challenge_data = crate::redis_ops::get_webauthn_challenge(kv, challenge_id)
+        .await?
+        .ok_or_else(|| {
+            kyomi_core::Error::Internal("Invalid or expired challenge".into())
+        })?;
+    crate::redis_ops::delete_webauthn_challenge(kv, challenge_id).await?;
+
+    // Reject a challenge minted by any other flow (KYO-279/KYO-284) —
+    // deliberately NOT PASSKEY_RECOVERY: recovery registration has its own
+    // service (`passkey_recovery_complete_service`) which additionally
+    // requires an HttpOnly `recovery_session` cookie binding the caller to
+    // the browser session that redeemed the recovery token. Accepting a
+    // recovery-purpose challenge here would let a caller holding only a
+    // `challenge_id` bypass that cookie gate. Same rejection as "not found"
+    // so this can't be used to probe purpose.
+    if !crate::webauthn_challenge_purpose::has_purpose(
+        &challenge_data,
+        &[crate::webauthn_challenge_purpose::PASSKEY_SIGNUP],
+    ) {
+        return Err(kyomi_core::Error::Internal(
+            "Invalid or expired challenge".into(),
+        ));
+    }
+
+    // Extract challenge state
+    let reg_state: PasskeyRegistration =
+        serde_json::from_value(challenge_data["registration_state"].clone())
+            .map_err(|e| kyomi_core::Error::Internal(format!("Deserialize reg state: {e}")))?;
+    let email = challenge_data["email"]
+        .as_str()
+        .ok_or_else(|| kyomi_core::Error::Internal("Missing email in challenge".into()))?;
+    let user_id = challenge_data["user_id"]
+        .as_str()
+        .ok_or_else(|| kyomi_core::Error::Internal("Missing user_id in challenge".into()))?;
+    let device_name = challenge_data["device_name"]
+        .as_str()
+        .unwrap_or("Unknown Device");
+
+    let credential_id_b64 =
+        verify_and_store_passkey(webauthn, &credential, &reg_state, db, user_id, device_name)
+            .await?;
+
     // Get user and create session
     let user = crate::user_service::get_user_by_id(db, user_id)
         .await?
@@ -1543,6 +1577,165 @@ pub async fn passkey_register_complete_service(
         email = %email,
         credential_id = %credential_id_b64,
         "Passkey registered and user auto-logged in"
+    );
+    Ok(sess)
+}
+
+// ---------------------------------------------------------------------------
+// Passkey recovery complete
+// ---------------------------------------------------------------------------
+
+/// Parameters for `passkey_recovery_complete_service`.
+pub struct PasskeyRecoveryCompleteParams<'a> {
+    pub db: &'a DbPool,
+    pub kv: &'a KVPool,
+    pub jwt_secret: &'a str,
+    pub webauthn: &'a webauthn_rs::Webauthn,
+    pub challenge_id: &'a str,
+    pub credential_json: &'a str,
+    pub device: &'a DeviceInfo,
+    /// The `recovery_session` cookie value, if the caller sent one at all.
+    /// `None` when the cookie is absent — rejected identically to every
+    /// other binding failure below (KYO-284).
+    pub recovery_session_token: Option<&'a str>,
+}
+
+/// Full passkey-recovery-complete orchestration (KYO-284).
+///
+/// Split out of `passkey_register_complete_service` so completing account
+/// recovery requires binding proof — possession of the HttpOnly
+/// `recovery_session` cookie minted by `passkey_recovery_verify_service` —
+/// not just a bare `challenge_id`. Before this split, the *only* thing
+/// binding a caller to the account being recovered was possession of the
+/// `challenge_id` returned in `passkey_recovery_verify`'s JSON response
+/// body; anyone who obtained that id (server logs, a compromised extension,
+/// a proxy) could attach their own passkey to the victim's account and be
+/// auto-logged in as them.
+///
+/// Mirrors `apps/server/src/routes/auth_passkeys.rs::recovery_register`
+/// (KYO-280), the REST reference implementation for this binding chain.
+/// Requires, in order:
+/// 1. A `recovery_session` cookie value was supplied at all.
+/// 2. It validates as a JWT against `jwt_secret`.
+/// 3. Its `scope` claim is exactly `"passkey_recovery"`.
+/// 4. The challenge's `purpose` is `PASSKEY_RECOVERY`.
+/// 5. The challenge's stored `email` matches the JWT's `email` claim.
+/// 6. The user identified by the JWT's `user_id` claim still exists.
+///
+/// Every rejection above returns the identical
+/// `Error::Internal("Invalid or expired challenge")` a nonexistent
+/// `challenge_id` produces — a distinguishable error for "wrong scope" or
+/// "email mismatch" would let an attacker learn which check they failed
+/// (the same fail-closed, no-oracle rule KYO-279/KYO-280 established for
+/// challenge purpose binding).
+pub async fn passkey_recovery_complete_service(
+    params: PasskeyRecoveryCompleteParams<'_>,
+) -> kyomi_core::Result<AuthenticatedSession> {
+    let PasskeyRecoveryCompleteParams {
+        db,
+        kv,
+        jwt_secret,
+        webauthn,
+        challenge_id,
+        credential_json,
+        device,
+        recovery_session_token,
+    } = params;
+    use webauthn_rs::prelude::*;
+
+    fn invalid_or_expired_challenge() -> kyomi_core::Error {
+        kyomi_core::Error::Internal("Invalid or expired challenge".into())
+    }
+
+    let credential: RegisterPublicKeyCredential = serde_json::from_str(credential_json)
+        .map_err(|e| kyomi_core::Error::Internal(format!("Invalid credential JSON: {e}")))?;
+
+    // 1. A recovery session cookie must have been supplied at all.
+    let recovery_session_token = recovery_session_token.ok_or_else(invalid_or_expired_challenge)?;
+
+    // 2. It must validate as a JWT against the configured secret.
+    let token_data = crate::jwt::validate_token(recovery_session_token, jwt_secret)
+        .map_err(|_| invalid_or_expired_challenge())?;
+
+    // 3. Its scope must be exactly "passkey_recovery" — rejects, for
+    // example, a normal access-token cookie replayed here.
+    let scope = token_data
+        .claims
+        .extra
+        .get("scope")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if scope != "passkey_recovery" {
+        return Err(invalid_or_expired_challenge());
+    }
+
+    let recovery_user_id = token_data
+        .claims
+        .extra
+        .get("user_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(invalid_or_expired_challenge)?
+        .to_string();
+    let recovery_email = token_data
+        .claims
+        .extra
+        .get("email")
+        .and_then(|v| v.as_str())
+        .ok_or_else(invalid_or_expired_challenge)?
+        .to_string();
+
+    // Get and delete challenge (prevent replay).
+    let challenge_data = crate::redis_ops::get_webauthn_challenge(kv, challenge_id)
+        .await?
+        .ok_or_else(invalid_or_expired_challenge)?;
+    crate::redis_ops::delete_webauthn_challenge(kv, challenge_id).await?;
+
+    // 4. Reject a challenge minted by any other flow — e.g. a signup or
+    // add-device challenge replayed here to register a passkey under the
+    // recovery session's user without the account's original consent.
+    if !crate::webauthn_challenge_purpose::has_purpose(
+        &challenge_data,
+        &[crate::webauthn_challenge_purpose::PASSKEY_RECOVERY],
+    ) {
+        return Err(invalid_or_expired_challenge());
+    }
+
+    // 5. The challenge's stored email must match the recovery session's.
+    let challenge_email = challenge_data["email"].as_str().unwrap_or("");
+    if challenge_email != recovery_email {
+        return Err(invalid_or_expired_challenge());
+    }
+
+    // 6. The user must still exist.
+    let user = crate::user_service::get_user_by_id(db, &recovery_user_id)
+        .await?
+        .ok_or_else(invalid_or_expired_challenge)?;
+
+    // Extract challenge state
+    let reg_state: PasskeyRegistration =
+        serde_json::from_value(challenge_data["registration_state"].clone())
+            .map_err(|e| kyomi_core::Error::Internal(format!("Deserialize reg state: {e}")))?;
+    let device_name = challenge_data["device_name"]
+        .as_str()
+        .unwrap_or("Unknown Device");
+
+    let credential_id_b64 = verify_and_store_passkey(
+        webauthn,
+        &credential,
+        &reg_state,
+        db,
+        &user.user_id,
+        device_name,
+    )
+    .await?;
+
+    // Preserve the current post-completion UX (auto-login) — the security
+    // fix here is the session binding above, not the login behavior.
+    let sess = create_authenticated_session(db, kv, jwt_secret, &user, device).await?;
+    tracing::info!(
+        user_id = %user.user_id,
+        credential_id = %credential_id_b64,
+        "Passkey recovery completed and user auto-logged in"
     );
     Ok(sess)
 }
@@ -1839,19 +2032,58 @@ pub async fn passkey_signup_complete_service(
 // Passkey recovery verify
 // ---------------------------------------------------------------------------
 
+/// Success payload for `passkey_recovery_verify_service` (KYO-284).
+///
+/// A named struct rather than a tuple deliberately — every field here is a
+/// `String`, and the caller (`passkey_recovery_verify` in
+/// `kyomi-ui/src/server_fns/auth.rs`) sets `recovery_session_jwt` as an
+/// HttpOnly cookie. A positional mix-up between `email` and
+/// `recovery_session_jwt` in a 4-`String` tuple would compile silently and
+/// leak the session token into a response field, or vice versa.
+pub struct PasskeyRecoveryVerifySuccess {
+    pub challenge_id: String,
+    pub creation_challenge: String,
+    pub email: String,
+    /// Short-lived JWT (`scope: "passkey_recovery"`) binding the eventual
+    /// `passkey_recovery_complete_service` call to this same browser
+    /// session. The server_fn sets this as the HttpOnly `recovery_session`
+    /// cookie — it must never be sent back in the JSON response body.
+    pub recovery_session_jwt: String,
+}
+
+/// Hand-written, not derived: `recovery_session_jwt` is a live bearer
+/// credential (KYO-284) — a signed JWT that authenticates the completion
+/// call for the next 15 minutes. A derived `Debug` would print it verbatim
+/// into any `{result:?}` assertion failure, panic message, or log line that
+/// formats this struct. Every other field is non-secret and printed as-is.
+impl std::fmt::Debug for PasskeyRecoveryVerifySuccess {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PasskeyRecoveryVerifySuccess")
+            .field("challenge_id", &self.challenge_id)
+            .field("creation_challenge", &self.creation_challenge)
+            .field("email", &self.email)
+            .field("recovery_session_jwt", &"<redacted>")
+            .finish()
+    }
+}
+
 /// Full passkey-recovery-verify orchestration.
 ///
-/// Verifies the recovery token and generates a WebAuthn registration challenge
-/// for replacing the user's passkey. Returns `(challenge_id, creation_challenge,
-/// email)` on success, or an error message on failure.
+/// Verifies the recovery token and generates a WebAuthn registration
+/// challenge for replacing the user's passkey, plus a short-lived
+/// `recovery_session` JWT (KYO-284) that binds the eventual completion call
+/// to this same browser session — mirroring
+/// `apps/server/src/routes/auth_passkeys.rs::recovery_verify` (KYO-280),
+/// the REST reference implementation for this binding chain. Returns
+/// [`PasskeyRecoveryVerifySuccess`] on success, or an error message on
+/// failure.
 pub async fn passkey_recovery_verify_service(
     db: &DbPool,
     kv: &KVPool,
+    jwt_secret: &str,
     webauthn: &webauthn_rs::Webauthn,
     token: &str,
-) -> kyomi_core::Result<Result<(String, String, String), String>> {
-    // Returns Ok((challenge_id, creation_challenge, email)) or Err(message)
-
+) -> kyomi_core::Result<Result<PasskeyRecoveryVerifySuccess, String>> {
     // Verify token. Must be "passkey_recovery" — the type actually minted
     // for this URL (`/auth/recover-passkey/complete`, see
     // `auth_passkeys.rs`). The old literal, "recovery", was never minted
@@ -1905,12 +2137,30 @@ pub async fn passkey_recovery_verify_service(
     let creation_challenge = serde_json::to_string(&ccr)
         .map_err(|e| kyomi_core::Error::Internal(format!("Serialize creation challenge: {e}")))?;
 
+    // Mint the recovery session JWT (KYO-284) — same claim shape and expiry
+    // as `auth_passkeys.rs::recovery_verify`'s `recovery_session` cookie.
+    let mut extra = std::collections::HashMap::new();
+    extra.insert("user_id".into(), serde_json::json!(&user.user_id));
+    extra.insert("email".into(), serde_json::json!(&email));
+    extra.insert("scope".into(), serde_json::json!("passkey_recovery"));
+    let recovery_session_jwt = crate::jwt::create_access_token_str(
+        &user.user_id,
+        jwt_secret,
+        15, // 15 minutes — matches the REST recovery_session cookie's Max-Age=900
+        extra,
+    )?;
+
     tracing::info!(
         email = %email,
         user_id = %user.user_id,
         "Passkey recovery token verified, WebAuthn challenge generated"
     );
-    Ok(Ok((challenge_id, creation_challenge, email)))
+    Ok(Ok(PasskeyRecoveryVerifySuccess {
+        challenge_id,
+        creation_challenge,
+        email,
+        recovery_session_jwt,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -2398,9 +2648,368 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn register_complete_accepts_recovery_purpose() {
+    async fn register_complete_rejects_challenge_minted_for_recovery() {
+        // KYO-284: recovery registration was split into its own service
+        // (`passkey_recovery_complete_service`, tested below) which
+        // additionally requires the HttpOnly `recovery_session` cookie.
+        // `passkey_register_complete_service` must now reject a
+        // PASSKEY_RECOVERY-purpose challenge exactly like an unrecognised
+        // one — accepting it here would let a caller holding only a bare
+        // `challenge_id` bypass that cookie gate.
         let result =
             register_complete_with_purpose(Some(purpose::PASSKEY_RECOVERY), true).await;
+        assert_invalid_or_expired_challenge(result);
+    }
+
+    // -----------------------------------------------------------------
+    // Recovery completion session binding (KYO-284)
+    // -----------------------------------------------------------------
+    //
+    // `passkey_recovery_complete_service` requires, in order: (1) a
+    // recovery_session cookie value at all, (2) it validates as a JWT,
+    // (3) scope == "passkey_recovery", (4) challenge purpose ==
+    // PASSKEY_RECOVERY, (5) challenge email == JWT email, (6) the user
+    // still exists. Every rejection must be indistinguishable from the
+    // "challenge not found" case — that equality *is* the security
+    // property, so every test below reuses the same
+    // `assert_invalid_or_expired_challenge` helper the purpose-gate tests
+    // above use for exactly that reason.
+
+    struct RecoveryFixture {
+        db: DbPool,
+        kv: KVPool,
+        webauthn: webauthn_rs::Webauthn,
+        device: DeviceInfo,
+        user_id: String,
+        email: String,
+    }
+
+    async fn recovery_fixture(email: &str) -> RecoveryFixture {
+        let db = test_pool().await;
+        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+        let webauthn = test_webauthn();
+        let device = test_device();
+        let user = crate::user_service::create_user(&db, email, Some("Victim"), true)
+            .await
+            .expect("create user");
+        RecoveryFixture {
+            db,
+            kv,
+            webauthn,
+            device,
+            user_id: user.user_id,
+            email: email.to_string(),
+        }
+    }
+
+    /// Mint a `recovery_session`-shaped JWT with the given claims, matching
+    /// the shape `passkey_recovery_verify_service` mints in production.
+    /// Signed with `"test-secret"` (what every test's `jwt_secret` param
+    /// uses) and a 15-minute expiry, matching production.
+    fn mint_recovery_jwt(user_id: &str, email: &str, scope: &str) -> String {
+        mint_recovery_jwt_with(user_id, email, scope, "test-secret", 15)
+    }
+
+    /// Same as `mint_recovery_jwt`, with the signing secret and expiry
+    /// (minutes from now; negative mints an already-expired token)
+    /// exposed — used by the expired-token and wrong-secret-token
+    /// rejection tests below.
+    fn mint_recovery_jwt_with(
+        user_id: &str,
+        email: &str,
+        scope: &str,
+        secret: &str,
+        expires_minutes: i64,
+    ) -> String {
+        let mut extra = std::collections::HashMap::new();
+        extra.insert("user_id".into(), serde_json::json!(user_id));
+        extra.insert("email".into(), serde_json::json!(email));
+        extra.insert("scope".into(), serde_json::json!(scope));
+        crate::jwt::create_access_token_str(user_id, secret, expires_minutes, extra)
+            .expect("mint recovery jwt")
+    }
+
+    async fn store_recovery_challenge(
+        fixture: &RecoveryFixture,
+        challenge_id: &str,
+        challenge_email: &str,
+        purpose_field: Option<&str>,
+        include_registration_state: bool,
+    ) {
+        let mut challenge_data = serde_json::json!({
+            "email": challenge_email,
+            "user_id": fixture.user_id,
+            "device_name": "Recovery Device",
+        });
+        if include_registration_state {
+            let (_ccr, reg_state) = crate::webauthn::start_registration(
+                &fixture.webauthn,
+                Uuid::new_v4(),
+                challenge_email,
+                "Victim",
+                None,
+            )
+            .expect("start registration");
+            challenge_data["registration_state"] =
+                serde_json::to_value(&reg_state).expect("serialize reg state");
+        }
+        if let Some(p) = purpose_field {
+            challenge_data["purpose"] = serde_json::json!(p);
+        }
+        crate::redis_ops::store_webauthn_challenge(&fixture.kv, challenge_id, &challenge_data)
+            .await
+            .expect("store challenge");
+    }
+
+    #[tokio::test]
+    async fn recovery_complete_rejects_missing_recovery_session() {
+        let fixture = recovery_fixture("recovery-missing-session@example.com").await;
+        store_recovery_challenge(
+            &fixture,
+            "recovery-chal-missing-session",
+            &fixture.email,
+            Some(purpose::PASSKEY_RECOVERY),
+            false,
+        )
+        .await;
+
+        let result = passkey_recovery_complete_service(PasskeyRecoveryCompleteParams {
+            db: &fixture.db,
+            kv: &fixture.kv,
+            jwt_secret: "test-secret",
+            webauthn: &fixture.webauthn,
+            challenge_id: "recovery-chal-missing-session",
+            credential_json: REGISTER_CREDENTIAL_JSON,
+            device: &fixture.device,
+            recovery_session_token: None,
+        })
+        .await;
+
+        assert_invalid_or_expired_challenge(result);
+    }
+
+    #[tokio::test]
+    async fn recovery_complete_rejects_expired_recovery_session() {
+        let fixture = recovery_fixture("recovery-expired-session@example.com").await;
+        store_recovery_challenge(
+            &fixture,
+            "recovery-chal-expired-session",
+            &fixture.email,
+            Some(purpose::PASSKEY_RECOVERY),
+            false,
+        )
+        .await;
+        // Expired 5 minutes ago — well past jsonwebtoken's default leeway,
+        // same margin `jwt::tests::expired_token_rejected_with_specific_error`
+        // uses.
+        let token = mint_recovery_jwt_with(
+            &fixture.user_id,
+            &fixture.email,
+            "passkey_recovery",
+            "test-secret",
+            -5,
+        );
+
+        let result = passkey_recovery_complete_service(PasskeyRecoveryCompleteParams {
+            db: &fixture.db,
+            kv: &fixture.kv,
+            jwt_secret: "test-secret",
+            webauthn: &fixture.webauthn,
+            challenge_id: "recovery-chal-expired-session",
+            credential_json: REGISTER_CREDENTIAL_JSON,
+            device: &fixture.device,
+            recovery_session_token: Some(&token),
+        })
+        .await;
+
+        assert_invalid_or_expired_challenge(result);
+    }
+
+    #[tokio::test]
+    async fn recovery_complete_rejects_recovery_session_signed_with_wrong_secret() {
+        let fixture = recovery_fixture("recovery-wrong-secret@example.com").await;
+        store_recovery_challenge(
+            &fixture,
+            "recovery-chal-wrong-secret",
+            &fixture.email,
+            Some(purpose::PASSKEY_RECOVERY),
+            false,
+        )
+        .await;
+        // Signed with a secret other than the one
+        // passkey_recovery_complete_service validates against — e.g. a
+        // forged token, or a stale one from before a secret rotation.
+        let token = mint_recovery_jwt_with(
+            &fixture.user_id,
+            &fixture.email,
+            "passkey_recovery",
+            "a-completely-different-secret",
+            15,
+        );
+
+        let result = passkey_recovery_complete_service(PasskeyRecoveryCompleteParams {
+            db: &fixture.db,
+            kv: &fixture.kv,
+            jwt_secret: "test-secret",
+            webauthn: &fixture.webauthn,
+            challenge_id: "recovery-chal-wrong-secret",
+            credential_json: REGISTER_CREDENTIAL_JSON,
+            device: &fixture.device,
+            recovery_session_token: Some(&token),
+        })
+        .await;
+
+        assert_invalid_or_expired_challenge(result);
+    }
+
+    #[tokio::test]
+    async fn recovery_complete_rejects_wrong_scope() {
+        let fixture = recovery_fixture("recovery-wrong-scope@example.com").await;
+        store_recovery_challenge(
+            &fixture,
+            "recovery-chal-wrong-scope",
+            &fixture.email,
+            Some(purpose::PASSKEY_RECOVERY),
+            false,
+        )
+        .await;
+        // Same user_id/email as the challenge, but minted for a different
+        // purpose entirely — e.g. a stray access-token-shaped cookie.
+        let token = mint_recovery_jwt(&fixture.user_id, &fixture.email, "access");
+
+        let result = passkey_recovery_complete_service(PasskeyRecoveryCompleteParams {
+            db: &fixture.db,
+            kv: &fixture.kv,
+            jwt_secret: "test-secret",
+            webauthn: &fixture.webauthn,
+            challenge_id: "recovery-chal-wrong-scope",
+            credential_json: REGISTER_CREDENTIAL_JSON,
+            device: &fixture.device,
+            recovery_session_token: Some(&token),
+        })
+        .await;
+
+        assert_invalid_or_expired_challenge(result);
+    }
+
+    #[tokio::test]
+    async fn recovery_complete_rejects_email_mismatch() {
+        let fixture = recovery_fixture("recovery-victim@example.com").await;
+        // Challenge was minted for a *different* email than the recovery
+        // session JWT claims — e.g. the session belongs to one account but
+        // the challenge_id belongs to another.
+        store_recovery_challenge(
+            &fixture,
+            "recovery-chal-email-mismatch",
+            "someone-else@example.com",
+            Some(purpose::PASSKEY_RECOVERY),
+            false,
+        )
+        .await;
+        let token = mint_recovery_jwt(&fixture.user_id, &fixture.email, "passkey_recovery");
+
+        let result = passkey_recovery_complete_service(PasskeyRecoveryCompleteParams {
+            db: &fixture.db,
+            kv: &fixture.kv,
+            jwt_secret: "test-secret",
+            webauthn: &fixture.webauthn,
+            challenge_id: "recovery-chal-email-mismatch",
+            credential_json: REGISTER_CREDENTIAL_JSON,
+            device: &fixture.device,
+            recovery_session_token: Some(&token),
+        })
+        .await;
+
+        assert_invalid_or_expired_challenge(result);
+    }
+
+    #[tokio::test]
+    async fn recovery_complete_rejects_challenge_minted_for_a_different_flow() {
+        let fixture = recovery_fixture("recovery-wrong-purpose@example.com").await;
+        // Challenge purpose is signup, not recovery — a signup challenge
+        // replayed against the recovery-completion path.
+        store_recovery_challenge(
+            &fixture,
+            "recovery-chal-wrong-purpose",
+            &fixture.email,
+            Some(purpose::PASSKEY_SIGNUP),
+            false,
+        )
+        .await;
+        let token = mint_recovery_jwt(&fixture.user_id, &fixture.email, "passkey_recovery");
+
+        let result = passkey_recovery_complete_service(PasskeyRecoveryCompleteParams {
+            db: &fixture.db,
+            kv: &fixture.kv,
+            jwt_secret: "test-secret",
+            webauthn: &fixture.webauthn,
+            challenge_id: "recovery-chal-wrong-purpose",
+            credential_json: REGISTER_CREDENTIAL_JSON,
+            device: &fixture.device,
+            recovery_session_token: Some(&token),
+        })
+        .await;
+
+        assert_invalid_or_expired_challenge(result);
+    }
+
+    #[tokio::test]
+    async fn recovery_complete_rejects_nonexistent_challenge_with_identical_error() {
+        // Baseline for the equality property under test: a fully valid
+        // recovery session presented against a challenge_id that was never
+        // stored must produce the exact same rejection as every binding
+        // failure above — proving none of them are distinguishable oracles.
+        let fixture = recovery_fixture("recovery-no-such-challenge@example.com").await;
+        let token = mint_recovery_jwt(&fixture.user_id, &fixture.email, "passkey_recovery");
+
+        let result = passkey_recovery_complete_service(PasskeyRecoveryCompleteParams {
+            db: &fixture.db,
+            kv: &fixture.kv,
+            jwt_secret: "test-secret",
+            webauthn: &fixture.webauthn,
+            challenge_id: "does-not-exist",
+            credential_json: REGISTER_CREDENTIAL_JSON,
+            device: &fixture.device,
+            recovery_session_token: Some(&token),
+        })
+        .await;
+
+        assert_invalid_or_expired_challenge(result);
+    }
+
+    #[tokio::test]
+    async fn recovery_complete_accepts_valid_binding_and_reaches_webauthn_verification() {
+        // All six checks pass: cookie present, valid JWT, correct scope,
+        // correct purpose, matching email, user exists. Execution must
+        // reach real WebAuthn verification and fail *there* (the fixture
+        // credential is cryptographically inert against our test RP, same
+        // as every other "happy path" test in this module — see the
+        // module-level comment) rather than at the binding gate — proving
+        // the binding checks specifically did not block a legitimately
+        // bound caller.
+        let fixture = recovery_fixture("recovery-happy-path@example.com").await;
+        store_recovery_challenge(
+            &fixture,
+            "recovery-chal-happy-path",
+            &fixture.email,
+            Some(purpose::PASSKEY_RECOVERY),
+            true,
+        )
+        .await;
+        let token = mint_recovery_jwt(&fixture.user_id, &fixture.email, "passkey_recovery");
+
+        let result = passkey_recovery_complete_service(PasskeyRecoveryCompleteParams {
+            db: &fixture.db,
+            kv: &fixture.kv,
+            jwt_secret: "test-secret",
+            webauthn: &fixture.webauthn,
+            challenge_id: "recovery-chal-happy-path",
+            credential_json: REGISTER_CREDENTIAL_JSON,
+            device: &fixture.device,
+            recovery_session_token: Some(&token),
+        })
+        .await;
+
         let err = match result {
             Err(e) => e,
             Ok(_) => panic!("fixture credential must fail real verification"),
@@ -2576,13 +3185,14 @@ mod tests {
 
             let token = mint_token(&db, email, token_type).await;
 
-            let result = passkey_recovery_verify_service(&db, &kv, &webauthn, &token)
-                .await
-                .expect("service call should not error");
+            let result =
+                passkey_recovery_verify_service(&db, &kv, "test-secret", &webauthn, &token)
+                    .await
+                    .expect("service call should not error");
 
             if token_type == TOKEN_TYPE_PASSKEY_RECOVERY {
                 assert!(
-                    matches!(result, Ok((_, _, _))),
+                    matches!(result, Ok(PasskeyRecoveryVerifySuccess { .. })),
                     "passkey recovery must accept its own token type ({token_type}), got {result:?}"
                 );
             } else {

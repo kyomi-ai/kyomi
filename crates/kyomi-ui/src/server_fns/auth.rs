@@ -996,10 +996,15 @@ pub async fn passkey_login_complete(
     }
 }
 
-/// Complete passkey registration — verify the browser credential and store it.
+/// Complete passkey *signup* — verify the browser credential and store it.
 ///
 /// Public endpoint — no authentication required.
 /// Mirrors `POST /auth/passkeys/register/complete` in `apps/server/src/routes/auth_passkeys.rs`.
+///
+/// Signup only (KYO-284) — `passkey_register_complete_service` rejects a
+/// recovery-purpose challenge. Recovery completion uses the dedicated
+/// `passkey_recovery_complete` server fn below, which additionally
+/// requires the `recovery_session` cookie.
 ///
 /// Delegates all orchestration to `kyomi_auth::auth_service::passkey_register_complete_service`.
 #[server(prefix = "/leptos-api")]
@@ -1211,6 +1216,10 @@ pub async fn passkey_signup_complete(
 /// Public endpoint — no authentication required.
 /// Mirrors `POST /auth/passkeys/recovery/verify` from the React backend.
 ///
+/// Also sets the HttpOnly `recovery_session` cookie (KYO-284) — binds the
+/// eventual `passkey_recovery_complete` call to this same browser session,
+/// matching `apps/server/src/routes/auth_passkeys.rs::recovery_verify`.
+///
 /// Delegates all orchestration to `kyomi_auth::auth_service::passkey_recovery_verify_service`.
 #[server(prefix = "/leptos-api")]
 pub async fn passkey_recovery_verify(
@@ -1229,6 +1238,7 @@ pub async fn passkey_recovery_verify(
     let result = kyomi_auth::auth_service::passkey_recovery_verify_service(
         &ctx.db,
         &kv,
+        &ctx.config.jwt_secret,
         webauthn,
         &token,
     )
@@ -1239,7 +1249,24 @@ pub async fn passkey_recovery_verify(
     })?;
 
     match result {
-        Ok((challenge_id, creation_challenge, email)) => {
+        Ok(kyomi_auth::auth_service::PasskeyRecoveryVerifySuccess {
+            challenge_id,
+            creation_challenge,
+            email,
+            recovery_session_jwt,
+        }) => {
+            // Set the HttpOnly recovery_session cookie so the eventual
+            // passkey_recovery_complete call can prove it's the same
+            // browser session that redeemed the recovery token (KYO-284).
+            let response_options =
+                leptos::prelude::expect_context::<leptos_axum::ResponseOptions>();
+            let mut cookie_headers = axum::http::HeaderMap::new();
+            kyomi_auth::cookies::set_recovery_session_cookie(
+                &mut cookie_headers,
+                &recovery_session_jwt,
+            );
+            append_set_cookie_headers(&response_options, &cookie_headers);
+
             Ok(PasskeyRecoveryVerifyResult::Success {
                 challenge_id,
                 creation_challenge,
@@ -1250,9 +1277,96 @@ pub async fn passkey_recovery_verify(
     }
 }
 
+/// Complete passkey account *recovery* — verify the browser credential,
+/// bind it to the recovery session that redeemed the recovery token, and
+/// store it.
+///
+/// Public endpoint — no authentication required at the server_fn boundary,
+/// but requires the HttpOnly `recovery_session` cookie set by
+/// `passkey_recovery_verify` above (KYO-284). Mirrors
+/// `POST /auth/passkeys/recovery/register` in
+/// `apps/server/src/routes/auth_passkeys.rs`.
+///
+/// Delegates all orchestration to
+/// `kyomi_auth::auth_service::passkey_recovery_complete_service`.
+#[server(prefix = "/leptos-api")]
+pub async fn passkey_recovery_complete(
+    challenge_id: String,
+    credential_json: String,
+) -> Result<LoginResult, ServerFnError> {
+    let ctx = extract_context()?;
+    let webauthn = ctx
+        .webauthn
+        .as_ref()
+        .ok_or_else(|| ServerFnError::new("WebAuthn not configured"))?;
+    let kv = ctx
+        .kv
+        .clone()
+        .ok_or_else(|| ServerFnError::new("KV store not available"))?;
+    let headers: axum::http::HeaderMap = leptos_axum::extract()
+        .await
+        .map_err(|e| ServerFnError::new(format!("Failed to extract headers: {e}")))?;
+    let device = extract_device_info(&headers);
+    let recovery_session_token =
+        kyomi_auth::cookies::get_cookie_value(&headers, "recovery_session");
+
+    let sess = kyomi_auth::auth_service::passkey_recovery_complete_service(
+        kyomi_auth::auth_service::PasskeyRecoveryCompleteParams {
+            db: &ctx.db,
+            kv: &kv,
+            jwt_secret: &ctx.config.jwt_secret,
+            webauthn,
+            challenge_id: &challenge_id,
+            credential_json: &credential_json,
+            device: &device,
+            recovery_session_token,
+        },
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "passkey_recovery_complete_service error");
+        ServerFnError::new("Internal server error")
+    })?;
+
+    set_session_cookies(&sess);
+
+    // Clear the recovery session cookie now that recovery has completed —
+    // it must not be reusable for a second completion attempt.
+    let response_options = leptos::prelude::expect_context::<leptos_axum::ResponseOptions>();
+    let mut clear_headers = axum::http::HeaderMap::new();
+    kyomi_auth::cookies::clear_recovery_session_cookie(&mut clear_headers);
+    append_set_cookie_headers(&response_options, &clear_headers);
+
+    Ok(LoginResult::Success {
+        user_id: sess.user.user_id,
+        email: sess.user.email,
+        name: sess.user.name.unwrap_or_default(),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Private helpers (server-only)
 // ---------------------------------------------------------------------------
+
+/// Forward every `Set-Cookie` header in `headers` into the current HTTP
+/// response via `ResponseOptions`.
+///
+/// Shared by every call site that builds a throwaway `HeaderMap` via a
+/// `kyomi_auth::cookies::*` setter and needs those headers to actually
+/// reach the client: `set_session_cookies` below, `passkey_recovery_verify`
+/// setting the `recovery_session` cookie, and `passkey_recovery_complete`
+/// clearing it (KYO-284). Before this extraction each call site duplicated
+/// the same "build a `HeaderMap`, call a setter, loop `SET_COOKIE` values
+/// into `ResponseOptions`" sequence.
+#[cfg(feature = "ssr")]
+fn append_set_cookie_headers(
+    opts: &leptos_axum::ResponseOptions,
+    headers: &axum::http::HeaderMap,
+) {
+    for value in headers.get_all(axum::http::header::SET_COOKIE) {
+        opts.append_header(axum::http::header::SET_COOKIE, value.clone());
+    }
+}
 
 /// Apply session cookies to the current HTTP response.
 ///
@@ -1266,9 +1380,7 @@ pub(crate) fn set_session_cookies(sess: &kyomi_auth::session::AuthenticatedSessi
     use leptos_axum::ResponseOptions;
 
     let opts = expect_context::<ResponseOptions>();
-    for value in sess.cookie_headers.get_all(axum::http::header::SET_COOKIE) {
-        opts.append_header(axum::http::header::SET_COOKIE, value.clone());
-    }
+    append_set_cookie_headers(&opts, &sess.cookie_headers);
 }
 
 /// Extract the client IP from request headers.
