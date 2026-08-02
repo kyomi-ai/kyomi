@@ -1215,7 +1215,7 @@ mod tests {
     #[test]
     fn get_events_for_storage_produces_correct_json() {
         // Verify the serialization format without needing Redis.
-        let events = vec![
+        let events = [
             AgentThinkingEvent {
                 event_type: ThinkingEventType::AgentStart,
                 timestamp: "2025-01-15T10:00:00Z".to_string(),

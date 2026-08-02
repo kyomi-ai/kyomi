@@ -837,7 +837,7 @@ mod tests {
     fn result_ordering_descending_by_similarity() {
         // Simulate the sorting logic used in InMemoryVectorSearch
         let query = vec![1.0f32, 0.0, 0.0];
-        let candidates = vec![
+        let candidates = [
             vec![0.1f32, 0.9, 0.0], // low similarity
             vec![0.9f32, 0.1, 0.0], // high similarity
             vec![0.5f32, 0.5, 0.0], // medium similarity
@@ -859,7 +859,7 @@ mod tests {
     #[test]
     fn limit_parameter_respected() {
         let query = vec![1.0f32, 0.0, 0.0];
-        let candidates = vec![
+        let candidates = [
             vec![0.9f32, 0.1, 0.0],
             vec![0.8f32, 0.2, 0.0],
             vec![0.7f32, 0.3, 0.0],

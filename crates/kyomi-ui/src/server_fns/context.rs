@@ -311,10 +311,10 @@ mod tests {
         }
 
         // Self-hosted should have most features enabled.
-        assert_eq!(map["ai_chat_enabled"], true);
-        assert_eq!(map["multi_user_enabled"], true);
-        assert_eq!(map["billing_enabled"], false); // self-hosted has no billing
-        assert_eq!(map["credits_exhausted"], false);
+        assert!(map["ai_chat_enabled"]);
+        assert!(map["multi_user_enabled"]);
+        assert!(!map["billing_enabled"]); // self-hosted has no billing
+        assert!(!map["credits_exhausted"]);
     }
 
     #[test]
@@ -323,8 +323,8 @@ mod tests {
         let caps = kyomi_core::capability::compute_capabilities_self_hosted();
         let map = build_capabilities_map(&caps);
 
-        assert_eq!(map["billing_enabled"], false);
-        assert_eq!(map["credits_exhausted"], false);
+        assert!(!map["billing_enabled"]);
+        assert!(!map["credits_exhausted"]);
     }
 
     #[test]

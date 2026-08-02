@@ -1158,7 +1158,7 @@ mod tests {
                         },
                     });
                     let _ = tx.try_send(ConnectResponse {
-                        id: id,
+                        id,
                         body: ConnectResponseBody::ArrowComplete {
                             execution_time_ms: Some(15),
                             bytes_processed: None,
@@ -1312,7 +1312,7 @@ mod tests {
                         },
                     });
                     let _ = tx.try_send(ConnectResponse {
-                        id: id,
+                        id,
                         body: ConnectResponseBody::ArrowComplete {
                             execution_time_ms: Some(20),
                             bytes_processed: None,

@@ -390,7 +390,7 @@ mod tests {
     #[test]
     fn test_all_tiers_have_same_config() {
         let configs = default_tier_configs();
-        for (_, config) in &configs {
+        for config in configs.values() {
             assert_eq!(config.monthly_event_limit, 100_000);
             assert_eq!(config.grace_percent, 20);
             assert_eq!(config.retention_days, 180);

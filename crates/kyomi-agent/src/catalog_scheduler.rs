@@ -1279,7 +1279,9 @@ mod tests {
 
     #[test]
     fn public_dataset_refresh_initial_delay_is_less_than_interval() {
-        assert!(PUBLIC_DATASET_REFRESH_INITIAL_DELAY_SECONDS < PUBLIC_DATASET_REFRESH_INTERVAL_SECONDS);
+        const {
+            assert!(PUBLIC_DATASET_REFRESH_INITIAL_DELAY_SECONDS < PUBLIC_DATASET_REFRESH_INTERVAL_SECONDS);
+        }
     }
 
     #[test]
@@ -1510,24 +1512,24 @@ mod tests {
     #[test]
     fn initial_delay_is_less_than_interval() {
         // Initial delay should be less than the refresh interval
-        assert!(REFRESH_INITIAL_DELAY_SECONDS < REFRESH_INTERVAL_SECONDS);
+        const { assert!(REFRESH_INITIAL_DELAY_SECONDS < REFRESH_INTERVAL_SECONDS) };
     }
 
     #[test]
     fn cleanup_initial_delay_is_reasonable() {
         // Cleanup initial delay should be less than or equal to the cleanup interval
-        assert!(CLEANUP_INITIAL_DELAY_SECONDS <= CLEANUP_INTERVAL_SECONDS);
+        const { assert!(CLEANUP_INITIAL_DELAY_SECONDS <= CLEANUP_INTERVAL_SECONDS) };
         // And at least 1 hour (no rush for cleanup)
-        assert!(CLEANUP_INITIAL_DELAY_SECONDS >= 3600);
+        const { assert!(CLEANUP_INITIAL_DELAY_SECONDS >= 3600) };
     }
 
     #[test]
     fn lock_ttl_prevents_deadlock() {
         // Lock TTL should be at most equal to the check interval
         // so locks auto-expire even if the holder crashes
-        assert!(CATALOG_REFRESH_LOCK_TTL <= REFRESH_INTERVAL_SECONDS);
-        assert!(TOKEN_CLEANUP_LOCK_TTL <= CLEANUP_INTERVAL_SECONDS);
-        assert!(QUERY_HISTORY_CLEANUP_LOCK_TTL <= QUERY_HISTORY_CLEANUP_INTERVAL_SECONDS);
+        const { assert!(CATALOG_REFRESH_LOCK_TTL <= REFRESH_INTERVAL_SECONDS) };
+        const { assert!(TOKEN_CLEANUP_LOCK_TTL <= CLEANUP_INTERVAL_SECONDS) };
+        const { assert!(QUERY_HISTORY_CLEANUP_LOCK_TTL <= QUERY_HISTORY_CLEANUP_INTERVAL_SECONDS) };
     }
 
     // -- Query history cleanup constants --
@@ -1544,7 +1546,9 @@ mod tests {
 
     #[test]
     fn query_history_cleanup_initial_delay_is_less_than_interval() {
-        assert!(QUERY_HISTORY_CLEANUP_INITIAL_DELAY_SECONDS < QUERY_HISTORY_CLEANUP_INTERVAL_SECONDS);
+        const {
+            assert!(QUERY_HISTORY_CLEANUP_INITIAL_DELAY_SECONDS < QUERY_HISTORY_CLEANUP_INTERVAL_SECONDS);
+        }
     }
 
     #[test]

@@ -393,14 +393,14 @@ mod tests {
     fn expansion_base_score_above_min_similarity() {
         // EXPANSION_BASE_SCORE must be above MIN_SIMILARITY (0.25) to pass the
         // quality gate in the retrieval pipeline.
-        assert!(EXPANSION_BASE_SCORE > 0.25);
+        const { assert!(EXPANSION_BASE_SCORE > 0.25) };
     }
 
     #[test]
     fn expansion_base_score_below_strong_vector_match() {
         // EXPANSION_BASE_SCORE should be below typical strong vector matches
         // (0.6-0.9) so that direct vector hits rank higher.
-        assert!(EXPANSION_BASE_SCORE < 0.6);
+        const { assert!(EXPANSION_BASE_SCORE < 0.6) };
     }
 
     #[test]

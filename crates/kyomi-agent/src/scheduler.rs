@@ -720,7 +720,7 @@ mod tests {
 
     #[test]
     fn catchup_jitter_range_is_valid() {
-        assert!(CATCHUP_JITTER_MIN < CATCHUP_JITTER_MAX);
+        const { assert!(CATCHUP_JITTER_MIN < CATCHUP_JITTER_MAX) };
         assert_eq!(CATCHUP_JITTER_MIN, 30);
         assert_eq!(CATCHUP_JITTER_MAX, 90);
     }
@@ -769,11 +769,11 @@ mod tests {
     #[test]
     fn catchup_jitter_range_reasonable() {
         // Jitter min should be at least 10s to avoid immediate thundering herd
-        assert!(CATCHUP_JITTER_MIN >= 10);
+        const { assert!(CATCHUP_JITTER_MIN >= 10) };
         // Jitter max should be under 2 minutes for reasonable catch-up time
-        assert!(CATCHUP_JITTER_MAX <= 120);
+        const { assert!(CATCHUP_JITTER_MAX <= 120) };
         // Range should allow meaningful spread
-        assert!(CATCHUP_JITTER_MAX - CATCHUP_JITTER_MIN >= 30);
+        const { assert!(CATCHUP_JITTER_MAX - CATCHUP_JITTER_MIN >= 30) };
     }
 
     // -- Poll interval and cleanup interval relationship --
@@ -781,7 +781,7 @@ mod tests {
     #[test]
     fn cleanup_runs_much_less_frequently_than_polling() {
         // Cleanup should run at least 100x less frequently than polling
-        assert!(CLEANUP_INTERVAL_SECONDS / POLL_INTERVAL_SECONDS >= 100);
+        const { assert!(CLEANUP_INTERVAL_SECONDS / POLL_INTERVAL_SECONDS >= 100) };
     }
 
     // -- Missed execution cutoff is in hours --
@@ -789,7 +789,7 @@ mod tests {
     #[test]
     fn missed_execution_cutoff_reasonable() {
         // Cutoff should be at least 1 hour and at most 48 hours
-        assert!(MISSED_EXECUTION_CUTOFF_HOURS >= 1);
-        assert!(MISSED_EXECUTION_CUTOFF_HOURS <= 48);
+        const { assert!(MISSED_EXECUTION_CUTOFF_HOURS >= 1) };
+        const { assert!(MISSED_EXECUTION_CUTOFF_HOURS <= 48) };
     }
 }
