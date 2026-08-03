@@ -22,6 +22,83 @@ use crate::server_fns::team::*;
 use crate::types::{OwnershipTransferData, TeamInvitation, TeamMember};
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Ownership derivation (KYO-240)
+//
+// Both the "Transfer Ownership" button guard and the pending-transfers
+// section need "is the current user the workspace owner?", each computed
+// from two independent fetches (`user_ctx`, `members`). Before KYO-240 this
+// logic was duplicated verbatim at two call sites — one reading `.get()`
+// (a synchronous reactive closure), one reading `.await` (inside a
+// `Suspend` block) — with every fetch failure silently discarded via
+// `.ok()`. Consolidating into these two functions fixes both problems at
+// once: there is now exactly one implementation to keep correct, and a
+// failed fetch is logged instead of vanishing. Fail-closed behaviour is
+// byte-for-byte unchanged — `current_user_id` still degrades to `""` and
+// `is_owner` still degrades to `false`.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Extract the current user's id from a possibly-not-yet-loaded,
+/// possibly-failed `UserContext` fetch. Fails closed to `""` — logs on
+/// fetch failure, stays silent while merely loading. `""` is not itself
+/// guaranteed to be unmatchable against a real `member.user_id`; see the
+/// explicit guard in [`is_owner_from`] for the invariant that makes the
+/// degraded value here still resolve to `is_owner == false`.
+fn current_user_id_from(user_ctx: Option<Result<UserContext, ServerFnError>>) -> String {
+    user_ctx
+        .and_then(|result| {
+            result
+                .map_err(|e| {
+                    tracing::warn!(
+                        error = %e,
+                        "team_page: user context fetch failed while deriving ownership, failing closed to empty user id"
+                    );
+                })
+                .ok()
+        })
+        .map(|ctx| ctx.user_id.clone())
+        .unwrap_or_default()
+}
+
+/// Whether `current_user_id` owns the workspace, derived from a possibly-
+/// not-yet-loaded, possibly-failed members fetch. Fails closed to `false` —
+/// logs on fetch failure, stays silent while merely loading. Also fails
+/// closed to `false` whenever `current_user_id` is empty (the degraded
+/// value `current_user_id_from` returns after its own fetch failure):
+/// a member row's `user_id` is never legitimately empty, but a corrupt one
+/// could be, and without this guard `"" == ""` would let it match and grant
+/// ownership — the fail-*open* bug this function must not have.
+fn is_owner_from(members: Option<Result<Vec<TeamMember>, ServerFnError>>, current_user_id: &str) -> bool {
+    // Process the members fetch first — unconditionally — so a failed fetch
+    // always logs its own diagnostic. If we checked `current_user_id` first
+    // and returned early, a workspace with both a failed UserContext fetch
+    // *and* a failed members fetch would only ever surface the former; the
+    // latter is an independent failure and deserves its own WARN regardless
+    // of whether we were going to short-circuit to `false` anyway.
+    let members = members.and_then(|result| {
+        result
+            .map_err(|e| {
+                tracing::warn!(
+                    error = %e,
+                    "team_page: workspace members fetch failed while deriving ownership, failing closed to false"
+                );
+            })
+            .ok()
+    });
+
+    if current_user_id.is_empty() {
+        return false;
+    }
+
+    members
+        .map(|members| {
+            members
+                .iter()
+                .any(|member| member.user_id == current_user_id && member.is_owner)
+        })
+        .unwrap_or(false)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Guard: checks subscription tier before rendering team management
 // Matches React SettingsContent.jsx which gates on isAdmin && isTeamTier
 // ─────────────────────────────────────────────────────────────────────────────
@@ -73,6 +150,19 @@ pub fn TeamPage() -> impl IntoView {
 fn TeamPageInner() -> impl IntoView {
     // Use the UserContext resource provided by SettingsShell — same resource, no extra fetch.
     let user_ctx = expect_context::<LocalResource<Result<UserContext, ServerFnError>>>();
+
+    // Single derivation of `current_user_id`, consumed by both the
+    // button-visibility closure and the pending-transfers `Suspend` block
+    // below. Deliberately a `Memo` (not a plain call to
+    // `current_user_id_from` or a `Signal::derive`, which is an unmemoized
+    // `Arc<dyn Fn>` — nothing dedupes recomputation): a `Memo` only
+    // reruns its body — and therefore only re-invokes the
+    // `tracing::warn!` inside `current_user_id_from` — when `user_ctx`
+    // itself changes, never merely because a reactive scope that also
+    // happens to read `user_ctx` reran for an unrelated reason (a
+    // `members`/`transfers` refetch). Without this, one stale
+    // `UserContext` failure would re-log on every subsequent team action.
+    let current_user_id = Memo::new(move |_| current_user_id_from(user_ctx.get()));
 
     // Resources for members, invitations, transfers
     let (members_version, set_members_version) = signal(0u32);
@@ -345,14 +435,8 @@ fn TeamPageInner() -> impl IntoView {
                 <div class="flex gap-2 flex-shrink-0">
                     // Transfer Ownership button — visible to owner only
                     {move || {
-                        let current_user_id = user_ctx.get()
-                            .and_then(|r| r.ok())
-                            .map(|u| u.user_id.clone())
-                            .unwrap_or_default();
-                        let is_owner = members.get()
-                            .and_then(|r| r.ok())
-                            .map(|m| m.iter().any(|member| member.user_id == current_user_id && member.is_owner))
-                            .unwrap_or(false);
+                        let current_user_id = current_user_id.get();
+                        let is_owner = is_owner_from(members.get(), &current_user_id);
 
                         if is_owner {
                             view! {
@@ -440,14 +524,17 @@ fn TeamPageInner() -> impl IntoView {
             // Pending Ownership Transfers
             <Transition fallback=|| ()>
                 {move || Suspend::new(async move {
-                    let current_user_id = user_ctx.await
-                        .ok()
-                        .map(|u| u.user_id.clone())
-                        .unwrap_or_default();
-                    let is_owner = members.await
-                        .ok()
-                        .map(|m| m.iter().any(|member| member.user_id == current_user_id && member.is_owner))
-                        .unwrap_or(false);
+                    // Still await `user_ctx` — unchanged suspense-gating
+                    // timing from before this fix, this block still waits
+                    // for it to resolve like `members`/`transfers` below.
+                    // But the value comes from the `current_user_id` memo,
+                    // not from calling `current_user_id_from` again here:
+                    // that's what stops this block's own `members`- and
+                    // `transfers`-driven re-entry from re-triggering the
+                    // diagnostic log for an unchanged `user_ctx` failure.
+                    let _ = user_ctx.await;
+                    let current_user_id = current_user_id.get_untracked();
+                    let is_owner = is_owner_from(Some(members.await), &current_user_id);
 
                     match transfers.await {
                         Ok(t) if !t.is_empty() => {
@@ -1120,5 +1207,194 @@ fn TransferOwnershipModal(
                 </div>
             </Show>
         </Modal>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use tracing::Level;
+
+    use kyomi_test_tracing::capture_tracing;
+
+    use super::*;
+
+    /// Minimal `UserContext` fixture — only `user_id` varies between the
+    /// cases below.
+    fn user_ctx_fixture(user_id: &str) -> UserContext {
+        UserContext {
+            user_id: user_id.to_string(),
+            email: "user@example.com".to_string(),
+            name: None,
+            workspace_id: Some("ws-1".to_string()),
+            workspace_name: Some("Test Workspace".to_string()),
+            is_owner: false,
+            subscription_tier: "team".to_string(),
+            subscription_status: "active".to_string(),
+            is_personal_mode: false,
+            is_self_hosted: false,
+            billing_enabled: false,
+            capabilities: HashMap::new(),
+            chart_palette: "balanced".to_string(),
+            permissions: Vec::new(),
+        }
+    }
+
+    /// Minimal `TeamMember` fixture — only `user_id` and `is_owner` vary
+    /// between the cases below.
+    fn member_fixture(user_id: &str, is_owner: bool) -> TeamMember {
+        TeamMember {
+            user_id: user_id.to_string(),
+            email: format!("{user_id}@example.com"),
+            name: None,
+            role: if is_owner { "workspace_admin".to_string() } else { "workspace_user".to_string() },
+            role_display: if is_owner { "Admin".to_string() } else { "Member".to_string() },
+            is_admin_role: is_owner,
+            is_owner,
+            joined_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    // ── current_user_id_from ───────────────────────────────────────────────
+
+    #[test]
+    fn current_user_id_from_failed_fetch_yields_empty_string_and_logs() {
+        let logs = capture_tracing();
+
+        let id = current_user_id_from(Some(Err(ServerFnError::new("simulated network failure"))));
+
+        assert_eq!(id, "", "a failed fetch must fail closed to an empty user id, unchanged from before KYO-240");
+
+        let warnings = logs.events_at(Level::WARN);
+        assert_eq!(
+            warnings.len(),
+            1,
+            "expected exactly one WARN-level diagnostic for the failed fetch; captured: {:?}",
+            logs.events()
+        );
+        assert!(warnings[0].1.contains("simulated network failure"));
+    }
+
+    #[test]
+    fn current_user_id_from_loading_yields_empty_string_without_logging() {
+        let logs = capture_tracing();
+
+        let id = current_user_id_from(None);
+
+        assert_eq!(id, "");
+        assert!(logs.events().is_empty());
+    }
+
+    #[test]
+    fn current_user_id_from_success_returns_the_fetched_id_without_logging() {
+        let logs = capture_tracing();
+
+        let id = current_user_id_from(Some(Ok(user_ctx_fixture("user-42"))));
+
+        assert_eq!(id, "user-42");
+        assert!(logs.events().is_empty());
+    }
+
+    // ── is_owner_from ───────────────────────────────────────────────────────
+
+    #[test]
+    fn is_owner_from_failed_fetch_yields_false_and_logs() {
+        let logs = capture_tracing();
+
+        // Even a `current_user_id` that would match, had the fetch
+        // succeeded, must not make the caller think it's the owner.
+        let is_owner = is_owner_from(Some(Err(ServerFnError::new("simulated timeout"))), "user-1");
+
+        assert!(!is_owner, "a failed members fetch must fail closed to false, unchanged from before KYO-240");
+
+        let warnings = logs.events_at(Level::WARN);
+        assert_eq!(
+            warnings.len(),
+            1,
+            "expected exactly one WARN-level diagnostic for the failed fetch; captured: {:?}",
+            logs.events()
+        );
+        assert!(warnings[0].1.contains("simulated timeout"));
+    }
+
+    #[test]
+    fn is_owner_from_loading_yields_false_without_logging() {
+        let logs = capture_tracing();
+
+        let is_owner = is_owner_from(None, "user-1");
+
+        assert!(!is_owner);
+        assert!(logs.events().is_empty());
+    }
+
+    #[test]
+    fn is_owner_from_success_matches_the_current_user_as_owner() {
+        let members = vec![member_fixture("user-1", true), member_fixture("user-2", false)];
+        assert!(is_owner_from(Some(Ok(members)), "user-1"));
+    }
+
+    #[test]
+    fn is_owner_from_success_does_not_match_a_non_owner_member() {
+        let members = vec![member_fixture("user-1", false), member_fixture("user-2", true)];
+        assert!(!is_owner_from(Some(Ok(members)), "user-1"));
+    }
+
+    #[test]
+    fn is_owner_from_never_matches_the_empty_string_fallback_id() {
+        // Regression guard for the specific degrade-to-`""` behaviour KYO-240
+        // was told to preserve exactly: if a member row somehow had an empty
+        // `user_id` (it never legitimately would), a failed UserContext
+        // fetch must still not spuriously grant ownership.
+        let members = vec![member_fixture("", true)];
+        assert!(!is_owner_from(Some(Ok(members)), ""));
+    }
+
+    // ── current_user_id memoization (KYO-240 review fix) ────────────────────
+    //
+    // `TeamPageInner` hoists `current_user_id_from` into a `Memo` so its
+    // `tracing::warn!` only fires when `user_ctx` itself changes — never
+    // merely because a reactive scope that also happens to read `user_ctx`
+    // reran for an unrelated reason (a `members`/`transfers` refetch). This
+    // reproduces that shape directly against `leptos::prelude::Memo`
+    // (standing a plain `signal` in for the co-read resource) rather than
+    // against the real `LocalResource`/`Suspend` machinery, which isn't
+    // exercisable outside a running component tree.
+    #[test]
+    fn current_user_id_from_memoized_does_not_relog_when_an_unrelated_signal_changes() {
+        let owner = Owner::new();
+        owner.set();
+
+        let (user_ctx, _set_user_ctx) =
+            signal(Some(Err::<UserContext, ServerFnError>(ServerFnError::new("simulated network failure"))));
+        // Stands in for `members`/`transfers`: a co-read resource whose own
+        // refetch reruns the surrounding scope without `user_ctx` changing.
+        let (unrelated, set_unrelated) = signal(0u32);
+
+        let current_user_id = Memo::new(move |_| current_user_id_from(user_ctx.get()));
+
+        let logs = capture_tracing();
+
+        // First evaluation, mirroring the button-visibility closure reading
+        // both signals together.
+        assert_eq!(current_user_id.get(), "");
+        let _ = unrelated.get();
+
+        // Simulate an unrelated resource refetch (e.g. `members_version` or
+        // `transfers_version` bumping): `user_ctx`'s own signal is
+        // untouched, so the memo must not recompute — and must not re-log.
+        set_unrelated.set(1);
+        assert_eq!(current_user_id.get(), "");
+        let _ = unrelated.get();
+
+        let warnings = logs.events_at(Level::WARN);
+        assert_eq!(
+            warnings.len(),
+            1,
+            "the UserContext-fetch-failure warning must log exactly once across two \
+             evaluations where only the unrelated co-read signal changed, not once per \
+             evaluation; captured: {:?}",
+            logs.events()
+        );
     }
 }

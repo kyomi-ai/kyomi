@@ -35,6 +35,31 @@ impl Permissions {
     }
 }
 
+/// Derive the current permission set from a possibly-not-yet-loaded,
+/// possibly-failed `UserContext` fetch.
+///
+/// Fails closed to an empty set — while loading (`None`) and on fetch
+/// failure (`Some(Err(_))`) alike — but unlike the pre-KYO-240 version, a
+/// failed fetch is no longer silent: it's logged via `tracing::warn!` so
+/// "every permission-gated surface vanished" has a diagnostic trail instead
+/// of none. The loading case deliberately does not log — it isn't a
+/// failure, just a resource that hasn't resolved yet.
+fn permissions_from(user_ctx: Option<Result<UserContext, ServerFnError>>) -> Vec<Permission> {
+    user_ctx
+        .and_then(|result| {
+            result
+                .map_err(|e| {
+                    tracing::warn!(
+                        error = %e,
+                        "use_permissions: user context fetch failed, failing closed to zero permissions"
+                    );
+                })
+                .ok()
+        })
+        .map(|ctx| ctx.permissions)
+        .unwrap_or_default()
+}
+
 /// Reactive permission set derived from the shared `UserContext` resource.
 ///
 /// The single lookup helper every UI gate should use (KYO-189 P2) — wraps
@@ -45,13 +70,7 @@ impl Permissions {
 /// `expect_context` otherwise.
 pub fn use_permissions() -> Permissions {
     let user_ctx = expect_context::<LocalResource<Result<UserContext, ServerFnError>>>();
-    Permissions(Signal::derive(move || {
-        user_ctx
-            .get()
-            .and_then(|r| r.ok())
-            .map(|ctx| ctx.permissions)
-            .unwrap_or_default()
-    }))
+    Permissions(Signal::derive(move || permissions_from(user_ctx.get())))
 }
 
 /// Why (or whether) the current user may use analytics settings.
@@ -104,6 +123,25 @@ pub fn analytics_access(ctx: &UserContext) -> AnalyticsAccess {
     }
 }
 
+/// Derive [`AnalyticsAccess`] from a possibly-not-yet-loaded, possibly-failed
+/// `UserContext` fetch. Same shape as [`permissions_from`] — fails closed to
+/// `Denied`, logs only the failed-fetch case (KYO-240).
+fn analytics_access_from(user_ctx: Option<Result<UserContext, ServerFnError>>) -> AnalyticsAccess {
+    user_ctx
+        .and_then(|result| {
+            result
+                .map_err(|e| {
+                    tracing::warn!(
+                        error = %e,
+                        "use_analytics_access: user context fetch failed, failing closed to Denied"
+                    );
+                })
+                .ok()
+        })
+        .map(|ctx| analytics_access(&ctx))
+        .unwrap_or(AnalyticsAccess::Denied)
+}
+
 /// Reactive wrapper around [`analytics_access`] over the shared
 /// `UserContext` resource (KYO-260), mirroring [`use_permissions`].
 ///
@@ -112,18 +150,16 @@ pub fn analytics_access(ctx: &UserContext) -> AnalyticsAccess {
 /// permission to render analytics content.
 pub fn use_analytics_access() -> Signal<AnalyticsAccess> {
     let user_ctx = expect_context::<LocalResource<Result<UserContext, ServerFnError>>>();
-    Signal::derive(move || {
-        user_ctx
-            .get()
-            .and_then(|r| r.ok())
-            .map(|ctx| analytics_access(&ctx))
-            .unwrap_or(AnalyticsAccess::Denied)
-    })
+    Signal::derive(move || analytics_access_from(user_ctx.get()))
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+
+    use tracing::Level;
+
+    use kyomi_test_tracing::capture_tracing;
 
     use super::*;
 
@@ -191,5 +227,89 @@ mod tests {
     fn billing_disabled_for_admin_without_billing() {
         let access = analytics_access(&ctx(false, false, vec![Permission::ManageAnalytics]));
         assert_eq!(access, AnalyticsAccess::BillingDisabled);
+    }
+
+    // ── KYO-240: failed fetches must fail closed AND log ──────────────────
+
+    #[test]
+    fn permissions_from_failed_fetch_yields_no_permissions_and_logs() {
+        let logs = capture_tracing();
+
+        let permissions = permissions_from(Some(Err(ServerFnError::new("simulated network failure"))));
+
+        // Fail-closed: a failed fetch must still yield zero permissions,
+        // exactly like before KYO-240.
+        assert!(
+            permissions.is_empty(),
+            "a failed UserContext fetch must fail closed to zero permissions, got {permissions:?}"
+        );
+
+        // KYO-240: unlike before, the failure must also be diagnosable.
+        let warnings = logs.events_at(Level::WARN);
+        assert_eq!(
+            warnings.len(),
+            1,
+            "expected exactly one WARN-level diagnostic for the failed fetch; captured: {:?}",
+            logs.events()
+        );
+        assert!(
+            warnings[0].1.contains("simulated network failure"),
+            "the diagnostic should carry the underlying error so the failure can be root-caused; \
+             captured: {:?}",
+            warnings[0].1
+        );
+    }
+
+    #[test]
+    fn permissions_from_loading_yields_no_permissions_without_logging() {
+        // The load-bearing counterpart to the test above: `None` (resource
+        // still loading) is not a failure and must stay silent, or every
+        // page render would spam a warning while `UserContext` resolves.
+        let logs = capture_tracing();
+
+        let permissions = permissions_from(None);
+
+        assert!(permissions.is_empty());
+        assert!(
+            logs.events().is_empty(),
+            "a merely-loading resource must not log a warning; captured: {:?}",
+            logs.events()
+        );
+    }
+
+    #[test]
+    fn permissions_from_success_returns_the_fetched_permissions_without_logging() {
+        let logs = capture_tracing();
+
+        let permissions = permissions_from(Some(Ok(ctx(false, true, vec![Permission::ManageTeam]))));
+
+        assert_eq!(permissions, vec![Permission::ManageTeam]);
+        assert!(logs.events().is_empty());
+    }
+
+    #[test]
+    fn analytics_access_from_failed_fetch_yields_denied_and_logs() {
+        let logs = capture_tracing();
+
+        let access = analytics_access_from(Some(Err(ServerFnError::new("simulated timeout"))));
+
+        assert_eq!(access, AnalyticsAccess::Denied);
+        let warnings = logs.events_at(Level::WARN);
+        assert_eq!(
+            warnings.len(),
+            1,
+            "expected exactly one WARN-level diagnostic for the failed fetch; captured: {:?}",
+            logs.events()
+        );
+    }
+
+    #[test]
+    fn analytics_access_from_loading_yields_denied_without_logging() {
+        let logs = capture_tracing();
+
+        let access = analytics_access_from(None);
+
+        assert_eq!(access, AnalyticsAccess::Denied);
+        assert!(logs.events().is_empty());
     }
 }

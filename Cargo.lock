@@ -6177,6 +6177,7 @@ dependencies = [
  "kyomi-datasource-server",
  "kyomi-embed",
  "kyomi-knowledge",
+ "kyomi-test-tracing",
  "kyomi-types",
  "lettre",
  "p256",
@@ -6197,7 +6198,6 @@ dependencies = [
  "tokio",
  "totp-rs",
  "tracing",
- "tracing-subscriber",
  "url",
  "uuid",
  "webauthn-rs",
@@ -6406,6 +6406,7 @@ dependencies = [
  "kyomi-knowledge",
  "kyomi-slack",
  "kyomi-test-harness",
+ "kyomi-test-tracing",
  "kyomi-types",
  "kyomi-ui",
  "leptos",
@@ -6485,6 +6486,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kyomi-test-tracing"
+version = "0.1.0"
+dependencies = [
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "kyomi-types"
 version = "0.1.0"
 dependencies = [
@@ -6531,6 +6540,7 @@ dependencies = [
  "kyomi-embed",
  "kyomi-knowledge",
  "kyomi-slack",
+ "kyomi-test-tracing",
  "kyomi-types",
  "kyomi-ui-components",
  "leptos",

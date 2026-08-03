@@ -326,55 +326,12 @@ impl MCPSessionManager {
 
 #[cfg(test)]
 mod tests {
-    use std::fmt::Write as _;
-    use std::sync::{Arc, Mutex};
-
     use kyomi_core::kv_store::KVStore;
     use tracing::Level;
-    use tracing_subscriber::layer::{Context, SubscriberExt};
-    use tracing_subscriber::{Layer, Registry};
+
+    use kyomi_test_tracing::capture_tracing;
 
     use super::*;
-
-    /// Shared sink that a `CaptureLayer` writes tracing events into.
-    type EventLog = Arc<Mutex<Vec<(Level, String)>>>;
-
-    /// Minimal `tracing_subscriber::Layer` that records every event's level
-    /// and rendered fields, so tests can assert on log output without a real
-    /// subscriber (fmt/json) formatting to stdout.
-    ///
-    /// Duplicated from `apps/server/src/routes/auth_passkeys.rs` — see
-    /// `kyomi-auth/Cargo.toml`: pulling in `kyomi-test-harness` here would
-    /// drag `kyomi-server`/`axum`/`sqlx` into this crate's test build since
-    /// the harness depends on `kyomi-auth`. A follow-up ticket tracks
-    /// extracting a shared test-only helper crate.
-    struct CaptureLayer(EventLog);
-
-    impl<S: tracing::Subscriber> Layer<S> for CaptureLayer {
-        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
-            struct FieldVisitor(String);
-            impl tracing::field::Visit for FieldVisitor {
-                fn record_debug(
-                    &mut self,
-                    field: &tracing::field::Field,
-                    value: &dyn std::fmt::Debug,
-                ) {
-                    if field.name() == "message" {
-                        let _ = write!(self.0, "{value:?}");
-                    } else {
-                        let _ = write!(self.0, " {}={value:?}", field.name());
-                    }
-                }
-            }
-
-            let mut visitor = FieldVisitor(String::new());
-            event.record(&mut visitor);
-            self.0
-                .lock()
-                .expect("capture lock poisoned")
-                .push((*event.metadata().level(), visitor.0));
-        }
-    }
 
     /// Minimal `KVStore` whose `get` always fails, to exercise the KV-outage
     /// path in `validate_session`. No other method is reachable through that
@@ -470,22 +427,17 @@ mod tests {
     async fn validate_session_absent_does_not_log_error() {
         let mgr = test_manager().await;
 
-        let captured: EventLog = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = Registry::default().with(CaptureLayer(captured.clone()));
-        let guard = tracing::subscriber::set_default(subscriber);
+        let logs = capture_tracing();
 
         let result = mgr.validate_session("nonexistent-session").await;
 
-        drop(guard);
-
         assert!(result.is_none(), "an absent session should validate to None");
 
-        let events = captured.lock().expect("capture lock poisoned").clone();
-        let error_events: Vec<&(Level, String)> =
-            events.iter().filter(|(level, _)| *level == Level::ERROR).collect();
+        let error_events = logs.events_at(Level::ERROR);
         assert!(
             error_events.is_empty(),
-            "a merely-absent session must not log an error; captured: {events:?}"
+            "a merely-absent session must not log an error; captured: {:?}",
+            logs.events()
         );
     }
 
@@ -504,30 +456,26 @@ mod tests {
             .await
             .expect("in-memory KV set should succeed");
 
-        let captured: EventLog = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = Registry::default().with(CaptureLayer(captured.clone()));
-        let guard = tracing::subscriber::set_default(subscriber);
+        let logs = capture_tracing();
 
         let result = mgr.validate_session(session_id).await;
-
-        drop(guard);
 
         assert!(
             result.is_none(),
             "malformed session data must be treated as invalid, not surfaced to the caller"
         );
 
-        let events = captured.lock().expect("capture lock poisoned").clone();
-        let error_events: Vec<&(Level, String)> =
-            events.iter().filter(|(level, _)| *level == Level::ERROR).collect();
+        let error_events = logs.events_at(Level::ERROR);
         assert!(
             !error_events.is_empty(),
-            "malformed session data must emit an error!-level log; captured: {events:?}"
+            "malformed session data must emit an error!-level log; captured: {:?}",
+            logs.events()
         );
         assert!(
             error_events.iter().any(|(_, message)| message.contains("malformed")),
             "expected an error log identifying the data as malformed (not merely absent); \
-             captured: {events:?}"
+             captured: {:?}",
+            logs.events()
         );
         for (_, message) in &error_events {
             assert!(
@@ -549,25 +497,20 @@ mod tests {
     async fn validate_session_kv_error_logs_error() {
         let mgr = MCPSessionManager::new(Arc::new(FailingKVStore));
 
-        let captured: EventLog = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = Registry::default().with(CaptureLayer(captured.clone()));
-        let guard = tracing::subscriber::set_default(subscriber);
+        let logs = capture_tracing();
 
         let result = mgr.validate_session("any-session").await;
-
-        drop(guard);
 
         assert!(
             result.is_none(),
             "a KV store error must deny access (fail closed), not surface to the caller"
         );
 
-        let events = captured.lock().expect("capture lock poisoned").clone();
-        let error_events: Vec<&(Level, String)> =
-            events.iter().filter(|(level, _)| *level == Level::ERROR).collect();
+        let error_events = logs.events_at(Level::ERROR);
         assert!(
             !error_events.is_empty(),
-            "a KV store error must emit an error!-level log; captured: {events:?}"
+            "a KV store error must emit an error!-level log; captured: {:?}",
+            logs.events()
         );
     }
 
