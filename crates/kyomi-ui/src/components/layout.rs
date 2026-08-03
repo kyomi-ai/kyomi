@@ -851,7 +851,7 @@ fn Sidebar(
                         class=move || {
                             let spacing = if effective_collapsed.get() { "gap-3 px-2.5" } else { "gap-3 pl-2.5 pr-3 py-2.5" };
                             if new_chat_active.get() {
-                                format!("w-full min-h-[44px] flex items-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring bg-[rgba(217,119,6,0.12)] text-amber-500 {spacing}")
+                                format!("w-full min-h-[44px] flex items-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring bg-[rgba(217,119,6,0.12)] text-primary {spacing}")
                             } else {
                                 format!("w-full min-h-[44px] flex items-center rounded-lg hover:bg-[var(--color-sidebar-hover)] transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring {spacing}")
                             }
@@ -938,7 +938,7 @@ fn Sidebar(
                                                     class=move || {
                                                         let active = current_path.get() == session_href_cmp;
                                                         if active {
-                                                            "block px-3 py-2.5 rounded-lg cursor-pointer transition-colors text-sm text-amber-500 bg-[rgba(217,119,6,0.12)] truncate focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                                                            "block px-3 py-2.5 rounded-lg cursor-pointer transition-colors text-sm text-primary bg-[rgba(217,119,6,0.12)] truncate focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                                                         } else {
                                                             "block px-3 py-2.5 rounded-lg cursor-pointer transition-colors text-sm text-[var(--color-sidebar-foreground)] hover:bg-[var(--color-sidebar-hover)] truncate focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                                                         }
@@ -1268,7 +1268,7 @@ fn Sidebar(
 ///
 /// Navy sidebar styling:
 /// - Default: `text-[var(--color-sidebar-foreground)]`, `hover:bg-[var(--color-sidebar-hover)]`
-/// - Active: amber accent background `bg-[rgba(217,119,6,0.12)]` with `text-amber-500`
+/// - Active: amber accent background `bg-[rgba(217,119,6,0.12)]` with `text-primary`
 /// - Collapsed: `gap-3 px-2.5`, Expanded: `gap-3 pl-2.5 pr-3 py-2.5`
 /// - Icon: inherits text color from parent `<a>`
 /// - Label: `text-sm font-medium whitespace-nowrap overflow-hidden transition-opacity duration-300`
@@ -1315,7 +1315,7 @@ fn NavItem(
                 let active = is_active.get();
                 let spacing = if collapsed.get() { "gap-3 px-2.5" } else { "gap-3 pl-2.5 pr-3 py-2.5" };
                 if active {
-                    format!("w-full min-h-[44px] flex items-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring bg-[rgba(217,119,6,0.12)] text-amber-500 {spacing}")
+                    format!("w-full min-h-[44px] flex items-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring bg-[rgba(217,119,6,0.12)] text-primary {spacing}")
                 } else {
                     format!("w-full min-h-[44px] flex items-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring hover:bg-[var(--color-sidebar-hover)] text-[var(--color-sidebar-foreground)] {spacing}")
                 }
