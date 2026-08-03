@@ -79,7 +79,6 @@ fn client() -> reqwest::Client {
 
 // ─── SSR login page ─────────────────────────────────────────────────────────
 
-#[ignore = "KYO-236: quarantined. KYO-255 — needs a real trunk+tailwind build of crates/kyomi-ui/dist/, which CI does not produce"]
 #[tokio::test]
 async fn login_returns_200() {
     let base = base_url().await;
@@ -92,7 +91,6 @@ async fn login_returns_200() {
     assert_eq!(resp.status(), 200);
 }
 
-#[ignore = "KYO-236: quarantined. KYO-255 — needs a real trunk+tailwind build of crates/kyomi-ui/dist/, which CI does not produce"]
 #[tokio::test]
 async fn login_has_data_ssr_attribute() {
     let base = base_url().await;
@@ -111,7 +109,6 @@ async fn login_has_data_ssr_attribute() {
     );
 }
 
-#[ignore = "KYO-236: quarantined. KYO-255 — needs a real trunk+tailwind build of crates/kyomi-ui/dist/, which CI does not produce"]
 #[tokio::test]
 async fn login_contains_prerendered_content() {
     let base = base_url().await;
@@ -138,7 +135,6 @@ async fn login_contains_prerendered_content() {
     );
 }
 
-#[ignore = "KYO-236: quarantined. KYO-255 — needs a real trunk+tailwind build of crates/kyomi-ui/dist/, which CI does not produce"]
 #[tokio::test]
 async fn login_includes_wasm_loader() {
     let base = base_url().await;
@@ -157,7 +153,6 @@ async fn login_includes_wasm_loader() {
     );
 }
 
-#[ignore = "KYO-236: quarantined. KYO-255 — needs a real trunk+tailwind build of crates/kyomi-ui/dist/, which CI does not produce"]
 #[tokio::test]
 async fn login_includes_serialized_resources() {
     let base = base_url().await;
@@ -196,7 +191,6 @@ async fn login_does_not_contain_loading_spinner() {
 
 // ─── CSR pages remain unaffected ────────────────────────────────────────────
 
-#[ignore = "KYO-236: quarantined. KYO-255 — needs a real trunk+tailwind build of crates/kyomi-ui/dist/, which CI does not produce"]
 #[tokio::test]
 async fn signup_complete_returns_csr_shell() {
     let base = base_url().await;
