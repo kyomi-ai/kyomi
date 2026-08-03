@@ -284,7 +284,7 @@ async fn health_v1_alias_matches_api_health_shape() {
 // returns HTML — not the former JSON API info.  We only assert a 200 status
 // and an HTML content-type.
 
-#[ignore = "KYO-236: quarantined. KYO-255 — needs a real trunk+tailwind build of crates/kyomi-ui/dist/, which CI does not produce"]
+#[ignore = "KYO-316: asserts GET / returns 200 HTML, but / redirects unauthenticated clients to /login (303). Not a dist/ problem — still fails with a fully-populated build; needs the intended contract established first"]
 #[tokio::test]
 async fn root_returns_200_html() {
     let base = base_url().await;

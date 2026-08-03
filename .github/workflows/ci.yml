@@ -2,7 +2,7 @@
 # Kyomi — CI (Pull Request Checks)
 # =============================================================================
 # Runs on every PR to main, including new pushes to existing PRs.
-# Five jobs:
+# Six jobs:
 #   1. lint-policy (fast, ~5s) — rejects new #[allow(...)] suppressions AND
 #      runs the server_fn/REST divergence linter across the full tree
 #   2. trivy-scan (~30s) — Trivy filesystem vulnerability scanner (HIGH/CRITICAL)
@@ -13,6 +13,10 @@
 #   5. clippy (slow) — full workspace clippy + compilation check + unit and
 #      integration tests (apps/server/tests/ — needs the postgres service
 #      below; KYO-236)
+#   6. ssr-contract-tests (slow, runs parallel to clippy — see the job's own
+#      comment for why it's a separate job rather than a step tacked onto
+#      clippy) — real trunk build of crates/kyomi-ui, then the SSR contract
+#      suite against it (KYO-255)
 # =============================================================================
 
 name: CI
@@ -314,6 +318,160 @@ jobs:
         env:
           RUSTC_WRAPPER: ${{ env.SCCACHE_AVAILABLE == 'true' && 'sccache' || '' }}
         run: cargo test --locked --workspace --lib --bins --tests --exclude kyomi-desktop --exclude kyomi-datasource-server
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
+
+  # ---------------------------------------------------------------------------
+  # SSR contract tests against a real trunk build (KYO-255)
+  #
+  # apps/server/tests/contract_ssr.rs asserts on the actual server-rendered
+  # HTML of /login (data-ssr attribute, prerendered heading/inputs, the WASM
+  # loader script, serialized resource scripts) plus the CSR shell on a
+  # non-SSR route. None of that exists without a genuine `trunk build` of
+  # crates/kyomi-ui/dist/ — apps/server/src/leptos_frontend.rs embeds dist/
+  # via rust_embed at *compile* time, so the `mkdir -p crates/kyomi-ui/dist`
+  # the clippy job uses (an empty directory, just enough for RustEmbed's
+  # derive macro to compile) produces a struct with no assets.
+  #
+  # The six tests that need real assets carry #[ignore] in the source, and
+  # this job's final step passes `--include-ignored` to opt back in. That
+  # split — not un-ignoring them outright — is load-bearing: the clippy job
+  # above also runs `cargo test --tests`, which would pick up contract_ssr
+  # along with every other integration-test target. Against clippy's empty
+  # dist/ those six would fail every PR (they did, briefly — KYO-255 first
+  # landed without the #[ignore]s and broke clippy). #[ignore] keeps them
+  # out of that generic sweep; this job is the only place `--include-ignored`
+  # is passed, so it's the only place they run. The seventh test in that
+  # file, login_does_not_contain_loading_spinner, needs no dist/ assets to
+  # pass and is intentionally left unignored — it still runs in clippy's
+  # sweep. Run locally with: cd crates/kyomi-ui && trunk build, then
+  # cargo test -p kyomi-server --test contract_ssr -- --include-ignored.
+  #
+  # Why this is its own job instead of a step in `clippy` above: a cold
+  # `trunk build` (wasm-dev profile, matching Trunk.toml's cargo_profile —
+  # do NOT strip that setting the way release.yml does, that's there to make
+  # *production* release builds pay the wasm-opt cost, not this one) was
+  # measured at 13m13s — 10m37s compiling kyomi-ui to wasm32, plus 2m20s in
+  # Trunk.toml's post_build hook running `brotli -q 11` over the 63 MB debug
+  # wasm output. Tacking that onto clippy's already-slow 31-37 minutes would
+  # push every PR to ~44-50 minutes. Run in parallel instead, this job's
+  # measured cost (trunk build + server build + the contract suite) lands
+  # around 20-25 minutes — shorter than clippy — so GitHub Actions runs the
+  # two concurrently and the slowest one (still clippy) is what determines
+  # wall-clock CI time for a PR. This job adds runner-minutes, not waiting.
+  #
+  # Same postgres service shape as clippy (KYO-236): credentials/db name
+  # match kyomi-core's Config::test_config() default, so no DATABASE_URL
+  # override is needed. Separate container from clippy's — each job gets
+  # its own fresh service.
+  #
+  # `Install build dependencies` mirrors release.yml's job of the same name
+  # (not clippy's, which additionally installs poppler-utils for
+  # kyomi-agent's own tests — irrelevant here, this job only runs
+  # contract_ssr). build-essential/pkg-config/libssl-dev/clang are needed
+  # because kyomi-server pulls in kyomi-embed, whose candle-transformers ->
+  # tokenizers -> esaxx-rs chain compiles C++ via the `cc` crate.
+  #
+  # `Install brotli` is the single easiest thing to get wrong here:
+  # Trunk.toml's post_build hook shells out to `brotli` and `gzip` on every
+  # .wasm/.js/.css it produces, and brotli is not preinstalled on any
+  # existing CI job (release.yml installs it for exactly this reason —
+  # clippy never needs it, since it never runs a real trunk build).
+  # Without this step `trunk build` fails inside the hook, not the compile.
+  # ---------------------------------------------------------------------------
+  ssr-contract-tests:
+    name: SSR Contract Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+    # postgres backs apps/server/tests/contract_ssr.rs the same way it backs
+    # clippy's apps/server/tests/ suite (KYO-236) — see that job's comment
+    # for why Redis is not needed here either.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg15
+        env:
+          POSTGRES_USER: kyomi_test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: kyomi_test
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev clang
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Verify sccache can reach GHA cache
+        run: |
+          echo 'fn main(){}' > /tmp/sccache_test.rs
+          if sccache $(rustc --print sysroot)/bin/rustc /tmp/sccache_test.rs --crate-type bin -o /tmp/sccache_test_out; then
+            echo "SCCACHE_AVAILABLE=true" >> $GITHUB_ENV
+            sccache --show-stats 2>&1 | head -5
+          else
+            echo "::warning::sccache GHA cache probe failed (see above), building without cache"
+            echo "SCCACHE_AVAILABLE=false" >> $GITHUB_ENV
+          fi
+          rm -f /tmp/sccache_test.rs /tmp/sccache_test_out
+
+      - name: Add cargo bin to PATH
+        run: echo "$CARGO_HOME/bin" >> $GITHUB_PATH
+
+      - name: Install trunk
+        uses: taiki-e/install-action@trunk
+
+      - name: Install tailwindcss
+        run: |
+          curl -sLO https://github.com/tailwindlabs/tailwindcss/releases/download/v4.2.2/tailwindcss-linux-x64
+          chmod +x tailwindcss-linux-x64
+          sudo mv tailwindcss-linux-x64 /usr/local/bin/tailwindcss
+
+      - name: Install brotli (Trunk post_build hook dependency)
+        run: sudo apt-get install -y --no-install-recommends brotli
+
+      - name: Build MCP chart app WASM (required by kyomi-server include_str!)
+        working-directory: apps/mcp-chart-app-wasm
+        run: bash build.sh
+
+      - name: Strip local-dev mold linker config
+        run: sed -i '/# BEGIN_LOCAL_DEV_LINKER/,/# END_LOCAL_DEV_LINKER/d' .cargo/config.toml
+
+      # Plain `trunk build`, not --release. Trunk.toml's cargo_profile =
+      # "wasm-dev" is the fast path this job's whole existence depends on —
+      # do not add a `sed -i '/cargo_profile/d' Trunk.toml` step like
+      # release.yml does. That step exists there to *undo* wasm-dev for
+      # production artifacts; here it would turn the measured 10m37s wasm
+      # compile into something much slower for no test benefit.
+      - name: trunk build (crates/kyomi-ui)
+        working-directory: crates/kyomi-ui
+        env:
+          RUSTC_WRAPPER: ${{ env.SCCACHE_AVAILABLE == 'true' && 'sccache' || '' }}
+        run: trunk build
+
+      # --include-ignored: the six tests in contract_ssr.rs that need a real
+      # dist/ carry #[ignore] so the clippy job's `cargo test --tests` sweep
+      # (which only mkdirs an empty dist/) skips them instead of failing.
+      # This is the job that opts back in, now that dist/ is real.
+      - name: cargo test (SSR contract tests)
+        env:
+          RUSTC_WRAPPER: ${{ env.SCCACHE_AVAILABLE == 'true' && 'sccache' || '' }}
+        run: cargo test --locked -p kyomi-server --test contract_ssr -- --include-ignored
 
       - name: sccache stats
         if: always()
