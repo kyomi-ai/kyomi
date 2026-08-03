@@ -12,9 +12,12 @@
 //! custom properties in `crates/kyomi-ui/style/main.css` under the
 //! `:root { --chartml-* }` block, because chartml-leptos's shipped CSS
 //! rules win over SVG presentation attributes in the browser cascade.
-//! That block is a hand-maintained mirror — if you edit `kyomi_theme()`,
-//! you must also edit `main.css`. The module docstring on `kyomi_theme`
-//! below spells out the contract.
+//! That block is a mirror by necessity — both paths must keep existing,
+//! see the module docstring on `kyomi_theme` below — but it is no longer
+//! hand-verified: `crates/kyomi-chart-theme/tests/css_theme_parity.rs`
+//! (run via `cargo test -p kyomi-chart-theme`) parses `main.css` and
+//! fails if it drifts from this file, in either direction, for both
+//! light and dark. See KYO-229.
 
 use chartml_core::theme::{BarCornerRadius, GridStyle, TextTransform, Theme, ZeroLineSpec};
 
@@ -85,9 +88,15 @@ pub fn kyomi_palette(name: &str, is_dark: bool) -> Vec<String> {
 /// wrong typography.
 ///
 /// **If you edit any field here, also edit the matching `--chartml-*`
-/// CSS variable in `main.css`.** They're hand-maintained mirrors; drift
-/// produces inconsistent rendering between the dashboard viewer and the
-/// PDF export.
+/// CSS variable in `main.css`.** They're parallel mirrors that must stay
+/// in sync; drift produces inconsistent rendering between the dashboard
+/// viewer and the PDF export. This is no longer just a warning to the
+/// reader: `crates/kyomi-chart-theme/tests/css_theme_parity.rs` parses
+/// `main.css` and asserts every `--chartml-*` property matches the field
+/// here (both light and dark), and that every field/property on either
+/// side is accounted for — via an explicit, commented allow-list for the
+/// handful that legitimately exist on only one side. Run
+/// `cargo test -p kyomi-chart-theme` after editing either file.
 pub fn kyomi_theme(is_dark: bool) -> Theme {
     // Page-matched chrome: chartml never emits a background rect, so the
     // chart inherits the surface it's placed on. `theme.bg` is the color

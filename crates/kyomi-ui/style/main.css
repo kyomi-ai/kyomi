@@ -465,11 +465,17 @@ html {
 :root {
   /* Chrome colors — Variant A editorial values.
    * NOTE: every value in this `:root` block has a matching field in
-   * `kyomi_theme()` in `crates/kyomi-chart-theme/src/lib.rs`.
-   * If you edit one, edit the other. The Rust function is the source of truth
-   * for SSR paths (PDF export, email snapshots, MCP chart app) that don't have
-   * a CSS cascade; this block is the source of truth for browser rendering
-   * because chartml-leptos's shipped CSS rules win over SVG presentation attrs. */
+   * `kyomi_theme()` in `crates/kyomi-chart-theme/src/lib.rs` (with a
+   * documented, allow-listed exception or two — see below).
+   * The Rust function is the source of truth for SSR paths (PDF export,
+   * email snapshots, MCP chart app) that don't have a CSS cascade; this
+   * block is the source of truth for browser rendering because
+   * chartml-leptos's shipped CSS rules win over SVG presentation attrs.
+   * This is enforced, not just documented: `cargo test -p
+   * kyomi-chart-theme` runs `tests/css_theme_parity.rs`, which parses
+   * this file and fails if a value here drifts from `kyomi_theme()`, or
+   * if either side gains a property/field the other doesn't know about.
+   * See KYO-229. */
   --chartml-text: #1C1917;
   --chartml-text-secondary: #6B6660;
   --chartml-text-strong: #1C1917;
@@ -915,7 +921,9 @@ html {
   --color-info-border: #2563eb;
   --color-info-foreground: #3b82f6;
 
-  /* ChartML dark theme — matches kyomi_theme(is_dark=true) in Rust.
+  /* ChartML dark theme — matches kyomi_theme(is_dark=true) in Rust, checked
+   * by `cargo test -p kyomi-chart-theme` (see the :root block's comment
+   * above and KYO-229).
    * `--chartml-bg` is the page background (separator color that disappears
    * into the surface), not a white chart fill. */
   --chartml-text: #F5F3EF;
