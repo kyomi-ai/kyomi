@@ -18,9 +18,11 @@ async fn base_url() -> String {
     }
 
     let config = kyomi_core::Config::test_config();
-    let db = kyomi_core::db::create_pool(&config.database_url)
+    // KYO-242: connects to (and provisions/self-heals) this worktree's
+    // private test database rather than the shared `kyomi_test` database.
+    let db = kyomi_core::test_db::connect_test_pool()
         .await
-        .expect("test DB should be running");
+        .expect("test DB should be reachable and migratable — see the error for the remedy");
     let kv: kyomi_core::KVPool = kyomi_core::kv_store::create_kv_store(config.redis_url.as_deref())
         .await
         .expect("failed to create KV store");

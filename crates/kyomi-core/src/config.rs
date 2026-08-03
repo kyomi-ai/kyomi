@@ -426,8 +426,11 @@ impl Config {
         const TEST_ENCRYPTION_KEY_B64: &str = "dGVzdC1hZXMta2V5LWZvci11bml0LXRlc3RzISEhISE=";
 
         Self {
-            database_url: env::var("DATABASE_URL")
-                .unwrap_or_else(|_| "postgres://kyomi_test:test@localhost:5434/kyomi_test".into()),
+            // KYO-242: derives a private per-worktree database by default
+            // instead of hardcoding the shared `kyomi_test` database, so
+            // this stays in agreement with `test_db::connect_test_pool()`
+            // (an explicit `DATABASE_URL` still overrides both).
+            database_url: crate::test_db::test_database_url(),
             redis_url: env::var("REDIS_URL").ok(),
             jwt_secret: env::var("JWT_SECRET_KEY")
                 .unwrap_or_else(|_| "test-jwt-secret-not-for-production".into()),

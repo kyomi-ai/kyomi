@@ -26,6 +26,8 @@ pub mod platform;
 pub mod redis;
 pub mod standalone;
 pub mod stream;
+#[cfg(any(test, feature = "test-helpers"))]
+pub mod test_db;
 pub mod websocket;
 
 pub mod doc_resources;
