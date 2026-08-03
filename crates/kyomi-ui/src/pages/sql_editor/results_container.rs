@@ -24,7 +24,7 @@ use super::results_table::ResultsTable;
 use super::tab_bar::TabBar;
 use super::types::{QueryStatus, ResultTab};
 use crate::components::dashboard::chart_builder::ChartBuilderModal;
-use crate::components::{Button, ButtonVariant, ButtonSize, Spinner};
+use crate::components::{Button, ButtonVariant, ButtonSize, Skeleton, Spinner};
 #[cfg(target_arch = "wasm32")]
 use crate::server_fns::sql_editor::generate_chart_from_results;
 
@@ -39,7 +39,7 @@ use crate::server_fns::sql_editor::generate_chart_from_results;
 /// Main orchestrator for tabbed results display.
 ///
 /// Renders a tab bar at the top and the active tab's content below:
-/// - **Loading** → spinner + "Running query..." message
+/// - **Loading** → table-shaped skeleton (KYO-233)
 /// - **Needs refresh** → "Results expired — click to re-run" with re-run button
 /// - **Error** → error message + "Re-run Query" button
 /// - **Success** → `ResultsTable` with data
@@ -525,7 +525,7 @@ fn render_tab_content(props: TabContentProps) -> AnyView {
     // Running → loading state
     if tab.status == QueryStatus::Running {
         return view! {
-            <ResultsLoading message="Running query..." />
+            <ResultsLoading />
         }
         .into_any();
     }
@@ -569,7 +569,7 @@ fn render_tab_content(props: TabContentProps) -> AnyView {
             result.total_rows = tab.total_rows;
         }
         return view! {
-            <div class="flex-1 flex flex-col min-h-0 relative">
+            <div class="flex-1 flex flex-col min-h-0 relative animate-fade-in">
                 <div class="flex-1 min-h-0">
                     <ResultsTable
                         result=result
@@ -594,17 +594,43 @@ fn render_tab_content(props: TabContentProps) -> AnyView {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Loading state displayed while a query is running.
+///
+/// Shaped like the `ResultsTable` it will be replaced by (header bar + sticky
+/// header row + several data rows) so there is no layout jump when the real
+/// table mounts — a bare spinner communicated only "something is happening",
+/// not what shape is coming (KYO-233 / DESIGN.md "Loading State Pattern").
 #[component]
-fn ResultsLoading(
-    /// Message to display below the spinner.
-    #[prop(into)]
-    message: String,
-) -> impl IntoView {
+fn ResultsLoading() -> impl IntoView {
+    // Matches ResultsTable's outer box (results_table.rs) so swapping in the
+    // real table doesn't shift the surrounding layout.
     view! {
-        <div class="flex-1 flex items-center justify-center">
-            <div class="text-center">
-                <Spinner class="text-primary mx-auto mb-3 !h-8 !w-8" />
-                <p class="text-sm text-muted-foreground">{message}</p>
+        <div class="flex-1 min-h-0 h-full flex flex-col rounded-md overflow-hidden relative border border-border bg-card">
+            // Header bar — mirrors "Results: Showing X-Y of Z rows x N columns"
+            <div class="px-4 py-3 border-b flex-shrink-0 flex items-center justify-between bg-muted border-border">
+                <Skeleton class="h-4 w-56" />
+            </div>
+
+            // Table area — sticky header row + several data rows
+            <div class="flex-1 overflow-auto">
+                <div class="flex border-b border-border bg-muted" style="width: 100%;">
+                    {(0..5).map(|_| view! {
+                        <div class="flex-1 px-2 py-1.5">
+                            <Skeleton class="h-3 w-2/3" />
+                        </div>
+                    }).collect_view()}
+                </div>
+                {(0..12).map(|i| {
+                    let row_bg = if i % 2 == 1 { "bg-muted" } else { "bg-card" };
+                    view! {
+                        <div class=format!("flex border-b border-border {row_bg}") style="width: 100%;">
+                            {(0..5).map(|_| view! {
+                                <div class="flex-1 px-2 py-1">
+                                    <Skeleton class="h-3 w-4/5" />
+                                </div>
+                            }).collect_view()}
+                        </div>
+                    }
+                }).collect_view()}
             </div>
         </div>
     }

@@ -13,7 +13,8 @@ use leptos::prelude::*;
 use phosphor_leptos::{Icon, IconWeight};
 
 use crate::components::{
-    Button, ButtonSize, ButtonVariant, ConfirmDialog, EmptyState, RightPanel, Spinner, Tooltip,
+    Button, ButtonSize, ButtonVariant, ConfirmDialog, EmptyState, RightPanel, Skeleton, Spinner,
+    Tooltip,
 };
 use crate::server_fns::dashboards::{
     diff_versions, get_version, list_versions, restore_version,
@@ -151,6 +152,24 @@ fn context_filter(lines: &[DiffLine], context: usize) -> Vec<DiffLine> {
     result
 }
 
+
+/// Fallback shown while `list_versions` is in flight — repeated rows
+/// approximating a version entry (title line, timestamp line, change-summary
+/// line) so the panel doesn't resize when real versions replace it (KYO-233).
+#[component]
+fn VersionListSkeleton() -> impl IntoView {
+    view! {
+        <div class="divide-y divide-border/50">
+            {(0..6).map(|_| view! {
+                <div class="px-4 py-3">
+                    <Skeleton class="h-4 w-24 mb-2" />
+                    <Skeleton class="h-3 w-32 mb-1.5" />
+                    <Skeleton class="h-3 w-48" />
+                </div>
+            }).collect_view()}
+        </div>
+    }
+}
 
 // ─── Main component ─────────────────────────────────────────────────────────
 
@@ -390,11 +409,7 @@ pub fn HistoryPanel(
                             } else {
                                 // ── Version List ────────────────────────────
                                 view! {
-                                    <Suspense fallback=move || view! {
-                                        <div class="flex items-center justify-center py-12">
-                                            <Spinner class="text-muted-foreground" />
-                                        </div>
-                                    }>
+                                    <Suspense fallback=move || view! { <VersionListSkeleton /> }>
                                         {move || {
                                             versions_resource.get().map(|result| match result {
                                                 Err(e) => view! {
@@ -424,7 +439,7 @@ pub fn HistoryPanel(
                                                     let historical_versions = result.versions;
 
                                                     view! {
-                                                        <div class="divide-y divide-border/50">
+                                                        <div class="divide-y divide-border/50 animate-fade-in">
                                                             // Preview banner
                                                             {move || previewing.get().map(|pv| view! {
                                                                 <div class="px-4 py-3 bg-warning border-b border-warning-border">

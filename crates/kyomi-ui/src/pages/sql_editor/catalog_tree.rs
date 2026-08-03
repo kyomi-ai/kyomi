@@ -16,7 +16,7 @@ use std::collections::HashSet;
 
 use leptos::prelude::*;
 use phosphor_leptos::Icon;
-use crate::components::{Button, ButtonSize, ButtonVariant};
+use crate::components::{Button, ButtonSize, ButtonVariant, Skeleton};
 use crate::pages::sql_editor::types::{CatalogNode, CatalogNodeType};
 use crate::query_cache::use_query;
 use crate::server_fns::sql_editor::get_catalog_tree;
@@ -98,12 +98,10 @@ pub fn CatalogTree(
 
             match catalog_data.get() {
                 None => {
-                    // Loading (first fetch or transition)
-                    view! {
-                        <div class="flex items-center justify-center py-8">
-                            <crate::components::Spinner />
-                        </div>
-                    }.into_any()
+                    // Loading (first fetch or transition) — indented rows
+                    // approximating the eventual tree shape (project > dataset
+                    // > table), per DESIGN.md's data-loading skeleton pattern.
+                    view! { <CatalogTreeSkeleton /> }.into_any()
                 }
                 Some(Err(e)) => {
                     // Error state
@@ -130,21 +128,69 @@ pub fn CatalogTree(
                         let table_count = catalog.table_count;
                         let tree = catalog.tree;
                         view! {
-                            <CatalogTreeView
-                                tree=tree
-                                table_count=table_count
-                                search_query=search_query
-                                expanded_nodes=expanded_nodes
-                                on_toggle=Callback::new(toggle_node)
-                                on_table_click=on_table_click
-                                on_column_click=on_column_click
-                                on_table_info=stored_table_info.try_get_value().flatten()
-                            />
+                            <div class="animate-fade-in">
+                                <CatalogTreeView
+                                    tree=tree
+                                    table_count=table_count
+                                    search_query=search_query
+                                    expanded_nodes=expanded_nodes
+                                    on_toggle=Callback::new(toggle_node)
+                                    on_table_click=on_table_click
+                                    on_column_click=on_column_click
+                                    on_table_info=stored_table_info.try_get_value().flatten()
+                                />
+                            </div>
                         }.into_any()
                     }
                 }
             }
         }}
+    }
+}
+
+// ─── Loading skeleton ───────────────────────────────────────────────────────
+
+/// Indented rows approximating the eventual tree shape while the catalog
+/// loads — mirrors `CatalogNodeView`'s depth-based indentation and
+/// icon-plus-name row layout so there is no shape change when real nodes
+/// replace it (KYO-233).
+#[component]
+fn CatalogTreeSkeleton() -> impl IntoView {
+    // (depth, name width) pairs sketching a plausible project > dataset >
+    // table > column hierarchy at a few expansion levels.
+    const ROWS: [(usize, &str); 9] = [
+        (0, "w-24"),
+        (1, "w-32"),
+        (2, "w-28"),
+        (2, "w-20"),
+        (1, "w-36"),
+        (2, "w-24"),
+        (0, "w-28"),
+        (1, "w-20"),
+        (1, "w-32"),
+    ];
+
+    view! {
+        <div class="text-xs">
+            <div class="px-2 py-1 border-b border-border">
+                <Skeleton class="h-3 w-24" />
+            </div>
+            <div class="py-1">
+                {ROWS.iter().map(|(depth, width)| {
+                    let margin = if *depth > 0 {
+                        format!("margin-left: {depth}rem")
+                    } else {
+                        String::new()
+                    };
+                    view! {
+                        <div class="flex items-center gap-1 px-2 py-0.5" style=margin>
+                            <Skeleton class="w-3 h-3 rounded-sm" />
+                            <Skeleton class=format!("h-3 {width}") />
+                        </div>
+                    }
+                }).collect_view()}
+            </div>
+        </div>
     }
 }
 
