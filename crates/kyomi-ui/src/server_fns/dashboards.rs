@@ -3,9 +3,10 @@
 //! Server functions for dashboard CRUD operations.
 //!
 //! These replace the REST API calls for listing, viewing, creating,
-//! updating, and deleting dashboards. Each function calls the same
-//! service-layer code as the existing REST routes in
-//! `apps/server/src/routes/dashboards.rs`.
+//! updating, and deleting dashboards. Each function calls directly into
+//! `kyomi_auth::dashboard_service` — the REST routes that predated this
+//! module were deleted wholesale in the React→Leptos migration
+//! (KYO-73, #182).
 
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -128,8 +129,6 @@ pub struct CurrentVersion {
 /// When `query` is provided, searches by title/content. Otherwise lists all.
 /// `sort_by` accepts "popularity", "recent" (default), or "created".
 /// `limit` defaults to 50, clamped to [1, 100].
-///
-/// Mirrors `GET /dashboards/` in `apps/server/src/routes/dashboards.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn list_dashboards(
     query: Option<String>,
@@ -194,8 +193,6 @@ pub(crate) fn map_search_result_to_list_item(
 ///
 /// Records a view for popularity tracking (fire-and-forget).
 /// Returns a 404-equivalent error if the dashboard is not found.
-///
-/// Mirrors `GET /dashboards/{dashboard_id}` in `apps/server/src/routes/dashboards.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn get_dashboard(dashboard_id: String) -> Result<DashboardDetail, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
@@ -240,8 +237,6 @@ pub async fn get_dashboard(dashboard_id: String) -> Result<DashboardDetail, Serv
 ///
 /// The service layer enforces free-tier dashboard limits (5 per workspace).
 /// After creation, fires off background embedding generation.
-///
-/// Mirrors `POST /dashboards/` in `apps/server/src/routes/dashboards.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn create_dashboard(
     title: String,
@@ -290,8 +285,6 @@ pub async fn create_dashboard(
 ///
 /// Rejects no-op updates where all fields are `None`.
 /// Re-embeds the dashboard if title or content changed.
-///
-/// Mirrors `PATCH /dashboards/{dashboard_id}` in `apps/server/src/routes/dashboards.rs`.
 #[server(prefix = "/leptos-api", input = server_fn::codec::Json)]
 pub async fn update_dashboard(
     dashboard_id: String,
@@ -397,8 +390,6 @@ pub async fn update_dashboard(
 }
 
 /// Delete a dashboard by ID.
-///
-/// Mirrors `DELETE /dashboards/{dashboard_id}` in `apps/server/src/routes/dashboards.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn delete_dashboard(dashboard_id: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
@@ -602,8 +593,6 @@ pub async fn restore_version(
 ///
 /// Reads from `users.extra_metadata.default_dashboard_id`.
 /// Returns `None` if no default is set.
-///
-/// Mirrors `PATCH /users/me/preferences` read path in `apps/server/src/routes/users.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn get_user_default_dashboard() -> Result<Option<String>, ServerFnError> {
     let auth = extract_auth().await?;
@@ -628,8 +617,6 @@ pub async fn get_user_default_dashboard() -> Result<Option<String>, ServerFnErro
 ///
 /// Writes to `users.extra_metadata.default_dashboard_id`.
 /// Pass `None` or empty string to clear the default.
-///
-/// Mirrors `PATCH /users/me/preferences` write path in `apps/server/src/routes/users.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn set_user_default_dashboard(dashboard_id: Option<String>) -> Result<(), ServerFnError> {
     let auth = extract_auth().await?;
@@ -651,8 +638,6 @@ pub async fn set_user_default_dashboard(dashboard_id: Option<String>) -> Result<
 ///
 /// Reads from `workspaces.settings.default_dashboard_id` (top-level, not custom_settings).
 /// Returns `None` if no default is set.
-///
-/// Mirrors `GET /workspaces/default-dashboard` in `apps/server/src/routes/workspaces.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn get_workspace_default_dashboard() -> Result<Option<String>, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
@@ -676,8 +661,6 @@ pub async fn get_workspace_default_dashboard() -> Result<Option<String>, ServerF
 ///
 /// Writes to `workspaces.settings.default_dashboard_id` (top-level).
 /// Pass `None` or empty string to clear the default.
-///
-/// Mirrors `PATCH /workspaces/settings` write path in `apps/server/src/routes/workspaces.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn set_workspace_default_dashboard(
     dashboard_id: Option<String>,

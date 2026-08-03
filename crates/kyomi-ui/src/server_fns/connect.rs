@@ -7,7 +7,9 @@
 //! - `POST /api/v1/datasources` (with `connection_type: "connect"`) → `create_connect_datasource()`
 //! - `POST /api/v1/datasources/{id}/connect/rotate-token` → `rotate_connect_token()`
 //!
-//! Calls the same service-layer code as `apps/server/src/routes/datasources.rs`.
+//! Each function calls directly into `kyomi_auth::datasource_service` — the
+//! REST route handlers that predated this module were deleted wholesale in
+//! the React→Leptos migration (KYO-73, #183).
 
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};

@@ -170,8 +170,6 @@ pub struct OwnershipTransferData {
 ///
 /// Maps from `kyomi_core::models::Watch` with timestamps converted to RFC 3339
 /// strings and alert channel info resolved from the platform layer.
-///
-/// Mirrors `WatchResponse` in `apps/server/src/routes/watches.rs`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WatchListItem {
     pub watch_id: String,
@@ -196,8 +194,6 @@ pub struct WatchListItem {
 ///
 /// Maps from `kyomi_core::models::WatchExecution` with timestamps converted to
 /// RFC 3339 strings and enum fields converted to strings.
-///
-/// Mirrors `ExecutionResponse` in `apps/server/src/routes/watches.rs`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WatchExecutionItem {
     pub id: i32,
@@ -221,8 +217,8 @@ pub struct WatchExecutionItem {
 
 /// An alert item (a watch execution that triggered an alert).
 ///
-/// Mirrors the alert entries in `AlertHistoryResponse` in
-/// `apps/server/src/routes/watches.rs`.
+/// Shares the same fields as `WatchExecutionItem` but always includes
+/// `execution_trace`, regardless of the caller.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AlertItem {
     pub id: i32,

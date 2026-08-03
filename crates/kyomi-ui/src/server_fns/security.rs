@@ -18,9 +18,12 @@
 //! - `DELETE /auth/passkeys/{id}` -> `delete_passkey()`
 //! - `PATCH /auth/passkeys/{id}` -> `rename_passkey()`
 //!
-//! Calls the same service-layer code as `apps/server/src/routes/auth_password.rs`,
-//! `apps/server/src/routes/auth_totp.rs`, `apps/server/src/routes/auth_passkeys.rs`,
-//! and `apps/server/src/routes/auth.rs`.
+//! Calls into the same `kyomi_auth` service layer as
+//! `apps/server/src/routes/auth_passkeys.rs`. The REST counterparts for
+//! password, TOTP, and session management — `auth_password.rs`,
+//! `auth_totp.rs`, and `auth.rs` — were deleted wholesale in the
+//! React→Leptos migration (KYO-73, #183); this module is now their only
+//! implementation.
 
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -54,7 +57,7 @@ pub async fn has_password() -> Result<bool, ServerFnError> {
 
 /// Set a password for a user who does not yet have one (e.g. OAuth-only users).
 ///
-/// Mirrors the validation in `apps/server/src/routes/auth_password.rs::set_password`:
+/// Validation rules:
 /// - Password must be at least 8 characters.
 /// - User must NOT already have a password.
 #[server(prefix = "/leptos-api")]
@@ -92,7 +95,7 @@ pub async fn set_password(new_password: String) -> Result<String, ServerFnError>
 
 /// Change password for a user who already has one.
 ///
-/// Mirrors the validation in `apps/server/src/routes/auth_password.rs::change_password`:
+/// Validation rules:
 /// - New password must be at least 8 characters.
 /// - Current password must be verified first.
 #[server(prefix = "/leptos-api")]
@@ -126,8 +129,6 @@ pub async fn change_password(
 // ---------------------------------------------------------------------------
 
 /// Check whether the current user has TOTP 2FA enabled.
-///
-/// Mirrors `GET /auth/2fa/status` in `apps/server/src/routes/auth_totp.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn get_totp_status() -> Result<TotpStatus, ServerFnError> {
     let auth = extract_auth().await?;
@@ -144,8 +145,6 @@ pub async fn get_totp_status() -> Result<TotpStatus, ServerFnError> {
 ///
 /// The secret is stored in Redis (10 min TTL) until the user confirms with
 /// a verification code via `enable_totp()`.
-///
-/// Mirrors `POST /auth/2fa/setup` in `apps/server/src/routes/auth_totp.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn setup_totp() -> Result<TotpSetup, ServerFnError> {
     let auth = extract_auth().await?;
@@ -171,8 +170,6 @@ pub async fn setup_totp() -> Result<TotpSetup, ServerFnError> {
 ///
 /// On success the secret is persisted in `user_auth_methods`. On failure the
 /// pending secret is re-stored in Redis so the user can retry.
-///
-/// Mirrors `POST /auth/2fa/enable` in `apps/server/src/routes/auth_totp.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn enable_totp(code: String) -> Result<String, ServerFnError> {
     let auth = extract_auth().await?;
@@ -192,9 +189,8 @@ pub async fn enable_totp(code: String) -> Result<String, ServerFnError> {
 
 /// Disable 2FA for the authenticated user.
 ///
-/// Mirrors `POST /auth/2fa/disable` in `apps/server/src/routes/auth_totp.rs`.
-/// The REST handler does not require a TOTP code — it simply removes the auth
-/// method for the already-authenticated user.
+/// Deliberately does not require re-entering a TOTP code — it simply
+/// removes the auth method for the already-authenticated user.
 #[server(prefix = "/leptos-api")]
 pub async fn disable_totp() -> Result<String, ServerFnError> {
     let auth = extract_auth().await?;
@@ -238,7 +234,6 @@ pub struct SessionEntry {
 
 /// Get all active sessions for the current user.
 ///
-/// Mirrors `GET /auth/sessions` in `apps/server/src/routes/auth.rs`.
 /// Determines the current session by comparing the refresh token cookie's
 /// family_id against each session's family_id.
 #[server(prefix = "/leptos-api")]
@@ -281,7 +276,6 @@ pub async fn get_sessions() -> Result<Vec<SessionEntry>, ServerFnError> {
 
 /// Revoke a specific session by token ID.
 ///
-/// Mirrors `DELETE /auth/sessions/{token_id}` in `apps/server/src/routes/auth.rs`.
 /// Revokes the entire token family so rotated tokens in the same session are
 /// also invalidated.
 #[server(prefix = "/leptos-api")]
@@ -303,7 +297,7 @@ pub async fn revoke_session(token_id: String) -> Result<String, ServerFnError> {
 
 /// Log out the current session.
 ///
-/// Mirrors `POST /auth/logout` in `apps/server/src/routes/auth.rs`:
+/// Steps:
 /// 1. Reads the refresh token cookie.
 /// 2. Revokes the entire token family so rotated tokens are also invalidated.
 /// 3. Clears both auth cookies (access_token + refresh_token) via `ResponseOptions`.
@@ -339,8 +333,6 @@ pub async fn logout() -> Result<(), ServerFnError> {
 }
 
 /// Log out from all devices by revoking every refresh token for the user.
-///
-/// Mirrors `POST /auth/logout-all` in `apps/server/src/routes/auth.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn logout_all_sessions() -> Result<String, ServerFnError> {
     let auth = extract_auth().await?;

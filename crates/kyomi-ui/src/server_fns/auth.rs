@@ -11,9 +11,11 @@
 //! - `POST /auth/google/callback`      -> `google_oauth_callback()`
 //! - `POST /auth/signup/resend`        -> `resend_verification()`
 //!
-//! Calls the same service-layer code as `apps/server/src/routes/auth.rs`,
-//! `apps/server/src/routes/auth_password.rs`, and
-//! `apps/server/src/routes/auth_google_oauth.rs`.
+//! Calls into the same `kyomi_auth::auth_service` layer as
+//! `apps/server/src/routes/auth_google_oauth.rs`. The REST counterparts for
+//! password login/signup and auth config — `auth.rs` and `auth_password.rs`
+//! — were deleted wholesale in the React→Leptos migration (KYO-73, #183);
+//! this module is now their only implementation.
 
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -204,8 +206,9 @@ pub async fn datasource_oauth_callback(
 
 /// Get the auth configuration (which methods are available).
 ///
-/// Public endpoint — no authentication required.
-/// Mirrors `GET /auth/config` in `apps/server/src/routes/auth.rs`.
+/// Public endpoint — no authentication required. Reports which auth methods
+/// (password, Google OAuth, passkeys) and SMTP are configured, so the
+/// login/signup UI can conditionally render its options.
 #[server(prefix = "/leptos-api")]
 pub async fn get_auth_config() -> Result<AuthConfig, ServerFnError> {
     let ctx = extract_context()?;
@@ -223,7 +226,6 @@ pub async fn get_auth_config() -> Result<AuthConfig, ServerFnError> {
 /// Log in with email and password, optionally providing a TOTP code.
 ///
 /// Public endpoint — no authentication required.
-/// Mirrors `POST /auth/login` in `apps/server/src/routes/auth_password.rs`.
 ///
 /// Delegates all orchestration to `kyomi_auth::auth_service::login_with_password_service`.
 #[server(prefix = "/leptos-api")]
@@ -291,7 +293,6 @@ pub async fn login_with_password(
 /// Start the signup flow.
 ///
 /// Public endpoint — no authentication required.
-/// Mirrors `POST /auth/signup/start` in `apps/server/src/routes/auth_password.rs`.
 ///
 /// Delegates all orchestration to `kyomi_auth::auth_service::signup_start_service`.
 #[server(prefix = "/leptos-api")]
@@ -358,7 +359,6 @@ pub async fn signup_start(
 /// Complete the signup flow after email verification.
 ///
 /// Public endpoint — no authentication required.
-/// Mirrors `POST /auth/signup/complete` in `apps/server/src/routes/auth_password.rs`.
 ///
 /// Delegates all orchestration to `kyomi_auth::auth_service::signup_complete_service`.
 #[server(prefix = "/leptos-api")]
@@ -565,8 +565,8 @@ pub async fn google_link_callback(
 /// Public endpoint — no authentication required.
 /// Always returns `Ok(())` to prevent email enumeration.
 ///
-/// Mirrors the resend logic in `signup_start` for existing unverified users
-/// in `apps/server/src/routes/auth_password.rs`.
+/// For an email with a pending signup (registered but not yet verified),
+/// re-sends the verification link rather than creating a new account.
 #[server(prefix = "/leptos-api")]
 pub async fn resend_verification(email: String) -> Result<(), ServerFnError> {
     let ctx = extract_context()?;
@@ -633,7 +633,6 @@ pub enum VerifyEmailResult {
 /// Verify an email address using the raw token from the verification link.
 ///
 /// Public endpoint — no authentication required.
-/// Mirrors the email verification logic in `apps/server/src/routes/auth_password.rs`.
 ///
 /// Checks the token against bcrypt hashes in `verification_tokens`, marks it
 /// used, and marks the user's email as verified via `mark_user_verified`.
@@ -692,7 +691,6 @@ pub enum RecoverySetPasswordResult {
 /// Start the account recovery flow by sending a recovery email.
 ///
 /// Public endpoint — no authentication required.
-/// Mirrors `POST /auth/recovery/start` in `apps/server/src/routes/auth_recovery.rs`.
 ///
 /// Always returns `Ok(())` to prevent email enumeration. Rate-limits and
 /// delegates email dispatch to a background task inline.
@@ -803,7 +801,6 @@ pub async fn passkey_recovery_start(email: String) -> Result<(), ServerFnError> 
 /// Verify a recovery token and create a short-lived recovery session.
 ///
 /// Public endpoint — no authentication required.
-/// Mirrors `POST /auth/recovery/verify` in `apps/server/src/routes/auth_recovery.rs`.
 ///
 /// Delegates all orchestration to `kyomi_auth::auth_service::recovery_verify_service`.
 #[server(prefix = "/leptos-api")]
@@ -848,7 +845,6 @@ pub async fn recovery_verify(
 /// Set a new password using a recovery session, completing the recovery flow.
 ///
 /// Public endpoint — no authentication required.
-/// Mirrors `POST /auth/recovery/set-password` in `apps/server/src/routes/auth_recovery.rs`.
 ///
 /// Delegates all orchestration to `kyomi_auth::auth_service::recovery_set_password_service`.
 #[server(prefix = "/leptos-api")]

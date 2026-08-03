@@ -2,11 +2,11 @@
 
 //! Server function for submitting user feedback.
 //!
-//! Thin adapter over [`kyomi_auth::feedback_service::submit_feedback`] — the
-//! same shared service called by the REST handler at
-//! `apps/server/src/routes/feedback.rs`. Keeping the logic (validation,
-//! persistence, Trakkt/Slack/email notifications) in one place guarantees the
-//! two surfaces cannot silently diverge.
+//! Thin adapter over [`kyomi_auth::feedback_service::submit_feedback`], which
+//! owns the validation, persistence, and Trakkt/Slack/email notification
+//! logic. The REST handler that used to share this same service function
+//! was deleted wholesale in the React→Leptos migration (KYO-73, #181); this
+//! server function is now its only caller.
 
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -21,9 +21,8 @@ pub struct FeedbackResponse {
 
 /// Submit user feedback via the shared feedback service.
 ///
-/// Mirrors the REST handler at `POST /api/v1/feedback` by delegating to the
-/// same `kyomi_auth::feedback_service::submit_feedback` entry point. Produces
-/// the same persistence, rate limiting, and notification side effects.
+/// Delegates entirely to `kyomi_auth::feedback_service::submit_feedback`,
+/// which owns persistence, rate limiting, and notification side effects.
 #[server(prefix = "/leptos-api", endpoint = "submit_feedback")]
 pub async fn submit_feedback(
     feedback_type: String,

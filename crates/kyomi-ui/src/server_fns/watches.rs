@@ -2,9 +2,9 @@
 
 //! Server functions for watch CRUD, executions, and alert management.
 //!
-//! These replace the REST API calls for managing watches, viewing executions,
-//! and handling alerts. Each function calls the same service-layer code as
-//! the existing REST routes in `apps/server/src/routes/watches.rs`.
+//! These call directly into `kyomi_auth::watch_service` — the internal REST
+//! routes that predated this module were deleted wholesale in the
+//! React→Leptos migration (KYO-73, #181).
 
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -33,8 +33,6 @@ use crate::types::AlertItem;
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Convert a `Watch` model to a `WatchListItem`, resolving alert channel info.
-///
-/// Mirrors `watch_to_response` in `apps/server/src/routes/watches.rs`.
 #[cfg(feature = "ssr")]
 async fn watch_to_item(
     db: &kyomi_core::DbPool,
@@ -81,8 +79,6 @@ async fn watch_to_item(
 }
 
 /// Convert a `WatchExecution` model to a `WatchExecutionItem`.
-///
-/// Mirrors `execution_to_response` in `apps/server/src/routes/watches.rs`.
 #[cfg(feature = "ssr")]
 fn execution_to_item(
     execution: &kyomi_core::models::WatchExecution,
@@ -154,8 +150,6 @@ fn execution_to_alert(execution: &kyomi_core::models::WatchExecution) -> AlertIt
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// List all watches in the current workspace.
-///
-/// Mirrors `GET /watches/` in `apps/server/src/routes/watches.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn list_watches() -> Result<Vec<WatchListItem>, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
@@ -173,8 +167,6 @@ pub async fn list_watches() -> Result<Vec<WatchListItem>, ServerFnError> {
 }
 
 /// Create a new watch.
-///
-/// Mirrors `POST /watches/` in `apps/server/src/routes/watches.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn create_watch(config: WatchConfig) -> Result<WatchListItem, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
@@ -251,8 +243,6 @@ pub async fn create_watch(config: WatchConfig) -> Result<WatchListItem, ServerFn
 }
 
 /// Update a watch with partial fields.
-///
-/// Mirrors `PATCH /watches/{watch_id}` in `apps/server/src/routes/watches.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn update_watch(
     watch_id: String,
@@ -381,8 +371,6 @@ pub async fn update_watch(
 }
 
 /// Delete a watch.
-///
-/// Mirrors `DELETE /watches/{watch_id}` in `apps/server/src/routes/watches.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn delete_watch(watch_id: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
@@ -403,8 +391,6 @@ pub async fn delete_watch(watch_id: String) -> Result<(), ServerFnError> {
 }
 
 /// Toggle a watch's enabled state.
-///
-/// Mirrors `POST /watches/{watch_id}/toggle` in `apps/server/src/routes/watches.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn toggle_watch(watch_id: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
@@ -437,8 +423,6 @@ pub async fn toggle_watch(watch_id: String) -> Result<(), ServerFnError> {
 /// Manually trigger a watch run.
 ///
 /// Checks rate limits and concurrency, then spawns background execution.
-///
-/// Mirrors `POST /watches/{watch_id}/run` in `apps/server/src/routes/watches.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn run_watch_now(watch_id: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
@@ -512,8 +496,6 @@ pub async fn run_watch_now(watch_id: String) -> Result<(), ServerFnError> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Get execution history for a watch.
-///
-/// Mirrors `GET /watches/{watch_id}/executions` in `apps/server/src/routes/watches.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn get_watch_executions(
     watch_id: String,
@@ -537,9 +519,6 @@ pub async fn get_watch_executions(
 }
 
 /// Get a specific execution by ID.
-///
-/// Mirrors `GET /watches/{watch_id}/executions/{execution_id}` in
-/// `apps/server/src/routes/watches.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn get_watch_execution(
     watch_id: String,
@@ -566,8 +545,6 @@ pub async fn get_watch_execution(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Get alerts history (paginated).
-///
-/// Mirrors `GET /watches/alerts` in `apps/server/src/routes/watches.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn get_alerts(
     watch_id: Option<String>,
@@ -600,8 +577,6 @@ pub async fn get_alerts(
 }
 
 /// Get unread alerts count for the sidebar badge.
-///
-/// Mirrors `GET /watches/alerts/count` in `apps/server/src/routes/watches.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn get_unread_alerts_count() -> Result<i64, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
@@ -612,9 +587,6 @@ pub async fn get_unread_alerts_count() -> Result<i64, ServerFnError> {
 }
 
 /// Mark an alert as read.
-///
-/// Mirrors `POST /watches/alerts/{execution_id}/read` in
-/// `apps/server/src/routes/watches.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn mark_alert_read(execution_id: i32) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
@@ -625,9 +597,6 @@ pub async fn mark_alert_read(execution_id: i32) -> Result<(), ServerFnError> {
 }
 
 /// Mark an alert as unread.
-///
-/// Mirrors `POST /watches/alerts/{execution_id}/unread` in
-/// `apps/server/src/routes/watches.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn mark_alert_unread(execution_id: i32) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
@@ -638,9 +607,6 @@ pub async fn mark_alert_unread(execution_id: i32) -> Result<(), ServerFnError> {
 }
 
 /// Soft-delete an alert.
-///
-/// Mirrors `POST /watches/alerts/{execution_id}/delete` in
-/// `apps/server/src/routes/watches.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn delete_alert(execution_id: i32) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
@@ -651,9 +617,6 @@ pub async fn delete_alert(execution_id: i32) -> Result<(), ServerFnError> {
 }
 
 /// Restore a soft-deleted alert.
-///
-/// Mirrors `POST /watches/alerts/{execution_id}/restore` in
-/// `apps/server/src/routes/watches.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn restore_alert(execution_id: i32) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
@@ -664,9 +627,6 @@ pub async fn restore_alert(execution_id: i32) -> Result<(), ServerFnError> {
 }
 
 /// Bulk soft-delete alerts.
-///
-/// Mirrors `POST /watches/alerts/bulk-delete` in
-/// `apps/server/src/routes/watches.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn bulk_delete_alerts(execution_ids: Vec<i32>) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
@@ -695,9 +655,6 @@ pub async fn bulk_delete_alerts(execution_ids: Vec<i32>) -> Result<(), ServerFnE
 }
 
 /// Bulk mark alerts as read.
-///
-/// Mirrors `POST /watches/alerts/bulk-read` in
-/// `apps/server/src/routes/watches.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn bulk_mark_alerts_read(execution_ids: Vec<i32>) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
@@ -731,9 +688,6 @@ pub async fn bulk_mark_alerts_read(execution_ids: Vec<i32>) -> Result<(), Server
 }
 
 /// Bulk mark alerts as unread.
-///
-/// Mirrors `POST /watches/alerts/bulk-unread` in
-/// `apps/server/src/routes/watches.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn bulk_mark_alerts_unread(execution_ids: Vec<i32>) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
@@ -769,9 +723,6 @@ pub async fn bulk_mark_alerts_unread(execution_ids: Vec<i32>) -> Result<(), Serv
 /// Create a chat session from an alert, continuing the conversation.
 ///
 /// Returns the new session_id.
-///
-/// Mirrors `POST /watches/alerts/{execution_id}/continue-chat` in
-/// `apps/server/src/routes/watches.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn continue_alert_in_chat(execution_id: i32) -> Result<String, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
@@ -791,13 +742,10 @@ pub async fn continue_alert_in_chat(execution_id: i32) -> Result<String, ServerF
 
 /// Get thinking events for a specific execution.
 ///
-/// Returns a JSON array of thinking events directly (not wrapped in an envelope
-/// object like the REST route). Unlike the REST equivalent which returns
-/// `{ execution_id, session_id, events }`, this returns the events array directly
-/// since Leptos components consume it directly.
-///
-/// Based on `GET /watches/{watch_id}/executions/{execution_id}/thinking-events` in
-/// `apps/server/src/routes/watches.rs`.
+/// Returns a JSON array of thinking events directly, since Leptos components
+/// consume it as-is. The now-deleted REST route this replaced
+/// (`GET /watches/{watch_id}/executions/{execution_id}/thinking-events`) wrapped
+/// the same data in an envelope object (`{ execution_id, session_id, events }`).
 #[server(prefix = "/leptos-api")]
 pub async fn get_thinking_events(
     watch_id: String,

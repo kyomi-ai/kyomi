@@ -123,9 +123,6 @@ pub async fn get_onboarding_state() -> Result<OnboardingState, ServerFnError> {
 }
 
 /// Create the sample datasource for the workspace (admin only).
-///
-/// Mirrors `POST /api/v1/datasources/sample` in
-/// `apps/server/src/routes/datasources.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn create_sample_datasource() -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
@@ -211,9 +208,6 @@ pub async fn create_sample_datasource() -> Result<(), ServerFnError> {
 }
 
 /// Availability state for the sample datasource in the current workspace.
-///
-/// Mirrors `GET /api/v1/datasources/sample/available` in
-/// `apps/server/src/routes/datasources.rs`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SampleDatasourceAvailability {
     /// True if the server has a sample ClickHouse configured (via

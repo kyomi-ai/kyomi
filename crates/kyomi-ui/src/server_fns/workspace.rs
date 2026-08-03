@@ -2,10 +2,10 @@
 
 //! Server functions for the Workspace settings page.
 //!
-//! These replace the REST API calls that WorkspaceSettings.jsx makes
-//! to `/api/v1/workspaces/*` endpoints. Each function calls the same
-//! service-layer code as the existing REST route handlers in
-//! `apps/server/src/routes/workspaces.rs`.
+//! These replace the REST API calls that WorkspaceSettings.jsx used to make
+//! to `/api/v1/workspaces/*` endpoints. Each function calls directly into
+//! `kyomi_auth::workspace_service` — the REST route handlers were deleted
+//! wholesale in the React→Leptos migration (KYO-73, #183).
 
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -108,8 +108,6 @@ pub async fn switch_workspace(workspace_id: String) -> Result<(), ServerFnError>
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Read a nested key from `settings.custom_settings[key]`.
-///
-/// Mirrors `custom_settings_get()` in `apps/server/src/routes/workspaces.rs`.
 #[cfg(feature = "ssr")]
 fn custom_settings_get<'a>(
     settings: &'a Option<serde_json::Value>,
@@ -143,8 +141,6 @@ fn clear_custom_settings_key(
 }
 
 /// Merge a key-value pair into `settings.custom_settings`.
-///
-/// Mirrors `merge_custom_settings()` in `apps/server/src/routes/workspaces.rs`.
 #[cfg(feature = "ssr")]
 fn merge_custom_settings(
     settings: &Option<serde_json::Value>,

@@ -4,8 +4,9 @@
 //!
 //! Provides session CRUD, message retrieval, AI message sending, and
 //! collaboration features (sharing, pinning, read status). Each function
-//! calls the same service-layer code as the REST handlers in
-//! `apps/server/src/routes/chat.rs`.
+//! calls directly into `kyomi_auth::chat_service` — the REST handlers that
+//! predated this module were deleted wholesale in the React→Leptos
+//! migration (KYO-73, #183).
 //!
 //! ## Endpoints
 //!
@@ -235,7 +236,8 @@ pub async fn get_websocket_config() -> Result<WebSocketConfig, ServerFnError> {
     extra.insert("name".into(), serde_json::json!(ac.auth.name));
     extra.insert("roles".into(), serde_json::json!(ac.auth.roles));
 
-    // Short-lived token (15 minutes) — matches apps/server/src/routes/auth.rs
+    // Short-lived token (15 minutes) — matches the standard access-token
+    // expiry used elsewhere (see `jwt.access_token_expire_minutes`).
     let token = kyomi_auth::jwt::create_access_token_str(
         &ac.auth.user_id,
         &ac.ctx.config.jwt_secret,
@@ -259,9 +261,6 @@ pub async fn get_websocket_config() -> Result<WebSocketConfig, ServerFnError> {
 ///
 /// Verifies the user has access (owner or shared in workspace) before
 /// returning messages. Returns up to 200 messages, oldest first.
-///
-/// Mirrors `GET /chat/sessions/{session_id}/messages` in
-/// `apps/server/src/routes/chat.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn get_session_messages(
     session_id: String,
@@ -303,9 +302,6 @@ pub async fn get_session_messages(
 ///
 /// Only the session owner can update the title. Returns an error if the
 /// session is not found, access is denied, or the user is not the owner.
-///
-/// Mirrors `PUT /chat/sessions/{session_id}` in
-/// `apps/server/src/routes/chat.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn update_session_title(
     session_id: String,
@@ -357,9 +353,6 @@ pub async fn update_session_title(
 ///
 /// Only the session owner can delete. Returns an error if the session is
 /// not found or the user is not the owner.
-///
-/// Mirrors `DELETE /chat/sessions/{session_id}` in
-/// `apps/server/src/routes/chat.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn delete_chat_session(session_id: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
@@ -399,9 +392,6 @@ pub async fn delete_chat_session(session_id: String) -> Result<(), ServerFnError
 ///
 /// Validates that the list is non-empty and capped at 100. Only deletes
 /// sessions owned by the current user in the current workspace.
-///
-/// Mirrors `POST /chat/sessions/bulk-delete` in
-/// `apps/server/src/routes/chat.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn bulk_delete_sessions(session_ids: Vec<String>) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
@@ -447,8 +437,6 @@ pub async fn bulk_delete_sessions(session_ids: Vec<String>) -> Result<(), Server
 ///
 /// Returns sessions (owned + shared) whose title matches the query (ILIKE).
 /// Returns an empty list when the query is empty.
-///
-/// Mirrors `GET /chat/search` in `apps/server/src/routes/chat.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn search_chat_messages(query: String) -> Result<Vec<ChatSessionItem>, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
@@ -894,9 +882,6 @@ pub async fn unshare_session(session_id: String) -> Result<(), ServerFnError> {
 ///
 /// Upserts into `conversation_read_status` to track the user's read position.
 /// Used for computing `unread_count` in session listings.
-///
-/// Mirrors `POST /chat/sessions/{session_id}/read` in
-/// `apps/server/src/routes/chat.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn mark_session_read(
     session_id: String,
@@ -973,9 +958,6 @@ pub async fn mark_session_read(
 /// Requires access to the session (owner or shared in workspace).
 /// Returns `true` if the toggle was successful (message found), `false`
 /// otherwise.
-///
-/// Mirrors `POST /chat/sessions/{session_id}/messages/{message_id}/toggle-pin`
-/// in `apps/server/src/routes/chat.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn toggle_message_pin(
     session_id: String,
@@ -1008,9 +990,6 @@ pub async fn toggle_message_pin(
 ///
 /// Only the session owner can edit messages. Re-encrypts the content before
 /// storing. Thin wrapper around `chat_service::update_message_content_owned`.
-///
-/// Mirrors `PATCH /chat/sessions/{session_id}/messages/{message_id}` in
-/// `apps/server/src/routes/chat.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn update_message_content(
     session_id: String,

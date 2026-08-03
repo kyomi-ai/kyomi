@@ -13,7 +13,9 @@
 //! - `GET /datasources/{id}/settings` → `get_datasource_settings()`
 //! - `POST /datasources/discover` → `discover_datasource_resources()`
 //!
-//! Calls the same service-layer code as `apps/server/src/routes/datasources.rs`.
+//! Each function calls directly into `kyomi_auth::datasource_service` — the
+//! REST route handlers that predated this module were deleted wholesale in
+//! the React→Leptos migration (KYO-73, #183).
 
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -455,9 +457,10 @@ fn overlay_credentials(stored: serde_json::Value, provided: &serde_json::Value) 
 
 /// Discover available resources (databases, schemas, warehouses, etc.) for a datasource.
 ///
-/// Mirrors `POST /api/v1/datasources/discover` from catalog.rs.
-/// Uses provider-specific list methods (list_databases, list_schemas, list_warehouses, etc.)
-/// matching `discover_all_resources()` in `apps/server/src/routes/catalog.rs`.
+/// Uses provider-specific list methods (list_databases, list_schemas, list_warehouses, etc.),
+/// the same mapping the REST route's `discover_all_resources()` used before that
+/// route (`catalog.rs`) was deleted wholesale in the React→Leptos migration
+/// (KYO-73, #182).
 #[server(prefix = "/leptos-api")]
 pub async fn discover_datasource_resources(
     datasource_type: String,
