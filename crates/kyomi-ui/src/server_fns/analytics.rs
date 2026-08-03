@@ -9,7 +9,9 @@
 //! - `PUT /analytics/sites/{id}` -> `update_analytics_site()`
 //! - `DELETE /analytics/sites/{id}` -> `delete_analytics_site()`
 //!
-//! Calls the same service-layer code as `apps/server/src/routes/analytics_sites.rs`.
+//! Each function calls directly into `kyomi_auth::analytics_site_service` —
+//! the REST route handlers that predated this module were deleted wholesale
+//! in the React→Leptos migration (KYO-73, #183).
 
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};

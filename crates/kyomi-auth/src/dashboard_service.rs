@@ -1566,9 +1566,9 @@ fn compute_line_diff(
 ///
 /// This is the single source of truth for the dashboard version-diff
 /// orchestration. The Leptos `server_fn` at
-/// `crates/kyomi-ui/src/server_fns/dashboards.rs::diff_versions` and the
-/// REST handler at `apps/server/src/routes/dashboards.rs::diff_versions`
-/// both delegate here.
+/// `crates/kyomi-ui/src/server_fns/dashboards.rs::diff_versions` delegates
+/// here; the REST handler that used to share this logic was deleted
+/// wholesale in the React→Leptos migration (KYO-73, #182).
 pub async fn diff_versions(
     pool: &DbPool,
     dashboard_id: &str,

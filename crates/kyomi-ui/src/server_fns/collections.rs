@@ -10,7 +10,9 @@
 //! - `POST   /collections/{collection_id}/dashboards`       -> `add_dashboard_to_collection()`
 //! - `DELETE /collections/{collection_id}/dashboards/{id}`  -> `remove_dashboard_from_collection()`
 //!
-//! Calls the same service-layer code as `apps/server/src/routes/collections.rs`.
+//! Each function calls directly into `kyomi_auth::collection_service` — the
+//! REST route handlers that predated this module were deleted wholesale in
+//! the React→Leptos migration (KYO-73, #181).
 
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};

@@ -16,8 +16,9 @@
 //!   NOT debited from Kyomi credits.
 //!
 //! The default model (`model`) is stored under
-//! `workspaces.settings.custom_settings.default_model`, matching the existing
-//! model-settings endpoint in `apps/server/src/routes/workspaces.rs`.
+//! `workspaces.settings.custom_settings.default_model`, the same layout
+//! written by `crates/kyomi-ui/src/server_fns/workspace.rs`'s workspace
+//! settings update path.
 
 use std::str::FromStr;
 
@@ -413,7 +414,8 @@ pub async fn update(
 // ---------------------------------------------------------------------------
 
 /// Read `settings.custom_settings.default_model` as a string, matching the
-/// layout written by `apps/server/src/routes/workspaces.rs::update_model_settings`.
+/// layout written by `crates/kyomi-ui/src/server_fns/workspace.rs`'s
+/// workspace settings update path.
 fn read_default_model(settings: &Option<serde_json::Value>) -> Option<String> {
     read_custom_settings_string(settings, "default_model")
 }
@@ -473,10 +475,10 @@ fn read_custom_settings_string(settings: &Option<serde_json::Value>, key: &str) 
 
 /// Non-destructively merge a new `default_model` value into the settings JSON.
 ///
-/// Matches the behaviour of `merge_custom_settings` in
-/// `apps/server/src/routes/workspaces.rs`. Kept private to avoid a route →
-/// auth crate dependency; the two implementations are trivial and share the
-/// same contract.
+/// A separate, near-identical `merge_custom_settings` helper exists in
+/// `crates/kyomi-ui/src/server_fns/workspace.rs` for general workspace
+/// settings writes (chart palette, title model) — the two duplicate each
+/// other rather than sharing one implementation. Tracked as KYO-301.
 fn merge_default_model(
     settings: &Option<serde_json::Value>,
     model: &str,

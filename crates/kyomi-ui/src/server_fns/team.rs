@@ -6,8 +6,9 @@
 //! to `/api/v1/workspaces/members`, `/api/v1/workspaces/invitations`,
 //! and `/api/v1/workspaces/ownership/transfers` endpoints.
 //!
-//! Each function calls the same service-layer code as the existing REST
-//! route handlers in `apps/server/src/routes/workspaces.rs`.
+//! Each function calls directly into `kyomi_auth::workspace_service` — the
+//! REST route handlers that predated this module were deleted wholesale in
+//! the React→Leptos migration (KYO-73, #183).
 
 use leptos::prelude::*;
 
@@ -18,8 +19,6 @@ use crate::types::{OwnershipTransferData, TeamInvitation, TeamMember};
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Map frontend role name ("admin"|"user") to DB role string.
-///
-/// Mirrors `map_role_to_db()` in `apps/server/src/routes/workspaces.rs`.
 #[cfg(feature = "ssr")]
 fn map_role_to_db(role: &str) -> &'static str {
     let roles = &kyomi_core::constants::get().workspace.roles;
@@ -41,8 +40,6 @@ fn is_admin_role(role: &str) -> bool {
 }
 
 /// Generate an invitation ID: `inv-{uuid_hex[0..24]}`.
-///
-/// Mirrors `generate_invitation_id()` in `apps/server/src/routes/workspaces.rs`.
 #[cfg(feature = "ssr")]
 fn generate_invitation_id() -> String {
     let hex = sqlx::types::Uuid::new_v4().simple().to_string();

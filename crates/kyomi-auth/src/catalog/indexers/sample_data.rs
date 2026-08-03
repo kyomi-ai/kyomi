@@ -24,10 +24,13 @@ use crate::catalog::types::{CatalogIndexResult, ColumnEntry};
 
 /// Sentinel workspace ID for shared sample data.
 ///
-/// NOTE (dormant): `index_sample_data` is only called from the legacy
-/// `POST /api/v1/datasources/sample` REST route in
-/// `apps/server/src/routes/datasources.rs`, which nothing in the UI invokes
-/// anymore. The sentinel is typically empty on a fresh install.
+/// NOTE (dead code): `index_sample_data`'s only caller was the REST route
+/// `POST /api/v1/datasources/sample`, deleted wholesale in the React→Leptos
+/// migration (KYO-73, #183). The Leptos replacement,
+/// `crates/kyomi-ui/src/server_fns/onboarding.rs::create_sample_datasource`,
+/// indexes sample tables through the generic per-workspace catalog indexer
+/// instead — nothing calls `index_sample_data` anymore. See KYO-300.
+/// The sentinel is typically empty on a fresh install.
 pub const SAMPLE_DATA_WORKSPACE_ID: &str = "sample-data-workspace";
 
 /// Sentinel datasource config ID for sample data (not a real datasource config row).

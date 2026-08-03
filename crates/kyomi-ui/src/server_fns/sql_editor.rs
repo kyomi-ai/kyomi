@@ -1221,8 +1221,9 @@ fn generate_table_fallback(datasource_slug: &str, sql_text: &str, columns: &[Str
 
 /// Rule-based ChartML generation.
 ///
-/// Matches the logic in `apps/server/src/routes/chart_generate.rs`
-/// `generate_with_rules()`.
+/// Ported from `generate_with_rules()` in the REST route `chart_generate.rs`,
+/// deleted wholesale in the React→Leptos migration (KYO-73, #183); this is
+/// now the only implementation.
 #[cfg(feature = "ssr")]
 fn generate_chartml_with_rules(
     sql_text: &str,
