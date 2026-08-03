@@ -7,7 +7,7 @@ use leptos::prelude::*;
 use phosphor_leptos::Icon;
 
 use crate::components::modal::{Modal, ModalSize};
-use crate::components::Spinner;
+use crate::components::Skeleton;
 use crate::server_fns::sql_editor::{get_table_info, TableInfoResponse};
 
 // ─── Component ───────────────────────────────────────────────────────────────
@@ -48,11 +48,7 @@ pub fn TableInfoModal(
             title="Table Info"
             size=ModalSize::Lg
         >
-            <Transition fallback=move || view! {
-                <div class="flex items-center justify-center py-12">
-                    <Spinner />
-                </div>
-            }>
+            <Transition fallback=move || view! { <TableInfoSkeleton /> }>
                 {move || Suspend::new(async move {
                     let result = table_info.await;
                     match result {
@@ -70,12 +66,63 @@ pub fn TableInfoModal(
                             }.into_any()
                         }
                         Some(Ok(info)) => {
-                            view! { <TableInfoContent info=info /> }.into_any()
+                            view! {
+                                <div class="animate-fade-in">
+                                    <TableInfoContent info=info />
+                                </div>
+                            }.into_any()
                         }
                     }
                 })}
             </Transition>
         </Modal>
+    }
+}
+
+// ─── Loading skeleton ──────────────────────────────────────────────────────
+
+/// Fallback shown while `get_table_info` is in flight — mirrors
+/// `TableInfoContent`'s layout (heading, refreshed timestamp, stats row,
+/// then a header-plus-rows column table) so the modal doesn't resize when
+/// real data replaces it (KYO-233).
+#[component]
+fn TableInfoSkeleton() -> impl IntoView {
+    view! {
+        <div class="space-y-4">
+            // Table name heading + qualified path
+            <div>
+                <Skeleton class="h-5 w-40 mb-1.5" />
+                <Skeleton class="h-3 w-56" />
+            </div>
+
+            // Last refreshed timestamp
+            <Skeleton class="h-3 w-48" />
+
+            // Stats row (Type / Rows / Columns)
+            <div class="flex gap-4">
+                <Skeleton class="h-4 w-16" />
+                <Skeleton class="h-4 w-20" />
+                <Skeleton class="h-4 w-20" />
+            </div>
+
+            // Columns table — header + rows
+            <div class="overflow-hidden border border-border rounded-md">
+                <div class="flex items-center gap-6 bg-muted px-3 py-2">
+                    <Skeleton class="h-3 w-16" />
+                    <Skeleton class="h-3 w-16" />
+                    <Skeleton class="h-3 w-14" />
+                    <Skeleton class="h-3 w-28" />
+                </div>
+                {(0..6).map(|_| view! {
+                    <div class="flex items-center gap-6 px-3 py-2 border-t border-border">
+                        <Skeleton class="h-3 w-20" />
+                        <Skeleton class="h-3 w-14" />
+                        <Skeleton class="h-3 w-12" />
+                        <Skeleton class="h-3 w-36" />
+                    </div>
+                }).collect_view()}
+            </div>
+        </div>
     }
 }
 

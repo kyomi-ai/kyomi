@@ -34,7 +34,7 @@ use crate::components::chat::CopilotChat;
 use crate::components::input::INPUT_CLASS;
 use crate::components::modal::{Modal, ModalSize};
 use crate::components::select::Select;
-use crate::components::{Button, ButtonSize, ButtonVariant, RightPanel, SearchInput};
+use crate::components::{Button, ButtonSize, ButtonVariant, RightPanel, SearchInput, Skeleton};
 use crate::components::Spinner;
 use crate::pages::sql_editor::catalog_tree::CatalogTree;
 use crate::pages::sql_editor::results_table::ResultsTable;
@@ -1614,12 +1614,12 @@ pub fn ChartBuilderModal(
                                     // Preview content
                                     {move || {
                                         if preview_loading.get() {
+                                            // Chart-area block matching the box the real
+                                            // `ChartPreview` fills once data arrives
+                                            // (DESIGN.md "Loading State Pattern" — KYO-233).
                                             view! {
-                                                <div class="flex items-center justify-center h-full">
-                                                    <div class="flex flex-col items-center gap-2">
-                                                        <Spinner class="text-primary".to_string() />
-                                                        <p class="text-sm text-muted-foreground">"Loading preview..."</p>
-                                                    </div>
+                                                <div class="h-full w-full">
+                                                    <Skeleton class="h-full w-full rounded-lg" />
                                                 </div>
                                             }.into_any()
                                         } else if let Some(ref err) = preview_error.get() {
@@ -1639,10 +1639,12 @@ pub fn ChartBuilderModal(
                                             let spec = rewrite_spec_for_remote(&preview_yaml.get());
                                             let chartml_inst = chartml_inst.take();
                                             view! {
-                                                <ChartPreview
-                                                    spec=spec
-                                                    chartml=chartml_inst
-                                                />
+                                                <div class="h-full animate-fade-in">
+                                                    <ChartPreview
+                                                        spec=spec
+                                                        chartml=chartml_inst
+                                                    />
+                                                </div>
                                             }.into_any()
                                         } else if datasource_slug_sig.get().is_empty() {
                                             // Inline data chart — render directly without remote fetch.

@@ -16,7 +16,7 @@ use crate::components::watches::{ExecutionLogViewer, WatchModal};
 use crate::components::{
     Alert, AlertDescription, AlertVariant, Button, ButtonLink, ButtonSize, ButtonVariant, Card,
     CardContent, CardHeader, CardTitle, ConfirmDialog, EmptyState, ListPageSkeleton, Modal,
-    ModalSize, Spinner, StatusBadge, StatusBadgeVariant, Switch,
+    ModalSize, StatusBadge, StatusBadgeVariant, Switch,
 };
 use crate::server_fns::context::UserContext;
 use crate::server_fns::watches::{
@@ -484,17 +484,19 @@ pub fn WatchesPage() -> impl IntoView {
 
     view! {
         {move || {
-            // Loading state for capabilities
-            if ctx_loading.get() {
-                return view! {
-                    <div class="flex items-center justify-center h-full">
-                        <Spinner />
-                    </div>
-                }.into_any();
-            }
-
-            // Capability gate — upgrade prompt for non-Pro users
-            if !has_watch_capability.get() {
+            // Capability gate — upgrade prompt for non-Pro users.
+            //
+            // While capabilities are still resolving (`ctx_loading`), `has_watch_capability`
+            // defaults to `false` — but we deliberately do NOT gate on that default. Doing so
+            // would flash the upgrade card for Pro users during the brief window before the
+            // parent Layout's `UserContext` resource resolves (it's shared/cached per session,
+            // so this window is normally sub-frame). Instead, fall through to the main page
+            // below, whose own `Transition` check also folds in `ctx_loading` (not just
+            // `store_initialized`) and renders `ListPageSkeleton` until BOTH are ready —
+            // reusing that skeleton covers this loading window too, so there is no second
+            // skeleton to invent or maintain, and no window where a warm IndexedDB cache
+            // could render stale watch data before capability is confirmed (KYO-233).
+            if !ctx_loading.get() && !has_watch_capability.get() {
                 return view! {
                     <div class="h-full flex flex-col bg-background">
                         <div class="page-header h-16 px-4 md:px-6 flex-shrink-0 flex items-center justify-between">
@@ -583,9 +585,14 @@ pub fn WatchesPage() -> impl IntoView {
                 <div class="flex-1 overflow-auto p-4 md:p-6 @container">
                     <Transition fallback=move || view! { <ListPageSkeleton /> }>
                         {move || {
-                            // Show skeleton until the SyncStore has been hydrated
-                            // from IndexedDB (KYO-169).
-                            if !store_initialized.get() {
+                            // Show skeleton until the SyncStore has been hydrated from
+                            // IndexedDB (KYO-169) AND capability resolution has finished
+                            // (`ctx_loading`). The outer capability gate above only acts once
+                            // `ctx_loading` is false, so without folding it in here too, a
+                            // warm IndexedDB cache could render real watch data before we know
+                            // whether the current plan still has watch capability — e.g. a
+                            // user downgraded since their last cached session (KYO-233 review).
+                            if !store_initialized.get() || ctx_loading.get() {
                                 return view! { <ListPageSkeleton /> }.into_any();
                             }
                             let watches = watches_signal.get();

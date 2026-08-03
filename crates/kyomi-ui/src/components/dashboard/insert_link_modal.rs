@@ -15,7 +15,7 @@ use leptos::prelude::*;
 
 use crate::components::alert::{Alert, AlertVariant};
 use crate::components::modal::{Modal, ModalSize};
-use crate::components::spinner::Spinner;
+use crate::components::ModalListSkeleton;
 use crate::server_fns::dashboards::{list_dashboards, DashboardListItem};
 
 use super::shared::{BTN_BASE, BTN_DEFAULT, BTN_OUTLINE, BTN_SIZE, DashboardListEntry};
@@ -150,16 +150,12 @@ pub fn InsertDashboardLinkModal(
                 })
             }}
 
-            // React: body — flex-1 overflow-y-auto
-            <div class="flex-1 overflow-y-auto">
-                <Suspense fallback=move || view! {
-                    <div class="flex items-center justify-center py-12">
-                        <div class="flex items-center gap-2 text-muted-foreground">
-                            <Spinner />
-                            "Loading dashboards..."
-                        </div>
-                    </div>
-                }>
+            // React: body — flex-1 overflow-y-auto.
+            // Fixed height (matches `save_dashboard_modal.rs`, which shares this
+            // list via `DashboardListEntry`) so the skeleton→loaded swap doesn't
+            // shift the modal's height (KYO-233).
+            <div class="flex-1 overflow-y-auto h-[420px]">
+                <Suspense fallback=move || view! { <ModalListSkeleton /> }>
                     {move || {
                         dashboards_resource.get().map(|result| {
                             let dashboards = match result {
@@ -173,42 +169,44 @@ pub fn InsertDashboardLinkModal(
                             let dashboards_list = dashboards.clone();
 
                             view! {
-                                // React: empty state
-                                {if dashboards_len == 0 {
-                                    Some(view! {
-                                        <div class="text-center py-8">
-                                            <p class="text-sm text-muted-foreground">
-                                                "No dashboards found"
-                                            </p>
-                                            <p class="text-xs text-muted-foreground/70 mt-1">
-                                                "Create a dashboard first to link to it"
-                                            </p>
-                                        </div>
-                                    })
-                                } else {
-                                    None
-                                }}
+                                <div class="animate-fade-in">
+                                    // React: empty state
+                                    {if dashboards_len == 0 {
+                                        Some(view! {
+                                            <div class="text-center py-8">
+                                                <p class="text-sm text-muted-foreground">
+                                                    "No dashboards found"
+                                                </p>
+                                                <p class="text-xs text-muted-foreground/70 mt-1">
+                                                    "Create a dashboard first to link to it"
+                                                </p>
+                                            </div>
+                                        })
+                                    } else {
+                                        None
+                                    }}
 
-                                // React: dashboard list — space-y-2
-                                {if dashboards_len > 0 {
-                                    Some(view! {
-                                        <div class="space-y-2">
-                                            <For
-                                                each=move || dashboards_list.clone()
-                                                key=|d| d.dashboard_id.clone()
-                                                let:dashboard
-                                            >
-                                                <DashboardListEntry
-                                                    dashboard=dashboard
-                                                    selected_dashboard_id=selected_dashboard_id
-                                                    on_select=handle_select
-                                                />
-                                            </For>
-                                        </div>
-                                    })
-                                } else {
-                                    None
-                                }}
+                                    // React: dashboard list — space-y-2
+                                    {if dashboards_len > 0 {
+                                        Some(view! {
+                                            <div class="space-y-2">
+                                                <For
+                                                    each=move || dashboards_list.clone()
+                                                    key=|d| d.dashboard_id.clone()
+                                                    let:dashboard
+                                                >
+                                                    <DashboardListEntry
+                                                        dashboard=dashboard
+                                                        selected_dashboard_id=selected_dashboard_id
+                                                        on_select=handle_select
+                                                    />
+                                                </For>
+                                            </div>
+                                        })
+                                    } else {
+                                        None
+                                    }}
+                                </div>
                             }
                         })
                     }}

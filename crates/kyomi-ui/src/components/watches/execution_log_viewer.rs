@@ -15,7 +15,7 @@ use phosphor_leptos::Icon;
 use crate::components::chat::AgentThinking;
 use crate::components::chat::thinking::ThinkingEvent;
 use crate::components::dashboard::{ChartInfoModal, MarkdownRenderer};
-use crate::components::{Badge, BadgeVariant, Spinner};
+use crate::components::{Badge, BadgeVariant, Skeleton, Spinner};
 use crate::server_fns::context::UserContext;
 use crate::server_fns::watches::get_thinking_events;
 use crate::types::WatchExecutionItem;
@@ -257,12 +257,7 @@ pub fn ExecutionLogViewer(
         return view! {
             {move || {
                 if is_loading.get() {
-                    view! {
-                        <div class="flex items-center justify-center py-8 gap-2 text-muted-foreground">
-                            <Spinner/>
-                            <span>"Loading execution..."</span>
-                        </div>
-                    }.into_any()
+                    view! { <ExecutionLogSkeleton /> }.into_any()
                 } else {
                     view! {
                         <div class="text-center py-8 text-muted-foreground">
@@ -304,12 +299,7 @@ pub fn ExecutionLogViewer(
             // Matches React's early-return pattern where spinner replaces all content
             {move || {
                 if is_loading.get() && selected_execution.get().is_none() {
-                    return view! {
-                        <div class="flex items-center justify-center py-8 gap-2 text-muted-foreground">
-                            <Spinner/>
-                            <span>"Loading execution..."</span>
-                        </div>
-                    }.into_any();
+                    return view! { <ExecutionLogSkeleton /> }.into_any();
                 }
 
                 let execs = executions_for_selector.clone();
@@ -352,97 +342,99 @@ pub fn ExecutionLogViewer(
                     let status_badge = status_badge_view(&status);
 
                     view! {
-                        // Summary Header
-                        <div class="flex items-center justify-between p-3 bg-muted/50 rounded-lg">
-                            <div class="flex items-center gap-3">
-                                {status_badge}
-                                <span class="text-xs text-muted-foreground">
-                                    {timestamp}
-                                </span>
+                        <div class="space-y-4 animate-fade-in">
+                            // Summary Header
+                            <div class="flex items-center justify-between p-3 bg-muted/50 rounded-lg">
+                                <div class="flex items-center gap-3">
+                                    {status_badge}
+                                    <span class="text-xs text-muted-foreground">
+                                        {timestamp}
+                                    </span>
+                                </div>
+                                {duration.map(|d| view! {
+                                    <span class="text-xs text-muted-foreground">{d}</span>
+                                })}
                             </div>
-                            {duration.map(|d| view! {
-                                <span class="text-xs text-muted-foreground">{d}</span>
-                            })}
-                        </div>
 
-                        // Error Message
-                        {error_message.clone().map(|err_msg| view! {
-                            <div class="p-3 bg-error/10 border border-error-border rounded-lg">
-                                <div class="flex items-start gap-2">
-                                    <Icon icon=phosphor_leptos::X_CIRCLE attr:class="h-4 w-4 text-error-foreground mt-0.5 shrink-0"/>
-                                    <div>
-                                        <p class="text-sm font-medium text-error-foreground">"Execution Error"</p>
-                                        <p class="text-sm text-error-foreground/80 mt-1">{err_msg}</p>
+                            // Error Message
+                            {error_message.clone().map(|err_msg| view! {
+                                <div class="p-3 bg-error/10 border border-error-border rounded-lg">
+                                    <div class="flex items-start gap-2">
+                                        <Icon icon=phosphor_leptos::X_CIRCLE attr:class="h-4 w-4 text-error-foreground mt-0.5 shrink-0"/>
+                                        <div>
+                                            <p class="text-sm font-medium text-error-foreground">"Execution Error"</p>
+                                            <p class="text-sm text-error-foreground/80 mt-1">{err_msg}</p>
+                                        </div>
                                     </div>
                                 </div>
-                            </div>
-                        })}
+                            })}
 
-                        // Chat-like Conversation View
-                        <div class="space-y-4 py-4">
-                            // User Message - Watch Prompt
-                            <div class="flex flex-col items-end">
-                                <div class="max-w-sm sm:max-w-md lg:max-w-lg xl:max-w-2xl px-4 py-3 text-primary-foreground bg-primary rounded-2xl shadow-sm text-sm">
-                                    {prompt_to_show}
+                            // Chat-like Conversation View
+                            <div class="space-y-4 py-4">
+                                // User Message - Watch Prompt
+                                <div class="flex flex-col items-end">
+                                    <div class="max-w-sm sm:max-w-md lg:max-w-lg xl:max-w-2xl px-4 py-3 text-primary-foreground bg-primary rounded-2xl shadow-sm text-sm">
+                                        {prompt_to_show}
+                                    </div>
                                 </div>
-                            </div>
 
-                            // Assistant Message - Response
-                            <div class="flex flex-col items-start">
-                                <div class="w-full px-6 py-4 bg-card border border-border rounded-2xl shadow-sm overflow-hidden">
-                                    // Agent thinking trace (above the response markdown)
-                                    <Transition fallback=|| ()>
-                                        {move || {
-                                            Suspend::new(async move {
-                                                let events: Vec<ThinkingEvent> = thinking_events_resource.await.to_vec();
-                                                if events.is_empty() {
-                                                    None
-                                                } else {
-                                                    Some(view! {
-                                                        <AgentThinking
-                                                            thinking_events=events
-                                                            is_active=false
-                                                        />
-                                                    })
-                                                }
-                                            })
+                                // Assistant Message - Response
+                                <div class="flex flex-col items-start">
+                                    <div class="w-full px-6 py-4 bg-card border border-border rounded-2xl shadow-sm overflow-hidden">
+                                        // Agent thinking trace (above the response markdown)
+                                        <Transition fallback=|| ()>
+                                            {move || {
+                                                Suspend::new(async move {
+                                                    let events: Vec<ThinkingEvent> = thinking_events_resource.await.to_vec();
+                                                    if events.is_empty() {
+                                                        None
+                                                    } else {
+                                                        Some(view! {
+                                                            <AgentThinking
+                                                                thinking_events=events
+                                                                is_active=false
+                                                            />
+                                                        })
+                                                    }
+                                                })
+                                            }}
+                                        </Transition>
+                                        {if let Some(response) = agent_response {
+                                            // KYO-119: Pass workspace_id so `MarkdownRenderer`
+                                            // can register `KyomiDatasourceProvider` on its
+                                            // owner — the execution-log modal mounts outside
+                                            // `DashboardChartProviders`, so chartml blocks
+                                            // with `data: { datasource, query }` would
+                                            // otherwise fail with "no provider registered
+                                            // for kind 'datasource'". Empty string skips
+                                            // registration when the user context hasn't
+                                            // loaded a workspace yet.
+                                            let ws_id = workspace_id.get().unwrap_or_default();
+                                            view! {
+                                                <MarkdownRenderer
+                                                    content=Signal::derive(move || response.clone())
+                                                    workspace_id=ws_id
+                                                    on_chart_info=on_chart_info
+                                                    on_ask_about_chart=on_ask_about_chart
+                                                />
+                                            }.into_any()
+                                        } else if status == "running" {
+                                            view! {
+                                                <div class="flex items-center gap-2 text-muted-foreground">
+                                                    <Spinner/>
+                                                    <span class="text-sm">"Processing..."</span>
+                                                </div>
+                                            }.into_any()
+                                        } else if error_message.is_none() {
+                                            view! {
+                                                <p class="text-sm text-muted-foreground italic">
+                                                    "No response generated"
+                                                </p>
+                                            }.into_any()
+                                        } else {
+                                            view! { <span></span> }.into_any()
                                         }}
-                                    </Transition>
-                                    {if let Some(response) = agent_response {
-                                        // KYO-119: Pass workspace_id so `MarkdownRenderer`
-                                        // can register `KyomiDatasourceProvider` on its
-                                        // owner — the execution-log modal mounts outside
-                                        // `DashboardChartProviders`, so chartml blocks
-                                        // with `data: { datasource, query }` would
-                                        // otherwise fail with "no provider registered
-                                        // for kind 'datasource'". Empty string skips
-                                        // registration when the user context hasn't
-                                        // loaded a workspace yet.
-                                        let ws_id = workspace_id.get().unwrap_or_default();
-                                        view! {
-                                            <MarkdownRenderer
-                                                content=Signal::derive(move || response.clone())
-                                                workspace_id=ws_id
-                                                on_chart_info=on_chart_info
-                                                on_ask_about_chart=on_ask_about_chart
-                                            />
-                                        }.into_any()
-                                    } else if status == "running" {
-                                        view! {
-                                            <div class="flex items-center gap-2 text-muted-foreground">
-                                                <Spinner/>
-                                                <span class="text-sm">"Processing..."</span>
-                                            </div>
-                                        }.into_any()
-                                    } else if error_message.is_none() {
-                                        view! {
-                                            <p class="text-sm text-muted-foreground italic">
-                                                "No response generated"
-                                            </p>
-                                        }.into_any()
-                                    } else {
-                                        view! { <span></span> }.into_any()
-                                    }}
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -462,4 +454,39 @@ pub fn ExecutionLogViewer(
         </div>
     }
     .into_any()
+}
+
+// ---------------------------------------------------------------------------
+// Loading skeleton
+// ---------------------------------------------------------------------------
+
+/// Fallback shown while an execution (or its list) is loading — mirrors the
+/// summary-header + chat-bubble shape rendered once an execution is
+/// available, so nothing jumps when real content replaces it (KYO-233).
+/// Shared by both loading branches above: "no executions fetched yet" and
+/// "switching to a different execution" render the identical eventual shape.
+#[component]
+fn ExecutionLogSkeleton() -> impl IntoView {
+    view! {
+        <div class="space-y-4">
+            // Summary header
+            <div class="flex items-center justify-between p-3 bg-muted/50 rounded-lg">
+                <div class="flex items-center gap-3">
+                    <Skeleton class="h-5 w-24 rounded-full" />
+                    <Skeleton class="h-3 w-16" />
+                </div>
+                <Skeleton class="h-3 w-10" />
+            </div>
+
+            // Chat-like conversation view
+            <div class="space-y-4 py-4">
+                <div class="flex flex-col items-end">
+                    <Skeleton class="h-14 w-2/3 rounded-2xl" />
+                </div>
+                <div class="flex flex-col items-start w-full">
+                    <Skeleton class="h-28 w-full rounded-2xl" />
+                </div>
+            </div>
+        </div>
+    }
 }

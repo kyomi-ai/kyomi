@@ -16,7 +16,7 @@ use leptos::prelude::*;
 use wasm_bindgen::prelude::*;
 
 use phosphor_leptos::Icon;
-use crate::components::{Button, ButtonSize, ButtonVariant, Checkbox, ConfirmDialog};
+use crate::components::{Button, ButtonSize, ButtonVariant, Checkbox, ConfirmDialog, Skeleton};
 use crate::pages::sql_editor::types::QueryHistoryEntry;
 use crate::server_fns::sql_editor::{
     delete_query_history, list_query_history, update_query_history,
@@ -351,12 +351,10 @@ pub fn QueryHistory(
             // Content area
             {move || {
                 if loading.get() {
-                    // Loading state
-                    view! {
-                        <div class="flex-1 flex items-center justify-center py-8">
-                            <crate::components::Spinner />
-                        </div>
-                    }.into_any()
+                    // Loading state — repeated rows approximating the query
+                    // list items below (preview line + metadata line), per
+                    // DESIGN.md's data-loading skeleton pattern (KYO-233).
+                    view! { <QueryHistorySkeleton /> }.into_any()
                 } else if let Some(err) = error.get() {
                     // Error state
                     view! {
@@ -408,7 +406,7 @@ pub fn QueryHistory(
                 } else {
                     // Query list
                     view! {
-                        <div class="flex-1 overflow-auto">
+                        <div class="flex-1 overflow-auto animate-fade-in">
                             <For
                                 each=move || entries.get()
                                 key=|entry| entry.id.clone()
@@ -555,6 +553,35 @@ pub fn QueryHistory(
                     }.into_any()
                 }
             }}
+        </div>
+    }
+}
+
+// ─── Loading skeleton ───────────────────────────────────────────────────────
+
+/// Repeated rows approximating the query-history list — a preview line plus
+/// a metadata line, matching the entry layout rendered once `entries` loads
+/// (KYO-233).
+#[component]
+fn QueryHistorySkeleton() -> impl IntoView {
+    view! {
+        <div class="flex-1 overflow-auto">
+            {(0..8).map(|_| view! {
+                <div class="px-3 py-2 border-b border-border">
+                    <div class="flex items-start justify-between gap-2 mb-1">
+                        <Skeleton class="h-3.5 w-4/5" />
+                        <div class="flex items-center gap-1 flex-shrink-0">
+                            <Skeleton class="h-4 w-4 rounded" />
+                            <Skeleton class="h-4 w-4 rounded" />
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <Skeleton class="h-2.5 w-10" />
+                        <Skeleton class="h-2.5 w-3" />
+                        <Skeleton class="h-2.5 w-8" />
+                    </div>
+                </div>
+            }).collect_view()}
         </div>
     }
 }
