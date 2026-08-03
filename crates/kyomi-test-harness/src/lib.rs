@@ -76,8 +76,6 @@ pub async fn setup_server() -> TestServer {
     let jwt_secret = config.jwt_secret.clone();
     let encryption_key_arc = Arc::new(encryption_key);
 
-    let ws_manager = kyomi_auth::websocket::WebSocketManager::new(None, db.clone());
-
     let state = kyomi_server::state::AppState {
         db: db.clone(),
         kv: kv.clone(),
@@ -88,7 +86,7 @@ pub async fn setup_server() -> TestServer {
         embedding: kyomi_embed::LazyEmbedding::loaded(
             kyomi_embed::EmbeddingService::new().expect("embedding model"),
         ),
-        ws_manager,
+        ws_manager: kyomi_auth::websocket::WebSocketManager::new(None, db.clone()),
         stripe: None,
         mcp_sessions: kyomi_auth::mcp_session_manager::MCPSessionManager::new(kv.clone()),
         cancel_registry: kyomi_server::cancel_registry::CancelRegistry::default(),
@@ -97,7 +95,39 @@ pub async fn setup_server() -> TestServer {
         platforms: Arc::new(kyomi_core::platform::PlatformRegistry::new()),
     };
 
-    let app = kyomi_server::build_service(state);
+    // Mirrors apps/server/src/main.rs's route assembly: build the core
+    // router, then conditionally nest platform-specific routes. Without
+    // this, `/api/v1/slack/*` falls through to the SPA fallback in every
+    // contract test — see KYO-254. `AppState` is `Clone`, so `slack_state`
+    // is derived from the already-built `state` rather than duplicating
+    // each field's construction.
+    #[cfg(feature = "slack")]
+    let slack_state = kyomi_slack::SlackState {
+        db: state.db.clone(),
+        kv: state.kv.clone(),
+        redis: state.redis.clone(),
+        config: state.config.clone(),
+        encryption_key: state.encryption_key.clone(),
+        slack_client: kyomi_slack::client::SlackClient::new()
+            .expect("Slack client should build — construction only builds a reqwest::Client"),
+        ws_manager: state.ws_manager.clone(),
+        embedding: state.embedding.clone(),
+        connect_registry: state.connect_registry.clone(),
+        platforms: state.platforms.clone(),
+    };
+
+    let extras = kyomi_server::ServerExtras {
+        #[cfg(feature = "slack")]
+        slack_client: Some(slack_state.slack_client.clone()),
+    };
+    let router = kyomi_server::build_router(state, extras);
+    #[cfg(feature = "slack")]
+    let router = router.nest(
+        "/api/v1/slack",
+        kyomi_slack::routes::routes().with_state(slack_state),
+    );
+    let app = kyomi_server::wrap_service(router);
+
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("failed to bind test server");
