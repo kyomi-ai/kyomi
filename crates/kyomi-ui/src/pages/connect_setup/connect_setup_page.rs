@@ -763,7 +763,7 @@ fn SuccessStep(
             // Delivery status — delivered
             <Show when=move || has_callback.get() && delivery_status.get() == Some(DeliveryStatus::Delivered)>
                 <div class="flex items-center justify-center gap-2 text-sm text-foreground py-2">
-                    <span class="h-5 w-5 text-green-500 inline-flex items-center justify-center">
+                    <span class="h-5 w-5 text-success-foreground inline-flex items-center justify-center">
                         <Icon icon=phosphor_leptos::CHECK_CIRCLE/>
                     </span>
                     "Token delivered to CLI. You can close this tab."
@@ -844,7 +844,7 @@ fn CopyButton(
             {move || {
                 if copied.get() {
                     view! {
-                        <span class="h-4 w-4 text-green-500 inline-flex items-center justify-center">
+                        <span class="h-4 w-4 text-success-foreground inline-flex items-center justify-center">
                             <Icon icon=phosphor_leptos::CHECK/>
                         </span>
                     }.into_any()
