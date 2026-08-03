@@ -396,15 +396,14 @@ async fn migration_chains_produce_matching_schemas() {
         concat!(env!("CARGO_MANIFEST_DIR"), "/../../apps/server/schema-parity-allowlist.toml");
     let allow = Allowlist::load(allowlist_path);
 
-    // Same default as kyomi_core::Config::test_config() / apps/server/tests
-    // contract suite, so this needs no env override against the CI postgres
-    // service or a local `kyomi-postgres-test` container.
-    let base_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://kyomi_test:test@localhost:5434/kyomi_test".into());
-    let slash = base_url
-        .rfind('/')
-        .expect("DATABASE_URL must be of the form postgres://user:pass@host:port/dbname");
-    let server_url = &base_url[..slash];
+    // Same server-resolution rule as kyomi_core::Config::test_config() /
+    // apps/server/tests contract suite (kyomi_core::test_db), so this needs
+    // no env override against the CI postgres service or a local
+    // `kyomi-postgres-test` container. Only the server part matters here —
+    // the database name itself is discarded in favor of our own scratch
+    // database below.
+    let base_url = kyomi_core::test_db::test_database_url();
+    let (server_url, _) = kyomi_core::test_db::split_database_url(&base_url);
 
     // KYO-242: never touch the shared contract-test database — create and
     // drop our own scratch database on the same server so this check is

@@ -4,9 +4,6 @@ version = "0.1.0"
 edition = "2024"
 license.workspace = true
 
-[features]
-test-helpers = []
-
 [dependencies]
 async-trait = { workspace = true }
 axum = { workspace = true }
@@ -32,9 +29,22 @@ kyomi-connect-protocol = { workspace = true }
 kyomi-types = { workspace = true }
 dashmap = { workspace = true }
 tokio-util = { workspace = true }
+sha2 = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
+
+[features]
+test-helpers = ["dep:sha2", "dep:hex"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
+sha2 = { workspace = true }
+hex = { workspace = true }
+# Self dev-dependency: activates our own `test-helpers` feature so this
+# crate's own integration tests (crates/kyomi-core/tests/*.rs) can call
+# `kyomi_core::test_db`, which is gated `cfg(any(test, feature =
+# "test-helpers"))`. `cfg(test)` alone does NOT cover integration test
+# binaries — they link against the crate compiled without `--cfg test`.
+kyomi-core = { path = ".", features = ["test-helpers"] }
 
 [lints]
 workspace = true

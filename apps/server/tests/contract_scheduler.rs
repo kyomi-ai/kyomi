@@ -213,8 +213,9 @@ fn all_10_datasource_types_still_registered_in_registry() {
 
 #[tokio::test]
 async fn sample_data_needs_refresh_true_for_empty_db() {
-    let config = kyomi_core::Config::test_config();
-    let db = match kyomi_core::db::create_pool(&config.database_url).await {
+    // KYO-242: connects to (and provisions/self-heals) this worktree's
+    // private test database rather than the shared `kyomi_test` database.
+    let db = match kyomi_core::test_db::connect_test_pool().await {
         Ok(pool) => pool,
         Err(_) => return, // Skip if DB unavailable
     };
@@ -229,8 +230,9 @@ async fn sample_data_needs_refresh_true_for_empty_db() {
 
 #[tokio::test]
 async fn bigquery_public_needs_refresh_true_for_empty_db() {
-    let config = kyomi_core::Config::test_config();
-    let db = match kyomi_core::db::create_pool(&config.database_url).await {
+    // KYO-242: connects to (and provisions/self-heals) this worktree's
+    // private test database rather than the shared `kyomi_test` database.
+    let db = match kyomi_core::test_db::connect_test_pool().await {
         Ok(pool) => pool,
         Err(_) => return,
     };
@@ -248,8 +250,9 @@ async fn bigquery_public_needs_refresh_true_for_empty_db() {
 
 #[tokio::test]
 async fn sample_data_get_table_count_returns_zero_for_empty_db() {
-    let config = kyomi_core::Config::test_config();
-    let db = match kyomi_core::db::create_pool(&config.database_url).await {
+    // KYO-242: connects to (and provisions/self-heals) this worktree's
+    // private test database rather than the shared `kyomi_test` database.
+    let db = match kyomi_core::test_db::connect_test_pool().await {
         Ok(pool) => pool,
         Err(_) => return,
     };
@@ -263,8 +266,9 @@ async fn sample_data_get_table_count_returns_zero_for_empty_db() {
 
 #[tokio::test]
 async fn bigquery_public_get_table_count_returns_zero_for_empty_db() {
-    let config = kyomi_core::Config::test_config();
-    let db = match kyomi_core::db::create_pool(&config.database_url).await {
+    // KYO-242: connects to (and provisions/self-heals) this worktree's
+    // private test database rather than the shared `kyomi_test` database.
+    let db = match kyomi_core::test_db::connect_test_pool().await {
         Ok(pool) => pool,
         Err(_) => return,
     };
@@ -280,8 +284,9 @@ async fn bigquery_public_get_table_count_returns_zero_for_empty_db() {
 
 #[tokio::test]
 async fn can_refresh_now_returns_true_for_nonexistent_datasource() {
-    let config = kyomi_core::Config::test_config();
-    let db = match kyomi_core::db::create_pool(&config.database_url).await {
+    // KYO-242: connects to (and provisions/self-heals) this worktree's
+    // private test database rather than the shared `kyomi_test` database.
+    let db = match kyomi_core::test_db::connect_test_pool().await {
         Ok(pool) => pool,
         Err(_) => return,
     };
