@@ -618,6 +618,19 @@ mod tests {
         .expect("insert chat session");
     }
 
+    /// Flip an already-seeded chat session's `shared` column. Separate from
+    /// `seed_chat_session` because most existing tests want the default
+    /// (unshared) row and only the KYO-249 doc-visibility tests below need
+    /// to control it explicitly.
+    async fn set_chat_session_shared(sq: &sqlx::SqlitePool, session_id: &str, shared: bool) {
+        sqlx::query("UPDATE chat_sessions SET shared = $1 WHERE session_id = $2")
+            .bind(if shared { 1 } else { 0 })
+            .bind(session_id)
+            .execute(sq)
+            .await
+            .expect("set chat session shared flag");
+    }
+
     async fn seed_watch(
         sq: &sqlx::SqlitePool,
         watch_id: &str,
@@ -1425,6 +1438,366 @@ mod tests {
             after_non_owner.is_empty(),
             "non-owner must see neither the correctly-written Delete row \
              nor the (now-fixed) leaked row: {after_non_owner:?}"
+        );
+    }
+
+    // ─── KYO-249: dashboard/knowledge/chat_session backfill undersync fix ──
+
+    /// Read the current `is_workspace_visible` flag directly, bypassing
+    /// `get_entries_since`'s visibility filter — used where a test needs to
+    /// assert on the raw column rather than on what a particular requester
+    /// can see.
+    async fn raw_is_workspace_visible(sq: &sqlx::SqlitePool, entity_id: &str) -> bool {
+        let visible: i64 = sqlx::query_scalar(
+            "SELECT is_workspace_visible FROM sync_log WHERE entity_id = $1",
+        )
+        .bind(entity_id)
+        .fetch_one(sq)
+        .await
+        .expect("fetch is_workspace_visible");
+        visible != 0
+    }
+
+    /// KYO-249: a `sync_log` dashboard row written before the KYO-172/173
+    /// backfill migration ran was mis-classified as private
+    /// (`is_workspace_visible = false`) even though the dashboard sits in a
+    /// public collection — under-syncing it to every workspace member whose
+    /// delta cursor spans the migration boundary, until a full re-bootstrap.
+    ///
+    /// This seeds a dashboard in a public collection, writes its sync_log
+    /// row the way `create_dashboard` would have written it *if* the bug
+    /// weren't present at the time (i.e. what the row should have been),
+    /// then hand-corrupts it into the exact under-synced state the buggy
+    /// 20260724000000/00024 migration produced, applies the real
+    /// `00031_fix_sync_log_doc_visibility.sql` file (read from disk, not
+    /// reimplemented), and asserts both the raw column flip and the
+    /// end-to-end consequence: a non-owner's delta sync now returns the row
+    /// it previously withheld.
+    #[tokio::test]
+    async fn kyo_249_fix_migration_marks_public_dashboard_row_visible() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+
+        seed_user(sq, "user-a", "a@test.local").await;
+        seed_user(sq, "user-b", "b@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+        seed_workspace_member(sq, "ws-1", "user-b", "user").await;
+        seed_dashboard(sq, "dash-pub", "user-a", "ws-1", "dashboard").await;
+        seed_collection(sq, "col-pub", "ws-1", "user-a", true).await;
+        seed_collection_dashboard(sq, "col-pub", "dash-pub").await;
+
+        let sid = write_sync_entry(
+            &db,
+            SyncEntryParams {
+                entity_type: "dashboard",
+                entity_id: "dash-pub",
+                workspace_id: "ws-1",
+                action: SyncActionType::Insert,
+                data: Some(serde_json::json!({
+                    "dashboard_id": "dash-pub",
+                    "user_id": "user-a",
+                    "title": "A's Public Dashboard",
+                })),
+                owner_user_id: Some("user-a"),
+                is_workspace_visible: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Sanity check: the corrupted state must actually reproduce the
+        // undersync, or this test would pass vacuously.
+        let withheld_before_fix = get_entries_since(&db, "ws-1", 0, "user-b", 100)
+            .await
+            .unwrap();
+        assert!(
+            withheld_before_fix.is_empty(),
+            "corrupted pre-fix state must reproduce the undersync to a \
+             non-owner (sanity check) — without this, the test below is \
+             meaningless: {withheld_before_fix:?}"
+        );
+
+        apply_migration_file(
+            sq,
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../apps/server/migrations-sqlite/00031_fix_sync_log_doc_visibility.sql"
+            ),
+        )
+        .await;
+
+        assert!(
+            raw_is_workspace_visible(sq, "dash-pub").await,
+            "public-collection dashboard row must be flipped to workspace-visible"
+        );
+
+        // End-to-end acceptance criterion: the non-owner's delta sync now
+        // returns the row it previously withheld.
+        let after_fix_b = get_entries_since(&db, "ws-1", 0, "user-b", 100)
+            .await
+            .unwrap();
+        assert_eq!(
+            after_fix_b.iter().map(|e| e.sync_id).collect::<Vec<_>>(),
+            vec![sid],
+            "non-owner must now receive the corrected historical public \
+             dashboard row: {after_fix_b:?}"
+        );
+    }
+
+    /// KYO-249 regression: the fix migration must not mark a genuinely
+    /// private dashboard's historical row visible just because it was
+    /// caught by the same unconditional backfill.
+    #[tokio::test]
+    async fn kyo_249_fix_migration_leaves_private_dashboard_row_invisible() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+
+        seed_user(sq, "user-a", "a@test.local").await;
+        seed_user(sq, "user-b", "b@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+        seed_workspace_member(sq, "ws-1", "user-b", "user").await;
+        // Private dashboard: no collection membership at all.
+        seed_dashboard(sq, "dash-priv", "user-a", "ws-1", "dashboard").await;
+
+        let sid = write_sync_entry(
+            &db,
+            SyncEntryParams {
+                entity_type: "dashboard",
+                entity_id: "dash-priv",
+                workspace_id: "ws-1",
+                action: SyncActionType::Insert,
+                data: Some(serde_json::json!({
+                    "dashboard_id": "dash-priv",
+                    "user_id": "user-a",
+                    "title": "A's Private Dashboard",
+                })),
+                owner_user_id: Some("user-a"),
+                is_workspace_visible: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        apply_migration_file(
+            sq,
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../apps/server/migrations-sqlite/00031_fix_sync_log_doc_visibility.sql"
+            ),
+        )
+        .await;
+
+        assert!(
+            !raw_is_workspace_visible(sq, "dash-priv").await,
+            "private dashboard row must stay is_workspace_visible = false"
+        );
+
+        let after_fix_b = get_entries_since(&db, "ws-1", 0, "user-b", 100)
+            .await
+            .unwrap();
+        assert!(
+            after_fix_b.is_empty(),
+            "non-owner must still not see the private dashboard row: {after_fix_b:?}"
+        );
+
+        let after_fix_a = get_entries_since(&db, "ws-1", 0, "user-a", 100)
+            .await
+            .unwrap();
+        assert_eq!(
+            after_fix_a.iter().map(|e| e.sync_id).collect::<Vec<_>>(),
+            vec![sid],
+            "owner must still see their own private dashboard row: {after_fix_a:?}"
+        );
+    }
+
+    /// KYO-249 regression: the fix migration's guard (`is_workspace_visible
+    /// = false`) must mean an already-`true` row is never touched, even if
+    /// the entity's *current* visibility no longer agrees with it (e.g. a
+    /// dashboard that was public when this historical row was written and
+    /// has since been made private). The migration only ever moves
+    /// false -> true; it must never regress an already-correct true row
+    /// back to false, which is exactly what an unguarded blanket recompute
+    /// would do.
+    #[tokio::test]
+    async fn kyo_249_fix_migration_does_not_modify_already_visible_row() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+
+        seed_user(sq, "user-a", "a@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+        // No public collection membership — current truth says private.
+        seed_dashboard(sq, "dash-now-private", "user-a", "ws-1", "dashboard").await;
+
+        // This row is already (correctly, at the time it was written)
+        // workspace-visible = true, even though the dashboard is not in a
+        // public collection *now*.
+        write_sync_entry(
+            &db,
+            SyncEntryParams {
+                entity_type: "dashboard",
+                entity_id: "dash-now-private",
+                workspace_id: "ws-1",
+                action: SyncActionType::Insert,
+                data: Some(serde_json::json!({
+                    "dashboard_id": "dash-now-private",
+                    "user_id": "user-a",
+                    "title": "Formerly Public Dashboard",
+                })),
+                owner_user_id: Some("user-a"),
+                is_workspace_visible: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        apply_migration_file(
+            sq,
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../apps/server/migrations-sqlite/00031_fix_sync_log_doc_visibility.sql"
+            ),
+        )
+        .await;
+
+        assert!(
+            raw_is_workspace_visible(sq, "dash-now-private").await,
+            "an already-visible row must not be modified by the fix migration, \
+             even though current truth would now say private"
+        );
+    }
+
+    /// KYO-249: the same undersync bug and fix for `chat_session` — a
+    /// shared session's historical row was backfilled to
+    /// `is_workspace_visible = false`. The guard must recompute from the
+    /// session's *current* `shared` column (the live-access predicate), not
+    /// from `data->>'shared'` on the row's own payload.
+    #[tokio::test]
+    async fn kyo_249_fix_migration_marks_shared_chat_session_row_visible() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+
+        seed_user(sq, "user-a", "a@test.local").await;
+        seed_user(sq, "user-b", "b@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+        seed_workspace_member(sq, "ws-1", "user-b", "user").await;
+        seed_chat_session(sq, "chat-shared", "user-a", "ws-1").await;
+        set_chat_session_shared(sq, "chat-shared", true).await;
+
+        let sid = write_sync_entry(
+            &db,
+            SyncEntryParams {
+                entity_type: "chat_session",
+                entity_id: "chat-shared",
+                workspace_id: "ws-1",
+                action: SyncActionType::Insert,
+                data: Some(serde_json::json!({
+                    "session_id": "chat-shared",
+                    "shared": true,
+                    "created_by": {"user_id": "user-a"},
+                })),
+                owner_user_id: Some("user-a"),
+                is_workspace_visible: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let withheld_before_fix = get_entries_since(&db, "ws-1", 0, "user-b", 100)
+            .await
+            .unwrap();
+        assert!(
+            withheld_before_fix.is_empty(),
+            "sanity check: corrupted pre-fix state must reproduce the \
+             undersync to a non-owner: {withheld_before_fix:?}"
+        );
+
+        apply_migration_file(
+            sq,
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../apps/server/migrations-sqlite/00031_fix_sync_log_doc_visibility.sql"
+            ),
+        )
+        .await;
+
+        assert!(
+            raw_is_workspace_visible(sq, "chat-shared").await,
+            "shared chat session row must be flipped to workspace-visible"
+        );
+
+        let after_fix_b = get_entries_since(&db, "ws-1", 0, "user-b", 100)
+            .await
+            .unwrap();
+        assert_eq!(
+            after_fix_b.iter().map(|e| e.sync_id).collect::<Vec<_>>(),
+            vec![sid],
+            "non-owner must now receive the corrected historical shared \
+             chat session row: {after_fix_b:?}"
+        );
+    }
+
+    /// KYO-249 regression: an unshared chat session's historical row must
+    /// stay invisible after the fix migration runs.
+    #[tokio::test]
+    async fn kyo_249_fix_migration_leaves_unshared_chat_session_row_invisible() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+
+        seed_user(sq, "user-a", "a@test.local").await;
+        seed_user(sq, "user-b", "b@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+        seed_workspace_member(sq, "ws-1", "user-b", "user").await;
+        // Unshared — seed_chat_session leaves `shared` at its default (0).
+        seed_chat_session(sq, "chat-private", "user-a", "ws-1").await;
+
+        let sid = write_sync_entry(
+            &db,
+            SyncEntryParams {
+                entity_type: "chat_session",
+                entity_id: "chat-private",
+                workspace_id: "ws-1",
+                action: SyncActionType::Insert,
+                data: Some(serde_json::json!({
+                    "session_id": "chat-private",
+                    "shared": false,
+                    "created_by": {"user_id": "user-a"},
+                })),
+                owner_user_id: Some("user-a"),
+                is_workspace_visible: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        apply_migration_file(
+            sq,
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../apps/server/migrations-sqlite/00031_fix_sync_log_doc_visibility.sql"
+            ),
+        )
+        .await;
+
+        assert!(
+            !raw_is_workspace_visible(sq, "chat-private").await,
+            "unshared chat session row must stay is_workspace_visible = false"
+        );
+
+        let after_fix_b = get_entries_since(&db, "ws-1", 0, "user-b", 100)
+            .await
+            .unwrap();
+        assert!(
+            after_fix_b.is_empty(),
+            "non-owner must still not see the unshared chat session row: {after_fix_b:?}"
+        );
+
+        let after_fix_a = get_entries_since(&db, "ws-1", 0, "user-a", 100)
+            .await
+            .unwrap();
+        assert_eq!(
+            after_fix_a.iter().map(|e| e.sync_id).collect::<Vec<_>>(),
+            vec![sid],
+            "owner must still see their own unshared chat session row: {after_fix_a:?}"
         );
     }
 }
