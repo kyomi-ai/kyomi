@@ -333,9 +333,21 @@ jobs:
   # crates/kyomi-ui/dist/ — apps/server/src/leptos_frontend.rs embeds dist/
   # via rust_embed at *compile* time, so the `mkdir -p crates/kyomi-ui/dist`
   # the clippy job uses (an empty directory, just enough for RustEmbed's
-  # derive macro to compile) produces a struct with no assets. Every one of
-  # these six tests was quarantined under KYO-236 for exactly that reason
-  # and stayed quarantined until this job existed to build the real thing.
+  # derive macro to compile) produces a struct with no assets.
+  #
+  # The six tests that need real assets carry #[ignore] in the source, and
+  # this job's final step passes `--include-ignored` to opt back in. That
+  # split — not un-ignoring them outright — is load-bearing: the clippy job
+  # above also runs `cargo test --tests`, which would pick up contract_ssr
+  # along with every other integration-test target. Against clippy's empty
+  # dist/ those six would fail every PR (they did, briefly — KYO-255 first
+  # landed without the #[ignore]s and broke clippy). #[ignore] keeps them
+  # out of that generic sweep; this job is the only place `--include-ignored`
+  # is passed, so it's the only place they run. The seventh test in that
+  # file, login_does_not_contain_loading_spinner, needs no dist/ assets to
+  # pass and is intentionally left unignored — it still runs in clippy's
+  # sweep. Run locally with: cd crates/kyomi-ui && trunk build, then
+  # cargo test -p kyomi-server --test contract_ssr -- --include-ignored.
   #
   # Why this is its own job instead of a step in `clippy` above: a cold
   # `trunk build` (wasm-dev profile, matching Trunk.toml's cargo_profile —
@@ -452,10 +464,14 @@ jobs:
           RUSTC_WRAPPER: ${{ env.SCCACHE_AVAILABLE == 'true' && 'sccache' || '' }}
         run: trunk build
 
+      # --include-ignored: the six tests in contract_ssr.rs that need a real
+      # dist/ carry #[ignore] so the clippy job's `cargo test --tests` sweep
+      # (which only mkdirs an empty dist/) skips them instead of failing.
+      # This is the job that opts back in, now that dist/ is real.
       - name: cargo test (SSR contract tests)
         env:
           RUSTC_WRAPPER: ${{ env.SCCACHE_AVAILABLE == 'true' && 'sccache' || '' }}
-        run: cargo test --locked -p kyomi-server --test contract_ssr
+        run: cargo test --locked -p kyomi-server --test contract_ssr -- --include-ignored
 
       - name: sccache stats
         if: always()
