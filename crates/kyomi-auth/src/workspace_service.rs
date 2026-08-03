@@ -618,21 +618,6 @@ pub async fn update_member_role(
     Ok(result.rows_affected() > 0)
 }
 
-/// Remove a member from a workspace (hard delete).
-pub async fn remove_member(
-    pool: &DbPool,
-    workspace_id: &str,
-    user_id: &str,
-) -> kyomi_core::Result<bool> {
-    let result = kyomi_core::db_execute!(
-        pool,
-        "DELETE FROM workspace_users \
-         WHERE workspace_id = $1 AND user_id = $2",
-        workspace_id, user_id
-    )?;
-    Ok(result.rows_affected() > 0)
-}
-
 /// Count admins in a workspace.
 pub async fn count_admins(
     pool: &DbPool,
@@ -1269,16 +1254,80 @@ pub async fn remove_workspace_member(
         ));
     }
 
-    kyomi_core::db_execute!(
-        pool,
-        "UPDATE chat_sessions SET user_id = $1 \
-         WHERE user_id = $2 AND workspace_id = $3 AND shared = true",
-        owner_user_id,
-        target_user_id,
-        workspace_id
-    )?;
+    // Reassign the departing user's shared sessions, drop their membership,
+    // and drop their per-user platform links/credentials atomically. The
+    // link cleanup matters even though KYO-223 already gates the one known
+    // exploitable read path (`resolve_active_workspace_roles` in
+    // `enterprise/kyomi-slack/src/routes.rs`): deleting the row here means a
+    // *future* integration entry point that forgets to check membership
+    // fails closed (no link row to resolve) instead of failing open. This
+    // is defence in depth, not a replacement for that gate.
+    //
+    // `workspace_integrations` (the workspace's platform installation) is
+    // deliberately untouched — it is keyed `(workspace_id, platform_type)`,
+    // not per-user, and removing one member must not tear down the
+    // workspace's Slack/etc. installation.
+    let update_chat_sessions_sql = "UPDATE chat_sessions SET user_id = $1 \
+         WHERE user_id = $2 AND workspace_id = $3 AND shared = true";
+    let delete_workspace_users_sql = "DELETE FROM workspace_users \
+         WHERE workspace_id = $1 AND user_id = $2";
+    let delete_platform_user_links_sql = "DELETE FROM platform_user_links \
+         WHERE workspace_id = $1 AND user_id = $2";
+    let delete_workspace_user_integrations_sql = "DELETE FROM workspace_user_integrations \
+         WHERE workspace_id = $1 AND user_id = $2";
 
-    remove_member(pool, workspace_id, target_user_id).await?;
+    match pool {
+        kyomi_core::db::DbPool::Postgres(pg) => {
+            let mut tx = pg.begin().await?;
+            sqlx::query(update_chat_sessions_sql)
+                .bind(owner_user_id)
+                .bind(target_user_id)
+                .bind(workspace_id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query(delete_workspace_users_sql)
+                .bind(workspace_id)
+                .bind(target_user_id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query(delete_platform_user_links_sql)
+                .bind(workspace_id)
+                .bind(target_user_id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query(delete_workspace_user_integrations_sql)
+                .bind(workspace_id)
+                .bind(target_user_id)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+        }
+        kyomi_core::db::DbPool::Sqlite(sq) => {
+            let mut tx = sq.begin().await?;
+            sqlx::query(update_chat_sessions_sql)
+                .bind(owner_user_id)
+                .bind(target_user_id)
+                .bind(workspace_id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query(delete_workspace_users_sql)
+                .bind(workspace_id)
+                .bind(target_user_id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query(delete_platform_user_links_sql)
+                .bind(workspace_id)
+                .bind(target_user_id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query(delete_workspace_user_integrations_sql)
+                .bind(workspace_id)
+                .bind(target_user_id)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+        }
+    }
 
     if let Some(config) = config
         && let Some(stripe) = stripe_from_config(config)
@@ -1571,6 +1620,83 @@ mod tests {
         .expect("insert invitation");
     }
 
+    /// Insert a `platform_user_links` row (e.g. a Slack identity link).
+    async fn seed_platform_user_link(
+        pool: &DbPool,
+        workspace_id: &str,
+        user_id: &str,
+        platform_type: &str,
+        platform_user_id: &str,
+    ) {
+        let sq = match pool {
+            DbPool::Sqlite(sq) => sq,
+            _ => panic!("test requires sqlite pool"),
+        };
+        sqlx::query(
+            "INSERT INTO platform_user_links \
+             (id, workspace_id, user_id, platform_type, platform_user_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .bind(format!("link-{workspace_id}-{user_id}-{platform_type}"))
+        .bind(workspace_id)
+        .bind(user_id)
+        .bind(platform_type)
+        .bind(platform_user_id)
+        .execute(sq)
+        .await
+        .expect("insert platform_user_link");
+    }
+
+    /// Insert a `workspace_user_integrations` row (per-user platform credentials).
+    async fn seed_workspace_user_integration(
+        pool: &DbPool,
+        workspace_id: &str,
+        user_id: &str,
+        platform_type: &str,
+    ) {
+        let sq = match pool {
+            DbPool::Sqlite(sq) => sq,
+            _ => panic!("test requires sqlite pool"),
+        };
+        sqlx::query(
+            "INSERT INTO workspace_user_integrations \
+             (id, workspace_id, user_id, platform_type, config) \
+             VALUES (?1, ?2, ?3, ?4, '{}')",
+        )
+        .bind(format!("uint-{workspace_id}-{user_id}-{platform_type}"))
+        .bind(workspace_id)
+        .bind(user_id)
+        .bind(platform_type)
+        .execute(sq)
+        .await
+        .expect("insert workspace_user_integration");
+    }
+
+    /// Insert a `workspace_integrations` row (workspace-level platform install).
+    async fn seed_workspace_integration(
+        pool: &DbPool,
+        workspace_id: &str,
+        platform_type: &str,
+        installed_by: &str,
+    ) {
+        let sq = match pool {
+            DbPool::Sqlite(sq) => sq,
+            _ => panic!("test requires sqlite pool"),
+        };
+        sqlx::query(
+            "INSERT INTO workspace_integrations \
+             (id, workspace_id, platform_type, config, installed_by) \
+             VALUES (?1, ?2, ?3, '{}', ?4)",
+        )
+        .bind(format!("wint-{workspace_id}-{platform_type}"))
+        .bind(workspace_id)
+        .bind(platform_type)
+        .bind(installed_by)
+        .execute(sq)
+        .await
+        .expect("insert workspace_integration");
+    }
+
     #[tokio::test]
     async fn accept_invitation_cas_succeeds_first_time() {
         let pool = test_pool().await;
@@ -1726,4 +1852,142 @@ mod tests {
         let summaries = get_user_workspaces_with_counts(&pool, "user-empty").await.unwrap();
         assert!(summaries.is_empty());
     }
+
+    // -- remove_workspace_member (KYO-247: offboard platform links) --
+    //
+    // NOTE: crates/kyomi-auth's test pools are all in-memory SQLite (KYO-292,
+    // open) — every test below exercises only the `DbPool::Sqlite` arm of
+    // `remove_workspace_member`'s transaction. The `DbPool::Postgres` arm is
+    // structurally identical (same SQL strings, same statement order) but is
+    // not covered by an automated test in this crate.
+
+    /// Seed an owner + a member with a Slack link and workspace-level Slack
+    /// install, ready for `remove_workspace_member` to act on.
+    async fn seed_offboard_fixture(pool: &DbPool, workspace_id: &str) {
+        seed_user(pool, "owner-off", "owner-off@test.local").await;
+        seed_user(pool, "member-off", "member-off@test.local").await;
+        seed_workspace(pool, workspace_id, "owner-off").await;
+        seed_membership(pool, workspace_id, "owner-off", true, "2026-01-01T00:00:00Z").await;
+        seed_membership(pool, workspace_id, "member-off", true, "2026-01-02T00:00:00Z").await;
+    }
+
+    #[tokio::test]
+    async fn remove_workspace_member_deletes_platform_user_link() {
+        let pool = test_pool().await;
+        seed_offboard_fixture(&pool, "ws-off-1").await;
+        seed_platform_user_link(&pool, "ws-off-1", "member-off", "slack", "U123").await;
+
+        remove_workspace_member(&pool, "ws-off-1", "owner-off", "owner-off", "member-off", None)
+            .await
+            .expect("remove member");
+
+        let link =
+            kyomi_core::platform::get_platform_user_link(&pool, "ws-off-1", "member-off", "slack")
+                .await
+                .expect("query platform_user_links");
+        assert!(
+            link.is_none(),
+            "platform_user_links row must not survive offboarding"
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_workspace_member_deletes_workspace_user_integration() {
+        let pool = test_pool().await;
+        seed_offboard_fixture(&pool, "ws-off-2").await;
+        seed_workspace_user_integration(&pool, "ws-off-2", "member-off", "slack").await;
+
+        remove_workspace_member(&pool, "ws-off-2", "owner-off", "owner-off", "member-off", None)
+            .await
+            .expect("remove member");
+
+        let integration =
+            kyomi_core::platform::get_user_integration(&pool, "ws-off-2", "member-off", "slack")
+                .await
+                .expect("query workspace_user_integrations");
+        assert!(
+            integration.is_none(),
+            "workspace_user_integrations row must not survive offboarding"
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_workspace_member_then_readd_does_not_restore_platform_link() {
+        let pool = test_pool().await;
+        seed_offboard_fixture(&pool, "ws-off-3").await;
+        seed_platform_user_link(&pool, "ws-off-3", "member-off", "slack", "U123").await;
+
+        remove_workspace_member(&pool, "ws-off-3", "owner-off", "owner-off", "member-off", None)
+            .await
+            .expect("remove member");
+
+        // Re-add the same user to the workspace (e.g. re-invited and accepted).
+        seed_membership(&pool, "ws-off-3", "member-off", true, "2026-01-03T00:00:00Z").await;
+
+        let link =
+            kyomi_core::platform::get_platform_user_link(&pool, "ws-off-3", "member-off", "slack")
+                .await
+                .expect("query platform_user_links");
+        assert!(
+            link.is_none(),
+            "re-adding a removed member must not silently reactivate their old Slack link"
+        );
+    }
+
+    /// KYO-223 put its active-membership gate on the query call site
+    /// (`resolve_active_workspace_roles`), not inside `resolve_platform_user`
+    /// or the disconnect helpers, precisely so a user can still unlink their
+    /// own platform identity after being removed from the workspace. This
+    /// pins that the offboarding cleanup doesn't couple `delete_platform_user_link`
+    /// to an active-membership check — it must remain a plain, idempotent
+    /// delete regardless of membership state.
+    #[tokio::test]
+    async fn disconnect_path_still_works_after_member_already_removed() {
+        let pool = test_pool().await;
+        seed_offboard_fixture(&pool, "ws-off-4").await;
+        seed_platform_user_link(&pool, "ws-off-4", "member-off", "slack", "U123").await;
+
+        remove_workspace_member(&pool, "ws-off-4", "owner-off", "owner-off", "member-off", None)
+            .await
+            .expect("remove member");
+
+        // The offboarding transaction already deleted the link. A stale
+        // client (or a retry) hitting "disconnect Slack" afterward must not
+        // error just because the user has no active membership.
+        kyomi_core::platform::delete_platform_user_link(&pool, "ws-off-4", "member-off", "slack")
+            .await
+            .expect("disconnect path must not require active membership");
+    }
+
+    #[tokio::test]
+    async fn remove_workspace_member_does_not_delete_workspace_integration() {
+        let pool = test_pool().await;
+        seed_offboard_fixture(&pool, "ws-off-5").await;
+        seed_workspace_integration(&pool, "ws-off-5", "slack", "owner-off").await;
+
+        remove_workspace_member(&pool, "ws-off-5", "owner-off", "owner-off", "member-off", None)
+            .await
+            .expect("remove member");
+
+        let integration =
+            kyomi_core::platform::get_workspace_integration(&pool, "ws-off-5", "slack")
+                .await
+                .expect("query workspace_integrations");
+        assert!(
+            integration.is_some(),
+            "workspace_integrations is workspace-scoped, not per-user — \
+             removing one member must not delete the workspace's platform install"
+        );
+    }
+
+    // Atomicity (point 6 of the ticket): skipped. All four statements in the
+    // transaction are unconditional DELETE/UPDATE by primary/foreign key with
+    // no CHECK constraints that can fail under normal data, so forcing a
+    // partial-failure without adding fault-injection scaffolding (e.g. a
+    // test-only trigger that raises mid-transaction) isn't possible with the
+    // existing test helpers. That scaffolding would be exactly the "fragile
+    // harness" the ticket says to avoid, so this is intentionally not tested
+    // here. The `match pool { ... tx.commit().await? ... }` shape (copied
+    // from `accept_ownership_transfer`) is the same shape already relied on
+    // elsewhere in this file for atomicity.
 }
