@@ -213,3 +213,7 @@ tokio = { workspace = true }
 # P-256 key generation for Connect token unit tests — matches what
 # kyomi-auth::connect_token::tests uses to build an ephemeral signing key.
 p256 = { workspace = true }
+# Tracing-capture helper for KYO-240's fail-closed-and-logged tests. Shared
+# with kyomi-auth and apps/server (KYO-244) rather than a fourth copy of the
+# CaptureLayer helper.
+kyomi-test-tracing = { workspace = true }

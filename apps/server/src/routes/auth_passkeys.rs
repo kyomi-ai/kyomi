@@ -1426,52 +1426,15 @@ async fn recovery_register(
 
 #[cfg(test)]
 mod tests {
-    use std::fmt::Write as _;
-    use std::sync::{Arc, Mutex};
-
     use tracing::Level;
-    use tracing_subscriber::layer::{Context, SubscriberExt};
-    use tracing_subscriber::{Layer, Registry};
     use webauthn_rs::prelude::Passkey;
+
+    use kyomi_test_tracing::capture_tracing;
 
     use super::{
         lookup_recovery_user, require_purpose, PASSKEY_ADD_DEVICE, PASSKEY_LOGIN,
         PASSKEY_RECOVERY, PASSKEY_SIGNUP,
     };
-
-    /// Shared sink that a `CaptureLayer` writes tracing events into.
-    type EventLog = Arc<Mutex<Vec<(Level, String)>>>;
-
-    /// Minimal `tracing_subscriber::Layer` that records every event's level
-    /// and rendered fields, so tests can assert on log output without a real
-    /// subscriber (fmt/json) formatting to stdout.
-    struct CaptureLayer(EventLog);
-
-    impl<S: tracing::Subscriber> Layer<S> for CaptureLayer {
-        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
-            struct FieldVisitor(String);
-            impl tracing::field::Visit for FieldVisitor {
-                fn record_debug(
-                    &mut self,
-                    field: &tracing::field::Field,
-                    value: &dyn std::fmt::Debug,
-                ) {
-                    if field.name() == "message" {
-                        let _ = write!(self.0, "{value:?}");
-                    } else {
-                        let _ = write!(self.0, " {}={value:?}", field.name());
-                    }
-                }
-            }
-
-            let mut visitor = FieldVisitor(String::new());
-            event.record(&mut visitor);
-            self.0
-                .lock()
-                .expect("capture lock poisoned")
-                .push((*event.metadata().level(), visitor.0));
-        }
-    }
 
     /// `lookup_recovery_user` must return `None` when the database lookup
     /// itself fails (not merely when no user exists) — and it must say so
@@ -1489,31 +1452,27 @@ mod tests {
         }
 
         let email = "db-error-recovery-test@example.com";
-        let captured: EventLog = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = Registry::default().with(CaptureLayer(captured.clone()));
-        let guard = tracing::subscriber::set_default(subscriber);
+        let logs = capture_tracing();
 
         let result = lookup_recovery_user(&db, email).await;
-
-        drop(guard);
 
         assert!(
             result.is_none(),
             "a DB error must be reported as no user, not surfaced to the caller"
         );
 
-        let events = captured.lock().expect("capture lock poisoned").clone();
-        let error_events: Vec<&(Level, String)> =
-            events.iter().filter(|(level, _)| *level == Level::ERROR).collect();
+        let error_events = logs.events_at(Level::ERROR);
         assert!(
             !error_events.is_empty(),
-            "a DB error during passkey recovery must emit an error!-level log; captured: {events:?}"
+            "a DB error during passkey recovery must emit an error!-level log; captured: {:?}",
+            logs.events()
         );
         assert!(
             error_events
                 .iter()
                 .any(|(_, message)| message.contains("user lookup failed")),
-            "expected an error log describing the lookup failure; captured: {events:?}"
+            "expected an error log describing the lookup failure; captured: {:?}",
+            logs.events()
         );
         for (_, message) in &error_events {
             assert!(
@@ -1536,22 +1495,17 @@ mod tests {
             .expect("connect in-memory sqlite");
 
         let email = "absent-recovery-test@example.com";
-        let captured: EventLog = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = Registry::default().with(CaptureLayer(captured.clone()));
-        let guard = tracing::subscriber::set_default(subscriber);
+        let logs = capture_tracing();
 
         let result = lookup_recovery_user(&db, email).await;
 
-        drop(guard);
-
         assert!(result.is_none(), "no such user should look up to None");
 
-        let events = captured.lock().expect("capture lock poisoned").clone();
-        let error_events: Vec<&(Level, String)> =
-            events.iter().filter(|(level, _)| *level == Level::ERROR).collect();
+        let error_events = logs.events_at(Level::ERROR);
         assert!(
             error_events.is_empty(),
-            "a merely-absent user must not log an error — only a DB failure should; captured: {events:?}"
+            "a merely-absent user must not log an error — only a DB failure should; captured: {:?}",
+            logs.events()
         );
     }
 

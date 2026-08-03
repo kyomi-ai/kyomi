@@ -13,6 +13,7 @@ members = [
     "crates/kyomi-ui",
     "crates/kyomi-ui-components",
     "crates/kyomi-test-harness",
+    "crates/kyomi-test-tracing",
     "crates/kyomi-types",
 ]
 resolver = "3"
@@ -132,6 +133,7 @@ kyomi-ui = { path = "crates/kyomi-ui" }
 kyomi-ui-components = { path = "crates/kyomi-ui-components" }
 kyomi-server = { path = "apps/server" }
 kyomi-test-harness = { path = "crates/kyomi-test-harness" }
+kyomi-test-tracing = { path = "crates/kyomi-test-tracing" }
 kyomi-types = { path = "crates/kyomi-types" }
 kyomi-connect-protocol = "1.4"
 kyomi-datasource-drivers = { version = "1.6.0", package = "kyomi-datasource" }

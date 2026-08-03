@@ -115,7 +115,18 @@ pub async fn get_user_context() -> Result<UserContext, ServerFnError> {
         kyomi_auth::datasource_service::list_datasources(&ctx.db, ws_id, false)
             .await
             .map(|ds| !ds.is_empty())
-            .unwrap_or(false)
+            .unwrap_or_else(|e| {
+                // Fail closed to "no datasources" — same outcome as before
+                // KYO-240 — but log so a DB outage is distinguishable from a
+                // genuinely empty workspace instead of silently hiding the
+                // empty-state CTA with no trace of why.
+                tracing::warn!(
+                    workspace_id = %ws_id,
+                    error = %e,
+                    "get_user_context: list_datasources failed, failing closed to has_datasources=false"
+                );
+                false
+            })
     } else {
         false
     };
