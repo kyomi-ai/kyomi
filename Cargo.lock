@@ -6482,6 +6482,7 @@ dependencies = [
  "kyomi-core",
  "kyomi-embed",
  "kyomi-server",
+ "kyomi-slack",
  "serde_json",
  "sqlx",
  "tokio",

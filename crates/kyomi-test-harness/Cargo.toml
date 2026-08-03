@@ -5,11 +5,35 @@ edition = "2024"
 license.workspace = true
 publish = false
 
+[features]
+default = ["slack"]
+# Mount /api/v1/slack in the in-process test server, mirroring main.rs
+# (see apps/server/Cargo.toml's own "slack" feature). Needed so contract
+# tests exercise real Slack route logic instead of falling through to the
+# SPA fallback. KYO-254.
+#
+# Forwards to `kyomi-server/slack`: `kyomi_server::ServerExtras` has a
+# `slack_client` field gated on *that* crate's own "slack" feature, and our
+# `#[cfg(feature = "slack")]` blocks below refer to *this* crate's feature.
+# The two must travel together or the `ServerExtras` literal in
+# `setup_server()` stops matching its field set. `default-features = false`
+# on the `kyomi-server` dependency below is what makes the forward
+# meaningful — without it, kyomi-server's own `default = ["slack"]` would
+# win regardless of this feature's state.
+slack = ["dep:kyomi-slack", "kyomi-server/slack"]
+
 [dependencies]
 kyomi-core = { workspace = true, features = ["test-helpers"] }
 kyomi-auth = { workspace = true }
 kyomi-embed = { workspace = true }
-kyomi-server = { workspace = true }
+# Not `workspace = true`: overriding `default-features` on an inherited
+# dependency requires the workspace root entry to declare
+# `default-features` explicitly, which `kyomi-server = { path = "apps/server" }`
+# (Cargo.toml:134) does not. Depend on the path directly instead so this
+# crate's own "slack" feature (below) is the sole source of truth for
+# whether kyomi-server's "slack" feature is requested through this edge.
+kyomi-server = { path = "../../apps/server", default-features = false }
+kyomi-slack = { path = "../../enterprise/kyomi-slack", optional = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 sqlx = { workspace = true }
