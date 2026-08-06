@@ -2,7 +2,7 @@
 # Kyomi — Desktop Build
 # =============================================================================
 # Builds Tauri desktop installers for all platforms.
-# Triggered on version tags alongside the release workflow.
+# Manually dispatched (workflow_dispatch) — not triggered by version tags.
 #
 # Artifacts are attached to the same GitHub Release created by release.yml.
 # =============================================================================
@@ -28,6 +28,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Observed max successful run: 61.9m (last ~15 runs).
           - os: linux
             runner: ubuntu-latest
             trunk_arch: x86_64
@@ -37,6 +38,19 @@ jobs:
             binaryen_arch: x86_64-linux
             bundles: deb appimage
             sed_inplace: "sed -i"
+            timeout: 120
+          # Observed max successful run: 224.1m (last ~15 runs) — macOS
+          # desktop builds legitimately take 2-4 hours; do not lower this
+          # to match the other legs (KYO-259).
+          #
+          # 300 is deliberately the ceiling rather than something roomier:
+          # GitHub's own default job timeout is 360, so anything at or above
+          # that is indistinguishable from setting no timeout at all. This
+          # leg has the thinnest margin of the three (~34% over observed max,
+          # on only 5 samples spanning 125-224m) — that is the cost of the
+          # 360 cap, not an oversight. If a healthy build ever gets killed
+          # here, the fix is to make the build faster, not to raise this to
+          # 360 and silently give up the bound.
           - os: macos
             runner: macos-latest
             trunk_arch: aarch64
@@ -46,11 +60,15 @@ jobs:
             binaryen_arch: arm64-macos
             bundles: dmg
             sed_inplace: "sed -i ''"
+            timeout: 300
+          # Observed max successful run: 99.7m (last ~15 runs).
           - os: windows
             runner: windows-latest
             bundles: msi nsis
+            timeout: 180
     name: Desktop (${{ matrix.os }})
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeout }}
     env:
       SCCACHE_GHA_ENABLED: "true"
     steps:

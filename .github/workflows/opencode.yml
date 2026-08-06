@@ -8,6 +8,7 @@ jobs:
     review:
         if: github.actor != 'dependabot[bot]'
         runs-on: ubuntu-latest
+        timeout-minutes: 15
         permissions:
             id-token: write
             contents: read
@@ -21,6 +22,7 @@ jobs:
 
             - name: Run opencode
               uses: anomalyco/opencode/github@latest
+              timeout-minutes: 10
               env:
                   OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
               with:
