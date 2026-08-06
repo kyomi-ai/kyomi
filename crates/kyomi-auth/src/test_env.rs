@@ -20,10 +20,16 @@
 //!
 //! # What this guard does *not* guarantee
 //!
-//! It serializes env **mutators** against each other. It does not, and
-//! cannot, stop unrelated code elsewhere in the same test binary from
-//! **reading** the environment concurrently while a guard holds the lock —
-//! only mutation is exclusive here, not observation.
+//! `std::env::set_var`'s Safety section requires no other thread be
+//! concurrently *writing or reading* the environment through anything
+//! outside `std::env`. This guard discharges only the writer half: every
+//! mutator in this crate takes the same lock, so no two mutations race. It
+//! cannot discharge the reader half — any other test in the same
+//! parallel-by-default test binary may call `std::env::var` (directly, or
+//! indirectly via libc/DNS) while a guard here holds the lock. That is a
+//! real, currently-unmet part of the safety contract, accepted deliberately
+//! rather than forcing `--test-threads=1` on the whole binary or giving up
+//! env-dependent tests.
 //!
 //! [`set`]: EnvVarGuard::set
 //! [`remove`]: EnvVarGuard::remove
@@ -74,8 +80,10 @@ impl EnvVarGuard {
         self.record_prior(key);
         // SAFETY: `_lock` is held for this guard's entire lifetime, and
         // every env-mutating test in this crate acquires the same lock
-        // before touching the environment, so no other thread can be
-        // calling `set_var`/`remove_var`/`var` concurrently with this call.
+        // before mutating, so no other *mutator* races this call. It does
+        // NOT rule out a concurrent *reader* elsewhere in the binary —
+        // `set_var`'s contract requires that too, and this guard leaves it
+        // unmet; see the module doc's "What this guard does not guarantee".
         unsafe { std::env::set_var(key, value) };
         self
     }
@@ -83,7 +91,8 @@ impl EnvVarGuard {
     /// Remove `key` for the lifetime of this guard.
     pub(crate) fn remove(mut self, key: &str) -> Self {
         self.record_prior(key);
-        // SAFETY: see `set` above — same crate-wide mutex, held throughout.
+        // SAFETY: see `set` above — excludes other mutators via the same
+        // mutex; the concurrent-reader gap noted there applies here too.
         unsafe { std::env::remove_var(key) };
         self
     }
@@ -101,7 +110,8 @@ impl Drop for EnvVarGuard {
     fn drop(&mut self) {
         for (key, prev) in self.saved.drain() {
             // SAFETY: see `set` above — same crate-wide mutex, held through
-            // the end of this `drop`, so this restoration is exclusive too.
+            // the end of this `drop`, so restoration is exclusive against
+            // other mutators; the reader gap noted there still applies.
             unsafe {
                 match prev {
                     Some(v) => std::env::set_var(&key, v),
@@ -127,8 +137,9 @@ mod tests {
     fn set_baseline(key: &str, value: &str) {
         let guard = lock().lock().unwrap_or_else(|e| e.into_inner());
         // SAFETY: `guard` (the same crate-wide mutex `EnvVarGuard` uses) is
-        // held for this call, so no other thread can be calling
-        // `set_var`/`remove_var`/`var` concurrently with it.
+        // held for this call, so no other *mutator* races it. Like
+        // `EnvVarGuard::set`, this does not rule out a concurrent reader
+        // elsewhere in the binary — see the module doc.
         unsafe { std::env::set_var(key, value) };
         drop(guard);
     }
@@ -138,7 +149,7 @@ mod tests {
     /// the lock even though it's setup/teardown, not the guard under test.
     fn remove_baseline(key: &str) {
         let guard = lock().lock().unwrap_or_else(|e| e.into_inner());
-        // SAFETY: see `set_baseline`.
+        // SAFETY: see `set_baseline` above — same mutator-only guarantee.
         unsafe { std::env::remove_var(key) };
         drop(guard);
     }
