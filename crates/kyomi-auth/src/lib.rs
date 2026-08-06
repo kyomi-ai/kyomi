@@ -68,6 +68,12 @@ pub mod webauthn_challenge_purpose;
 pub mod websocket;
 pub mod workspace_service;
 
+/// Shared support for tests that mutate process environment variables.
+/// See its module docs for why every such test in this crate must go
+/// through it rather than rolling its own lock.
+#[cfg(test)]
+pub(crate) mod test_env;
+
 /// Build a shared HTTP client with a proper User-Agent header.
 ///
 /// Some APIs (notably Snowflake) reject requests without a User-Agent.

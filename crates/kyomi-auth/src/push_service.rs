@@ -425,49 +425,21 @@ mod tests {
     //! # Env var discipline
     //!
     //! `endpoint_host_is_allowed_env_extension` mutates the process-global
-    //! env var `PUSH_ALLOWED_ENDPOINT_HOSTS`. `cargo test` runs tests in
-    //! parallel within a binary, so that test serializes through `ENV_LOCK`
-    //! and restores the env var on drop. Every other test in this module
-    //! must not depend on the env var being unset — they don't, since
+    //! env var `PUSH_ALLOWED_ENDPOINT_HOSTS`. It goes through the crate-wide
+    //! [`crate::test_env::EnvVarGuard`] (see its module docs), which
+    //! serializes it against every other env-mutating test in this crate —
+    //! not just the ones in this file. Every other test in this module must
+    //! not depend on the env var being unset — they don't, since
     //! `validate_push_endpoint`/`endpoint_host_is_allowed` only *add* to the
     //! built-in allowlist when the env var happens to be set, and none of
     //! the fixed reject/accept cases below could be flipped by an
     //! attacker-chosen operator suffix.
 
     use super::*;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use crate::test_env::EnvVarGuard;
 
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
-
-    struct EnvGuard {
-        _lock: MutexGuard<'static, ()>,
-        prev: Option<String>,
-    }
-
-    impl EnvGuard {
-        fn with_hosts(value: &str) -> Self {
-            let lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
-            let prev = std::env::var(PUSH_ALLOWED_ENDPOINT_HOSTS_ENV).ok();
-            // SAFETY: `lock` is held for the entire test body, so no other
-            // thread observes this env var while it's set.
-            unsafe { std::env::set_var(PUSH_ALLOWED_ENDPOINT_HOSTS_ENV, value) };
-            Self { _lock: lock, prev }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            // SAFETY: see EnvGuard::with_hosts.
-            unsafe {
-                match self.prev.take() {
-                    Some(v) => std::env::set_var(PUSH_ALLOWED_ENDPOINT_HOSTS_ENV, v),
-                    None => std::env::remove_var(PUSH_ALLOWED_ENDPOINT_HOSTS_ENV),
-                }
-            }
-        }
+    fn with_hosts(value: &str) -> EnvVarGuard {
+        EnvVarGuard::acquire().set(PUSH_ALLOWED_ENDPOINT_HOSTS_ENV, value)
     }
 
     // -----------------------------------------------------------------
@@ -609,7 +581,7 @@ mod tests {
 
     #[test]
     fn endpoint_host_is_allowed_env_extension() {
-        let _guard = EnvGuard::with_hosts("relay.example.internal");
+        let _guard = with_hosts("relay.example.internal");
 
         assert_eq!(
             validate_push_endpoint("https://relay.example.internal/push/abc"),

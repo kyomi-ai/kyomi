@@ -753,49 +753,17 @@ mod tests {
 
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use crate::test_env::EnvVarGuard;
 
     // --- Env var serialization ------------------------------------------
     //
     // Both `workspace_secrets::tests` and these tests mutate
-    // `WORKSPACE_SECRETS_KEY`. Each test module has its own lock, but they
-    // still race when run in the same binary. We intentionally use a module-
-    // local lock here (matching the `workspace_secrets` pattern) and rely on
-    // tests in this module never overlapping env reads with that module —
-    // since they're in separate files and cargo-test parallelism schedules
-    // them independently, each acquires its own lock before touching the var
-    // and clears it before releasing. This matches the pattern already in
-    // `workspace_secrets::tests`.
+    // `WORKSPACE_SECRETS_KEY`. Both go through the single crate-wide
+    // `EnvVarGuard` (see its module docs) so the two modules' env-mutating
+    // tests are mutually excluded, not just self-consistent within one file.
 
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
-
-    struct EnvGuard {
-        _lock: MutexGuard<'static, ()>,
-        prev: Option<String>,
-    }
-
-    impl EnvGuard {
-        fn with_key(key_b64: &str) -> Self {
-            let lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
-            let prev = std::env::var("WORKSPACE_SECRETS_KEY").ok();
-            // SAFETY: lock is held for the duration of the test.
-            unsafe { std::env::set_var("WORKSPACE_SECRETS_KEY", key_b64) };
-            Self { _lock: lock, prev }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            unsafe {
-                match self.prev.take() {
-                    Some(v) => std::env::set_var("WORKSPACE_SECRETS_KEY", v),
-                    None => std::env::remove_var("WORKSPACE_SECRETS_KEY"),
-                }
-            }
-        }
+    fn with_key(key_b64: &str) -> EnvVarGuard {
+        EnvVarGuard::acquire().set("WORKSPACE_SECRETS_KEY", key_b64)
     }
 
     fn test_key() -> String {
@@ -870,7 +838,7 @@ mod tests {
 
     #[tokio::test]
     async fn db_roundtrip_kyomi_to_byok_to_kyomi() {
-        let _env = EnvGuard::with_key(&test_key());
+        let _env = with_key(&test_key());
         let db = test_sqlite_pool().await;
         let ws = "ws-roundtrip";
         insert_test_workspace(&db, ws).await;
@@ -943,7 +911,7 @@ mod tests {
 
     #[tokio::test]
     async fn db_model_only_update_preserves_key() {
-        let _env = EnvGuard::with_key(&test_key());
+        let _env = with_key(&test_key());
         let db = test_sqlite_pool().await;
         let ws = "ws-model-only";
         insert_test_workspace(&db, ws).await;
@@ -988,7 +956,7 @@ mod tests {
 
     #[tokio::test]
     async fn db_byok_without_key_rejected() {
-        let _env = EnvGuard::with_key(&test_key());
+        let _env = with_key(&test_key());
         let db = test_sqlite_pool().await;
         let ws = "ws-byok-no-key";
         insert_test_workspace(&db, ws).await;

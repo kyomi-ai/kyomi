@@ -165,65 +165,28 @@ mod tests {
     //! # Env var discipline
     //!
     //! These tests mutate the process-global env var `WORKSPACE_SECRETS_KEY`.
-    //! `cargo test` runs tests in parallel across a single binary, so we
-    //! serialize all tests in this module through `ENV_LOCK`. Each test
-    //! acquires the mutex for its whole duration and restores the env var
-    //! before returning (via `EnvGuard::drop`).
+    //! `cargo test` runs tests in parallel across a single binary, and
+    //! `workspace_ai_config`'s tests mutate this same var, so serialization
+    //! through only a module-local lock would not exclude them from each
+    //! other. Every test here goes through [`crate::test_env::EnvVarGuard`],
+    //! the single mutex shared by all env-mutating tests in this crate — see
+    //! its module docs for why a per-variable or per-module lock isn't
+    //! sufficient even between *different* keys.
     //!
     //! Tests in this module must NOT call each other's helpers across the
-    //! mutex boundary, and must NOT spawn tasks that touch the env var.
+    //! guard's lifetime, and must NOT spawn tasks that touch the env var.
 
     use super::*;
+    use crate::test_env::EnvVarGuard;
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
 
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+    fn with_key(key_b64: &str) -> EnvVarGuard {
+        EnvVarGuard::acquire().set(MASTER_KEY_ENV, key_b64)
     }
 
-    /// RAII guard that sets `WORKSPACE_SECRETS_KEY` for the duration of a
-    /// test and clears it on drop. Holds the global mutex so tests are
-    /// serialized.
-    struct EnvGuard {
-        _lock: MutexGuard<'static, ()>,
-        prev: Option<String>,
-    }
-
-    impl EnvGuard {
-        fn with_key(key_b64: &str) -> Self {
-            // Poisoned mutex is fine — we just want mutual exclusion.
-            let lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
-            let prev = std::env::var(MASTER_KEY_ENV).ok();
-            // SAFETY: tests are single-threaded w.r.t. this env var because
-            // `lock` is held for the entire test body.
-            unsafe { std::env::set_var(MASTER_KEY_ENV, key_b64) };
-            Self { _lock: lock, prev }
-        }
-
-        fn without_key() -> Self {
-            let lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
-            let prev = std::env::var(MASTER_KEY_ENV).ok();
-            // SAFETY: tests are single-threaded w.r.t. this env var because
-            // `lock` is held for the entire test body.
-            unsafe { std::env::remove_var(MASTER_KEY_ENV) };
-            Self { _lock: lock, prev }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            // SAFETY: tests are single-threaded w.r.t. this env var because
-            // `_lock` is held for the entire test body and released only after
-            // this drop completes.
-            unsafe {
-                match self.prev.take() {
-                    Some(v) => std::env::set_var(MASTER_KEY_ENV, v),
-                    None => std::env::remove_var(MASTER_KEY_ENV),
-                }
-            }
-        }
+    fn without_key() -> EnvVarGuard {
+        EnvVarGuard::acquire().remove(MASTER_KEY_ENV)
     }
 
     fn key_a() -> String {
@@ -236,7 +199,7 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        let _g = EnvGuard::with_key(&key_a());
+        let _g = with_key(&key_a());
         let plaintext = "sk-ant-api03-super-secret-key-value";
         let encrypted = encrypt_secret(plaintext).unwrap();
         let decrypted = decrypt_secret(&encrypted).unwrap();
@@ -245,7 +208,7 @@ mod tests {
 
     #[test]
     fn roundtrip_empty_string() {
-        let _g = EnvGuard::with_key(&key_a());
+        let _g = with_key(&key_a());
         let encrypted = encrypt_secret("").unwrap();
         let decrypted = decrypt_secret(&encrypted).unwrap();
         assert_eq!(decrypted, "");
@@ -253,7 +216,7 @@ mod tests {
 
     #[test]
     fn fresh_nonce_per_encryption() {
-        let _g = EnvGuard::with_key(&key_a());
+        let _g = with_key(&key_a());
         let enc1 = encrypt_secret("same").unwrap();
         let enc2 = encrypt_secret("same").unwrap();
         assert_ne!(enc1, enc2, "nonces must differ");
@@ -265,11 +228,11 @@ mod tests {
     fn wrong_master_key_fails() {
         // Encrypt with key A, then swap the env to key B and attempt to decrypt.
         let encrypted = {
-            let _g = EnvGuard::with_key(&key_a());
+            let _g = with_key(&key_a());
             encrypt_secret("top-secret").unwrap()
         };
 
-        let _g = EnvGuard::with_key(&key_b());
+        let _g = with_key(&key_b());
         let err = decrypt_secret(&encrypted).unwrap_err();
         assert!(
             matches!(err, WorkspaceSecretError::DecryptionFailed),
@@ -279,7 +242,7 @@ mod tests {
 
     #[test]
     fn tampered_ciphertext_fails() {
-        let _g = EnvGuard::with_key(&key_a());
+        let _g = with_key(&key_a());
         let encrypted = encrypt_secret("tamper-me").unwrap();
 
         // Flip a byte in the middle of the payload (past the nonce, inside
@@ -299,7 +262,7 @@ mod tests {
 
     #[test]
     fn is_available_false_when_env_missing() {
-        let _g = EnvGuard::without_key();
+        let _g = without_key();
         assert!(!is_available());
         let err = encrypt_secret("x").unwrap_err();
         assert!(matches!(err, WorkspaceSecretError::NotConfigured));
@@ -307,7 +270,7 @@ mod tests {
 
     #[test]
     fn is_available_true_when_env_set() {
-        let _g = EnvGuard::with_key(&key_a());
+        let _g = with_key(&key_a());
         assert!(is_available());
     }
 
@@ -315,7 +278,7 @@ mod tests {
     fn malformed_master_key_fails() {
         // 16 bytes, not 32.
         let short = BASE64_STANDARD.encode([0u8; 16]);
-        let _g = EnvGuard::with_key(&short);
+        let _g = with_key(&short);
         assert!(!is_available());
         let err = encrypt_secret("x").unwrap_err();
         assert!(matches!(err, WorkspaceSecretError::MalformedKey(_)));
@@ -323,7 +286,7 @@ mod tests {
 
     #[test]
     fn malformed_ciphertext_rejected() {
-        let _g = EnvGuard::with_key(&key_a());
+        let _g = with_key(&key_a());
         // Valid base64 but shorter than nonce+tag.
         let too_short = BASE64_STANDARD.encode([0u8; 10]);
         let err = decrypt_secret(&too_short).unwrap_err();
