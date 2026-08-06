@@ -646,6 +646,59 @@ let user_context = build_user_context(&state, &user).await?;
 
 Flagged repeatedly in KYO-195/196 reviews (behavior-change-in-refactor): eager `user_context` construction and an encryption-key check both moved ahead of `resolve_datasource`, changing side effects and first-error for invalid-slug inputs.
 
+### The third copy of a test helper is the extraction trigger — not the second
+
+Two independent copies of a test helper can be justified ("different crate, not worth a shared dependency"). A third copy means the justification was wrong: the helper is general, and the copies will drift. By the third copy, each one has usually already been reviewed and approved individually, so nobody sees the aggregate.
+
+**Rule:** Before writing a test helper, grep for its distinctive symbol names across `crates/` and `apps/`. If two copies already exist, extract all of them into a shared test-support crate (`kyomi-test-tracing`, `kyomi-test-harness`) in the same change rather than adding a third. If you decide against extracting, you must record the reasoning on the tracking ticket — a fresh "it's not worth it" comment in the new file, re-deriving a justification an earlier ticket already evaluated, is what makes the duplication invisible.
+
+```rust
+// WRONG — third inline copy, with a comment re-deriving the same justification
+// as the two existing copies, and no reference to the ticket tracking them
+struct CaptureLayer { /* ... */ }
+struct EventLog { /* ... */ }
+
+// RIGHT — one implementation, three consumers
+use kyomi_test_tracing::capture_tracing;
+let logs = capture_tracing();
+assert!(logs.events_at(Level::ERROR).is_empty());
+```
+
+Flagged in KYO-240 cycle 1: the PR added a third `CaptureLayer`/`EventLog` copy after `kyomi-auth/src/mcp_session_manager.rs` and `apps/server/src/routes/auth_passkeys.rs`, which is the exact trigger condition KYO-244 had already written down. The extraction into `crates/kyomi-test-tracing` in cycle 2 was accepted as in-scope precisely because it was a direct response to a finding on that PR. The same class is still open elsewhere: duplicated SQLite fixture helpers in `kyomi-slack`, `extract_between` in two settings test modules, and per-module seeding helpers in `kyomi-auth`.
+
+## Comments & Documentation
+
+*Standards for what comments may claim, and keeping those claims true.*
+
+### A comment must describe this code — never mirror another file
+
+A comment of the form `Mirrors POST /x in apps/server/src/routes/y.rs` states a fact about a *different* file. It rots the instant that file changes, and it rots silently when the file is deleted: nothing type-checks a path inside a `///`. It also carries no information a reader of *this* function needs.
+
+**Rule:** Write what the function does, enforces, or returns. If parity with another implementation is genuinely load-bearing, say what the shared property *is* rather than pointing at a path — and only when the other file is still live. When a comment's only content is a comparison, deleting it loses nothing.
+
+```rust
+// WRONG — claims a fact about a file deleted in 13e957e1
+/// Mirrors POST /api/v1/auth/logout in apps/server/src/routes/auth.rs.
+pub async fn logout() -> Result<(), ServerFnError> { /* ... */ }
+
+// RIGHT — states what this function actually does
+/// Steps:
+/// 1. Revoke the refresh-token family.
+/// 2. Clear the session cookies.
+/// 3. Return regardless of whether a session existed.
+pub async fn logout() -> Result<(), ServerFnError> { /* ... */ }
+```
+
+Flagged across all three groups of KYO-239 (+82/-131 of pure comment removal across 18 files, all pointing at routes deleted in `13e957e1`/`60e6f56c`/`0f9390b5`). KYO-302 exists because the informal `matches the REST handler` phrasing escapes that sweep's audit regex.
+
+### A doc comment that outlived its behavior is a defect, not a nit
+
+When behavior deliberately changes, the doc comment above it becomes an active lie — and it is more dangerous than no comment, because the next reader (or agent) trusts it over the code. Tests written against the old comment fail, and the failure looks like a bug in the code rather than a stale contract.
+
+**Rule:** Changing a route's or function's observable contract means updating its doc comment in the same commit. When you find a stale one, correct it and cite the ticket that changed the behavior, so the next reader can see *when* the contract moved rather than guessing which of the two is current.
+
+Flagged in KYO-256: `apps/server/src/routes/mcp.rs` documented `present-and-invalid returns 404 (forces re-initialize)` long after the route was changed to auto-heal invalid sessions into a new 200 response — and three contract tests were still asserting the documented 404.
+
 ## String & Text Processing
 
 *Standards for safe string manipulation in Rust.*
