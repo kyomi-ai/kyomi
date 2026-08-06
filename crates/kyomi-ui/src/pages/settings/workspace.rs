@@ -7,20 +7,124 @@
 
 use leptos::prelude::*;
 
+use kyomi_types::Permission;
+
 use crate::components::{
     ActionStatus, Card, CardContent, CardDescription, CardHeader, CardTitle, Skeleton,
     INPUT_CLASS,
 };
-use crate::components::{Alert, AlertDescription, AlertVariant, Button, ButtonVariant};
+use crate::components::{Alert, AlertDescription, AlertTitle, AlertVariant, Button, ButtonVariant};
+use crate::server_fns::context::UserContext;
 use crate::server_fns::workspace::*;
 use crate::types::WorkspaceSettingsData;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Main page
+// Access guard
+//
+// `get_workspace_settings` is gated server-side on
+// `ac.require(Permission::ManageWorkspaceSettings, ...)` (server_fns/workspace.rs),
+// so a member without the permission already gets a rejected fetch today.
+// But `get_workspace_slack_status` is NOT gated — any authenticated workspace
+// member can call it and receive Slack `installed`/`team_id`/`team_name`. The
+// tab that links here is hidden from members without
+// `ManageWorkspaceSettings` OR in personal mode (settings_shell.rs:79-81),
+// but nothing stopped a direct navigation to `/settings/workspace` from
+// reaching this page and its ungated resource. This guard mirrors the tab's
+// full condition set so a page reached directly is denied on exactly the
+// same terms as the tab that's supposed to be the only way in.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Denial message for a member who lacks `ManageWorkspaceSettings` — used
+/// both for that specific rejection and, since it's the more conservative of
+/// the two possible reasons, for the fail-closed fetch-error branch below
+/// where the actual reason (missing permission vs. personal mode) can't be
+/// determined.
+const MISSING_PERMISSION_MSG: &str =
+    "You must be a workspace administrator to manage workspace settings.";
+
+/// Returns the denial message for `ctx`, or `None` if workspace settings
+/// access is allowed. Mirrors the tab visibility condition at
+/// `settings_shell.rs:79-81` exactly: `can_manage_workspace_settings &&
+/// !ctx.is_personal_mode`. A pure function so the two failure branches are
+/// unit-testable without standing up the reactive component tree.
+fn workspace_access_denial_message(ctx: &UserContext) -> Option<&'static str> {
+    if ctx.is_personal_mode {
+        return Some("Workspace settings aren't available in personal mode.");
+    }
+    if !ctx.can(Permission::ManageWorkspaceSettings) {
+        return Some(MISSING_PERMISSION_MSG);
+    }
+    None
+}
+
+/// Full access decision for the awaited `UserContext` fetch, covering both
+/// the resolved-context case and the fetch-failure case in one place so the
+/// view has a single match arm to render. `Ok` delegates to
+/// [`workspace_access_denial_message`]; `Err` fails CLOSED to
+/// `MISSING_PERMISSION_MSG` — see the comment on [`WorkspacePage`] for why
+/// this deliberately diverges from `TeamPage`'s fail-open behaviour.
+fn workspace_access_decision(ctx_result: &Result<UserContext, ServerFnError>) -> Option<&'static str> {
+    match ctx_result {
+        Ok(ctx) => workspace_access_denial_message(ctx),
+        Err(_) => Some(MISSING_PERMISSION_MSG),
+    }
+}
+
+/// Shared "Access Denied" alert markup for both the confirmed-denial branch
+/// and the fail-closed fetch-error branch.
+fn access_denied_view(msg: &'static str) -> impl IntoView {
+    view! {
+        <div class="p-4 sm:p-6">
+            <Alert variant=AlertVariant::Error>
+                <AlertTitle>"Access Denied"</AlertTitle>
+                <AlertDescription>{msg}</AlertDescription>
+            </Alert>
+        </div>
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Main page — guard, then delegate to WorkspacePageInner
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[component]
 pub fn WorkspacePage() -> impl IntoView {
+    // Use the UserContext resource provided by SettingsShell — already resolved, no extra fetch.
+    let user_ctx = expect_context::<LocalResource<Result<UserContext, ServerFnError>>>();
+
+    view! {
+        <Transition>
+            {move || Suspend::new(async move {
+                let ctx_result = user_ctx.await;
+                // `Err(_)` here deliberately fails CLOSED, unlike `TeamPage`
+                // (team.rs), which fails open on a failed context fetch and
+                // relies on its server fns to reject unauthorized calls.
+                // That's not safe here: `get_workspace_slack_status`
+                // (server_fns/workspace.rs) has no permission check at all,
+                // so failing open would let a transient `UserContext` fetch
+                // failure leak Slack `team_id`/`team_name` to any
+                // authenticated member. This also matches the fail-closed
+                // convention KYO-240 established for permission derivation
+                // elsewhere in this crate. Net effect: an admin who hits
+                // this branch (a genuine `UserContext` fetch failure, not
+                // normal operation) now sees "Access Denied" instead of a
+                // partly-loaded page — normal operation for admins is
+                // unchanged.
+                match workspace_access_decision(&ctx_result) {
+                    Some(msg) => access_denied_view(msg).into_any(),
+                    None => view! { <WorkspacePageInner /> }.into_any(),
+                }
+            })}
+        </Transition>
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inner page — only rendered when access is confirmed
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[component]
+fn WorkspacePageInner() -> impl IntoView {
     let settings = Resource::new(|| (), |_| get_workspace_settings());
 
     view! {
@@ -333,5 +437,118 @@ fn WorkspaceSlackCard() -> impl IntoView {
                 </Transition>
             </CardContent>
         </Card>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    /// Minimal `UserContext` fixture — `is_personal_mode` and `permissions`
+    /// vary between the cases below.
+    fn user_ctx_fixture(is_personal_mode: bool, permissions: Vec<Permission>) -> UserContext {
+        UserContext {
+            user_id: "user-1".to_string(),
+            email: "user@example.com".to_string(),
+            name: None,
+            workspace_id: Some("ws-1".to_string()),
+            workspace_name: Some("Test Workspace".to_string()),
+            is_owner: false,
+            subscription_tier: "team".to_string(),
+            subscription_status: "active".to_string(),
+            is_personal_mode,
+            is_self_hosted: false,
+            billing_enabled: false,
+            capabilities: HashMap::new(),
+            chart_palette: "balanced".to_string(),
+            permissions,
+        }
+    }
+
+    // ── workspace_access_denial_message ─────────────────────────────────────
+
+    #[test]
+    fn denies_when_permission_is_absent() {
+        let ctx = user_ctx_fixture(false, Vec::new());
+
+        let denial = workspace_access_denial_message(&ctx);
+
+        assert_eq!(denial, Some(MISSING_PERMISSION_MSG));
+    }
+
+    #[test]
+    fn denies_in_personal_mode_even_with_the_permission() {
+        // The subset trap KYO-260 fell into: gating on the permission alone
+        // without also checking `is_personal_mode` — settings_shell.rs:80
+        // requires both `can_manage_workspace_settings && !is_personal_mode`.
+        let ctx = user_ctx_fixture(true, vec![Permission::ManageWorkspaceSettings]);
+
+        let denial = workspace_access_denial_message(&ctx);
+
+        assert_eq!(
+            denial,
+            Some("Workspace settings aren't available in personal mode.")
+        );
+    }
+
+    #[test]
+    fn allows_when_permission_is_present_and_not_personal_mode() {
+        let ctx = user_ctx_fixture(false, vec![Permission::ManageWorkspaceSettings]);
+
+        let denial = workspace_access_denial_message(&ctx);
+
+        assert_eq!(denial, None);
+    }
+
+    #[test]
+    fn denies_when_neither_permission_nor_personal_mode_condition_is_met() {
+        // Personal mode with no permission either — still denied, and on the
+        // personal-mode message since that check runs first (matching
+        // settings_shell.rs's short-circuit order).
+        let ctx = user_ctx_fixture(true, Vec::new());
+
+        let denial = workspace_access_denial_message(&ctx);
+
+        assert_eq!(
+            denial,
+            Some("Workspace settings aren't available in personal mode.")
+        );
+    }
+
+    // ── workspace_access_decision (fail-closed on fetch failure) ────────────
+
+    #[test]
+    fn denies_on_a_failed_context_fetch() {
+        // The deliberate deviation from `TeamPage`: a failed `UserContext`
+        // fetch must fail CLOSED here, not open, because
+        // `get_workspace_slack_status` has no permission check of its own.
+        let result: Result<UserContext, ServerFnError> =
+            Err(ServerFnError::new("simulated network failure"));
+
+        let denial = workspace_access_decision(&result);
+
+        assert_eq!(denial, Some(MISSING_PERMISSION_MSG));
+    }
+
+    #[test]
+    fn decision_allows_when_the_fetch_succeeds_and_access_is_granted() {
+        let ctx = user_ctx_fixture(false, vec![Permission::ManageWorkspaceSettings]);
+        let result: Result<UserContext, ServerFnError> = Ok(ctx);
+
+        let denial = workspace_access_decision(&result);
+
+        assert_eq!(denial, None);
+    }
+
+    #[test]
+    fn decision_denies_when_the_fetch_succeeds_but_access_is_not_granted() {
+        let ctx = user_ctx_fixture(false, Vec::new());
+        let result: Result<UserContext, ServerFnError> = Ok(ctx);
+
+        let denial = workspace_access_decision(&result);
+
+        assert_eq!(denial, Some(MISSING_PERMISSION_MSG));
     }
 }
