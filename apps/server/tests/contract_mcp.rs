@@ -11,7 +11,7 @@
 //!
 //! Test organization:
 //! - Section 1: Unauthenticated 401 tests
-//! - Section 2: Free tier gets 402 (Payment Required)
+//! - Section 2: Free tier gets 200 (MCP is not tier-gated)
 //! - Section 3: Initialize response shape + session header
 //! - Section 4: Tools/list response shape
 //! - Section 5: Tools/call — unknown tool returns error
@@ -29,7 +29,11 @@ use kyomi_test_harness::{base_url, cleanup_test_user, AuthContext};
 // Test infrastructure
 // ===========================================================================
 
-/// Create an authenticated test context with Starter tier (MCP requires Starter+).
+/// Create an authenticated test context on the Starter tier.
+///
+/// The tier is not what grants MCP access — nothing does, since KYO-224 removed
+/// tier gating (KYO-256). Starter is simply the tier most of this file's tests
+/// have always run against; `setup_free_auth_context` covers the free-tier case.
 async fn setup_auth_context(suffix: &str) -> Option<AuthContext> {
     let ctx = kyomi_test_harness::setup_auth_context("MCP Test User", "mcp", suffix).await?;
     kyomi_core::db_execute!(
@@ -41,7 +45,10 @@ async fn setup_auth_context(suffix: &str) -> Option<AuthContext> {
     Some(ctx)
 }
 
-/// Create an authenticated test context with free tier (MCP should be denied).
+/// Create an authenticated test context left on the default free tier.
+///
+/// Used by `mcp_is_available_to_free_tier` to prove MCP is *not* denied to free
+/// workspaces (KYO-256).
 async fn setup_free_auth_context(suffix: &str) -> Option<AuthContext> {
     kyomi_test_harness::setup_auth_context("MCP Free User", "mcp", suffix).await
 }
@@ -127,15 +134,14 @@ async fn mcp_post_returns_401_without_auth() {
 }
 
 // ===========================================================================
-// 2. Free tier gets 402 (Payment Required) for MCP
+// 2. Free tier gets 200 (MCP is not tier-gated)
 // ===========================================================================
 
-#[ignore = "KYO-236: quarantined. KYO-256 — asserts pre-auto-heal / pre-Cloud-tier-flattening MCP behavior; current behavior is deliberate"]
 #[tokio::test]
-async fn mcp_returns_402_for_free_tier() {
-    let ctx = setup_free_auth_context("free-402").await;
+async fn mcp_is_available_to_free_tier() {
+    let ctx = setup_free_auth_context("free-tier").await;
     if ctx.is_none() {
-        eprintln!("SKIP: mcp_returns_402_for_free_tier — requires Rust-backend mode");
+        eprintln!("SKIP: mcp_is_available_to_free_tier — requires Rust-backend mode");
         return;
     }
     let ctx = ctx.unwrap();
@@ -153,19 +159,28 @@ async fn mcp_returns_402_for_free_tier() {
         .await
         .expect("MCP request should succeed");
 
+    // KYO-256: the tier gate this test used to assert (402 for free tier) was
+    // removed in KYO-224 — `has_capability` no longer exists in the codebase,
+    // and `mcp.rs` has no 402 branch. MCP access is available to every tier,
+    // not gated by subscription (see the module doc above), so a free-tier
+    // `initialize` call succeeds like any other tier's.
     assert_eq!(
         resp.status(),
-        402,
-        "MCP for free tier should return 402 Payment Required"
+        200,
+        "MCP is not tier-gated — free tier should get 200"
+    );
+    assert!(
+        resp.headers().get("mcp-session-id").is_some(),
+        "successful initialize should return Mcp-Session-Id header"
     );
 
     let body: Value = resp.json().await.expect("should return JSON");
     assert!(
-        body.get("detail").is_some(),
-        "402 response should have 'detail'"
+        body.get("result").is_some(),
+        "initialize should return a JSON-RPC success response with a 'result' field"
     );
 
-    cleanup_test_user(&ctx.db, "mcp-test-free-402@contract-test.local").await;
+    cleanup_test_user(&ctx.db, "mcp-test-free-tier@contract-test.local").await;
 }
 
 // ===========================================================================
@@ -853,12 +868,11 @@ async fn get_without_session_returns_400() {
     cleanup_test_user(&ctx.db, "mcp-test-get-no-session@contract-test.local").await;
 }
 
-#[ignore = "KYO-236: quarantined. KYO-256 — asserts pre-auto-heal / pre-Cloud-tier-flattening MCP behavior; current behavior is deliberate"]
 #[tokio::test]
-async fn get_with_invalid_session_returns_404() {
+async fn get_with_invalid_session_auto_heals() {
     let ctx = setup_auth_context("get-bad-session").await;
     if ctx.is_none() {
-        eprintln!("SKIP: get_with_invalid_session_returns_404 — requires Rust-backend mode");
+        eprintln!("SKIP: get_with_invalid_session_auto_heals — requires Rust-backend mode");
         return;
     }
     let ctx = ctx.unwrap();
@@ -872,10 +886,38 @@ async fn get_with_invalid_session_returns_404() {
         .await
         .unwrap();
 
+    // KYO-256: `handle_mcp_sse` (mcp.rs) auto-heals an invalid session instead
+    // of 404ing — it mints a fresh session and streams from it, mirroring the
+    // `request_with_invalid_session_auto_heals` test for the POST path.
     assert_eq!(
         resp.status(),
-        404,
-        "GET /mcp with invalid session should return 404"
+        200,
+        "GET /mcp with invalid session should auto-heal and return 200"
+    );
+
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .map(|v| v.to_str().unwrap().to_string())
+        .unwrap_or_default();
+    assert!(
+        content_type.contains("text/event-stream"),
+        "GET /mcp should return text/event-stream, got: {content_type}"
+    );
+
+    // A genuinely new session must be minted — not the bogus id echoed back.
+    let resp_session = resp
+        .headers()
+        .get("mcp-session-id")
+        .map(|v| v.to_str().unwrap().to_string());
+    assert!(
+        resp_session.is_some(),
+        "auto-healed response should include a new Mcp-Session-Id header"
+    );
+    assert_ne!(
+        resp_session.as_deref(),
+        Some("bogus-session-id"),
+        "auto-healed session id must differ from the bogus one sent"
     );
 
     cleanup_test_user(&ctx.db, "mcp-test-get-bad-session@contract-test.local").await;
@@ -932,10 +974,10 @@ async fn get_with_valid_session_returns_sse_stream() {
 }
 
 // ===========================================================================
-// 16. DELETE /mcp removes session
+// 16. DELETE /mcp removes session (proven by the POST auto-heal header, since
+//     a deleted session no longer 404s — see KYO-256 comment below)
 // ===========================================================================
 
-#[ignore = "KYO-236: quarantined. KYO-256 — asserts pre-auto-heal / pre-Cloud-tier-flattening MCP behavior; current behavior is deliberate"]
 #[tokio::test]
 async fn delete_removes_session() {
     let ctx = setup_auth_context("delete-sess").await;
@@ -958,7 +1000,16 @@ async fn delete_removes_session() {
 
     assert_eq!(resp.status(), 200, "DELETE should return 200");
 
-    // Now try to use the deleted session — should get 404
+    // Now try to use the deleted session — the POST auto-heal path (mcp.rs)
+    // kicks in instead of a 404: `validate_session` fails for the removed id,
+    // so the server mints a new session and attaches it via `Mcp-Session-Id`.
+    //
+    // KYO-256: this is actually a *stronger* proof of removal than the old
+    // 404 assertion. The auto-heal header is only attached when
+    // `validate_session` fails. Had the session survived the DELETE, no heal
+    // would occur and the response would carry no `Mcp-Session-Id` header at
+    // all — so the header's presence, and its difference from the deleted
+    // id, is the removal proof.
     let resp = mcp_post_with_session(&ctx.base_url, &ctx.access_token, &session_id)
         .body(
             json!({
@@ -974,8 +1025,22 @@ async fn delete_removes_session() {
 
     assert_eq!(
         resp.status(),
-        404,
-        "Using deleted session should return 404"
+        200,
+        "Using a deleted session should auto-heal and return 200"
+    );
+
+    let healed_session = resp
+        .headers()
+        .get("mcp-session-id")
+        .map(|v| v.to_str().unwrap().to_string());
+    assert!(
+        healed_session.is_some(),
+        "auto-heal after DELETE should attach a new Mcp-Session-Id header"
+    );
+    assert_ne!(
+        healed_session.as_deref(),
+        Some(session_id.as_str()),
+        "healed session id must differ from the deleted session id"
     );
 
     cleanup_test_user(&ctx.db, "mcp-test-delete-sess@contract-test.local").await;

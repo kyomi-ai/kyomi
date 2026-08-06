@@ -13,9 +13,14 @@
 //! ## Session Management (MCP spec 2025-03-26)
 //!
 //! - `initialize` creates a new session and returns `Mcp-Session-Id` header
-//! - Non-initialize POST methods: missing `Mcp-Session-Id` is allowed (backwards compat),
-//!   but present-and-invalid returns 404 (forces re-initialize)
-//! - GET SSE stream requires valid `Mcp-Session-Id` header
+//! - Non-initialize POST methods: missing `Mcp-Session-Id` is allowed (backwards compat).
+//!   A present-but-invalid/expired session id auto-heals: the server mints a fresh
+//!   session (from the workspace id on the auth token) and returns it via the
+//!   `Mcp-Session-Id` response header, rather than returning 404. (KYO-256: this
+//!   replaced an earlier 404-on-invalid-session contract — the Anthropic proxy
+//!   does not reliably re-initialize on a 404, so it got stuck after server restarts.)
+//! - GET SSE stream requires the `Mcp-Session-Id` header to be present (missing is a
+//!   400), but a present-but-invalid one auto-heals the same way (KYO-256)
 //! - Server restart clears all sessions → clients re-initialize → fresh tool list
 //! - Runtime tool changes → `notifications/tools/list_changed` pushed via SSE
 //! - `DELETE` with session ID terminates that session
@@ -379,7 +384,8 @@ async fn handle_mcp_request(
 
 /// Handle GET /mcp — open an SSE stream for server-initiated notifications.
 ///
-/// Requires a valid `Mcp-Session-Id` header (obtained from `initialize`).
+/// A missing `Mcp-Session-Id` header is a 400. A present-but-invalid/expired
+/// one auto-heals into a fresh session rather than 404ing (KYO-256).
 /// The server pushes `notifications/tools/list_changed` through this stream
 /// when the available tool list changes (e.g., billing tier change).
 ///
