@@ -852,12 +852,8 @@ pub async fn datasource_oauth_disconnect_service(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_env::EnvVarGuard;
     use serde_json::json;
-
-    /// Mutex to serialize tests that mutate `MICROSOFT_OAUTH_*` env vars.
-    /// `std::env::set_var`/`remove_var` is process-global and not thread-safe,
-    /// so these tests must not run concurrently.
-    static MS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     // -- PKCE generation --
 
@@ -1004,12 +1000,9 @@ mod tests {
 
     #[test]
     fn extract_microsoft_config_falls_back_to_env_vars() {
-        let _lock = MS_ENV_LOCK.lock().unwrap();
-        // SAFETY: mutex serializes all env-var-mutating tests in this module
-        unsafe {
-            std::env::set_var("MICROSOFT_OAUTH_CLIENT_ID", "env-ms-client");
-            std::env::set_var("MICROSOFT_OAUTH_CLIENT_SECRET", "env-ms-secret");
-        }
+        let _guard = EnvVarGuard::acquire()
+            .set("MICROSOFT_OAUTH_CLIENT_ID", "env-ms-client")
+            .set("MICROSOFT_OAUTH_CLIENT_SECRET", "env-ms-secret");
 
         // No oauth_client_id in connection config — should fall back to env
         let config = json!({
@@ -1023,22 +1016,13 @@ mod tests {
         assert_eq!(pc.client_id, "env-ms-client");
         assert_eq!(pc.client_secret, "env-ms-secret");
         assert_eq!(pc.account_or_host, "test-tenant");
-
-        // Clean up
-        unsafe {
-            std::env::remove_var("MICROSOFT_OAUTH_CLIENT_ID");
-            std::env::remove_var("MICROSOFT_OAUTH_CLIENT_SECRET");
-        }
     }
 
     #[test]
     fn extract_microsoft_config_prefers_connection_config_over_env() {
-        let _lock = MS_ENV_LOCK.lock().unwrap();
-        // SAFETY: mutex serializes all env-var-mutating tests in this module
-        unsafe {
-            std::env::set_var("MICROSOFT_OAUTH_CLIENT_ID", "env-should-not-use");
-            std::env::set_var("MICROSOFT_OAUTH_CLIENT_SECRET", "env-should-not-use");
-        }
+        let _guard = EnvVarGuard::acquire()
+            .set("MICROSOFT_OAUTH_CLIENT_ID", "env-should-not-use")
+            .set("MICROSOFT_OAUTH_CLIENT_SECRET", "env-should-not-use");
 
         let config = json!({
             "tenant_id": "test-tenant",
@@ -1052,22 +1036,13 @@ mod tests {
         .unwrap();
         assert_eq!(pc.client_id, "ds-client");
         assert_eq!(pc.client_secret, "ds-secret");
-
-        // Clean up
-        unsafe {
-            std::env::remove_var("MICROSOFT_OAUTH_CLIENT_ID");
-            std::env::remove_var("MICROSOFT_OAUTH_CLIENT_SECRET");
-        }
     }
 
     #[test]
     fn extract_microsoft_config_errors_when_no_client_id_anywhere() {
-        let _lock = MS_ENV_LOCK.lock().unwrap();
-        // SAFETY: mutex serializes all env-var-mutating tests in this module
-        unsafe {
-            std::env::remove_var("MICROSOFT_OAUTH_CLIENT_ID");
-            std::env::remove_var("MICROSOFT_OAUTH_CLIENT_SECRET");
-        }
+        let _guard = EnvVarGuard::acquire()
+            .remove("MICROSOFT_OAUTH_CLIENT_ID")
+            .remove("MICROSOFT_OAUTH_CLIENT_SECRET");
 
         let config = json!({
             "tenant_id": "test-tenant",

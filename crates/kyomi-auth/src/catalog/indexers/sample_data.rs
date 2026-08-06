@@ -450,29 +450,16 @@ mod tests {
 
     #[test]
     fn config_from_env_returns_none_when_host_set_but_password_missing() {
-        // SAFETY: env var mutation is inherently thread-unsafe. This test is
-        // safe in practice because no other test sets SAMPLE_CLICKHOUSE_HOST.
-        // If flakiness is ever observed, add the `serial_test` crate.
-        let original_host = std::env::var("SAMPLE_CLICKHOUSE_HOST").ok();
-        let original_password = std::env::var("SAMPLE_CLICKHOUSE_PASSWORD").ok();
-
-        unsafe {
-            std::env::set_var("SAMPLE_CLICKHOUSE_HOST", "test-host");
-            std::env::remove_var("SAMPLE_CLICKHOUSE_PASSWORD");
-        }
+        // Goes through the crate-wide `EnvVarGuard` (see its module docs):
+        // `set_var`/`remove_var` mutation is unsound across *any* two threads
+        // touching the environment concurrently, not just two threads
+        // touching the same key, so a lock scoped to this test alone would
+        // not be sound against other env-mutating tests in this crate.
+        let _guard = crate::test_env::EnvVarGuard::acquire()
+            .set("SAMPLE_CLICKHOUSE_HOST", "test-host")
+            .remove("SAMPLE_CLICKHOUSE_PASSWORD");
 
         let result = SampleClickHouseConfig::from_env();
-
-        unsafe {
-            match original_host {
-                Some(v) => std::env::set_var("SAMPLE_CLICKHOUSE_HOST", v),
-                None => std::env::remove_var("SAMPLE_CLICKHOUSE_HOST"),
-            }
-            match original_password {
-                Some(v) => std::env::set_var("SAMPLE_CLICKHOUSE_PASSWORD", v),
-                None => std::env::remove_var("SAMPLE_CLICKHOUSE_PASSWORD"),
-            }
-        }
 
         assert!(result.is_none());
     }
