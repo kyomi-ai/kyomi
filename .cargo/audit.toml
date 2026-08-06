@@ -94,6 +94,42 @@ ignore = [
     "RUSTSEC-2026-0098", # name constraints for URI names were incorrectly accepted
     "RUSTSEC-2026-0099", # name constraints were accepted for certificates asserting a wildcard name
     "RUSTSEC-2026-0104", # reachable panic in certificate revocation list parsing
+
+    # -------------------------------------------------------------------------
+    # rkyv 0.7.46 — never compiled: unactivated optional dependency (KYO-317)
+    # -------------------------------------------------------------------------
+    # Path: rkyv 0.7.46 <- optional dep of rust_decimal 1.42.1 (behind
+    #       rust_decimal's own `rkyv` feature) <- kyomi-datasource 1.6.0 and
+    #       sqlx-core 0.8.6.
+    #
+    # Unlike every other entry in this file, the problem here isn't that no
+    # fix exists — it's that the vulnerable code is never compiled into any
+    # Kyomi artifact in the first place. rust_decimal's `rkyv` feature is not
+    # part of its `default = ["serde", "std"]` set, and nothing in this
+    # workspace enables it. `cargo tree -i rkyv --target all --all-features`
+    # (verified 2026-08-06) prints only:
+    #
+    #   warning: nothing to print.
+    #
+    # rkyv shows up in Cargo.lock anyway because cargo records the full
+    # resolution graph, including optional dependencies that no enabled
+    # feature activates, and `cargo-audit` scans that lockfile with no
+    # feature awareness — it cannot tell an activated dependency from a
+    # merely-resolvable one.
+    #
+    # Neither available fix applies. rust_decimal 1.42.1 is the newest
+    # release (`cargo update -p rust_decimal --dry-run` -> `Locking 0
+    # packages`, verified 2026-08-06); its `rkyv` feature still requires
+    # `rkyv = "^0.7.46"` per rust_decimal's own Cargo.toml — no release has
+    # moved that feature to rkyv 0.8. Forcing the bump directly is also
+    # rejected: `cargo update -p rkyv --precise 0.8.17` fails with "candidate
+    # versions found which didn't match: 0.8.17 ... required by package
+    # rust_decimal v1.42.1" (verified 2026-08-06).
+    #
+    # Remove when: rust_decimal publishes a release whose `rkyv` feature
+    # depends on `rkyv >= 0.8.17`, at which point a plain `cargo update -p
+    # rust_decimal` clears it.
+    "RUSTSEC-2026-0235", # Insufficient archive validation can cause out-of-bounds reads in archives containing Rc/Arc
 ]
 
 # Informational advisories (unmaintained / unsound / yanked) are reported but do
