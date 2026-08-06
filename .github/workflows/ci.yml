@@ -36,6 +36,7 @@ jobs:
   lint-policy:
     name: Lint Suppression Policy
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -88,6 +89,7 @@ jobs:
   trivy-scan:
     name: Trivy Security Scan
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -118,6 +120,7 @@ jobs:
   cargo-audit:
     name: Dependency Audit
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -158,6 +161,7 @@ jobs:
   schema-parity:
     name: Migration Schema Parity
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       SCCACHE_GHA_ENABLED: "true"
     services:
@@ -216,6 +220,9 @@ jobs:
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
+    # Observed max successful run: 40.9m (last ~15 runs). Set with headroom
+    # for the slowest legitimate compile, not the median (KYO-259).
+    timeout-minutes: 75
     env:
       SCCACHE_GHA_ENABLED: "true"
     # postgres backs the apps/server/tests/ contract-test suite (KYO-236).
