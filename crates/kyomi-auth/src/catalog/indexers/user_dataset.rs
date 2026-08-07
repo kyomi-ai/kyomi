@@ -23,7 +23,7 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use crate::catalog::helpers::{
-    archive_missing_tables, cache_table, update_datasource_last_refresh,
+    archive_missing_tables, cache_table, resolve_final_status, update_datasource_last_refresh,
     update_workspace_status, IndexerContext,
 };
 use crate::catalog::types::{CatalogIndexResult, ColumnEntry};
@@ -107,9 +107,10 @@ impl UserDatasetIndexer {
             })
             .await
             {
-                Ok(count) => {
+                Ok((count, dataset_errors)) => {
                     any_project_succeeded = true;
                     tables_indexed += count;
+                    errors.extend(dataset_errors);
                 }
                 Err(e) => {
                     // Check if this is an auth error (401) — skip silently
@@ -191,14 +192,20 @@ impl UserDatasetIndexer {
         // Update last refresh timestamp
         let _ = update_datasource_last_refresh(db, datasource_config_id).await;
 
-        // Update workspace status to idle
+        // Update workspace status using the resolved final status (KYO-264).
+        // `nothing_found` alone can't distinguish a genuinely empty-but-
+        // accessible set of datasets from a total discovery failure —
+        // `resolve_final_status` (shared with the SQL path, KYO-126) draws
+        // that line using the `errors` collected above, which now include
+        // per-dataset failures via `fold_dataset_outcomes`.
+        let (final_status, failure_reason) = resolve_final_status(nothing_found, &errors);
         let _ = update_workspace_status(
             db,
             workspace_id,
             datasource_config_id,
-            "idle",
+            final_status,
             None,
-            None,
+            failure_reason.as_deref(),
         )
         .await;
 
@@ -267,10 +274,19 @@ struct IndexDatasetParams<'a> {
 /// Index all datasets in a single BigQuery project.
 ///
 /// Lists datasets via BigQuery REST API, then iterates tables in each.
-/// Returns the total number of tables indexed.
+/// Returns the total number of tables indexed across all datasets in the
+/// project, plus any per-dataset errors collected along the way (KYO-264) —
+/// e.g. IAM allowing `bigquery.datasets.list` but denying
+/// `bigquery.tables.list` on every dataset. The `Err` return here is
+/// reserved for a whole-project failure (listing the datasets themselves
+/// failed, including an expired-OAuth 401 the caller checks for) — it is
+/// distinct from per-dataset errors, which are always returned via the `Ok`
+/// tuple's error list so the caller can fold them into its `errors`
+/// accumulator regardless of whether other datasets in the project
+/// succeeded.
 async fn index_project_datasets(
     params: IndexProjectParams<'_>,
-) -> Result<usize> {
+) -> Result<(usize, Vec<String>)> {
     let IndexProjectParams {
         client,
         db,
@@ -284,10 +300,10 @@ async fn index_project_datasets(
     // List all datasets in the project
     let datasets = list_bigquery_datasets(client, access_token, project_id).await?;
 
-    let mut tables_indexed = 0usize;
+    let mut outcomes = Vec::with_capacity(datasets.len());
 
     for dataset_id in &datasets {
-        match index_dataset_tables(IndexDatasetParams {
+        let outcome = index_dataset_tables(IndexDatasetParams {
             client,
             db,
             embedding,
@@ -298,23 +314,55 @@ async fn index_project_datasets(
             max_tables: max_tables_per_dataset,
             seen_table_ids,
         })
-        .await
-        {
-            Ok(count) => {
-                tables_indexed += count;
-            }
-            Err(e) => {
-                warn!(
-                    project_id,
-                    dataset_id,
-                    error = %e,
-                    "failed to index dataset"
-                );
-            }
+        .await;
+
+        if let Err(ref e) = outcome {
+            warn!(
+                project_id,
+                dataset_id,
+                error = %e,
+                "failed to index dataset"
+            );
+        }
+
+        outcomes.push((dataset_id.clone(), outcome));
+    }
+
+    Ok(fold_dataset_outcomes(project_id, outcomes))
+}
+
+/// Fold per-dataset indexing outcomes into a project's total indexed-table
+/// count and a list of formatted per-dataset error strings.
+///
+/// KYO-264: before this existed, `index_project_datasets` only logged
+/// (`warn!`) each per-dataset `Err` and discarded it — so a project where
+/// every dataset's table listing failed (e.g. IAM allows
+/// `bigquery.datasets.list` but denies `bigquery.tables.list` on every
+/// dataset) still returned `Ok(0)` with an empty error list. That made a
+/// total discovery failure indistinguishable, to `resolve_final_status`,
+/// from a project that genuinely has zero datasets — both look like
+/// `nothing_found == true` with `errors.is_empty() == true`, which resolves
+/// to `"idle"`.
+///
+/// Deliberately free of I/O (`outcomes` are already-resolved `Result`s) so
+/// this can be exercised directly by a unit test without an HTTP-mocking
+/// dependency — none exists in this workspace, and this fold is the entire
+/// piece of decision logic KYO-264 needs proven.
+fn fold_dataset_outcomes(
+    project_id: &str,
+    outcomes: Vec<(String, Result<usize>)>,
+) -> (usize, Vec<String>) {
+    let mut tables_indexed = 0usize;
+    let mut errors = Vec::new();
+
+    for (dataset_id, outcome) in outcomes {
+        match outcome {
+            Ok(count) => tables_indexed += count,
+            Err(e) => errors.push(format!("{project_id}.{dataset_id}: {e}")),
         }
     }
 
-    Ok(tables_indexed)
+    (tables_indexed, errors)
 }
 
 /// Index all tables in a single BigQuery dataset.
@@ -555,9 +603,117 @@ pub async fn get_bigquery_table_schema(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn full_table_id_format() {
         let full = format!("{}.{}.{}", "my-project", "my_dataset", "my_table");
         assert_eq!(full, "my-project.my_dataset.my_table");
+    }
+
+    // ── fold_dataset_outcomes (KYO-264) ──────────────────────────────────
+
+    fn permission_denied(dataset_id: &str) -> Result<usize> {
+        Err(kyomi_core::Error::Internal(format!(
+            "BigQuery tables list failed (HTTP 403): permission denied on {dataset_id}"
+        )))
+    }
+
+    #[test]
+    fn all_datasets_ok_sums_counts_with_no_errors() {
+        let outcomes = vec![
+            ("ds_a".to_string(), Ok(3usize)),
+            ("ds_b".to_string(), Ok(2usize)),
+        ];
+        let (tables_indexed, errors) = fold_dataset_outcomes("proj-1", outcomes);
+        assert_eq!(tables_indexed, 5);
+        assert!(errors.is_empty());
+    }
+
+    /// The KYO-264 headline scenario: IAM allows listing datasets but denies
+    /// `bigquery.tables.list` on every one of them. Before the fix,
+    /// `index_project_datasets` only `warn!`-logged each of these and
+    /// returned `Ok(0)` with an empty error list — indistinguishable from a
+    /// project with zero real datasets. This asserts the errors actually
+    /// reach the fold's output, and that each is prefixed with enough
+    /// context (project + dataset id) to be actionable.
+    #[test]
+    fn all_datasets_failing_produces_non_empty_errors_and_zero_count() {
+        let outcomes = vec![
+            ("ds_a".to_string(), permission_denied("ds_a")),
+            ("ds_b".to_string(), permission_denied("ds_b")),
+        ];
+        let (tables_indexed, errors) = fold_dataset_outcomes("proj-1", outcomes);
+        assert_eq!(tables_indexed, 0);
+        assert_eq!(errors.len(), 2);
+        assert!(
+            errors[0].starts_with("proj-1.ds_a: "),
+            "expected project+dataset prefix, got: {}",
+            errors[0]
+        );
+        assert!(
+            errors[1].starts_with("proj-1.ds_b: "),
+            "expected project+dataset prefix, got: {}",
+            errors[1]
+        );
+    }
+
+    #[test]
+    fn mixed_outcomes_sum_successes_and_collect_only_failures() {
+        let outcomes = vec![
+            ("ds_a".to_string(), Ok(4usize)),
+            ("ds_b".to_string(), permission_denied("ds_b")),
+        ];
+        let (tables_indexed, errors) = fold_dataset_outcomes("proj-1", outcomes);
+        assert_eq!(tables_indexed, 4);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].starts_with("proj-1.ds_b: "));
+    }
+
+    // ── error propagation end-to-end into resolve_final_status (KYO-264) ──
+    //
+    // These tie `fold_dataset_outcomes`'s output directly to the same
+    // `resolve_final_status` call `index_workspace_catalog` makes, proving
+    // the fix actually changes the persisted status — not just that errors
+    // exist in a vec somewhere.
+
+    #[test]
+    fn errored_and_empty_resolves_to_failed_with_non_generic_reason() {
+        let outcomes = vec![
+            ("ds_a".to_string(), permission_denied("ds_a")),
+            ("ds_b".to_string(), permission_denied("ds_b")),
+        ];
+        let (tables_indexed, errors) = fold_dataset_outcomes("proj-1", outcomes);
+        // Mirrors index_workspace_catalog's `nothing_found` computation when
+        // no table was ever seen (seen_table_ids stays empty on the same
+        // input that produces tables_indexed == 0 here).
+        let nothing_found = tables_indexed == 0;
+
+        let (status, reason) = resolve_final_status(nothing_found, &errors);
+        assert_eq!(status, "failed");
+        let reason = reason.expect("failed status must carry a reason");
+        assert_ne!(
+            reason, "No tables discovered — existing catalog preserved",
+            "reason must be the real per-dataset error, not the generic result message"
+        );
+        assert!(reason.contains("proj-1.ds_a"));
+        assert!(reason.contains("permission denied"));
+    }
+
+    #[test]
+    fn accessible_but_genuinely_empty_resolves_to_idle() {
+        let outcomes = vec![
+            ("ds_a".to_string(), Ok(0usize)),
+            ("ds_b".to_string(), Ok(0usize)),
+        ];
+        let (tables_indexed, errors) = fold_dataset_outcomes("proj-1", outcomes);
+        let nothing_found = tables_indexed == 0;
+
+        let (status, reason) = resolve_final_status(nothing_found, &errors);
+        assert_eq!(
+            status, "idle",
+            "datasets that were listed fine and are genuinely empty must not report failed"
+        );
+        assert_eq!(reason, None);
     }
 }

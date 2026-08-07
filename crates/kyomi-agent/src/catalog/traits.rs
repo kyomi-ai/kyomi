@@ -21,8 +21,8 @@ use serde_json::Value;
 use tracing::{info, warn};
 
 use kyomi_auth::catalog::helpers::{
-    archive_missing_tables, cache_table, update_datasource_last_refresh, update_workspace_status,
-    CacheTableParams, IndexerContext,
+    archive_missing_tables, cache_table, resolve_final_status, update_datasource_last_refresh,
+    update_workspace_status, CacheTableParams, IndexerContext,
 };
 use kyomi_auth::catalog::types::{CatalogIndexResult, ColumnEntry, TableEntry};
 
@@ -758,42 +758,6 @@ pub async fn index_catalog_sql(
     result
 }
 
-/// Determine the final `workspaces.catalog_refresh_status` value and (when
-/// applicable) a failure reason, from the outcome of a SQL catalog indexing
-/// run.
-///
-/// KYO-126: before this function existed, `index_catalog_sql` unconditionally
-/// wrote `"idle"` at the end of every run — including one where every
-/// container's discovery query failed (e.g. the role lacks permission to
-/// read the catalog) and zero tables were found. That made a total
-/// discovery failure indistinguishable from a healthy, empty datasource.
-///
-/// This function draws the line at whether any discovery error was
-/// observed:
-/// - `nothing_found` + at least one error → the zero tables are *caused by*
-///   a real failure: report `"failed"` with a reason built from the
-///   collected errors.
-/// - `nothing_found` with no errors → every container query genuinely
-///   succeeded and simply returned no tables (or the user configured zero
-///   containers) — this is not a failure and must keep reporting `"idle"`,
-///   or a legitimately empty-but-accessible schema would wrongly show as a
-///   broken datasource.
-/// - not `nothing_found` → normal completion, `"idle"`, regardless of
-///   whether some individual tables/containers errored along the way (partial
-///   success is still success; those errors are already surfaced via
-///   `CatalogIndexResult::errors`).
-fn resolve_final_status(nothing_found: bool, errors: &[String]) -> (&'static str, Option<String>) {
-    if !nothing_found || errors.is_empty() {
-        return ("idle", None);
-    }
-
-    let reason = match errors.len() {
-        1 => errors[0].clone(),
-        n => format!("{} (+{} more error{})", errors[0], n - 1, if n == 2 { "" } else { "s" }),
-    };
-    ("failed", Some(reason))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -803,58 +767,6 @@ mod tests {
     use kyomi_embed::EmbeddingService;
     use serde_json::json;
     use std::sync::{Arc, Mutex};
-
-    // ── resolve_final_status (KYO-126) ───────────────────────────────────
-
-    #[test]
-    fn errored_and_empty_reports_failed_with_reason() {
-        let errors = vec!["Failed to list tables in schema 'public': permission denied".to_string()];
-        let (status, reason) = resolve_final_status(true, &errors);
-        assert_eq!(status, "failed");
-        assert_eq!(
-            reason,
-            Some("Failed to list tables in schema 'public': permission denied".to_string())
-        );
-    }
-
-    #[test]
-    fn errored_and_empty_with_multiple_errors_reports_count() {
-        let errors = vec![
-            "Failed to list tables in schema 'a': permission denied".to_string(),
-            "Failed to list tables in schema 'b': permission denied".to_string(),
-        ];
-        let (status, reason) = resolve_final_status(true, &errors);
-        assert_eq!(status, "failed");
-        assert_eq!(
-            reason,
-            Some(
-                "Failed to list tables in schema 'a': permission denied (+1 more error)"
-                    .to_string()
-            )
-        );
-    }
-
-    #[test]
-    fn empty_without_errors_reports_idle() {
-        // Regression guard (KYO-126): an accessible datasource that
-        // genuinely has zero tables (or where the user configured zero
-        // containers) must not be reported as failed.
-        let (status, reason) = resolve_final_status(true, &[]);
-        assert_eq!(status, "idle");
-        assert_eq!(reason, None);
-    }
-
-    #[test]
-    fn not_nothing_found_reports_idle_even_with_partial_errors() {
-        // A normal completion where some individual tables/containers
-        // errored but at least one table was still indexed is a partial
-        // success, not a failure — those errors are already surfaced via
-        // `CatalogIndexResult::errors`.
-        let errors = vec!["Failed to get columns for public.weird_table: timeout".to_string()];
-        let (status, reason) = resolve_final_status(false, &errors);
-        assert_eq!(status, "idle");
-        assert_eq!(reason, None);
-    }
 
     // ─── Log capture for KYO-217 credential-resolution warnings ────────────
     //
