@@ -18,6 +18,11 @@
 //!   auth-check GET against the upstream provider using the candidate
 //!   credentials. Never writes to the DB and never logs the key. The 10s
 //!   timeout prevents a slow upstream from tying up a server thread.
+//! * [`get_resolved_ai_provider`] — admin/owner only. Reports what is
+//!   *actually* resolved and in effect right now — the workspace's stored
+//!   BYOK credentials when configured, otherwise whatever the server's env
+//!   vars resolve to — rather than just naming the relevant env vars. Never
+//!   writes to the DB and never returns the plaintext API key.
 //!
 //! **SaaS vs self-hosted gating**:
 //!
@@ -26,6 +31,8 @@
 //!   (BYOK is disabled in SaaS mode).
 //! * [`test_workspace_ai_config`] — self-hosted only (no BYOK in SaaS).
 //! * [`list_workspace_ai_models`] — self-hosted only (no BYOK in SaaS).
+//! * [`get_resolved_ai_provider`] — self-hosted only. SaaS always uses
+//!   Kyomi-managed AI, so there is no per-tenant resolution to report.
 
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -87,6 +94,42 @@ pub struct TestAiConfigResult {
     /// Short human-readable message. `"Connection OK"` on success; a
     /// sanitised error summary on failure. **Never contains the API key.**
     pub message: String,
+}
+
+/// What AI provider/model configuration is actually resolved and in effect
+/// for a self-hosted workspace right now — as opposed to just naming the
+/// relevant environment variables.
+///
+/// **Never contains the plaintext API key, a prefix/suffix of it, its
+/// length, or any other derivative** — `has_api_key: bool` is the absolute
+/// maximum exposed. See [`resolve_effective_ai_provider`] for how this is
+/// computed and why BYOK and env resolution can't both be shown at once.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ResolvedAiProviderView {
+    /// A provider resolved successfully and is in effect.
+    Resolved {
+        /// `"anthropic" | "openai" | "gemini"`.
+        provider: String,
+        /// `Some(m)` when a model was explicitly configured (workspace BYOK
+        /// model, or `LLM_MODEL` in Kyomi/env mode). `None` means the
+        /// provider's own built-in default model is in effect.
+        model: Option<String>,
+        /// Custom API base URL override, when one is in effect.
+        base_url: Option<String>,
+        /// Whether a non-empty API key backs this resolution.
+        has_api_key: bool,
+        /// Effective title-generation model (workspace `title_model`
+        /// setting, falling back to `LLM_TITLE_MODEL`), when either is set.
+        /// `None` means title generation uses the cheapest model for the
+        /// resolved provider.
+        title_model: Option<String>,
+    },
+    /// No provider could be resolved. `reason` is the same message
+    /// [`kyomi_agent::resolve_provider_config`] or
+    /// [`kyomi_agent::create_provider_from_workspace`] would raise at
+    /// request time — safe to show verbatim, never contains key material.
+    Unconfigured { reason: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -266,6 +309,128 @@ pub async fn test_workspace_ai_config(
         .map(str::to_string);
 
     test_provider(&provider, key, base_url.as_deref()).await
+}
+
+// ---------------------------------------------------------------------------
+// get_resolved_ai_provider
+// ---------------------------------------------------------------------------
+
+/// Report what AI provider/model configuration is actually resolved and in
+/// effect for this workspace right now — not just the names of the relevant
+/// environment variables. Self-hosted only; SaaS always uses Kyomi-managed
+/// AI, so there is nothing per-tenant to resolve. Admin/owner only, same
+/// permission as every other AI config server fn in this file.
+///
+/// See [`resolve_effective_ai_provider`] for the BYOK-vs-env precedence this
+/// mirrors, and [`ResolvedAiProviderView`] for the security guarantee on
+/// what may appear in the response.
+#[server(prefix = "/leptos-api")]
+pub async fn get_resolved_ai_provider() -> Result<ResolvedAiProviderView, ServerFnError> {
+    let ac = AuthenticatedContext::extract().await?;
+    // Resolution reporting is only meaningful for self-hosted deployments —
+    // SaaS workspaces always run Kyomi-managed AI.
+    if !ac.ctx.config.self_hosted {
+        return Err(ServerFnError::new(
+            "AI provider resolution is only reported for self-hosted deployments.",
+        ));
+    }
+    ac.require(Permission::ManageAiConfig, "Workspace admin access required")?;
+
+    let ws_config = kyomi_auth::workspace_ai_config::load(ac.db(), &ac.ws_id)
+        .await
+        .into_sfn()?;
+
+    Ok(resolve_effective_ai_provider(&ws_config, &ac.ctx.config))
+}
+
+/// Compute what AI provider/model configuration is actually resolved and in
+/// effect for a workspace, mirroring the decision
+/// [`kyomi_agent::create_provider_from_workspace`] makes at request time:
+///
+/// * If the workspace has a BYOK provider configured (`provider != Kyomi`),
+///   its own stored credentials govern — the server's env config is never
+///   consulted, exactly like the real factory.
+/// * Otherwise (`provider == Kyomi`), the server's env-configured
+///   `LLM_PROVIDER`/`LLM_API_KEY` (or the legacy `ANTHROPIC_API_KEY`) govern,
+///   via [`kyomi_agent::resolve_provider_config`] — the same function the
+///   real factory calls for Kyomi-mode workspaces.
+///
+/// These two paths cannot both be "in effect" for a single workspace at
+/// once, so there is nothing to reconcile — reporting whichever one
+/// `ws_config.provider` selects *is* reporting the real answer.
+///
+/// Two deliberate narrowings versus the real factory, both safe only
+/// because [`get_resolved_ai_provider`] is the sole caller and rejects the
+/// request unless `self_hosted`:
+///
+/// * The factory short-circuits every SaaS workspace to Kyomi mode before
+///   looking at `ws_config.provider`; this function has no such branch, so
+///   it mirrors the factory faithfully **only when `self_hosted == true`**.
+/// * A BYOK row whose stored key is present but blank is reported
+///   `Unconfigured` here, where the factory checks only `Option::is_none()`.
+///   No shipped flow can create that row — `update_workspace_ai_config`,
+///   the only writer, is `require_saas`-gated — so this is defence in depth
+///   against direct DB edits, not a behavioural divergence in practice.
+///
+/// Pure and network-free: never constructs an HTTP client or an
+/// `LLMProvider` instance, so it's cheap enough to call on every page load.
+/// Never puts the plaintext API key — or any derivative of it — into the
+/// returned view; only `has_api_key: bool` crosses that boundary.
+#[cfg(feature = "ssr")]
+fn resolve_effective_ai_provider(
+    ws_config: &kyomi_auth::workspace_ai_config::WorkspaceAiConfig,
+    config: &kyomi_core::Config,
+) -> ResolvedAiProviderView {
+    use kyomi_auth::workspace_ai_config::WorkspaceAiProvider;
+
+    // Workspace-level title_model wins over the env default — matches the
+    // precedence `kyomi_agent::execution::generate_title_inner` applies.
+    let title_model = ws_config
+        .title_model
+        .clone()
+        .or_else(|| config.llm_title_model.clone());
+
+    if ws_config.provider != WorkspaceAiProvider::Kyomi {
+        // BYOK: the workspace's own stored credentials govern, not the env.
+        let has_api_key = ws_config
+            .api_key
+            .as_deref()
+            .is_some_and(|k| !k.trim().is_empty());
+
+        if !has_api_key {
+            // Mirrors the exact error `create_provider_from_workspace` raises
+            // for this case (`kyomi_agent::provider`).
+            return ResolvedAiProviderView::Unconfigured {
+                reason: format!(
+                    "workspace BYOK provider {} has no stored API key",
+                    ws_config.provider.as_str()
+                ),
+            };
+        }
+
+        return ResolvedAiProviderView::Resolved {
+            provider: ws_config.provider.as_str().to_string(),
+            model: ws_config.model.clone(),
+            base_url: ws_config.base_url.clone(),
+            has_api_key: true,
+            title_model,
+        };
+    }
+
+    // Kyomi mode: the server's env-configured keys govern.
+    match kyomi_agent::resolve_provider_config(config) {
+        Ok(resolved) => ResolvedAiProviderView::Resolved {
+            provider: resolved.provider.to_string(),
+            model: resolved.model,
+            base_url: resolved.base_url,
+            // Guards against a pathological `ANTHROPIC_API_KEY=""` env var,
+            // which `resolve_provider_config` treats as "set" (it only
+            // checks `is_some`, not emptiness) but which is not a usable key.
+            has_api_key: !resolved.api_key.trim().is_empty(),
+            title_model,
+        },
+        Err(e) => ResolvedAiProviderView::Unconfigured { reason: e.to_string() },
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1322,5 +1487,232 @@ mod tests {
         assert!((parse_cost_value(Some(&serde_json::json!(0.0000025))) - 0.0000025).abs() < 1e-15);
         assert_eq!(parse_cost_value(None), 0.0);
         assert_eq!(parse_cost_value(Some(&serde_json::json!("not-a-number"))), 0.0);
+    }
+
+    // ---- resolve_effective_ai_provider ------------------------------------
+
+    fn byok_ws_config(
+        provider: kyomi_auth::workspace_ai_config::WorkspaceAiProvider,
+        api_key: Option<&str>,
+    ) -> kyomi_auth::workspace_ai_config::WorkspaceAiConfig {
+        kyomi_auth::workspace_ai_config::WorkspaceAiConfig {
+            provider,
+            model: None,
+            api_key: api_key.map(str::to_string),
+            base_url: None,
+            title_model: None,
+            context_window: 0,
+        }
+    }
+
+    fn kyomi_ws_config() -> kyomi_auth::workspace_ai_config::WorkspaceAiConfig {
+        byok_ws_config(kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Kyomi, None)
+    }
+
+    #[test]
+    fn resolve_kyomi_mode_env_resolves_successfully() {
+        let mut config = kyomi_core::Config::test_config();
+        config.self_hosted = true;
+        config.llm_provider = Some("openai".into());
+        config.llm_api_key = Some("sk-server-key".into());
+        config.llm_model = Some("gpt-4o".into());
+        config.llm_base_url = Some("https://proxy.example.com".into());
+
+        let view = resolve_effective_ai_provider(&kyomi_ws_config(), &config);
+        assert_eq!(
+            view,
+            ResolvedAiProviderView::Resolved {
+                provider: "openai".to_string(),
+                model: Some("gpt-4o".to_string()),
+                base_url: Some("https://proxy.example.com".to_string()),
+                has_api_key: true,
+                title_model: None,
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_kyomi_mode_no_model_means_provider_default() {
+        let mut config = kyomi_core::Config::test_config();
+        config.self_hosted = true;
+        config.llm_provider = None;
+        config.llm_api_key = None;
+        config.anthropic_api_key = Some("sk-ant-server".into());
+        config.llm_model = None;
+
+        let view = resolve_effective_ai_provider(&kyomi_ws_config(), &config);
+        assert_eq!(
+            view,
+            ResolvedAiProviderView::Resolved {
+                provider: "anthropic".to_string(),
+                model: None,
+                base_url: None,
+                has_api_key: true,
+                title_model: None,
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_kyomi_mode_no_keys_is_unconfigured() {
+        let mut config = kyomi_core::Config::test_config();
+        config.self_hosted = true;
+        config.llm_provider = None;
+        config.llm_api_key = None;
+        config.anthropic_api_key = None;
+
+        let view = resolve_effective_ai_provider(&kyomi_ws_config(), &config);
+        match view {
+            ResolvedAiProviderView::Unconfigured { reason } => {
+                assert!(reason.contains("no LLM provider configured"), "got: {reason}");
+            }
+            other => panic!("expected Unconfigured, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_kyomi_mode_partial_env_is_unconfigured_with_partial_reason() {
+        let mut config = kyomi_core::Config::test_config();
+        config.self_hosted = true;
+        config.llm_provider = Some("openai".into());
+        config.llm_api_key = None;
+        config.anthropic_api_key = None;
+
+        let view = resolve_effective_ai_provider(&kyomi_ws_config(), &config);
+        match view {
+            ResolvedAiProviderView::Unconfigured { reason } => {
+                assert!(reason.contains("LLM_API_KEY is missing"), "got: {reason}");
+            }
+            other => panic!("expected Unconfigured, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_byok_with_stored_key_uses_workspace_credentials_not_env() {
+        let mut ws = byok_ws_config(
+            kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Gemini,
+            Some("AIza-workspace-key"),
+        );
+        ws.model = Some("gemini-2.5-pro".to_string());
+        ws.base_url = Some("https://gemini.proxy.example.com".to_string());
+
+        // Deliberately different from the workspace config — proves the env
+        // is not consulted at all when BYOK is configured.
+        let mut config = kyomi_core::Config::test_config();
+        config.self_hosted = true;
+        config.llm_provider = Some("openai".into());
+        config.llm_api_key = Some("sk-server-key-should-not-appear".into());
+        config.llm_model = Some("gpt-4o".into());
+
+        let view = resolve_effective_ai_provider(&ws, &config);
+        assert_eq!(
+            view,
+            ResolvedAiProviderView::Resolved {
+                provider: "gemini".to_string(),
+                model: Some("gemini-2.5-pro".to_string()),
+                base_url: Some("https://gemini.proxy.example.com".to_string()),
+                has_api_key: true,
+                title_model: None,
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_byok_without_stored_key_is_unconfigured() {
+        let ws = byok_ws_config(
+            kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Anthropic,
+            None,
+        );
+        let config = kyomi_core::Config::test_config();
+
+        let view = resolve_effective_ai_provider(&ws, &config);
+        match view {
+            ResolvedAiProviderView::Unconfigured { reason } => {
+                assert!(reason.contains("no stored API key"), "got: {reason}");
+                assert!(reason.contains("anthropic"), "got: {reason}");
+            }
+            other => panic!("expected Unconfigured, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_byok_blank_stored_key_is_unconfigured() {
+        // Whitespace-only key must not be treated as "has a key".
+        let ws = byok_ws_config(
+            kyomi_auth::workspace_ai_config::WorkspaceAiProvider::OpenAI,
+            Some("   "),
+        );
+        let config = kyomi_core::Config::test_config();
+
+        let view = resolve_effective_ai_provider(&ws, &config);
+        assert!(matches!(view, ResolvedAiProviderView::Unconfigured { .. }));
+    }
+
+    #[test]
+    fn resolve_title_model_prefers_workspace_setting_over_env() {
+        let mut ws = kyomi_ws_config();
+        ws.title_model = Some("claude-haiku-4-5-20251001".to_string());
+
+        let mut config = kyomi_core::Config::test_config();
+        config.self_hosted = true;
+        config.anthropic_api_key = Some("sk-ant-server".into());
+        config.llm_title_model = Some("gpt-4o-mini".into());
+
+        let view = resolve_effective_ai_provider(&ws, &config);
+        match view {
+            ResolvedAiProviderView::Resolved { title_model, .. } => {
+                assert_eq!(title_model.as_deref(), Some("claude-haiku-4-5-20251001"));
+            }
+            other => panic!("expected Resolved, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_title_model_falls_back_to_env_when_workspace_unset() {
+        let ws = kyomi_ws_config();
+
+        let mut config = kyomi_core::Config::test_config();
+        config.self_hosted = true;
+        config.anthropic_api_key = Some("sk-ant-server".into());
+        config.llm_title_model = Some("gpt-4o-mini".into());
+
+        let view = resolve_effective_ai_provider(&ws, &config);
+        match view {
+            ResolvedAiProviderView::Resolved { title_model, .. } => {
+                assert_eq!(title_model.as_deref(), Some("gpt-4o-mini"));
+            }
+            other => panic!("expected Resolved, got {other:?}"),
+        }
+    }
+
+    /// Security-critical: the exact assertion KYO-265 requires — serialise
+    /// the view produced from a config carrying a real-looking API key and
+    /// confirm the key never appears in the wire JSON, for both the BYOK
+    /// path and the Kyomi/env path.
+    #[test]
+    fn resolved_view_json_never_contains_the_api_key() {
+        let ws = byok_ws_config(
+            kyomi_auth::workspace_ai_config::WorkspaceAiProvider::OpenAI,
+            Some("sk-THIS-MUST-NEVER-LEAK-99887766"),
+        );
+        let config = kyomi_core::Config::test_config();
+
+        let view = resolve_effective_ai_provider(&ws, &config);
+        let json = serde_json::to_string(&view).expect("view must serialise");
+        assert!(
+            !json.contains("THIS-MUST-NEVER-LEAK"),
+            "API key material leaked into serialised view: {json}"
+        );
+
+        let mut config2 = kyomi_core::Config::test_config();
+        config2.self_hosted = true;
+        config2.llm_provider = Some("anthropic".into());
+        config2.llm_api_key = Some("sk-ANOTHER-SECRET-SHOULD-NOT-LEAK-11223344".into());
+        let view2 = resolve_effective_ai_provider(&kyomi_ws_config(), &config2);
+        let json2 = serde_json::to_string(&view2).expect("view must serialise");
+        assert!(
+            !json2.contains("ANOTHER-SECRET-SHOULD-NOT-LEAK"),
+            "API key material leaked into serialised view: {json2}"
+        );
     }
 }
