@@ -209,6 +209,30 @@ let filtered = Signal::derive(move || {
 
 **This is the root cause of most "reactive value already disposed" panics.** The previous 12+ tickets for this panic class were fixed one-by-one; this pattern prevents the entire class.
 
+### `Signal::derive` is not memoized — use `Memo` when the body does more than read
+
+`Signal::derive` wraps a plain `Fn() -> T`: it re-runs its body on *every* read. So a reactive closure that reads a derive alongside an unrelated signal re-runs the derive's body whenever that unrelated signal changes, not just when the derive's own dependencies do. `Memo` caches its value and recomputes only when the signals it actually reads change. If the derived body is pure and cheap this is invisible — but if it logs, records a metric, or does real work, the re-runs are observable and wrong.
+
+**Rule:** If a derived value's body has a side effect or is expensive, define it with `Memo::new` scoped to only the signals it reads, and have callers read the memo. Reserve `Signal::derive` for cheap, pure projections. Never place a `warn!`/`error!` inside a closure that a multi-resource reactive scope reads — the log stops meaning "this failed" and starts meaning "something nearby re-rendered."
+
+```rust
+// WRONG — the closure also reads `members`, so every members refetch re-runs
+// current_user_id_from and re-emits its warn! for a failure that already happened
+let is_owner = move || {
+    let id = current_user_id_from(user_ctx.get()); // contains warn! on the Err path
+    members.get().iter().any(|m| m.user_id == id && m.role == "owner")
+};
+
+// RIGHT — Memo scoped to user_ctx; the body (and its log) runs once per real change
+let current_user_id = Memo::new(move |_| current_user_id_from(user_ctx.get()));
+let is_owner = move || {
+    let id = current_user_id.get();
+    members.get().iter().any(|m| m.user_id == id && m.role == "owner")
+};
+```
+
+Flagged as 🟡 in KYO-240 (2026-08-03): once the `UserContext` fetch failed, every later team action — remove member, role change, initiate/cancel transfer — bumped `members_version`/`transfers_version`, re-ran the enclosing closure, and re-logged "user context fetch failed", so one stale failure read as a stream of fresh ones. The identical shape one function away (`is_owner_from` re-awaiting a cached `Err`) was ticketed as KYO-304.
+
 ### Use `.try_set()` / `.try_update()` in ALL deferred execution contexts
 
 **Enforcement: blocking.** `scripts/lint/check-disposal-safety.sh` Rule A catches bare `.set()` / `.update()` inside `spawn_local` and other deferred callbacks, and **fails CI**. This is the only pattern in this section that stops a merge. Escape hatch, requiring a ≥5-character justification: `// lint-allow: disposal-safe=<why>`. See *Enforcement status* above.
@@ -699,6 +723,28 @@ When behavior deliberately changes, the doc comment above it becomes an active l
 
 Flagged in KYO-256: `apps/server/src/routes/mcp.rs` documented `present-and-invalid returns 404 (forces re-initialize)` long after the route was changed to auto-heal invalid sessions into a new 200 response — and three contract tests were still asserting the documented 404.
 
+### Never claim a guarantee stronger than the code enforces
+
+This is not the stale-comment case above — it is a comment that was never true. Two shapes recur: a doc that states an invariant as an inherent property when some *other* function is what actually enforces it, and a `SAFETY` block that asserts the lock/guard excludes more than it does. Both read as verified facts, both are trusted over the code, and both survive review easily because nothing type-checks a claim inside a `///`. The tell is a comment that contradicts a neighbouring doc or test — if two comments in one module state different guarantees, at least one is wrong.
+
+**Rule:** State an invariant once, in the function that enforces it; everywhere else reference that site instead of restating the property. In a `SAFETY` comment, name the half of the obligation you discharge *and* the half you do not — a deliberately accepted, documented risk is honest engineering; silently widening the guarantee is a defect. When in doubt, read the upstream contract (std's own docs, the module doc) rather than paraphrasing it from memory.
+
+```rust
+// WRONG — asserts reader-exclusion the mutex does not provide, and directly
+// contradicts the module doc's own "What this guard does not guarantee"
+// SAFETY: the lock is held, so no other thread can be calling
+// `set_var`/`remove_var`/`var` concurrently with this call.
+unsafe { std::env::set_var(key, value) };
+
+// RIGHT — names what is covered and what is deliberately not
+// SAFETY: the crate-wide lock is held, which discharges only the writer half
+// of `set_var`'s contract (no concurrent mutators). Concurrent *readers* are
+// not excluded — see the module doc's "What this guard does not guarantee".
+unsafe { std::env::set_var(key, value) };
+```
+
+Flagged in KYO-240 (`current_user_id_from`'s doc asserted "an empty id can never match a real `member.user_id`" as inherent, when only the guard inside `is_owner_from` makes it true) and in KYO-318 cycle 2, where the per-call `SAFETY` comments claimed the env lock excluded concurrent *readers* while the module doc said the opposite — the contradiction passed a full review pass and was only caught by CI after merge.
+
 ## String & Text Processing
 
 *Standards for safe string manipulation in Rust.*
@@ -767,3 +813,23 @@ A fix is not done until a test locks in the precise behavior the ticket changed 
 **Rule:** Before calling a fix complete, ask "what one assertion, if it regressed, would silently reintroduce this bug?" and write that test. A `Display`-format fix gets `assert_eq!(Error::X(msg).to_string(), msg)`; a security/validation fix gets one test per rejection path (wrong user, expired, wrong state); a query-identity fix asserts the row count / archived count directly.
 
 Flagged repeatedly in review: KYO-145 (missing `Display` prefix-free assertion blocked sign-off until added), KYO-143 (new status-mapping branch shipped untested), KYO-140 (exemplary — the archival fix shipped with a test running the real query template against an in-memory pool asserting `tables_archived == 0`).
+
+### Prove the test fails without the fix — then prove you restored the tree
+
+A green test proves nothing on its own. It may assert a condition that holds either way: an `assert_ne!(None, None)` on a value that is `None` on both code paths, a filter that empties the collection before the assertion runs, an enum variant reachable by an early return that never touches the changed logic. Every one of those passes against the buggy code too, which means the regression it claims to prevent will ship silently.
+
+**Rule:** Before claiming a test locks in a behavior change, revert the fix (or mutate the exact line the assertion depends on), re-run *that* test, and confirm it fails with the failure the ticket describes. Then restore from a pre-mutation copy and confirm `git diff --cached` is byte-identical to what you staged — a mutation left behind in the working tree is worse than no test. Quote the mutation and its failure output in the PR; "the tests pass" is not the claim being made. Prefer assertions that can only pass for the right reason: assert the *whole* captured log is empty rather than filtering to one level, and put an `assert!(x.is_some())` ahead of any `assert_ne!` whose `None == None` case would pass vacuously.
+
+```bash
+# 1. Break the exact line the assertion depends on
+$ # edit auth_service.rs: "signup" -> "email_verification" (the pre-fix value)
+$ cargo test -p kyomi-auth --locked --lib passkey_signup_verify_only_accepts_its_own_token_type
+#   → MUST fail, with the cross-flow acceptance the ticket describes
+
+# 2. Restore and prove no drift from your own testing
+$ cp .backup/auth_service.rs crates/kyomi-auth/src/auth_service.rs
+$ git diff --cached --stat        # identical to before the mutation
+$ cargo test -p kyomi-auth --locked --lib passkey_signup_verify_only_accepts_its_own_token_type
+```
+
+Applied in almost every review in the 2026-08-01 → 2026-08-07 window, and load-bearing in several: KYO-256 mutated both auto-heal branches to echo the bogus session id back, and confirmed each `assert_ne!` duly failed with `Some(x)` on both sides rather than passing vacuously; KYO-263 mutated both guard conditions to show the fail-closed branch was covered by a real assertion rather than only by prose; KYO-222 cycle 2 re-ran the implementer's `#[serde(rename)]` mutation rather than trusting the claim; KYO-281 and KYO-282 each reverted the shipped fix to reproduce the exact panic; KYO-259 broke a matrix expression to prove `actionlint` catches it. Each of those reviews also re-confirmed the staged diff byte-for-byte after restoring.
