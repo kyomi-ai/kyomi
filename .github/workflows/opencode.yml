@@ -8,7 +8,7 @@ jobs:
     review:
         if: github.actor != 'dependabot[bot]'
         runs-on: ubuntu-latest
-        timeout-minutes: 15
+        timeout-minutes: 30
         permissions:
             id-token: write
             contents: read
@@ -20,6 +20,12 @@ jobs:
               with:
                   persist-credentials: false
 
+            # Step-level timeout, not job-level — this timer starts only
+            # once the step itself starts, i.e. after a runner has already
+            # been acquired. Queue time cannot consume it the way it does
+            # for the job-level `timeout-minutes` above, so this does NOT
+            # need the same runner-acquisition headroom and should not be
+            # bumped to match it (KYO-322).
             - name: Run opencode
               uses: anomalyco/opencode/github@latest
               timeout-minutes: 10

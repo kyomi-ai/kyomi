@@ -28,7 +28,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Observed max successful run: 61.9m (last ~15 runs).
+          # Observed execution max: 61.9m (last ~15 runs). 120m leaves
+          # ~58m of headroom, which also covers runner-acquisition queue
+          # delay — timeout-minutes counts queued time, not just
+          # execution time (KYO-259, KYO-322).
           - os: linux
             runner: ubuntu-latest
             trunk_arch: x86_64
@@ -39,9 +42,12 @@ jobs:
             bundles: deb appimage
             sed_inplace: "sed -i"
             timeout: 120
-          # Observed max successful run: 224.1m (last ~15 runs) — macOS
-          # desktop builds legitimately take 2-4 hours; do not lower this
-          # to match the other legs (KYO-259).
+          # Observed execution max: 224.1m (last ~15 runs) — macOS desktop
+          # builds legitimately take 2-4 hours; do not lower this to match
+          # the other legs (KYO-259). That figure is execution time only;
+          # the 300m timeout below also has to absorb runner-acquisition
+          # queue delay, since timeout-minutes counts queued time too
+          # (KYO-322).
           #
           # 300 is deliberately the ceiling rather than something roomier:
           # GitHub's own default job timeout is 360, so anything at or above
@@ -61,7 +67,10 @@ jobs:
             bundles: dmg
             sed_inplace: "sed -i ''"
             timeout: 300
-          # Observed max successful run: 99.7m (last ~15 runs).
+          # Observed execution max: 99.7m (last ~15 runs). 180m leaves
+          # ~80m of headroom, which also covers runner-acquisition queue
+          # delay — timeout-minutes counts queued time, not just
+          # execution time (KYO-259, KYO-322).
           - os: windows
             runner: windows-latest
             bundles: msi nsis

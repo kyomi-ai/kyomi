@@ -17,6 +17,21 @@
 #      comment for why it's a separate job rather than a step tacked onto
 #      clippy) — real trunk build of crates/kyomi-ui, then the SSR contract
 #      suite against it (KYO-255)
+#
+# A note on `timeout-minutes` (KYO-322): GitHub starts that clock when a
+# job is QUEUED, not when a runner picks it up, so a job that executes in
+# seconds can still be killed by its timeout if it waits long enough for
+# a runner to become available — job 92674541505 (Migration Schema
+# Parity, 15m timeout) was cancelled at exactly 15m01s with zero steps
+# run, entirely queue time. Every `timeout-minutes` value below is
+# therefore observed execution max *plus* deliberate headroom for that
+# runner-acquisition wait, not a multiple of execution time alone
+# (KYO-259 set the first pass off execution time only; KYO-322 corrected
+# the basis and re-checked every value against it — most were raised, the
+# already-roomy ones were verified sufficient and left unchanged). The
+# execution-time notes above (e.g. "fast, ~5s") describe how long each
+# job actually runs once a runner has it — they remain accurate and are
+# not the timeout basis.
 # =============================================================================
 
 name: CI
@@ -36,7 +51,7 @@ jobs:
   lint-policy:
     name: Lint Suppression Policy
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -89,7 +104,7 @@ jobs:
   trivy-scan:
     name: Trivy Security Scan
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -120,7 +135,7 @@ jobs:
   cargo-audit:
     name: Dependency Audit
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -161,7 +176,7 @@ jobs:
   schema-parity:
     name: Migration Schema Parity
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     env:
       SCCACHE_GHA_ENABLED: "true"
     services:
@@ -220,8 +235,9 @@ jobs:
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
-    # Observed max successful run: 40.9m (last ~15 runs). Set with headroom
-    # for the slowest legitimate compile, not the median (KYO-259).
+    # Observed execution max: 40.9m (last ~15 runs). 75m adds headroom for
+    # the slowest legitimate compile plus runner-acquisition queue time,
+    # which counts against timeout-minutes too (KYO-259, KYO-322).
     timeout-minutes: 75
     env:
       SCCACHE_GHA_ENABLED: "true"
@@ -391,7 +407,13 @@ jobs:
   ssr-contract-tests:
     name: SSR Contract Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Observed execution max: 28.2m (last ~15 runs). 60m is not a simple
+    # multiple of that — it's sized to leave ~32m of deliberate headroom
+    # for runner-acquisition queue delay on top of execution time, since
+    # timeout-minutes counts queued time too (KYO-259 set 45m off
+    # execution time alone, which left only ~17m of queue slack; KYO-322
+    # corrected the basis).
+    timeout-minutes: 60
     env:
       SCCACHE_GHA_ENABLED: "true"
     # postgres backs apps/server/tests/contract_ssr.rs the same way it backs
