@@ -24,7 +24,7 @@ use tracing::{info, warn};
 
 use crate::catalog::helpers::{
     archive_missing_tables, cache_table, resolve_final_status, update_datasource_last_refresh,
-    update_workspace_status, IndexerContext,
+    update_datasource_status, IndexerContext,
 };
 use crate::catalog::types::{CatalogIndexResult, ColumnEntry};
 
@@ -57,8 +57,8 @@ impl UserDatasetIndexer {
                 .with_ids(datasource_config_id, workspace_id);
         }
 
-        // Update workspace status to running
-        let _ = update_workspace_status(
+        // Mark this datasource's catalog refresh as running
+        let _ = update_datasource_status(
             db,
             workspace_id,
             datasource_config_id,
@@ -120,7 +120,7 @@ impl UserDatasetIndexer {
                             project_id,
                             "skipping project due to expired OAuth token"
                         );
-                        let _ = update_workspace_status(
+                        let _ = update_datasource_status(
                             db,
                             workspace_id,
                             datasource_config_id,
@@ -148,7 +148,7 @@ impl UserDatasetIndexer {
             }
 
             // Update progress
-            let _ = update_workspace_status(
+            let _ = update_datasource_status(
                 db,
                 workspace_id,
                 datasource_config_id,
@@ -192,14 +192,14 @@ impl UserDatasetIndexer {
         // Update last refresh timestamp
         let _ = update_datasource_last_refresh(db, datasource_config_id).await;
 
-        // Update workspace status using the resolved final status (KYO-264).
+        // Record this datasource's resolved final status (KYO-264).
         // `nothing_found` alone can't distinguish a genuinely empty-but-
         // accessible set of datasets from a total discovery failure —
         // `resolve_final_status` (shared with the SQL path, KYO-126) draws
         // that line using the `errors` collected above, which now include
         // per-dataset failures via `fold_dataset_outcomes`.
         let (final_status, failure_reason) = resolve_final_status(nothing_found, &errors);
-        let _ = update_workspace_status(
+        let _ = update_datasource_status(
             db,
             workspace_id,
             datasource_config_id,

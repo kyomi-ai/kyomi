@@ -1024,9 +1024,10 @@ where
 
 /// Outcome of [`prepare_manual_catalog_refresh`].
 pub enum ManualRefreshDecision {
-    /// A refresh is genuinely in flight — `workspaces.catalog_refresh_status`
-    /// is `running` AND the start stamp is still within the guard window.
-    /// The caller should not spawn a duplicate background index.
+    /// A refresh is genuinely in flight —
+    /// `datasource_configs.catalog_refresh_status` is `running` AND the
+    /// start stamp is still within the guard window. The caller should not
+    /// spawn a duplicate background index.
     AlreadyRunning,
     /// Validation passed. `credentials` are the OAuth-refreshed credentials,
     /// ready for the caller to hand to the background `index_datasource` call.
@@ -1061,8 +1062,8 @@ pub struct PrepareManualRefreshParams<'a> {
 /// This absorbs everything the `refresh_catalog` server fn used to run
 /// inline before backgrounding the slow table-by-table indexing:
 ///
-/// 1. **Concurrency guard.** `workspaces.catalog_refresh_status == running`
-///    AND `last_index_started_at` within `guard_minutes` — returns
+/// 1. **Concurrency guard.** `datasource_configs.catalog_refresh_status ==
+///    running` AND `last_index_started_at` within `guard_minutes` — returns
 ///    [`ManualRefreshDecision::AlreadyRunning`] without touching credentials
 ///    or the network if so. `catalog_refresh_status` alone isn't checked
 ///    without the stamp because a crash could leave it stuck at `running`
@@ -1088,19 +1089,23 @@ pub async fn prepare_manual_catalog_refresh(
     p: PrepareManualRefreshParams<'_>,
 ) -> kyomi_core::Result<ManualRefreshDecision> {
     #[derive(sqlx::FromRow)]
-    struct WorkspaceRefreshStatusRow {
+    struct DatasourceRefreshStatusRow {
         catalog_refresh_status: Option<kyomi_core::enums::CatalogRefreshStatus>,
     }
 
+    // KYO-267: scoped to this datasource, not the workspace — filtering on
+    // `workspace_id` too (not just `p.datasource.id`) is a tenant-isolation
+    // boundary, not redundant, even though the id is already unique.
     let status_row = kyomi_core::db_fetch_optional!(
         p.db,
-        WorkspaceRefreshStatusRow,
-        "SELECT catalog_refresh_status FROM workspaces WHERE workspace_id = $1",
+        DatasourceRefreshStatusRow,
+        "SELECT catalog_refresh_status FROM datasource_configs WHERE id = $1 AND workspace_id = $2",
+        &p.datasource.id,
         &p.ws_id
     )
     .map_err(|e| {
         kyomi_core::Error::Internal(format!(
-            "failed to load workspace catalog refresh status: {e}"
+            "failed to load datasource catalog refresh status: {e}"
         ))
     })?;
 

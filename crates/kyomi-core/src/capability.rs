@@ -396,8 +396,6 @@ mod tests {
             business_knowledge: None,
             knowledge_updated_at: None,
             last_catalog_refresh: None,
-            catalog_refresh_status: None,
-            catalog_refresh_progress: None,
             catalog_onboarding_completed: false,
             catalog_indexed_projects: None,
             created_at: Utc::now(),

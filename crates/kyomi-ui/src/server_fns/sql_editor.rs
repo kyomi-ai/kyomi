@@ -662,9 +662,9 @@ pub async fn search_catalog(
 /// `CatalogIndexingService::index_datasource()` call (the single catalog
 /// indexing pipeline used by all callers: manual refresh, scheduler,
 /// post-create spawn) in a `tokio::spawn`. The spawned task updates
-/// `workspaces.catalog_refresh_status` on its own (see
-/// `update_workspace_status` in `traits.rs`) — poll it via
-/// `get_catalog_refresh_status`.
+/// `datasource_configs.catalog_refresh_status` on its own (see
+/// `update_datasource_status` in `kyomi-auth/src/catalog/helpers.rs`) —
+/// poll it via `get_catalog_refresh_status`.
 ///
 /// Returns immediately once validation passes, before indexing starts.
 #[server(prefix = "/leptos-api")]
@@ -789,20 +789,20 @@ pub struct CatalogRefreshStatusResponse {
     pub progress: Option<serde_json::Value>,
 }
 
-/// Fetch the current catalog refresh status for a datasource's workspace.
+/// Fetch the current catalog refresh status for a datasource.
 ///
-/// Status is tracked per-workspace (`workspaces.catalog_refresh_status`),
-/// not per-datasource — `datasource_slug` is used only to confirm the
-/// caller has access to a datasource in this workspace before returning
-/// workspace-wide status.
+/// Status is tracked per-datasource (`datasource_configs.catalog_refresh_status`,
+/// KYO-267) — `datasource_slug` both confirms the caller has access to this
+/// datasource in the workspace and identifies which datasource's status to
+/// return.
 #[server(prefix = "/leptos-api")]
 pub async fn get_catalog_refresh_status(
     datasource_slug: String,
 ) -> Result<CatalogRefreshStatusResponse, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    // Resolve the slug to confirm workspace access before returning status.
-    kyomi_auth::datasource_service::resolve_datasource(
+    // Resolve the slug to confirm workspace access and get the datasource id.
+    let datasource = kyomi_auth::datasource_service::resolve_datasource(
         ac.db(),
         &datasource_slug,
         &ac.ws_id,
@@ -812,16 +812,17 @@ pub async fn get_catalog_refresh_status(
     .into_sfn()?;
 
     #[derive(sqlx::FromRow)]
-    struct WorkspaceCatalogStatusRow {
+    struct DatasourceCatalogStatusRow {
         catalog_refresh_status: Option<kyomi_core::enums::CatalogRefreshStatus>,
         catalog_refresh_progress: Option<serde_json::Value>,
     }
 
     let row = kyomi_core::db_fetch_optional!(
         ac.db(),
-        WorkspaceCatalogStatusRow,
-        "SELECT catalog_refresh_status, catalog_refresh_progress FROM workspaces \
-         WHERE workspace_id = $1",
+        DatasourceCatalogStatusRow,
+        "SELECT catalog_refresh_status, catalog_refresh_progress FROM datasource_configs \
+         WHERE id = $1 AND workspace_id = $2",
+        &datasource.id,
         &ac.ws_id
     )
     .into_sfn()?;
