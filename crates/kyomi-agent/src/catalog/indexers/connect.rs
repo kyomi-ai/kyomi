@@ -17,7 +17,7 @@ use tracing::{info, warn};
 
 use crate::catalog::traits::CatalogIndexer;
 use kyomi_auth::catalog::helpers::{
-    archive_missing_tables, cache_table, update_datasource_last_refresh, update_workspace_status,
+    archive_missing_tables, cache_table, update_datasource_last_refresh, update_datasource_status,
     CacheTableParams, IndexerContext,
 };
 use kyomi_auth::catalog::types::{CatalogIndexResult, ColumnEntry};
@@ -119,7 +119,7 @@ impl CatalogIndexer for ConnectIndexer {
                 "Connection test failed during Connect catalog indexing"
             );
             let reason = "Connection test failed — is the Connect binary running?";
-            let _ = update_workspace_status(
+            let _ = update_datasource_status(
                 db, &ctx.workspace_id, &ctx.datasource_config_id, "failed", None, Some(reason),
             ).await;
             return CatalogIndexResult::error(reason)
@@ -127,7 +127,7 @@ impl CatalogIndexer for ConnectIndexer {
                 .with_ids(&ctx.datasource_config_id, &ctx.workspace_id);
         }
 
-        let _ = update_workspace_status(
+        let _ = update_datasource_status(
             db, &ctx.workspace_id, &ctx.datasource_config_id, "running", None, None,
         ).await;
 
@@ -164,7 +164,7 @@ impl CatalogIndexer for ConnectIndexer {
                         "discover_catalog command failed"
                     );
                     let msg = format!("Catalog discovery failed: {e}");
-                    let _ = update_workspace_status(
+                    let _ = update_datasource_status(
                         db, &ctx.workspace_id, &ctx.datasource_config_id, "failed", None,
                         Some(&msg),
                     ).await;
@@ -198,7 +198,7 @@ struct ProcessDiscoveredCatalogParams<'a> {
 }
 
 /// Cache the tables in a discovered Connect catalog, archive whatever's no
-/// longer present, and decide the run's final workspace status.
+/// longer present, and decide the run's final datasource status.
 ///
 /// Split out from [`ConnectIndexer::index_catalog`] so this logic — which
 /// includes the KYO-126 `nothing_found` decision below — is unit-testable
@@ -310,7 +310,7 @@ async fn process_discovered_catalog(params: ProcessDiscoveredCatalogParams<'_>) 
     // (`resolve_final_status`), which still needs to distinguish the two
     // because its per-container errors are visible here on the Connect path
     // but aren't there.
-    let _ = update_workspace_status(
+    let _ = update_datasource_status(
         db,
         &ctx.workspace_id,
         &ctx.datasource_config_id,
@@ -478,12 +478,12 @@ mod tests {
         }
     }
 
-    async fn workspace_status(sq: &sqlx::SqlitePool, workspace_id: &str) -> String {
-        sqlx::query_scalar("SELECT catalog_refresh_status FROM workspaces WHERE workspace_id = ?")
-            .bind(workspace_id)
+    async fn datasource_status(sq: &sqlx::SqlitePool, datasource_config_id: &str) -> String {
+        sqlx::query_scalar("SELECT catalog_refresh_status FROM datasource_configs WHERE id = ?")
+            .bind(datasource_config_id)
             .fetch_one(sq)
             .await
-            .expect("read workspace status")
+            .expect("read datasource status")
     }
 
     /// KYO-126, second pass: a Connect catalog that discovers zero tables
@@ -517,7 +517,7 @@ mod tests {
         assert_eq!(result.tables_indexed, 0);
 
         assert_eq!(
-            workspace_status(sq, &ctx.workspace_id).await,
+            datasource_status(sq, &ctx.datasource_config_id).await,
             "idle",
             "a genuinely empty (but reachable) Connect catalog must not be reported as failed"
         );
@@ -582,7 +582,7 @@ mod tests {
         assert_eq!(cached_rows, 1, "the discovered table must be cached");
 
         assert_eq!(
-            workspace_status(sq, &ctx.workspace_id).await,
+            datasource_status(sq, &ctx.datasource_config_id).await,
             "idle"
         );
     }

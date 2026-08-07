@@ -1052,8 +1052,6 @@ async fn execute_watch_inner(
                settings, \
                business_knowledge, knowledge_updated_at, \
                last_catalog_refresh, \
-               catalog_refresh_status, \
-               catalog_refresh_progress, \
                catalog_onboarding_completed, \
                catalog_indexed_projects, \
                created_at, updated_at \

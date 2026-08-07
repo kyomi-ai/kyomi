@@ -8,7 +8,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::enums::{CatalogRefreshStatus, SubscriptionStatus, SubscriptionTier, WorkspaceRole, WorkspaceStatus};
+use crate::enums::{SubscriptionStatus, SubscriptionTier, WorkspaceRole, WorkspaceStatus};
 
 /// Workspace record — full model matching the Python SQLAlchemy schema.
 ///
@@ -93,12 +93,6 @@ pub struct Workspace {
     // ── Catalog ─────────────────────────────────────────────────────
     /// Last time the schema catalog was refreshed.
     pub last_catalog_refresh: Option<DateTime<Utc>>,
-
-    /// Catalog refresh status: idle, running, etc.
-    pub catalog_refresh_status: Option<CatalogRefreshStatus>,
-
-    /// JSON progress object during catalog refresh.
-    pub catalog_refresh_progress: Option<serde_json::Value>,
 
     /// Whether the catalog onboarding flow is completed.
     #[sqlx(default)]

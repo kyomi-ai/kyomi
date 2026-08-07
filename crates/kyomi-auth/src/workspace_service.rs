@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use kyomi_core::db::in_clause_placeholders;
 use kyomi_core::enums::{
-    CatalogRefreshStatus, SubscriptionStatus, SubscriptionTier, TransferStatus, WorkspaceRole,
+    SubscriptionStatus, SubscriptionTier, TransferStatus, WorkspaceRole,
     WorkspaceStatus,
 };
 
@@ -198,8 +198,6 @@ struct WorkspaceMembershipRow {
     business_knowledge: Option<String>,
     knowledge_updated_at: Option<DateTime<Utc>>,
     last_catalog_refresh: Option<DateTime<Utc>>,
-    catalog_refresh_status: Option<CatalogRefreshStatus>,
-    catalog_refresh_progress: Option<serde_json::Value>,
     #[sqlx(default)]
     catalog_onboarding_completed: bool,
     catalog_indexed_projects: Option<serde_json::Value>,
@@ -241,8 +239,6 @@ impl WorkspaceMembershipRow {
             business_knowledge: self.business_knowledge,
             knowledge_updated_at: self.knowledge_updated_at,
             last_catalog_refresh: self.last_catalog_refresh,
-            catalog_refresh_status: self.catalog_refresh_status,
-            catalog_refresh_progress: self.catalog_refresh_progress,
             catalog_onboarding_completed: self.catalog_onboarding_completed,
             catalog_indexed_projects: self.catalog_indexed_projects,
             created_at: self.created_at,
@@ -289,7 +285,7 @@ pub async fn get_user_workspaces(
            w.ai_credits_used_usd, w.ai_bundle_balance_usd, w.analytics_bundle_events, \
            w.user_limit, w.stripe_customer_id, w.stripe_subscription_id, w.settings, \
            w.business_knowledge, w.knowledge_updated_at, w.last_catalog_refresh, \
-           w.catalog_refresh_status, w.catalog_refresh_progress, w.catalog_onboarding_completed, \
+           w.catalog_onboarding_completed, \
            w.catalog_indexed_projects, w.created_at, w.updated_at, \
            wu.id AS wu_id, wu.workspace_id AS wu_workspace_id, wu.user_id AS wu_user_id, \
            wu.role AS wu_role, wu.active AS wu_active, wu.created_at AS wu_created_at, \

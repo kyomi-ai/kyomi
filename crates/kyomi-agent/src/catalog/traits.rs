@@ -22,7 +22,7 @@ use tracing::{info, warn};
 
 use kyomi_auth::catalog::helpers::{
     archive_missing_tables, cache_table, resolve_final_status, update_datasource_last_refresh,
-    update_workspace_status, CacheTableParams, IndexerContext,
+    update_datasource_status, CacheTableParams, IndexerContext,
 };
 use kyomi_auth::catalog::types::{CatalogIndexResult, ColumnEntry, TableEntry};
 
@@ -41,7 +41,7 @@ pub trait CatalogIndexer: Send + Sync {
     /// 2. Connect to the datasource
     /// 3. Discover and cache tables with embeddings
     /// 4. Archive missing tables
-    /// 5. Update workspace status
+    /// 5. Update this datasource's catalog refresh status
     async fn index_catalog(
         &self,
         ctx: &IndexerContext,
@@ -169,7 +169,7 @@ pub trait SQLCatalogIndexer: Send + Sync {
 
 // ─── Shared helpers ────────────────────────────────────────────────────────────
 
-// `can_refresh_now`, `archive_missing_tables`, `update_workspace_status`,
+// `can_refresh_now`, `archive_missing_tables`, `update_datasource_status`,
 // `update_datasource_last_refresh`, `cache_table` all live in
 // `kyomi_auth::catalog::helpers` and are imported above.
 
@@ -392,7 +392,7 @@ pub async fn index_catalog_sql(
     let start_time = Utc::now();
 
     // Update status to running
-    let _ = update_workspace_status(
+    let _ = update_datasource_status(
         db,
         &ctx.workspace_id,
         &ctx.datasource_config_id,
@@ -419,7 +419,7 @@ pub async fn index_catalog_sql(
             )
             .with_ids(&ctx.datasource_config_id, &ctx.workspace_id);
 
-        let _ = update_workspace_status(
+        let _ = update_datasource_status(
             db,
             &ctx.workspace_id,
             &ctx.datasource_config_id,
@@ -446,7 +446,7 @@ pub async fn index_catalog_sql(
                 .with_times(&start_time.to_rfc3339(), &Utc::now().to_rfc3339())
                 .with_ids(&ctx.datasource_config_id, &ctx.workspace_id);
 
-            let _ = update_workspace_status(
+            let _ = update_datasource_status(
                 db,
                 &ctx.workspace_id,
                 &ctx.datasource_config_id,
@@ -470,7 +470,7 @@ pub async fn index_catalog_sql(
                 .with_times(&start_time.to_rfc3339(), &Utc::now().to_rfc3339())
                 .with_ids(&ctx.datasource_config_id, &ctx.workspace_id);
 
-            let _ = update_workspace_status(
+            let _ = update_datasource_status(
                 db,
                 &ctx.workspace_id,
                 &ctx.datasource_config_id,
@@ -492,7 +492,7 @@ pub async fn index_catalog_sql(
             .with_times(&start_time.to_rfc3339(), &Utc::now().to_rfc3339())
             .with_ids(&ctx.datasource_config_id, &ctx.workspace_id);
 
-        let _ = update_workspace_status(
+        let _ = update_datasource_status(
             db,
             &ctx.workspace_id,
             &ctx.datasource_config_id,
@@ -515,7 +515,7 @@ pub async fn index_catalog_sql(
                 .with_times(&start_time.to_rfc3339(), &Utc::now().to_rfc3339())
                 .with_ids(&ctx.datasource_config_id, &ctx.workspace_id);
 
-            let _ = update_workspace_status(
+            let _ = update_datasource_status(
                 db,
                 &ctx.workspace_id,
                 &ctx.datasource_config_id,
@@ -704,12 +704,12 @@ pub async fn index_catalog_sql(
     // Update datasource last refresh time
     let _ = update_datasource_last_refresh(db, &ctx.datasource_config_id).await;
 
-    // Update workspace status. A container set that yields zero tables is
+    // Record this datasource's status. A container set that yields zero tables is
     // only a failure if at least one discovery error occurred along the
     // way (KYO-126) — a container that is accessible but genuinely empty
     // must still report `idle`. See `resolve_final_status`.
     let (final_status, failure_reason) = resolve_final_status(nothing_found, &errors);
-    let _ = update_workspace_status(
+    let _ = update_datasource_status(
         db,
         &ctx.workspace_id,
         &ctx.datasource_config_id,
@@ -1364,8 +1364,8 @@ mod tests {
     }
 
     /// KYO-126, second pass: a Databricks-shaped catalog where every schema
-    /// is permission-denied must end up `"failed"` on the workspace status
-    /// column with a real reason, not `"idle"`. Before this fix, the
+    /// is permission-denied must end up `"failed"` on the datasource's
+    /// status column with a real reason, not `"idle"`. Before this fix, the
     /// per-schema failures never reached `errors` at all — the container
     /// call returned `Ok(vec![])`, `resolve_final_status(true, &[])` always
     /// resolves to `("idle", None)` regardless of how the emptiness arose.
@@ -1406,18 +1406,18 @@ mod tests {
             "both per-schema partial failures must reach the errors accumulator"
         );
 
-        // The workspace-scoped status column is what the UI actually reads
+        // The datasource-scoped status column is what the UI actually reads
         // (`CatalogIndexResult::status` is always "error" whenever nothing
         // is found, successful-empty or genuinely-failed alike — see
         // `resolve_final_status`'s doc comment for why that distinction
-        // lives in the workspace column instead).
+        // lives in the status column instead).
         let status: String = sqlx::query_scalar(
-            "SELECT catalog_refresh_status FROM workspaces WHERE workspace_id = ?",
+            "SELECT catalog_refresh_status FROM datasource_configs WHERE id = ?",
         )
-        .bind(&ctx.workspace_id)
+        .bind(&ctx.datasource_config_id)
         .fetch_one(sq)
         .await
-        .expect("read workspace status");
+        .expect("read datasource status");
         assert_eq!(
             status, "failed",
             "a catalog where every schema is permission-denied must surface as failed"
@@ -1492,12 +1492,12 @@ mod tests {
         );
 
         let status: String = sqlx::query_scalar(
-            "SELECT catalog_refresh_status FROM workspaces WHERE workspace_id = ?",
+            "SELECT catalog_refresh_status FROM datasource_configs WHERE id = ?",
         )
-        .bind(&ctx.workspace_id)
+        .bind(&ctx.datasource_config_id)
         .fetch_one(sq)
         .await
-        .expect("read workspace status");
+        .expect("read datasource status");
         assert_eq!(
             status, "idle",
             "partial success (one bad schema, others fine) must not be reported as failed"

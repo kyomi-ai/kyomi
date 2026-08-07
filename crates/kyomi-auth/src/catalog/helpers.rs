@@ -173,12 +173,18 @@ pub async fn archive_missing_tables(
     Ok(archived_names)
 }
 
-/// Update the workspace's catalog refresh status.
+/// Update a datasource's catalog refresh status.
 ///
-/// Sets the `catalog_refresh_status` VARCHAR column on the workspace.
+/// Sets the `catalog_refresh_status` VARCHAR column on `datasource_configs`,
+/// scoped to `datasource_config_id`.
 ///
 /// The column is VARCHAR(50) with values: 'idle', 'running', 'failed'.
 /// Progress details are stored in `catalog_refresh_progress` (json column).
+///
+/// Filters on `workspace_id` in addition to `datasource_config_id` — that is
+/// a tenant-isolation boundary (a caller must not be able to update another
+/// workspace's datasource by id alone) and must not be dropped just because
+/// `datasource_config_id` is already globally unique.
 ///
 /// `error` is a human-readable failure reason, set whenever `status` is
 /// `"failed"` and a specific cause is known (KYO-126). It is written as a
@@ -191,33 +197,17 @@ pub async fn archive_missing_tables(
 /// that lookup always missed and the poller fell back to a generic message
 /// even when a concrete failure reason was available.
 ///
-/// ### Known limitation: workspace-scoped concurrency (KYO-126)
-///
-/// `catalog_refresh_status` and `catalog_refresh_progress` are columns on
-/// `workspaces`, not on `datasource_configs` — every datasource in a
-/// workspace shares the same pair of columns, and this function is the sole
-/// writer of both. [`index_started_within`] guards against a *single*
-/// datasource's refresh double-running, but it keys off
-/// `datasource_config_id`, not `workspace_id`, so two *different*
-/// datasources in the same workspace can legitimately refresh at the same
-/// time. If datasource A's run fails here (writing `"failed"` + A's reason)
-/// and datasource B's run then finishes and calls this function with
-/// `"idle"`, B's write silently overwrites A's failure — there is no
-/// history, so nothing records that A ever failed. `attribute_refresh_failure`
-/// (`kyomi-ui/src/server_fns/datasources.rs`) guards against
-/// *misattributing* a still-present failure to the wrong datasource, but it
-/// cannot protect a failure that has already been clobbered by a later
-/// write: by the time it reads the row, the failing status may simply be
-/// gone, and the datasource whose refresh actually failed will show a clean
-/// "idle" Catalog tab.
-///
-/// This is a pre-existing limitation of the workspace-scoped column, not
-/// something callers can work around locally (no ordering discipline
-/// between concurrent callers changes the fact that only one status/reason
-/// pair can be stored at a time). Fixing it properly requires a schema
-/// change — e.g. moving `catalog_refresh_status`/`catalog_refresh_progress`
-/// onto `datasource_configs` — tracked separately, not attempted here.
-pub async fn update_workspace_status(
+/// KYO-267: this was previously `update_workspace_status`, writing to
+/// `workspaces.catalog_refresh_status`/`catalog_refresh_progress` — columns
+/// shared by every datasource in the workspace. Two different datasources
+/// refreshing concurrently (`index_started_within` below keys off
+/// `datasource_config_id`, not `workspace_id`, so this was always possible)
+/// meant one datasource's successful `"idle"` write could silently
+/// overwrite another's `"failed"` + reason, with no history of the failure
+/// ever having happened. Moving both columns onto `datasource_configs`
+/// removes the shared-state entirely — each datasource now owns its own
+/// status/reason pair.
+pub async fn update_datasource_status(
     db: &DbPool,
     workspace_id: &str,
     datasource_config_id: &str,
@@ -230,24 +220,32 @@ pub async fn update_workspace_status(
     let is_pg = db.is_postgres();
     let json_cast = if is_pg { "::json" } else { "" };
     let sql = format!(
-        "UPDATE workspaces SET catalog_refresh_status = $1, catalog_refresh_progress = $2{json_cast} WHERE workspace_id = $3"
+        "UPDATE datasource_configs SET catalog_refresh_status = $1, catalog_refresh_progress = $2{json_cast} WHERE id = $3 AND workspace_id = $4"
     );
 
-    kyomi_core::db_execute!(db, &sql, status, progress_json, workspace_id)
+    kyomi_core::db_execute!(db, &sql, status, progress_json, datasource_config_id, workspace_id)
         .map_err(|e| {
-            kyomi_core::Error::Internal(format!("failed to update workspace status: {e}"))
+            kyomi_core::Error::Internal(format!("failed to update datasource status: {e}"))
         })?;
 
     Ok(())
 }
 
-/// Build the JSON envelope stored in `workspaces.catalog_refresh_progress`.
+/// Build the JSON envelope stored in `datasource_configs.catalog_refresh_progress`.
 ///
-/// Extracted from [`update_workspace_status`] so the shape — in particular,
+/// Extracted from [`update_datasource_status`] so the shape — in particular,
 /// `"error"` living as a top-level sibling of `"progress"` rather than
 /// nested inside it — is directly testable. This is the exact shape
 /// `get_catalog_refresh_status` and the settings page's refresh poller read
 /// (KYO-126): both call `envelope.get("error")` on the whole column value.
+///
+/// The `"datasource_config_id"` key is redundant now that the envelope
+/// lives on the datasource's own row (KYO-267) rather than a shared
+/// workspace column — a reader no longer needs it to know which datasource
+/// a status belongs to. It is kept purely as informational/debugging
+/// context (costs nothing, and removing it risked breaking a reader that
+/// wasn't checked), not because anything still depends on it for
+/// attribution.
 fn build_progress_envelope(
     datasource_config_id: &str,
     progress: Option<&Value>,
@@ -261,8 +259,9 @@ fn build_progress_envelope(
     })
 }
 
-/// Determine the final `workspaces.catalog_refresh_status` value and (when
-/// applicable) a failure reason, from the outcome of a catalog indexing run.
+/// Determine the final `datasource_configs.catalog_refresh_status` value and
+/// (when applicable) a failure reason, from the outcome of a catalog
+/// indexing run.
 ///
 /// Shared by both the SQL-based indexing template method
 /// (`kyomi_agent::catalog::traits::index_catalog_sql`) and the BigQuery
@@ -879,5 +878,143 @@ mod tests {
         let extracted = extract_schema_signature(&metadata);
 
         assert_eq!(computed, extracted);
+    }
+
+    // ── update_datasource_status concurrency (KYO-267) ───────────────────
+
+    /// Seeds one workspace with two datasource rows, `datasource_config_id`s
+    /// `"ds-A-{suffix}"` and `"ds-B-{suffix}"`. Parameterized by suffix so
+    /// the two tests below don't collide on primary keys.
+    async fn seed_two_datasource_fixture(sq: &sqlx::SqlitePool, suffix: &str) -> (String, String, String) {
+        let user_id = format!("u-concurrency-{suffix}");
+        let workspace_id = format!("ws-concurrency-{suffix}");
+        let ds_a = format!("ds-A-{suffix}");
+        let ds_b = format!("ds-B-{suffix}");
+
+        sqlx::query("INSERT INTO users (user_id, email) VALUES (?, ?)")
+            .bind(&user_id)
+            .bind(format!("{user_id}@test.local"))
+            .execute(sq)
+            .await
+            .expect("insert user");
+        sqlx::query("INSERT INTO workspaces (workspace_id, name, owner_user_id) VALUES (?, 'WS', ?)")
+            .bind(&workspace_id)
+            .bind(&user_id)
+            .execute(sq)
+            .await
+            .expect("insert workspace");
+        for (id, slug) in [(&ds_a, "a"), (&ds_b, "b")] {
+            sqlx::query(
+                "INSERT INTO datasource_configs (id, workspace_id, name, datasource_type, slug) \
+                 VALUES (?, ?, ?, 'postgres', ?)",
+            )
+            .bind(id)
+            .bind(&workspace_id)
+            .bind(format!("DS-{slug}-{suffix}"))
+            .bind(format!("{slug}-{suffix}"))
+            .execute(sq)
+            .await
+            .expect("insert datasource_config");
+        }
+
+        (workspace_id, ds_a, ds_b)
+    }
+
+    /// Reads back `(catalog_refresh_status, error reason)` for a single
+    /// datasource, extracting the reason the same way
+    /// `get_catalog_refresh_status`/`get_catalog_stats` do: the top-level
+    /// `"error"` key of the stored `catalog_refresh_progress` envelope.
+    async fn read_datasource_status(sq: &sqlx::SqlitePool, datasource_config_id: &str) -> (String, Option<String>) {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            catalog_refresh_status: Option<String>,
+            catalog_refresh_progress: Option<String>,
+        }
+
+        let row: Row = sqlx::query_as(
+            "SELECT catalog_refresh_status, catalog_refresh_progress FROM datasource_configs WHERE id = ?",
+        )
+        .bind(datasource_config_id)
+        .fetch_one(sq)
+        .await
+        .expect("read datasource status");
+
+        let reason = row
+            .catalog_refresh_progress
+            .as_deref()
+            .and_then(|p| serde_json::from_str::<Value>(p).ok())
+            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string));
+
+        (row.catalog_refresh_status.unwrap_or_else(|| "idle".to_string()), reason)
+    }
+
+    /// This is the whole point of KYO-267. Before this fix,
+    /// `catalog_refresh_status`/`catalog_refresh_progress` lived on
+    /// `workspaces` and were shared by every datasource in it — datasource
+    /// A failing, then datasource B finishing successfully, meant B's
+    /// `"idle"` write silently clobbered A's `"failed"` + reason with no
+    /// history of the failure ever having existed (the KYO-126 bug
+    /// reintroduced by a different mechanism). Each datasource now owns its
+    /// own status/reason pair, so A's failure must survive B's unrelated
+    /// success regardless of write order.
+    #[tokio::test]
+    async fn concurrent_datasources_retain_independent_terminal_status() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        let (workspace_id, ds_a, ds_b) = seed_two_datasource_fixture(sq, "order1").await;
+
+        // A fails first...
+        update_datasource_status(&db, &workspace_id, &ds_a, "failed", None, Some("permission denied for schema analytics"))
+            .await
+            .expect("write A failed");
+        // ...then B finishes successfully.
+        update_datasource_status(&db, &workspace_id, &ds_b, "idle", None, None)
+            .await
+            .expect("write B idle");
+
+        let (status_a, reason_a) = read_datasource_status(sq, &ds_a).await;
+        let (status_b, reason_b) = read_datasource_status(sq, &ds_b).await;
+
+        assert_eq!(status_a, "failed", "B's success must not clobber A's failure");
+        assert_eq!(reason_a, Some("permission denied for schema analytics".to_string()));
+        assert_eq!(status_b, "idle");
+        assert_eq!(reason_b, None);
+    }
+
+    /// Companion to the test above with the write order reversed: B
+    /// succeeds first, then A fails. A shared-column implementation would
+    /// report whichever wrote last (A's `"failed"`) for *both* datasources
+    /// here; per-datasource columns must still show each its own outcome
+    /// regardless of ordering.
+    #[tokio::test]
+    async fn concurrent_datasources_retain_independent_terminal_status_reverse_order() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        let (workspace_id, ds_a, ds_b) = seed_two_datasource_fixture(sq, "order2").await;
+
+        // B succeeds first...
+        update_datasource_status(&db, &workspace_id, &ds_b, "idle", None, None)
+            .await
+            .expect("write B idle");
+        // ...then A fails.
+        update_datasource_status(&db, &workspace_id, &ds_a, "failed", None, Some("connection timed out"))
+            .await
+            .expect("write A failed");
+
+        let (status_a, reason_a) = read_datasource_status(sq, &ds_a).await;
+        let (status_b, reason_b) = read_datasource_status(sq, &ds_b).await;
+
+        assert_eq!(status_a, "failed");
+        assert_eq!(reason_a, Some("connection timed out".to_string()));
+        assert_eq!(status_b, "idle", "A's later failure must not clobber B's earlier success");
+        assert_eq!(reason_b, None);
     }
 }

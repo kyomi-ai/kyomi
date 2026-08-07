@@ -7280,10 +7280,10 @@ fn EditModeCatalogTab(
                     // refresh is being watched, this renders from
                     // `CatalogStatsResult` any time the page loads — so a
                     // background/initial index failure (nobody was polling)
-                    // still leaves a visible trace. `refresh_failed` is
-                    // already attributed to this datasource server-side
-                    // (`attribute_refresh_failure`), so a failure on another
-                    // datasource in the same workspace never renders here.
+                    // still leaves a visible trace. `refresh_failed` reads
+                    // `catalog_refresh_status` directly off this datasource's
+                    // own row (KYO-267), so a failure on another datasource
+                    // in the same workspace can never render here.
                     //
                     // Suppressed while the transient "Refresh error" Alert
                     // above is showing a result from the same manual refresh

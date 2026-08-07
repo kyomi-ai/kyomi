@@ -221,16 +221,14 @@ pub struct CatalogStatsResult {
     pub table_count: i64,
     pub schema_count: i64,
     pub last_indexed: Option<String>,
-    /// True if the workspace's most recent catalog refresh failed AND that
-    /// failure is attributed to *this* datasource (KYO-126).
-    ///
-    /// `catalog_refresh_status` is a per-workspace column, not per-datasource
-    /// — every datasource in the workspace shares it. This field is
-    /// server-computed (see `attribute_refresh_failure`) so the Catalog tab
-    /// never shows datasource A's failure on datasource B's page. Deliberately
-    /// a plain `bool`, not the typed `kyomi_core::enums::CatalogRefreshStatus`
-    /// — `kyomi-ui` compiles to wasm32 and `kyomi-core` is an `ssr`-only
-    /// dependency (see `docs/CODING_STANDARDS.md`).
+    /// True if this datasource's most recent catalog refresh failed
+    /// (KYO-126, made genuinely per-datasource by KYO-267 —
+    /// `catalog_refresh_status` now lives on `datasource_configs`, so no
+    /// cross-datasource attribution step is needed to know whose failure
+    /// this is). Deliberately a plain `bool`, not the typed
+    /// `kyomi_core::enums::CatalogRefreshStatus` — `kyomi-ui` compiles to
+    /// wasm32 and `kyomi-core` is an `ssr`-only dependency (see
+    /// `docs/CODING_STANDARDS.md`).
     pub refresh_failed: bool,
     /// Human-readable reason for the failure, when one was recorded.
     /// `None` even when `refresh_failed` is `true` means no specific reason
@@ -705,57 +703,6 @@ pub(crate) async fn create_query_provider(
     Ok((ds, provider))
 }
 
-/// Determine whether the workspace's most recent catalog refresh failure
-/// belongs to `datasource_id`, and extract the reason if so.
-///
-/// `catalog_refresh_status`/`catalog_refresh_progress` are workspace-scoped
-/// columns shared by every datasource in the workspace (KYO-126) — a
-/// failure recorded while refreshing datasource A must never be shown on
-/// datasource B's Catalog tab. `update_workspace_status`
-/// (`kyomi-auth/src/catalog/helpers.rs`) stamps the failing
-/// `datasource_config_id` into the progress envelope specifically so this
-/// attribution can be made; a status of `"failed"` with no matching
-/// `datasource_config_id` (or no progress at all) is not attributed here.
-///
-/// ### This does not close the workspace-scoped concurrency gap
-///
-/// This function only guards *misattribution* — showing A's failure on B's
-/// tab. It cannot recover a failure that was already overwritten before this
-/// function ever ran: if datasource A fails and datasource B's refresh
-/// completes successfully afterward, `update_workspace_status` (whose doc
-/// comment on `kyomi-auth`'s copy has the full explanation) has already
-/// replaced A's `"failed"` + reason with B's `"idle"` by the time this
-/// function reads the row. There is nothing left to attribute — A's Catalog
-/// tab will show clean, even though its refresh genuinely failed. This is
-/// the same pre-existing workspace-scoped-column limitation, not a bug in
-/// the attribution check itself; fixing it requires a schema change (see
-/// `update_workspace_status`'s doc comment), not a change here.
-#[cfg(feature = "ssr")]
-fn attribute_refresh_failure(
-    datasource_id: &str,
-    status: Option<kyomi_core::enums::CatalogRefreshStatus>,
-    progress: Option<&serde_json::Value>,
-) -> (bool, Option<String>) {
-    if status != Some(kyomi_core::enums::CatalogRefreshStatus::Failed) {
-        return (false, None);
-    }
-
-    let Some(progress) = progress else {
-        return (false, None);
-    };
-
-    let owning_datasource_id = progress.get("datasource_config_id").and_then(|v| v.as_str());
-    if owning_datasource_id != Some(datasource_id) {
-        return (false, None);
-    }
-
-    let reason = progress
-        .get("error")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-    (true, reason)
-}
-
 /// Return table count, schema count, and last-indexed timestamp for a datasource.
 ///
 /// Used by the datasource settings page to display catalog health at a glance.
@@ -821,30 +768,34 @@ pub async fn get_catalog_stats(
         .and_then(|r| r.last_catalog_refresh)
         .map(|dt| dt.to_rfc3339());
 
-    // KYO-126: attribute a workspace-scoped refresh failure to this
-    // datasource, if it's the one that caused it — see
-    // `attribute_refresh_failure`.
+    // KYO-267: catalog_refresh_status/progress now live directly on this
+    // datasource's own row, so no cross-datasource attribution step is
+    // needed — a failure recorded here can only ever belong to this
+    // datasource.
     #[derive(sqlx::FromRow)]
-    struct WorkspaceRefreshRow {
+    struct DatasourceRefreshRow {
         catalog_refresh_status: Option<kyomi_core::enums::CatalogRefreshStatus>,
         catalog_refresh_progress: Option<serde_json::Value>,
     }
     let refresh_row = kyomi_core::db_fetch_optional!(
         ac.db(),
-        WorkspaceRefreshRow,
-        "SELECT catalog_refresh_status, catalog_refresh_progress FROM workspaces \
-         WHERE workspace_id = $1",
+        DatasourceRefreshRow,
+        "SELECT catalog_refresh_status, catalog_refresh_progress FROM datasource_configs \
+         WHERE id = $1 AND workspace_id = $2",
+        &datasource_id,
         &ac.ws_id
     )
     .into_sfn()?;
 
-    let (refresh_failed, refresh_failure_reason) = match refresh_row {
-        Some(row) => attribute_refresh_failure(
-            &datasource_id,
-            row.catalog_refresh_status,
-            row.catalog_refresh_progress.as_ref(),
-        ),
-        None => (false, None),
+    let refresh_failed = refresh_row
+        .as_ref()
+        .is_some_and(|row| row.catalog_refresh_status == Some(kyomi_core::enums::CatalogRefreshStatus::Failed));
+    let refresh_failure_reason = if refresh_failed {
+        refresh_row
+            .and_then(|row| row.catalog_refresh_progress)
+            .and_then(|progress| progress.get("error").and_then(|v| v.as_str()).map(str::to_string))
+    } else {
+        None
     };
 
     Ok(CatalogStatsResult {
@@ -900,63 +851,3 @@ mod overlay_credentials_tests {
     }
 }
 
-#[cfg(all(test, feature = "ssr"))]
-mod attribute_refresh_failure_tests {
-    use super::attribute_refresh_failure;
-    use kyomi_core::enums::CatalogRefreshStatus;
-    use serde_json::json;
-
-    #[test]
-    fn not_failed_status_is_never_attributed() {
-        for status in [None, Some(CatalogRefreshStatus::Idle), Some(CatalogRefreshStatus::Running)] {
-            let progress = json!({"datasource_config_id": "ds-1", "error": "boom"});
-            let (failed, reason) = attribute_refresh_failure("ds-1", status, Some(&progress));
-            assert!(!failed, "status {status:?} must never be attributed as a failure");
-            assert_eq!(reason, None);
-        }
-    }
-
-    #[test]
-    fn failed_status_with_no_progress_is_not_attributed() {
-        let (failed, reason) =
-            attribute_refresh_failure("ds-1", Some(CatalogRefreshStatus::Failed), None);
-        assert!(!failed);
-        assert_eq!(reason, None);
-    }
-
-    #[test]
-    fn failed_status_for_a_different_datasource_is_not_attributed() {
-        // KYO-126: catalog_refresh_status is workspace-scoped — a failure
-        // recorded while refreshing datasource A must not render on
-        // datasource B's Catalog tab.
-        let progress = json!({
-            "datasource_config_id": "ds-A",
-            "error": "permission denied for schema analytics",
-        });
-        let (failed, reason) =
-            attribute_refresh_failure("ds-B", Some(CatalogRefreshStatus::Failed), Some(&progress));
-        assert!(!failed, "a failure belonging to a different datasource must not attribute here");
-        assert_eq!(reason, None);
-    }
-
-    #[test]
-    fn failed_status_for_this_datasource_is_attributed_with_reason() {
-        let progress = json!({
-            "datasource_config_id": "ds-1",
-            "error": "permission denied for schema analytics",
-        });
-        let (failed, reason) =
-            attribute_refresh_failure("ds-1", Some(CatalogRefreshStatus::Failed), Some(&progress));
-        assert!(failed);
-        assert_eq!(reason, Some("permission denied for schema analytics".to_string()));
-    }
-
-    #[test]
-    fn failed_status_for_this_datasource_without_error_key_is_attributed_without_reason() {
-        let progress = json!({"datasource_config_id": "ds-1", "error": null});
-        let (failed, reason) =
-            attribute_refresh_failure("ds-1", Some(CatalogRefreshStatus::Failed), Some(&progress));
-        assert!(failed, "still attributed — the UI falls back to a generic message");
-        assert_eq!(reason, None);
-    }
-}
