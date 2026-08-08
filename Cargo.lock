@@ -6213,9 +6213,9 @@ dependencies = [
 
 [[package]]
 name = "kyomi-connect-protocol"
-version = "1.4.0"
+version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0939d6b08dc889261a2899c62a66155fb95abf007e0a874787af2cb426a841fd"
+checksum = "6dde339653cb245f2ce7f33d814ac368a990385d3d6a50c5e8505d92c97e992c"
 dependencies = [
  "base64 0.22.1",
  "futures-util",
