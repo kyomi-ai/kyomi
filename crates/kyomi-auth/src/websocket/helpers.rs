@@ -998,18 +998,29 @@ pub async fn broadcast_chat_session_sync(
     let (data, is_shared) = if matches!(action, SyncActionType::Delete) {
         (None, false)
     } else {
-        let result = crate::chat_service::fetch_session_snapshot(db, session_id)
-            .await
-            .map(|(_ws_id, snapshot)| {
+        match crate::chat_service::fetch_session_snapshot(db, session_id).await {
+            Ok(Some((_ws_id, snapshot))) => {
                 let shared = snapshot
                     .get("shared")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
                 (Some(snapshot), shared)
-            });
-        match result {
-            Some((data, shared)) => (data, shared),
-            None => return,
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    session_id,
+                    "chat session sync broadcast: snapshot unavailable; skipping broadcast"
+                );
+                return;
+            }
+            Err(e) => {
+                tracing::error!(
+                    session_id,
+                    error = %e,
+                    "chat session sync broadcast: snapshot fetch failed; skipping broadcast"
+                );
+                return;
+            }
         }
     };
 
@@ -1060,21 +1071,34 @@ pub async fn broadcast_chat_session_unshare(
     send_sync_action(manager, workspace_id, &delete_action, Some(owner_user_id)).await;
 
     // Send update to owner with latest snapshot so they keep it.
-    if let Some((_ws, snapshot)) =
-        crate::chat_service::fetch_session_snapshot(db, session_id).await
-    {
-        let update_action = SyncAction {
-            sync_id: 0,
-            entity_type: entity_types::CHAT_SESSION.to_string(),
-            entity_id: session_id.to_string(),
-            workspace_id: workspace_id.to_string(),
-            action: SyncActionType::Update,
-            data: Some(snapshot),
-            timestamp: chrono::Utc::now().to_rfc3339(),
-        };
-        let msg = WebSocketMessage::new(MessageType::SyncAction)
-            .with_data(serde_json::to_value(&update_action).unwrap_or_default());
-        manager.send_to_user(owner_user_id, msg).await;
+    match crate::chat_service::fetch_session_snapshot(db, session_id).await {
+        Ok(Some((_ws, snapshot))) => {
+            let update_action = SyncAction {
+                sync_id: 0,
+                entity_type: entity_types::CHAT_SESSION.to_string(),
+                entity_id: session_id.to_string(),
+                workspace_id: workspace_id.to_string(),
+                action: SyncActionType::Update,
+                data: Some(snapshot),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+            };
+            let msg = WebSocketMessage::new(MessageType::SyncAction)
+                .with_data(serde_json::to_value(&update_action).unwrap_or_default());
+            manager.send_to_user(owner_user_id, msg).await;
+        }
+        Ok(None) => {
+            tracing::warn!(
+                session_id,
+                "chat session unshare broadcast: snapshot unavailable; skipping owner update"
+            );
+        }
+        Err(e) => {
+            tracing::error!(
+                session_id,
+                error = %e,
+                "chat session unshare broadcast: snapshot fetch failed; skipping owner update"
+            );
+        }
     }
 }
 
