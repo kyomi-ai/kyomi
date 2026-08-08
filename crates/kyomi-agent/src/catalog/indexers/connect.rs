@@ -17,8 +17,8 @@ use tracing::{info, warn};
 
 use crate::catalog::traits::CatalogIndexer;
 use kyomi_auth::catalog::helpers::{
-    archive_missing_tables, cache_table, update_datasource_last_refresh, update_datasource_status,
-    CacheTableParams, IndexerContext,
+    archive_missing_tables, cache_table, resolve_final_status, update_datasource_last_refresh,
+    update_datasource_status, CacheTableParams, IndexerContext,
 };
 use kyomi_auth::catalog::types::{CatalogIndexResult, ColumnEntry};
 use kyomi_core::connect_protocol::{CatalogResult, DiscoverCatalogParams};
@@ -72,6 +72,13 @@ fn connect_container_scope(connection_config: &Value) -> ContainerScope {
 /// ignores it and returns everything — this client-side pass guarantees a
 /// scoped refresh only ever caches the selected containers regardless of the
 /// agent's version. A `None` scope (index all) leaves the result untouched.
+///
+/// Only `containers` is filtered — `errors` (the per-container/per-table
+/// discovery failures the agent recorded, kyomi-connect-protocol 1.4.1) is
+/// passed through untouched. Those errors describe containers that failed
+/// *during discovery*, before they could ever appear here; scope filtering
+/// has nothing to say about them, and dropping them would silently defeat
+/// `process_discovered_catalog`'s `resolve_final_status` decision.
 fn filter_catalog_to_scope(mut catalog: CatalogResult, scope: Option<&[String]>) -> CatalogResult {
     if let Some(scope) = scope {
         catalog
@@ -142,7 +149,10 @@ impl CatalogIndexer for ConnectIndexer {
                 datasource_config_id = ctx.datasource_config_id,
                 "no containers selected for Connect indexing — archiving existing catalog"
             );
-            CatalogResult { containers: Vec::new() }
+            CatalogResult {
+                containers: Vec::new(),
+                errors: Vec::new(),
+            }
         } else {
             let scoped_containers = match &scope {
                 ContainerScope::Only(names) => Some(names.clone()),
@@ -294,29 +304,40 @@ async fn process_discovered_catalog(params: ProcessDiscoveredCatalogParams<'_>) 
 
     let _ = update_datasource_last_refresh(db, &ctx.datasource_config_id).await;
 
-    // `nothing_found` on this path can no longer be blamed on a hidden
-    // permission error: the agent-side fix (kyomi-connect PR #16) makes a
-    // genuine permission denial surface as a real `Err` from
-    // `discover_catalog`, which `index_catalog` already catches and maps to
-    // `"failed"` with the agent's own message before this function is ever
-    // called. By the time execution reaches here, discovery itself
-    // succeeded — `nothing_found` means the selected containers were read
-    // successfully and simply contain no cacheable tables. Reporting that
-    // as `"idle"` restores the pre-KYO-126 behavior for this path, which was
-    // never the reported bug here: mapping it to `"failed"` instead would
-    // leave a freshly-connected or legitimately empty Connect datasource
-    // stuck behind a permanent red alert with nothing to fix. See KYO-126's
-    // review notes for why this differs from the direct SQL path
-    // (`resolve_final_status`), which still needs to distinguish the two
-    // because its per-container errors are visible here on the Connect path
-    // but aren't there.
+    // KYO-268 phase 2: `nothing_found` can no longer be assumed to mean "a
+    // fully successful discovery that simply found no tables" — that
+    // premise (from the KYO-126 fix this comment used to describe) held
+    // only for a *total* denial, which is still unchanged: it surfaces as a
+    // real `Err` from `discover_catalog`, caught above in `index_catalog`'s
+    // discovery match arm, and this function is never reached in that case.
+    // What's new (kyomi-connect-protocol 1.4.1, kyomi-connect PR #17) is a
+    // *partial* denial: one container or table failing no longer aborts the
+    // whole crawl. `discover_catalog` still returns `Ok`, with the failing
+    // container/table simply omitted from `containers` and its failure
+    // recorded in `catalog_result.errors` instead. So `nothing_found` can
+    // now happen with discovery having "succeeded" only in the sense that
+    // it returned `Ok` — every container that *was* reachable turned out
+    // empty, while a sibling container was silently denied and excluded.
+    //
+    // `resolve_final_status` — the same function the direct SQL path uses —
+    // is what tells the two cases apart: `nothing_found` with at least one
+    // recorded error maps to `"failed"` with a reason built from that
+    // error; `nothing_found` with no errors is a genuinely empty,
+    // fully-accessible catalog and still reports `"idle"` (the original
+    // KYO-126 case this path was fixed for). A non-empty result (some
+    // tables were cached) always reports `"idle"` regardless of `errors` —
+    // a 9-of-10-accessible datasource must not carry a permanent red alert
+    // over one denied container. Those errors aren't dropped in that case;
+    // they're carried on `CatalogIndexResult::errors` below instead.
+    let (final_status, failure_reason) =
+        resolve_final_status(nothing_found, &catalog_result.errors);
     let _ = update_datasource_status(
         db,
         &ctx.workspace_id,
         &ctx.datasource_config_id,
-        "idle",
+        final_status,
         None,
-        None,
+        failure_reason.as_deref(),
     )
     .await;
 
@@ -327,13 +348,35 @@ async fn process_discovered_catalog(params: ProcessDiscoveredCatalogParams<'_>) 
         tables_indexed,
         tables_archived,
         nothing_found,
+        discovery_errors = catalog_result.errors.len(),
         elapsed_secs = (end_time - start_time).num_seconds(),
         "Connect catalog indexing complete"
     );
 
-    CatalogIndexResult::completed(tables_indexed, tables_archived)
+    let mut result = CatalogIndexResult::completed(tables_indexed, tables_archived)
         .with_times(&start_time.to_rfc3339(), &end_time.to_rfc3339())
-        .with_ids(&ctx.datasource_config_id, &ctx.workspace_id)
+        .with_ids(&ctx.datasource_config_id, &ctx.workspace_id);
+
+    // Surface partial-discovery failures on the result even when the run
+    // otherwise succeeded (KYO-268 acceptance criterion 1: a denial must be
+    // "surfaced as a visible, attributable error reason", not just silently
+    // dropped once tables were found elsewhere). Mirrors the direct SQL
+    // path (`index_catalog_sql`), which does the same regardless of status.
+    //
+    // As of this change, nothing in the UI actually renders this for an
+    // "idle" status: `get_catalog_refresh_status`'s poller only reads the
+    // progress envelope's `error` key on the `"failed"` branch
+    // (`crates/kyomi-ui/src/pages/settings/datasources.rs`), and the
+    // settings page's persistent notice only renders when
+    // `catalog_refresh_status == "failed"`. So today this reaches logs and
+    // any direct caller of `CatalogIndexResult`, not yet the datasource
+    // Catalog tab. Surfacing it there needs a UI change out of scope for
+    // this fix (KYO-268) — tracked as a follow-up rather than built here.
+    if !catalog_result.errors.is_empty() {
+        result.errors = Some(catalog_result.errors);
+    }
+
+    result
 }
 
 #[cfg(test)]
@@ -401,6 +444,7 @@ mod tests {
                     tables: Vec::new(),
                 })
                 .collect(),
+            errors: Vec::new(),
         }
     }
 
@@ -428,19 +472,48 @@ mod tests {
         assert!(c.containers.is_empty());
     }
 
-    // ── process_discovered_catalog (KYO-126, second pass) ─────────────────
+    /// KYO-268 phase 2: scope filtering must never drop the discovery
+    /// errors the agent recorded on the way in — those describe containers
+    /// that failed *before* this function ever sees them, so scope has
+    /// nothing to say about them. Dropping them here would silently defeat
+    /// `process_discovered_catalog`'s `resolve_final_status` decision below.
+    #[test]
+    fn filter_preserves_errors_untouched() {
+        let mut c = catalog(&["public", "staging"]);
+        c.errors = vec!["container 'restricted' permission denied".to_string()];
+        let scope = vec!["public".to_string()];
+
+        let filtered = filter_catalog_to_scope(c, Some(&scope));
+
+        assert_eq!(container_names(&filtered), vec!["public"]);
+        assert_eq!(
+            filtered.errors,
+            vec!["container 'restricted' permission denied".to_string()],
+            "filter_catalog_to_scope must pass errors through untouched"
+        );
+    }
+
+    // ── process_discovered_catalog (KYO-126, KYO-268 phase 2) ──────────────
     //
-    // A permission denial on the Connect path is now surfaced by
-    // `discover_catalog` returning a real `Err` (agent-side fix,
-    // kyomi-connect PR #16) — already handled, unchanged, in
-    // `index_catalog`'s discovery match arm, and not exercised here since it
-    // requires a live Connect WebSocket connection through `ConnectRegistry`
-    // (Redis-backed), not a plain value these tests can construct.
+    // A *total* permission denial on the Connect path is still surfaced by
+    // `discover_catalog` returning a real `Err` (kyomi-connect PR #16 made
+    // denials surface as `Err` at all; PR #17 narrowed that to "every
+    // container failed") — handled, unchanged, in `index_catalog`'s
+    // discovery match arm, and not exercised here since it requires a live
+    // Connect WebSocket connection through `ConnectRegistry` (Redis-backed),
+    // not a plain value these tests can construct.
     //
-    // What these tests lock in is the actual code change: once discovery
-    // has succeeded, `nothing_found` must report `"idle"`, never `"failed"`
-    // — a genuinely empty (but reachable) Connect datasource must not show
-    // a permanent red alert.
+    // What's new here (KYO-268 phase 2, kyomi-connect-protocol 1.4.1): a
+    // *partial* denial — one container or table failing while others
+    // succeed — no longer aborts discovery at all. It arrives as `Ok` with
+    // the failure recorded in `CatalogResult::errors` and the failing
+    // container/table simply absent from `containers`. These tests
+    // construct that shape directly and lock in `process_discovered_catalog`
+    // folding it into `resolve_final_status`:
+    // - tables found elsewhere + errors -> `"idle"`, errors preserved on the
+    //   returned `CatalogIndexResult`
+    // - zero tables + errors -> `"failed"`, reason drawn from the real error
+    // - zero tables + no errors -> `"idle"` (the original KYO-126 case)
 
     async fn seed_connect_fixture(sq: &sqlx::SqlitePool, suffix: &str) -> IndexerContext {
         let user_id = format!("u-connect-{suffix}");
@@ -507,7 +580,10 @@ mod tests {
             db: &db,
             embedding: &embedding,
             ctx: &ctx,
-            catalog_result: CatalogResult { containers: Vec::new() },
+            catalog_result: CatalogResult {
+                containers: Vec::new(),
+                errors: Vec::new(),
+            },
             explicit_empty: false,
             start_time: Utc::now(),
         })
@@ -515,6 +591,10 @@ mod tests {
 
         assert_eq!(result.status, "completed");
         assert_eq!(result.tables_indexed, 0);
+        assert!(
+            result.errors.is_none(),
+            "no discovery errors were recorded, so none should appear on the result"
+        );
 
         assert_eq!(
             datasource_status(sq, &ctx.datasource_config_id).await,
@@ -550,6 +630,7 @@ mod tests {
                     }],
                 }],
             }],
+            errors: Vec::new(),
         };
 
         let result = process_discovered_catalog(ProcessDiscoveredCatalogParams {
@@ -584,6 +665,136 @@ mod tests {
         assert_eq!(
             datasource_status(sq, &ctx.datasource_config_id).await,
             "idle"
+        );
+    }
+
+    /// KYO-268 phase 2: the load-bearing case. One container out of several
+    /// is denied (recorded in `errors`, omitted from `containers`) while the
+    /// rest discover tables normally. The datasource must still report
+    /// `"idle"` — a 9-of-10-accessible datasource must not carry a
+    /// permanent red alert over one denial — but the denial itself must not
+    /// be silently dropped: it has to reach the returned
+    /// `CatalogIndexResult::errors` (acceptance criterion 1).
+    #[tokio::test]
+    async fn partial_failure_with_tables_found_reports_idle_and_preserves_errors() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        let ctx = seed_connect_fixture(sq, "partialok").await;
+        let embedding = EmbeddingService::new().expect("load embedding model");
+
+        let catalog_result = CatalogResult {
+            containers: vec![kyomi_core::connect_protocol::CatalogContainer {
+                name: "public".to_string(),
+                tables: vec![kyomi_core::connect_protocol::CatalogTable {
+                    name: "orders".to_string(),
+                    native_type: Some("BASE TABLE".to_string()),
+                    columns: vec![kyomi_core::connect_protocol::CatalogColumn {
+                        name: "id".to_string(),
+                        native_type: "int4".to_string(),
+                        description: None,
+                    }],
+                }],
+            }],
+            errors: vec!["container 'restricted': permission denied".to_string()],
+        };
+
+        let result = process_discovered_catalog(ProcessDiscoveredCatalogParams {
+            db: &db,
+            embedding: &embedding,
+            ctx: &ctx,
+            catalog_result,
+            explicit_empty: false,
+            start_time: Utc::now(),
+        })
+        .await;
+
+        assert_eq!(
+            result.errors.as_deref(),
+            Some(&["container 'restricted': permission denied".to_string()][..]),
+            "the denied container's error must reach the caller-visible result, not just logs"
+        );
+
+        // See the "Not `result.tables_indexed`" comment on
+        // `tables_found_are_cached_and_reports_idle` above for why the cache
+        // row is asserted directly instead.
+        let cached_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM datasource_table_cache WHERE datasource_config_id = ? AND is_archived = 0",
+        )
+        .bind(&ctx.datasource_config_id)
+        .fetch_one(sq)
+        .await
+        .expect("count cached tables");
+        assert_eq!(
+            cached_rows, 1,
+            "the accessible container's table must still be cached despite the sibling denial"
+        );
+
+        assert_eq!(
+            datasource_status(sq, &ctx.datasource_config_id).await,
+            "idle",
+            "a 9-of-10-accessible Connect catalog must not go red over one denied container"
+        );
+    }
+
+    /// KYO-268 phase 2: zero tables found *and* a recorded discovery error
+    /// must report `"failed"` with a reason drawn from the real error text
+    /// — not the generic "no tables found" message, and not silently
+    /// `"idle"` (which would hide a genuine permission problem behind a
+    /// healthy-looking status).
+    #[tokio::test]
+    async fn errors_with_zero_tables_reports_failed_with_real_reason() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        let ctx = seed_connect_fixture(sq, "alldenied").await;
+        let embedding = EmbeddingService::new().expect("load embedding model");
+
+        let catalog_result = CatalogResult {
+            containers: Vec::new(),
+            errors: vec!["container 'public': permission denied".to_string()],
+        };
+
+        let result = process_discovered_catalog(ProcessDiscoveredCatalogParams {
+            db: &db,
+            embedding: &embedding,
+            ctx: &ctx,
+            catalog_result,
+            explicit_empty: false,
+            start_time: Utc::now(),
+        })
+        .await;
+
+        assert_eq!(
+            result.errors.as_deref(),
+            Some(&["container 'public': permission denied".to_string()][..])
+        );
+
+        assert_eq!(
+            datasource_status(sq, &ctx.datasource_config_id).await,
+            "failed",
+            "zero tables caused by a recorded discovery error must surface as failed, not idle"
+        );
+
+        // The reason must be the real error text, not a generic message —
+        // read it back off the persisted progress envelope, the exact shape
+        // `get_catalog_refresh_status` returns to the frontend.
+        let progress: String = sqlx::query_scalar(
+            "SELECT catalog_refresh_progress FROM datasource_configs WHERE id = ?",
+        )
+        .bind(&ctx.datasource_config_id)
+        .fetch_one(sq)
+        .await
+        .expect("read progress envelope");
+        assert!(
+            progress.contains("container 'public': permission denied"),
+            "failure reason must be the real discovery error, not a generic message, got: {progress}"
         );
     }
 }

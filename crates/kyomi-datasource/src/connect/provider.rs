@@ -807,6 +807,7 @@ mod tests {
                         ],
                     }],
                 }],
+                errors: Vec::new(),
             };
 
             let response = ConnectResponse {
@@ -856,6 +857,7 @@ mod tests {
         let (registry, conn_id, handle) = setup_mock_connect(dsid, |request, response_tx| {
             let catalog = CatalogResult {
                 containers: vec![],
+                errors: Vec::new(),
             };
             let response = ConnectResponse {
                 id: request.id,
