@@ -639,6 +639,23 @@ mod tests {
     }
 
     #[test]
+    fn mask_snowflake_sensitive_credential_fields() {
+        // Snowflake's key-pair auth mode carries a PEM private_key alongside
+        // username/password (KYO-330). Both password and private_key are
+        // sensitive_credential_fields and must be masked; username must not.
+        let creds = json!({
+            "username": "admin",
+            "password": "pass123",
+            "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvQ...\n-----END PRIVATE KEY-----"
+        });
+
+        let masked = mask_credentials(&creds, "snowflake");
+        assert_eq!(masked["username"], "admin");
+        assert_eq!(masked["password"], MASKED_VALUE);
+        assert_eq!(masked["private_key"], MASKED_VALUE);
+    }
+
+    #[test]
     fn mask_credentials_skips_non_string_values() {
         // Non-string values (numbers, booleans) should NOT be masked
         let creds = json!({

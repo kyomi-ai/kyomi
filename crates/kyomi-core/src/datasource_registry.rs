@@ -554,7 +554,10 @@ static CLICKHOUSE_META: LazyLock<DatasourceTypeMetadata> =
 // --- Snowflake ---
 // Python: apps/backend-python/src/api/datasources/snowflake/__init__.py
 // auth_modes: [password_auth_mode(is_default=True), oauth_auth_mode(oauth_provider="snowflake")]
-// sensitive_credential_fields: ["password"]
+// The Python source predates key-pair auth (KYO-274) and only ever masked
+// "password". Key-pair mode's own PEM `private_key` field (see the `keypair`
+// AuthModeConfig below) is just as sensitive and is masked here too — see
+// KYO-330.
 // No sensitive_connection_config_fields
 static SNOWFLAKE_META: LazyLock<DatasourceTypeMetadata> =
     LazyLock::new(|| DatasourceTypeMetadata {
@@ -562,8 +565,12 @@ static SNOWFLAKE_META: LazyLock<DatasourceTypeMetadata> =
         display_name: "Snowflake",
         description: "Snowflake cloud data warehouse",
         default_port: None,
-        credential_fields: &["username", "password"],
-        sensitive_credential_fields: &["password"],
+        // Type-level field surface across all auth modes: password mode's
+        // ["username", "password"] plus keypair mode's "private_key" (see
+        // the `keypair` AuthModeConfig below, which lists the same three
+        // fields at the per-mode level).
+        credential_fields: &["username", "password", "private_key"],
+        sensitive_credential_fields: &["password", "private_key"],
         sensitive_connection_config_fields: &[],
         requires_user_credentials: true,
         accepts_user_context: false,
@@ -1186,9 +1193,11 @@ mod tests {
         assert_eq!(db.sensitive_credential_fields, &["access_token"]);
         assert!(db.sensitive_connection_config_fields.is_empty());
 
-        // Snowflake — only password is sensitive (matches Python source)
+        // Snowflake — password (password auth mode) and private_key
+        // (key-pair auth mode, KYO-330) are both sensitive; the Python
+        // source predates key-pair auth and only had "password".
         let sf = get_metadata(&DatasourceType::Snowflake);
-        assert_eq!(sf.sensitive_credential_fields, &["password"]);
+        assert_eq!(sf.sensitive_credential_fields, &["password", "private_key"]);
         assert!(sf.sensitive_connection_config_fields.is_empty());
 
         // Synapse — multiple sensitive fields
