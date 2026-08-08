@@ -29,13 +29,23 @@ use kyomi_types::Permission;
 
 pub use kyomi_types::DatasourceInfo;
 
-/// A single auth mode usable for headless catalog-indexing credentials, with
-/// its label carried alongside the id so the client never has to re-derive
-/// (or hardcode) the display name.
+/// A single auth mode, with everything a client needs to render it carried
+/// alongside the id so the client never has to re-derive (or hardcode) the
+/// display name, description, or "recommended" status.
+///
+/// `description` and `is_default` are used by the four connection Auth Mode
+/// Selectors (`*AuthModeSection` in `pages/settings/datasources.rs`, KYO-274);
+/// `is_default` is also read there to render a "(Recommended)" suffix on the
+/// default mode's label — that suffix is a presentation affordance, not part
+/// of `display_name`, so it stays out of this wire type and every other
+/// registry consumer (e.g. a future API response) isn't stuck with it baked
+/// into the name.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AuthModeOption {
     pub mode_id: String,
     pub display_name: String,
+    pub description: String,
+    pub is_default: bool,
 }
 
 /// A datasource type from the registry.
@@ -51,6 +61,12 @@ pub struct DatasourceTypeInfo {
     /// Empty means the indexing-credentials selector should stay hidden for
     /// this type.
     pub indexing_auth_modes: Vec<AuthModeOption>,
+    /// The type's full set of connection auth modes — every mode a user can
+    /// select to connect to (not just headless-index) this datasource type.
+    /// Drives the four `*AuthModeSection` Authentication Mode selectors
+    /// (KYO-274). Unlike `indexing_auth_modes`, this is unfiltered: it is
+    /// exactly `DatasourceTypeMetadata::auth_modes` for the type.
+    pub connection_auth_modes: Vec<AuthModeOption>,
 }
 
 /// A freshly generated SSH keypair for a datasource's SSH tunnel.
@@ -97,6 +113,18 @@ pub async fn get_datasource_types() -> Result<Vec<DatasourceTypeInfo>, ServerFnE
                 .map(|m| AuthModeOption {
                     mode_id: m.mode_id.clone(),
                     display_name: m.display_name.clone(),
+                    description: m.description.clone(),
+                    is_default: m.is_default,
+                })
+                .collect(),
+            connection_auth_modes: meta
+                .auth_modes
+                .iter()
+                .map(|m| AuthModeOption {
+                    mode_id: m.mode_id.clone(),
+                    display_name: m.display_name.clone(),
+                    description: m.description.clone(),
+                    is_default: m.is_default,
                 })
                 .collect(),
         })
