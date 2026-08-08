@@ -66,7 +66,16 @@ pub struct UsageData {
 pub async fn get_ai_usage_status() -> Result<UsageData, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    // Self-hosted: no billing, unlimited AI usage
+    // Self-hosted: no billing, unlimited AI usage. This branch's
+    // `analytics_events_used: 0` is a hardcoded zero — it returns before
+    // ever reaching the Redis-backed quota lookup below, so it is not
+    // "real" usage data. Unlike `get_analytics_usage`'s sibling self-hosted
+    // short-circuit (server_fns/analytics.rs), this one *is* rendered live
+    // — `UsagePage` shows it via `AnalyticsEventsCard` for every
+    // self-hosted admin — and it reports `analytics_events_included` as
+    // the Cloud plan's 100K constant even though self-hosted has no such
+    // quota. See the note on `get_analytics_usage` for the resulting
+    // cross-path inconsistency.
     if ac.ctx.config.self_hosted {
         return Ok(UsageData {
             percentage_used: 0.0,
