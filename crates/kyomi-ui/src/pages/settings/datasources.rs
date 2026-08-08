@@ -922,6 +922,39 @@ const PROVIDER_TYPES: &[(&str, &str)] = &[
     ("flaredb", "FlareDB"),
 ];
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Connection auth-mode registry fetch (KYO-274 review follow-up)
+//
+// `get_datasource_types()` backs the four connection Authentication Mode
+// selectors (`*AuthModeSection` below). A failed fetch used to be silently
+// discarded via `.ok()`, so a network blip made all four selectors render
+// with zero options and no explanation. `connection_auth_modes_unavailable_from`
+// is the pure, testable extraction of "did the fetch fail?" (logging on
+// failure); see the `Memo` at its call site for why the failure check must
+// stay on its own reactive scope rather than living inside the per-type
+// `connection_auth_modes` derive.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Whether the datasource-type registry fetch backing the four connection
+/// Authentication Mode selectors has resolved to an error. `None` (still
+/// loading) and `Some(Ok(_))` (succeeded) both resolve to `false` — only a
+/// resolved error counts as "unavailable". Logs on failure so it isn't
+/// otherwise invisible; stays silent while merely loading.
+fn connection_auth_modes_unavailable_from(
+    datasource_types: &Option<Result<Vec<DatasourceTypeInfo>, ServerFnError>>,
+) -> bool {
+    match datasource_types {
+        Some(Err(e)) => {
+            leptos::logging::warn!(
+                "failed to load datasource-type registry — connection auth mode \
+                 options unavailable: {e}"
+            );
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Modal state for create/edit mode.
 ///
 /// Matches `apps/frontend/src/components/settings/DatasourceModal.jsx`.
@@ -2609,6 +2642,24 @@ pub fn DatasourceModal(
     // `EditModeCatalogTab` already calls it for `indexing_auth_modes` (KYO-187),
     // so this reuses the same cached fetch rather than adding a second one.
     let datasource_types = use_query("datasource-types", || (), |_: ()| get_datasource_types());
+
+    // Observe the registry fetch's error state via `connection_auth_modes_unavailable_from`
+    // (defined above `DatasourceModal`) — never inline inside `connection_auth_modes`
+    // below. That derive also reads `ds_type`, and `Signal::derive` re-runs
+    // its *entire* body on every dependency change, not just its own
+    // (docs/CODING_STANDARDS.md: "Signal::derive is not memoized"); a
+    // `warn!` living there would re-fire the same stale failure every time
+    // the user switches provider — the exact KYO-240 shape this document
+    // warns about. Wrapping the pure fn in a `Memo` scoped ONLY to
+    // `datasource_types` means it only recomputes — and therefore only
+    // re-logs — when the fetch outcome itself changes.
+    let connection_auth_modes_unavailable: Memo<bool> =
+        Memo::new(move |_| connection_auth_modes_unavailable_from(&datasource_types.get()));
+
+    // Per-type option list. A cheap, pure projection — the `.ok()` here is
+    // safe because the error case is already observed above, on its own
+    // Memo keyed on the query result alone; this derive re-running per
+    // `ds_type` switch has no side effect of its own.
     let connection_auth_modes: Signal<Vec<AuthModeOption>> = Signal::derive(move || {
         let ds_type_val = ds_type.get();
         datasource_types
@@ -3250,6 +3301,24 @@ pub fn DatasourceModal(
                                     <Show when=move || !is_connect.get()>
                                     <div class="space-y-4">
 
+                                    // Registry fetch failed — without this, the four
+                                    // Authentication Mode selectors below would each
+                                    // silently render with zero options and no
+                                    // explanation (bigquery/snowflake/databricks/synapse
+                                    // are all registry-defined, so a successful fetch
+                                    // that simply omits the current type isn't an
+                                    // expected case here — this narrows to the actual
+                                    // fetch failure).
+                                    <Show when=move || connection_auth_modes_unavailable.get()>
+                                        <Alert variant=AlertVariant::Warning>
+                                            <AlertDescription>
+                                                "Couldn't load authentication mode options. Please refresh and try again."
+                                            </AlertDescription>
+                                        </Alert>
+                                    </Show>
+
+                                    <Show when=move || !connection_auth_modes_unavailable.get()>
+
                                     // BigQuery auth mode selector
                                     <Show when=move || ds_type.get() == "bigquery">
                                         <BigQueryAuthModeSection
@@ -3356,6 +3425,8 @@ pub fn DatasourceModal(
                                             is_admin=is_admin
                                             auth_modes=connection_auth_modes
                                         />
+                                    </Show>
+
                                     </Show>
 
                                     // Connection fields (provider-specific) — workspace-admin-only
@@ -8221,6 +8292,111 @@ mod tests {
             helper.contains("m.is_default") && helper.contains("(Recommended)"),
             "auth_mode_select_options must derive the \"(Recommended)\" suffix from \
              AuthModeOption::is_default"
+        );
+    }
+
+    // ── KYO-274 review follow-up: connection auth-mode fetch failure ───
+    //
+    // `connection_auth_modes` used to resolve a failed `get_datasource_types()`
+    // fetch via a silent `.and_then(|r| r.ok())`, so a network blip made all
+    // four Authentication Mode selectors render with zero options and no
+    // explanation. `connection_auth_modes_unavailable_from` is the pure
+    // extraction of "did the fetch fail?" that now drives a visible warning
+    // instead — exercised directly here since (unlike the rest of this
+    // module) it has no view-tree branching to work around.
+
+    use leptos::prelude::ServerFnError;
+
+    use super::{connection_auth_modes_unavailable_from, DatasourceTypeInfo};
+
+    #[test]
+    fn connection_auth_modes_unavailable_from_failed_fetch_is_true() {
+        let unavailable = connection_auth_modes_unavailable_from(&Some(Err(
+            ServerFnError::new("simulated network failure"),
+        )));
+        assert!(
+            unavailable,
+            "a failed datasource-type registry fetch must report the connection auth \
+             modes as unavailable, so the caller can show a warning instead of silently \
+             rendering the four Authentication Mode selectors with zero options"
+        );
+    }
+
+    #[test]
+    fn connection_auth_modes_unavailable_from_loading_is_false() {
+        let unavailable = connection_auth_modes_unavailable_from(&None);
+        assert!(
+            !unavailable,
+            "a fetch that hasn't resolved yet must not be reported as unavailable — that \
+             would flash a false warning on every mount before the query settles"
+        );
+    }
+
+    #[test]
+    fn connection_auth_modes_unavailable_from_success_is_false() {
+        let unavailable = connection_auth_modes_unavailable_from(&Some(Ok(vec![
+            DatasourceTypeInfo {
+                type_id: "bigquery".to_string(),
+                display_name: "BigQuery".to_string(),
+                indexing_auth_modes: Vec::new(),
+                connection_auth_modes: Vec::new(),
+            },
+        ])));
+        assert!(
+            !unavailable,
+            "a successfully resolved fetch must never be reported as unavailable, \
+             regardless of what it contains"
+        );
+    }
+
+    /// `connection_auth_modes_unavailable` must be its own reactive scope,
+    /// not folded into the per-type `connection_auth_modes` derive — the
+    /// exact KYO-240 shape this repo has hit before (see
+    /// docs/CODING_STANDARDS.md's "Signal::derive is not memoized"): a
+    /// derive that reads both the query result and `ds_type` re-runs its
+    /// whole body, including any log call, on every provider switch, so one
+    /// stale failure would re-announce itself on every subsequent switch.
+    #[test]
+    fn connection_auth_modes_unavailable_is_a_memo_scoped_only_to_datasource_types() {
+        let f = extract_between(SRC, "pub fn DatasourceModal(", "fn BigQueryAuthModeSection(");
+        assert!(
+            f.contains("Memo::new(move |_| connection_auth_modes_unavailable_from(&datasource_types.get()))"),
+            "connection_auth_modes_unavailable must be a Memo scoped to datasource_types \
+             alone, calling the pure connection_auth_modes_unavailable_from — not a \
+             Signal::derive that also reads ds_type"
+        );
+    }
+
+    /// The alert must actually gate the four provider selectors, not merely
+    /// render alongside an empty one — otherwise a user with a failed fetch
+    /// still sees a description-less, option-less BigQuery/Snowflake/
+    /// Databricks/Synapse dropdown. Checks ordering: the warning Alert
+    /// (gated on the failure) must appear before a sibling <Show> that
+    /// gates the four provider selectors on the *negation*, so exactly one
+    /// of the two branches renders.
+    #[test]
+    fn connection_auth_modes_unavailable_alert_wraps_the_four_selectors() {
+        let f = extract_between(SRC, "pub fn DatasourceModal(", "fn BigQueryAuthModeSection(");
+        let positive_pos = f
+            .find("Show when=move || connection_auth_modes_unavailable.get()")
+            .expect(
+                "expected a <Show when=connection_auth_modes_unavailable.get()> block \
+                 rendering the failure warning",
+            );
+        let negated_pos = f
+            .find("Show when=move || !connection_auth_modes_unavailable.get()")
+            .expect(
+                "expected a <Show when=!connection_auth_modes_unavailable.get()> block \
+                 gating the four *AuthModeSection selectors",
+            );
+        let bigquery_show_pos = f
+            .find("Show when=move || ds_type.get() == \"bigquery\"")
+            .expect("expected the BigQuery selector's own <Show>");
+        assert!(
+            positive_pos < negated_pos && negated_pos < bigquery_show_pos,
+            "the failure Alert, the negated gate, and the BigQuery selector must appear \
+             in that order — otherwise the four selectors aren't actually suppressed \
+             while the fetch has failed"
         );
     }
 
