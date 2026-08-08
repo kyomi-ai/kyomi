@@ -192,8 +192,14 @@ struct SessionSnapshotRow {
 
 /// Build a JSON snapshot for the sync log from a live session row.
 ///
-/// Returns `(workspace_id, snapshot_json)`. Returns `None` if the session is
-/// not found or if the query fails.
+/// Returns `Ok(Some((workspace_id, snapshot_json)))` if the session exists
+/// (and is `session_type = 'chat'`). Returns `Ok(None)` if there is
+/// genuinely no such row — a real miss, not a failure. Returns `Err` if the
+/// query itself failed (pool exhaustion, dropped connection, decode error,
+/// ...). Callers must not collapse `Ok(None)` and `Err` into the same
+/// branch: an `Err` means the session may well still be there and the
+/// failure is transient and worth logging loudly, while `Ok(None)`
+/// verifiably means it is not (KYO-269).
 ///
 /// # Scoping invariant (KYO-202 audit)
 ///
@@ -218,7 +224,7 @@ struct SessionSnapshotRow {
 pub async fn fetch_session_snapshot(
     db: &DbPool,
     session_id: &str,
-) -> Option<(String, serde_json::Value)> {
+) -> kyomi_core::Result<Option<(String, serde_json::Value)>> {
     let is_pg = db.is_postgres();
     let bf = kyomi_core::sql_compat::bool_false(is_pg);
     let sql = format!(
@@ -240,9 +246,12 @@ pub async fn fetch_session_snapshot(
         &sql,
         session_id
     )
-    .ok()?;
+    .map_err(|e| kyomi_core::Error::Internal(format!("failed to fetch session snapshot: {e}")))?;
 
-    let row = row?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
     let workspace_id = row.workspace_id.clone();
     let json = serde_json::json!({
         "session_id": row.session_id,
@@ -262,7 +271,7 @@ pub async fn fetch_session_snapshot(
         },
         "slack_channel_id": null,
     });
-    Some((workspace_id, json))
+    Ok(Some((workspace_id, json)))
 }
 
 /// Fetch session counts for a list of session IDs.
@@ -904,28 +913,43 @@ pub async fn add_message(
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to update session timestamp: {e}")))?;
 
     // Sync log for the session metadata update — best-effort.
-    if let Some((workspace_id, snapshot)) = fetch_session_snapshot(db, session_id).await {
-        let is_shared = snapshot.get("shared").and_then(|v| v.as_bool()).unwrap_or(false);
-        let session_owner = snapshot
-            .get("created_by")
-            .and_then(|cb| cb.get("user_id"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        if let Err(e) = sync_log_service::write_sync_entry(
-            db,
-            sync_log_service::SyncEntryParams {
-                entity_type: entity_types::CHAT_SESSION,
-                entity_id: session_id,
-                workspace_id: &workspace_id,
-                action: SyncActionType::Update,
-                data: Some(snapshot),
-                owner_user_id: session_owner.as_deref(),
-                is_workspace_visible: is_shared,
-            },
-        )
-        .await
-        {
-            tracing::warn!(error = %e, session_id = %session_id, "Failed to write sync log entry");
+    match fetch_session_snapshot(db, session_id).await {
+        Ok(Some((workspace_id, snapshot))) => {
+            let is_shared = snapshot.get("shared").and_then(|v| v.as_bool()).unwrap_or(false);
+            let session_owner = snapshot
+                .get("created_by")
+                .and_then(|cb| cb.get("user_id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            if let Err(e) = sync_log_service::write_sync_entry(
+                db,
+                sync_log_service::SyncEntryParams {
+                    entity_type: entity_types::CHAT_SESSION,
+                    entity_id: session_id,
+                    workspace_id: &workspace_id,
+                    action: SyncActionType::Update,
+                    data: Some(snapshot),
+                    owner_user_id: session_owner.as_deref(),
+                    is_workspace_visible: is_shared,
+                },
+            )
+            .await
+            {
+                tracing::warn!(error = %e, session_id = %session_id, "Failed to write sync log entry");
+            }
+        }
+        Ok(None) => {
+            tracing::warn!(
+                session_id,
+                "add_message: snapshot unavailable; skipping sync log write"
+            );
+        }
+        Err(e) => {
+            tracing::error!(
+                session_id,
+                error = %e,
+                "add_message: snapshot fetch failed; skipping sync log write"
+            );
         }
     }
 
@@ -1035,30 +1059,46 @@ pub async fn update_session(
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to update session: {e}")))?;
 
     // Sync log — best-effort: log a warning and continue on failure.
-    if rows_affected > 0
-        && let Some((workspace_id, snapshot)) = fetch_session_snapshot(db, session_id).await
-    {
-        let is_shared = snapshot.get("shared").and_then(|v| v.as_bool()).unwrap_or(false);
-        let session_owner = snapshot
-            .get("created_by")
-            .and_then(|cb| cb.get("user_id"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        if let Err(e) = sync_log_service::write_sync_entry(
-            db,
-            sync_log_service::SyncEntryParams {
-                entity_type: entity_types::CHAT_SESSION,
-                entity_id: session_id,
-                workspace_id: &workspace_id,
-                action: SyncActionType::Update,
-                data: Some(snapshot),
-                owner_user_id: session_owner.as_deref(),
-                is_workspace_visible: is_shared,
-            },
-        )
-        .await
-        {
-            tracing::warn!(error = %e, session_id = %session_id, "Failed to write sync log entry");
+    if rows_affected > 0 {
+        match fetch_session_snapshot(db, session_id).await {
+            Ok(Some((workspace_id, snapshot))) => {
+                let is_shared =
+                    snapshot.get("shared").and_then(|v| v.as_bool()).unwrap_or(false);
+                let session_owner = snapshot
+                    .get("created_by")
+                    .and_then(|cb| cb.get("user_id"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                if let Err(e) = sync_log_service::write_sync_entry(
+                    db,
+                    sync_log_service::SyncEntryParams {
+                        entity_type: entity_types::CHAT_SESSION,
+                        entity_id: session_id,
+                        workspace_id: &workspace_id,
+                        action: SyncActionType::Update,
+                        data: Some(snapshot),
+                        owner_user_id: session_owner.as_deref(),
+                        is_workspace_visible: is_shared,
+                    },
+                )
+                .await
+                {
+                    tracing::warn!(error = %e, session_id = %session_id, "Failed to write sync log entry");
+                }
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    session_id,
+                    "update_session: snapshot unavailable; skipping sync log write"
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    session_id,
+                    error = %e,
+                    "update_session: snapshot fetch failed; skipping sync log write"
+                );
+            }
         }
     }
 
@@ -1162,16 +1202,29 @@ pub async fn set_session_shared(
 ///
 /// Never writes an `Update`/`Insert`-type row with `data: None` — that is
 /// the wire protocol's Delete signal (KYO-218/KYO-245). If the snapshot
-/// can't be fetched, the write is skipped entirely and a warning is
-/// logged; a missing sync_log row means "not converged yet", which is the
-/// only safe failure mode here.
+/// can't be fetched, the write is skipped entirely and logged — `warn` for
+/// a genuine miss, `error` for a query failure (KYO-269) — since either way
+/// a missing sync_log row means "not converged yet", which is the only safe
+/// failure mode here.
 async fn write_shared_sync_log(db: &DbPool, session_id: &str, shared: bool) {
-    let Some((workspace_id, snapshot)) = fetch_session_snapshot(db, session_id).await else {
-        tracing::warn!(
-            session_id,
-            "chat session visibility sync log: snapshot unavailable; skipping write"
-        );
-        return;
+    let snapshot_result = fetch_session_snapshot(db, session_id).await;
+    let (workspace_id, snapshot) = match snapshot_result {
+        Ok(Some(pair)) => pair,
+        Ok(None) => {
+            tracing::warn!(
+                session_id,
+                "chat session visibility sync log: snapshot unavailable; skipping write"
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::error!(
+                session_id,
+                error = %e,
+                "chat session visibility sync log: snapshot fetch failed; skipping write"
+            );
+            return;
+        }
     };
 
     let owner_user_id = snapshot
@@ -2841,6 +2894,84 @@ mod tests {
         assert!(
             owner_entries[0].sync_id < owner_entries[1].sync_id,
             "Delete must be applied before Update, or the owner ends up evicted too"
+        );
+    }
+
+    // ── KYO-269: fetch_session_snapshot must not collapse "absent" and
+    //    "query failed" into the same `None` ──
+
+    #[tokio::test]
+    async fn fetch_session_snapshot_returns_snapshot_for_existing_chat_session() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        seed_user(sq, "user-a", "user-a@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+        seed_chat_session(sq, SeedSession::new("sess-1", "user-a", "ws-1", "Title")).await;
+
+        let (workspace_id, snapshot) = fetch_session_snapshot(&db, "sess-1")
+            .await
+            .expect("query must succeed")
+            .expect("existing chat session must yield Some");
+        assert_eq!(workspace_id, "ws-1");
+        assert_eq!(snapshot.get("session_id").and_then(|v| v.as_str()), Some("sess-1"));
+    }
+
+    #[tokio::test]
+    async fn fetch_session_snapshot_missing_session_is_ok_none_not_err() {
+        let db = test_pool().await;
+
+        let result = fetch_session_snapshot(&db, "does-not-exist")
+            .await
+            .expect("a genuinely-missing session must be Ok(None), never Err");
+        assert!(
+            result.is_none(),
+            "a session_id with no matching row must yield Ok(None): {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_session_snapshot_non_chat_session_type_is_ok_none() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        seed_user(sq, "user-a", "user-a@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+        // The row exists but isn't session_type='chat' — the sync path's
+        // "absent" case includes this, not just a missing row entirely.
+        seed_chat_session(
+            sq,
+            SeedSession::new("sess-watch-exec", "user-a", "ws-1", "Watch run")
+                .session_type("watch_execution"),
+        )
+        .await;
+
+        let result = fetch_session_snapshot(&db, "sess-watch-exec")
+            .await
+            .expect("query must succeed even though the row is the wrong session_type");
+        assert!(
+            result.is_none(),
+            "a non-chat session_type row must yield Ok(None), not Some: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_session_snapshot_query_failure_is_err_not_ok_none() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        seed_user(sq, "user-a", "user-a@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+        seed_chat_session(sq, SeedSession::new("sess-1", "user-a", "ws-1", "Title")).await;
+
+        // Force a real sqlx query failure (not a mock): closing the pool
+        // makes every subsequent query return `sqlx::Error::PoolClosed`,
+        // exercising the actual failure path a saturated/dropped pool would
+        // hit in production — not something asserted about our own fake.
+        sq.close().await;
+
+        let result = fetch_session_snapshot(&db, "sess-1").await;
+        assert!(
+            result.is_err(),
+            "a query failure against a session that still exists must surface as \
+             Err, not silently collapse into the same Ok(None) as a genuine miss: {result:?}"
         );
     }
 }
