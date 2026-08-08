@@ -355,6 +355,13 @@ async fn search_knowledge_chunks(
 ) -> Vec<serde_json::Value> {
     // For SQLite: load all chunks, compute cosine similarity in memory
     // For Postgres: use pgvector ORDER BY embedding <=> $2::vector
+    //
+    // Left dual-armed (not routed through sql_compat::embedding_placeholder):
+    // SQLite has no `<=>` operator, so these are two genuinely different
+    // queries, not the same SQL differing only by a cast. The Postgres arm
+    // orders and scores in SQL; the SQLite arm selects the raw embedding
+    // column unordered and both order and score are computed afterward in
+    // Rust (see the score-vs-embedding field split on `KnowledgeChunkRow`).
     let rows = match db {
         kyomi_core::db::DbPool::Postgres(pg) => {
             let vec_str = format!(

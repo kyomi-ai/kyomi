@@ -8,6 +8,20 @@
 //!   similarity in memory, sorts descending (higher = more similar).
 //!
 //! Both implementations return results ranked by similarity (highest first).
+//!
+//! ## Why the `$1::vector` casts here don't go through `sql_compat`
+//!
+//! `sql_compat::embedding_placeholder` exists to unify SQL text that is
+//! *shared* between a Postgres and a SQLite arm of the same query, differing
+//! only by the cast. That pattern doesn't apply in this file: dialect
+//! selection happens once, at the type level, via [`create_vector_search`]
+//! choosing between the `PgVectorSearch` and `InMemoryVectorSearch` structs —
+//! not via an `is_pg` branch inside a shared function. `PgVectorSearch`'s
+//! queries are Postgres-only (there is no parallel SQLite query to
+//! deduplicate against); `InMemoryVectorSearch` never builds `<=>` SQL at
+//! all, it loads embeddings and computes cosine similarity in Rust. Routing
+//! `PgVectorSearch`'s literal `$1::vector` through `embedding_placeholder(true, ...)`
+//! would hardcode `is_pg = true` for no deduplication benefit.
 
 use async_trait::async_trait;
 use kyomi_core::db::DbPool;
