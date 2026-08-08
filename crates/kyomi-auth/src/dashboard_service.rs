@@ -13,13 +13,12 @@
 //! - Background embedding generation via `tokio::spawn`
 
 use chrono::{DateTime, Duration, Utc};
-use kyomi_core::embedding_compat::{bytes_to_embedding, embedding_to_bytes};
+use kyomi_core::embedding_compat::{bytes_to_pg_vector, embedding_to_bytes};
 use kyomi_core::sql_compat;
 use kyomi_core::{db_execute, db_fetch_optional, db_fetch_scalar};
 use kyomi_core::models::DocType;
 use kyomi_core::{DbPool, Result};
 use kyomi_embed::EmbeddingService;
-use pgvector::Vector;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1140,6 +1139,18 @@ pub async fn rechunk_document(
     // Extract table references before the transaction
     let table_refs = extract_table_references(content);
 
+    // The chunk INSERT text is identical across backends except the embedding
+    // placeholder's `::vector` cast — build it once and bind the embedding
+    // value differently per backend below (pgvector::Vector only implements
+    // sqlx's Encode for Postgres, see embedding_compat::bytes_to_pg_vector).
+    let is_pg = db.is_postgres();
+    let chunk_insert_sql = format!(
+        "INSERT INTO knowledge_chunks \
+            (id, dashboard_id, workspace_id, content, chunk_index, embedding) \
+         VALUES ($1, $2, $3, $4, $5, {embedding})",
+        embedding = sql_compat::embedding_placeholder(is_pg, "$6"),
+    );
+
     // Wrap delete + insert in a transaction for atomicity — if any insert
     // fails, the old chunks remain intact rather than leaving partial state.
     match db {
@@ -1162,20 +1173,16 @@ pub async fn rechunk_document(
             for (i, (chunk_text, embedding)) in chunks.iter().zip(embeddings.iter()).enumerate() {
                 let chunk_id = uuid::Uuid::new_v4().to_string();
                 let vector = pgvector::Vector::from(embedding.clone());
-                sqlx::query(
-                    "INSERT INTO knowledge_chunks \
-                        (id, dashboard_id, workspace_id, content, chunk_index, embedding) \
-                     VALUES ($1, $2, $3, $4, $5, $6::vector)",
-                )
-                .bind(&chunk_id)
-                .bind(dashboard_id)
-                .bind(workspace_id)
-                .bind(chunk_text)
-                .bind(i as i32)
-                .bind(&vector)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| kyomi_core::Error::Internal(format!("failed to insert chunk: {e}")))?;
+                sqlx::query(&chunk_insert_sql)
+                    .bind(&chunk_id)
+                    .bind(dashboard_id)
+                    .bind(workspace_id)
+                    .bind(chunk_text)
+                    .bind(i as i32)
+                    .bind(&vector)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| kyomi_core::Error::Internal(format!("failed to insert chunk: {e}")))?;
             }
 
             for table_ref in &table_refs {
@@ -1214,20 +1221,16 @@ pub async fn rechunk_document(
             for (i, (chunk_text, embedding)) in chunks.iter().zip(embeddings.iter()).enumerate() {
                 let chunk_id = uuid::Uuid::new_v4().to_string();
                 let emb_bytes = embedding_to_bytes(embedding);
-                sqlx::query(
-                    "INSERT INTO knowledge_chunks \
-                        (id, dashboard_id, workspace_id, content, chunk_index, embedding) \
-                     VALUES ($1, $2, $3, $4, $5, $6)",
-                )
-                .bind(&chunk_id)
-                .bind(dashboard_id)
-                .bind(workspace_id)
-                .bind(chunk_text)
-                .bind(i as i32)
-                .bind(&emb_bytes)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| kyomi_core::Error::Internal(format!("failed to insert chunk: {e}")))?;
+                sqlx::query(&chunk_insert_sql)
+                    .bind(&chunk_id)
+                    .bind(dashboard_id)
+                    .bind(workspace_id)
+                    .bind(chunk_text)
+                    .bind(i as i32)
+                    .bind(&emb_bytes)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| kyomi_core::Error::Internal(format!("failed to insert chunk: {e}")))?;
             }
 
             for table_ref in &table_refs {
@@ -1716,30 +1719,26 @@ pub fn spawn_embedding_generation(
         match embedding_svc.embed_one(&text) {
             Ok(vec) => {
                 let embedding_bytes = embedding_to_bytes(&vec);
+                let is_pg = db.is_postgres();
+                let sql = format!(
+                    "UPDATE dashboards SET embedding = {embedding} WHERE dashboard_id = $2 AND workspace_id = $3",
+                    embedding = sql_compat::embedding_placeholder(is_pg, "$1"),
+                );
                 let result = match &db {
-                    kyomi_core::db::DbPool::Postgres(pg) => {
-                        let pg_vec = Vector::from(bytes_to_embedding(&embedding_bytes));
-                        sqlx::query(
-                            "UPDATE dashboards SET embedding = $1::vector WHERE dashboard_id = $2 AND workspace_id = $3",
-                        )
-                        .bind(&pg_vec)
+                    kyomi_core::db::DbPool::Postgres(pg) => sqlx::query(&sql)
+                        .bind(bytes_to_pg_vector(&embedding_bytes))
                         .bind(&dashboard_id)
                         .bind(&workspace_id)
                         .execute(pg)
                         .await
-                        .map(|_| ())
-                    }
-                    kyomi_core::db::DbPool::Sqlite(sq) => {
-                        sqlx::query(
-                            "UPDATE dashboards SET embedding = $1 WHERE dashboard_id = $2 AND workspace_id = $3",
-                        )
+                        .map(|_| ()),
+                    kyomi_core::db::DbPool::Sqlite(sq) => sqlx::query(&sql)
                         .bind(&embedding_bytes)
                         .bind(&dashboard_id)
                         .bind(&workspace_id)
                         .execute(sq)
                         .await
-                        .map(|_| ())
-                    }
+                        .map(|_| ()),
                 };
 
                 match result {
