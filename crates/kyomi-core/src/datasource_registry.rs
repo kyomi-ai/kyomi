@@ -267,7 +267,13 @@ fn service_account_auth_mode(is_default: bool) -> AuthModeConfig {
     AuthModeConfig {
         mode_id: "service_account".into(),
         display_name: "Service Account".into(),
-        description: "Use a service account for server-side authentication".into(),
+        // KYO-274: the previous copy ("Use a service account for
+        // server-side authentication") didn't say who shares it. That's
+        // the one fact that actually distinguishes this mode from the
+        // per-user password/OAuth modes above — every workspace member
+        // authenticates as the same identity — so it belongs in the
+        // description, not just in `credential_scope: "workspace"`.
+        description: "All users share a service account for automated access".into(),
         credential_type: "service_account".into(),
         oauth_provider: None,
         oauth_global: false,
@@ -564,6 +570,58 @@ static SNOWFLAKE_META: LazyLock<DatasourceTypeMetadata> =
         auth_modes: leak_auth_modes(vec![
             password_auth_mode(true, true),
             oauth_auth_mode("snowflake", false, None, None),
+            // Key-pair auth (KYO-274). This mode was already fully wired in
+            // `kyomi-ui` — a dedicated credential field (`cred_private_key`),
+            // its own field-set UI, and a live server-side credential-status
+            // branch (`datasource_auth_service.rs`'s `"keypair"` arm) — but
+            // had no registry entry at all, so it was invisible to every
+            // registry-driven consumer. That included
+            // `indexing_auth_modes()` (KYO-187): a workspace using Snowflake
+            // key-pair auth could not select key-pair for catalog-indexing
+            // credentials, because the indexing selector is built from this
+            // list and key-pair simply wasn't in it. `supports_headless_indexing:
+            // true` below is what fixes that — a key-pair is precisely the
+            // kind of credential that authenticates without an interactive
+            // session, exactly like `password` and `token`
+            // (`datasource_auth_service.rs:345-356` already treats it that
+            // way).
+            AuthModeConfig {
+                mode_id: "keypair".into(),
+                display_name: "Key Pair".into(),
+                description: "Authenticate using an RSA key pair".into(),
+                credential_type: "keypair".into(),
+                oauth_provider: None,
+                oauth_global: false,
+                // Matches `password_auth_mode`: a personal, per-user
+                // credential tracked via `UserDatasourceCredential.enabled`,
+                // same as password. No reason found to diverge.
+                credential_scope: "user".into(),
+                preference_tracking: "credential".into(),
+                // Mirrors exactly what `kyomi-ui`'s connection-config /
+                // credential builder persists for this mode
+                // (`datasources.rs:2028-2037` writes `username` + `password`
+                // + `private_key`; the keypair-mode field UI at
+                // `datasources.rs:5946-5985` shows "Username" and "Private
+                // Key (PEM)" as required, and "Private Key Passphrase" —
+                // stored under the `password` key — as optional). All three
+                // are listed here since `credential_fields` documents the
+                // field surface, not just the required subset (compare
+                // `password_auth_mode`, which lists both of its fields
+                // despite neither being conditionally optional in the same
+                // way). `password` and `private_key` both carry secrets, so
+                // both are sensitive.
+                credential_fields: vec!["username".into(), "password".into(), "private_key".into()],
+                sensitive_fields: vec!["password".into(), "private_key".into()],
+                is_default: false,
+                // The "Shared credentials (all users)" toggle
+                // (`ProviderCredentialsFields`, `datasources.rs:5908-5920`)
+                // is not excluded for Snowflake's keypair mode — it falls
+                // through to the same generic branch that renders the
+                // toggle for `password` mode. A workspace admin can already
+                // configure one shared key-pair for every member today.
+                supports_shared_credentials: true,
+                supports_headless_indexing: true,
+            },
         ]),
         catalog_container_label: "database",
         catalog_config_keys: &["catalog_databases"],
@@ -765,7 +823,14 @@ static SYNAPSE_META: LazyLock<DatasourceTypeMetadata> =
             AuthModeConfig {
                 mode_id: "service_principal".into(),
                 display_name: "Service Principal".into(),
-                description: "Authenticate using an Azure AD service principal".into(),
+                // KYO-274: same downgrade as BigQuery's service_account —
+                // "Authenticate using an Azure AD service principal" doesn't
+                // say the client ID/secret is one identity used by the whole
+                // workspace, not a per-user credential (there is exactly one
+                // Client ID/Secret field pair for the datasource; every
+                // connecting user shares it). That's the fact worth stating.
+                description: "All users share a service principal (app registration) identity"
+                    .into(),
                 credential_type: "password".into(),
                 oauth_provider: None,
                 oauth_global: false,
@@ -781,13 +846,21 @@ static SYNAPSE_META: LazyLock<DatasourceTypeMetadata> =
                 supports_shared_credentials: true,
                 supports_headless_indexing: true,
             },
-            // Microsoft OAuth
-            oauth_auth_mode(
-                "microsoft",
-                false,
-                Some("Microsoft Account"),
-                Some("Sign in with your Microsoft/Azure AD account"),
-            ),
+            // NOTE: a plain (non-enterprise) `oauth_auth_mode("microsoft", ...)`
+            // — "Microsoft Account" — lived here previously but was never
+            // wired up: no credential-field UI rendered for it, the
+            // connection-config builder's synapse match had no arm for it
+            // (would have silently mis-persisted a username/password for an
+            // OAuth-only mode), and `synapse_oauth_source` never mapped it to
+            // an OAuth-status fetch. `kyomi-ui`'s Authentication Mode
+            // selector never offered it either — the selector only ever
+            // exposed `sql` / `service_principal` / `enterprise_oauth`.
+            // Removed as dead (KYO-274); `enterprise_oauth` already covers
+            // Microsoft OAuth for Synapse. Do not re-add it speculatively —
+            // if a non-enterprise Microsoft OAuth mode is genuinely needed,
+            // it needs the UI wiring (field set, credential-config arm,
+            // OAuth-source mapping) built alongside it, not just a registry
+            // entry.
             // Microsoft Enterprise OAuth
             enterprise_oauth_auth_mode(
                 "microsoft",
@@ -991,22 +1064,39 @@ mod tests {
     // --- Snowflake auth modes ---
 
     #[test]
-    fn snowflake_has_two_auth_modes() {
+    fn snowflake_has_three_auth_modes() {
         let meta = get_metadata(&DatasourceType::Snowflake);
-        assert_eq!(meta.auth_modes.len(), 2);
+        assert_eq!(meta.auth_modes.len(), 3);
         assert_eq!(meta.auth_modes[0].mode_id, "password");
         assert!(meta.auth_modes[0].is_default);
         assert_eq!(meta.auth_modes[1].mode_id, "oauth");
         assert_eq!(meta.auth_modes[1].credential_type, "oauth_per_datasource");
         assert_eq!(meta.auth_modes[1].oauth_provider.as_deref(), Some("snowflake"));
+
+        // Key-pair auth (KYO-274) — see the long comment on this entry's
+        // construction for why it was added and why
+        // `supports_headless_indexing` is `true`.
+        assert_eq!(meta.auth_modes[2].mode_id, "keypair");
+        assert_eq!(meta.auth_modes[2].credential_type, "keypair");
+        assert!(!meta.auth_modes[2].is_default);
+        assert!(meta.auth_modes[2].supports_shared_credentials);
+        assert!(meta.auth_modes[2].supports_headless_indexing);
+        assert_eq!(
+            meta.auth_modes[2].credential_fields,
+            vec!["username", "password", "private_key"]
+        );
+        assert_eq!(
+            meta.auth_modes[2].sensitive_fields,
+            vec!["password", "private_key"]
+        );
     }
 
     // --- Synapse auth modes ---
 
     #[test]
-    fn synapse_has_four_auth_modes() {
+    fn synapse_has_three_auth_modes() {
         let meta = get_metadata(&DatasourceType::Synapse);
-        assert_eq!(meta.auth_modes.len(), 4);
+        assert_eq!(meta.auth_modes.len(), 3);
         assert_eq!(meta.auth_modes[0].mode_id, "sql");
         assert_eq!(meta.auth_modes[0].display_name, "SQL Authentication");
         assert!(meta.auth_modes[0].is_default);
@@ -1023,16 +1113,12 @@ mod tests {
         );
         assert_eq!(meta.auth_modes[1].sensitive_fields, vec!["client_secret"]);
 
-        assert_eq!(meta.auth_modes[2].mode_id, "oauth");
-        assert_eq!(meta.auth_modes[2].display_name, "Microsoft Account");
+        // The plain "Microsoft Account" oauth mode that used to sit here was
+        // removed as an unwired dead entry (KYO-274) — see the comment left
+        // in its place in the registry.
+        assert_eq!(meta.auth_modes[2].mode_id, "enterprise_oauth");
         assert_eq!(
-            meta.auth_modes[2].oauth_provider.as_deref(),
-            Some("microsoft")
-        );
-
-        assert_eq!(meta.auth_modes[3].mode_id, "enterprise_oauth");
-        assert_eq!(
-            meta.auth_modes[3].display_name,
+            meta.auth_modes[2].display_name,
             "Microsoft OAuth (Enterprise)"
         );
     }
@@ -1291,10 +1377,25 @@ mod tests {
         // equal what the old client-side `match` produced, including
         // flaredb's empty list (its only auth mode, `none`, has no
         // credentials and cannot back a headless indexing run).
+        //
+        // Snowflake's row below is the one deliberate exception, and it is
+        // an intended fix, not an accommodation: KYO-274 added the `keypair`
+        // auth mode to the registry with `supports_headless_indexing: true`.
+        // Before that, `keypair` did not exist in the registry at all, so it
+        // could never appear here — a workspace using Snowflake key-pair
+        // auth had no way to select key-pair credentials for catalog
+        // indexing, even though key-pair is exactly the kind of credential
+        // that can authenticate a headless background job. This test
+        // failing on that line (before the table below was updated) is what
+        // proved the gap was real; the updated expectation is the shipped
+        // fix.
         let expected: &[(&str, &[(&str, &str)])] = &[
             ("bigquery", &[("service_account", "Service Account")]),
             ("clickhouse", &[("password", "Password")]),
-            ("snowflake", &[("password", "Password")]),
+            (
+                "snowflake",
+                &[("password", "Password"), ("keypair", "Key Pair")],
+            ),
             ("databricks", &[("token", "Personal Access Token")]),
             ("redshift", &[("password", "Password")]),
             ("postgres", &[("password", "Password")]),
@@ -1355,6 +1456,45 @@ mod tests {
 
         let sy = get_metadata(&DatasourceType::Synapse);
         let ids = sy.get_auth_mode_ids();
-        assert_eq!(ids, vec!["sql", "service_principal", "oauth", "enterprise_oauth"]);
+        assert_eq!(ids, vec!["sql", "service_principal", "enterprise_oauth"]);
+    }
+
+    // --- Connection auth-mode ids (KYO-274) ---
+
+    /// After KYO-274, `kyomi-ui`'s four `*AuthModeSection` components
+    /// (BigQuery, Snowflake, Databricks, Synapse) no longer hardcode auth
+    /// mode ids/labels/descriptions — they render whatever
+    /// `DatasourceTypeInfo::connection_auth_modes` returns, which
+    /// `get_datasource_types()` populates directly from `meta.auth_modes`
+    /// for the type (see `kyomi-ui/src/server_fns/datasources.rs`). That
+    /// means the UI's mode list is, by construction, always exactly this
+    /// registry's `auth_modes` — there is no longer a second copy that can
+    /// drift out of sync the way the BigQuery label text did before this
+    /// ticket.
+    ///
+    /// This test pins today's known-good id list per provider as a
+    /// regression guard: a future edit to any of these four types'
+    /// `auth_modes` (add, remove, or reorder a mode) is still a real,
+    /// user-visible change to what admins can select — this test forces
+    /// that change to be a deliberate, reviewed edit here rather than a
+    /// silent drift discovered later in the UI.
+    #[test]
+    fn connection_auth_mode_ids_match_expected_table() {
+        let expected: &[(&str, &[&str])] = &[
+            ("bigquery", &["kyomi_oauth", "enterprise_oauth", "service_account"]),
+            ("snowflake", &["password", "oauth", "keypair"]),
+            ("databricks", &["token", "oauth"]),
+            ("synapse", &["sql", "service_principal", "enterprise_oauth"]),
+        ];
+
+        for (type_id, expected_ids) in expected {
+            let meta = get_metadata_by_str(type_id)
+                .unwrap_or_else(|| panic!("unknown datasource type {type_id}"));
+            let actual: Vec<&str> = meta.auth_modes.iter().map(|m| m.mode_id.as_str()).collect();
+            assert_eq!(
+                &actual, expected_ids,
+                "connection auth mode ids mismatch for {type_id}"
+            );
+        }
     }
 }
