@@ -5,7 +5,16 @@
 //! Replaces `apps/frontend/src/components/settings/AnalyticsSettings.jsx` (438 lines).
 //!
 //! Features:
-//! - Analytics usage overview (events this month / limit)
+//! - Analytics usage overview: monthly event quota progress bar (with the
+//!   raw percentage shown even past 100%, since a bar can't visually exceed
+//!   full), non-expiring bundle reserve balance, and a status banner for
+//!   over-quota states (drawing from bundle reserve / quota exceeded with
+//!   grace still active / quota and reserve both exhausted). Not shown at
+//!   all for self-hosted deployments — there is no quota to report there,
+//!   and the page's existing `analytics_access()` gate already prevents
+//!   `AnalyticsContent` (and this card) from rendering in that case, so the
+//!   card never has to special-case it. A failed fetch renders an explicit
+//!   error, never a zeroed-out card.
 //! - Sites list with inline create/edit form
 //! - Each site shows: name, domain badges, tracking snippet with copy button, datasource link
 //! - Create site form: name + domains + datasource slug inputs
@@ -13,15 +22,21 @@
 //! - Delete site with confirmation
 //! - Auto-generates datasource slug from site name
 
+use std::sync::Arc;
+
 use leptos::prelude::*;
 use phosphor_leptos::Icon;
 use crate::components::{
-    Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, Card, CardContent, CardDescription,
-    CardHeader, CardTitle, ConfirmDialog, Label, Skeleton, INPUT_CLASS,
+    Alert, AlertDescription, AlertVariant, Badge, BadgeVariant, Button, ButtonSize,
+    ButtonVariant, Card, CardContent, CardDescription, CardHeader, CardTitle, ConfirmDialog,
+    Label, Skeleton, INPUT_CLASS,
 };
 use crate::server_fns::analytics::*;
 use crate::server_fns::context::UserContext;
 use crate::utils::permissions::{analytics_access, AnalyticsAccess};
+
+use super::billing::format_number;
+use super::usage::{BundleRow, UsageCardShell};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -56,6 +71,7 @@ pub fn AnalyticsPage() -> impl IntoView {
     let user_ctx = expect_context::<LocalResource<Result<UserContext, ServerFnError>>>();
 
     let sites_resource = Resource::new(|| (), |_| list_analytics_sites());
+    let usage_resource = Resource::new(|| (), |_| get_analytics_usage());
 
     view! {
         <div class="p-4 sm:p-6">
@@ -116,18 +132,22 @@ pub fn AnalyticsPage() -> impl IntoView {
 
                     match sites_resource.await {
                         Ok(sites) => {
+                            let usage = usage_resource.await;
                             view! {
                                 <AnalyticsContent
                                     initial_sites=sites
                                     sites_resource=sites_resource
+                                    usage=usage
                                 />
                             }.into_any()
                         }
                         Err(_) => {
+                            let usage = usage_resource.await;
                             view! {
                                 <AnalyticsContent
                                     initial_sites=vec![]
                                     sites_resource=sites_resource
+                                    usage=usage
                                 />
                             }.into_any()
                         }
@@ -151,10 +171,17 @@ fn AnalyticsLoadingSkeleton() -> impl IntoView {
                 <Skeleton class="h-9 w-24"/>
             </div>
             <Card>
+                <CardHeader>
+                    <Skeleton class="h-5 w-40"/>
+                    <Skeleton class="h-4 w-56 mt-1"/>
+                </CardHeader>
                 <CardContent>
-                    <div class="space-y-2 pt-6">
-                        <Skeleton class="h-4 w-full"/>
-                        <Skeleton class="h-2 w-full"/>
+                    <div class="space-y-4">
+                        <div class="space-y-2">
+                            <Skeleton class="h-4 w-full"/>
+                            <Skeleton class="h-2 w-full"/>
+                        </div>
+                        <Skeleton class="h-4 w-3/5"/>
                     </div>
                 </CardContent>
             </Card>
@@ -179,6 +206,7 @@ fn AnalyticsLoadingSkeleton() -> impl IntoView {
 fn AnalyticsContent(
     initial_sites: Vec<AnalyticsSiteData>,
     sites_resource: Resource<Result<Vec<AnalyticsSiteData>, ServerFnError>>,
+    usage: Result<AnalyticsUsageData, ServerFnError>,
 ) -> impl IntoView {
     // Reactive state
     let (sites, set_sites) = signal(initial_sites);
@@ -349,6 +377,14 @@ fn AnalyticsContent(
 
     view! {
         <div class="space-y-6">
+            // Usage overview — always rendered here because AnalyticsContent
+            // only mounts on the AnalyticsAccess::Allowed path (not self-hosted,
+            // has ManageAnalytics, billing enabled). No second gate needed.
+            {match usage {
+                Ok(data) => view! { <AnalyticsUsageCard data=data/> }.into_any(),
+                Err(e) => view! { <AnalyticsUsageErrorCard message=e.to_string()/> }.into_any(),
+            }}
+
             // Header with Add button
             <div class="flex items-center justify-between">
                 <div>
@@ -370,23 +406,29 @@ fn AnalyticsContent(
             // Error messages from actions
             {move || create_action.value().get().and_then(|r| r.err()).map(|e| {
                 view! {
-                    <div class="rounded-lg border border-destructive/50 bg-destructive/10 p-3 text-sm text-error-foreground">
-                        {format!("Failed to create site: {e}")}
-                    </div>
+                    <Alert variant=AlertVariant::Error>
+                        <AlertDescription>
+                            {format!("Failed to create site: {e}")}
+                        </AlertDescription>
+                    </Alert>
                 }
             })}
             {move || update_action.value().get().and_then(|r| r.err()).map(|e| {
                 view! {
-                    <div class="rounded-lg border border-destructive/50 bg-destructive/10 p-3 text-sm text-error-foreground">
-                        {format!("Failed to update site: {e}")}
-                    </div>
+                    <Alert variant=AlertVariant::Error>
+                        <AlertDescription>
+                            {format!("Failed to update site: {e}")}
+                        </AlertDescription>
+                    </Alert>
                 }
             })}
             {move || delete_action.value().get().and_then(|r| r.err()).map(|e| {
                 view! {
-                    <div class="rounded-lg border border-destructive/50 bg-destructive/10 p-3 text-sm text-error-foreground">
-                        {format!("Failed to delete site: {e}")}
-                    </div>
+                    <Alert variant=AlertVariant::Error>
+                        <AlertDescription>
+                            {format!("Failed to delete site: {e}")}
+                        </AlertDescription>
+                    </Alert>
                 }
             })}
 
@@ -484,6 +526,151 @@ fn AnalyticsContent(
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Usage Overview
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// CSS class for the usage progress bar, driven by the server-computed
+/// `AnalyticsUsageData::status` rather than re-deriving thresholds from
+/// `usage_percent` client-side — the server already knows about the grace
+/// allowance and bundle draw-down, which a client-side percentage-only
+/// threshold can't reconstruct (a workspace can be over the included quota
+/// but not "in trouble" at all, if the bundle reserve is covering it — that
+/// is the `"reserve"` state below, distinct from `"warning"`/`"exceeded"`).
+fn analytics_status_bar_class(status: &str) -> &'static str {
+    match status {
+        "warning" => "h-2 rounded-full transition-all bg-warning-foreground",
+        "reserve" => "h-2 rounded-full transition-all bg-primary",
+        "exceeded" | "blocked" => "h-2 rounded-full transition-all bg-error-foreground",
+        // "ok" and any unrecognized status (forward-compat: a server-added
+        // status this build doesn't know about should read as calm, not alarm)
+        _ => "h-2 rounded-full transition-all bg-success-foreground",
+    }
+}
+
+/// Status banner shown below the usage card, if any. Returns the
+/// `<Alert>` variant to render alongside the message, chosen by severity
+/// rather than a flat error/not-error split:
+/// - `"reserve"` is `Info` — drawing from a paid, non-expiring bundle is
+///   the system working as designed, not a problem needing attention.
+/// - `"exceeded"` is `Warning` — over quota and out of reserve, but the
+///   grace allowance is still covering writes, so nothing is failing yet.
+/// - `"blocked"` is `Error` — grace is also exhausted and events are
+///   actively being rejected.
+fn analytics_usage_banner(status: &str, over_included: u64) -> Option<(AlertVariant, String)> {
+    match status {
+        "reserve" => Some((
+            AlertVariant::Info,
+            format!(
+                "Drawing from bundle reserve: {} events used beyond this month's included quota.",
+                format_number(over_included)
+            ),
+        )),
+        "exceeded" => Some((
+            AlertVariant::Warning,
+            "Monthly quota exceeded and no bundle reserve remaining. A grace allowance is \
+             still in effect."
+                .to_string(),
+        )),
+        "blocked" => Some((
+            AlertVariant::Error,
+            "Monthly quota and grace allowance exhausted with no bundle reserve remaining — \
+             new analytics events are being rejected."
+                .to_string(),
+        )),
+        _ => None,
+    }
+}
+
+/// Visual bar width for a usage percentage that may exceed 100 — a bar
+/// can't render past its own container, so the width is capped while the
+/// adjacent text label still shows the true (uncapped) percentage. Kept as
+/// a pure function so the capping behavior is independently testable.
+fn usage_bar_width_percent(usage_percent: f64) -> f64 {
+    usage_percent.min(100.0)
+}
+
+/// Usage overview card — monthly event quota, bundle reserve balance, and
+/// an over-quota status banner. Not gated on self-hosted here: the page's
+/// `analytics_access()` guard already keeps this component from mounting
+/// for self-hosted workspaces (see `AnalyticsPage`), so `data` is only ever
+/// constructed from a real Cloud quota — never the zeroed-out struct
+/// `get_analytics_usage` returns for self-hosted (that branch is simply
+/// never reached from this page).
+#[component]
+fn AnalyticsUsageCard(data: AnalyticsUsageData) -> impl IntoView {
+    let bar_class = analytics_status_bar_class(&data.status);
+    let bar_width = format!("{}%", usage_bar_width_percent(data.usage_percent));
+    let over_included = data.events_used.saturating_sub(data.events_limit);
+    let banner = analytics_usage_banner(&data.status, over_included);
+    let events_used = data.events_used;
+    let events_limit = data.events_limit;
+    let usage_percent = data.usage_percent;
+    let stat_value: ChildrenFn = Arc::new(move || {
+        view! {
+            {format!(
+                "{} / {}",
+                format_number(events_used),
+                format_number(events_limit),
+            )}
+            <span class="text-muted-foreground ml-1.5">
+                {format!("({:.0}%)", usage_percent)}
+            </span>
+        }
+        .into_any()
+    });
+
+    view! {
+        <UsageCardShell
+            icon=phosphor_leptos::PULSE
+            title="Event Usage"
+            description="Analytics events against your monthly quota and bundle reserve."
+            stat_label="Events This Month"
+            stat_value=stat_value
+            bar_class=bar_class
+            bar_width=bar_width
+            footnote="Included monthly quota — resets each billing period."
+            bundle_row=BundleRow {
+                label: "Bundle Reserve",
+                description: "Non-expiring. Used after the monthly quota is consumed.",
+                value: format!("{} events", format_number(data.bundle_balance)),
+            }
+        >
+            {banner.map(|(variant, message)| view! {
+                <Alert variant=variant>
+                    <AlertDescription>{message}</AlertDescription>
+                </Alert>
+            })}
+        </UsageCardShell>
+    }
+}
+
+/// Explicit error state for a failed usage-data fetch — never renders "0 of
+/// 0 events" or a blank card, since that would look identical to (and be
+/// indistinguishable from) an admin who has genuinely used nothing.
+#[component]
+fn AnalyticsUsageErrorCard(message: String) -> impl IntoView {
+    view! {
+        <Card>
+            <CardHeader>
+                <CardTitle class="flex items-center gap-2">
+                    <Icon icon=phosphor_leptos::PULSE size="20px"/>
+                    "Event Usage"
+                </CardTitle>
+                <CardDescription>
+                    "Analytics events against your monthly quota and bundle reserve."
+                </CardDescription>
+            </CardHeader>
+            <CardContent>
+                <Alert variant=AlertVariant::Error>
+                    <AlertDescription>
+                        {format!("Failed to load usage data: {message}")}
+                    </AlertDescription>
+                </Alert>
+            </CardContent>
+        </Card>
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Site Form (create / edit)
@@ -750,6 +937,14 @@ mod tests {
     //! in that the page now has exactly one guard, and that the guard
     //! covers the denied path explicitly rather than falling through to
     //! the sites content.
+    //!
+    //! Also covers KYO-278's usage-overview decision logic
+    //! (`analytics_status_bar_class`, `analytics_usage_banner`,
+    //! `usage_bar_width_percent`), which — unlike the guard above — are
+    //! plain pure functions and are tested directly rather than via
+    //! source-text assertions.
+
+    use super::*;
 
     const SRC: &str = include_str!("analytics.rs");
 
@@ -850,5 +1045,122 @@ mod tests {
             "the Allowed arm must fall through directly to sites_resource.await with no \
              extra logic in between — found: {between:?}"
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // KYO-278: usage overview decision logic. These test the pure
+    // functions directly rather than only asserting markup exists, per
+    // CODING_STANDARDS's testing section.
+    // ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn bar_class_is_success_for_ok_status() {
+        assert_eq!(
+            analytics_status_bar_class("ok"),
+            "h-2 rounded-full transition-all bg-success-foreground"
+        );
+    }
+
+    #[test]
+    fn bar_class_is_warning_for_warning_status() {
+        assert_eq!(
+            analytics_status_bar_class("warning"),
+            "h-2 rounded-full transition-all bg-warning-foreground"
+        );
+    }
+
+    #[test]
+    fn bar_class_is_primary_for_reserve_status() {
+        // "reserve" is deliberately NOT error-colored — drawing from a paid,
+        // non-expiring bundle is the system working as designed, not a
+        // problem state. This is the exact distinction a client-side
+        // percentage-only threshold (as in usage.rs's AnalyticsEventsCard,
+        // which renders live on self-hosted deployments via UsagePage —
+        // see the self-hosted quota-data notes on get_analytics_usage and
+        // get_ai_usage_status in server_fns/) cannot make without
+        // re-deriving what the server already knows.
+        assert_eq!(
+            analytics_status_bar_class("reserve"),
+            "h-2 rounded-full transition-all bg-primary"
+        );
+    }
+
+    #[test]
+    fn bar_class_is_error_for_exceeded_and_blocked_status() {
+        assert_eq!(
+            analytics_status_bar_class("exceeded"),
+            "h-2 rounded-full transition-all bg-error-foreground"
+        );
+        assert_eq!(
+            analytics_status_bar_class("blocked"),
+            "h-2 rounded-full transition-all bg-error-foreground"
+        );
+    }
+
+    #[test]
+    fn bar_class_defaults_to_success_for_unrecognized_status() {
+        // Forward-compat: an unknown status (e.g. a server rollout ahead of
+        // this build) must not read as an alarm by default.
+        assert_eq!(
+            analytics_status_bar_class("some-future-status"),
+            "h-2 rounded-full transition-all bg-success-foreground"
+        );
+    }
+
+    #[test]
+    fn banner_is_none_for_ok_and_warning() {
+        assert!(analytics_usage_banner("ok", 0).is_none());
+        assert!(analytics_usage_banner("warning", 0).is_none());
+    }
+
+    #[test]
+    fn banner_for_reserve_is_info_not_warning_or_error() {
+        let (variant, message) = analytics_usage_banner("reserve", 12_345)
+            .expect("reserve status must produce a banner");
+        assert!(
+            matches!(variant, AlertVariant::Info),
+            "reserve is an expected, non-problem state — Info, not Warning or Error"
+        );
+        assert!(
+            message.contains("12,345"),
+            "banner must surface the exact overage count: {message:?}"
+        );
+    }
+
+    #[test]
+    fn banner_for_exceeded_is_warning_and_blocked_is_error() {
+        let (exceeded_variant, exceeded_message) =
+            analytics_usage_banner("exceeded", 500).expect("exceeded status must produce a banner");
+        let (blocked_variant, blocked_message) =
+            analytics_usage_banner("blocked", 500).expect("blocked status must produce a banner");
+
+        assert!(
+            matches!(exceeded_variant, AlertVariant::Warning),
+            "exceeded still has the grace allowance covering writes — Warning, not Error"
+        );
+        assert!(
+            matches!(blocked_variant, AlertVariant::Error),
+            "blocked means events are actively being rejected — Error"
+        );
+        assert_ne!(
+            exceeded_message, blocked_message,
+            "exceeded (grace still active) and blocked (events being rejected) are \
+             materially different states and must not share wording"
+        );
+        assert!(
+            blocked_message.contains("rejected"),
+            "the blocked message must say events are actually being rejected, not just \
+             that the quota was exceeded: {blocked_message:?}"
+        );
+    }
+
+    #[test]
+    fn bar_width_caps_at_100_but_percent_over_100_is_still_a_valid_input() {
+        assert_eq!(usage_bar_width_percent(42.0), 42.0);
+        assert_eq!(usage_bar_width_percent(100.0), 100.0);
+        // usage_percent can legitimately exceed 100 (AnalyticsUsageData's own
+        // doc: "0..=100+") — the bar visually caps, but this function's
+        // caller in AnalyticsUsageCard still shows the uncapped 142% as text.
+        assert_eq!(usage_bar_width_percent(142.0), 100.0);
     }
 }

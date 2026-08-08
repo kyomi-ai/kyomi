@@ -10,6 +10,8 @@
 //! - Warning/exhaustion alerts
 //! - Uses Card, Alert, Skeleton
 
+use std::sync::Arc;
+
 use leptos::prelude::*;
 use leptos_router::components::Redirect;
 
@@ -71,6 +73,101 @@ fn usage_bar_class(percentage: f64, is_exhausted: bool) -> &'static str {
         "h-2 rounded-full transition-all bg-warning-foreground"
     } else {
         "h-2 rounded-full transition-all bg-success-foreground"
+    }
+}
+
+/// A bundle-reserve row: a `PACKAGE` icon, a label/description pair on the
+/// left, and a formatted balance on the right. Shown beneath the primary
+/// progress bar in [`UsageCardShell`] when supplied.
+pub struct BundleRow {
+    pub label: &'static str,
+    pub description: &'static str,
+    pub value: String,
+}
+
+/// Card shell shared by every "usage against a quota" settings card: an
+/// icon + title + description header, a labeled progress-bar row with an
+/// optional footnote, an optional bundle-reserve row, and a `children`
+/// slot for whatever the caller needs below that (status banner,
+/// "contact your owner" note, etc).
+///
+/// This is the third copy of this shape — [`WorkspaceUsageCard`] and
+/// [`AnalyticsEventsCard`] below, plus `AnalyticsUsageCard` in
+/// `pages/settings/analytics.rs` — and CODING_STANDARDS is explicit that
+/// the third copy, not the second, is the extraction trigger.
+///
+/// Deliberately does NOT own the status-banner logic: `WorkspaceUsageCard`
+/// gates its banner on a single boolean, `AnalyticsEventsCard` derives two
+/// independent flags client-side (`drawing_from_reserve` /
+/// `bundle_exhausted`), and `AnalyticsUsageCard` consumes a three-way
+/// server-computed `status` string. Forcing those through one shared
+/// signature would mean a bespoke config flag per variant — exactly what
+/// CODING_STANDARDS warns against. Each caller renders its own banner (and
+/// ownership note, where relevant) as `children` instead.
+#[component]
+pub fn UsageCardShell(
+    icon: phosphor_leptos::IconData,
+    title: &'static str,
+    description: &'static str,
+    stat_label: &'static str,
+    stat_value: ChildrenFn,
+    bar_class: &'static str,
+    bar_width: String,
+    #[prop(optional)] footnote: Option<&'static str>,
+    #[prop(optional)] bundle_row: Option<BundleRow>,
+    children: Children,
+) -> impl IntoView {
+    view! {
+        <Card>
+            <CardHeader>
+                <CardTitle class="flex items-center gap-2">
+                    <Icon icon=icon size="20px"/>
+                    {title}
+                </CardTitle>
+                <CardDescription>{description}</CardDescription>
+            </CardHeader>
+            <CardContent>
+                <div class="space-y-4">
+                    <div>
+                        <div class="flex justify-between items-baseline mb-2">
+                            <span class="text-sm font-medium text-foreground">
+                                {stat_label}
+                            </span>
+                            <span class="font-mono tabular-nums text-sm font-medium text-foreground">
+                                {stat_value()}
+                            </span>
+                        </div>
+                        <div class="w-full bg-muted rounded-full h-2">
+                            <div class=bar_class style:width=bar_width/>
+                        </div>
+                        {footnote.map(|f| view! {
+                            <p class="text-xs text-muted-foreground mt-1.5">{f}</p>
+                        })}
+                    </div>
+
+                    {bundle_row.map(|row| view! {
+                        <div class="flex items-center justify-between pt-3 border-t border-border">
+                            <div class="flex items-center gap-2">
+                                <Icon icon=phosphor_leptos::PACKAGE size="16px" attr:class="text-muted-foreground"/>
+                                <div>
+                                    <div class="text-sm font-medium text-foreground">
+                                        {row.label}
+                                    </div>
+                                    <div class="text-xs text-muted-foreground">
+                                        {row.description}
+                                    </div>
+                                </div>
+                            </div>
+                            <span class="font-mono tabular-nums text-sm font-medium text-foreground">
+                                {row.value}
+                            </span>
+                        </div>
+                    })}
+
+                    {children()}
+                </div>
+            </CardContent>
+        </Card>
     }
 }
 
@@ -244,68 +341,37 @@ fn WorkspaceUsageCard(
 ) -> impl IntoView {
     let bar_class = usage_bar_class(percentage, is_exhausted);
     let bar_width = format!("{}%", percentage.min(100.0));
+    let stat_value: ChildrenFn =
+        Arc::new(move || format!("{:.1}%", percentage).into_any());
 
     view! {
-        <Card>
-            <CardHeader>
-                <CardTitle class="flex items-center gap-2">
-                    <Icon icon=phosphor_leptos::SPARKLE size="20px"/>
-                    "Workspace AI Usage"
-                </CardTitle>
-                <CardDescription>"AI usage across the workspace."</CardDescription>
-            </CardHeader>
-            <CardContent>
-                <div class="space-y-4">
-                    <div>
-                        <div class="flex justify-between items-baseline mb-2">
-                            <span class="text-sm font-medium text-foreground">
-                                "AI Credits Used"
-                            </span>
-                            <span class="font-mono tabular-nums text-sm font-medium text-foreground">
-                                {format!("{:.1}%", percentage)}
-                            </span>
-                        </div>
-                        <div class="w-full bg-muted rounded-full h-2">
-                            <div
-                                class=bar_class
-                                style:width=bar_width
-                            />
-                        </div>
-                    </div>
-
-                    // Bundle balance row
-                    <div class="flex items-center justify-between pt-3 border-t border-border">
-                        <div class="flex items-center gap-2">
-                            <Icon icon=phosphor_leptos::PACKAGE size="16px" attr:class="text-muted-foreground"/>
-                            <div>
-                                <div class="text-sm font-medium text-foreground">
-                                    "AI Credit Balance"
-                                </div>
-                                <div class="text-xs text-muted-foreground">
-                                    "Purchased credits. Non-expiring."
-                                </div>
-                            </div>
-                        </div>
-                        <span class="font-mono tabular-nums text-sm font-medium text-foreground">
-                            {format!("${:.2} remaining", ai_bundle_balance_usd)}
-                        </span>
-                    </div>
-
-                    {is_exhausted.then(|| view! {
-                        <div class="rounded-md bg-error/10 border border-error/30 px-3 py-2">
-                            <p class="text-xs text-error-foreground">
-                                "You have exceeded AI usage limits"
-                            </p>
-                        </div>
-                    })}
-                    {(!is_owner).then(|| view! {
-                        <p class="text-xs text-muted-foreground">
-                            "Contact your workspace owner to purchase additional AI credits."
-                        </p>
-                    })}
+        <UsageCardShell
+            icon=phosphor_leptos::SPARKLE
+            title="Workspace AI Usage"
+            description="AI usage across the workspace."
+            stat_label="AI Credits Used"
+            stat_value=stat_value
+            bar_class=bar_class
+            bar_width=bar_width
+            bundle_row=BundleRow {
+                label: "AI Credit Balance",
+                description: "Purchased credits. Non-expiring.",
+                value: format!("${:.2} remaining", ai_bundle_balance_usd),
+            }
+        >
+            {is_exhausted.then(|| view! {
+                <div class="rounded-md bg-error/10 border border-error/30 px-3 py-2">
+                    <p class="text-xs text-error-foreground">
+                        "You have exceeded AI usage limits"
+                    </p>
                 </div>
-            </CardContent>
-        </Card>
+            })}
+            {(!is_owner).then(|| view! {
+                <p class="text-xs text-muted-foreground">
+                    "Contact your workspace owner to purchase additional AI credits."
+                </p>
+            })}
+        </UsageCardShell>
     }
 }
 
@@ -411,87 +477,56 @@ fn AnalyticsEventsCard(
         "h-2 rounded-full transition-all bg-success-foreground"
     };
     let bar_width = format!("{}%", usage_pct.min(100.0));
+    let stat_value: ChildrenFn = Arc::new(move || {
+        view! {
+            {format!(
+                "{} / {}",
+                format_number(events_used),
+                format_number(events_included),
+            )}
+            <span class="text-muted-foreground ml-1.5">
+                {format!("({:.0}%)", usage_pct)}
+            </span>
+        }
+        .into_any()
+    });
 
     view! {
-        <Card>
-            <CardHeader>
-                <CardTitle class="flex items-center gap-2">
-                    <Icon icon=phosphor_leptos::PULSE size="20px"/>
-                    "Analytics Events"
-                </CardTitle>
-                <CardDescription>"Event usage against your monthly quota and bundle reserve."</CardDescription>
-            </CardHeader>
-            <CardContent>
-                <div class="space-y-4">
-                    // Primary usage bar — monthly included quota
-                    <div>
-                        <div class="flex justify-between items-baseline mb-2">
-                            <span class="text-sm font-medium text-foreground">
-                                "Events This Month"
-                            </span>
-                            <span class="font-mono tabular-nums text-sm font-medium text-foreground">
-                                {format!(
-                                    "{} / {}",
-                                    format_number(events_used),
-                                    format_number(events_included),
-                                )}
-                                <span class="text-muted-foreground ml-1.5">
-                                    {format!("({:.0}%)", usage_pct)}
-                                </span>
-                            </span>
-                        </div>
-                        <div class="w-full bg-muted rounded-full h-2">
-                            <div
-                                class=bar_class
-                                style:width=bar_width
-                            />
-                        </div>
-                        <p class="text-xs text-muted-foreground mt-1.5">
-                            "Included monthly quota — resets each billing period."
-                        </p>
-                    </div>
-
-                    // Bundle reserve row
-                    <div class="flex items-center justify-between pt-3 border-t border-border">
-                        <div class="flex items-center gap-2">
-                            <Icon icon=phosphor_leptos::PACKAGE size="16px" attr:class="text-muted-foreground"/>
-                            <div>
-                                <div class="text-sm font-medium text-foreground">
-                                    "Bundle Reserve"
-                                </div>
-                                <div class="text-xs text-muted-foreground">
-                                    "Non-expiring. Used after monthly quota is consumed."
-                                </div>
-                            </div>
-                        </div>
-                        <span class="font-mono tabular-nums text-sm font-medium text-foreground">
-                            {format!("{} events", format_number(bundle_u))}
-                        </span>
-                    </div>
-
-                    // Status messages
-                    {drawing_from_reserve.then(|| view! {
-                        <div class="rounded-md bg-accent/30 border border-accent/30 px-3 py-2">
-                            <p class="text-xs text-foreground">
-                                <span class="font-medium">"Drawing from bundle reserve: "</span>
-                                {format!("{} events used beyond this month's included quota.", format_number(over_by))}
-                            </p>
-                        </div>
-                    })}
-                    {bundle_exhausted.then(|| view! {
-                        <div class="rounded-md bg-error/10 border border-error/30 px-3 py-2">
-                            <p class="text-xs text-error-foreground">
-                                "Monthly quota exceeded and no bundle reserve remaining."
-                            </p>
-                        </div>
-                    })}
-                    {(!is_owner).then(|| view! {
-                        <p class="text-xs text-muted-foreground">
-                            "Contact your workspace owner to purchase additional event bundles."
-                        </p>
-                    })}
+        <UsageCardShell
+            icon=phosphor_leptos::PULSE
+            title="Analytics Events"
+            description="Event usage against your monthly quota and bundle reserve."
+            stat_label="Events This Month"
+            stat_value=stat_value
+            bar_class=bar_class
+            bar_width=bar_width
+            footnote="Included monthly quota — resets each billing period."
+            bundle_row=BundleRow {
+                label: "Bundle Reserve",
+                description: "Non-expiring. Used after monthly quota is consumed.",
+                value: format!("{} events", format_number(bundle_u)),
+            }
+        >
+            {drawing_from_reserve.then(|| view! {
+                <div class="rounded-md bg-accent/30 border border-accent/30 px-3 py-2">
+                    <p class="text-xs text-foreground">
+                        <span class="font-medium">"Drawing from bundle reserve: "</span>
+                        {format!("{} events used beyond this month's included quota.", format_number(over_by))}
+                    </p>
                 </div>
-            </CardContent>
-        </Card>
+            })}
+            {bundle_exhausted.then(|| view! {
+                <div class="rounded-md bg-error/10 border border-error/30 px-3 py-2">
+                    <p class="text-xs text-error-foreground">
+                        "Monthly quota exceeded and no bundle reserve remaining."
+                    </p>
+                </div>
+            })}
+            {(!is_owner).then(|| view! {
+                <p class="text-xs text-muted-foreground">
+                    "Contact your workspace owner to purchase additional event bundles."
+                </p>
+            })}
+        </UsageCardShell>
     }
 }

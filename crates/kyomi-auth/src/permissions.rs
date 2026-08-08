@@ -329,5 +329,76 @@ mod tests {
                 "member must be rejected by the ManageTeam gate"
             );
         }
+
+        /// Sibling of `admin_accepted_member_rejected_by_manage_team_gate`.
+        ///
+        /// **What this proves, precisely:** that `permissions_for` — the
+        /// single source of truth every `ac.require(Permission::X, ...)`
+        /// call is defined in terms of — correctly excludes a
+        /// `workspace_user` from `Permission::ManageAnalytics` and includes
+        /// a `workspace_admin`. That is a necessary precondition for
+        /// `get_analytics_usage`'s gate (`kyomi-ui/src/server_fns/analytics.rs`)
+        /// to work, but it is **not sufficient**: this test never calls
+        /// `get_analytics_usage`, so it cannot detect whether that function
+        /// actually calls `ac.require(Permission::ManageAnalytics, ...)` at
+        /// all. Deleting that call site does not fail this test — confirmed
+        /// by mutation-testing during KYO-278 review. The call-site coverage
+        /// lives in `server_fns::analytics::tests::
+        /// get_analytics_usage_requires_manage_analytics_before_the_self_hosted_branch`,
+        /// a source-assertion test (no request-context harness exists to
+        /// call the `#[server]` fn directly — see that test's doc comment).
+        ///
+        /// Added for KYO-278: `get_analytics_usage` shipped with no
+        /// permission check at all — every sibling server fn in that file
+        /// (`list_analytics_sites`, `create_analytics_site`,
+        /// `update_analytics_site`, `delete_analytics_site`) called
+        /// `ac.require(Permission::ManageAnalytics, ...)` immediately after
+        /// `AuthenticatedContext::extract()`; this one didn't, so any
+        /// authenticated workspace member — not just admins — could read
+        /// the workspace's analytics event usage, quota, and
+        /// billing-adjacent bundle balance. Reuses the exact
+        /// `test_pool`/`seed_*`/`mint_token` helpers above rather than
+        /// adding a second copy (CODING_STANDARDS "third copy" rule — this
+        /// is the second use, still within budget).
+        #[tokio::test]
+        async fn admin_accepted_member_rejected_by_manage_analytics_gate() {
+            let pool = test_pool().await;
+            seed_user(&pool, "owner-2").await;
+            seed_user(&pool, "admin-2").await;
+            seed_user(&pool, "member-2").await;
+            seed_workspace(&pool, "ws-2", "owner-2").await;
+            seed_membership(&pool, "ws-2", "owner-2", "workspace_admin").await;
+            seed_membership(&pool, "ws-2", "admin-2", "workspace_admin").await;
+            seed_membership(&pool, "ws-2", "member-2", "workspace_user").await;
+
+            let state = AuthState {
+                jwt_secret: SECRET.to_string(),
+                db: pool.clone(),
+                is_personal: false,
+            };
+
+            let admin_token = mint_token("admin-2", "ws-2");
+            let mut admin_parts = parts_with_bearer(&admin_token);
+            let admin_auth = AuthUser::from_request_parts(&mut admin_parts, &state)
+                .await
+                .expect("admin auth extraction");
+
+            let member_token = mint_token("member-2", "ws-2");
+            let mut member_parts = parts_with_bearer(&member_token);
+            let member_auth = AuthUser::from_request_parts(&mut member_parts, &state)
+                .await
+                .expect("member auth extraction");
+
+            // What `analytics::get_analytics_usage`'s
+            // `ac.require(Permission::ManageAnalytics, ...)` actually evaluates:
+            assert!(
+                permissions_for(&admin_auth).contains(&Permission::ManageAnalytics),
+                "admin must be accepted by the ManageAnalytics gate"
+            );
+            assert!(
+                !permissions_for(&member_auth).contains(&Permission::ManageAnalytics),
+                "member must be rejected by the ManageAnalytics gate"
+            );
+        }
     }
 }
