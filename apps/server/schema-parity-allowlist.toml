@@ -233,21 +233,3 @@ reason = "Postgres default `(now() + '7 days'::interval)` — SQLite has no INTE
 table = "workspace_invitations"
 column = "expires_at"
 reason = "Postgres default `(now() + '7 days'::interval)` — SQLite has no INTERVAL arithmetic; apps/server/migrations-sqlite/00001_baseline.sql computes the same 7-day expiry in the Rust application layer before insert instead (see its 'skip INTERVAL default' comment)."
-
-# ---------------------------------------------------------------------------
-# Known drift found while building this check (KYO-206), each with its own
-# ticket. These were deliberately NOT fixed in KYO-206: that PR had to
-# demonstrate this check failing on a real divergence, and fixing the
-# divergences it found would have destroyed the evidence.
-#
-# These entries are WAIVERS FOR REAL BUGS, not statements that the
-# divergence is acceptable. Each linked ticket's acceptance criteria include
-# deleting its entry from this file — so if you are fixing one of these,
-# remove the entry rather than leaving a stale waiver that would mask a
-# future regression on the same column.
-# ---------------------------------------------------------------------------
-
-[[entry]]
-table = "refresh_tokens"
-column = "family_id"
-reason = "KNOWN DRIFT — tracked by KYO-294, remove this entry when fixing it. Postgres (20260216121703_add_refresh_token_rotation.sql) backfills family_id then runs `ALTER COLUMN family_id SET NOT NULL`. The SQLite migration (00003_refresh_token_rotation.sql) backfills the same way but has no equivalent NOT NULL step, so family_id stays nullable forever on self-hosted — a future code path that fails to set it would silently escape the family-based revocation query (`WHERE family_id = ...`) instead of being rejected at insert time."
