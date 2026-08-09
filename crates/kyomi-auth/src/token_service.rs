@@ -35,6 +35,7 @@ pub struct DeviceInfo {
 // ---------------------------------------------------------------------------
 
 /// Result of verifying a refresh token, accounting for rotation state.
+#[derive(Debug)]
 pub enum RefreshTokenVerifyResult {
     /// Token is valid and current (not replaced). Caller should rotate it.
     Valid(RefreshTokenUserData),
@@ -491,4 +492,208 @@ pub struct SessionInfo {
     pub ip_address: Option<String>,
     pub country_code: Option<String>,
     pub oauth_client_name: Option<String>,
+}
+
+// ─── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    // ─── family_id NOT NULL constraint (KYO-294) ─────────────────────────────
+    //
+    // Regression coverage for the SQLite/Postgres divergence
+    // schema-parity-allowlist.toml tracked before
+    // migrations-sqlite/00034_refresh_tokens_family_id_not_null.sql: SQLite's
+    // `refresh_tokens.family_id` was nullable (no NOT NULL step after 00003's
+    // backfill), so an INSERT that omitted family_id silently succeeded on
+    // self-hosted while the same INSERT already failed loudly on Postgres
+    // (20260216121703_add_refresh_token_rotation.sql's `SET NOT NULL`).
+    // Confirmed by hand against the pre-00034 schema before writing these:
+    // the sqlite insert below succeeds silently (storing family_id = NULL)
+    // without the fix, and is rejected with it.
+    //
+    // These bypass `store_refresh_token` (which always supplies family_id)
+    // and insert raw SQL directly, the same way a bad migration, import
+    // script, or future callsite could.
+
+    async fn test_pool() -> DbPool {
+        let _ = kyomi_core::constants::load_with_fallback();
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+
+        sqlx::query("PRAGMA foreign_keys=ON")
+            .execute(&pool)
+            .await
+            .expect("enable foreign keys");
+
+        sqlx::migrate!("../../apps/server/migrations-sqlite")
+            .run(&pool)
+            .await
+            .expect("run sqlite migrations");
+
+        DbPool::Sqlite(pool)
+    }
+
+    fn sqlite_pool(db: &DbPool) -> &sqlx::SqlitePool {
+        match db {
+            DbPool::Sqlite(sq) => sq,
+            _ => panic!("test requires sqlite pool"),
+        }
+    }
+
+    async fn seed_user(sq: &sqlx::SqlitePool, user_id: &str, email: &str) {
+        sqlx::query("INSERT INTO users (user_id, email) VALUES ($1, $2)")
+            .bind(user_id)
+            .bind(email)
+            .execute(sq)
+            .await
+            .expect("insert user");
+    }
+
+    fn test_device_info() -> DeviceInfo {
+        DeviceInfo {
+            user_agent: Some("test-agent".to_string()),
+            ip_address: Some("127.0.0.1".to_string()),
+            country_code: None,
+            oauth_client_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlite_insert_omitting_family_id_fails() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        seed_user(sq, "user-1", "user1@example.com").await;
+
+        let result = sqlx::query(
+            "INSERT INTO refresh_tokens (token_id, user_id, token_hash, expires_at) \
+             VALUES ('rt-no-family', 'user-1', 'hash-1', '2030-01-01T00:00:00Z')",
+        )
+        .execute(sq)
+        .await;
+
+        assert!(
+            result.is_err(),
+            "omitting family_id must be rejected by the NOT NULL constraint \
+             (no default), got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_insert_omitting_family_id_fails() {
+        let test_name = "postgres_insert_omitting_family_id_fails";
+        let Some(db) = crate::test_pg::postgres_test_pool_or_skip(test_name).await else {
+            return;
+        };
+        let pg = crate::test_pg::postgres_pool(&db);
+
+        let user_id = crate::test_pg::unique_test_id("user");
+        crate::test_pg::seed_user_pg(pg, &user_id, &format!("{user_id}@example.com")).await;
+
+        let token_id = crate::test_pg::unique_test_id("rt");
+        let result = sqlx::query(
+            "INSERT INTO refresh_tokens (token_id, user_id, token_hash, expires_at) \
+             VALUES ($1, $2, 'hash-1', now() + interval '30 days')",
+        )
+        .bind(&token_id)
+        .bind(&user_id)
+        .execute(pg)
+        .await;
+
+        assert!(
+            result.is_err(),
+            "omitting family_id must be rejected by Postgres's NOT NULL constraint, got: {result:?}"
+        );
+
+        sqlx::query("DELETE FROM users WHERE user_id = $1")
+            .bind(&user_id)
+            .execute(pg)
+            .await
+            .expect("cleanup user (postgres)");
+    }
+
+    // ─── Rotation + family revocation end-to-end (KYO-294) ───────────────────
+    //
+    // Confirms rotation and family-based revocation still work on SQLite
+    // with the 00034 migration applied — nothing about the NOT NULL
+    // constraint changes these code paths, since both insert sites already
+    // bound family_id unconditionally, but this is the regression guard
+    // that would catch it if that stopped being true.
+
+    #[tokio::test]
+    async fn rotation_and_family_revocation_end_to_end_on_sqlite() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        seed_user(sq, "user-1", "user1@example.com").await;
+
+        let device_info = test_device_info();
+        let expires_at = Utc::now() + Duration::days(30);
+        let family_id = generate_family_id();
+
+        // 1. Store the initial token in a new family.
+        let raw_token_1 = "rt_initial_raw_token_value";
+        let token_hash_1 = hash_refresh_token(raw_token_1);
+        let token_id_1 = store_refresh_token(
+            &db, "user-1", &token_hash_1, expires_at, &device_info, &family_id,
+        )
+        .await
+        .expect("store initial refresh token");
+
+        // 2. Verifying the fresh token returns Valid, with the family_id we
+        //    supplied at insert.
+        match verify_refresh_token(&db, raw_token_1).await.expect("verify initial token") {
+            RefreshTokenVerifyResult::Valid(user_data) => {
+                assert_eq!(user_data.token_id, token_id_1);
+                assert_eq!(user_data.family_id, family_id);
+                assert_eq!(user_data.user_id, "user-1");
+            }
+            other => panic!("expected Valid, got a different variant: {other:?}"),
+        }
+
+        // 3. Rotate: old token marked replaced, new token created in the
+        //    same family.
+        let raw_token_2 = "rt_rotated_raw_token_value";
+        let token_hash_2 = hash_refresh_token(raw_token_2);
+        let token_id_2 = rotate_refresh_token(
+            &db, &token_id_1, "user-1", &family_id, &token_hash_2, expires_at, &device_info,
+        )
+        .await
+        .expect("rotate refresh token");
+        assert_ne!(token_id_2, token_id_1);
+
+        // 4. The old token is now within its grace period — GracePeriod, not
+        //    Invalid.
+        match verify_refresh_token(&db, raw_token_1).await.expect("verify replaced token") {
+            RefreshTokenVerifyResult::GracePeriod(user_data) => {
+                assert_eq!(user_data.family_id, family_id);
+            }
+            other => panic!("expected GracePeriod, got a different variant: {other:?}"),
+        }
+
+        // 5. The new token verifies as Valid.
+        match verify_refresh_token(&db, raw_token_2).await.expect("verify rotated token") {
+            RefreshTokenVerifyResult::Valid(user_data) => {
+                assert_eq!(user_data.token_id, token_id_2);
+                assert_eq!(user_data.family_id, family_id);
+            }
+            other => panic!("expected Valid, got a different variant: {other:?}"),
+        }
+
+        // 6. Revoke the whole family — both tokens (replaced + current) are
+        //    active rows in this family, so both are revoked.
+        let revoked_count = revoke_token_family(&db, &family_id).await.expect("revoke family");
+        assert_eq!(revoked_count, 2, "both tokens in the family must be revoked");
+
+        // 7. The previously-valid rotated token must now fail verification.
+        match verify_refresh_token(&db, raw_token_2).await.expect("verify after revocation") {
+            RefreshTokenVerifyResult::Invalid => {}
+            other => panic!("expected Invalid after family revocation, got: {other:?}"),
+        }
+    }
 }
