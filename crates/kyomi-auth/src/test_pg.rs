@@ -160,3 +160,34 @@ pub(crate) async fn seed_workspace_pg(pg: &sqlx::PgPool, workspace_id: &str, own
 pub(crate) fn unique_test_id(tag: &str) -> String {
     format!("k292-{tag}-{}", &uuid::Uuid::new_v4().simple().to_string()[..10])
 }
+
+/// Delete a workspace row and one or more user rows — the tail every
+/// `cleanup_pg` in this crate shares byte-for-byte. `workspaces` is deleted
+/// first because `workspaces.owner_user_id REFERENCES users(user_id)`.
+///
+/// Callers with module-specific rows to remove first (chat sessions and
+/// messages, datasource configs and table cache, workspace_users
+/// memberships) delete those in their own `cleanup_pg` before calling this
+/// — this helper owns only the part that was identical across all four
+/// copies, per `docs/CODING_STANDARDS.md`'s "third copy is the extraction
+/// trigger" rule (KYO-293 review: `collection_service`'s
+/// `cleanup_created_by_test_pg` was the fourth near-identical copy,
+/// alongside `chat_service`, `datasource_service`, and `workspace_service`).
+pub(crate) async fn cleanup_workspace_and_users_pg(
+    pg: &sqlx::PgPool,
+    workspace_id: &str,
+    user_ids: &[&str],
+) {
+    sqlx::query("DELETE FROM workspaces WHERE workspace_id = $1")
+        .bind(workspace_id)
+        .execute(pg)
+        .await
+        .expect("cleanup workspaces (postgres)");
+    for user_id in user_ids {
+        sqlx::query("DELETE FROM users WHERE user_id = $1")
+            .bind(user_id)
+            .execute(pg)
+            .await
+            .expect("cleanup users (postgres)");
+    }
+}
