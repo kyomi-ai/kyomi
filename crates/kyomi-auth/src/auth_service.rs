@@ -1418,70 +1418,45 @@ pub async fn passkey_login_complete_service(
         });
     }
 
-    // Verify assertion (discoverable or standard flow)
-    let is_discoverable = challenge_data["discoverable"].as_bool().unwrap_or(false);
+    // Verify assertion. The Leptos login flow (`passkey_login_start` in
+    // kyomi-ui) always mints a discoverable challenge — the non-discoverable
+    // ("standard", `allowCredentials` populated) flow was only ever produced
+    // by the REST implementation this replaced, removed in KYO-286.
     let passkeys = get_passkeys_for_user(db, &user.user_id).await?;
 
-    if is_discoverable {
-        let disc_state: DiscoverableAuthentication =
-            serde_json::from_value(challenge_data["discoverable_state"].clone())
-                .map_err(|e| {
-                    kyomi_core::Error::Internal(format!(
-                        "Deserialize discoverable state: {e}"
-                    ))
-                })?;
-        if passkeys.is_empty() {
-            return Ok(PasskeyLoginServiceResult::InvalidCredentials);
-        }
-        let auth_result = crate::webauthn::finish_discoverable_authentication(
-            webauthn,
-            &credential,
-            disc_state,
-            &passkeys,
-        )
-        .map_err(|e| {
-            tracing::warn!(error = %e, "Passkey discoverable auth failed");
-            kyomi_core::Error::Internal("Authentication failed".into())
-        });
-        match auth_result {
-            Ok(auth_result) => {
-                update_passkey_after_auth_inner(
-                    db,
-                    &user.user_id,
-                    &credential_id_b64,
-                    cred_id_bytes,
-                    &passkeys,
-                    &auth_result,
-                )
-                .await;
-            }
-            Err(_) => return Ok(PasskeyLoginServiceResult::AuthFailed),
-        }
-    } else {
-        let auth_state: PasskeyAuthentication =
-            serde_json::from_value(challenge_data["authentication_state"].clone())
-                .map_err(|e| {
-                    kyomi_core::Error::Internal(format!("Deserialize auth state: {e}"))
-                })?;
-        let auth_result = crate::webauthn::finish_authentication(webauthn, &credential, &auth_state)
+    let disc_state: DiscoverableAuthentication =
+        serde_json::from_value(challenge_data["discoverable_state"].clone())
             .map_err(|e| {
-                tracing::warn!(error = %e, "Passkey auth failed");
-                kyomi_core::Error::Internal("Authentication failed".into())
-            });
-        match auth_result {
-            Ok(auth_result) => {
-                update_passkey_after_auth_inner(
-                    db,
-                    &user.user_id,
-                    &credential_id_b64,
-                    cred_id_bytes,
-                    &passkeys,
-                    &auth_result,
-                )
-                .await;
-            }
-            Err(_) => return Ok(PasskeyLoginServiceResult::AuthFailed),
+                kyomi_core::Error::Internal(format!(
+                    "Deserialize discoverable state: {e}"
+                ))
+            })?;
+    if passkeys.is_empty() {
+        return Ok(PasskeyLoginServiceResult::InvalidCredentials);
+    }
+    let auth_result = crate::webauthn::finish_discoverable_authentication(
+        webauthn,
+        &credential,
+        disc_state,
+        &passkeys,
+    )
+    .map_err(|e| {
+        tracing::warn!(error = %e, "Passkey discoverable auth failed");
+        kyomi_core::Error::Internal("Authentication failed".into())
+    });
+    match auth_result {
+        Ok(auth_result) => {
+            update_passkey_after_auth_inner(
+                db,
+                &user.user_id,
+                &credential_id_b64,
+                cred_id_bytes,
+                &passkeys,
+                &auth_result,
+            )
+            .await;
         }
+        Err(_) => return Ok(PasskeyLoginServiceResult::AuthFailed),
     }
 
     // Touch last_used on webauthn auth method (best-effort)
@@ -1665,8 +1640,6 @@ pub struct PasskeyRecoveryCompleteParams<'a> {
 /// a proxy) could attach their own passkey to the victim's account and be
 /// auto-logged in as them.
 ///
-/// Mirrors `apps/server/src/routes/auth_passkeys.rs::recovery_register`
-/// (KYO-280), the REST reference implementation for this binding chain.
 /// Requires, in order:
 /// 1. A `recovery_session` cookie value was supplied at all.
 /// 2. It validates as a JWT against `jwt_secret`.
@@ -1850,11 +1823,11 @@ pub struct PasskeySignupStartParams<'a> {
 /// below (verified user) is deliberately a no-op that returns the exact same
 /// `VerificationRequired` result as the new-user and existing-unverified
 /// arms, both to close that hole and to avoid recreating the account-
-/// enumeration oracle the REST original (`auth_passkeys.rs::register_start`)
-/// has: that handler returns a distinct `BadRequest` for verified users,
-/// which lets a caller tell registered emails apart from unregistered ones.
-/// Mirror `signup_start_service`'s enumeration-safe behavior here, not the
-/// REST route's.
+/// enumeration oracle the REST implementation this replaced had: it returned
+/// a distinct `BadRequest` for verified users, which let a caller tell
+/// registered emails apart from unregistered ones. Mirror
+/// `signup_start_service`'s enumeration-safe behavior here, not the deleted
+/// route's.
 pub async fn passkey_signup_start_service(
     params: PasskeySignupStartParams<'_>,
 ) -> kyomi_core::Result<PasskeySignupStartServiceResult> {
@@ -2000,7 +1973,7 @@ pub async fn passkey_signup_complete_service(
     }
 
     // Verify token. Must be "signup" — the type minted for this exact URL
-    // (`/auth/passkey-signup`, see `auth_passkeys.rs`) — not
+    // (`/auth/passkey-signup`) — not
     // "email_verification", which is minted by the separate *password*
     // signup flow. Accepting "email_verification" here (KYO-282) meant a
     // password-signup verification link would also validate on the
@@ -2127,11 +2100,8 @@ impl std::fmt::Debug for PasskeyRecoveryVerifySuccess {
 /// Verifies the recovery token and generates a WebAuthn registration
 /// challenge for replacing the user's passkey, plus a short-lived
 /// `recovery_session` JWT (KYO-284) that binds the eventual completion call
-/// to this same browser session — mirroring
-/// `apps/server/src/routes/auth_passkeys.rs::recovery_verify` (KYO-280),
-/// the REST reference implementation for this binding chain. Returns
-/// [`PasskeyRecoveryVerifySuccess`] on success, or an error message on
-/// failure.
+/// to this same browser session. Returns [`PasskeyRecoveryVerifySuccess`] on
+/// success, or an error message on failure.
 pub async fn passkey_recovery_verify_service(
     db: &DbPool,
     kv: &KVPool,
@@ -2140,10 +2110,9 @@ pub async fn passkey_recovery_verify_service(
     token: &str,
 ) -> kyomi_core::Result<Result<PasskeyRecoveryVerifySuccess, String>> {
     // Verify token. Must be "passkey_recovery" — the type actually minted
-    // for this URL (`/auth/recover-passkey/complete`, see
-    // `auth_passkeys.rs`). The old literal, "recovery", was never minted
-    // anywhere in the workspace (KYO-282), so this verifier rejected every
-    // token from its own flow.
+    // for this URL (`/auth/recover-passkey/complete`). The old literal,
+    // "recovery", was never minted anywhere in the workspace (KYO-282), so
+    // this verifier rejected every token from its own flow.
     let email =
         crate::token_service::verify_verification_token(db, token, "passkey_recovery").await?;
     let Some(email) = email else {
@@ -2192,8 +2161,8 @@ pub async fn passkey_recovery_verify_service(
     let creation_challenge = serde_json::to_string(&ccr)
         .map_err(|e| kyomi_core::Error::Internal(format!("Serialize creation challenge: {e}")))?;
 
-    // Mint the recovery session JWT (KYO-284) — same claim shape and expiry
-    // as `auth_passkeys.rs::recovery_verify`'s `recovery_session` cookie.
+    // Mint the recovery session JWT (KYO-284) — 15-minute expiry, matching
+    // the `recovery_session` cookie's Max-Age below.
     let mut extra = std::collections::HashMap::new();
     extra.insert("user_id".into(), serde_json::json!(&user.user_id));
     extra.insert("email".into(), serde_json::json!(&email));
@@ -2418,8 +2387,9 @@ pub async fn recovery_start_service(
 /// database outage on the recovery path is visible to operators rather than
 /// silently returning success to every caller.
 ///
-/// Ported from `apps/server/src/routes/auth_passkeys.rs::lookup_recovery_user`
-/// (KYO-286 deletes that REST route once the Leptos path fully replaces it).
+/// Ported from `lookup_recovery_user` in the REST passkey-recovery
+/// implementation this replaced (deleted in KYO-286 once the Leptos path
+/// fully replaced it).
 async fn lookup_recovery_user(db: &DbPool, email: &str) -> Option<kyomi_core::models::User> {
     match crate::user_service::get_user_by_email(db, email).await {
         Ok(user) => user,
@@ -2442,13 +2412,11 @@ async fn lookup_recovery_user(db: &DbPool, email: &str) -> Option<kyomi_core::mo
 /// `recover_set_password_service`'s `remove_auth_method(db, user_id, "totp")`
 /// and never re-establishes a passkey.
 ///
-/// Mirrors `POST /auth/passkeys/recovery/request` in
-/// `apps/server/src/routes/auth_passkeys.rs::recovery_request` — the
-/// reference implementation this was ported from. Like that handler (and
-/// like `recovery_start_service` above), the only signal returned to a
-/// caller besides rate-limiting is silence: whether the account exists, is
-/// unverified, or token minting failed are all indistinguishable from the
-/// caller's perspective.
+/// Ported from the REST `recovery_request` handler this replaced (removed in
+/// KYO-286). Like that handler (and like `recovery_start_service` above), the
+/// only signal returned to a caller besides rate-limiting is silence: whether
+/// the account exists, is unverified, or token minting failed are all
+/// indistinguishable from the caller's perspective.
 ///
 /// Rate limiting is the one exception: the server_fn wrapper
 /// (`passkey_recovery_start` in `kyomi-ui`) does propagate that `Err`. What
@@ -2543,10 +2511,12 @@ fn spawn_verification_email(
 mod tests {
     use super::*;
     use sqlx::sqlite::SqlitePoolOptions;
+    use tracing::Level;
     use url::Url;
     use webauthn_rs::prelude::*;
 
     use crate::webauthn_challenge_purpose as purpose;
+    use kyomi_test_tracing::capture_tracing;
 
     async fn test_pool() -> DbPool {
         let _ = kyomi_core::constants::load_with_fallback();
@@ -2917,6 +2887,16 @@ mod tests {
             .expect("store challenge");
     }
 
+    /// Also stands in for the wire-level `recovery_register_requires_recovery_session`
+    /// contract test deleted with the REST passkey routes (KYO-286) —
+    /// `passkey_recovery_complete` (the server fn that replaced
+    /// `POST /auth/passkeys/recovery/register`) passes its `recovery_session`
+    /// cookie straight through to this service with no logic in between, so
+    /// this test covers the same gate. The old test asserted a distinguishable
+    /// HTTP 401 for this specific failure; that distinguishability was exactly
+    /// the oracle KYO-284's fail-closed design (see `passkey_recovery_complete_service`'s
+    /// doc comment) intentionally removed, so "rejected" is the property that
+    /// survives, not the status code.
     #[tokio::test]
     async fn recovery_complete_rejects_missing_recovery_session() {
         let fixture = recovery_fixture("recovery-missing-session@example.com").await;
@@ -3434,9 +3414,9 @@ mod tests {
 
     /// The response for a brand-new email, an existing-but-unverified email,
     /// and an existing-verified email must be indistinguishable — otherwise
-    /// the endpoint is an account-enumeration oracle (the failure mode of
-    /// the REST original, `auth_passkeys.rs::register_start`, which returns
-    /// a distinct `BadRequest` for verified users). Mirrors
+    /// the endpoint is an account-enumeration oracle (the failure mode of the
+    /// REST implementation this replaced, whose `register_start` returned a
+    /// distinct `BadRequest` for verified users). Mirrors
     /// `signup_start_service`'s enumeration-safe behavior instead.
     #[tokio::test]
     async fn passkey_signup_start_indistinguishable_across_account_states() {
@@ -3487,6 +3467,16 @@ mod tests {
     /// the endpoint is an account-enumeration oracle. This is the security
     /// property the whole flow depends on, so assert it explicitly rather
     /// than inferring it from the individual mint/no-mint tests below.
+    ///
+    /// Also stands in for the wire-level
+    /// `recovery_request_response_is_identical_for_different_unknown_emails`
+    /// contract test deleted with the REST passkey routes (KYO-286) —
+    /// `passkey_recovery_start` (the server fn that replaced
+    /// `POST /auth/passkeys/recovery/request`) delegates to this service with
+    /// no branching on the result, and returns no per-account response body
+    /// (`Result<(), ServerFnError>`) for the old test's "byte-identical body"
+    /// assertion to apply to; asserting every account state maps to the same
+    /// `Ok(())` here is the whole of that contract now.
     #[tokio::test]
     async fn passkey_recovery_start_indistinguishable_across_account_states() {
         let db = test_pool().await;
@@ -3632,6 +3622,85 @@ mod tests {
         assert!(
             totp_after.is_some(),
             "passkey recovery must never remove the totp auth method (KYO-285)"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // `lookup_recovery_user` — enumeration-resistant DB-error handling
+    // -----------------------------------------------------------------
+    //
+    // Ported from `apps/server/src/routes/auth_passkeys.rs`'s inline
+    // `#[cfg(test)] mod tests` (origin: KYO-215). That route file was
+    // deleted in KYO-286 once `lookup_recovery_user` was ported verbatim
+    // into this module, but its test module was not carried over with it —
+    // these two tests restore the coverage.
+
+    /// `lookup_recovery_user` must return `None` when the database lookup
+    /// itself fails (not merely when no user exists) — and it must say so
+    /// via an `error!`-level log rather than swallowing the error, since a
+    /// DB outage on the recovery path would otherwise silently return
+    /// success to every caller. See KYO-215.
+    #[tokio::test(flavor = "current_thread")]
+    async fn lookup_recovery_user_db_error_returns_none_and_logs_error() {
+        let db = test_pool().await;
+        match &db {
+            DbPool::Sqlite(pool) => pool.close().await,
+            DbPool::Postgres(_) => panic!("expected sqlite pool"),
+        }
+
+        let email = "db-error-recovery-test@example.com";
+        let logs = capture_tracing();
+
+        let result = lookup_recovery_user(&db, email).await;
+
+        assert!(
+            result.is_none(),
+            "a DB error must be reported as no user, not surfaced to the caller"
+        );
+
+        let error_events = logs.events_at(Level::ERROR);
+        assert!(
+            !error_events.is_empty(),
+            "a DB error during passkey recovery must emit an error!-level log; captured: {:?}",
+            logs.events()
+        );
+        assert!(
+            error_events
+                .iter()
+                .any(|(_, message)| message.contains("user lookup failed")),
+            "expected an error log describing the lookup failure; captured: {:?}",
+            logs.events()
+        );
+        for (_, message) in &error_events {
+            assert!(
+                !message.contains(email),
+                "recovery error logs must never contain the requester's email \
+                 (that would reintroduce the enumeration leak through logs); got: {message}"
+            );
+        }
+    }
+
+    /// The absent-user case must NOT log an error — only the DB-failure case
+    /// should. Without this test, a broad "always log an error" change would
+    /// pass the test above while defeating the entire point of the fix: the
+    /// two enumeration-resistant outcomes (no such user vs. DB down) must
+    /// stay distinguishable in the logs.
+    #[tokio::test(flavor = "current_thread")]
+    async fn lookup_recovery_user_absent_user_returns_none_without_error_log() {
+        let db = test_pool().await;
+
+        let email = "absent-recovery-test@example.com";
+        let logs = capture_tracing();
+
+        let result = lookup_recovery_user(&db, email).await;
+
+        assert!(result.is_none(), "no such user should look up to None");
+
+        let error_events = logs.events_at(Level::ERROR);
+        assert!(
+            error_events.is_empty(),
+            "a merely-absent user must not log an error — only a DB failure should; captured: {:?}",
+            logs.events()
         );
     }
 }

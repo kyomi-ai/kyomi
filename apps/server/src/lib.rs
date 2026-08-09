@@ -7,7 +7,6 @@
 pub mod cancel_registry;
 pub mod connect;
 pub mod health;
-pub mod helpers;
 pub mod leptos_frontend;
 pub mod middleware;
 pub mod routes;
@@ -119,7 +118,6 @@ pub fn build_router(state: state::AppState, _extras: ServerExtras) -> Router {
         // Auth routes under /api/v1/auth
         .nest("/api/v1/auth", routes::auth_token::routes())
         .nest("/api/v1/auth", routes::auth_google_oauth::routes())
-        .nest("/api/v1/auth", routes::auth_passkeys::routes())
         .nest("/api/v1/auth/oauth", routes::auth_datasource_oauth::routes())
         .nest("/api/v1/dashboards", routes::dashboard_export::routes())
         .nest("/api/v1/billing", routes::billing::routes())

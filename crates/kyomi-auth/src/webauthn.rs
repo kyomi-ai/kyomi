@@ -69,31 +69,6 @@ pub fn finish_registration(
         .map_err(|e| kyomi_core::Error::BadRequest(format!("WebAuthn registration failed: {e}")))
 }
 
-/// Start passkey authentication for a user.
-///
-/// Returns (request challenge JSON, PasskeyAuthentication state to store in Redis).
-pub fn start_authentication(
-    webauthn: &Webauthn,
-    credentials: &[Passkey],
-) -> kyomi_core::Result<(RequestChallengeResponse, PasskeyAuthentication)> {
-    webauthn
-        .start_passkey_authentication(credentials)
-        .map_err(|e| kyomi_core::Error::Internal(format!("WebAuthn authentication start: {e}")))
-}
-
-/// Complete passkey authentication — verify the assertion.
-///
-/// Returns the `AuthenticationResult` (contains updated sign count, credential ID, etc.).
-pub fn finish_authentication(
-    webauthn: &Webauthn,
-    credential: &PublicKeyCredential,
-    authentication_state: &PasskeyAuthentication,
-) -> kyomi_core::Result<AuthenticationResult> {
-    webauthn
-        .finish_passkey_authentication(credential, authentication_state)
-        .map_err(|e| kyomi_core::Error::BadRequest(format!("WebAuthn authentication failed: {e}")))
-}
-
 /// Start discoverable (conditional-ui) authentication.
 ///
 /// Used when the user has no known credentials at login_start time.
@@ -122,4 +97,72 @@ pub fn finish_discoverable_authentication(
     webauthn
         .finish_discoverable_authentication(credential, authentication_state, &discoverable_keys)
         .map_err(|e| kyomi_core::Error::BadRequest(format!("WebAuthn discoverable auth failed: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Passkeys migrated from the original Python implementation were rewritten
+    /// into webauthn-rs's serialization format by the Alembic migration
+    /// `774c005b0f00_migrate_python_passkeys_to_rust_format.py`. Those rows are
+    /// still in production databases and are deserialized on every login by
+    /// those users, so the format has to keep round-tripping through whatever
+    /// webauthn-rs version is pinned.
+    ///
+    /// Nothing else asserts this. A webauthn-rs bump that changed `Passkey`'s
+    /// shape would compile, pass every other test, and lock migrated users out
+    /// at login — the failure appears only for accounts created before the
+    /// migration, which is exactly the population least likely to be covered by
+    /// manual testing.
+    ///
+    /// Ported from `apps/server/src/routes/auth_passkeys.rs`'s test module when
+    /// that file was deleted (KYO-286). It lives here rather than with the
+    /// deleted REST routes because it was never about REST — it guards the
+    /// webauthn-rs types this module owns.
+    #[test]
+    fn migrated_python_passkey_json_still_deserializes() {
+        // base64url-no-pad, 32 bytes each — the shape the migration emitted.
+        let json = serde_json::json!({
+            "cred": {
+                "cred_id": "lLemfAbafh8fITA-hRAzYxuk3f6U42wM7-fYnoiodeo",
+                "cred": {
+                    "type_": "ES256",
+                    "key": {
+                        "EC_EC2": {
+                            "curve": "SECP256R1",
+                            "x": "3sfFdW2_SjhozsQJYUIJVFKy3jvMEaCs6IpWhmndx-g",
+                            "y": "R34op1BMjd1edprK6zX0ghM6nZODDTNhvDcrN84lQwc"
+                        }
+                    }
+                },
+                "counter": 5,
+                "transports": null,
+                "user_verified": true,
+                "backup_eligible": true,
+                "backup_state": true,
+                "registration_policy": "required",
+                "extensions": {
+                    "cred_protect": "NotRequested",
+                    "hmac_create_secret": "NotRequested",
+                    "appid": "NotRequested",
+                    "cred_props": "NotRequested"
+                },
+                "attestation": {
+                    "data": "None",
+                    "metadata": "None"
+                },
+                "attestation_format": "none"
+            }
+        });
+
+        let passkey: Passkey = serde_json::from_value(json)
+            .expect("migration-format JSON must deserialize into webauthn-rs Passkey");
+
+        assert_eq!(passkey.cred_id().len(), 32);
+        assert_eq!(
+            *passkey.cred_algorithm(),
+            webauthn_rs::prelude::COSEAlgorithm::ES256
+        );
+    }
 }
