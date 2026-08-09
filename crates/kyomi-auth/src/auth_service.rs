@@ -1756,14 +1756,67 @@ pub async fn passkey_recovery_complete_service(
     .await?;
 
     // Preserve the current post-completion UX (auto-login) — the security
-    // fix here is the session binding above, not the login behavior.
-    let sess = create_authenticated_session(db, kv, jwt_secret, &user, device).await?;
+    // fix here is the session binding above; the additional fix here is
+    // that any session an attacker held before recovery does not survive
+    // it (KYO-287) — see `revoke_sessions_and_mint_recovery_session`.
+    let sess =
+        revoke_sessions_and_mint_recovery_session(db, kv, jwt_secret, &user, device).await?;
     tracing::info!(
         user_id = %user.user_id,
         credential_id = %credential_id_b64,
         "Passkey recovery completed and user auto-logged in"
     );
     Ok(sess)
+}
+
+/// Revoke every refresh token issued to `user` before this recovery
+/// ceremony, then mint the fresh session the recovering user is
+/// establishing right now (KYO-287).
+///
+/// Split out of [`passkey_recovery_complete_service`] so the
+/// revoke-before-mint ordering can be tested directly against the
+/// database, independent of a real WebAuthn ceremony:
+/// `verify_and_store_passkey` requires a credential that cryptographically
+/// matches the `PasskeyRegistration` state generated for this specific
+/// challenge, which none of this module's test fixture credentials do (see
+/// the `tests` module's module-level comment below), so no test in this
+/// file can drive `passkey_recovery_complete_service` end-to-end to a
+/// successful `Ok(_)`.
+///
+/// Recovery happens precisely because the previous authenticator was lost
+/// or stolen, so whoever holds it must not keep a renewable session after
+/// the account owner regains control. The revoke below must run BEFORE
+/// `create_authenticated_session` — that call both mints and persists the
+/// recovering user's own new refresh token, and revoking after it would
+/// immediately log the user back out of the session they are in the
+/// middle of establishing.
+///
+/// This revokes refresh tokens only. It does NOT invalidate access tokens
+/// already issued to an attacker: `AuthUser::from_request_parts`
+/// (`crates/kyomi-auth/src/middleware.rs`) authenticates purely by
+/// cryptographic JWT validation and never consults `refresh_tokens` or
+/// checks `token_jti` against any revocation record. A stolen access token
+/// therefore stays valid until it expires on its own
+/// (`access_token_expire_minutes` in `data/constants.toml`, 15 minutes by
+/// default) regardless of this call. Full immediate revocation would
+/// require an access-token allow/deny list keyed on `jti`, which does not
+/// exist in this codebase today.
+async fn revoke_sessions_and_mint_recovery_session(
+    db: &DbPool,
+    kv: &KVPool,
+    jwt_secret: &str,
+    user: &kyomi_core::models::User,
+    device: &DeviceInfo,
+) -> kyomi_core::Result<AuthenticatedSession> {
+    let revoked_count =
+        crate::token_service::revoke_all_user_refresh_tokens(db, &user.user_id).await?;
+    tracing::info!(
+        user_id = %user.user_id,
+        revoked_count,
+        "Refresh tokens revoked during passkey recovery"
+    );
+
+    create_authenticated_session(db, kv, jwt_secret, user, device).await
 }
 
 // ---------------------------------------------------------------------------
@@ -3156,6 +3209,118 @@ mod tests {
             msg.contains("registration failed"),
             "expected a WebAuthn verification failure, got: {msg}"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Session revocation on passkey recovery (KYO-287)
+    // -----------------------------------------------------------------
+    //
+    // `passkey_recovery_complete_service` can't be driven to a successful
+    // `Ok(_)` in this test file at all — every fixture credential above is
+    // cryptographically inert against whatever fresh `PasskeyRegistration`
+    // state a given test generates, so `verify_and_store_passkey` always
+    // errors before the code under test here even runs. These tests instead
+    // exercise `revoke_sessions_and_mint_recovery_session` directly — the
+    // exact function `passkey_recovery_complete_service` calls once
+    // `verify_and_store_passkey` succeeds — against a real (migrated,
+    // in-memory) database, so the revoke-before-mint behavior is proven
+    // against production code, not a reimplementation of it.
+
+    #[tokio::test]
+    async fn passkey_recovery_revokes_pre_existing_refresh_tokens() {
+        let db = test_pool().await;
+        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+        let device = test_device();
+        let user = crate::user_service::create_user(
+            &db,
+            "recovery-revoke-old@example.com",
+            Some("Test User"),
+            true,
+        )
+        .await
+        .expect("create user");
+
+        // Seed a refresh token as if the (possibly stolen) authenticator
+        // had logged in before recovery.
+        let pre_existing_raw = "rt_pre-existing-attacker-session";
+        let pre_existing_hash = crate::token_service::hash_refresh_token(pre_existing_raw);
+        crate::token_service::store_refresh_token(
+            &db,
+            &user.user_id,
+            &pre_existing_hash,
+            chrono::Utc::now() + chrono::Duration::days(7),
+            &device,
+            "fam_pre-existing",
+        )
+        .await
+        .expect("seed pre-existing refresh token");
+
+        revoke_sessions_and_mint_recovery_session(&db, &kv, "test-secret", &user, &device)
+            .await
+            .expect("revoke + mint should not error");
+
+        let (is_active, revoked_at) = refresh_token_state(&db, &pre_existing_hash).await;
+        assert_eq!(
+            is_active, 0,
+            "pre-existing refresh token must be revoked (is_active) after recovery"
+        );
+        assert!(
+            revoked_at.is_some(),
+            "pre-existing refresh token must have revoked_at set after recovery"
+        );
+    }
+
+    #[tokio::test]
+    async fn passkey_recovery_leaves_the_newly_minted_refresh_token_active() {
+        let db = test_pool().await;
+        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+        let device = test_device();
+        let user = crate::user_service::create_user(
+            &db,
+            "recovery-revoke-new@example.com",
+            Some("Test User"),
+            true,
+        )
+        .await
+        .expect("create user");
+
+        let sess =
+            revoke_sessions_and_mint_recovery_session(&db, &kv, "test-secret", &user, &device)
+                .await
+                .expect("revoke + mint should not error");
+
+        let new_hash = crate::token_service::hash_refresh_token(&sess.refresh_token);
+        let (is_active, revoked_at) = refresh_token_state(&db, &new_hash).await;
+        assert_eq!(
+            is_active, 1,
+            "the refresh token minted by recovery itself must still be active — \
+             revoking after minting would log the user out of the session they \
+             just established"
+        );
+        assert!(
+            revoked_at.is_none(),
+            "the refresh token minted by recovery itself must not be revoked"
+        );
+    }
+
+    /// Read `is_active`/`revoked_at` for the refresh token matching
+    /// `token_hash`, via the same backend-dispatching macro production code
+    /// uses (`kyomi_core::db_fetch_one!`) rather than a raw sqlx call tied
+    /// to one backend.
+    async fn refresh_token_state(db: &DbPool, token_hash: &str) -> (i64, Option<String>) {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            is_active: i64,
+            revoked_at: Option<String>,
+        }
+        let row: Row = kyomi_core::db_fetch_one!(
+            db,
+            Row,
+            "SELECT is_active, revoked_at FROM refresh_tokens WHERE token_hash = $1",
+            token_hash
+        )
+        .expect("refresh token row must exist");
+        (row.is_active, row.revoked_at)
     }
 
     // -----------------------------------------------------------------
