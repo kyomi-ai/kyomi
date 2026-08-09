@@ -1165,6 +1165,138 @@ mod tests {
         assert_eq!(unfiltered.len(), 2);
     }
 
+    // ─── created_by NOT NULL + FK constraints (KYO-293) ──────────────────────
+    //
+    // Regression coverage for the SQLite/Postgres divergence
+    // schema-parity-allowlist.toml tracked before
+    // migrations-sqlite/00033_fix_collections_created_by_constraints.sql:
+    // SQLite's `collections.created_by` was `NOT NULL DEFAULT ''` with no
+    // FK, so an INSERT that omitted created_by (or named a nonexistent
+    // user) silently succeeded on self-hosted while the same INSERT
+    // already failed loudly on Postgres
+    // (20260609000000_add_created_by_to_collections.sql). Confirmed by
+    // hand against the pre-00033 schema before writing these: both inserts
+    // below succeed silently (storing `created_by = ''` and
+    // `created_by = 'no-such-user'` respectively) without the fix, and are
+    // rejected with it.
+    //
+    // These bypass `create_collection` (which always supplies created_by)
+    // and insert raw SQL directly, the same way a bad migration, import
+    // script, or future callsite could.
+
+    #[tokio::test]
+    async fn sqlite_insert_omitting_created_by_fails() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        seed_user(sq, "user-1", "user1@example.com").await;
+        seed_workspace(sq, "ws-1", "user-1").await;
+
+        let result = sqlx::query(
+            "INSERT INTO collections (id, workspace_id, name) VALUES ('coll-no-creator', 'ws-1', 'No Creator')",
+        )
+        .execute(sq)
+        .await;
+
+        assert!(
+            result.is_err(),
+            "omitting created_by must be rejected by the NOT NULL constraint \
+             (no default), got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlite_insert_with_unknown_created_by_fails() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        seed_user(sq, "user-1", "user1@example.com").await;
+        seed_workspace(sq, "ws-1", "user-1").await;
+
+        let result = sqlx::query(
+            "INSERT INTO collections (id, workspace_id, name, created_by) \
+             VALUES ('coll-bad-creator', 'ws-1', 'Bad Creator', 'no-such-user')",
+        )
+        .execute(sq)
+        .await;
+
+        assert!(
+            result.is_err(),
+            "created_by naming a nonexistent user must be rejected by the FK, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_insert_omitting_created_by_fails() {
+        let test_name = "postgres_insert_omitting_created_by_fails";
+        let Some(db) = crate::test_pg::postgres_test_pool_or_skip(test_name).await else {
+            return;
+        };
+        let pg = crate::test_pg::postgres_pool(&db);
+
+        let workspace_id = crate::test_pg::unique_test_id("ws");
+        let owner_id = crate::test_pg::unique_test_id("owner");
+        crate::test_pg::seed_user_pg(pg, &owner_id, &format!("{owner_id}@example.com")).await;
+        crate::test_pg::seed_workspace_pg(pg, &workspace_id, &owner_id).await;
+
+        let collection_id = crate::test_pg::unique_test_id("coll");
+        let result = sqlx::query(
+            "INSERT INTO collections (id, workspace_id, name) VALUES ($1, $2, 'No Creator')",
+        )
+        .bind(&collection_id)
+        .bind(&workspace_id)
+        .execute(pg)
+        .await;
+
+        assert!(
+            result.is_err(),
+            "omitting created_by must be rejected by Postgres's NOT NULL constraint, got: {result:?}"
+        );
+
+        cleanup_created_by_test_pg(pg, &workspace_id, &owner_id).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_insert_with_unknown_created_by_fails() {
+        let test_name = "postgres_insert_with_unknown_created_by_fails";
+        let Some(db) = crate::test_pg::postgres_test_pool_or_skip(test_name).await else {
+            return;
+        };
+        let pg = crate::test_pg::postgres_pool(&db);
+
+        let workspace_id = crate::test_pg::unique_test_id("ws");
+        let owner_id = crate::test_pg::unique_test_id("owner");
+        crate::test_pg::seed_user_pg(pg, &owner_id, &format!("{owner_id}@example.com")).await;
+        crate::test_pg::seed_workspace_pg(pg, &workspace_id, &owner_id).await;
+
+        let collection_id = crate::test_pg::unique_test_id("coll");
+        let result = sqlx::query(
+            "INSERT INTO collections (id, workspace_id, name, created_by) \
+             VALUES ($1, $2, 'Bad Creator', 'no-such-user')",
+        )
+        .bind(&collection_id)
+        .bind(&workspace_id)
+        .execute(pg)
+        .await;
+
+        assert!(
+            result.is_err(),
+            "created_by naming a nonexistent user must be rejected by \
+             collections_created_by_fkey, got: {result:?}"
+        );
+
+        cleanup_created_by_test_pg(pg, &workspace_id, &owner_id).await;
+    }
+
+    /// Delete everything a Postgres created_by-constraint test in this
+    /// module inserted, scoped by `workspace_id` — repeated local runs
+    /// against this worktree's persistent test database must not
+    /// accumulate rows. Both failing inserts above never actually land a
+    /// `collections` row (the constraint violation rolls the statement
+    /// back), so there is nothing to clean up there — only the workspace
+    /// and its owner.
+    async fn cleanup_created_by_test_pg(pg: &sqlx::PgPool, workspace_id: &str, owner_user_id: &str) {
+        crate::test_pg::cleanup_workspace_and_users_pg(pg, workspace_id, &[owner_user_id]).await;
+    }
+
     // ─── Visibility transitions (KYO-238) ────────────────────────────────────
     //
     // A dashboard's sync visibility is derived from collection membership,

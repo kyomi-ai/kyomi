@@ -3043,16 +3043,7 @@ mod tests {
             .execute(pg)
             .await
             .expect("cleanup chat_sessions (postgres)");
-        sqlx::query("DELETE FROM workspaces WHERE workspace_id = $1")
-            .bind(workspace_id)
-            .execute(pg)
-            .await
-            .expect("cleanup workspaces (postgres)");
-        sqlx::query("DELETE FROM users WHERE user_id = $1")
-            .bind(user_id)
-            .execute(pg)
-            .await
-            .expect("cleanup users (postgres)");
+        crate::test_pg::cleanup_workspace_and_users_pg(pg, workspace_id, &[user_id]).await;
     }
 
     #[tokio::test]
