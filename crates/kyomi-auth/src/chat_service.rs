@@ -2373,6 +2373,7 @@ pub async fn get_thinking_event_detail(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use sqlx::sqlite::SqlitePoolOptions;
 
     // Regression coverage for KYO-200: `thinking_event_details` existed only
@@ -2973,5 +2974,174 @@ mod tests {
             "a query failure against a session that still exists must surface as \
              Err, not silently collapse into the same Ok(None) as a genuine miss: {result:?}"
         );
+    }
+
+    // ─── Postgres coverage (KYO-292) ───────────────────────────────────────
+    //
+    // Every test above runs against `sqlite::memory:`, so `fetch_session_counts`
+    // and `fetch_message_timestamps`'s Postgres arms (`= ANY($1)` + array
+    // bind) are type-checked but never executed by this crate's test suite.
+    // These tests run the same functions against a real per-worktree
+    // Postgres database (see `crate::test_pg`) and skip cleanly — with a
+    // visible `SKIP:` line — when Postgres isn't reachable, so
+    // `cargo test -p kyomi-auth` with no Postgres available still passes.
+
+    async fn seed_chat_session_pg(
+        pg: &sqlx::PgPool,
+        session_id: &str,
+        user_id: &str,
+        workspace_id: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO chat_sessions \
+             (session_id, user_id, workspace_id, title, model, session_type, shared) \
+             VALUES ($1, $2, $3, 'Title', 'test-model', 'chat', false)",
+        )
+        .bind(session_id)
+        .bind(user_id)
+        .bind(workspace_id)
+        .execute(pg)
+        .await
+        .expect("insert chat session (postgres)");
+    }
+
+    async fn seed_chat_message_pg(
+        pg: &sqlx::PgPool,
+        message_id: &str,
+        session_id: &str,
+        pinned: bool,
+        created_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) {
+        sqlx::query(
+            "INSERT INTO chat_messages (message_id, session_id, role, content, pinned, created_at) \
+             VALUES ($1, $2, 'assistant', '', $3, COALESCE($4, now()))",
+        )
+        .bind(message_id)
+        .bind(session_id)
+        .bind(pinned)
+        .bind(created_at)
+        .execute(pg)
+        .await
+        .expect("insert chat message (postgres)");
+    }
+
+    /// Delete everything a Postgres test in this module inserted, scoped by
+    /// `workspace_id`, so repeated local runs against this worktree's
+    /// persistent test database don't accumulate rows. FK order: messages
+    /// -> sessions -> workspace -> user.
+    async fn cleanup_pg(pg: &sqlx::PgPool, workspace_id: &str, user_id: &str) {
+        sqlx::query(
+            "DELETE FROM chat_messages WHERE session_id IN \
+             (SELECT session_id FROM chat_sessions WHERE workspace_id = $1)",
+        )
+        .bind(workspace_id)
+        .execute(pg)
+        .await
+        .expect("cleanup chat_messages (postgres)");
+        sqlx::query("DELETE FROM chat_sessions WHERE workspace_id = $1")
+            .bind(workspace_id)
+            .execute(pg)
+            .await
+            .expect("cleanup chat_sessions (postgres)");
+        sqlx::query("DELETE FROM workspaces WHERE workspace_id = $1")
+            .bind(workspace_id)
+            .execute(pg)
+            .await
+            .expect("cleanup workspaces (postgres)");
+        sqlx::query("DELETE FROM users WHERE user_id = $1")
+            .bind(user_id)
+            .execute(pg)
+            .await
+            .expect("cleanup users (postgres)");
+    }
+
+    #[tokio::test]
+    async fn postgres_fetch_session_counts_counts_messages_and_pinned() {
+        let test_name = "postgres_fetch_session_counts_counts_messages_and_pinned";
+        let Some(db) = crate::test_pg::postgres_test_pool_or_skip(test_name).await else {
+            return;
+        };
+        let pg = crate::test_pg::postgres_pool(&db);
+
+        let workspace_id = crate::test_pg::unique_test_id("ws");
+        let user_id = crate::test_pg::unique_test_id("user");
+        let session_a = crate::test_pg::unique_test_id("sess-a");
+        let session_b = crate::test_pg::unique_test_id("sess-b");
+
+        crate::test_pg::seed_user_pg(pg, &user_id, &format!("{user_id}@test.local")).await;
+        crate::test_pg::seed_workspace_pg(pg, &workspace_id, &user_id).await;
+        seed_chat_session_pg(pg, &session_a, &user_id, &workspace_id).await;
+        seed_chat_session_pg(pg, &session_b, &user_id, &workspace_id).await;
+
+        // session_a: 3 messages, 1 pinned. session_b: 2 messages, 0 pinned.
+        seed_chat_message_pg(pg, &format!("{session_a}-m1"), &session_a, true, None).await;
+        seed_chat_message_pg(pg, &format!("{session_a}-m2"), &session_a, false, None).await;
+        seed_chat_message_pg(pg, &format!("{session_a}-m3"), &session_a, false, None).await;
+        seed_chat_message_pg(pg, &format!("{session_b}-m1"), &session_b, false, None).await;
+        seed_chat_message_pg(pg, &format!("{session_b}-m2"), &session_b, false, None).await;
+
+        let session_ids = vec![session_a.clone(), session_b.clone()];
+        let counts = fetch_session_counts(&db, &session_ids)
+            .await
+            .expect("fetch_session_counts must succeed against a real Postgres pool");
+
+        assert_eq!(
+            counts.len(),
+            2,
+            "exactly the 2 seeded sessions must come back — a weakened WHERE clause \
+             (e.g. AND turned to OR) would leak other sessions' rows into this result: {counts:?}"
+        );
+
+        let by_id: std::collections::HashMap<&str, &SessionCountRow> =
+            counts.iter().map(|c| (c.session_id.as_str(), c)).collect();
+
+        let a = by_id
+            .get(session_a.as_str())
+            .expect("session_a must have a count row");
+        assert_eq!(a.message_count, 3);
+        assert_eq!(a.pinned_count, 1);
+
+        let b = by_id
+            .get(session_b.as_str())
+            .expect("session_b must have a count row");
+        assert_eq!(b.message_count, 2);
+        assert_eq!(b.pinned_count, 0);
+
+        cleanup_pg(pg, &workspace_id, &user_id).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_fetch_message_timestamps_returns_created_at_for_requested_ids() {
+        let test_name = "postgres_fetch_message_timestamps_returns_created_at_for_requested_ids";
+        let Some(db) = crate::test_pg::postgres_test_pool_or_skip(test_name).await else {
+            return;
+        };
+        let pg = crate::test_pg::postgres_pool(&db);
+
+        let workspace_id = crate::test_pg::unique_test_id("ws");
+        let user_id = crate::test_pg::unique_test_id("user");
+        let session_id = crate::test_pg::unique_test_id("sess");
+        let message_wanted = format!("{session_id}-wanted");
+        let message_unwanted = format!("{session_id}-unwanted");
+
+        let wanted_created_at = chrono::Utc.with_ymd_and_hms(2026, 3, 15, 9, 30, 0).unwrap();
+
+        crate::test_pg::seed_user_pg(pg, &user_id, &format!("{user_id}@test.local")).await;
+        crate::test_pg::seed_workspace_pg(pg, &workspace_id, &user_id).await;
+        seed_chat_session_pg(pg, &session_id, &user_id, &workspace_id).await;
+        seed_chat_message_pg(pg, &message_wanted, &session_id, false, Some(wanted_created_at))
+            .await;
+        // Not in the requested id list — must not appear in the result.
+        seed_chat_message_pg(pg, &message_unwanted, &session_id, false, None).await;
+
+        let timestamps = fetch_message_timestamps(&db, std::slice::from_ref(&message_wanted))
+            .await
+            .expect("fetch_message_timestamps must succeed against a real Postgres pool");
+
+        assert_eq!(timestamps.len(), 1, "only the requested message id must be returned");
+        assert_eq!(timestamps[0].message_id, message_wanted);
+        assert_eq!(timestamps[0].created_at, wanted_created_at);
+
+        cleanup_pg(pg, &workspace_id, &user_id).await;
     }
 }

@@ -340,6 +340,12 @@ jobs:
       - name: cargo test (unit + integration tests)
         env:
           RUSTC_WRAPPER: ${{ env.SCCACHE_AVAILABLE == 'true' && 'sccache' || '' }}
+          # KYO-292: this job's pgvector service (above) is the only Postgres
+          # kyomi-auth's postgres_* tests can reach. If it's ever unreachable
+          # here, the coverage those tests exist for must fail loudly instead
+          # of silently reporting `ok` via the local skip path — see
+          # crates/kyomi-auth/src/test_pg.rs module docs.
+          KYOMI_REQUIRE_POSTGRES_TESTS: "1"
         run: cargo test --locked --workspace --lib --bins --tests --exclude kyomi-desktop --exclude kyomi-datasource-server
 
       - name: sccache stats
