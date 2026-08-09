@@ -12,7 +12,6 @@
 pub mod admin_notify;
 pub mod auth_datasource_oauth;
 pub mod auth_google_oauth;
-pub mod auth_passkeys;
 pub mod auth_token;
 pub mod dashboard_export;
 pub mod chartml;

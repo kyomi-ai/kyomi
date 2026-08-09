@@ -235,7 +235,8 @@ pub async fn start_passkey_registration(
     let email = &db_user.email;
     let display_name = db_user.name.as_deref().unwrap_or(email);
 
-    // Generate deterministic user handle from email (same as auth_passkeys.rs).
+    // Generate a deterministic user handle from the email: SHA-256, truncated
+    // to the first 16 bytes, read as a UUID.
     let user_unique_id = {
         let mut hasher = Sha256::new();
         hasher.update(email.as_bytes());

@@ -749,8 +749,6 @@ pub async fn recovery_start(email: String) -> Result<(), ServerFnError> {
 /// Start the passkey recovery flow by sending a recovery email.
 ///
 /// Public endpoint — no authentication required.
-/// Mirrors `POST /auth/passkeys/recovery/request` in
-/// `apps/server/src/routes/auth_passkeys.rs::recovery_request`.
 ///
 /// KYO-285: this is the passkey-recovery counterpart to `recovery_start`
 /// above — `/auth/recover-passkey` was previously wired to `recovery_start`
@@ -923,7 +921,6 @@ pub struct PasskeyRegisterStartResult {
 /// Start passkey login — generate a WebAuthn assertion challenge.
 ///
 /// Public endpoint — no authentication required.
-/// Mirrors `POST /auth/passkeys/login/start` in `apps/server/src/routes/auth_passkeys.rs`.
 ///
 /// Uses discoverable credential flow (empty `allowCredentials`) so the browser
 /// presents all available passkeys. If an email is provided and the user has
@@ -976,7 +973,6 @@ pub async fn passkey_login_start() -> Result<PasskeyLoginStartResult, ServerFnEr
 /// Complete passkey login — verify the WebAuthn assertion.
 ///
 /// Public endpoint — no authentication required.
-/// Mirrors `POST /auth/passkeys/login/complete` in `apps/server/src/routes/auth_passkeys.rs`.
 ///
 /// Delegates all orchestration to `kyomi_auth::auth_service::passkey_login_complete_service`.
 #[server(prefix = "/leptos-api")]
@@ -1047,7 +1043,6 @@ pub async fn passkey_login_complete(
 /// Complete passkey *signup* — verify the browser credential and store it.
 ///
 /// Public endpoint — no authentication required.
-/// Mirrors `POST /auth/passkeys/register/complete` in `apps/server/src/routes/auth_passkeys.rs`.
 ///
 /// Signup only (KYO-284) — `passkey_register_complete_service` rejects a
 /// recovery-purpose challenge. Recovery completion uses the dedicated
@@ -1143,11 +1138,10 @@ pub enum PasskeySignupStartResult {
 /// Start the passkey signup flow.
 ///
 /// Public endpoint — no authentication required. Mints a `"signup"`
-/// verification token (mirroring the legacy REST route
-/// `POST /api/v1/auth/passkeys/register/start` in
-/// `apps/server/src/routes/auth_passkeys.rs`, which nothing in the Leptos UI
-/// calls) and either emails a link to `/auth/passkey-signup` or, in the
-/// self-hosted SMTP-less case, returns the raw token directly.
+/// verification token (the REST route `POST /api/v1/auth/passkeys/register/start`
+/// did the same before it was deleted in KYO-286 — nothing in the Leptos UI
+/// ever called it) and either emails a link to `/auth/passkey-signup` or, in
+/// the self-hosted SMTP-less case, returns the raw token directly.
 ///
 /// Delegates all orchestration to
 /// `kyomi_auth::auth_service::passkey_signup_start_service`.
@@ -1265,8 +1259,7 @@ pub async fn passkey_signup_complete(
 /// Mirrors `POST /auth/passkeys/recovery/verify` from the React backend.
 ///
 /// Also sets the HttpOnly `recovery_session` cookie (KYO-284) — binds the
-/// eventual `passkey_recovery_complete` call to this same browser session,
-/// matching `apps/server/src/routes/auth_passkeys.rs::recovery_verify`.
+/// eventual `passkey_recovery_complete` call to this same browser session.
 ///
 /// Delegates all orchestration to `kyomi_auth::auth_service::passkey_recovery_verify_service`.
 #[server(prefix = "/leptos-api")]
@@ -1331,9 +1324,7 @@ pub async fn passkey_recovery_verify(
 ///
 /// Public endpoint — no authentication required at the server_fn boundary,
 /// but requires the HttpOnly `recovery_session` cookie set by
-/// `passkey_recovery_verify` above (KYO-284). Mirrors
-/// `POST /auth/passkeys/recovery/register` in
-/// `apps/server/src/routes/auth_passkeys.rs`.
+/// `passkey_recovery_verify` above (KYO-284).
 ///
 /// Delegates all orchestration to
 /// `kyomi_auth::auth_service::passkey_recovery_complete_service`.

@@ -18,12 +18,11 @@
 //! - `DELETE /auth/passkeys/{id}` -> `delete_passkey()`
 //! - `PATCH /auth/passkeys/{id}` -> `rename_passkey()`
 //!
-//! Calls into the same `kyomi_auth` service layer as
-//! `apps/server/src/routes/auth_passkeys.rs`. The REST counterparts for
-//! password, TOTP, and session management — `auth_password.rs`,
-//! `auth_totp.rs`, and `auth.rs` — were deleted wholesale in the
-//! React→Leptos migration (KYO-73, #183); this module is now their only
-//! implementation.
+//! The REST counterparts for password, TOTP, session, and passkey
+//! management — `auth_password.rs`, `auth_totp.rs`, and `auth.rs` were
+//! deleted wholesale in the React→Leptos migration (KYO-73, #183); the
+//! passkey REST routes followed once this module's passkey functions fully
+//! replaced them (KYO-286). This module is now their only implementation.
 
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -372,8 +371,6 @@ pub struct PasskeyInfo {
 }
 
 /// List all passkeys for the authenticated user.
-///
-/// Mirrors `GET /auth/passkeys/list` in `apps/server/src/routes/auth_passkeys.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn list_passkeys() -> Result<Vec<PasskeyInfo>, ServerFnError> {
     let auth = extract_auth().await?;
@@ -410,8 +407,6 @@ pub async fn list_passkeys() -> Result<Vec<PasskeyInfo>, ServerFnError> {
 ///
 /// Returns a JSON string containing the challenge_id and WebAuthn options
 /// that the browser needs for `navigator.credentials.create()`.
-///
-/// Mirrors `POST /auth/passkeys/add/start` in `apps/server/src/routes/auth_passkeys.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn start_passkey_registration(
     device_name: String,
@@ -457,8 +452,6 @@ pub async fn start_passkey_registration(
 /// Complete passkey registration by verifying the browser credential.
 ///
 /// Receives the challenge_id and the PublicKeyCredential JSON from the browser.
-///
-/// Mirrors `POST /auth/passkeys/add/complete` in `apps/server/src/routes/auth_passkeys.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn complete_passkey_registration(
     credential_json: String,
@@ -504,8 +497,6 @@ pub async fn complete_passkey_registration(
 }
 
 /// Delete a passkey for the authenticated user.
-///
-/// Mirrors `DELETE /auth/passkeys/{credential_id}` in `apps/server/src/routes/auth_passkeys.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn delete_passkey(credential_id: String) -> Result<String, ServerFnError> {
     let auth = extract_auth().await?;
@@ -525,8 +516,6 @@ pub async fn delete_passkey(credential_id: String) -> Result<String, ServerFnErr
 }
 
 /// Rename a passkey for the authenticated user.
-///
-/// Mirrors `PATCH /auth/passkeys/{credential_id}` in `apps/server/src/routes/auth_passkeys.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn rename_passkey(
     credential_id: String,
