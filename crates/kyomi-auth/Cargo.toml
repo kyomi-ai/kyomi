@@ -57,6 +57,12 @@ ssh-key = { version = "0.6", features = ["ed25519", "alloc", "std"] }
 
 [dev-dependencies]
 kyomi-test-tracing = { workspace = true }
+# Enables kyomi-core's "test-helpers" feature (gating `kyomi_core::test_db`)
+# for this crate's own test target only — kyomi-core is already a normal
+# dependency above without that feature. Same pattern as
+# apps/server/Cargo.toml and kyomi-core's own self-dependency; see
+# crates/kyomi-core/src/test_db.rs's module docs. KYO-292.
+kyomi-core = { workspace = true, features = ["test-helpers"] }
 
 [lints]
 workspace = true

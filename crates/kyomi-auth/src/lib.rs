@@ -74,6 +74,12 @@ pub mod workspace_service;
 #[cfg(test)]
 pub(crate) mod test_env;
 
+/// Shared connect-or-skip helper for tests that need a real Postgres pool
+/// (KYO-292). See its module docs for why this exists and the constraint
+/// it upholds (Postgres-absent runs must still pass, visibly skipped).
+#[cfg(test)]
+pub(crate) mod test_pg;
+
 /// Build a shared HTTP client with a proper User-Agent header.
 ///
 /// Some APIs (notably Snowflake) reject requests without a User-Agent.

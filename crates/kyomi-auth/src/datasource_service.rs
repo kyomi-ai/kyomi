@@ -2104,4 +2104,125 @@ mod tests {
         assert_eq!(*count, 0);
         assert!(refresh.is_some(), "last_catalog_refresh should survive the query failure");
     }
+
+    // ─── Postgres coverage (KYO-292) ───────────────────────────────────────
+    //
+    // Every test above runs against `sqlite::memory:`, so `fetch_table_counts`'s
+    // Postgres arm (`= ANY($1)` + array bind) is type-checked but never
+    // executed by this crate's test suite. This test runs the same function
+    // against a real per-worktree Postgres database (see `crate::test_pg`)
+    // and skips cleanly — with a visible `SKIP:` line — when Postgres isn't
+    // reachable, so `cargo test -p kyomi-auth` with no Postgres available
+    // still passes.
+
+    /// Seed the owner user and workspace together — a thin composition of
+    /// the two shared `crate::test_pg` fixtures, since every Postgres test
+    /// in this module needs both.
+    async fn seed_workspace_and_owner_pg(pg: &sqlx::PgPool, workspace_id: &str, owner_user_id: &str) {
+        crate::test_pg::seed_user_pg(pg, owner_user_id, &format!("{owner_user_id}@test.local"))
+            .await;
+        crate::test_pg::seed_workspace_pg(pg, workspace_id, owner_user_id).await;
+    }
+
+    async fn seed_datasource_pg(pg: &sqlx::PgPool, id: &str, workspace_id: &str, slug: &str) {
+        sqlx::query(
+            "INSERT INTO datasource_configs \
+             (id, workspace_id, name, datasource_type, connection_config, slug) \
+             VALUES ($1, $2, $3, 'postgres', '{}', $4)",
+        )
+        .bind(id)
+        .bind(workspace_id)
+        .bind(format!("Datasource {id}"))
+        .bind(slug)
+        .execute(pg)
+        .await
+        .expect("insert datasource (postgres)");
+    }
+
+    async fn seed_table_cache_row_pg(
+        pg: &sqlx::PgPool,
+        datasource_config_id: &str,
+        workspace_id: &str,
+        table_id: &str,
+        is_archived: bool,
+    ) {
+        sqlx::query(
+            "INSERT INTO datasource_table_cache \
+             (workspace_id, project_id, dataset_id, table_id, table_metadata, is_archived, datasource_config_id) \
+             VALUES ($1, 'proj', 'dataset', $2, '{}', $3, $4)",
+        )
+        .bind(workspace_id)
+        .bind(table_id)
+        .bind(is_archived)
+        .bind(datasource_config_id)
+        .execute(pg)
+        .await
+        .expect("insert table cache row (postgres)");
+    }
+
+    /// Delete everything a Postgres test in this module inserted, scoped by
+    /// `workspace_id`, so repeated local runs against this worktree's
+    /// persistent test database don't accumulate rows. FK order: table
+    /// cache -> datasource configs -> workspace -> owner.
+    async fn cleanup_pg(pg: &sqlx::PgPool, workspace_id: &str, owner_user_id: &str) {
+        sqlx::query("DELETE FROM datasource_table_cache WHERE workspace_id = $1")
+            .bind(workspace_id)
+            .execute(pg)
+            .await
+            .expect("cleanup datasource_table_cache (postgres)");
+        sqlx::query("DELETE FROM datasource_configs WHERE workspace_id = $1")
+            .bind(workspace_id)
+            .execute(pg)
+            .await
+            .expect("cleanup datasource_configs (postgres)");
+        sqlx::query("DELETE FROM workspaces WHERE workspace_id = $1")
+            .bind(workspace_id)
+            .execute(pg)
+            .await
+            .expect("cleanup workspaces (postgres)");
+        sqlx::query("DELETE FROM users WHERE user_id = $1")
+            .bind(owner_user_id)
+            .execute(pg)
+            .await
+            .expect("cleanup users (postgres)");
+    }
+
+    #[tokio::test]
+    async fn postgres_fetch_table_counts_excludes_archived_rows() {
+        let test_name = "postgres_fetch_table_counts_excludes_archived_rows";
+        let Some(db) = crate::test_pg::postgres_test_pool_or_skip(test_name).await else {
+            return;
+        };
+        let pg = crate::test_pg::postgres_pool(&db);
+
+        let workspace_id = crate::test_pg::unique_test_id("ws");
+        let owner_id = crate::test_pg::unique_test_id("owner");
+        let ds_a = crate::test_pg::unique_test_id("ds-a");
+        let ds_b = crate::test_pg::unique_test_id("ds-b");
+
+        seed_workspace_and_owner_pg(pg, &workspace_id, &owner_id).await;
+        seed_datasource_pg(pg, &ds_a, &workspace_id, "ds-a-slug").await;
+        seed_datasource_pg(pg, &ds_b, &workspace_id, "ds-b-slug").await;
+
+        // ds_a: 2 non-archived + 1 archived (archived must not count). ds_b:
+        // no cache rows at all, so it must not appear in the result either.
+        seed_table_cache_row_pg(pg, &ds_a, &workspace_id, "table1", false).await;
+        seed_table_cache_row_pg(pg, &ds_a, &workspace_id, "table2", false).await;
+        seed_table_cache_row_pg(pg, &ds_a, &workspace_id, "table3", true).await;
+
+        let bf = sql_compat::bool_false(true);
+        let counts = fetch_table_counts(&db, &[ds_a.clone(), ds_b.clone()], bf)
+            .await
+            .expect("fetch_table_counts must succeed against a real Postgres pool");
+
+        assert_eq!(
+            counts.len(),
+            1,
+            "only ds_a has cache rows, ds_b must not produce a group: {counts:?}"
+        );
+        assert_eq!(counts[0].datasource_config_id, ds_a);
+        assert_eq!(counts[0].count, 2, "the archived row must not be counted");
+
+        cleanup_pg(pg, &workspace_id, &owner_id).await;
+    }
 }

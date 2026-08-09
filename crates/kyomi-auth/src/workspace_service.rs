@@ -1986,4 +1986,97 @@ mod tests {
     // here. The `match pool { ... tx.commit().await? ... }` shape (copied
     // from `accept_ownership_transfer`) is the same shape already relied on
     // elsewhere in this file for atomicity.
+
+    // ─── Postgres coverage (KYO-292) ───────────────────────────────────────
+    //
+    // Every test above runs against `sqlite::memory:`, so `fetch_member_counts`'s
+    // Postgres arm (`= ANY($1)` + array bind) is type-checked but never
+    // executed by this crate's test suite. This test runs the same function
+    // against a real per-worktree Postgres database (see `crate::test_pg`)
+    // and skips cleanly — with a visible `SKIP:` line — when Postgres isn't
+    // reachable, so `cargo test -p kyomi-auth` with no Postgres available
+    // still passes.
+
+    async fn seed_membership_pg(
+        pg: &sqlx::PgPool,
+        workspace_id: &str,
+        user_id: &str,
+        active: bool,
+    ) {
+        sqlx::query(
+            "INSERT INTO workspace_users (workspace_id, user_id, role, active) \
+             VALUES ($1, $2, 'workspace_user', $3)",
+        )
+        .bind(workspace_id)
+        .bind(user_id)
+        .bind(active)
+        .execute(pg)
+        .await
+        .expect("insert membership (postgres)");
+    }
+
+    /// Delete everything a Postgres test in this module inserted, scoped by
+    /// `workspace_id` and its member `user_ids`, so repeated local runs
+    /// against this worktree's persistent test database don't accumulate
+    /// rows. FK order: memberships -> workspace -> users.
+    async fn cleanup_pg(pg: &sqlx::PgPool, workspace_id: &str, user_ids: &[&str]) {
+        sqlx::query("DELETE FROM workspace_users WHERE workspace_id = $1")
+            .bind(workspace_id)
+            .execute(pg)
+            .await
+            .expect("cleanup workspace_users (postgres)");
+        sqlx::query("DELETE FROM workspaces WHERE workspace_id = $1")
+            .bind(workspace_id)
+            .execute(pg)
+            .await
+            .expect("cleanup workspaces (postgres)");
+        for user_id in user_ids {
+            sqlx::query("DELETE FROM users WHERE user_id = $1")
+                .bind(user_id)
+                .execute(pg)
+                .await
+                .expect("cleanup users (postgres)");
+        }
+    }
+
+    #[tokio::test]
+    async fn postgres_fetch_member_counts_counts_only_active_members() {
+        let test_name = "postgres_fetch_member_counts_counts_only_active_members";
+        let Some(db) = crate::test_pg::postgres_test_pool_or_skip(test_name).await else {
+            return;
+        };
+        let pg = crate::test_pg::postgres_pool(&db);
+
+        let workspace_id = crate::test_pg::unique_test_id("ws");
+        let owner_id = crate::test_pg::unique_test_id("owner");
+        let member_id = crate::test_pg::unique_test_id("member");
+        let inactive_id = crate::test_pg::unique_test_id("inactive");
+
+        crate::test_pg::seed_user_pg(pg, &owner_id, &format!("{owner_id}@test.local")).await;
+        crate::test_pg::seed_user_pg(pg, &member_id, &format!("{member_id}@test.local")).await;
+        crate::test_pg::seed_user_pg(pg, &inactive_id, &format!("{inactive_id}@test.local")).await;
+        crate::test_pg::seed_workspace_pg(pg, &workspace_id, &owner_id).await;
+        seed_membership_pg(pg, &workspace_id, &owner_id, true).await;
+        seed_membership_pg(pg, &workspace_id, &member_id, true).await;
+        seed_membership_pg(pg, &workspace_id, &inactive_id, false).await;
+
+        let counts = fetch_member_counts(&db, std::slice::from_ref(&workspace_id))
+            .await
+            .expect("fetch_member_counts must succeed against a real Postgres pool");
+
+        assert_eq!(
+            counts.len(),
+            1,
+            "only the single queried workspace_id must produce an entry — a weakened WHERE \
+             clause (e.g. AND turned to OR) would leak other workspaces' rows into this map: \
+             {counts:?}"
+        );
+        assert_eq!(
+            counts.get(&workspace_id).copied(),
+            Some(2),
+            "only the 2 active memberships must be counted, not the inactive one: {counts:?}"
+        );
+
+        cleanup_pg(pg, &workspace_id, &[&owner_id, &member_id, &inactive_id]).await;
+    }
 }
