@@ -839,3 +839,11 @@ $ cargo test -p kyomi-auth --locked --lib passkey_signup_verify_only_accepts_its
 ```
 
 Applied in almost every review in the 2026-08-01 → 2026-08-07 window, and load-bearing in several: KYO-256 mutated both auto-heal branches to echo the bogus session id back, and confirmed each `assert_ne!` duly failed with `Some(x)` on both sides rather than passing vacuously; KYO-263 mutated both guard conditions to show the fail-closed branch was covered by a real assertion rather than only by prose; KYO-222 cycle 2 re-ran the implementer's `#[serde(rename)]` mutation rather than trusting the claim; KYO-281 and KYO-282 each reverted the shipped fix to reproduce the exact panic; KYO-259 broke a matrix expression to prove `actionlint` catches it. Each of those reviews also re-confirmed the staged diff byte-for-byte after restoring.
+
+### A `!contains(...)` assertion after an `assert_eq!` on the same value is dead
+
+If a test already asserts `assert_eq!(actual, "the exact expected string")`, every following `assert!(!actual.contains(X))` on that same value is unreachable as a failure. For any mutation that changes `actual`, the equality fires first; for any mutation that leaves `actual` unchanged, the `!contains` cannot fire either — the expected literal is fixed, so whether it contains `X` is decided at authoring time, not at run time. The line reads like a second guard and carries no weight.
+
+**Rule:** Don't stack a substring guard behind an exact-equality assertion on the same value. Either assert equality alone, or — if the substring is the real invariant and the exact string is incidental — assert the substring against something the equality does not already pin, such as a *different* value (`assert!(!other_field.contains(X))`) or a compile-time property of the constant itself (`assert!(!WRAP_UP_FAILED_MESSAGE.contains("cancelled"))`, which pins a constant a future reword could silently break). When reviewing, evaluate the pair, not each line in isolation.
+
+Flagged in the KYO-344 cycle-2 review (2026-08-10): the pair at `crates/kyomi-agent/src/agent.rs:1920` was mutation-tested three ways and the `!contains` guard was proven dead both before and after the change under review — reasoning alone had concluded the opposite.
