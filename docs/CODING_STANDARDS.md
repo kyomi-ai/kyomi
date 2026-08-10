@@ -604,7 +604,13 @@ pub async fn link_google_account(code: String) -> Result<LinkResult, ServerFnErr
 
 *Standards for database access, caching, state synchronization, and data flow.*
 
-*(No entries yet.)*
+### Tightening a column constraint requires auditing every write site for that table
+
+A migration that adds `NOT NULL`, a `UNIQUE`, or a foreign key does not fail at migration time when the offending write lives in Rust — it fails later, at the first `INSERT` that omitted the column and previously relied on a permissive default. If that write happens during server startup, the failure is a boot-loop: the migration has already committed, so every restart re-runs the same crashing code path.
+
+**Rule:** Before shipping a migration that tightens a constraint, grep for every `INSERT INTO <table>` and `UPDATE <table>` across `apps/`, `crates/`, *and* the sibling repos (`~/repos/kyomi-connect` in particular), and confirm each one supplies the newly-required column on **both** the Postgres and SQLite branches. Reviewing the migration file and its own test is not sufficient coverage — the regression is at the call sites, not in the DDL.
+
+Flagged in KYO-293: `00033_fix_collections_created_by_constraints.sql` made `collections.created_by` `NOT NULL`, but `kyomi_knowledge::unify::migrate_folders_to_collections` still ran `INSERT ... INTO collections` without `created_by` (previously absorbed by SQLite's `DEFAULT ''`). The resulting `RowNotFound` propagated through `?` into `main.rs`'s `.expect(...)`, killing the server process on every boot for any self-hosted SQLite install with an un-migrated folder row. Postgres had carried the same latent omission since `20260609000000_add_created_by_to_collections.sql`.
 
 ## Security
 
