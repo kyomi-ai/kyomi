@@ -98,6 +98,49 @@ jobs:
       - name: Signal disposal safety lint
         run: ./scripts/lint/check-disposal-safety.sh
 
+      # --------------------------------------------------------------------
+      # Git hooks guard (KYO-358).
+      #
+      # `.githooks/pre-commit` and `.githooks/pre-push` are only enforced
+      # locally if a contributor's clone has `core.hooksPath` pointed at
+      # `.githooks` AND the hook files are executable — git silently skips
+      # a hook it can't exec, so a hook that regresses to mode 100644 (e.g.
+      # re-added via a tool that doesn't preserve the bit) fails open with
+      # no signal anywhere. This step catches that class of regression in
+      # CI, independent of any single contributor's local setup:
+      #   - .githooks/ exists and has at least one hook file
+      #   - every tracked file in .githooks/ is mode 100755 (checked via
+      #     `git ls-files -s`, the mode a fresh clone actually gets — not
+      #     the filesystem bit on the runner's checkout)
+      #   - every hook parses (`bash -n`), so a hook can't rot into
+      #     something that fails to run at all
+      #
+      # Pure bash, no Rust toolchain required.
+      # --------------------------------------------------------------------
+      - name: Git hooks guard
+        run: |
+          if [ ! -d .githooks ] || [ -z "$(ls -A .githooks)" ]; then
+            echo "::error::.githooks/ is missing or empty."
+            exit 1
+          fi
+
+          status=0
+          while read -r mode _ _ path; do
+            if [ "$mode" != "100755" ]; then
+              echo "::error::${path} is tracked as mode ${mode}, expected 100755 (chmod +x it and re-stage)."
+              status=1
+            fi
+            if ! bash -n "$path"; then
+              echo "::error::${path} failed bash -n syntax check."
+              status=1
+            fi
+          done <<< "$(git ls-files -s .githooks/)"
+
+          if [ "$status" -ne 0 ]; then
+            exit 1
+          fi
+          echo "✅ .githooks/ hooks are executable and syntactically valid."
+
   # ---------------------------------------------------------------------------
   # Security: Trivy filesystem vulnerability scan
   # ---------------------------------------------------------------------------

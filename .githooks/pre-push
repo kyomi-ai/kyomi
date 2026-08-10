@@ -1,14 +1,24 @@
 #!/bin/bash
+# Prevent direct pushes to main — use feature branches + PRs instead.
 #
-# Prevent direct pushes to the main branch.
-# All changes must go through a pull request.
-#
+# This matches on the REMOTE ref being updated (read from stdin per the
+# documented pre-push hook protocol: `<local ref> <local sha> <remote ref>
+# <remote sha>`), not on the locally checked-out branch. That distinction
+# matters (KYO-358): a check based on the local branch name blocks
+# `git push origin HEAD:my-branch` while standing on main (false positive)
+# and — worse — does NOT block `git push origin my-branch:main` (false
+# negative, the actual dangerous operation). Matching the remote ref
+# catches the real case and only that case. Do not "simplify" this back
+# to a local-branch check.
 
 protected_branch="main"
-current_branch=$(git symbolic-ref HEAD 2>/dev/null | sed 's|refs/heads/||')
 
-if [ "$current_branch" = "$protected_branch" ]; then
-  echo "❌ Direct push to '$protected_branch' is blocked."
-  echo "   Create a feature branch and open a pull request instead."
-  exit 1
-fi
+while read -r local_ref local_sha remote_ref remote_sha; do
+    if echo "$remote_ref" | grep -q "refs/heads/${protected_branch}$"; then
+        echo "🚫 Direct push to '${protected_branch}' is blocked."
+        echo "   Create a feature branch and open a PR instead."
+        exit 1
+    fi
+done
+
+exit 0
