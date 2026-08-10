@@ -101,6 +101,8 @@ web-sys = { version = "0.3", features = [
     "HtmlCanvasElement", "CanvasRenderingContext2d",
     "FileReader", "File", "FileList",
     "HtmlVideoElement", "MediaStreamConstraints",
+    # KYO-303: browser-console tracing subscriber (wasm_logging.rs)
+    "console",
 ] }
 
 # SendWrapper for non-Send JS values in Leptos reactive closures
@@ -195,6 +197,28 @@ kyomi-slack = { path = "../../enterprise/kyomi-slack", optional = true }
 # `wasm32-unknown-unknown`'s stdlib lowers to extern C calls. See wasm_math_shims.rs.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 libm = "0.2"
+
+# KYO-303: browser-console tracing subscriber (wasm_logging.rs). wasm32-only
+# so the SSR build never pulls this in. `tracing-wasm` (the obvious
+# purpose-built crate) was evaluated and rejected — its last release,
+# 0.2.1, was published 2021-11-07 and the crate has had no commits since;
+# see the KYO-303 PR description for the crates.io evidence. Rather than add
+# an unmaintained dependency (or an unrelated third-party fork not
+# consumed anywhere else in this workspace), `wasm_logging.rs` hand-rolls a
+# minimal `tracing_subscriber::Layer`, matching the pattern
+# `kyomi-test-tracing`'s `CaptureLayer` already establishes locally
+# (crates/kyomi-test-tracing/src/lib.rs). `default-features = false` +
+# `features = ["registry"]` pulls in only `Registry`/`Layer`/`SubscriberExt`
+# — none of `fmt`/`ansi`/`tracing-log`/`json`/`env-filter`, which this
+# hand-rolled layer doesn't use and which apps/server's own
+# `tracing-subscriber` usage (features = ["json", "env-filter"]) does not
+# leak into this wasm32-only build (apps/server isn't part of kyomi-ui's
+# `hydrate`-feature dependency graph).
+# Not `workspace = true`: the workspace dependency doesn't declare
+# `default-features` explicitly, and Cargo requires that to be present
+# before a member can override it. Pinned to the same "0.3" requirement as
+# the workspace entry so it resolves to the same locked version everywhere.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }
 
 # Client-side persistent cache for the sync engine (WASM-only).
 #

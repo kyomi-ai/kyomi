@@ -17,6 +17,7 @@ pub mod query_cache;
 pub mod server_fns;
 pub mod types;
 pub mod utils;
+pub mod wasm_logging;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm_math_shims;
