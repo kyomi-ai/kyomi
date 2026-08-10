@@ -9,6 +9,14 @@ use kyomi_ui::app::App;
 use leptos::prelude::*;
 
 fn main() {
+    // KYO-303: install a console-forwarding tracing subscriber before
+    // anything else runs, so `tracing::warn!`/`error!` calls made during
+    // mount/hydration itself are captured too. SSR is untouched — this is
+    // wasm32-only and does not affect `apps/server`'s own
+    // `tracing_subscriber::fmt()` setup.
+    #[cfg(target_arch = "wasm32")]
+    kyomi_ui::wasm_logging::install();
+
     #[cfg(target_arch = "wasm32")]
     std::panic::set_hook(Box::new(|info| {
         console_error_panic_hook::hook(info);
