@@ -21,7 +21,7 @@ use std::sync::{Arc, OnceLock};
 
 use regex::Regex;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::provider::LLMProvider;
 use crate::tools::{ToolContext, ToolFilter, ToolRegistry};
@@ -60,6 +60,106 @@ pub(crate) fn classify_chartml_error(error: &str) -> &'static str {
     } else {
         "unknown"
     }
+}
+
+// ---------------------------------------------------------------------------
+// Iteration budget notices
+// ---------------------------------------------------------------------------
+
+/// Opening of the ephemeral iteration-budget notice.
+///
+/// The notice is wrapped in a `<system-reminder>` tag and written in harness
+/// voice so the model reads it as tooling output rather than user speech. It
+/// is appended to the tail of the LLM request and is never pushed to
+/// [`AgentState::messages`], so `AgentAdapter::persist_after_chat` never sees
+/// it, it never reaches `chat_messages`, and it is never reloaded on a later
+/// turn of the same session.
+///
+/// It is deliberately kept out of the system prompt: Anthropic requests set a
+/// request-level `cache_control` breakpoint, and the cached prefix must stay
+/// byte-identical when the notice fires.
+pub(crate) const BUDGET_NOTICE_PREFIX: &str = "<system-reminder>Iteration budget:";
+
+/// Ephemeral instruction sent with the forced wrap-up turn.
+///
+/// Paired with an empty tool slice, which every provider translates into a
+/// request carrying no `tools` key at all, so the model cannot emit another
+/// tool call and must answer from what it already gathered.
+pub(crate) const WRAP_UP_INSTRUCTION: &str =
+    "<system-reminder>The tool-use iteration budget for this turn is exhausted and no tools \
+     are available for this request. Answer the user now, using only what has already been \
+     gathered in this conversation. Say plainly which parts could not be completed, but still \
+     give the best answer the collected information supports. This notice comes from the \
+     harness, not from the user; do not quote it or reply to it.</system-reminder>";
+
+/// Message body of the [`kyomi_core::Error::Internal`] returned when the
+/// wrap-up turn itself fails — the turn produced nothing, and reporting that as
+/// a successful answer would hide the provider failure behind a plausible
+/// reply.
+///
+/// **This is not user-facing text on its own.** Two prefixes are prepended
+/// before it reaches a user:
+///
+/// 1. `Error::Internal`'s `Display`, `internal: {0}` —
+///    `crates/kyomi-core/src/error.rs:55`.
+/// 2. The chat error wrapper, `I encountered an error while processing your
+///    request: {error_str}` — `crates/kyomi-agent/src/execution.rs:450`.
+///
+/// So it must read as a lowercase, non-apologising *clause*, not a standalone
+/// sentence addressed to the user: what the user reads is
+/// `"I encountered an error while processing your request: internal: "`
+/// immediately followed by this string, and the whole thing has to parse as one
+/// sentence. It must also avoid the substring `cancelled`, which
+/// `execution.rs:439` uses to classify the turn as a user cancellation.
+///
+/// Reworded in KYO-344 review follow-up; the previous first-person apology
+/// produced two apologies and a stray `internal:` mid-sentence.
+pub(crate) const WRAP_UP_FAILED_MESSAGE: &str =
+    "the iteration budget for this request was exhausted and the final summary could not be \
+     generated; try rephrasing the question or breaking it into smaller parts";
+
+/// Fractions of the iteration budget (in tenths) at which a notice fires.
+///
+/// Ascending order is required: the crossing count in `chat()` treats the last
+/// entry as the most urgent one.
+const BUDGET_NOTICE_TENTHS: [u32; 2] = [7, 9];
+
+/// Zero-based iteration indices at which the graduated budget notices fire.
+///
+/// Derived from the configured ceiling, never hardcoded: a caller with
+/// `max_iterations = 25` gets `[17, 22]`, one with `20` gets `[14, 18]`, so
+/// changing the ceiling (KYO-345) moves the notices with it.
+///
+/// Small ceilings collapse both entries onto the same index (`3` yields
+/// `[2, 2]`) and very small ones onto `0`. Neither is special-cased here —
+/// `chat()` fires the highest *un-fired* threshold that the current iteration
+/// has crossed, so a collapsed pair produces exactly one notice.
+fn budget_notice_thresholds(max_iterations: u32) -> [u32; BUDGET_NOTICE_TENTHS.len()] {
+    // u64 keeps the product overflow-free for any u32 ceiling; the quotient can
+    // never exceed `max_iterations`, so narrowing back to u32 is exact.
+    BUDGET_NOTICE_TENTHS.map(|tenths| (u64::from(max_iterations) * u64::from(tenths) / 10) as u32)
+}
+
+/// Render the ephemeral iteration-budget notice.
+///
+/// `used` is the number of iterations already consumed when the notice fires.
+/// `final_notice` selects the stronger wording carried by the last (most
+/// urgent) threshold.
+fn budget_notice_text(used: u32, max_iterations: u32, final_notice: bool) -> String {
+    let remaining = max_iterations.saturating_sub(used);
+    let guidance = if final_notice {
+        "Stop gathering new information and produce the final answer now from what is already \
+         in context. If the budget runs out, one further request will be made with all tools \
+         withheld."
+    } else {
+        "Begin consolidating: prefer answering from what has already been gathered over opening \
+         new lines of investigation."
+    };
+    format!(
+        "{BUDGET_NOTICE_PREFIX} {used} of {max_iterations} tool-use iterations for this turn \
+         have been used, {remaining} remaining. {guidance} This notice comes from the harness, \
+         not from the user; do not quote it or reply to it.</system-reminder>"
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -289,6 +389,16 @@ impl CustomAgent {
         // never persisted to the database.
         let mut chartml_retry_messages: Vec<Message> = Vec::new();
 
+        // Ephemeral iteration-budget notice.  Like the ChartML retry messages
+        // it is appended to the LLM context and never added to
+        // `self.state.messages`, so it is never persisted and never reloaded
+        // on a later turn.  Unlike them it must survive tool-call iterations,
+        // so it is deliberately *not* cleared where they are cleared below.
+        let mut budget_notice: Option<Message> = None;
+        // How many notice thresholds have already fired during this call.
+        let mut budget_notices_fired = 0usize;
+        let budget_thresholds = budget_notice_thresholds(self.config.max_iterations);
+
         // Iteration loop.
         for iteration in 0..self.config.max_iterations {
             // Check cancellation.
@@ -298,21 +408,34 @@ impl CustomAgent {
 
             self.state.global_iteration += 1;
 
-            // Inject warning once at 80% of the iteration limit.
-            let threshold = (self.config.max_iterations as f32 * 0.8) as u32;
-            if iteration == threshold {
-                let remaining = self.config.max_iterations - iteration;
-                let warning = format!(
-                    "\u{26a0}\u{fe0f} IMPORTANT: You have only {remaining} iterations remaining. \
-                     Please wrap up your analysis and provide a final response soon."
-                );
-                self.state.messages.push(Message::user(warning));
+            // Graduated budget pressure.  Counting how many thresholds this
+            // iteration has crossed (rather than testing `iteration ==
+            // threshold`) means a threshold can never be skipped, and that
+            // thresholds which collapse onto the same index for a small
+            // ceiling fire once rather than twice.  A later notice *replaces*
+            // the earlier one — `Option` makes stacking structurally
+            // impossible.
+            let crossed = budget_thresholds
+                .iter()
+                .filter(|&&threshold| iteration >= threshold)
+                .count();
+            if crossed > budget_notices_fired {
+                budget_notices_fired = crossed;
+                budget_notice = Some(Message::user(budget_notice_text(
+                    iteration,
+                    self.config.max_iterations,
+                    crossed == budget_thresholds.len(),
+                )));
             }
 
             // Build LLM context (handles compaction), then append any
             // ephemeral ChartML retry messages so the LLM sees them.
             let mut llm_messages = self.build_llm_context();
             llm_messages.extend(chartml_retry_messages.iter().cloned());
+            // Budget notice last: maximum recency, immediately before the call.
+            if let Some(ref notice) = budget_notice {
+                llm_messages.push(notice.clone());
+            }
 
             // Get tool definitions.
             let tools = self.registry.get_tool_definitions(&self.config.tool_filter);
@@ -370,17 +493,7 @@ impl CustomAgent {
 
             // No tool calls -- this is the final response.
             if response.tool_calls.is_none() {
-                // Some models (e.g. MiMo) put the full answer in the reasoning
-                // field and leave content empty. Use reasoning as the response
-                // so the user sees something rather than a blank message.
-                // Only when the model chose to stop (not truncated by max_tokens).
-                let content = if response.content.is_empty()
-                    && response.finish_reason == "end_turn"
-                {
-                    response.thinking_content.unwrap_or_default()
-                } else {
-                    response.content
-                };
+                let content = final_response_text(response);
 
                 if let Some(ref cb) = self.callbacks.on_preparing_response {
                     cb();
@@ -534,12 +647,53 @@ impl CustomAgent {
             warn!(error = %e, "Failed to update ChartML validation retry_succeeded");
         }
 
-        let fallback =
-            "I apologize, but I've reached my maximum number of iterations for this request. \
-             Please try rephrasing your question or breaking it into smaller parts."
-                .to_string();
-        self.state.messages.push(Message::assistant(&fallback));
-        Ok(fallback)
+        // Cancellation is checked before every other LLM call in this loop;
+        // the wrap-up call is no exception.
+        if cancel_token.is_cancelled() {
+            return Err(kyomi_core::Error::Internal("Request cancelled".into()));
+        }
+
+        // Forced wrap-up turn: everything gathered so far, plus an ephemeral
+        // instruction to answer from it, and **no tools**.  With an empty tool
+        // slice every provider omits the `tools` key entirely, so the model
+        // cannot request another tool and must produce prose.  The instruction
+        // stays out of `self.state.messages` for the same reason the budget
+        // notice does — it must never reach the transcript.
+        let mut wrap_up_messages = self.build_llm_context();
+        wrap_up_messages.push(Message::user(WRAP_UP_INSTRUCTION));
+
+        if let Some(ref cb) = self.callbacks.on_preparing_response {
+            cb();
+        }
+
+        // The wrap-up is an LLM call like any other, so it counts.
+        self.state.global_iteration += 1;
+
+        let wrap_up = tokio::select! {
+            result = self.call_llm(&wrap_up_messages, &[]) => result,
+            _ = cancel_token.cancelled() => {
+                return Err(kyomi_core::Error::Internal(
+                    "Request cancelled".into(),
+                ));
+            }
+        };
+
+        let response = match wrap_up {
+            Ok(response) => response,
+            Err(e) => {
+                error!(
+                    error = %e,
+                    "wrap-up LLM call failed after exhausting max iterations"
+                );
+                return Err(kyomi_core::Error::Internal(
+                    WRAP_UP_FAILED_MESSAGE.to_string(),
+                ));
+            }
+        };
+
+        let content = final_response_text(response);
+        self.state.messages.push(Message::assistant(&content));
+        Ok(content)
     }
 
     // -----------------------------------------------------------------------
@@ -731,6 +885,20 @@ fn build_metadata_prefix(
         String::new()
     } else {
         format!("[{}] ", parts.join(", "))
+    }
+}
+
+/// Extract the user-visible text of a final LLM response.
+///
+/// Some models (e.g. MiMo) put the full answer in the reasoning field and
+/// leave `content` empty. Use the reasoning text in that case so the user sees
+/// something rather than a blank message — but only when the model chose to
+/// stop, not when it was truncated by `max_tokens`.
+fn final_response_text(response: crate::types::LLMResponse) -> String {
+    if response.content.is_empty() && response.finish_reason == "end_turn" {
+        response.thinking_content.unwrap_or_default()
+    } else {
+        response.content
     }
 }
 
@@ -1185,38 +1353,6 @@ Chart 2:\n```chartml\ndata:\n  query: SELECT 2\nvisualize:\n  type: line\n```";
         assert_eq!(state.global_iteration, 1);
     }
 
-    // -- Contract: Iteration warning threshold calculation -------------------
-
-    #[test]
-    fn iteration_warning_threshold_at_80_percent() {
-        let config = AgentConfig::default();
-        let threshold = (config.max_iterations as f32 * 0.8) as u32;
-        // 25 * 0.8 = 20.0
-        assert_eq!(threshold, 20);
-    }
-
-    #[test]
-    fn iteration_warning_threshold_custom_max() {
-        let config = AgentConfig {
-            max_iterations: 10,
-            ..Default::default()
-        };
-        let threshold = (config.max_iterations as f32 * 0.8) as u32;
-        assert_eq!(threshold, 8);
-    }
-
-    // -- Contract: Max iterations apology message ---------------------------
-
-    #[test]
-    fn max_iterations_apology_message_content() {
-        // The apology message returned when iterations are exhausted.
-        let apology = "I apologize, but I've reached my maximum number of iterations for this request. \
-             Please try rephrasing your question or breaking it into smaller parts.";
-        // Verify the key phrases that the frontend might rely on.
-        assert!(apology.contains("maximum number of iterations"));
-        assert!(apology.contains("rephrasing your question"));
-    }
-
     // -- Contract: AgentCallbacks can be set ---------------------------------
 
     #[test]
@@ -1306,5 +1442,514 @@ Chart 2:\n```chartml\ndata:\n  query: SELECT 2\nvisualize:\n  type: line\n```";
                 .contains("UPDATE chartml_validation_log")
         );
         assert!(CHARTML_VALIDATION_LOG_UPDATE_SQL.contains("retry_succeeded"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Iteration budget: scripted-provider harness
+    // -----------------------------------------------------------------------
+
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use serde_json::json;
+
+    use crate::tools::AgentTool;
+    use crate::types::{AgentTokenUsage, LLMResponse, MessageRole};
+
+    /// Name of the single tool registered by [`scripted_agent`].
+    const NOOP_TOOL_NAME: &str = "noop";
+
+    /// A tool that does nothing, registered so the tool slice the agent hands
+    /// to the LLM during the loop is non-empty — without it, "the wrap-up call
+    /// passes no tools" would hold vacuously.
+    struct NoopTool;
+
+    #[async_trait]
+    impl AgentTool for NoopTool {
+        fn name(&self) -> &str {
+            NOOP_TOOL_NAME
+        }
+
+        fn description(&self) -> &str {
+            "Does nothing."
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            json!({"type": "object", "properties": {}})
+        }
+
+        async fn execute(
+            &self,
+            _args: serde_json::Value,
+            _ctx: &ToolContext,
+        ) -> kyomi_core::Result<String> {
+            Ok("noop".to_string())
+        }
+    }
+
+    /// What [`ScriptedProvider`] returns for one `complete` call.
+    #[derive(Clone)]
+    enum Reply {
+        /// A plain text answer — ends the agent loop.
+        Text(String),
+        /// A single tool call — drives the loop into another iteration.
+        ToolCall,
+        /// A provider failure.
+        Failure(String),
+    }
+
+    /// One recorded `LLMProvider::complete` invocation.
+    #[derive(Debug)]
+    struct RecordedCall {
+        messages: Vec<Message>,
+        tools: Vec<Tool>,
+    }
+
+    impl RecordedCall {
+        /// Messages in this call that carry an iteration-budget notice.
+        fn budget_notices(&self) -> Vec<&Message> {
+            self.messages
+                .iter()
+                .filter(|m| m.content.contains(BUDGET_NOTICE_PREFIX))
+                .collect()
+        }
+    }
+
+    /// An [`LLMProvider`] that records every call it receives and replays a
+    /// fixed script of replies.
+    struct ScriptedProvider {
+        script: Mutex<VecDeque<Reply>>,
+        /// Replayed once the script runs out (e.g. "keeps calling tools").
+        after_script: Reply,
+        calls: Arc<Mutex<Vec<RecordedCall>>>,
+    }
+
+    #[async_trait]
+    impl LLMProvider for ScriptedProvider {
+        async fn complete(
+            &self,
+            messages: &[Message],
+            tools: &[Tool],
+            _temperature: Option<f32>,
+            _max_tokens: u32,
+            _user_names: &HashMap<String, String>,
+        ) -> kyomi_core::Result<LLMResponse> {
+            self.calls
+                .lock()
+                .expect("call log mutex")
+                .push(RecordedCall {
+                    messages: messages.to_vec(),
+                    tools: tools.to_vec(),
+                });
+
+            let reply = self
+                .script
+                .lock()
+                .expect("script mutex")
+                .pop_front()
+                .unwrap_or_else(|| self.after_script.clone());
+
+            match reply {
+                Reply::Text(content) => Ok(LLMResponse {
+                    content,
+                    finish_reason: "end_turn".to_string(),
+                    usage: AgentTokenUsage::default(),
+                    tool_calls: None,
+                    cost: None,
+                    thinking_content: None,
+                }),
+                Reply::ToolCall => Ok(LLMResponse {
+                    content: String::new(),
+                    finish_reason: "tool_use".to_string(),
+                    usage: AgentTokenUsage::default(),
+                    tool_calls: Some(vec![ToolCall {
+                        id: "tc_1".to_string(),
+                        name: NOOP_TOOL_NAME.to_string(),
+                        arguments: json!({}),
+                    }]),
+                    cost: None,
+                    thinking_content: None,
+                }),
+                Reply::Failure(message) => Err(kyomi_core::Error::Internal(message)),
+            }
+        }
+
+        fn model(&self) -> &str {
+            "scripted-model"
+        }
+    }
+
+    /// Build a `ToolContext` over an in-memory sqlite pool and in-memory KV
+    /// store. `session_id: None` keeps the agent off the ChartML validation
+    /// log writes, so no migrated schema is required.
+    async fn test_tool_context() -> ToolContext {
+        let db = kyomi_core::DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let ws_manager = kyomi_auth::websocket::WebSocketManager::new(None, db.clone());
+
+        ToolContext {
+            db,
+            kv: kyomi_core::kv_store_memory::InMemoryKVStore::new_pool(),
+            user_id: "user-a".to_string(),
+            workspace_id: "ws-1".to_string(),
+            encryption_key: Arc::new([0u8; 32]),
+            embedding: kyomi_embed::LazyEmbedding::new(),
+            ws_manager,
+            config: Arc::new(kyomi_core::Config::test_config()),
+            session_id: None,
+            supports_mcp_apps: false,
+            workspace_roles: Vec::new(),
+            connect_registry: None,
+            platforms: Arc::new(kyomi_core::platform::PlatformRegistry::new()),
+            user_display_name: "User A".to_string(),
+        }
+    }
+
+    /// Build an agent wired to a scripted provider and a one-tool registry.
+    async fn scripted_agent(
+        max_iterations: u32,
+        script: Vec<Reply>,
+        after_script: Reply,
+    ) -> (CustomAgent, Arc<Mutex<Vec<RecordedCall>>>) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let provider = ScriptedProvider {
+            script: Mutex::new(script.into()),
+            after_script,
+            calls: Arc::clone(&calls),
+        };
+
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(NoopTool));
+
+        let agent = CustomAgent::new(
+            Box::new(provider),
+            AgentConfig {
+                max_iterations,
+                ..Default::default()
+            },
+            Arc::new(registry),
+            test_tool_context().await,
+            HashMap::new(),
+        );
+
+        (agent, calls)
+    }
+
+    /// Run a full budget (`max_iterations` tool-calling iterations) and return
+    /// the recorded calls, including the final wrap-up call.
+    async fn run_until_exhausted(
+        max_iterations: u32,
+        wrap_up: Reply,
+    ) -> (CustomAgent, Vec<RecordedCall>) {
+        let script = vec![Reply::ToolCall; max_iterations as usize];
+        let (mut agent, calls) = scripted_agent(max_iterations, script, wrap_up).await;
+        agent
+            .chat("hello", CancellationToken::new(), None, None, None)
+            .await
+            .expect("chat should complete");
+        // The agent (via its provider) still holds a handle to the log, so
+        // take the recorded calls out from under the lock rather than
+        // unwrapping the Arc.
+        let recorded = std::mem::take(&mut *calls.lock().expect("call log mutex"));
+        (agent, recorded)
+    }
+
+    // -----------------------------------------------------------------------
+    // Iteration budget: thresholds
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn budget_notice_thresholds_are_derived_from_the_ceiling() {
+        assert_eq!(budget_notice_thresholds(25), [17, 22]);
+        assert_eq!(budget_notice_thresholds(20), [14, 18]);
+        // Degenerate ceilings collapse both thresholds onto a single index —
+        // `chat()` must still fire only one notice for them.
+        assert_eq!(budget_notice_thresholds(3), [2, 2]);
+        assert_eq!(budget_notice_thresholds(1), [0, 0]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Iteration budget: the notice is ephemeral
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn budget_notice_never_lands_in_agent_state() {
+        // 10 iterations => thresholds at 7 and 9, so both notices fire.
+        let (agent, _calls) = run_until_exhausted(10, Reply::Text("wrap up".to_string())).await;
+
+        let leaked: Vec<&Message> = agent
+            .state()
+            .messages
+            .iter()
+            .filter(|m| m.content.contains(BUDGET_NOTICE_PREFIX))
+            .collect();
+
+        assert!(
+            leaked.is_empty(),
+            "the budget notice must never reach state.messages — persist_after_chat \
+             writes every message past messages_loaded_count to chat_messages; found: {leaked:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn persistable_messages_contain_only_the_genuine_user_message() {
+        // Round-trip stand-in for persist_after_chat: this agent loaded nothing
+        // from the DB, so `messages_loaded_count` is 0 and every message in
+        // state.messages is one persist_after_chat would write (System aside).
+        let (agent, _calls) = run_until_exhausted(10, Reply::Text("wrap up".to_string())).await;
+
+        let user_messages: Vec<&Message> = agent
+            .state()
+            .messages
+            .iter()
+            .filter(|m| m.role == MessageRole::User)
+            .collect();
+
+        assert_eq!(
+            user_messages.len(),
+            1,
+            "exactly one row would be written with role = \"user\": {user_messages:?}"
+        );
+        assert_eq!(user_messages[0].content, "hello");
+    }
+
+    #[tokio::test]
+    async fn budget_notice_reaches_the_llm_from_the_crossing_iteration_onward() {
+        let (_agent, calls) = run_until_exhausted(10, Reply::Text("wrap up".to_string())).await;
+        assert_eq!(calls.len(), 11, "10 loop iterations plus the wrap-up call");
+
+        for (index, call) in calls.iter().take(7).enumerate() {
+            assert!(
+                call.budget_notices().is_empty(),
+                "no notice may appear before the first threshold (call {index})"
+            );
+        }
+
+        for (index, call) in calls.iter().enumerate().take(10).skip(7) {
+            assert_eq!(
+                call.budget_notices().len(),
+                1,
+                "call {index} must carry exactly one budget notice"
+            );
+        }
+
+        assert!(
+            calls[7]
+                .messages
+                .last()
+                .expect("call 7 has messages")
+                .content
+                .contains(BUDGET_NOTICE_PREFIX),
+            "the notice must sit at the tail of the request, at maximum recency"
+        );
+    }
+
+    #[tokio::test]
+    async fn budget_notice_survives_iterations_that_execute_tool_calls() {
+        // The notice fires at iteration 7, which itself executes a tool call —
+        // the point where `chartml_retry_messages` is cleared. The notice must
+        // not be cleared alongside them.
+        let (_agent, calls) = run_until_exhausted(10, Reply::Text("wrap up".to_string())).await;
+
+        assert_eq!(
+            calls[7].budget_notices().len(),
+            1,
+            "the notice fires on iteration 7"
+        );
+        assert_eq!(
+            calls[8].budget_notices().len(),
+            1,
+            "the notice must survive the tool-call iteration that precedes call 8"
+        );
+        assert_eq!(
+            calls[7].budget_notices()[0].content,
+            calls[8].budget_notices()[0].content,
+            "call 8 must carry the same notice, not a re-fired one"
+        );
+    }
+
+    #[tokio::test]
+    async fn urgent_notice_replaces_the_earlier_one_rather_than_stacking() {
+        let (_agent, calls) = run_until_exhausted(10, Reply::Text("wrap up".to_string())).await;
+
+        assert_eq!(
+            calls[7].budget_notices().len(),
+            1,
+            "the first threshold fires exactly one notice"
+        );
+        assert_eq!(
+            calls[9].budget_notices().len(),
+            1,
+            "the second threshold must replace the first, not stack with it"
+        );
+        assert_eq!(
+            calls[7].budget_notices()[0].content,
+            budget_notice_text(7, 10, false),
+            "the first threshold fires the non-urgent wording"
+        );
+        assert_eq!(
+            calls[9].budget_notices()[0].content,
+            budget_notice_text(9, 10, true),
+            "the second threshold fires the urgent wording"
+        );
+    }
+
+    #[tokio::test]
+    async fn budget_notice_fires_against_a_non_default_ceiling() {
+        // 20 iterations (the copilot ceiling) => thresholds at 14 and 18.
+        let (_agent, calls) = run_until_exhausted(20, Reply::Text("wrap up".to_string())).await;
+
+        assert!(
+            calls[13].budget_notices().is_empty(),
+            "70% of 20 is iteration 14, so call 13 must still be clean"
+        );
+        assert_eq!(
+            calls[14].budget_notices().len(),
+            1,
+            "the first threshold for a ceiling of 20 is iteration 14"
+        );
+        assert_eq!(
+            calls[14].budget_notices()[0].content,
+            budget_notice_text(14, 20, false)
+        );
+        assert_eq!(
+            calls[18].budget_notices().len(),
+            1,
+            "the second threshold for a ceiling of 20 is iteration 18"
+        );
+        assert_eq!(
+            calls[18].budget_notices()[0].content,
+            budget_notice_text(18, 20, true)
+        );
+    }
+
+    #[tokio::test]
+    async fn collapsed_thresholds_fire_exactly_one_notice() {
+        // 3 iterations => both thresholds land on iteration 2.
+        let (_agent, calls) = run_until_exhausted(3, Reply::Text("wrap up".to_string())).await;
+
+        assert!(calls[0].budget_notices().is_empty());
+        assert!(calls[1].budget_notices().is_empty());
+        assert_eq!(
+            calls[2].budget_notices().len(),
+            1,
+            "thresholds that collapse onto one index must fire once, not twice"
+        );
+        assert_eq!(
+            calls[2].budget_notices()[0].content,
+            budget_notice_text(2, 3, true),
+            "a collapsed pair fires the most urgent wording"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Iteration budget: exhaustion wrap-up
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn exhausting_the_budget_wraps_up_with_no_tools() {
+        let (agent, calls) =
+            run_until_exhausted(3, Reply::Text("Revenue grew 12% last quarter.".to_string()))
+                .await;
+
+        assert_eq!(calls.len(), 4, "3 loop iterations plus one wrap-up call");
+        assert_eq!(
+            calls[0].tools.len(),
+            1,
+            "loop iterations must offer the registered tool, otherwise the \
+             empty-tools assertion below is vacuous"
+        );
+        assert!(
+            calls[3].tools.is_empty(),
+            "the wrap-up call must withhold every tool: {:?}",
+            calls[3].tools
+        );
+        assert_eq!(
+            calls[3]
+                .messages
+                .last()
+                .expect("wrap-up call has messages")
+                .content,
+            WRAP_UP_INSTRUCTION,
+            "the wrap-up instruction must sit at the tail of the request"
+        );
+        assert!(
+            calls[3].budget_notices().is_empty(),
+            "the wrap-up request carries its own instruction, not the budget notice"
+        );
+
+        assert_eq!(
+            agent
+                .state()
+                .messages
+                .last()
+                .expect("state has messages")
+                .content,
+            "Revenue grew 12% last quarter.",
+            "the wrap-up answer is the assistant message, not a canned apology"
+        );
+        assert!(
+            !agent
+                .state()
+                .messages
+                .iter()
+                .any(|m| m.content == WRAP_UP_INSTRUCTION),
+            "the wrap-up instruction is ephemeral and must not be persisted"
+        );
+    }
+
+    #[tokio::test]
+    async fn exhaustion_returns_the_wrap_up_answer_not_a_canned_string() {
+        let script = vec![Reply::ToolCall; 3];
+        let (mut agent, _calls) = scripted_agent(
+            3,
+            script,
+            Reply::Text("Revenue grew 12% last quarter.".to_string()),
+        )
+        .await;
+
+        let answer = agent
+            .chat("hello", CancellationToken::new(), None, None, None)
+            .await
+            .expect("chat should complete");
+
+        assert_eq!(answer, "Revenue grew 12% last quarter.");
+        assert!(
+            !answer.contains(WRAP_UP_FAILED_MESSAGE),
+            "the canned exhaustion string must be gone: {answer}"
+        );
+    }
+
+    #[tokio::test]
+    async fn exhaustion_with_a_failing_wrap_up_call_returns_an_error() {
+        let script = vec![Reply::ToolCall; 3];
+        let (mut agent, _calls) =
+            scripted_agent(3, script, Reply::Failure("provider exploded".to_string())).await;
+
+        let result = agent
+            .chat("hello", CancellationToken::new(), None, None, None)
+            .await;
+
+        let err = result.expect_err(
+            "a failed wrap-up call is a real failure and must not be reported as a \
+             successful answer",
+        );
+        assert!(
+            err.to_string().contains(WRAP_UP_FAILED_MESSAGE),
+            "the error must carry the exhaustion message body: {err}"
+        );
+        assert_eq!(
+            agent
+                .state()
+                .messages
+                .last()
+                .expect("state has messages")
+                .role,
+            MessageRole::Tool,
+            "a failed wrap-up must append nothing — the last message is still the \
+             final tool result, not a substituted apology"
+        );
     }
 }
