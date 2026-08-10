@@ -209,6 +209,46 @@ impl AnthropicClient {
             .collect()
     }
 
+    /// Build the JSON request body for the Messages API.
+    ///
+    /// Split out of [`complete`](Self::complete) so the wire shape can be
+    /// asserted without an HTTP round-trip. Most importantly, the `tools` key
+    /// is **omitted entirely** for an empty slice — the agent relies on that
+    /// to force a no-tools wrap-up turn when its iteration budget runs out.
+    pub(crate) fn build_request_body(
+        model: &str,
+        system_prompt: Option<serde_json::Value>,
+        anthropic_messages: Vec<serde_json::Value>,
+        tools: &[Tool],
+        temperature: Option<f32>,
+        max_tokens: u32,
+    ) -> serde_json::Value {
+        let mut body = json!({
+            "model": model,
+            "messages": anthropic_messages,
+            "max_tokens": max_tokens,
+        });
+
+        if let Some(system) = system_prompt {
+            body["system"] = system;
+        }
+
+        if !tools.is_empty() {
+            body["tools"] = json!(Self::convert_tools_to_anthropic(tools));
+        }
+
+        if let Some(temp) = temperature {
+            body["temperature"] = json!(temp);
+        }
+
+        // Request-level prompt caching — Anthropic automatically places the
+        // breakpoint at the last cacheable block and extends the cache
+        // incrementally as the conversation grows.
+        body["cache_control"] = json!({"type": "ephemeral"});
+
+        body
+    }
+
     // -----------------------------------------------------------------------
     // API Call
     // -----------------------------------------------------------------------
@@ -236,33 +276,19 @@ impl AnthropicClient {
         let (system_prompt, anthropic_messages) =
             Self::convert_messages_to_anthropic(messages, user_names);
 
-        // Build request body.
-        let mut body = json!({
-            "model": self.base.model,
-            "messages": anthropic_messages,
-            "max_tokens": max_tokens,
-        });
-
-        if let Some(system) = system_prompt {
-            body["system"] = system;
-        }
-
-        if !tools.is_empty() {
-            body["tools"] = json!(Self::convert_tools_to_anthropic(tools));
-        }
-
-        if let Some(temp) = temperature {
-            body["temperature"] = json!(temp);
-        }
-
-        // Request-level prompt caching — Anthropic automatically places the
-        // breakpoint at the last cacheable block and extends the cache
-        // incrementally as the conversation grows.
-        body["cache_control"] = json!({"type": "ephemeral"});
+        let message_count = anthropic_messages.len();
+        let body = Self::build_request_body(
+            &self.base.model,
+            system_prompt,
+            anthropic_messages,
+            tools,
+            temperature,
+            max_tokens,
+        );
 
         debug!(
             model = %self.base.model,
-            message_count = anthropic_messages.len(),
+            message_count,
             tool_count = tools.len(),
             "calling Anthropic API"
         );
@@ -592,6 +618,51 @@ mod tests {
     fn convert_tools_empty() {
         let result = AnthropicClient::convert_tools_to_anthropic(&[]);
         assert!(result.is_empty());
+    }
+
+    // -- Request body tests --------------------------------------------------
+
+    /// `CustomAgent::chat` forces its final wrap-up turn by passing an empty
+    /// tool slice, relying on the request carrying no `tools` key at all — an
+    /// empty `tools: []` array would leave the model free to call a tool.
+    #[test]
+    fn build_request_body_omits_tools_key_when_slice_is_empty() {
+        let body = AnthropicClient::build_request_body(
+            "claude-test",
+            None,
+            vec![json!({"role": "user", "content": "hi"})],
+            &[],
+            None,
+            1024,
+        );
+
+        assert!(
+            body.get("tools").is_none(),
+            "an empty tool slice must omit the `tools` key entirely, got: {body}"
+        );
+    }
+
+    #[test]
+    fn build_request_body_includes_tools_when_slice_is_non_empty() {
+        let tools = vec![Tool {
+            name: "search_catalog".into(),
+            description: "Search for tables.".into(),
+            parameters: json!({"type": "object", "properties": {}}),
+        }];
+        let body = AnthropicClient::build_request_body(
+            "claude-test",
+            None,
+            vec![json!({"role": "user", "content": "hi"})],
+            &tools,
+            None,
+            1024,
+        );
+
+        let sent = body["tools"]
+            .as_array()
+            .expect("`tools` must be present for a non-empty slice");
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["name"], "search_catalog");
     }
 
     #[test]

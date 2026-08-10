@@ -203,6 +203,38 @@ impl OpenAIProvider {
             .collect()
     }
 
+    /// Build the JSON request body for the chat completions API.
+    ///
+    /// Split out of [`complete`](Self::complete) so the wire shape can be
+    /// asserted without an HTTP round-trip. Most importantly, the `tools` key
+    /// is **omitted entirely** for an empty slice — the agent relies on that
+    /// to force a no-tools wrap-up turn when its iteration budget runs out.
+    pub(crate) fn build_request_body(
+        model: &str,
+        openai_messages: Vec<serde_json::Value>,
+        tools: &[Tool],
+        temperature: Option<f32>,
+        max_tokens: u32,
+    ) -> serde_json::Value {
+        let mut body = json!({
+            "model": model,
+            "messages": openai_messages,
+            "max_tokens": max_tokens,
+        });
+
+        // Omit tools field entirely if empty — some OpenAI-compatible APIs
+        // error on an empty tools array.
+        if !tools.is_empty() {
+            body["tools"] = json!(Self::convert_tools_to_openai(tools));
+        }
+
+        if let Some(temp) = temperature {
+            body["temperature"] = json!(temp);
+        }
+
+        body
+    }
+
     // -----------------------------------------------------------------------
     // API Call
     // -----------------------------------------------------------------------
@@ -229,26 +261,18 @@ impl OpenAIProvider {
     ) -> kyomi_core::Result<LLMResponse> {
         let openai_messages = Self::convert_messages_to_openai(messages, user_names);
 
-        // Build request body.
-        let mut body = json!({
-            "model": self.base.model,
-            "messages": openai_messages,
-            "max_tokens": max_tokens,
-        });
-
-        // Omit tools field entirely if empty — some OpenAI-compatible APIs
-        // error on an empty tools array.
-        if !tools.is_empty() {
-            body["tools"] = json!(Self::convert_tools_to_openai(tools));
-        }
-
-        if let Some(temp) = temperature {
-            body["temperature"] = json!(temp);
-        }
+        let message_count = openai_messages.len();
+        let body = Self::build_request_body(
+            &self.base.model,
+            openai_messages,
+            tools,
+            temperature,
+            max_tokens,
+        );
 
         debug!(
             model = %self.base.model,
-            message_count = openai_messages.len(),
+            message_count,
             tool_count = tools.len(),
             "calling OpenAI-compatible API"
         );
@@ -680,6 +704,50 @@ mod tests {
     fn convert_tools_empty() {
         let result = OpenAIProvider::convert_tools_to_openai(&[]);
         assert!(result.is_empty());
+    }
+
+    // -- Request body tests --------------------------------------------------
+
+    /// `CustomAgent::chat` forces its final wrap-up turn by passing an empty
+    /// tool slice, relying on the request carrying no `tools` key at all — an
+    /// empty `tools: []` array would leave the model free to call a tool (and
+    /// makes several OpenAI-compatible gateways reject the request outright).
+    #[test]
+    fn build_request_body_omits_tools_key_when_slice_is_empty() {
+        let body = OpenAIProvider::build_request_body(
+            "gpt-test",
+            vec![json!({"role": "user", "content": "hi"})],
+            &[],
+            None,
+            1024,
+        );
+
+        assert!(
+            body.get("tools").is_none(),
+            "an empty tool slice must omit the `tools` key entirely, got: {body}"
+        );
+    }
+
+    #[test]
+    fn build_request_body_includes_tools_when_slice_is_non_empty() {
+        let tools = vec![Tool {
+            name: "search_catalog".into(),
+            description: "Search for tables.".into(),
+            parameters: json!({"type": "object", "properties": {}}),
+        }];
+        let body = OpenAIProvider::build_request_body(
+            "gpt-test",
+            vec![json!({"role": "user", "content": "hi"})],
+            &tools,
+            None,
+            1024,
+        );
+
+        let sent = body["tools"]
+            .as_array()
+            .expect("`tools` must be present for a non-empty slice");
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["function"]["name"], "search_catalog");
     }
 
     #[test]
