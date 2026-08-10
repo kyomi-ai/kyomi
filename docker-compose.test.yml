@@ -12,10 +12,14 @@ services:
   postgres-test:
     image: docker.io/pgvector/pgvector:pg15
     container_name: kyomi-postgres-test
+    # These credentials MUST stay in sync with crates/kyomi-core/src/test_db.rs's
+    # DEFAULT_TEST_SERVER and the `postgres` service blocks in .github/workflows/ci.yml.
+    # POSTGRES_USER is created as a superuser by the official postgres image, which
+    # connect_test_pool() and tests/schema_parity.rs rely on for CREATE DATABASE.
     environment:
-      POSTGRES_DB: test_db
-      POSTGRES_USER: test_user
-      POSTGRES_PASSWORD: test_password
+      POSTGRES_DB: kyomi_test
+      POSTGRES_USER: kyomi_test
+      POSTGRES_PASSWORD: test
       POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
     ports:
       - "5434:5432"
@@ -23,7 +27,7 @@ services:
       - ./apps/backend/scripts/test-init/postgres:/docker-entrypoint-initdb.d:z
       - kyomi_postgres_test:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U test_user -d test_db"]
+      test: ["CMD-SHELL", "pg_isready -U kyomi_test -d kyomi_test"]
       interval: 5s
       timeout: 5s
       retries: 10
