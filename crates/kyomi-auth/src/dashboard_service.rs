@@ -796,7 +796,15 @@ pub async fn delete_dashboard(
         ));
     }
 
-    // Capture visibility state before deletion for the sync log entry.
+    // Capture visibility before the DELETE — this ordering is load-bearing
+    // (KYO-313). `collection_dashboards` CASCADE-deletes with the dashboard,
+    // so afterwards no join can recompute the value: the `Delete` row written
+    // below is the only surviving record of whether non-owners could see this
+    // document, and a deleted entity is never mutated again, so a wrong value
+    // never self-heals. Moving this read after the DELETE would silently strip
+    // every deletion from non-owners' deltas, stranding the document in their
+    // caches forever. Guarded by
+    // `delete_of_public_dashboard_reaches_non_owners`.
     let was_visible = is_doc_publicly_visible(db, dashboard_id).await;
 
     let result = db_execute!(
@@ -2530,6 +2538,46 @@ visualize:
         .expect("insert workspace");
     }
 
+    /// Seeds `ws-1` with two members: `user-a` (workspace owner) and
+    /// `user-b`, a member who owns nothing shared with them by default.
+    async fn seed_two_member_workspace(db: &DbPool) {
+        let sq = sqlite_pool(db);
+        seed_user(sq, "user-a", "a@test.local").await;
+        seed_user(sq, "user-b", "b@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+    }
+
+    /// Makes `doc_id` workspace-visible by putting it in a fresh public
+    /// collection — the only mechanism by which a non-owner can see another
+    /// member's document (`visibility_predicate`).
+    async fn share_via_public_collection(
+        db: &DbPool,
+        doc_id: &str,
+        doc_type: &str,
+        collection_name: &str,
+    ) {
+        let collection = crate::collection_service::create_collection(
+            crate::collection_service::NewCollectionParams {
+                db,
+                workspace_id: "ws-1",
+                name: collection_name,
+                description: None,
+                color: None,
+                is_public: true,
+                doc_type,
+                created_by: "user-a",
+            },
+        )
+        .await
+        .expect("create public collection");
+
+        crate::collection_service::add_dashboard(
+            db, &collection.id, doc_id, "ws-1", "user-a", None,
+        )
+        .await
+        .expect("add doc to public collection");
+    }
+
     /// Seeds the KYO-181 scenario: user-a owns 3 private docs plus 1 doc
     /// that is a member of a public collection; user-b owns 1 private doc.
     /// Five rows total. Split across `doc_type` (2 dashboard, 3 knowledge)
@@ -2537,10 +2585,7 @@ visualize:
     /// its different visibility-predicate bind index) too, not just the
     /// unfiltered one.
     async fn seed_kyo_181_scenario(db: &DbPool) -> String {
-        let sq = sqlite_pool(db);
-        seed_user(sq, "user-a", "a@test.local").await;
-        seed_user(sq, "user-b", "b@test.local").await;
-        seed_workspace(sq, "ws-1", "user-a").await;
+        seed_two_member_workspace(db).await;
 
         // user-a: 3 private docs (2 dashboard, 1 knowledge).
         create_dashboard(
@@ -2571,26 +2616,7 @@ visualize:
         .await
         .expect("create a-public-knowledge");
 
-        let collection = crate::collection_service::create_collection(
-            crate::collection_service::NewCollectionParams {
-                db,
-                workspace_id: "ws-1",
-                name: "Public Folder",
-                description: None,
-                color: None,
-                is_public: true,
-                doc_type: "knowledge",
-                created_by: "user-a",
-            },
-        )
-        .await
-        .expect("create public collection");
-
-        crate::collection_service::add_dashboard(
-            db, &collection.id, &public_doc_id, "ws-1", "user-a", None,
-        )
-        .await
-        .expect("add public doc to collection");
+        share_via_public_collection(db, &public_doc_id, "knowledge", "Public Folder").await;
 
         // user-b: 1 private dashboard doc.
         create_dashboard(
@@ -2654,5 +2680,158 @@ visualize:
             dashboard_b, 1,
             "user-b should see only their own dashboard-type doc"
         );
+    }
+
+    // ── Delete-row visibility (KYO-313) ──────────────────────────────────
+    //
+    // `delete_dashboard` reads `is_doc_publicly_visible` *before* the
+    // `DELETE`, because `collection_dashboards` CASCADE-deletes with the
+    // dashboard: after the delete there is no join left to recompute the
+    // value from, and a deleted entity is never mutated again, so a wrong
+    // `is_workspace_visible` on the `Delete` row is permanent. These tests
+    // drive the real `delete_dashboard` and assert through the real
+    // `get_entries_since` filter, so moving that read after the `DELETE`
+    // (or hardcoding the flag) fails them.
+
+    /// The sync delta `user_id` would receive from a cold start.
+    async fn delta_for(db: &DbPool, user_id: &str) -> Vec<kyomi_types::sync::SyncAction> {
+        crate::sync_log_service::get_entries_since(db, "ws-1", 0, user_id, 100)
+            .await
+            .expect("read sync delta")
+    }
+
+    fn delete_rows_for<'a>(
+        delta: &'a [kyomi_types::sync::SyncAction],
+        entity_id: &str,
+    ) -> Vec<&'a kyomi_types::sync::SyncAction> {
+        delta
+            .iter()
+            .filter(|a| a.entity_id == entity_id && matches!(a.action, SyncActionType::Delete))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn delete_of_public_dashboard_reaches_non_owners() {
+        let db = test_pool().await;
+        seed_two_member_workspace(&db).await;
+
+        let doc_id = create_dashboard(
+            &db, "user-a", "ws-1", "Shared Dash", "# content",
+            DocType::Dashboard, None,
+        )
+        .await
+        .expect("create shared dashboard");
+        share_via_public_collection(&db, &doc_id, "dashboard", "Public Dashboards").await;
+
+        assert!(
+            delete_dashboard(&db, &doc_id, "ws-1", "user-a")
+                .await
+                .expect("delete dashboard"),
+            "the seeded dashboard should have been deleted"
+        );
+
+        // user-b could see the doc through the public collection, so their
+        // delta must carry the Delete that evicts it from their cache.
+        let delta_b = delta_for(&db, "user-b").await;
+        let deletes = delete_rows_for(&delta_b, &doc_id);
+        assert_eq!(
+            deletes.len(),
+            1,
+            "non-owner must receive exactly one Delete row for a publicly \
+             visible dashboard, got delta: {delta_b:?}"
+        );
+        assert_eq!(deletes[0].entity_type, entity_types::DASHBOARD);
+    }
+
+    #[tokio::test]
+    async fn delete_of_public_knowledge_doc_reaches_non_owners_as_knowledge() {
+        let db = test_pool().await;
+        seed_two_member_workspace(&db).await;
+
+        let doc_id = create_dashboard(
+            &db, "user-a", "ws-1", "Shared Notes", "public notes",
+            DocType::Knowledge, None,
+        )
+        .await
+        .expect("create shared knowledge doc");
+        share_via_public_collection(&db, &doc_id, "knowledge", "Public Notes").await;
+
+        assert!(
+            delete_dashboard(&db, &doc_id, "ws-1", "user-a")
+                .await
+                .expect("delete knowledge doc"),
+            "the seeded knowledge doc should have been deleted"
+        );
+
+        // Exercises the `!current.doc_type().is_dashboard()` branch: the
+        // client keys its cache by entity_type, so a `dashboard` row here
+        // would never evict the knowledge entry.
+        let delta_b = delta_for(&db, "user-b").await;
+        let deletes = delete_rows_for(&delta_b, &doc_id);
+        assert_eq!(
+            deletes.len(),
+            1,
+            "non-owner must receive exactly one Delete row for a publicly \
+             visible knowledge doc, got delta: {delta_b:?}"
+        );
+        assert_eq!(deletes[0].entity_type, entity_types::KNOWLEDGE);
+    }
+
+    #[tokio::test]
+    async fn delete_of_private_dashboard_stays_hidden_from_non_owners() {
+        let db = test_pool().await;
+        seed_two_member_workspace(&db).await;
+
+        let private_id = create_dashboard(
+            &db, "user-a", "ws-1", "Private Dash", "# content",
+            DocType::Dashboard, None,
+        )
+        .await
+        .expect("create private dashboard");
+
+        // A second, publicly visible doc that is also deleted. Its Delete row
+        // is what makes user-b's delta non-empty, so the "no rows for
+        // private_id" assertion below is a real filter result rather than an
+        // empty query.
+        let public_id = create_dashboard(
+            &db, "user-a", "ws-1", "Public Dash", "# content",
+            DocType::Dashboard, None,
+        )
+        .await
+        .expect("create public dashboard");
+        share_via_public_collection(&db, &public_id, "dashboard", "Public Dashboards").await;
+
+        for id in [&private_id, &public_id] {
+            assert!(
+                delete_dashboard(&db, id, "ws-1", "user-a")
+                    .await
+                    .expect("delete dashboard"),
+                "the seeded dashboard should have been deleted"
+            );
+        }
+
+        let delta_b = delta_for(&db, "user-b").await;
+        assert_eq!(
+            delete_rows_for(&delta_b, &public_id).len(),
+            1,
+            "control: the publicly visible doc's Delete must reach user-b, \
+             otherwise the assertion below proves nothing"
+        );
+        assert!(
+            delta_b.iter().all(|a| a.entity_id != private_id),
+            "a member who could never see the document must not learn of its \
+             existence from its deletion; got delta: {delta_b:?}"
+        );
+
+        // The owner still needs the Delete to evict their own cached copy.
+        let delta_a = delta_for(&db, "user-a").await;
+        let owner_deletes = delete_rows_for(&delta_a, &private_id);
+        assert_eq!(
+            owner_deletes.len(),
+            1,
+            "owner must receive the Delete row for their own private doc, \
+             got delta: {delta_a:?}"
+        );
+        assert_eq!(owner_deletes[0].entity_type, entity_types::DASHBOARD);
     }
 }
