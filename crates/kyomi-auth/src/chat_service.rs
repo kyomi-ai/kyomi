@@ -1340,7 +1340,15 @@ pub async fn delete_session(
     )
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to delete messages: {e}")))?;
 
-    // Capture visibility state before deletion for the sync log entry.
+    // Capture visibility before the DELETE — this ordering is load-bearing
+    // (KYO-313). The `chat_sessions` row is gone afterwards, so `shared` can
+    // never be recomputed: the `Delete` row written below is the only
+    // surviving record of whether non-owners could see this session, and a
+    // deleted entity is never mutated again, so a wrong value never
+    // self-heals. Moving this read after the DELETE would silently strip
+    // every deletion from non-owners' deltas, stranding the session in their
+    // caches forever. Guarded by
+    // `delete_of_shared_session_reaches_non_owners`.
     let is_pg = db.is_postgres();
     let bf = kyomi_core::sql_compat::bool_false(is_pg);
     let shared_sql = format!(
@@ -1448,7 +1456,14 @@ pub async fn bulk_delete_sessions(
 
     let owned_ids: Vec<String> = owned.into_iter().map(|r| r.session_id).collect();
 
-    // Capture visibility state before deletion for sync log entries.
+    // Capture visibility before the DELETEs — this ordering is load-bearing
+    // (KYO-313), for the same reason as `delete_session` above: the
+    // `chat_sessions` rows are gone afterwards and `shared` is unrecoverable,
+    // so this map is the only input the `Delete` rows below have. Building it
+    // after the deletes yields an empty map, and the `unwrap_or(false)` lookup
+    // would then stamp every row owner-only — silently stripping shared-session
+    // deletions from non-owners' deltas. Guarded by
+    // `bulk_delete_sessions_scopes_delete_rows_per_session_visibility`.
     let shared_map: std::collections::HashMap<String, bool> = match db {
         kyomi_core::db::DbPool::Postgres(pg) => {
             sqlx::query_as::<_, (String, bool)>(
@@ -2973,6 +2988,168 @@ mod tests {
             result.is_err(),
             "a query failure against a session that still exists must surface as \
              Err, not silently collapse into the same Ok(None) as a genuine miss: {result:?}"
+        );
+    }
+
+    // ── Delete-row visibility (KYO-313) ──────────────────────────────────
+    //
+    // Both delete paths read `shared` *before* the `DELETE`, because the
+    // `chat_sessions` row is gone afterwards: nothing can recompute the
+    // value, and a deleted entity is never mutated again, so a wrong
+    // `is_workspace_visible` on the `Delete` row is permanent. These tests
+    // drive the real delete functions and assert through the real
+    // `get_entries_since` filter, so moving those reads after the `DELETE`
+    // (or hardcoding the flag) fails them.
+
+    /// Seeds `ws-1` with two members: `user-a` (workspace owner) and
+    /// `user-b`, who owns nothing and is shown nothing by default.
+    async fn seed_two_member_workspace(db: &DbPool) {
+        let sq = sqlite_pool(db);
+        seed_user(sq, "user-a", "a@test.local").await;
+        seed_user(sq, "user-b", "b@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+    }
+
+    /// The sync delta `user_id` would receive from a cold start.
+    async fn delta_for(db: &DbPool, user_id: &str) -> Vec<kyomi_types::sync::SyncAction> {
+        crate::sync_log_service::get_entries_since(db, "ws-1", 0, user_id, 100)
+            .await
+            .expect("read sync delta")
+    }
+
+    fn delete_rows_for<'a>(
+        delta: &'a [kyomi_types::sync::SyncAction],
+        entity_id: &str,
+    ) -> Vec<&'a kyomi_types::sync::SyncAction> {
+        delta
+            .iter()
+            .filter(|a| a.entity_id == entity_id && matches!(a.action, SyncActionType::Delete))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn delete_of_shared_session_reaches_non_owners() {
+        let db = test_pool().await;
+        seed_two_member_workspace(&db).await;
+        seed_chat_session(
+            sqlite_pool(&db),
+            SeedSession::new("sess-shared", "user-a", "ws-1", "Shared").shared(true),
+        )
+        .await;
+
+        assert!(
+            delete_session(&db, "user-a", "sess-shared", Some("ws-1"))
+                .await
+                .expect("delete shared session"),
+            "the seeded session should have been deleted"
+        );
+
+        let delta_b = delta_for(&db, "user-b").await;
+        let deletes = delete_rows_for(&delta_b, "sess-shared");
+        assert_eq!(
+            deletes.len(),
+            1,
+            "non-owner must receive exactly one Delete row for a shared \
+             session, got delta: {delta_b:?}"
+        );
+        assert_eq!(deletes[0].entity_type, entity_types::CHAT_SESSION);
+    }
+
+    #[tokio::test]
+    async fn delete_of_private_session_stays_hidden_from_non_owners() {
+        let db = test_pool().await;
+        seed_two_member_workspace(&db).await;
+        let sq = sqlite_pool(&db);
+        seed_chat_session(sq, SeedSession::new("sess-private", "user-a", "ws-1", "Private")).await;
+        // A shared session, also deleted, so user-b's delta is non-empty and
+        // the "no rows for sess-private" assertion is a real filter result
+        // rather than an empty query.
+        seed_chat_session(
+            sq,
+            SeedSession::new("sess-shared", "user-a", "ws-1", "Shared").shared(true),
+        )
+        .await;
+
+        for sid in ["sess-private", "sess-shared"] {
+            assert!(
+                delete_session(&db, "user-a", sid, Some("ws-1"))
+                    .await
+                    .expect("delete session"),
+                "the seeded session {sid} should have been deleted"
+            );
+        }
+
+        let delta_b = delta_for(&db, "user-b").await;
+        assert_eq!(
+            delete_rows_for(&delta_b, "sess-shared").len(),
+            1,
+            "control: the shared session's Delete must reach user-b, otherwise \
+             the assertion below proves nothing"
+        );
+        assert!(
+            delta_b.iter().all(|a| a.entity_id != "sess-private"),
+            "a member who could never see the session must not learn of its \
+             existence from its deletion; got delta: {delta_b:?}"
+        );
+
+        // The owner still needs the Delete to evict their own cached copy.
+        let delta_a = delta_for(&db, "user-a").await;
+        let owner_deletes = delete_rows_for(&delta_a, "sess-private");
+        assert_eq!(
+            owner_deletes.len(),
+            1,
+            "owner must receive the Delete row for their own private session, \
+             got delta: {delta_a:?}"
+        );
+        assert_eq!(owner_deletes[0].entity_type, entity_types::CHAT_SESSION);
+    }
+
+    #[tokio::test]
+    async fn bulk_delete_sessions_scopes_delete_rows_per_session_visibility() {
+        let db = test_pool().await;
+        seed_two_member_workspace(&db).await;
+        let sq = sqlite_pool(&db);
+        seed_chat_session(sq, SeedSession::new("sess-private", "user-a", "ws-1", "Private")).await;
+        seed_chat_session(
+            sq,
+            SeedSession::new("sess-shared", "user-a", "ws-1", "Shared").shared(true),
+        )
+        .await;
+
+        // Both ids in one call: the write site looks each one up in a map
+        // built before the deletes, so a single collapsed value would show up
+        // as one of the two assertions below failing.
+        let deleted = bulk_delete_sessions(
+            &db,
+            "user-a",
+            &["sess-private".to_string(), "sess-shared".to_string()],
+            "ws-1",
+        )
+        .await
+        .expect("bulk delete sessions");
+        assert_eq!(deleted, 2, "both seeded sessions should have been deleted");
+
+        let delta_b = delta_for(&db, "user-b").await;
+        let shared_deletes = delete_rows_for(&delta_b, "sess-shared");
+        assert_eq!(
+            shared_deletes.len(),
+            1,
+            "non-owner must receive the shared session's Delete row, got \
+             delta: {delta_b:?}"
+        );
+        assert_eq!(shared_deletes[0].entity_type, entity_types::CHAT_SESSION);
+        assert!(
+            delta_b.iter().all(|a| a.entity_id != "sess-private"),
+            "the non-shared session must stay invisible to a non-owner even in \
+             a bulk delete; got delta: {delta_b:?}"
+        );
+
+        let delta_a = delta_for(&db, "user-a").await;
+        assert_eq!(
+            delete_rows_for(&delta_a, "sess-private").len(),
+            1,
+            "owner must receive the Delete row for their own private session, \
+             got delta: {delta_a:?}"
         );
     }
 
