@@ -2,6 +2,12 @@
 
 All scripts are organized by environment. **Every script is environment-specific** - no ambiguity about which database/services they target.
 
+## Repo setup
+
+- **`setup-hooks.sh`** - Run once per clone to enable the tracked git hooks
+  in `.githooks/`; the setting is shared with every worktree of that clone.
+  See root `CLAUDE.md` "Setup".
+
 ## Directory Structure
 
 ```

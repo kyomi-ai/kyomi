@@ -37,6 +37,22 @@ gitignored, invisible to everyone else, and will drift. Put them in
 `~/repos/kyomi-private/docs/`. Anything describing *unfixed* weaknesses (open
 gaps, vulnerabilities, audit findings) **must** go there: this repo is public.
 
+## Setup
+
+Run `./scripts/setup-hooks.sh` once per clone — it enables the tracked hooks
+in `.githooks/`:
+
+| Hook | Enforces |
+|---|---|
+| `pre-commit` | No new lint suppressions, the server_fn/REST divergence lint (KYO-122), a valid code-review-architect signature |
+| `pre-push` | No direct pushes to `main` |
+
+`core.hooksPath` is per-clone git config — it cannot be committed, but the
+setting is shared by every worktree of that clone. Because the configured
+path is relative (`.githooks`), git resolves it against each worktree's own
+top level, so one run correctly activates every worktree's own tracked hooks
+(KYO-358). The script is idempotent; re-run it any time you're unsure.
+
 ## Build & Testing
 
 The Leptos frontend has THREE separate build artifacts (Tailwind CSS, WASM, server binary) that must ALL be current. The #1 source of wasted time is testing against a stale binary.
