@@ -1142,3 +1142,753 @@ pub async fn send_dashboard_summary_ready(
 
     manager.send_to_user(user_id, msg).await;
 }
+
+// ─── Tests ───────────────────────────────────────────────────────────────────
+//
+// KYO-329: this module had zero tests despite owning the routing logic that
+// decides who is told about a state change and what payload they receive.
+// The dangerous failure mode (KYO-218) is a non-`Delete` `SyncAction` with
+// `data: None` — that's the wire protocol's Delete signal, so a mistake here
+// tells every connected client to evict an entity that's still there.
+//
+// These are real integration tests against an in-memory SQLite pool (with
+// migrations applied) and a real `WebSocketManager` in single-instance mode
+// (no Redis) — messages are delivered synchronously into the connection's
+// `mpsc::Receiver`, so no sleeps/polling are needed to observe them.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kyomi_core::DbPool;
+    use kyomi_types::sync::{SyncAction, SyncActionType};
+    use sqlx::sqlite::SqlitePoolOptions;
+    use tokio::sync::mpsc;
+
+    // ── Fixture setup ────────────────────────────────────────────────────
+
+    async fn test_pool() -> DbPool {
+        let _ = kyomi_core::constants::load_with_fallback();
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+
+        sqlx::query("PRAGMA foreign_keys=ON")
+            .execute(&pool)
+            .await
+            .expect("enable foreign keys");
+
+        sqlx::migrate!("../../apps/server/migrations-sqlite")
+            .run(&pool)
+            .await
+            .expect("run sqlite migrations");
+
+        DbPool::Sqlite(pool)
+    }
+
+    fn sqlite_pool(db: &DbPool) -> &sqlx::SqlitePool {
+        match db {
+            DbPool::Sqlite(sq) => sq,
+            _ => panic!("test requires sqlite pool"),
+        }
+    }
+
+    async fn seed_user(sq: &sqlx::SqlitePool, user_id: &str, email: &str) {
+        sqlx::query("INSERT INTO users (user_id, email) VALUES ($1, $2)")
+            .bind(user_id)
+            .bind(email)
+            .execute(sq)
+            .await
+            .expect("insert user");
+    }
+
+    async fn seed_workspace(sq: &sqlx::SqlitePool, workspace_id: &str, owner_user_id: &str) {
+        sqlx::query(
+            "INSERT INTO workspaces (workspace_id, name, owner_user_id) VALUES ($1, $2, $3)",
+        )
+        .bind(workspace_id)
+        .bind(format!("Workspace {workspace_id}"))
+        .bind(owner_user_id)
+        .execute(sq)
+        .await
+        .expect("insert workspace");
+    }
+
+    async fn seed_workspace_member(sq: &sqlx::SqlitePool, workspace_id: &str, user_id: &str) {
+        sqlx::query(
+            "INSERT INTO workspace_users (workspace_id, user_id, role, active) \
+             VALUES ($1, $2, 'user', 1)",
+        )
+        .bind(workspace_id)
+        .bind(user_id)
+        .execute(sq)
+        .await
+        .expect("insert workspace_users");
+    }
+
+    async fn seed_dashboard(
+        sq: &sqlx::SqlitePool,
+        dashboard_id: &str,
+        user_id: &str,
+        workspace_id: &str,
+        title: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO dashboards \
+             (dashboard_id, user_id, workspace_id, title, content, doc_type) \
+             VALUES ($1, $2, $3, $4, '# content', 'dashboard')",
+        )
+        .bind(dashboard_id)
+        .bind(user_id)
+        .bind(workspace_id)
+        .bind(title)
+        .execute(sq)
+        .await
+        .expect("insert dashboard");
+    }
+
+    async fn seed_public_collection(
+        sq: &sqlx::SqlitePool,
+        collection_id: &str,
+        workspace_id: &str,
+        created_by: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO collections (id, workspace_id, name, is_public, created_by) \
+             VALUES ($1, $2, $3, 1, $4)",
+        )
+        .bind(collection_id)
+        .bind(workspace_id)
+        .bind(format!("Public collection {collection_id}"))
+        .bind(created_by)
+        .execute(sq)
+        .await
+        .expect("insert public collection");
+    }
+
+    async fn link_dashboard_to_collection(
+        sq: &sqlx::SqlitePool,
+        collection_id: &str,
+        dashboard_id: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO collection_dashboards (collection_id, dashboard_id) VALUES ($1, $2)",
+        )
+        .bind(collection_id)
+        .bind(dashboard_id)
+        .execute(sq)
+        .await
+        .expect("insert collection_dashboards");
+    }
+
+    async fn seed_watch(
+        sq: &sqlx::SqlitePool,
+        watch_id: &str,
+        workspace_id: &str,
+        created_by: &str,
+        name: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO watches (watch_id, workspace_id, created_by, name, prompt, schedule) \
+             VALUES ($1, $2, $3, $4, 'Check something', '0 9 * * *')",
+        )
+        .bind(watch_id)
+        .bind(workspace_id)
+        .bind(created_by)
+        .bind(name)
+        .execute(sq)
+        .await
+        .expect("insert watch");
+    }
+
+    async fn seed_chat_session(
+        sq: &sqlx::SqlitePool,
+        session_id: &str,
+        user_id: &str,
+        workspace_id: &str,
+        title: &str,
+        shared: bool,
+    ) {
+        sqlx::query(
+            "INSERT INTO chat_sessions \
+             (session_id, user_id, workspace_id, title, model, session_type, shared) \
+             VALUES ($1, $2, $3, $4, 'test-model', 'chat', $5)",
+        )
+        .bind(session_id)
+        .bind(user_id)
+        .bind(workspace_id)
+        .bind(title)
+        .bind(shared)
+        .execute(sq)
+        .await
+        .expect("insert chat session");
+    }
+
+    /// Seeds `owner` + `other` as members of `ws-1`, then connects both to a
+    /// fresh single-instance `WebSocketManager`, draining the initial
+    /// heartbeat each `connect()` sends. Shared by every test below so the
+    /// fixture setup isn't duplicated six times over.
+    async fn setup_workspace_and_connections(
+        db: &DbPool,
+    ) -> (WebSocketManager, mpsc::Receiver<String>, mpsc::Receiver<String>) {
+        let sq = sqlite_pool(db);
+        seed_user(sq, "owner", "owner@test.local").await;
+        seed_user(sq, "other", "other@test.local").await;
+        seed_workspace(sq, "ws-1", "owner").await;
+        seed_workspace_member(sq, "ws-1", "owner").await;
+        seed_workspace_member(sq, "ws-1", "other").await;
+
+        let manager = WebSocketManager::new(None, db.clone());
+        let (_owner_conn, mut rx_owner) = manager.connect("owner").expect("connect owner");
+        let (_other_conn, mut rx_other) = manager.connect("other").expect("connect other");
+        assert!(
+            rx_owner
+                .try_recv()
+                .expect("connect() must send an immediate heartbeat")
+                .contains("heartbeat")
+        );
+        assert!(
+            rx_other
+                .try_recv()
+                .expect("connect() must send an immediate heartbeat")
+                .contains("heartbeat")
+        );
+        (manager, rx_owner, rx_other)
+    }
+
+    /// Drain every currently-buffered message on `rx`, parse each as a
+    /// `WebSocketMessage`, and return only the `SyncAction` payloads.
+    /// `connect()` sends an immediate Heartbeat and other message types can
+    /// share a receiver, so callers must never assume the next message is a
+    /// sync action.
+    fn drain_sync_actions(rx: &mut mpsc::Receiver<String>) -> Vec<SyncAction> {
+        let mut actions = Vec::new();
+        while let Ok(raw) = rx.try_recv() {
+            let envelope: WebSocketMessage = serde_json::from_str(&raw)
+                .unwrap_or_else(|e| panic!("invalid WebSocketMessage JSON: {e}: {raw}"));
+            if envelope.message_type != MessageType::SyncAction {
+                continue;
+            }
+            let data = envelope
+                .data
+                .expect("a sync_action message must carry a `data` field");
+            let action: SyncAction = serde_json::from_value(data)
+                .expect("sync_action `data` must deserialize as a SyncAction");
+            actions.push(action);
+        }
+        actions
+    }
+
+    fn assert_no_sync_action(rx: &mut mpsc::Receiver<String>, context: &str) {
+        let actions = drain_sync_actions(rx);
+        assert!(
+            actions.is_empty(),
+            "{context}: expected no sync action, got {actions:?}"
+        );
+    }
+
+    fn expect_single_sync_action(rx: &mut mpsc::Receiver<String>, context: &str) -> SyncAction {
+        let mut actions = drain_sync_actions(rx);
+        assert_eq!(
+            actions.len(),
+            1,
+            "{context}: expected exactly one sync action, got {actions:?}"
+        );
+        actions.remove(0)
+    }
+
+    // ── KYO-218 invariant: every helper in this module, exercised together ──
+
+    /// The highest-value single test in this module: drives every
+    /// `SyncAction`-emitting helper — across both `Delete` and non-`Delete`
+    /// actions, and across every routing branch — and asserts the invariant
+    /// that actually matters (KYO-218): a non-`Delete` `SyncAction` must
+    /// never carry `data: None`, because that's indistinguishable on the
+    /// wire from a Delete and tells the client to evict an entity that's
+    /// still there.
+    #[tokio::test]
+    async fn no_broadcast_helper_ever_emits_a_non_delete_sync_action_with_data_none() {
+        let db = test_pool().await;
+        let (manager, mut rx_owner, mut rx_other) = setup_workspace_and_connections(&db).await;
+        let sq = sqlite_pool(&db);
+
+        seed_dashboard(sq, "dash-1", "owner", "ws-1", "Dash One").await;
+        seed_public_collection(sq, "col-public", "ws-1", "owner").await;
+        link_dashboard_to_collection(sq, "col-public", "dash-1").await;
+
+        seed_watch(sq, "watch-1", "ws-1", "owner", "Watch One").await;
+        seed_chat_session(sq, "sess-shared", "owner", "ws-1", "Shared", true).await;
+        seed_chat_session(sq, "sess-private", "owner", "ws-1", "Private", false).await;
+
+        broadcast_dashboard_sync(&db, &manager, "dash-1", "ws-1", SyncActionType::Update, "owner")
+            .await;
+        broadcast_dashboard_sync(&db, &manager, "dash-1", "ws-1", SyncActionType::Delete, "owner")
+            .await;
+        broadcast_dashboard_visibility_change(&db, &manager, "dash-1", "ws-1", "owner", true)
+            .await;
+        broadcast_dashboard_visibility_change(&db, &manager, "dash-1", "ws-1", "owner", false)
+            .await;
+        broadcast_watch_sync(&db, &manager, "watch-1", "ws-1", SyncActionType::Update, "owner")
+            .await;
+        broadcast_watch_sync(&db, &manager, "watch-1", "ws-1", SyncActionType::Delete, "owner")
+            .await;
+        broadcast_chat_session_sync(
+            &db,
+            &manager,
+            "sess-shared",
+            "ws-1",
+            SyncActionType::Update,
+            "owner",
+        )
+        .await;
+        broadcast_chat_session_sync(
+            &db,
+            &manager,
+            "sess-private",
+            "ws-1",
+            SyncActionType::Update,
+            "owner",
+        )
+        .await;
+        broadcast_chat_session_sync(
+            &db,
+            &manager,
+            "sess-private",
+            "ws-1",
+            SyncActionType::Delete,
+            "owner",
+        )
+        .await;
+        broadcast_chat_session_unshare(&db, &manager, "sess-shared", "ws-1", "owner").await;
+        broadcast_entity_delete(&manager, "dashboard", "dash-1", "ws-1").await;
+
+        let manual = SyncAction {
+            sync_id: 0,
+            entity_type: "dashboard".to_string(),
+            entity_id: "dash-manual".to_string(),
+            workspace_id: "ws-1".to_string(),
+            action: SyncActionType::Update,
+            data: Some(serde_json::json!({"ok": true})),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        };
+        send_sync_action(&manager, "ws-1", &manual, None).await;
+
+        let mut all_actions = drain_sync_actions(&mut rx_owner);
+        all_actions.extend(drain_sync_actions(&mut rx_other));
+
+        assert!(
+            !all_actions.is_empty(),
+            "the fixture must actually produce sync actions for this test to mean anything"
+        );
+
+        for action in &all_actions {
+            if !matches!(action.action, SyncActionType::Delete) {
+                assert!(
+                    action.data.is_some(),
+                    "a non-Delete SyncAction must never carry data: None — that's the wire \
+                     protocol's Delete signal (KYO-218) and tells every client to evict an \
+                     entity that's still there: {action:?}"
+                );
+            }
+        }
+    }
+
+    // ── Routing: who actually receives each action ───────────────────────
+
+    #[tokio::test]
+    async fn broadcast_dashboard_sync_routes_public_to_workspace_private_to_owner_only() {
+        let db = test_pool().await;
+        let (manager, mut rx_owner, mut rx_other) = setup_workspace_and_connections(&db).await;
+        let sq = sqlite_pool(&db);
+
+        seed_dashboard(sq, "dash-public", "owner", "ws-1", "Public Dash").await;
+        seed_public_collection(sq, "col-public", "ws-1", "owner").await;
+        link_dashboard_to_collection(sq, "col-public", "dash-public").await;
+        seed_dashboard(sq, "dash-private", "owner", "ws-1", "Private Dash").await;
+
+        broadcast_dashboard_sync(
+            &db,
+            &manager,
+            "dash-public",
+            "ws-1",
+            SyncActionType::Update,
+            "owner",
+        )
+        .await;
+        let owner_public = expect_single_sync_action(&mut rx_owner, "public dash, owner");
+        let other_public = expect_single_sync_action(&mut rx_other, "public dash, non-owner");
+        assert_eq!(owner_public.entity_id, "dash-public");
+        assert_eq!(other_public.entity_id, "dash-public");
+
+        broadcast_dashboard_sync(
+            &db,
+            &manager,
+            "dash-private",
+            "ws-1",
+            SyncActionType::Update,
+            "owner",
+        )
+        .await;
+        let owner_private = expect_single_sync_action(&mut rx_owner, "private dash, owner");
+        assert_eq!(owner_private.entity_id, "dash-private");
+        assert_no_sync_action(&mut rx_other, "private dash must not reach a non-owner");
+    }
+
+    #[tokio::test]
+    async fn broadcast_watch_sync_never_broadcasts_to_workspace_only_owner() {
+        let db = test_pool().await;
+        let (manager, mut rx_owner, mut rx_other) = setup_workspace_and_connections(&db).await;
+        let sq = sqlite_pool(&db);
+        seed_watch(sq, "watch-1", "ws-1", "owner", "Owner's Watch").await;
+
+        broadcast_watch_sync(&db, &manager, "watch-1", "ws-1", SyncActionType::Update, "owner")
+            .await;
+
+        let owner_action = expect_single_sync_action(&mut rx_owner, "watch, owner");
+        assert_eq!(owner_action.entity_id, "watch-1");
+        assert_no_sync_action(
+            &mut rx_other,
+            "watches have no sharing model — must never reach a non-owner",
+        );
+    }
+
+    #[tokio::test]
+    async fn broadcast_chat_session_sync_routes_shared_to_workspace_private_to_owner_only() {
+        let db = test_pool().await;
+        let (manager, mut rx_owner, mut rx_other) = setup_workspace_and_connections(&db).await;
+        let sq = sqlite_pool(&db);
+        seed_chat_session(sq, "sess-shared", "owner", "ws-1", "Shared", true).await;
+        seed_chat_session(sq, "sess-private", "owner", "ws-1", "Private", false).await;
+
+        broadcast_chat_session_sync(
+            &db,
+            &manager,
+            "sess-shared",
+            "ws-1",
+            SyncActionType::Update,
+            "owner",
+        )
+        .await;
+        expect_single_sync_action(&mut rx_owner, "shared session, owner");
+        expect_single_sync_action(&mut rx_other, "shared session, non-owner");
+
+        broadcast_chat_session_sync(
+            &db,
+            &manager,
+            "sess-private",
+            "ws-1",
+            SyncActionType::Update,
+            "owner",
+        )
+        .await;
+        expect_single_sync_action(&mut rx_owner, "private session, owner");
+        assert_no_sync_action(&mut rx_other, "private session must not reach a non-owner");
+    }
+
+    #[tokio::test]
+    async fn broadcast_dashboard_visibility_change_going_private_deletes_non_owner_updates_owner()
+    {
+        let db = test_pool().await;
+        let (manager, mut rx_owner, mut rx_other) = setup_workspace_and_connections(&db).await;
+        let sq = sqlite_pool(&db);
+        seed_dashboard(sq, "dash-1", "owner", "ws-1", "Dash One").await;
+
+        broadcast_dashboard_visibility_change(&db, &manager, "dash-1", "ws-1", "owner", false)
+            .await;
+
+        let other_action = expect_single_sync_action(&mut rx_other, "going private, non-owner");
+        assert!(matches!(other_action.action, SyncActionType::Delete));
+        assert!(other_action.data.is_none());
+
+        let owner_action = expect_single_sync_action(&mut rx_owner, "going private, owner");
+        assert!(matches!(owner_action.action, SyncActionType::Update));
+        assert!(
+            owner_action.data.is_some(),
+            "owner keeps the doc and must receive the refreshed snapshot: {owner_action:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn broadcast_dashboard_visibility_change_going_public_updates_non_owner_excludes_owner()
+    {
+        let db = test_pool().await;
+        let (manager, mut rx_owner, mut rx_other) = setup_workspace_and_connections(&db).await;
+        let sq = sqlite_pool(&db);
+        seed_dashboard(sq, "dash-1", "owner", "ws-1", "Dash One").await;
+
+        broadcast_dashboard_visibility_change(&db, &manager, "dash-1", "ws-1", "owner", true)
+            .await;
+
+        let other_action = expect_single_sync_action(&mut rx_other, "going public, non-owner");
+        assert!(matches!(other_action.action, SyncActionType::Update));
+        assert!(other_action.data.is_some());
+
+        assert_no_sync_action(
+            &mut rx_owner,
+            "owner already has it — must not receive an extra broadcast",
+        );
+    }
+
+    #[tokio::test]
+    async fn broadcast_chat_session_unshare_deletes_non_owner_updates_owner_with_snapshot() {
+        let db = test_pool().await;
+        let (manager, mut rx_owner, mut rx_other) = setup_workspace_and_connections(&db).await;
+        let sq = sqlite_pool(&db);
+        seed_chat_session(sq, "sess-1", "owner", "ws-1", "Shared", true).await;
+
+        broadcast_chat_session_unshare(&db, &manager, "sess-1", "ws-1", "owner").await;
+
+        let other_action = expect_single_sync_action(&mut rx_other, "unshare, non-owner");
+        assert!(matches!(other_action.action, SyncActionType::Delete));
+        assert!(other_action.data.is_none());
+
+        let owner_action = expect_single_sync_action(&mut rx_owner, "unshare, owner");
+        assert!(matches!(owner_action.action, SyncActionType::Update));
+        assert!(
+            owner_action.data.is_some(),
+            "owner keeps the session and must receive the refreshed snapshot: {owner_action:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn broadcast_entity_delete_reaches_every_workspace_member() {
+        let db = test_pool().await;
+        let (manager, mut rx_owner, mut rx_other) = setup_workspace_and_connections(&db).await;
+
+        broadcast_entity_delete(&manager, "watch", "watch-1", "ws-1").await;
+
+        for (rx, who) in [(&mut rx_owner, "owner"), (&mut rx_other, "other")] {
+            let action = expect_single_sync_action(rx, who);
+            assert!(matches!(action.action, SyncActionType::Delete));
+            assert!(action.data.is_none());
+            assert_eq!(action.entity_id, "watch-1");
+        }
+    }
+
+    #[tokio::test]
+    async fn send_sync_action_respects_exclude_user_id() {
+        let db = test_pool().await;
+        let (manager, mut rx_owner, mut rx_other) = setup_workspace_and_connections(&db).await;
+
+        let action = SyncAction {
+            sync_id: 0,
+            entity_type: "dashboard".to_string(),
+            entity_id: "dash-1".to_string(),
+            workspace_id: "ws-1".to_string(),
+            action: SyncActionType::Update,
+            data: Some(serde_json::json!({"ok": true})),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        };
+        send_sync_action(&manager, "ws-1", &action, Some("owner")).await;
+
+        assert_no_sync_action(&mut rx_owner, "excluded user must not receive the broadcast");
+        expect_single_sync_action(&mut rx_other, "non-excluded user must receive the broadcast");
+    }
+
+    // ── Skip paths: snapshot-absent and snapshot-failed ──────────────────
+
+    #[tokio::test]
+    async fn broadcast_dashboard_sync_snapshot_absent_skips_broadcast() {
+        let db = test_pool().await;
+        let (manager, mut rx_owner, mut rx_other) = setup_workspace_and_connections(&db).await;
+
+        broadcast_dashboard_sync(
+            &db,
+            &manager,
+            "dash-does-not-exist",
+            "ws-1",
+            SyncActionType::Update,
+            "owner",
+        )
+        .await;
+
+        assert_no_sync_action(&mut rx_owner, "snapshot-absent must skip the broadcast (owner)");
+        assert_no_sync_action(&mut rx_other, "snapshot-absent must skip the broadcast (other)");
+    }
+
+    #[tokio::test]
+    async fn broadcast_dashboard_sync_fetch_failed_skips_broadcast() {
+        let db = test_pool().await;
+        let (manager, mut rx_owner, mut rx_other) = setup_workspace_and_connections(&db).await;
+        let sq = sqlite_pool(&db);
+        seed_dashboard(sq, "dash-1", "owner", "ws-1", "Dash One").await;
+
+        // Force a real sqlx query failure (not a mock): closing the pool
+        // makes every subsequent query return `sqlx::Error::PoolClosed`,
+        // exercising the actual failure path a saturated/dropped pool would
+        // hit in production (same technique as KYO-269 in chat_service.rs).
+        sq.close().await;
+
+        broadcast_dashboard_sync(&db, &manager, "dash-1", "ws-1", SyncActionType::Update, "owner")
+            .await;
+
+        assert_no_sync_action(&mut rx_owner, "fetch-failed must skip the broadcast (owner)");
+        assert_no_sync_action(&mut rx_other, "fetch-failed must skip the broadcast (other)");
+    }
+
+    #[tokio::test]
+    async fn broadcast_dashboard_visibility_change_snapshot_absent_skips_broadcast() {
+        let db = test_pool().await;
+        let (manager, mut rx_owner, mut rx_other) = setup_workspace_and_connections(&db).await;
+
+        broadcast_dashboard_visibility_change(
+            &db,
+            &manager,
+            "dash-does-not-exist",
+            "ws-1",
+            "owner",
+            false,
+        )
+        .await;
+
+        assert_no_sync_action(&mut rx_owner, "snapshot-absent must skip the broadcast (owner)");
+        assert_no_sync_action(&mut rx_other, "snapshot-absent must skip the broadcast (other)");
+    }
+
+    #[tokio::test]
+    async fn broadcast_dashboard_visibility_change_fetch_failed_skips_broadcast() {
+        let db = test_pool().await;
+        let (manager, mut rx_owner, mut rx_other) = setup_workspace_and_connections(&db).await;
+        let sq = sqlite_pool(&db);
+        seed_dashboard(sq, "dash-1", "owner", "ws-1", "Dash One").await;
+
+        sq.close().await;
+
+        broadcast_dashboard_visibility_change(&db, &manager, "dash-1", "ws-1", "owner", false)
+            .await;
+
+        assert_no_sync_action(&mut rx_owner, "fetch-failed must skip the broadcast (owner)");
+        assert_no_sync_action(&mut rx_other, "fetch-failed must skip the broadcast (other)");
+    }
+
+    #[tokio::test]
+    async fn broadcast_watch_sync_not_found_skips_broadcast() {
+        let db = test_pool().await;
+        let (manager, mut rx_owner, _rx_other) = setup_workspace_and_connections(&db).await;
+
+        broadcast_watch_sync(
+            &db,
+            &manager,
+            "watch-does-not-exist",
+            "ws-1",
+            SyncActionType::Update,
+            "owner",
+        )
+        .await;
+
+        assert_no_sync_action(&mut rx_owner, "not-found must skip the broadcast");
+    }
+
+    #[tokio::test]
+    async fn broadcast_watch_sync_fetch_failed_skips_broadcast() {
+        let db = test_pool().await;
+        let (manager, mut rx_owner, _rx_other) = setup_workspace_and_connections(&db).await;
+        let sq = sqlite_pool(&db);
+        seed_watch(sq, "watch-1", "ws-1", "owner", "Owner's Watch").await;
+
+        sq.close().await;
+
+        broadcast_watch_sync(&db, &manager, "watch-1", "ws-1", SyncActionType::Update, "owner")
+            .await;
+
+        assert_no_sync_action(&mut rx_owner, "fetch-failed must skip the broadcast");
+    }
+
+    #[tokio::test]
+    async fn broadcast_chat_session_sync_snapshot_absent_skips_broadcast() {
+        let db = test_pool().await;
+        let (manager, mut rx_owner, mut rx_other) = setup_workspace_and_connections(&db).await;
+
+        broadcast_chat_session_sync(
+            &db,
+            &manager,
+            "sess-does-not-exist",
+            "ws-1",
+            SyncActionType::Update,
+            "owner",
+        )
+        .await;
+
+        assert_no_sync_action(&mut rx_owner, "snapshot-absent must skip the broadcast (owner)");
+        assert_no_sync_action(&mut rx_other, "snapshot-absent must skip the broadcast (other)");
+    }
+
+    #[tokio::test]
+    async fn broadcast_chat_session_sync_fetch_failed_skips_broadcast() {
+        let db = test_pool().await;
+        let (manager, mut rx_owner, mut rx_other) = setup_workspace_and_connections(&db).await;
+        let sq = sqlite_pool(&db);
+        seed_chat_session(sq, "sess-1", "owner", "ws-1", "Shared", true).await;
+
+        sq.close().await;
+
+        broadcast_chat_session_sync(
+            &db,
+            &manager,
+            "sess-1",
+            "ws-1",
+            SyncActionType::Update,
+            "owner",
+        )
+        .await;
+
+        assert_no_sync_action(&mut rx_owner, "fetch-failed must skip the broadcast (owner)");
+        assert_no_sync_action(&mut rx_other, "fetch-failed must skip the broadcast (other)");
+    }
+
+    /// KYO-329 criterion 3: for `broadcast_chat_session_unshare` specifically,
+    /// a snapshot-absent owner-update fetch must NOT suppress the Delete to
+    /// non-owners — only the owner's restoring Update is skipped. See the
+    /// function's own doc comment for why: the Delete is unconditional.
+    #[tokio::test]
+    async fn broadcast_chat_session_unshare_snapshot_absent_skips_owner_update_sends_delete() {
+        let db = test_pool().await;
+        let (manager, mut rx_owner, mut rx_other) = setup_workspace_and_connections(&db).await;
+
+        broadcast_chat_session_unshare(&db, &manager, "sess-does-not-exist", "ws-1", "owner")
+            .await;
+
+        let other_action = expect_single_sync_action(&mut rx_other, "unshare, non-owner");
+        assert!(matches!(other_action.action, SyncActionType::Delete));
+        assert!(other_action.data.is_none());
+
+        assert_no_sync_action(
+            &mut rx_owner,
+            "owner update must be skipped when the snapshot is absent",
+        );
+    }
+
+    /// Same as above but for a real sqlx query failure rather than a
+    /// genuine miss. Uses two independent pools: `manager`'s own pool (which
+    /// `broadcast_to_workspace` queries for `workspace_users`) stays open,
+    /// while the separate `db` argument passed to the function under test is
+    /// closed — isolating exactly the owner-update snapshot fetch as the
+    /// failing query, the way one flaky connection would in production,
+    /// without a mock and without also killing the Delete broadcast's own
+    /// (unrelated) query.
+    #[tokio::test]
+    async fn broadcast_chat_session_unshare_fetch_failed_skips_owner_update_sends_delete() {
+        let manager_db = test_pool().await;
+        let (manager, mut rx_owner, mut rx_other) =
+            setup_workspace_and_connections(&manager_db).await;
+
+        let snapshot_db = test_pool().await;
+        let sq_snapshot = sqlite_pool(&snapshot_db);
+        seed_user(sq_snapshot, "owner", "owner@test.local").await;
+        seed_workspace(sq_snapshot, "ws-1", "owner").await;
+        seed_chat_session(sq_snapshot, "sess-1", "owner", "ws-1", "Shared", true).await;
+        sq_snapshot.close().await;
+
+        broadcast_chat_session_unshare(&snapshot_db, &manager, "sess-1", "ws-1", "owner").await;
+
+        let other_action = expect_single_sync_action(&mut rx_other, "unshare, non-owner");
+        assert!(matches!(other_action.action, SyncActionType::Delete));
+        assert!(other_action.data.is_none());
+
+        assert_no_sync_action(
+            &mut rx_owner,
+            "owner update must be skipped when the snapshot fetch fails",
+        );
+    }
+}
