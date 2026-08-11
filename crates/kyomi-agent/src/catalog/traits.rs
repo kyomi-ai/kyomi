@@ -399,6 +399,7 @@ pub async fn index_catalog_sql(
         "running",
         None,
         None,
+        &[],
     )
     .await;
 
@@ -426,6 +427,7 @@ pub async fn index_catalog_sql(
             "idle",
             None,
             None,
+            &[],
         )
         .await;
 
@@ -453,6 +455,7 @@ pub async fn index_catalog_sql(
                 "failed",
                 None,
                 Some(&msg),
+                &[],
             )
             .await;
 
@@ -477,6 +480,7 @@ pub async fn index_catalog_sql(
                 "failed",
                 None,
                 Some(&msg),
+                &[],
             )
             .await;
 
@@ -499,6 +503,7 @@ pub async fn index_catalog_sql(
             "failed",
             None,
             Some(&msg),
+            &[],
         )
         .await;
 
@@ -522,6 +527,7 @@ pub async fn index_catalog_sql(
                 "failed",
                 None,
                 Some(&msg),
+                &[],
             )
             .await;
 
@@ -716,6 +722,7 @@ pub async fn index_catalog_sql(
         final_status,
         None,
         failure_reason.as_deref(),
+        &errors,
     )
     .await;
 

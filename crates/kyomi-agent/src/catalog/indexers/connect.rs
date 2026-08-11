@@ -128,6 +128,7 @@ impl CatalogIndexer for ConnectIndexer {
             let reason = "Connection test failed — is the Connect binary running?";
             let _ = update_datasource_status(
                 db, &ctx.workspace_id, &ctx.datasource_config_id, "failed", None, Some(reason),
+                &[],
             ).await;
             return CatalogIndexResult::error(reason)
                 .with_times(&start_time.to_rfc3339(), &Utc::now().to_rfc3339())
@@ -135,7 +136,7 @@ impl CatalogIndexer for ConnectIndexer {
         }
 
         let _ = update_datasource_status(
-            db, &ctx.workspace_id, &ctx.datasource_config_id, "running", None, None,
+            db, &ctx.workspace_id, &ctx.datasource_config_id, "running", None, None, &[],
         ).await;
 
         // Resolve the configured container scope (KYO-162). An explicit empty
@@ -176,7 +177,7 @@ impl CatalogIndexer for ConnectIndexer {
                     let msg = format!("Catalog discovery failed: {e}");
                     let _ = update_datasource_status(
                         db, &ctx.workspace_id, &ctx.datasource_config_id, "failed", None,
-                        Some(&msg),
+                        Some(&msg), &[],
                     ).await;
                     return CatalogIndexResult::error(&msg)
                         .with_times(&start_time.to_rfc3339(), &Utc::now().to_rfc3339())
@@ -338,6 +339,7 @@ async fn process_discovered_catalog(params: ProcessDiscoveredCatalogParams<'_>) 
         final_status,
         None,
         failure_reason.as_deref(),
+        &catalog_result.errors,
     )
     .await;
 
@@ -363,15 +365,13 @@ async fn process_discovered_catalog(params: ProcessDiscoveredCatalogParams<'_>) 
     // dropped once tables were found elsewhere). Mirrors the direct SQL
     // path (`index_catalog_sql`), which does the same regardless of status.
     //
-    // As of this change, nothing in the UI actually renders this for an
-    // "idle" status: `get_catalog_refresh_status`'s poller only reads the
-    // progress envelope's `error` key on the `"failed"` branch
-    // (`crates/kyomi-ui/src/pages/settings/datasources.rs`), and the
-    // settings page's persistent notice only renders when
-    // `catalog_refresh_status == "failed"`. So today this reaches logs and
-    // any direct caller of `CatalogIndexResult`, not yet the datasource
-    // Catalog tab. Surfacing it there needs a UI change out of scope for
-    // this fix (KYO-268) — tracked as a follow-up rather than built here.
+    // KYO-327: these same errors are also passed to `update_datasource_status`
+    // above as the persisted `warnings` array (on both the `"idle"` and
+    // `"failed"` outcomes `resolve_final_status` can produce), which is what
+    // the settings page's refresh poller and its persistent Catalog-tab
+    // notice actually render. `CatalogIndexResult::errors` set here reaches
+    // logs and any direct in-process caller of this return value — it is a
+    // separate channel from the persisted envelope, not the one the UI reads.
     if !catalog_result.errors.is_empty() {
         result.errors = Some(catalog_result.errors);
     }
@@ -557,6 +557,23 @@ mod tests {
             .fetch_one(sq)
             .await
             .expect("read datasource status")
+    }
+
+    /// Read back the full persisted `catalog_refresh_progress` envelope as
+    /// parsed JSON (KYO-327), so tests can assert on the structured
+    /// `"warnings"` array rather than the `"error"` string.
+    async fn datasource_progress_envelope(
+        sq: &sqlx::SqlitePool,
+        datasource_config_id: &str,
+    ) -> Value {
+        let raw: String = sqlx::query_scalar(
+            "SELECT catalog_refresh_progress FROM datasource_configs WHERE id = ?",
+        )
+        .bind(datasource_config_id)
+        .fetch_one(sq)
+        .await
+        .expect("read progress envelope");
+        serde_json::from_str(&raw).expect("progress envelope must be valid JSON")
     }
 
     /// KYO-126, second pass: a Connect catalog that discovers zero tables
@@ -795,6 +812,138 @@ mod tests {
         assert!(
             progress.contains("container 'public': permission denied"),
             "failure reason must be the real discovery error, not a generic message, got: {progress}"
+        );
+    }
+
+    // ── persisted `warnings` array (KYO-327) ─────────────────────────────
+    //
+    // KYO-327's premise correction: before this fix, `resolve_final_status`
+    // folding a partial run (tables found elsewhere, some containers
+    // denied) down to `"idle"` also discarded the individual error strings
+    // — they were never written to the persisted envelope at all, so the
+    // settings page had nothing to read for a partial success. These two
+    // tests lock in the terminal write's new `warnings` parameter on both
+    // sides of that behavior: non-empty on a partial run, empty on a clean
+    // one.
+
+    /// The load-bearing regression: a partial run (some tables cached, one
+    /// container denied) must persist `catalog_refresh_status = "idle"`
+    /// *and* a non-empty `warnings` array carrying the real denial —  not
+    /// silently dropped the way `resolve_final_status`'s own reason
+    /// (`error`) is for this exact case (see
+    /// `not_nothing_found_reports_idle_even_with_partial_errors` in
+    /// `kyomi_auth::catalog::helpers`, which is unaffected by this change).
+    #[tokio::test]
+    async fn partial_run_with_tables_and_errors_persists_idle_with_warnings() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        let ctx = seed_connect_fixture(sq, "partialwarn").await;
+        let embedding = EmbeddingService::new().expect("load embedding model");
+
+        let catalog_result = CatalogResult {
+            containers: vec![kyomi_core::connect_protocol::CatalogContainer {
+                name: "public".to_string(),
+                tables: vec![kyomi_core::connect_protocol::CatalogTable {
+                    name: "orders".to_string(),
+                    native_type: Some("BASE TABLE".to_string()),
+                    columns: vec![kyomi_core::connect_protocol::CatalogColumn {
+                        name: "id".to_string(),
+                        native_type: "int4".to_string(),
+                        description: None,
+                    }],
+                }],
+            }],
+            errors: vec!["container 'restricted': permission denied".to_string()],
+        };
+
+        process_discovered_catalog(ProcessDiscoveredCatalogParams {
+            db: &db,
+            embedding: &embedding,
+            ctx: &ctx,
+            catalog_result,
+            explicit_empty: false,
+            start_time: Utc::now(),
+        })
+        .await;
+
+        assert_eq!(
+            datasource_status(sq, &ctx.datasource_config_id).await,
+            "idle",
+            "tables found elsewhere must still resolve to idle, not failed (KYO-126/KYO-268)"
+        );
+
+        let envelope = datasource_progress_envelope(sq, &ctx.datasource_config_id).await;
+        let warnings = envelope
+            .get("warnings")
+            .and_then(|w| w.as_array())
+            .expect("warnings must be a present JSON array");
+        assert_eq!(
+            warnings,
+            &vec![serde_json::json!(
+                "container 'restricted': permission denied"
+            )],
+            "the denied container's error must be persisted in the warnings array, got: {envelope}"
+        );
+    }
+
+    /// Companion regression guard (ticket AC3): a run with zero discovery
+    /// errors must persist an empty `warnings` array — always present, never
+    /// missing/null, so `get_catalog_stats` never needs null-handling — and
+    /// must not surface a warning to the user.
+    #[tokio::test]
+    async fn clean_run_persists_empty_warnings_array() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        let ctx = seed_connect_fixture(sq, "cleanwarn").await;
+        let embedding = EmbeddingService::new().expect("load embedding model");
+
+        let catalog_result = CatalogResult {
+            containers: vec![kyomi_core::connect_protocol::CatalogContainer {
+                name: "public".to_string(),
+                tables: vec![kyomi_core::connect_protocol::CatalogTable {
+                    name: "orders".to_string(),
+                    native_type: Some("BASE TABLE".to_string()),
+                    columns: vec![kyomi_core::connect_protocol::CatalogColumn {
+                        name: "id".to_string(),
+                        native_type: "int4".to_string(),
+                        description: None,
+                    }],
+                }],
+            }],
+            errors: Vec::new(),
+        };
+
+        process_discovered_catalog(ProcessDiscoveredCatalogParams {
+            db: &db,
+            embedding: &embedding,
+            ctx: &ctx,
+            catalog_result,
+            explicit_empty: false,
+            start_time: Utc::now(),
+        })
+        .await;
+
+        assert_eq!(
+            datasource_status(sq, &ctx.datasource_config_id).await,
+            "idle"
+        );
+
+        let envelope = datasource_progress_envelope(sq, &ctx.datasource_config_id).await;
+        let warnings = envelope
+            .get("warnings")
+            .and_then(|w| w.as_array())
+            .expect("warnings must be a present JSON array, not missing/null");
+        assert!(
+            warnings.is_empty(),
+            "a clean run (zero discovery errors) must persist an empty warnings array, got: {envelope}"
         );
     }
 }

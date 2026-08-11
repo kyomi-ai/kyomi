@@ -262,6 +262,17 @@ pub struct CatalogStatsResult {
     /// `None` even when `refresh_failed` is `true` means no specific reason
     /// was available (falls back to a generic message in the UI).
     pub refresh_failure_reason: Option<String>,
+    /// Per-container/per-table discovery errors from the most recent
+    /// refresh, when that refresh *succeeded overall* but one or more
+    /// containers/schemas could not be read (KYO-327) — e.g. tables were
+    /// found and cached, but a permission-denied schema was skipped. Always
+    /// empty when `refresh_failed` is `true`: a hard failure already has its
+    /// own red error Alert (`refresh_failure_reason`), and showing both
+    /// would double-report the same underlying denial. Populated from the
+    /// persisted envelope's top-level `"warnings"` array (see
+    /// `kyomi_auth::catalog::helpers::update_datasource_status`), never by
+    /// parsing `refresh_failure_reason`'s collapsed text.
+    pub refresh_warnings: Vec<String>,
 }
 
 /// Create a new datasource (admin only).
@@ -731,6 +742,43 @@ pub(crate) async fn create_query_provider(
     Ok((ds, provider))
 }
 
+/// Extract the structured `"warnings"` array from a datasource's persisted
+/// `catalog_refresh_progress` envelope (see
+/// `kyomi_auth::catalog::helpers::update_datasource_status`), for a
+/// non-failed refresh only.
+///
+/// KYO-327: when `refresh_failed` is `true`, always returns an empty vec —
+/// a hard failure already has its own reason surfaced via
+/// `refresh_failure_reason`/the settings page's red error Alert, so
+/// returning warnings too would double-report the same underlying denial
+/// through a second Alert. Extracted as a pure function (mirrors
+/// `overlay_credentials` above) so it's unit-testable without standing up
+/// the `#[server]` fn's request-extracted `AuthenticatedContext`.
+///
+/// `ssr`-only, same as `overlay_credentials`: its sole caller is
+/// `get_catalog_stats`' server-side body, so under the `hydrate`/wasm32
+/// build it would otherwise be dead code and fail the `-D warnings` clippy
+/// gate.
+#[cfg(feature = "ssr")]
+fn extract_refresh_warnings(
+    refresh_failed: bool,
+    progress: Option<&serde_json::Value>,
+) -> Vec<String> {
+    if refresh_failed {
+        return Vec::new();
+    }
+
+    progress
+        .and_then(|progress| progress.get("warnings"))
+        .and_then(|w| w.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Return table count, schema count, and last-indexed timestamp for a datasource.
 ///
 /// Used by the datasource settings page to display catalog health at a glance.
@@ -818,13 +866,20 @@ pub async fn get_catalog_stats(
     let refresh_failed = refresh_row
         .as_ref()
         .is_some_and(|row| row.catalog_refresh_status == Some(kyomi_core::enums::CatalogRefreshStatus::Failed));
+
+    // Extracted once so both branches below can read the same envelope
+    // without a double-move of `refresh_row`.
+    let refresh_progress = refresh_row.and_then(|row| row.catalog_refresh_progress);
+
     let refresh_failure_reason = if refresh_failed {
-        refresh_row
-            .and_then(|row| row.catalog_refresh_progress)
+        refresh_progress
+            .as_ref()
             .and_then(|progress| progress.get("error").and_then(|v| v.as_str()).map(str::to_string))
     } else {
         None
     };
+
+    let refresh_warnings = extract_refresh_warnings(refresh_failed, refresh_progress.as_ref());
 
     Ok(CatalogStatsResult {
         table_count,
@@ -832,6 +887,7 @@ pub async fn get_catalog_stats(
         last_indexed,
         refresh_failed,
         refresh_failure_reason,
+        refresh_warnings,
     })
 }
 
@@ -876,6 +932,66 @@ mod overlay_credentials_tests {
         let provided = json!({ "username": "bob", "password": "typed-password" });
         let merged = overlay_credentials(stored, &provided);
         assert_eq!(merged, provided);
+    }
+}
+
+// ── extract_refresh_warnings (KYO-327) ────────────────────────────────────
+
+#[cfg(all(test, feature = "ssr"))]
+mod extract_refresh_warnings_tests {
+    use super::extract_refresh_warnings;
+    use serde_json::json;
+
+    /// Idle-with-warnings case: a partial run (tables found, some
+    /// containers denied) resolves to `"idle"` (`refresh_failed == false`)
+    /// but its envelope carries a non-empty `"warnings"` array — those must
+    /// reach the caller.
+    #[test]
+    fn non_failed_run_with_warnings_returns_them() {
+        let progress = json!({
+            "warnings": [
+                "Failed to list tables in schema 'restricted': permission denied"
+            ],
+        });
+        let warnings = extract_refresh_warnings(false, Some(&progress));
+        assert_eq!(
+            warnings,
+            vec!["Failed to list tables in schema 'restricted': permission denied".to_string()]
+        );
+    }
+
+    /// Clean run: no errors at all during discovery, so the persisted
+    /// envelope's `"warnings"` array is empty — must round-trip as an empty
+    /// vec, not `None`/a missing field.
+    #[test]
+    fn clean_run_returns_empty_vec() {
+        let progress = json!({ "warnings": [] });
+        let warnings = extract_refresh_warnings(false, Some(&progress));
+        assert!(warnings.is_empty());
+    }
+
+    /// A refresh row with no persisted progress at all (e.g. a pre-KYO-327
+    /// row, or a datasource that has never been refreshed) must not panic
+    /// and must report no warnings.
+    #[test]
+    fn missing_progress_returns_empty_vec() {
+        let warnings = extract_refresh_warnings(false, None);
+        assert!(warnings.is_empty());
+    }
+
+    /// Failed case: even when the envelope carries warnings, a hard failure
+    /// must suppress them — `refresh_failure_reason` already reports the
+    /// cause, and showing both would double-report the same denial.
+    #[test]
+    fn failed_run_suppresses_warnings_even_if_present() {
+        let progress = json!({
+            "warnings": ["Failed to list tables in schema 'a': permission denied"],
+        });
+        let warnings = extract_refresh_warnings(true, Some(&progress));
+        assert!(
+            warnings.is_empty(),
+            "a failed run must not surface warnings alongside its own failure reason"
+        );
     }
 }
 

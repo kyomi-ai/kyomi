@@ -197,6 +197,22 @@ pub async fn archive_missing_tables(
 /// that lookup always missed and the poller fell back to a generic message
 /// even when a concrete failure reason was available.
 ///
+/// `warnings` (KYO-327) is the run's collected per-container/per-table
+/// discovery errors, written as a top-level `"warnings"` array — always
+/// present, even when empty, so readers never need null-handling. Unlike
+/// `error`, which only applies to a hard `"failed"` outcome, `warnings` is
+/// meaningful on `"idle"` too: `resolve_final_status` folds a partial run
+/// (some tables found, some containers denied) down to `"idle"` and
+/// discards the individual error strings in that decision — this is the one
+/// place they survive to be shown to the user. Callers doing an
+/// intermediate/progress write (status `"running"`, or an early exit that
+/// isn't the run's resolved final status) pass `&[]`; only the three
+/// terminal call sites that already call `resolve_final_status`
+/// (`kyomi_agent::catalog::traits::index_catalog_sql`,
+/// `kyomi_agent::catalog::indexers::connect::process_discovered_catalog`,
+/// `UserDatasetIndexer::index_workspace_catalog`) pass the run's real error
+/// slice, on both the `"idle"` and `"failed"` outcomes it can resolve to.
+///
 /// KYO-267: this was previously `update_workspace_status`, writing to
 /// `workspaces.catalog_refresh_status`/`catalog_refresh_progress` — columns
 /// shared by every datasource in the workspace. Two different datasources
@@ -214,8 +230,10 @@ pub async fn update_datasource_status(
     status: &str,
     progress: Option<Value>,
     error: Option<&str>,
+    warnings: &[String],
 ) -> Result<()> {
-    let progress_json = build_progress_envelope(datasource_config_id, progress.as_ref(), error);
+    let progress_json =
+        build_progress_envelope(datasource_config_id, progress.as_ref(), error, warnings);
 
     let is_pg = db.is_postgres();
     let json_cast = if is_pg { "::json" } else { "" };
@@ -246,16 +264,25 @@ pub async fn update_datasource_status(
 /// context (costs nothing, and removing it risked breaking a reader that
 /// wasn't checked), not because anything still depends on it for
 /// attribution.
+///
+/// `"warnings"` (KYO-327) is always a JSON array, never null — a top-level
+/// sibling of `"progress"`/`"error"`, same reasoning as `"error"` above.
+/// Readers must never parse `"error"`'s collapsed `"<first> (+N more
+/// errors)"` string for this; that string's wording is deliberately opaque
+/// (see `CatalogIndexResult::errors`'s doc comment) and exists only for a
+/// human reading the hard-failure reason, not for driving UI.
 fn build_progress_envelope(
     datasource_config_id: &str,
     progress: Option<&Value>,
     error: Option<&str>,
+    warnings: &[String],
 ) -> Value {
     serde_json::json!({
         "datasource_config_id": datasource_config_id,
         "updated_at": Utc::now().to_rfc3339(),
         "progress": progress,
         "error": error,
+        "warnings": warnings,
     })
 }
 
@@ -802,6 +829,7 @@ mod tests {
             "ds-1",
             Some(&serde_json::json!({"processed": 3})),
             Some("permission denied for schema analytics"),
+            &[],
         );
 
         assert_eq!(
@@ -820,8 +848,52 @@ mod tests {
 
     #[test]
     fn envelope_error_is_null_when_none() {
-        let envelope = build_progress_envelope("ds-1", None, None);
+        let envelope = build_progress_envelope("ds-1", None, None, &[]);
         assert!(envelope.get("error").is_some_and(|v| v.is_null()));
+    }
+
+    // ── build_progress_envelope warnings (KYO-327) ───────────────────────
+
+    #[test]
+    fn envelope_puts_warnings_as_top_level_sibling_of_progress_and_error() {
+        // Same shape requirement as `envelope_puts_error_as_top_level_sibling_of_progress`
+        // above, extended to the new `"warnings"` key: `get_catalog_stats`
+        // (kyomi-ui/src/server_fns/datasources.rs) reads
+        // `envelope.get("warnings")` directly on the whole
+        // `catalog_refresh_progress` column value, not nested under
+        // `envelope["progress"]["warnings"]`.
+        let warnings =
+            vec!["Failed to list tables in schema 'restricted': permission denied".to_string()];
+        let envelope = build_progress_envelope(
+            "ds-1",
+            Some(&serde_json::json!({"processed": 3})),
+            None,
+            &warnings,
+        );
+
+        assert_eq!(
+            envelope.get("warnings"),
+            Some(&serde_json::json!([
+                "Failed to list tables in schema 'restricted': permission denied"
+            ]))
+        );
+        assert_eq!(
+            envelope.get("progress"),
+            Some(&serde_json::json!({"processed": 3}))
+        );
+    }
+
+    #[test]
+    fn envelope_warnings_is_empty_array_not_null_when_none() {
+        // Unlike `"error"`, which is `null` when absent, `"warnings"` must
+        // always be a present, empty JSON array — readers should never need
+        // null-handling to distinguish "no warnings" from "field missing".
+        let envelope = build_progress_envelope("ds-1", None, None, &[]);
+        assert_eq!(envelope.get("warnings"), Some(&serde_json::json!([])));
+        assert!(
+            !envelope.get("warnings").is_some_and(|v| v.is_null()),
+            "warnings must be an empty array, not null, when the run had no warnings"
+        );
     }
 
     #[test]
@@ -968,11 +1040,11 @@ mod tests {
         let (workspace_id, ds_a, ds_b) = seed_two_datasource_fixture(sq, "order1").await;
 
         // A fails first...
-        update_datasource_status(&db, &workspace_id, &ds_a, "failed", None, Some("permission denied for schema analytics"))
+        update_datasource_status(&db, &workspace_id, &ds_a, "failed", None, Some("permission denied for schema analytics"), &[])
             .await
             .expect("write A failed");
         // ...then B finishes successfully.
-        update_datasource_status(&db, &workspace_id, &ds_b, "idle", None, None)
+        update_datasource_status(&db, &workspace_id, &ds_b, "idle", None, None, &[])
             .await
             .expect("write B idle");
 
@@ -1001,11 +1073,11 @@ mod tests {
         let (workspace_id, ds_a, ds_b) = seed_two_datasource_fixture(sq, "order2").await;
 
         // B succeeds first...
-        update_datasource_status(&db, &workspace_id, &ds_b, "idle", None, None)
+        update_datasource_status(&db, &workspace_id, &ds_b, "idle", None, None, &[])
             .await
             .expect("write B idle");
         // ...then A fails.
-        update_datasource_status(&db, &workspace_id, &ds_a, "failed", None, Some("connection timed out"))
+        update_datasource_status(&db, &workspace_id, &ds_a, "failed", None, Some("connection timed out"), &[])
             .await
             .expect("write A failed");
 
