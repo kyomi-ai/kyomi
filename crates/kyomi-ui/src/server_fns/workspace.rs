@@ -348,9 +348,11 @@ pub async fn update_workspace_chartml_config(palette: String) -> Result<(), Serv
 ///
 /// Returns whether the Kyomi Slack app is installed in the workspace,
 /// along with the Slack team name and ID if installed.
+/// Requires workspace admin role.
 #[server(prefix = "/leptos-api")]
 pub async fn get_workspace_slack_status() -> Result<crate::types::WorkspaceSlackStatus, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
+    ac.require(Permission::ManageIntegrations, "Workspace admin access required")?;
 
     let ws_config =
         kyomi_core::platform::get_workspace_integration(ac.db(), &ac.ws_id, "slack")
@@ -492,6 +494,79 @@ mod tests {
         assert!(
             config_value.get("config").is_none(),
             "workspace chartml_config must be flat, not nested under a 'config' key"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // KYO-321: get_workspace_slack_status shipped with no permission gate
+    //
+    // `get_workspace_slack_status` runs inside `AuthenticatedContext::extract()`,
+    // which needs a real Leptos/Axum request context (see
+    // `kyomi_auth::permissions::tests::gated_server_fn` for why that can't
+    // be faked in a plain unit test — it's the closest true end-to-end
+    // precedent, exercising the same `AuthUser::from_request_parts` path
+    // `extract()` runs). A `permissions_for` test is necessary but NOT
+    // sufficient here: `admin_holds_every_admin_permission_but_no_owner_only_ones`
+    // already proves `ManageIntegrations` is in the admin permission set, but
+    // it cannot detect that a specific call site simply forgot to call
+    // `ac.require(...)` — that is exactly the KYO-321 regression (same
+    // species of bug as KYO-278's `get_analytics_usage`). So, following the
+    // same source-assertion technique `server_fns::analytics::tests` uses
+    // for its own request-context-bound guard, this test locks in the
+    // specific regression KYO-321 fixed: `get_workspace_slack_status`
+    // shipped authenticated-only, with no `ac.require(...)` call at all,
+    // letting any workspace member (not just admins) read whether Slack is
+    // installed plus the connected Slack `team_id` and `team_name`.
+    // ─────────────────────────────────────────────────────────────────────
+
+    const SRC: &str = include_str!("workspace.rs");
+
+    /// Returns the source slice from the first occurrence of `start` up to
+    /// (but not including) the first occurrence of `end` that follows it.
+    fn extract_between<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
+        let start_pos = src
+            .find(start)
+            .unwrap_or_else(|| panic!("marker not found in server_fns/workspace.rs: {start:?}"));
+        let end_pos = src[start_pos..]
+            .find(end)
+            .map(|i| start_pos + i)
+            .unwrap_or_else(|| {
+                panic!("end marker not found after {start:?} in server_fns/workspace.rs: {end:?}")
+            });
+        &src[start_pos..end_pos]
+    }
+
+    /// The marker that opens this very `mod tests` block — slicing `SRC` up
+    /// to this marker yields only production code, so this test's own
+    /// source text (the string literals below) can never accidentally
+    /// satisfy its own assertion.
+    const MOD_TESTS_MARKER: &str = "#[cfg(all(test, feature = \"ssr\"))]\nmod tests {";
+
+    /// `get_workspace_slack_status` must call
+    /// `ac.require(Permission::ManageIntegrations, ...)` — every sibling
+    /// Slack-integration fn in this file (`get_slack_install_url`,
+    /// `uninstall_workspace_slack`) does. Without it, any authenticated
+    /// workspace member (not just admins) can read whether Slack is
+    /// installed plus the connected Slack `team_id` and `team_name`.
+    #[test]
+    fn get_workspace_slack_status_requires_manage_integrations() {
+        let production_src = SRC
+            .split(MOD_TESTS_MARKER)
+            .next()
+            .expect("MOD_TESTS_MARKER must appear in server_fns/workspace.rs");
+
+        let fn_body = extract_between(
+            production_src,
+            "pub async fn get_workspace_slack_status() -> Result<crate::types::WorkspaceSlackStatus, ServerFnError> {",
+            "\n/// Get the Slack OAuth install URL",
+        );
+
+        assert!(
+            fn_body.contains("ac.require(Permission::ManageIntegrations"),
+            "get_workspace_slack_status must call ac.require(Permission::ManageIntegrations, ...) \
+             — every sibling Slack-integration fn in this file does; this one shipped without \
+             it (KYO-321) and any authenticated workspace member could read whether Slack is \
+             installed plus the connected Slack team_id and team_name"
         );
     }
 }
