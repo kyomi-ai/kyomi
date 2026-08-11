@@ -166,21 +166,12 @@ impl UserDatasetIndexer {
             .await;
         }
 
-        // Archive tables that no longer exist — only when we have positive evidence
-        // of tables. If no tables were found (regardless of whether any project query
-        // succeeded), preserve the existing catalog. A successful query returning 0
-        // rows is just as unsafe to archive on as a failed query.
-        let nothing_found = seen_table_ids.is_empty() && tables_indexed == 0;
+        let outcome = resolve_run_outcome(!seen_table_ids.is_empty(), tables_indexed, &errors);
 
-        let tables_archived = if nothing_found {
-            warn!(
-                workspace_id,
-                datasource_config_id,
-                any_project_succeeded,
-                "No tables found — preserving existing catalog (archiving skipped)"
-            );
-            0
-        } else {
+        // Archive tables that no longer exist — see `resolve_run_outcome` for
+        // why this is gated on "was anything listed" rather than "was
+        // anything usable".
+        let tables_archived = if outcome.archive {
             let archived_names = archive_missing_tables(
                 db,
                 workspace_id,
@@ -190,25 +181,26 @@ impl UserDatasetIndexer {
             .await
             .unwrap_or_default();
             archived_names.len()
+        } else {
+            warn!(
+                workspace_id,
+                datasource_config_id,
+                any_project_succeeded,
+                "No tables found — preserving existing catalog (archiving skipped)"
+            );
+            0
         };
 
         // Update last refresh timestamp
         let _ = update_datasource_last_refresh(db, datasource_config_id).await;
 
-        // Record this datasource's resolved final status (KYO-264).
-        // `nothing_found` alone can't distinguish a genuinely empty-but-
-        // accessible set of datasets from a total discovery failure —
-        // `resolve_final_status` (shared with the SQL path, KYO-126) draws
-        // that line using the `errors` collected above, which now include
-        // per-dataset failures via `fold_dataset_outcomes`.
-        let (final_status, failure_reason) = resolve_final_status(nothing_found, &errors);
         let _ = update_datasource_status(
             db,
             workspace_id,
             datasource_config_id,
-            final_status,
+            outcome.status,
             None,
-            failure_reason.as_deref(),
+            outcome.failure_reason.as_deref(),
             &errors,
         )
         .await;
@@ -225,13 +217,14 @@ impl UserDatasetIndexer {
             "user dataset indexing complete"
         );
 
-        // If nothing was found, return an error result so callers surface
-        // the failure rather than silently reporting zero tables indexed.
-        if nothing_found {
-            let mut result =
-                CatalogIndexResult::error("No tables discovered — existing catalog preserved")
-                    .with_times(&start_time.to_rfc3339(), &end_time.to_rfc3339())
-                    .with_ids(datasource_config_id, workspace_id);
+        // If nothing usable came out of this run, return an error result so
+        // callers surface the failure rather than silently reporting zero
+        // tables indexed — see `resolve_run_outcome` for what the message
+        // does and doesn't claim.
+        if let Some(message) = outcome.error_message {
+            let mut result = CatalogIndexResult::error(message)
+                .with_times(&start_time.to_rfc3339(), &end_time.to_rfc3339())
+                .with_ids(datasource_config_id, workspace_id);
             if !errors.is_empty() {
                 result.errors = Some(errors);
             }
@@ -247,6 +240,89 @@ impl UserDatasetIndexer {
         }
 
         result
+    }
+}
+
+/// The end-of-run decisions `index_workspace_catalog` makes once every
+/// project has been walked: whether to archive, what status to persist, and
+/// what the returned `CatalogIndexResult` should say.
+struct RunOutcome {
+    /// Whether `archive_missing_tables` should run at all.
+    archive: bool,
+    /// Value written to `datasource_configs.catalog_refresh_status`.
+    status: &'static str,
+    /// Failure reason persisted alongside a `"failed"` status.
+    failure_reason: Option<String>,
+    /// `Some(msg)` when the run produced nothing usable and the caller must
+    /// return `CatalogIndexResult::error(msg)` instead of `completed(..)`.
+    error_message: Option<&'static str>,
+}
+
+/// Resolve the two questions `index_workspace_catalog` needs answered once
+/// every project has been walked — "should we archive?" and "what status do
+/// we persist, with what reason and caller-facing message?"
+///
+/// `seen_any_table` answers "did discovery (listing) see anything?" — it
+/// must be derived from `seen_table_ids`, which, since KYO-324, is
+/// populated with every table a dataset *listing* returned, including ones
+/// whose schema fetch subsequently failed (see `fold_table_outcomes`).
+/// `tables_indexed` / `errors` answer "did we get anything *usable*?" — a
+/// table can be listed and still contribute nothing if its schema read was
+/// denied. These are genuinely different questions, and conflating them
+/// back into one predicate is the exact KYO-324 regression: a run where
+/// every table listed fine but every `get_bigquery_table_schema` call was
+/// denied (a real BigQuery IAM split — `bigquery.tables.list` granted,
+/// `bigquery.tables.get` denied) used to report `catalog_refresh_status =
+/// 'idle'` with 0 tables and no reason, because the single predicate this
+/// replaces (`seen_table_ids.is_empty() && tables_indexed == 0`) is false
+/// the moment anything was listed at all — a silent success.
+///
+/// - **Archiving** only ever needs the first question. If nothing was ever
+///   listed (regardless of whether any project query succeeded), the
+///   existing catalog must be preserved — a successful listing that
+///   enumerates 0 tables is just as unsafe to archive on as a failed one.
+///   A table whose schema fetch failed still counts as "listed", so a
+///   blanket `bigquery.tables.get` denial does not evict tables that
+///   demonstrably still exist (KYO-324).
+/// - **Status** needs the second question. `resolve_final_status` (shared
+///   with the SQL path, KYO-126) draws the idle/failed line using `errors`,
+///   which include per-dataset failures via `fold_dataset_outcomes` AND
+///   per-table schema-fetch failures via `fold_table_outcomes` (KYO-324).
+/// - **The returned error message** must not claim more than what actually
+///   happened: when nothing was ever listed, no archiving ran; when tables
+///   WERE listed but none of them ended up indexed, archiving already ran and
+///   preserved exactly those listed tables. Note the second message says
+///   "indexed", not "read": a listed table also fails to be indexed when its
+///   schema read succeeded but `cache_table` declined the write
+///   (`TableOutcome::NotCached`), so naming the read specifically would
+///   overclaim on that path.
+///
+/// Pure and I/O-free (mirrors `fold_dataset_outcomes` / `fold_table_outcomes`
+/// above) so this exact decision — not a re-derivation of it — can be
+/// exercised directly by a unit test; see
+/// `all_tables_listed_all_schemas_denied_resolves_to_failed` et al.
+fn resolve_run_outcome(
+    seen_any_table: bool,
+    tables_indexed: usize,
+    errors: &[String],
+) -> RunOutcome {
+    let nothing_listed = !seen_any_table;
+    let nothing_usable = tables_indexed == 0;
+
+    let (status, failure_reason) = resolve_final_status(nothing_usable, errors);
+
+    let message = if nothing_listed {
+        "No tables discovered — existing catalog preserved"
+    } else {
+        "Tables were listed but none could be indexed — existing catalog preserved for the tables still present"
+    };
+    let error_message = nothing_usable.then_some(message);
+
+    RunOutcome {
+        archive: !nothing_listed,
+        status,
+        failure_reason,
+        error_message,
     }
 }
 
@@ -336,7 +412,8 @@ async fn index_project_datasets(
 }
 
 /// Fold per-dataset indexing outcomes into a project's total indexed-table
-/// count and a list of formatted per-dataset error strings.
+/// count and a list of formatted per-dataset (and, since KYO-324, per-table)
+/// error strings.
 ///
 /// KYO-264: before this existed, `index_project_datasets` only logged
 /// (`warn!`) each per-dataset `Err` and discarded it — so a project where
@@ -348,20 +425,30 @@ async fn index_project_datasets(
 /// `nothing_found == true` with `errors.is_empty() == true`, which resolves
 /// to `"idle"`.
 ///
+/// KYO-324: each `Ok` outcome now also carries `table_errors` — per-table
+/// schema-fetch failures collected by `fold_table_outcomes` for datasets
+/// whose table *listing* succeeded but whose table *schema reads* were
+/// denied. Those are folded into the same `errors` output so a total
+/// schema-fetch denial reaches `resolve_final_status` exactly like a total
+/// dataset-listing denial does.
+///
 /// Deliberately free of I/O (`outcomes` are already-resolved `Result`s) so
 /// this can be exercised directly by a unit test without an HTTP-mocking
 /// dependency — none exists in this workspace, and this fold is the entire
-/// piece of decision logic KYO-264 needs proven.
+/// piece of decision logic KYO-264/KYO-324 needs proven.
 fn fold_dataset_outcomes(
     project_id: &str,
-    outcomes: Vec<(String, Result<usize>)>,
+    outcomes: Vec<(String, Result<DatasetOutcome>)>,
 ) -> (usize, Vec<String>) {
     let mut tables_indexed = 0usize;
     let mut errors = Vec::new();
 
     for (dataset_id, outcome) in outcomes {
         match outcome {
-            Ok(count) => tables_indexed += count,
+            Ok(o) => {
+                tables_indexed += o.tables_indexed;
+                errors.extend(o.table_errors);
+            }
             Err(e) => errors.push(format!("{project_id}.{dataset_id}: {e}")),
         }
     }
@@ -369,12 +456,110 @@ fn fold_dataset_outcomes(
     (tables_indexed, errors)
 }
 
+/// Cap on how many per-table schema-fetch failures a single dataset
+/// contributes to the run's `errors` (and the persisted failure reason)
+/// before further failures are collapsed into one summary line.
+///
+/// Every real caller of `index_workspace_catalog` passes
+/// `max_tables_per_dataset: None` (verified: `catalog_scheduler.rs:489`,
+/// `catalog_scheduler.rs:638`, `indexing_service.rs:355/423`,
+/// `sql_editor.rs:760` all pass `None`), so nothing upstream bounds how many
+/// tables a single dataset can enumerate. Without this cap, a dataset with
+/// thousands of tables under a blanket `bigquery.tables.get` denial would
+/// grow both `CatalogIndexResult::errors` and the summarised persisted
+/// failure reason to thousands of near-identical lines.
+const MAX_TABLE_ERRORS_PER_DATASET: usize = 5;
+
+/// What happened to one table inside `index_dataset_tables`.
+enum TableOutcome {
+    /// Schema read and `cache_table` wrote the catalog row.
+    Indexed,
+    /// Schema read, but `cache_table` declined to write the row.
+    NotCached,
+    /// The table was listed, but its schema could not be read.
+    SchemaUnreadable(String),
+}
+
+/// The result of indexing every table listed in one BigQuery dataset.
+struct DatasetOutcome {
+    tables_indexed: usize,
+    /// Fully-qualified ids of EVERY table the listing returned — readable or
+    /// not. Archiving keys off this set, so a table whose schema fetch was
+    /// denied must still appear here or the run would evict a table that
+    /// demonstrably still exists (KYO-324).
+    seen_table_ids: Vec<String>,
+    /// Bounded, formatted schema-fetch failures.
+    table_errors: Vec<String>,
+}
+
+/// Fold per-table indexing outcomes from one dataset into a
+/// [`DatasetOutcome`].
+///
+/// Mirrors `fold_dataset_outcomes` (KYO-264) one level down: every outcome —
+/// whether the schema read succeeded, was declined by `cache_table`, or
+/// failed outright — contributes its `full_table_id` to `seen_table_ids`.
+/// That is the archiving invariant this ticket (KYO-324) exists to protect:
+/// a table whose schema fetch was denied was still *listed*, so it must not
+/// be treated as gone. Only `SchemaUnreadable` contributes to
+/// `table_errors`, capped at `MAX_TABLE_ERRORS_PER_DATASET` with a trailing
+/// summary line for anything beyond the cap.
+///
+/// Deliberately free of I/O (`outcomes` are already-resolved `TableOutcome`s)
+/// so this can be exercised directly by a unit test without an
+/// HTTP-mocking dependency — none exists in this workspace. Matches the
+/// style and doc-comment depth of `fold_dataset_outcomes` above, its
+/// established precedent.
+fn fold_table_outcomes(
+    dataset_label: &str,
+    outcomes: Vec<(String, TableOutcome)>,
+) -> DatasetOutcome {
+    let mut tables_indexed = 0usize;
+    let mut seen_table_ids = Vec::with_capacity(outcomes.len());
+    let mut table_errors = Vec::new();
+    let mut unreadable_beyond_cap = 0usize;
+
+    for (full_table_id, outcome) in outcomes {
+        seen_table_ids.push(full_table_id.clone());
+
+        match outcome {
+            TableOutcome::Indexed => tables_indexed += 1,
+            TableOutcome::NotCached => {}
+            TableOutcome::SchemaUnreadable(msg) => {
+                if table_errors.len() < MAX_TABLE_ERRORS_PER_DATASET {
+                    table_errors.push(format!("{full_table_id}: {msg}"));
+                } else {
+                    unreadable_beyond_cap += 1;
+                }
+            }
+        }
+    }
+
+    if unreadable_beyond_cap > 0 {
+        table_errors.push(format!(
+            "{dataset_label}: {unreadable_beyond_cap} further table schema failure{} not shown",
+            if unreadable_beyond_cap == 1 { "" } else { "s" }
+        ));
+    }
+
+    DatasetOutcome {
+        tables_indexed,
+        seen_table_ids,
+        table_errors,
+    }
+}
+
 /// Index all tables in a single BigQuery dataset.
 ///
-/// Returns the number of tables indexed.
+/// Returns a [`DatasetOutcome`] carrying the indexed-table count, every
+/// listed table id (readable or not — see `fold_table_outcomes`), and any
+/// bounded per-table schema-fetch errors. The `Err` return here is reserved
+/// for the table *listing* call itself failing; a per-table schema-fetch
+/// failure is captured as `TableOutcome::SchemaUnreadable` and folded into
+/// the `Ok` result instead (KYO-324), because the table was still
+/// demonstrably listed and must still count toward `seen_table_ids`.
 async fn index_dataset_tables(
     params: IndexDatasetParams<'_>,
-) -> Result<usize> {
+) -> Result<DatasetOutcome> {
     let IndexDatasetParams {
         client,
         db,
@@ -393,11 +578,10 @@ async fn index_dataset_tables(
         tables.truncate(max);
     }
 
-    let mut tables_indexed = 0usize;
+    let mut outcomes = Vec::with_capacity(tables.len());
 
     for table_id in &tables {
         let full_table_id = format!("{project_id}.{dataset_id}.{table_id}");
-        seen_table_ids.insert(full_table_id.clone());
 
         // Fetch table schema
         let columns =
@@ -411,6 +595,7 @@ async fn index_dataset_tables(
                         error = %e,
                         "could not fetch schema, skipping"
                     );
+                    outcomes.push((full_table_id, TableOutcome::SchemaUnreadable(format!("{e}"))));
                     continue;
                 }
             };
@@ -428,12 +613,19 @@ async fn index_dataset_tables(
         })
         .await;
 
-        if cached {
-            tables_indexed += 1;
-        }
+        let outcome = if cached {
+            TableOutcome::Indexed
+        } else {
+            TableOutcome::NotCached
+        };
+        outcomes.push((full_table_id, outcome));
     }
 
-    Ok(tables_indexed)
+    let dataset_label = format!("{project_id}.{dataset_id}");
+    let dataset_outcome = fold_table_outcomes(&dataset_label, outcomes);
+    seen_table_ids.extend(dataset_outcome.seen_table_ids.iter().cloned());
+
+    Ok(dataset_outcome)
 }
 
 // ─── BigQuery REST API helpers ──────────────────────────────────────────────────
@@ -615,9 +807,20 @@ mod tests {
         assert_eq!(full, "my-project.my_dataset.my_table");
     }
 
-    // ── fold_dataset_outcomes (KYO-264) ──────────────────────────────────
+    // ── fold_dataset_outcomes (KYO-264, updated shape for KYO-324) ────────
 
-    fn permission_denied(dataset_id: &str) -> Result<usize> {
+    /// An `Ok` dataset outcome carrying only a table count, for tests that
+    /// exercise `fold_dataset_outcomes`'s roll-up logic and don't care
+    /// about individual table ids or per-table errors.
+    fn dataset_ok(tables_indexed: usize) -> Result<DatasetOutcome> {
+        Ok(DatasetOutcome {
+            tables_indexed,
+            seen_table_ids: Vec::new(),
+            table_errors: Vec::new(),
+        })
+    }
+
+    fn permission_denied(dataset_id: &str) -> Result<DatasetOutcome> {
         Err(kyomi_core::Error::Internal(format!(
             "BigQuery tables list failed (HTTP 403): permission denied on {dataset_id}"
         )))
@@ -626,8 +829,8 @@ mod tests {
     #[test]
     fn all_datasets_ok_sums_counts_with_no_errors() {
         let outcomes = vec![
-            ("ds_a".to_string(), Ok(3usize)),
-            ("ds_b".to_string(), Ok(2usize)),
+            ("ds_a".to_string(), dataset_ok(3)),
+            ("ds_b".to_string(), dataset_ok(2)),
         ];
         let (tables_indexed, errors) = fold_dataset_outcomes("proj-1", outcomes);
         assert_eq!(tables_indexed, 5);
@@ -665,7 +868,7 @@ mod tests {
     #[test]
     fn mixed_outcomes_sum_successes_and_collect_only_failures() {
         let outcomes = vec![
-            ("ds_a".to_string(), Ok(4usize)),
+            ("ds_a".to_string(), dataset_ok(4)),
             ("ds_b".to_string(), permission_denied("ds_b")),
         ];
         let (tables_indexed, errors) = fold_dataset_outcomes("proj-1", outcomes);
@@ -674,12 +877,35 @@ mod tests {
         assert!(errors[0].starts_with("proj-1.ds_b: "));
     }
 
-    // ── error propagation end-to-end into resolve_final_status (KYO-264) ──
+    /// KYO-324: an `Ok` dataset outcome can itself carry `table_errors` when
+    /// the dataset's table *listing* succeeded but individual schema reads
+    /// were denied. `fold_dataset_outcomes` must surface those into its
+    /// `errors` output exactly like a whole-dataset `Err` does, or a total
+    /// schema-fetch denial across one dataset would go unnoticed at the
+    /// project level.
+    #[test]
+    fn ok_dataset_with_table_errors_propagates_into_project_errors() {
+        let outcomes = vec![(
+            "ds_a".to_string(),
+            Ok(DatasetOutcome {
+                tables_indexed: 0,
+                seen_table_ids: vec!["proj-1.ds_a.t1".to_string()],
+                table_errors: vec!["proj-1.ds_a.t1: HTTP 403 permission denied".to_string()],
+            }),
+        )];
+        let (tables_indexed, errors) = fold_dataset_outcomes("proj-1", outcomes);
+        assert_eq!(tables_indexed, 0);
+        assert_eq!(errors, vec!["proj-1.ds_a.t1: HTTP 403 permission denied"]);
+    }
+
+    // ── error propagation end-to-end into resolve_run_outcome (KYO-264) ──
     //
-    // These tie `fold_dataset_outcomes`'s output directly to the same
-    // `resolve_final_status` call `index_workspace_catalog` makes, proving
+    // These tie `fold_dataset_outcomes`'s output to the same
+    // `resolve_run_outcome` call `index_workspace_catalog` makes, proving
     // the fix actually changes the persisted status — not just that errors
-    // exist in a vec somewhere.
+    // exist in a vec somewhere. Both scenarios here never list a single
+    // table (every dataset failed, or every dataset was empty), so
+    // `seen_any_table` is `false`.
 
     #[test]
     fn errored_and_empty_resolves_to_failed_with_non_generic_reason() {
@@ -688,14 +914,12 @@ mod tests {
             ("ds_b".to_string(), permission_denied("ds_b")),
         ];
         let (tables_indexed, errors) = fold_dataset_outcomes("proj-1", outcomes);
-        // Mirrors index_workspace_catalog's `nothing_found` computation when
-        // no table was ever seen (seen_table_ids stays empty on the same
-        // input that produces tables_indexed == 0 here).
-        let nothing_found = tables_indexed == 0;
 
-        let (status, reason) = resolve_final_status(nothing_found, &errors);
-        assert_eq!(status, "failed");
-        let reason = reason.expect("failed status must carry a reason");
+        let run_outcome = resolve_run_outcome(false, tables_indexed, &errors);
+        assert_eq!(run_outcome.status, "failed");
+        let reason = run_outcome
+            .failure_reason
+            .expect("failed status must carry a reason");
         assert_ne!(
             reason, "No tables discovered — existing catalog preserved",
             "reason must be the real per-dataset error, not the generic result message"
@@ -707,17 +931,311 @@ mod tests {
     #[test]
     fn accessible_but_genuinely_empty_resolves_to_idle() {
         let outcomes = vec![
-            ("ds_a".to_string(), Ok(0usize)),
-            ("ds_b".to_string(), Ok(0usize)),
+            ("ds_a".to_string(), dataset_ok(0)),
+            ("ds_b".to_string(), dataset_ok(0)),
         ];
         let (tables_indexed, errors) = fold_dataset_outcomes("proj-1", outcomes);
-        let nothing_found = tables_indexed == 0;
 
-        let (status, reason) = resolve_final_status(nothing_found, &errors);
+        let run_outcome = resolve_run_outcome(false, tables_indexed, &errors);
         assert_eq!(
-            status, "idle",
+            run_outcome.status, "idle",
             "datasets that were listed fine and are genuinely empty must not report failed"
         );
-        assert_eq!(reason, None);
+        assert_eq!(run_outcome.failure_reason, None);
+    }
+
+    // ── fold_table_outcomes (KYO-324) ──────────────────────────────────
+    //
+    // `fold_table_outcomes` is the pure seam this ticket exists to add.
+    // `index_dataset_tables` inserted every listed table id into
+    // `seen_table_ids` BEFORE fetching its schema, so a schema-fetch denial
+    // never wrongly archived the table (see `archive_missing_tables`) — but
+    // the denial itself was dropped (`warn!` + `continue`), so a dataset
+    // where every schema fetch was denied looked identical to a genuinely
+    // empty dataset: `tables_indexed == 0`, `seen_table_ids` non-empty
+    // (implying `nothing_found == false`), `errors` empty — which the old
+    // single `nothing_found` predicate resolved to `"idle"`.
+
+    fn schema_denied(table: &str) -> TableOutcome {
+        TableOutcome::SchemaUnreadable(format!("HTTP 403: permission denied reading {table}"))
+    }
+
+    #[test]
+    fn all_tables_indexed_counts_and_seen_ids_match() {
+        let outcomes = vec![
+            ("proj-1.ds_a.t1".to_string(), TableOutcome::Indexed),
+            ("proj-1.ds_a.t2".to_string(), TableOutcome::Indexed),
+        ];
+        let result = fold_table_outcomes("proj-1.ds_a", outcomes);
+        assert_eq!(result.tables_indexed, 2);
+        assert_eq!(
+            result.seen_table_ids,
+            vec!["proj-1.ds_a.t1".to_string(), "proj-1.ds_a.t2".to_string()]
+        );
+        assert!(result.table_errors.is_empty());
+    }
+
+    /// AC3 / the trap this ticket calls out explicitly: every table's
+    /// schema fetch is denied, but every one of them was still *listed*.
+    /// `seen_table_ids` must contain ALL of them — that set is what
+    /// `archive_missing_tables` uses to decide what still exists. If this
+    /// regresses (a table dropped from `seen_table_ids` because its schema
+    /// fetch failed), a total `bigquery.tables.get` denial would archive
+    /// the entire existing catalog instead of just failing the run.
+    #[test]
+    fn all_schema_unreadable_still_populates_seen_table_ids_completely() {
+        let table_ids = ["proj-1.ds_a.t1", "proj-1.ds_a.t2", "proj-1.ds_a.t3"];
+        let outcomes: Vec<(String, TableOutcome)> = table_ids
+            .iter()
+            .map(|t| (t.to_string(), schema_denied(t)))
+            .collect();
+
+        let result = fold_table_outcomes("proj-1.ds_a", outcomes);
+
+        assert_eq!(result.tables_indexed, 0);
+        assert_eq!(
+            result.seen_table_ids.len(),
+            table_ids.len(),
+            "every listed table must appear in seen_table_ids even when its schema fetch failed"
+        );
+        for t in &table_ids {
+            assert!(
+                result.seen_table_ids.contains(&t.to_string()),
+                "{t} missing from seen_table_ids — archive_missing_tables would wrongly evict it"
+            );
+        }
+        assert_eq!(result.table_errors.len(), table_ids.len());
+        for (t, err) in table_ids.iter().zip(result.table_errors.iter()) {
+            assert!(
+                err.starts_with(&format!("{t}: ")),
+                "expected table-id-prefixed error, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_indexed_and_unreadable_counts_and_errors_correctly() {
+        let outcomes = vec![
+            ("proj-1.ds_a.t1".to_string(), TableOutcome::Indexed),
+            ("proj-1.ds_a.t2".to_string(), schema_denied("proj-1.ds_a.t2")),
+            ("proj-1.ds_a.t3".to_string(), TableOutcome::NotCached),
+        ];
+        let result = fold_table_outcomes("proj-1.ds_a", outcomes);
+
+        assert_eq!(result.tables_indexed, 1);
+        assert_eq!(result.seen_table_ids.len(), 3, "NotCached must still count as seen");
+        assert_eq!(result.table_errors.len(), 1);
+        assert!(result.table_errors[0].starts_with("proj-1.ds_a.t2: "));
+    }
+
+    /// More `SchemaUnreadable` outcomes than `MAX_TABLE_ERRORS_PER_DATASET`:
+    /// the individual error list must be bounded, with one trailing summary
+    /// line for the rest — but `seen_table_ids` must remain complete, since
+    /// archiving must not be affected by the error cap.
+    #[test]
+    fn table_errors_are_capped_with_a_summary_line_but_seen_ids_stay_complete() {
+        let total = MAX_TABLE_ERRORS_PER_DATASET + 3;
+        let table_ids: Vec<String> = (0..total)
+            .map(|i| format!("proj-1.ds_a.t{i}"))
+            .collect();
+        let outcomes: Vec<(String, TableOutcome)> = table_ids
+            .iter()
+            .map(|t| (t.clone(), schema_denied(t)))
+            .collect();
+
+        let result = fold_table_outcomes("proj-1.ds_a", outcomes);
+
+        assert_eq!(result.tables_indexed, 0);
+        assert_eq!(
+            result.seen_table_ids.len(),
+            total,
+            "the error cap must not drop any table from seen_table_ids"
+        );
+
+        // MAX_TABLE_ERRORS_PER_DATASET individual errors, plus one summary line.
+        assert_eq!(result.table_errors.len(), MAX_TABLE_ERRORS_PER_DATASET + 1);
+        for i in 0..MAX_TABLE_ERRORS_PER_DATASET {
+            assert!(
+                result.table_errors[i].starts_with(&format!("proj-1.ds_a.t{i}: ")),
+                "expected table {i}'s error to be individually listed, got: {}",
+                result.table_errors[i]
+            );
+        }
+        let summary = result.table_errors.last().expect("summary line present");
+        assert!(
+            summary.starts_with("proj-1.ds_a: "),
+            "summary line must be labeled with the dataset, got: {summary}"
+        );
+        assert!(
+            summary.contains(&(total - MAX_TABLE_ERRORS_PER_DATASET).to_string()),
+            "summary line must name how many further failures were dropped, got: {summary}"
+        );
+    }
+
+    // ── end-to-end through resolve_run_outcome (KYO-324 acceptance) ───────
+    //
+    // These run `fold_table_outcomes`'s output through `resolve_run_outcome`
+    // — the exact function `index_workspace_catalog` calls — rather than
+    // re-deriving `nothing_listed` / `nothing_usable` / the
+    // `resolve_final_status` call inline. That is deliberate: a test that
+    // re-derives the production decision instead of calling it still passes
+    // if someone reverts `index_workspace_catalog`'s call site back to the
+    // pre-fix predicate, which is exactly the KYO-324 regression. Routing
+    // through `resolve_run_outcome` means a mutation to that function's
+    // predicates is what fails these tests, not a mutation to a copy living
+    // in the test body.
+    //
+    // Four cases, matching `resolve_run_outcome`'s full input matrix:
+    //   seen_any_table | tables_indexed | errors     | archive | status | error_message
+    //   false          | 0              | empty      | false   | idle   | Some("No tables discovered...")
+    //   true            | 0              | non-empty | true    | failed | Some("Tables were listed but none could be indexed...")
+    //   true            | >0             | non-empty | true    | idle   | None
+    // (seen_any_table=false with non-empty errors is exercised indirectly —
+    // it can only arise from a whole-project listing failure, not from
+    // `fold_table_outcomes`, so it isn't representable via this fixture.)
+
+    /// AC1: every table listed, every schema fetch denied ⇒ `"failed"` with
+    /// a reason naming the underlying error (not the generic message), and
+    /// archiving must still run.
+    #[test]
+    fn all_tables_listed_all_schemas_denied_resolves_to_failed() {
+        let table_ids = ["proj-1.ds_a.t1", "proj-1.ds_a.t2"];
+        let outcomes: Vec<(String, TableOutcome)> = table_ids
+            .iter()
+            .map(|t| (t.to_string(), schema_denied(t)))
+            .collect();
+        let dataset_outcome = fold_table_outcomes("proj-1.ds_a", outcomes);
+        let seen_any_table = !dataset_outcome.seen_table_ids.is_empty();
+
+        let run_outcome = resolve_run_outcome(
+            seen_any_table,
+            dataset_outcome.tables_indexed,
+            &dataset_outcome.table_errors,
+        );
+
+        assert!(
+            run_outcome.archive,
+            "tables were listed — archiving must still run"
+        );
+        assert_eq!(run_outcome.status, "failed");
+        assert_eq!(
+            run_outcome.error_message,
+            Some(
+                "Tables were listed but none could be indexed — existing catalog preserved for the tables still present"
+            )
+        );
+        let reason = run_outcome
+            .failure_reason
+            .expect("failed status must carry a reason");
+        assert_ne!(
+            reason, "No tables discovered — existing catalog preserved",
+            "reason must name the real schema-fetch error, not the generic empty-discovery message"
+        );
+        assert!(reason.contains("proj-1.ds_a.t1"));
+        assert!(reason.contains("permission denied"));
+    }
+
+    /// AC2: some tables indexed, some schema fetches failed ⇒ still
+    /// `"idle"` (partial success), with no failure reason or caller-facing
+    /// error message — the schema-fetch failure itself still lives in
+    /// `dataset_outcome.table_errors`, which the real caller folds into
+    /// `CatalogIndexResult::errors` separately from `RunOutcome`.
+    #[test]
+    fn partial_success_resolves_to_idle_with_errors_still_surfaced() {
+        let outcomes = vec![
+            ("proj-1.ds_a.t1".to_string(), TableOutcome::Indexed),
+            ("proj-1.ds_a.t2".to_string(), schema_denied("proj-1.ds_a.t2")),
+        ];
+        let dataset_outcome = fold_table_outcomes("proj-1.ds_a", outcomes);
+        let seen_any_table = !dataset_outcome.seen_table_ids.is_empty();
+
+        let run_outcome = resolve_run_outcome(
+            seen_any_table,
+            dataset_outcome.tables_indexed,
+            &dataset_outcome.table_errors,
+        );
+
+        assert!(
+            run_outcome.archive,
+            "one table indexed successfully — archiving must run"
+        );
+        assert_eq!(
+            run_outcome.status, "idle",
+            "partial success must not be reported as failed"
+        );
+        assert_eq!(run_outcome.failure_reason, None);
+        assert_eq!(run_outcome.error_message, None);
+        assert_eq!(
+            dataset_outcome.table_errors.len(),
+            1,
+            "the schema-fetch failure must still be present for CatalogIndexResult::errors"
+        );
+        assert!(dataset_outcome.table_errors[0].starts_with("proj-1.ds_a.t2: "));
+    }
+
+    /// AC3 regression, tied directly to `resolve_run_outcome`'s `archive`
+    /// field: when every table's schema fetch is denied, `seen_table_ids`
+    /// (which `archive_missing_tables` is keyed on) must still contain
+    /// every table that was listed, and `resolve_run_outcome` must still
+    /// report `archive: true` — so the existing cached catalog is not
+    /// archived.
+    #[test]
+    fn all_schema_denied_does_not_starve_archiving_of_seen_ids() {
+        let table_ids = ["proj-1.ds_a.t1", "proj-1.ds_a.t2", "proj-1.ds_a.t3"];
+        let outcomes: Vec<(String, TableOutcome)> = table_ids
+            .iter()
+            .map(|t| (t.to_string(), schema_denied(t)))
+            .collect();
+        let dataset_outcome = fold_table_outcomes("proj-1.ds_a", outcomes);
+        let seen_any_table = !dataset_outcome.seen_table_ids.is_empty();
+
+        let run_outcome = resolve_run_outcome(
+            seen_any_table,
+            dataset_outcome.tables_indexed,
+            &dataset_outcome.table_errors,
+        );
+
+        assert!(
+            run_outcome.archive,
+            "tables were listed, so archiving must run and use the full seen_table_ids set"
+        );
+        let seen_table_ids: HashSet<String> = dataset_outcome.seen_table_ids.iter().cloned().collect();
+        for t in &table_ids {
+            assert!(
+                seen_table_ids.contains(*t),
+                "{t} must be present so archive_missing_tables does not evict it"
+            );
+        }
+    }
+
+    /// The fourth row of `resolve_run_outcome`'s matrix: a genuinely empty
+    /// run — nothing was ever listed (e.g. a dataset with zero tables) and
+    /// nothing failed outright. Archiving must be skipped (there is no
+    /// positive evidence of tables to archive against) and the status must
+    /// be `"idle"`, not `"failed"` — an empty-but-accessible dataset is not
+    /// an error, even though the caller still gets an informational
+    /// `error_message` back so `CatalogIndexResult` reflects that nothing
+    /// was indexed this run.
+    #[test]
+    fn genuinely_empty_run_skips_archiving_and_resolves_to_idle() {
+        let dataset_outcome = fold_table_outcomes("proj-1.ds_a", Vec::new());
+        let seen_any_table = !dataset_outcome.seen_table_ids.is_empty();
+
+        let run_outcome = resolve_run_outcome(
+            seen_any_table,
+            dataset_outcome.tables_indexed,
+            &dataset_outcome.table_errors,
+        );
+
+        assert!(
+            !run_outcome.archive,
+            "nothing was ever listed — archiving must be skipped"
+        );
+        assert_eq!(run_outcome.status, "idle");
+        assert_eq!(run_outcome.failure_reason, None);
+        assert_eq!(
+            run_outcome.error_message,
+            Some("No tables discovered — existing catalog preserved")
+        );
     }
 }
