@@ -115,7 +115,7 @@ fn size_classes(size: ButtonSize) -> &'static str {
 /// Button component matching DESIGN.md button specification.
 ///
 /// # Usage
-/// ```rust
+/// ```ignore
 /// // Primary button (default)
 /// <Button on:click=handler>"Save"</Button>
 ///
