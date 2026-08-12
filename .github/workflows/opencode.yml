@@ -31,6 +31,26 @@ jobs:
               timeout-minutes: 10
               env:
                   OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+                  # opencode defaults exactly two permissions to "ask":
+                  # external_directory and doom_loop. Everything else defaults
+                  # to "allow". In CI there is no human to answer an "ask"
+                  # prompt, so it blocks until the step timeout above kills
+                  # the job with no review produced (KYO-333, PR #315: the
+                  # bot tried to read a sibling repo path and hung 9m26s).
+                  # "deny" instead returns an immediate refusal the model can
+                  # read and reason past, so the review continues. Set here
+                  # via OPENCODE_CONFIG_CONTENT (CI-scoped env), not a
+                  # repo-root opencode.json, so local opencode use in this
+                  # repo is unaffected — developers legitimately need to
+                  # read sibling repos (see CLAUDE.md "Where things live").
+                  OPENCODE_CONFIG_CONTENT: |
+                      {
+                        "$schema": "https://opencode.ai/config.json",
+                        "permission": {
+                          "external_directory": "deny",
+                          "doom_loop": "deny"
+                        }
+                      }
               with:
                   model: openrouter/xiaomi/mimo-v2.5
                   prompt: |
