@@ -10,9 +10,9 @@
 #   4. schema-parity (fast — only compiles kyomi-core, not the workspace) —
 #      diffs the Postgres and SQLite migration chains' resulting schemas;
 #      needs its own postgres service (KYO-206)
-#   5. clippy (slow) — full workspace clippy + compilation check + unit and
-#      integration tests (apps/server/tests/ — needs the postgres service
-#      below; KYO-236)
+#   5. clippy (slow) — full workspace clippy + compilation check + unit
+#      tests, integration tests, and doctests (apps/server/tests/ — needs
+#      the postgres service below; KYO-236)
 #   6. ssr-contract-tests (slow, runs parallel to clippy — see the job's own
 #      comment for why it's a separate job rather than a step tacked onto
 #      clippy) — real trunk build of crates/kyomi-ui, then the SSR contract
@@ -390,6 +390,19 @@ jobs:
           # crates/kyomi-auth/src/test_pg.rs module docs.
           KYOMI_REQUIRE_POSTGRES_TESTS: "1"
         run: cargo test --locked --workspace --lib --bins --tests --exclude kyomi-desktop --exclude kyomi-datasource-server
+
+      # The step above passes explicit target flags (--lib --bins --tests),
+      # which excludes doctests entirely — cargo only compiles/runs them
+      # under --doc (or no target flags at all). That gap let a doc comment
+      # containing invalid standalone Rust (a Leptos view! example fenced as
+      # ```rust) sit broken on `pub fn Button` for months: a bare `cargo test
+      # --workspace` implicitly includes doctests among its default targets,
+      # and cargo test's default fail-fast behaviour aborts that run before
+      # most crates are reached (KYO-338, hit for real during KYO-286).
+      - name: cargo test (doctests)
+        env:
+          RUSTC_WRAPPER: ${{ env.SCCACHE_AVAILABLE == 'true' && 'sccache' || '' }}
+        run: cargo test --locked --workspace --doc --exclude kyomi-desktop --exclude kyomi-datasource-server
 
       - name: sccache stats
         if: always()
