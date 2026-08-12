@@ -2183,6 +2183,153 @@ visualize:
         assert!(additions >= 2, "expected at least 2 additions (modified + appended)");
         assert!(deletions >= 1, "expected at least 1 deletion (the modified line)");
     }
+
+    // ─── Postgres coverage (KYO-334) ────────────────────────────────────
+    //
+    // Every test above runs against `sqlite::memory:`, which only ever
+    // exercises the `Vec<u8>` BLOB bind arm for `knowledge_chunks.embedding`.
+    // `rechunk_document`'s Postgres arm binds `pgvector::Vector::from(embedding.clone())`
+    // directly (never routing through `embedding_compat::bytes_to_pg_vector`
+    // at all), a structurally different bind site from `learning_service.rs`'s
+    // helper-mediated one — and `Vector` only implements sqlx's `Encode` for
+    // Postgres, so a wrong bind here type-checks, does not error at query
+    // time, and silently corrupts the stored vector. This test writes
+    // through the real `rechunk_document` production function against a
+    // real Postgres+pgvector database and asserts cosine self-similarity
+    // between the stored embedding and the same embedding recomputed from
+    // the same input text, with a non-vacuity control asserting an
+    // unrelated embedding scores far from 1.0 — see `crate::test_pg` module
+    // docs for the harness.
+
+    /// Delete everything the rechunk-bind Postgres test inserted, scoped by
+    /// `workspace_id`/`dashboard_id`. `knowledge_chunks`/`knowledge_file_tables`
+    /// cascade off `dashboards.dashboard_id`, but are deleted explicitly
+    /// first for the same reason every other `cleanup_pg` in this crate
+    /// does. `dashboards.workspace_id`/`user_id` have no `ON DELETE CASCADE`,
+    /// so the dashboard row must go before `cleanup_workspace_and_users_pg`
+    /// deletes the workspace and owner.
+    async fn cleanup_rechunk_pg(pg: &sqlx::PgPool, workspace_id: &str, owner_user_id: &str, dashboard_id: &str) {
+        sqlx::query("DELETE FROM knowledge_chunks WHERE dashboard_id = $1")
+            .bind(dashboard_id)
+            .execute(pg)
+            .await
+            .expect("cleanup knowledge_chunks (postgres)");
+        sqlx::query("DELETE FROM knowledge_file_tables WHERE dashboard_id = $1")
+            .bind(dashboard_id)
+            .execute(pg)
+            .await
+            .expect("cleanup knowledge_file_tables (postgres)");
+        sqlx::query("DELETE FROM dashboards WHERE dashboard_id = $1")
+            .bind(dashboard_id)
+            .execute(pg)
+            .await
+            .expect("cleanup dashboards (postgres)");
+        sqlx::query("DELETE FROM sync_log WHERE workspace_id = $1")
+            .bind(workspace_id)
+            .execute(pg)
+            .await
+            .expect("cleanup sync_log (postgres)");
+        crate::test_pg::cleanup_workspace_and_users_pg(pg, workspace_id, &[owner_user_id]).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_rechunk_document_embedding_roundtrips_through_pgvector_bind() {
+        let test_name = "postgres_rechunk_document_embedding_roundtrips_through_pgvector_bind";
+        let Some(db) = crate::test_pg::postgres_test_pool_or_skip(test_name).await else {
+            return;
+        };
+        let pg = crate::test_pg::postgres_pool(&db);
+
+        let workspace_id = crate::test_pg::unique_test_id("ws");
+        let owner_id = crate::test_pg::unique_test_id("owner");
+        crate::test_pg::seed_user_pg(pg, &owner_id, &format!("{owner_id}@test.local")).await;
+        crate::test_pg::seed_workspace_pg(pg, &workspace_id, &owner_id).await;
+
+        let embed = EmbeddingService::new().expect("load embedding model");
+        let content = "Our nightly ETL job aggregates click-through rates from the \
+            marketing_events table and writes hourly rollups into the \
+            campaign_performance table. Analysts pull this data into ChartML \
+            dashboards to track conversion funnel drop-off by campaign_id.";
+
+        // embed=None so create_dashboard doesn't also spawn a background
+        // rechunk racing the explicit one below.
+        let dashboard_id = create_dashboard(
+            &db,
+            &owner_id,
+            &workspace_id,
+            "Bind coverage doc",
+            content,
+            DocType::Knowledge,
+            None,
+        )
+        .await
+        .expect("create_dashboard (postgres)");
+
+        rechunk_document(&db, &embed, &dashboard_id, content, &workspace_id)
+            .await
+            .expect("rechunk_document (postgres)");
+
+        let chunk_id: String = sqlx::query_scalar(
+            "SELECT id FROM knowledge_chunks WHERE dashboard_id = $1 ORDER BY chunk_index LIMIT 1",
+        )
+        .bind(&dashboard_id)
+        .fetch_one(pg)
+        .await
+        .expect("fetch chunk id");
+
+        // Same production embedding call `rechunk_document` made internally
+        // (`embed_passages`) for this single-chunk content — deterministic
+        // for identical input text, so this is "the same vector" the ticket
+        // requires, not a re-derivation of the bind logic under test.
+        let expected = embed
+            .embed_passages(&[content])
+            .expect("embed_passages (expected)")
+            .into_iter()
+            .next()
+            .expect("one embedding for one chunk");
+
+        let similarity: f64 = sqlx::query_scalar(
+            "SELECT 1 - (embedding <=> $1::vector) FROM knowledge_chunks WHERE id = $2",
+        )
+        .bind(pgvector::Vector::from(expected))
+        .bind(&chunk_id)
+        .fetch_one(pg)
+        .await
+        .expect("fetch embedding similarity");
+        assert!(
+            (similarity - 1.0).abs() < 1e-4,
+            "self-similarity should be ~1.0 for the same embedding, got {similarity}"
+        );
+
+        // Non-vacuity control: an unrelated chunk's embedding must not
+        // score near 1.0 against the stored vector — without this, the
+        // assertion above would pass equally well on a table of zeroes.
+        let unrelated = embed
+            .embed_passages(&[
+                "The Pacific Northwest rainforest receives over 100 inches of \
+                 rainfall annually, supporting old-growth Douglas fir and western \
+                 hemlock stands more than 500 years old. Coastal fog drip \
+                 contributes significantly to summer moisture during the dry season.",
+            ])
+            .expect("embed_passages (control)")
+            .into_iter()
+            .next()
+            .expect("one embedding for one control chunk");
+        let control_similarity: f64 = sqlx::query_scalar(
+            "SELECT 1 - (embedding <=> $1::vector) FROM knowledge_chunks WHERE id = $2",
+        )
+        .bind(pgvector::Vector::from(unrelated))
+        .bind(&chunk_id)
+        .fetch_one(pg)
+        .await
+        .expect("fetch control similarity");
+        assert!(
+            control_similarity < 0.5,
+            "unrelated embedding must not score near 1.0, got {control_similarity}"
+        );
+
+        cleanup_rechunk_pg(pg, &workspace_id, &owner_id, &dashboard_id).await;
+    }
 }
 
 // ─── Contract tests ─────────────────────────────────────────────────────────

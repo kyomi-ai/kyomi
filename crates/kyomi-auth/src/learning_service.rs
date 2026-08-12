@@ -1350,10 +1350,10 @@ pub async fn get_learning_by_id(
 // These exercise the SQLite arm of the blocks converted to shared
 // `sql_compat` helpers in KYO-195 (`save_learning`'s INSERT, the insight/
 // embedding UPDATE, and the reference_queries UPDATE). They are the
-// regression net for the SQLite side of that conversion — the Postgres
-// side (embedding bind via `pgvector::Vector`, `::learning_scope` enum
-// cast) cannot be exercised here and was verified by code inspection only;
-// see the KYO-195 summary for what remains unverified against real Postgres.
+// regression net for the SQLite side of that conversion. The Postgres side
+// (embedding bind via `pgvector::Vector`, `::learning_scope` enum cast) is
+// covered separately by the "Postgres coverage (KYO-334)" tests near the
+// end of this module, which run against a real Postgres+pgvector database.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1621,5 +1621,190 @@ mod tests {
                 .await
                 .expect("fetch raw reference_queries");
         assert!(raw.is_none(), "column must be SQL NULL, not the string \"null\"");
+    }
+
+    // ─── Postgres coverage (KYO-334) ───────────────────────────────────────
+    //
+    // Every test above runs `save_learning`/`update_learning` against
+    // `sqlite::memory:`, which only ever exercises the `Vec<u8>` BLOB bind
+    // arm for `agent_learnings.embedding`. `pgvector::Vector` implements
+    // sqlx's `Encode` for the Postgres backend only, so a wrong bind on
+    // that arm (e.g. binding raw bytes where a `Vector` is expected, or
+    // transposing two positional binds) type-checks, does not error at
+    // query time, and silently corrupts the stored vector — no panic, no
+    // failed query, just degraded vector-search relevance. These tests
+    // write through the real `save_learning`/`update_learning` production
+    // functions against a real Postgres+pgvector database and assert
+    // cosine self-similarity between the stored embedding and the same
+    // embedding recomputed from the same input text, with a non-vacuity
+    // control asserting an unrelated embedding scores far from 1.0 — see
+    // `crate::test_pg` module docs for the harness.
+
+    /// Seed the owner user and workspace together — every Postgres test in
+    /// this module needs both.
+    async fn seed_workspace_and_owner_pg(pg: &sqlx::PgPool, workspace_id: &str, owner_user_id: &str) {
+        crate::test_pg::seed_user_pg(pg, owner_user_id, &format!("{owner_user_id}@test.local"))
+            .await;
+        crate::test_pg::seed_workspace_pg(pg, workspace_id, owner_user_id).await;
+    }
+
+    /// Cosine self-similarity between `agent_learnings.embedding` at
+    /// `learning_id` and `expected`: `1 - (embedding <=> $1::vector)`,
+    /// which is `1.0` for an exact match (modulo pgvector's own storage
+    /// rounding) and drops the more the two vectors diverge.
+    async fn learning_embedding_similarity(pg: &sqlx::PgPool, learning_id: &str, expected: Vec<f32>) -> f64 {
+        sqlx::query_scalar(
+            "SELECT 1 - (embedding <=> $1::vector) FROM agent_learnings WHERE learning_id = $2",
+        )
+        .bind(Vector::from(expected))
+        .bind(learning_id)
+        .fetch_one(pg)
+        .await
+        .expect("fetch embedding similarity")
+    }
+
+    /// Delete everything a Postgres embedding-bind test in this module
+    /// inserted, scoped by `workspace_id`. `agent_learnings.workspace_id`
+    /// cascades on workspace delete, but this deletes it explicitly first
+    /// for the same reason every other `cleanup_pg` in this crate does —
+    /// see `docs/CODING_STANDARDS.md`'s "third copy is the extraction
+    /// trigger" rule for why `crate::test_pg::cleanup_workspace_and_users_pg`
+    /// only owns the tail every module's cleanup shares.
+    async fn cleanup_learning_pg(pg: &sqlx::PgPool, workspace_id: &str, owner_user_id: &str) {
+        sqlx::query("DELETE FROM agent_learnings WHERE workspace_id = $1")
+            .bind(workspace_id)
+            .execute(pg)
+            .await
+            .expect("cleanup agent_learnings (postgres)");
+        crate::test_pg::cleanup_workspace_and_users_pg(pg, workspace_id, &[owner_user_id]).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_save_learning_embedding_roundtrips_through_pgvector_bind() {
+        let test_name = "postgres_save_learning_embedding_roundtrips_through_pgvector_bind";
+        let Some(db) = crate::test_pg::postgres_test_pool_or_skip(test_name).await else {
+            return;
+        };
+        let pg = crate::test_pg::postgres_pool(&db);
+
+        let workspace_id = crate::test_pg::unique_test_id("ws");
+        let owner_id = crate::test_pg::unique_test_id("owner");
+        seed_workspace_and_owner_pg(pg, &workspace_id, &owner_id).await;
+
+        let embedding_svc = kyomi_embed::EmbeddingService::new().expect("load embedding model");
+        let insight = "Postgres bind coverage: always filter analytics queries by workspace_id";
+
+        let learning_id = save_learning(SaveLearningParams {
+            db: &db,
+            embedding_svc: &embedding_svc,
+            workspace_id: &workspace_id,
+            user_id: &owner_id,
+            session_id: "session-pg-1",
+            insight,
+            context: None,
+            scope: "workspace",
+            datasource_config_id: None,
+            learning_type: "learning",
+            reference_queries: None,
+            structured_metadata: None,
+        })
+        .await
+        .expect("save_learning (postgres)");
+
+        // Same production embedding call `save_learning` made internally —
+        // the model is deterministic for identical input text, so this is
+        // "the same vector" the ticket requires, not a re-derivation of the
+        // bind logic under test.
+        let expected = embedding_svc.embed_one(insight).expect("embed_one (expected)");
+        let similarity = learning_embedding_similarity(pg, &learning_id, expected).await;
+        assert!(
+            (similarity - 1.0).abs() < 1e-4,
+            "self-similarity should be ~1.0 for the same embedding, got {similarity}"
+        );
+
+        // Non-vacuity control: an unrelated insight's embedding must not
+        // score near 1.0 against the stored vector — without this, the
+        // assertion above would pass equally well on a table of zeroes.
+        let unrelated = embedding_svc
+            .embed_one("The quarterly bake sale raised money for the school library")
+            .expect("embed_one (control)");
+        let control_similarity = learning_embedding_similarity(pg, &learning_id, unrelated).await;
+        assert!(
+            control_similarity < 0.5,
+            "unrelated embedding must not score near 1.0, got {control_similarity}"
+        );
+
+        cleanup_learning_pg(pg, &workspace_id, &owner_id).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_update_learning_embedding_roundtrips_through_pgvector_bind() {
+        let test_name = "postgres_update_learning_embedding_roundtrips_through_pgvector_bind";
+        let Some(db) = crate::test_pg::postgres_test_pool_or_skip(test_name).await else {
+            return;
+        };
+        let pg = crate::test_pg::postgres_pool(&db);
+
+        let workspace_id = crate::test_pg::unique_test_id("ws");
+        let owner_id = crate::test_pg::unique_test_id("owner");
+        seed_workspace_and_owner_pg(pg, &workspace_id, &owner_id).await;
+
+        let embedding_svc = kyomi_embed::EmbeddingService::new().expect("load embedding model");
+        let original_insight = "Original insight before update";
+
+        let learning_id = save_learning(SaveLearningParams {
+            db: &db,
+            embedding_svc: &embedding_svc,
+            workspace_id: &workspace_id,
+            user_id: &owner_id,
+            session_id: "session-pg-2",
+            insight: original_insight,
+            context: None,
+            scope: "workspace",
+            datasource_config_id: None,
+            learning_type: "learning",
+            reference_queries: None,
+            structured_metadata: None,
+        })
+        .await
+        .expect("save_learning (postgres)");
+
+        let updated_insight = "A completely different insight about join ordering in SQL Server";
+        update_learning(
+            &db,
+            &embedding_svc,
+            &learning_id,
+            &workspace_id,
+            &LearningUpdates {
+                insight: Some(updated_insight.to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("update_learning (postgres)");
+
+        // Same production embedding call `update_learning` made internally
+        // for the new insight text.
+        let expected = embedding_svc
+            .embed_one(updated_insight)
+            .expect("embed_one (expected)");
+        let similarity = learning_embedding_similarity(pg, &learning_id, expected).await;
+        assert!(
+            (similarity - 1.0).abs() < 1e-4,
+            "self-similarity should be ~1.0 for the updated embedding, got {similarity}"
+        );
+
+        // Non-vacuity control: an unrelated embedding must not score near
+        // 1.0 against the row `update_learning` just rewrote.
+        let unrelated = embedding_svc
+            .embed_one("The neighborhood cat show is next Saturday at the community center")
+            .expect("embed_one (control)");
+        let control_similarity = learning_embedding_similarity(pg, &learning_id, unrelated).await;
+        assert!(
+            control_similarity < 0.5,
+            "unrelated embedding must not score near 1.0, got {control_similarity}"
+        );
+
+        cleanup_learning_pg(pg, &workspace_id, &owner_id).await;
     }
 }
