@@ -900,3 +900,17 @@ assert_eq!(counts.get("session-a"), Some(&3));
 ```
 
 Flagged as 🟡 in KYO-292 (2026-08-09): `postgres_fetch_session_counts_counts_messages_and_pinned` (`crates/kyomi-auth/src/chat_service.rs`) and `postgres_fetch_member_counts_counts_only_active_members` (`crates/kyomi-auth/src/workspace_service.rs`) both looked up only their own seeded ids and both survived the `AND`→`OR` mutation traced above, while the two sibling tests in the same diff that did assert `.len()` did not. This is the test-side counterpart of *`workspace_id` is not an authorization boundary* above — the query returns more than the requester may see, and every assertion still passes.
+
+## Version Control & Working Tree
+
+*Standards for reasoning about repo state before drawing conclusions from it.*
+
+### Never draw conclusions about repo state from a working tree you have not verified is current
+
+A stale checkout is indistinguishable from a real defect when you only look at the working tree. A file mode that reads `100644` instead of `100755`, a file that appears missing, a config block that isn't there, a hook that "was never wired up" — every one of these reads identically whether the repo genuinely lacks the thing or your clone is simply behind. The working tree cannot tell you which case you're in; only comparing it against the remote can.
+
+**Rule:** before filing a bug, writing a ticket, or asserting that something is missing, unenforced, or unimplemented based on what you see in a checkout, run `git fetch origin main` and `git rev-list --left-right --count main...origin/main`. A non-zero right-hand number means the checkout is behind, and every conclusion drawn from it is provisional until you either update the tree or account for the drift. State the divergence in the ticket, or say explicitly that the tree was verified current.
+
+This compounds with the repo-layout hazard already documented in `CLAUDE.md`: a `grep` limited to `~/repos/kyomi` misses code that lives in `kyomi-connect`, `chartml`, or the other sibling repos. It's the same failure shape — concluding *absence* from an incomplete view, whether the gap is a stale local branch or a repo boundary you didn't search across.
+
+Real precedent: KYO-372 was filed at priority 2 on 2026-08-12, claiming `.githooks/pre-commit` was committed non-executable so the mandatory review-signature gate had never run in any clone. It was cancelled: `origin/main` had the file at `100755` since PR #329 (KYO-358) merged 2026-08-10. The reporting tree was 10 commits behind. Cost: a wrong `agent-ready` ticket, which costs a whole subsequent agent run to triage and cancel. Tracked as KYO-373.
