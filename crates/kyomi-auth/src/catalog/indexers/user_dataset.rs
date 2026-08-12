@@ -68,6 +68,7 @@ impl UserDatasetIndexer {
                 "processed": 0,
             })),
             None,
+            &[],
         )
         .await;
 
@@ -127,6 +128,7 @@ impl UserDatasetIndexer {
                             "idle",
                             None,
                             None,
+                            &[],
                         )
                         .await;
 
@@ -159,6 +161,7 @@ impl UserDatasetIndexer {
                     "tables_indexed": tables_indexed,
                 })),
                 None,
+                &[],
             )
             .await;
         }
@@ -198,6 +201,7 @@ impl UserDatasetIndexer {
             outcome.status,
             None,
             outcome.failure_reason.as_deref(),
+            &errors,
         )
         .await;
 
