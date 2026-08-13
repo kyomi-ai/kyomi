@@ -626,6 +626,14 @@ Gating the row is not sufficient on its own: any `JOIN`ed metadata pulled alongs
 
 Flagged in KYO-182: the agent's system-prompt document list (`build_documents_text`) selected every dashboard in the workspace with only `WHERE d.workspace_id = $1`, so every member's private document titles, collection names, and update times were injected into every other member's chat and freely recited by the agent — while `search_dashboards` and the dashboards page were correctly filtered. The first fix pass gated which documents appeared but left the joined collection name unfiltered, still leaking a private collection's name for any document that also had a visible membership. Same root cause as KYO-172 (sync-engine leak): a code path that reads `dashboards` (and its joined metadata) outside the shared visibility check.
 
+### A helper that looks like a security control but has no caller is worse than no helper
+
+`mask_credentials(&value, ds_type)` reads like the thing that stops secrets reaching an API response, and the registry arrays it consults (`sensitive_credential_fields`, `AuthModeConfig.sensitive_fields`) read like the configuration that drives it. Nothing calls any of it outside its own tests. The harm is not the missing call — it is that the function's existence answers "is this masked?" for the next engineer, who then builds a new datasource-listing endpoint without masking because it looks handled. A test that pins the array's contents makes the whole apparatus look wired up and load-bearing while proving only that a constant equals itself.
+
+**Rule:** Before treating a function or a registry array as a security control — and before accepting a ticket that says one is broken — grep for its production callers (`grep -rln "<name>" crates apps`) and name the live path that reaches it. If there are none, say so plainly: the change is a metadata-consistency fix, not a fix to a live exposure, and neither the PR nor the ticket may describe it as one. Metadata no code reads should be deleted or wired up, not silently corrected in place; if it must survive, back it with a check that executes the consumer rather than a test that pins the value.
+
+Flagged as 🔴 in KYO-330 (2026-08-08): `crates/kyomi-auth/src/credential_service.rs:40` has zero production callers, so the ticket's premise ("any API response that runs Snowflake credentials through `mask_credentials` returns the PEM private key unmasked") described a path that does not exist. The actual live return path, `get_datasource_settings_detail` → `client_safe_user_settings` (`datasource_service.rs:1603-1613`), is an unrelated hardcoded default-deny allowlist that already excluded `private_key`, added a month earlier by `1949b555c` (KYO-130). The ticket was re-titled and de-prioritised rather than shipped as a security fix, and KYO-332 tracks deleting or wiring the inert metadata. The same week, KYO-274 removed a Synapse `oauth` `AuthModeConfig` entry that no code consumed — the UI never offered it and `synapse_oauth_source` had no arm for it, so it would have silently fallen through to the SQL username/password branch had anyone selected it.
+
 ## Code Organization
 
 *Standards for module structure, imports, shared utilities, and avoiding duplication.*
@@ -847,3 +855,48 @@ If a test already asserts `assert_eq!(actual, "the exact expected string")`, eve
 **Rule:** Don't stack a substring guard behind an exact-equality assertion on the same value. Either assert equality alone, or — if the substring is the real invariant and the exact string is incidental — assert the substring against something the equality does not already pin, such as a *different* value (`assert!(!other_field.contains(X))`) or a compile-time property of the constant itself (`assert!(!WRAP_UP_FAILED_MESSAGE.contains("cancelled"))`, which pins a constant a future reword could silently break). When reviewing, evaluate the pair, not each line in isolation.
 
 Flagged in the KYO-344 cycle-2 review (2026-08-10): the pair at `crates/kyomi-agent/src/agent.rs:1920` was mutation-tested three ways and the `!contains` guard was proven dead both before and after the change under review — reasoning alone had concluded the opposite.
+
+### A test that never ran is not a passing test — make the skip fail where it matters
+
+Two mechanisms remove a test from a run while the run still reports green. A test that skips at runtime (`let Some(pool) = connect().await else { eprintln!("SKIP: ..."); return; }`) *passes*, and the default harness captures and discards stderr for passing tests — the `SKIP:` line is invisible unless someone passes `--nocapture`/`--show-output`, which CI does not. A test behind a feature gate (`#[cfg(all(test, feature = "ssr"))]`) is not compiled at all without that feature, and the suite still exits `ok` with a healthy-looking count made up entirely of other tests. In both cases the reported total is true and the conclusion drawn from it is false, and nothing will ever surface the gap.
+
+**Rule:** A test that can decline to run must fail loudly in the environment that is supposed to run it. Gate the skip on an explicit env var CI sets — panic naming the variable, the test, and the underlying error when it is set; skip when it is unset, so a local run without the container still works. When reporting a test count for a feature-gated suite, name the feature and confirm the specific new test names appear in the output (grep the run for them) rather than quoting a total. Never call a skip "visible" until you have watched it under the exact command CI runs.
+
+```bash
+# WRONG — passes, prints nothing, proves nothing
+$ cargo test --locked --workspace --lib --bins --tests   # SKIP: line captured and discarded
+test result: ok. 672 passed; 0 failed
+
+# RIGHT — CI sets the var, so a Postgres-arm test that cannot connect fails the job
+$ KYOMI_REQUIRE_POSTGRES_TESTS=1 cargo test -p kyomi-auth --locked --lib -- postgres_
+#   → panics naming KYOMI_REQUIRE_POSTGRES_TESTS, the test, and the connection error
+$ cargo test -p kyomi-auth --locked --lib -- postgres_   # var unset, local dev
+#   → SKIP: lines, run still green
+```
+
+Flagged as 🟡 in KYO-292 (2026-08-09): `crates/kyomi-auth/src/test_pg.rs`'s module doc claimed the skip was made "visible … rather than silent, because a Postgres-arm test that always reports success without ever running the Postgres arm is worse than no test" — the intent was right and the mechanism did not deliver it, since `ci.yml`'s `cargo test --locked --workspace --lib --bins --tests …` passes neither capture flag. Fixed by having `postgres_test_pool_or_skip` panic under `KYOMI_REQUIRE_POSTGRES_TESTS=1`, which the CI job now sets alongside its `pgvector` service; both branches were then reproduced against a dead `DATABASE_URL`. The feature-gate half was flagged in KYO-278 (2026-08-08): the new `#[cfg(all(test, feature = "ssr"))]` regression tests are invisible without `--features ssr` while `kyomi-ui` still runs 161 other tests green — and the reviewer's own first pass mis-read a truncated log as "the crate compiles zero tests without ssr," a stronger claim than the evidence supported.
+
+### Deleting a file means accounting for every test in its `#[cfg(test)] mod tests`
+
+When a duplicate implementation is deleted, its functions get ported because callers need them; its test module goes down with the file because nothing references it. Some of those tests are not about the layer being deleted at all — they pin security properties or data-compatibility guarantees of code that survives, and they have no equivalent anywhere else. Nothing fails when they vanish: the suite gets smaller and stays green, and the loss is discoverable only by reading a file that no longer exists.
+
+**Rule:** Before deleting a file, enumerate every `fn` in its test module and give each one an explicit disposition — ported (say where), or already covered (name the specific test and confirm it actually asserts the same property). "Covered elsewhere" is a claim to verify, not an assumption. Establish that the module is exhausted by reading it end to end rather than spot-checking, and mutation-test each ported test in its new home: a test that changed crates may have picked up a different fixture or a differently-flavoured runtime.
+
+Flagged across all three cycles of KYO-286 (2026-08-09), which deleted `apps/server/src/routes/auth_passkeys.rs` — 1645 lines whose `mod tests` ran from line 1427 to EOF and held 9 tests. Cycle 1 🔴: the two KYO-215 tests on `lookup_recovery_user` (a DB failure logs `error!` without the requester's email; an absent user logs nothing, so the two enumeration-resistant outcomes stay distinguishable to operators but not to callers) were dropped even though the function itself was ported verbatim into `crates/kyomi-auth/src/auth_service.rs`. Cycle 2 🟡: `deserialize_migrated_passkey_json`, guarding that Python-migration passkey JSON still deserializes under `webauthn-rs`, was orphaned with no equivalent anywhere in the tree. The six `require_purpose_*` tests were the one honest "covered elsewhere" case — `webauthn_challenge_purpose.rs` tests `has_purpose` directly and `auth_service.rs` exercises purpose binding end to end — but that took checking, not assuming. Only a line-by-line accounting in cycle 3 established the module was exhausted.
+
+### A test that reads back only its own seeded rows cannot catch a widened filter
+
+A test that seeds two sessions, calls `fetch_session_counts(&[a, b])`, and asserts `counts[a] == 3` proves the rows it seeded are found. It says nothing about what else came back. Widen the query's `WHERE session_id = ANY($1)` to `... OR pinned = true` and every assertion still passes — the seeded ids already matched the id-list clause — while the caller now receives every other tenant's rows. That is exactly the shape of a scoping bug, and it is the one shape this kind of test structurally cannot see.
+
+**Rule:** Any test over a query whose correctness depends on a filter must assert the *size* of the result, not merely the presence of the rows it seeded, with a message naming the leak the assertion exists to catch. Mutate the filter to the *widened* form (`AND` → `OR`) rather than to a broken one — a mutation that empties the result is killed by any assertion at all and proves nothing about scoping.
+
+```rust
+// WRONG — survives WHERE session_id = ANY($1) OR pinned = true
+assert_eq!(counts.get("session-a"), Some(&3));
+
+// RIGHT — the widened filter now fails on the count
+assert_eq!(counts.len(), 2, "query must return only the requested sessions; an AND→OR widening would leak other workspaces' rows");
+assert_eq!(counts.get("session-a"), Some(&3));
+```
+
+Flagged as 🟡 in KYO-292 (2026-08-09): `postgres_fetch_session_counts_counts_messages_and_pinned` (`crates/kyomi-auth/src/chat_service.rs`) and `postgres_fetch_member_counts_counts_only_active_members` (`crates/kyomi-auth/src/workspace_service.rs`) both looked up only their own seeded ids and both survived the `AND`→`OR` mutation traced above, while the two sibling tests in the same diff that did assert `.len()` did not. This is the test-side counterpart of *`workspace_id` is not an authorization boundary* above — the query returns more than the requester may see, and every assertion still passes.
