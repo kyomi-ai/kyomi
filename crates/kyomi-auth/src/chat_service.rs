@@ -2515,16 +2515,51 @@ mod tests {
         .expect("insert chat session");
     }
 
-    async fn seed_chat_message(sq: &sqlx::SqlitePool, message_id: &str, session_id: &str) {
+    /// Seed a `chat_messages` row, with control over `pinned` and
+    /// `created_at` for tests that need to construct a specific message
+    /// ordering (e.g. unread-count cutoff calculations). Pass `None` for
+    /// `created_at` to let it default to "now".
+    async fn seed_chat_message(
+        sq: &sqlx::SqlitePool,
+        message_id: &str,
+        session_id: &str,
+        pinned: bool,
+        created_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) {
+        let created_at = created_at.unwrap_or_else(Utc::now);
         sqlx::query(
-            "INSERT INTO chat_messages (message_id, session_id, role, content) \
-             VALUES ($1, $2, 'assistant', '')",
+            "INSERT INTO chat_messages (message_id, session_id, role, content, pinned, created_at) \
+             VALUES ($1, $2, 'assistant', '', $3, $4)",
         )
         .bind(message_id)
         .bind(session_id)
+        .bind(pinned)
+        .bind(created_at)
         .execute(sq)
         .await
         .expect("insert chat message");
+    }
+
+    /// Seed a `conversation_read_status` row (the id column is
+    /// autoincrement/`nextval`-defaulted on both backends, so it is omitted
+    /// here). Pass `None` for `last_read_message_id` to cover the
+    /// never-read branch of the unread-count calculation.
+    async fn seed_read_status(
+        sq: &sqlx::SqlitePool,
+        session_id: &str,
+        user_id: &str,
+        last_read_message_id: Option<&str>,
+    ) {
+        sqlx::query(
+            "INSERT INTO conversation_read_status (session_id, user_id, last_read_message_id) \
+             VALUES ($1, $2, $3)",
+        )
+        .bind(session_id)
+        .bind(user_id)
+        .bind(last_read_message_id)
+        .execute(sq)
+        .await
+        .expect("insert conversation_read_status");
     }
 
     #[tokio::test]
@@ -2540,7 +2575,7 @@ mod tests {
             SeedSession::new("session-1", "user-1", "ws-1", "Test session"),
         )
         .await;
-        seed_chat_message(sq, "message-1", "session-1").await;
+        seed_chat_message(sq, "message-1", "session-1", false, None).await;
 
         let mut full_texts = std::collections::HashMap::new();
         full_texts.insert(
@@ -3153,6 +3188,301 @@ mod tests {
         );
     }
 
+    // ─── KYO-342: get_user_sessions / search_sessions coverage ─────────────
+    //
+    // `get_user_sessions` and `search_sessions` had zero tests on either
+    // backend before this. The highest-value gap is the unread-count
+    // calculation (`chat_service.rs:583-630`): a dual-backend code path
+    // (Postgres UNNEST-join vs. SQLite N-query loop) that KYO-292 did not
+    // touch, reachable only for a shared session owned by a *different*
+    // user than the one listing sessions.
+
+    #[tokio::test]
+    async fn get_user_sessions_computes_unread_counts_for_shared_sessions_on_sqlite() {
+        let db = test_pool().await;
+        seed_two_member_workspace(&db).await;
+        let sq = sqlite_pool(&db);
+
+        // user-a owns all three sessions; user-b is the viewer whose unread
+        // counts get computed. All three are shared so the unread-count
+        // path in `get_user_sessions` is reached at all.
+        seed_chat_session(
+            sq,
+            SeedSession::new("sess-unread", "user-a", "ws-1", "Unread").shared(true),
+        )
+        .await;
+        seed_chat_session(
+            sq,
+            SeedSession::new("sess-read", "user-a", "ws-1", "Read").shared(true),
+        )
+        .await;
+        seed_chat_session(
+            sq,
+            SeedSession::new("sess-never", "user-a", "ws-1", "Never").shared(true),
+        )
+        .await;
+
+        // Out-of-scope rows the WHERE clause (`cs.session_type = $1 AND
+        // (cs.user_id = $2 OR (cs.shared = true AND cs.workspace_id = $3))`)
+        // must exclude, so the `len() == 3` assertion below is load-bearing
+        // rather than vacuous — see docs/CODING_STANDARDS.md "A test that
+        // reads back only its own seeded rows cannot catch a widened
+        // filter". Without rows like these, an `AND` -> `OR` widening of
+        // that clause has nothing to leak and every assertion still passes.
+        seed_user(sq, "user-c", "c@test.local").await;
+        seed_workspace(sq, "ws-other", "user-c").await;
+
+        // Different workspace, shared -- excluded by `cs.workspace_id = $3`.
+        seed_chat_session(
+            sq,
+            SeedSession::new(
+                "sess-other-workspace",
+                "user-c",
+                "ws-other",
+                "Other Workspace Shared",
+            )
+            .shared(true),
+        )
+        .await;
+        seed_chat_message(sq, "other-workspace-m1", "sess-other-workspace", false, None).await;
+
+        // Same workspace, another user's private (non-shared) session --
+        // excluded because it satisfies neither `cs.user_id = $2` (the
+        // viewer is user-b) nor the shared-in-workspace branch.
+        seed_chat_session(
+            sq,
+            SeedSession::new(
+                "sess-other-user-private",
+                "user-c",
+                "ws-1",
+                "Other User Private",
+            ),
+        )
+        .await;
+        seed_chat_message(
+            sq,
+            "other-user-private-m1",
+            "sess-other-user-private",
+            false,
+            None,
+        )
+        .await;
+
+        let t1 = chrono::Utc.with_ymd_and_hms(2026, 3, 15, 9, 0, 0).unwrap();
+        let t2 = chrono::Utc.with_ymd_and_hms(2026, 3, 15, 9, 5, 0).unwrap();
+        let t3 = chrono::Utc.with_ymd_and_hms(2026, 3, 15, 9, 10, 0).unwrap();
+
+        // sess-unread: 3 messages (1 pinned), viewer has read through m2 ->
+        // m3 is the only unread message.
+        seed_chat_message(sq, "unread-m1", "sess-unread", true, Some(t1)).await;
+        seed_chat_message(sq, "unread-m2", "sess-unread", false, Some(t2)).await;
+        seed_chat_message(sq, "unread-m3", "sess-unread", false, Some(t3)).await;
+        seed_read_status(sq, "sess-unread", "user-b", Some("unread-m2")).await;
+
+        // sess-read: 2 messages, viewer's last-read message is the newest
+        // one -> zero messages are strictly newer than the cutoff.
+        seed_chat_message(sq, "read-m1", "sess-read", false, Some(t1)).await;
+        seed_chat_message(sq, "read-m2", "sess-read", false, Some(t2)).await;
+        seed_read_status(sq, "sess-read", "user-b", Some("read-m2")).await;
+
+        // sess-never: 2 messages, no conversation_read_status row for the
+        // viewer at all -> falls into never_read_sessions.
+        seed_chat_message(sq, "never-m1", "sess-never", false, Some(t1)).await;
+        seed_chat_message(sq, "never-m2", "sess-never", false, Some(t2)).await;
+
+        let sessions = get_user_sessions(&db, "user-b", "ws-1", 50, 0, false, "chat")
+            .await
+            .expect("get_user_sessions must succeed on sqlite");
+
+        assert_eq!(
+            sessions.len(),
+            3,
+            "exactly the 3 seeded sessions must come back — a weakened WHERE clause \
+             (e.g. AND turned to OR) would leak sess-other-workspace (a different \
+             workspace's shared session) or sess-other-user-private (another user's \
+             private session in this workspace) into this result: {sessions:?}"
+        );
+
+        let by_id: std::collections::HashMap<&str, &SessionListItem> =
+            sessions.iter().map(|s| (s.session_id.as_str(), s)).collect();
+
+        assert!(
+            !by_id.contains_key("sess-other-workspace"),
+            "a shared session belonging to a different workspace must be excluded; \
+             got sessions: {sessions:?}"
+        );
+        assert!(
+            !by_id.contains_key("sess-other-user-private"),
+            "another user's private (non-shared) session in this workspace must be \
+             excluded; got sessions: {sessions:?}"
+        );
+
+        let unread = by_id
+            .get("sess-unread")
+            .expect("a shared session owned by another user must be listed for the viewer");
+        assert_eq!(
+            unread.message_count, 3,
+            "fetch_session_counts regression: expected 3 messages, got {unread:?}"
+        );
+        assert_eq!(
+            unread.pinned_count, 1,
+            "fetch_session_counts regression: expected 1 pinned message, got {unread:?}"
+        );
+        assert_eq!(
+            unread.unread_count, 1,
+            "the SQLite N-query unread arm must count only messages strictly newer than \
+             the viewer's last-read message (created_at > cutoff); got {unread:?}"
+        );
+
+        let read = by_id
+            .get("sess-read")
+            .expect("a shared session owned by another user must be listed for the viewer");
+        assert_eq!(read.message_count, 2, "got {read:?}");
+        assert_eq!(read.pinned_count, 0, "got {read:?}");
+        assert_eq!(
+            read.unread_count, 0,
+            "a fully-read shared session (cutoff == newest message) must report zero \
+             unread messages; got {read:?}"
+        );
+
+        let never = by_id
+            .get("sess-never")
+            .expect("a shared session owned by another user must be listed for the viewer");
+        assert_eq!(never.message_count, 2, "got {never:?}");
+        assert_eq!(never.pinned_count, 0, "got {never:?}");
+        assert_eq!(
+            never.unread_count, never.message_count,
+            "a session with no conversation_read_status row for the viewer must fall into \
+             never_read_sessions and report the full message_count as unread; got {never:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_sessions_filters_by_title_match_and_hardcoded_chat_session_type_on_sqlite() {
+        let db = test_pool().await;
+        seed_two_member_workspace(&db).await;
+        let sq = sqlite_pool(&db);
+
+        seed_chat_session(
+            sq,
+            SeedSession::new("sess-match", "user-a", "ws-1", "Quarterly Revenue Report"),
+        )
+        .await;
+        seed_chat_session(
+            sq,
+            SeedSession::new("sess-nomatch", "user-a", "ws-1", "Random Notes"),
+        )
+        .await;
+        // Title matches the query, but session_type is not 'chat' —
+        // search_sessions hardcodes that filter, so this must be excluded.
+        seed_chat_session(
+            sq,
+            SeedSession::new("sess-wrong-type", "user-a", "ws-1", "Revenue Watch Alert")
+                .session_type("watch"),
+        )
+        .await;
+
+        // Out-of-scope rows the WHERE clause (`(cs.user_id = $1 OR
+        // (cs.shared = true AND cs.workspace_id = $2)) AND cs.session_type
+        // = 'chat' AND {ilike_expr}`) must exclude, so the `len() == 1`
+        // assertion below is load-bearing rather than vacuous — see
+        // docs/CODING_STANDARDS.md "A test that reads back only its own
+        // seeded rows cannot catch a widened filter". Both titles match the
+        // "Revenue" query, so an `AND` -> `OR` widening of the scoping
+        // clause (not the title filter) is what these catch.
+        seed_user(sq, "user-c", "c@test.local").await;
+        seed_workspace(sq, "ws-other", "user-c").await;
+
+        // Different workspace, shared -- excluded by `cs.workspace_id = $2`.
+        seed_chat_session(
+            sq,
+            SeedSession::new(
+                "sess-other-workspace",
+                "user-c",
+                "ws-other",
+                "Revenue Forecast Shared",
+            )
+            .shared(true),
+        )
+        .await;
+        seed_chat_message(sq, "other-workspace-m1", "sess-other-workspace", false, None).await;
+
+        // Same workspace, another user's private (non-shared) session --
+        // excluded because it satisfies neither `cs.user_id = $1` (the
+        // caller is user-a) nor the shared-in-workspace branch.
+        seed_chat_session(
+            sq,
+            SeedSession::new(
+                "sess-other-user-private",
+                "user-c",
+                "ws-1",
+                "Revenue Notes Private",
+            ),
+        )
+        .await;
+        seed_chat_message(
+            sq,
+            "other-user-private-m1",
+            "sess-other-user-private",
+            false,
+            None,
+        )
+        .await;
+
+        seed_chat_message(sq, "match-m1", "sess-match", true, None).await;
+        seed_chat_message(sq, "match-m2", "sess-match", false, None).await;
+
+        let results = search_sessions(&db, "user-a", "ws-1", "Revenue", 50)
+            .await
+            .expect("search_sessions must succeed on sqlite");
+
+        assert_eq!(
+            results.len(),
+            1,
+            "exactly the 1 title-matching chat session must come back — a weakened WHERE \
+             clause (e.g. AND turned to OR) would leak the non-matching or wrong-session-type \
+             sessions, or sess-other-workspace (a different workspace's shared session, also \
+             title-matching) or sess-other-user-private (another user's private session in \
+             this workspace, also title-matching) into this result: {results:?}"
+        );
+
+        let by_id: std::collections::HashMap<&str, &SessionListItem> =
+            results.iter().map(|s| (s.session_id.as_str(), s)).collect();
+
+        let matched = by_id
+            .get("sess-match")
+            .expect("a chat session whose title contains the query must be returned");
+        assert_eq!(
+            matched.message_count, 2,
+            "got {matched:?}, results: {results:?}"
+        );
+        assert_eq!(
+            matched.pinned_count, 1,
+            "got {matched:?}, results: {results:?}"
+        );
+
+        assert!(
+            !by_id.contains_key("sess-nomatch"),
+            "a session whose title does not contain the query must be excluded; \
+             got results: {results:?}"
+        );
+        assert!(
+            !by_id.contains_key("sess-wrong-type"),
+            "search_sessions hardcodes session_type = 'chat'; a title match on a \
+             non-chat session must still be excluded; got results: {results:?}"
+        );
+        assert!(
+            !by_id.contains_key("sess-other-workspace"),
+            "a title-matching shared session belonging to a different workspace must be \
+             excluded; got results: {results:?}"
+        );
+        assert!(
+            !by_id.contains_key("sess-other-user-private"),
+            "a title-matching private (non-shared) session owned by another user in this \
+             workspace must be excluded; got results: {results:?}"
+        );
+    }
+
     // ─── Postgres coverage (KYO-292) ───────────────────────────────────────
     //
     // Every test above runs against `sqlite::memory:`, so `fetch_session_counts`
@@ -3168,18 +3498,42 @@ mod tests {
         session_id: &str,
         user_id: &str,
         workspace_id: &str,
+        shared: bool,
     ) {
         sqlx::query(
             "INSERT INTO chat_sessions \
              (session_id, user_id, workspace_id, title, model, session_type, shared) \
-             VALUES ($1, $2, $3, 'Title', 'test-model', 'chat', false)",
+             VALUES ($1, $2, $3, 'Title', 'test-model', 'chat', $4)",
         )
         .bind(session_id)
         .bind(user_id)
         .bind(workspace_id)
+        .bind(shared)
         .execute(pg)
         .await
         .expect("insert chat session (postgres)");
+    }
+
+    /// Seed a `conversation_read_status` row (the `id` column is
+    /// `nextval`-defaulted on Postgres, so it is omitted here). Pass `None`
+    /// for `last_read_message_id` to cover the never-read branch of the
+    /// unread-count calculation.
+    async fn seed_read_status_pg(
+        pg: &sqlx::PgPool,
+        session_id: &str,
+        user_id: &str,
+        last_read_message_id: Option<&str>,
+    ) {
+        sqlx::query(
+            "INSERT INTO conversation_read_status (session_id, user_id, last_read_message_id) \
+             VALUES ($1, $2, $3)",
+        )
+        .bind(session_id)
+        .bind(user_id)
+        .bind(last_read_message_id)
+        .execute(pg)
+        .await
+        .expect("insert conversation_read_status (postgres)");
     }
 
     async fn seed_chat_message_pg(
@@ -3204,9 +3558,19 @@ mod tests {
 
     /// Delete everything a Postgres test in this module inserted, scoped by
     /// `workspace_id`, so repeated local runs against this worktree's
-    /// persistent test database don't accumulate rows. FK order: messages
-    /// -> sessions -> workspace -> user.
-    async fn cleanup_pg(pg: &sqlx::PgPool, workspace_id: &str, user_id: &str) {
+    /// persistent test database don't accumulate rows. Takes a slice of
+    /// user ids because the unread-count fixtures need both an owner and a
+    /// viewer. FK order: read_status/messages -> sessions -> workspace ->
+    /// users.
+    async fn cleanup_pg(pg: &sqlx::PgPool, workspace_id: &str, user_ids: &[&str]) {
+        sqlx::query(
+            "DELETE FROM conversation_read_status WHERE session_id IN \
+             (SELECT session_id FROM chat_sessions WHERE workspace_id = $1)",
+        )
+        .bind(workspace_id)
+        .execute(pg)
+        .await
+        .expect("cleanup conversation_read_status (postgres)");
         sqlx::query(
             "DELETE FROM chat_messages WHERE session_id IN \
              (SELECT session_id FROM chat_sessions WHERE workspace_id = $1)",
@@ -3220,7 +3584,7 @@ mod tests {
             .execute(pg)
             .await
             .expect("cleanup chat_sessions (postgres)");
-        crate::test_pg::cleanup_workspace_and_users_pg(pg, workspace_id, &[user_id]).await;
+        crate::test_pg::cleanup_workspace_and_users_pg(pg, workspace_id, user_ids).await;
     }
 
     #[tokio::test]
@@ -3238,8 +3602,8 @@ mod tests {
 
         crate::test_pg::seed_user_pg(pg, &user_id, &format!("{user_id}@test.local")).await;
         crate::test_pg::seed_workspace_pg(pg, &workspace_id, &user_id).await;
-        seed_chat_session_pg(pg, &session_a, &user_id, &workspace_id).await;
-        seed_chat_session_pg(pg, &session_b, &user_id, &workspace_id).await;
+        seed_chat_session_pg(pg, &session_a, &user_id, &workspace_id, false).await;
+        seed_chat_session_pg(pg, &session_b, &user_id, &workspace_id, false).await;
 
         // session_a: 3 messages, 1 pinned. session_b: 2 messages, 0 pinned.
         seed_chat_message_pg(pg, &format!("{session_a}-m1"), &session_a, true, None).await;
@@ -3275,7 +3639,7 @@ mod tests {
         assert_eq!(b.message_count, 2);
         assert_eq!(b.pinned_count, 0);
 
-        cleanup_pg(pg, &workspace_id, &user_id).await;
+        cleanup_pg(pg, &workspace_id, &[&user_id]).await;
     }
 
     #[tokio::test]
@@ -3296,7 +3660,7 @@ mod tests {
 
         crate::test_pg::seed_user_pg(pg, &user_id, &format!("{user_id}@test.local")).await;
         crate::test_pg::seed_workspace_pg(pg, &workspace_id, &user_id).await;
-        seed_chat_session_pg(pg, &session_id, &user_id, &workspace_id).await;
+        seed_chat_session_pg(pg, &session_id, &user_id, &workspace_id, false).await;
         seed_chat_message_pg(pg, &message_wanted, &session_id, false, Some(wanted_created_at))
             .await;
         // Not in the requested id list — must not appear in the result.
@@ -3310,6 +3674,123 @@ mod tests {
         assert_eq!(timestamps[0].message_id, message_wanted);
         assert_eq!(timestamps[0].created_at, wanted_created_at);
 
-        cleanup_pg(pg, &workspace_id, &user_id).await;
+        cleanup_pg(pg, &workspace_id, &[&user_id]).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_get_user_sessions_computes_unread_counts_for_shared_sessions() {
+        let test_name = "postgres_get_user_sessions_computes_unread_counts_for_shared_sessions";
+        let Some(db) = crate::test_pg::postgres_test_pool_or_skip(test_name).await else {
+            return;
+        };
+        let pg = crate::test_pg::postgres_pool(&db);
+
+        let workspace_id = crate::test_pg::unique_test_id("ws");
+        let owner_id = crate::test_pg::unique_test_id("owner");
+        let viewer_id = crate::test_pg::unique_test_id("viewer");
+        let sess_unread = crate::test_pg::unique_test_id("sess-u");
+        let sess_read = crate::test_pg::unique_test_id("sess-r");
+        let sess_never = crate::test_pg::unique_test_id("sess-n");
+
+        crate::test_pg::seed_user_pg(pg, &owner_id, &format!("{owner_id}@test.local")).await;
+        crate::test_pg::seed_user_pg(pg, &viewer_id, &format!("{viewer_id}@test.local")).await;
+        crate::test_pg::seed_workspace_pg(pg, &workspace_id, &owner_id).await;
+
+        // All three sessions are owned by `owner_id` and shared, and listed
+        // by `viewer_id` — the only combination that reaches the unread-count
+        // calculation (`s.shared && s.user_id != user_id`).
+        seed_chat_session_pg(pg, &sess_unread, &owner_id, &workspace_id, true).await;
+        seed_chat_session_pg(pg, &sess_read, &owner_id, &workspace_id, true).await;
+        seed_chat_session_pg(pg, &sess_never, &owner_id, &workspace_id, true).await;
+
+        let t1 = chrono::Utc.with_ymd_and_hms(2026, 3, 15, 9, 0, 0).unwrap();
+        let t2 = chrono::Utc.with_ymd_and_hms(2026, 3, 15, 9, 5, 0).unwrap();
+        let t3 = chrono::Utc.with_ymd_and_hms(2026, 3, 15, 9, 10, 0).unwrap();
+
+        // sess_unread: 3 messages (1 pinned), viewer has read through m2 ->
+        // m3 (created after the cutoff) is the only unread message. This
+        // session and sess_read both land in `unread_queries`, so a swapped
+        // sids/cutoffs bind order in the UNNEST query would cross-assign
+        // their cutoffs and flip both results.
+        let unread_m1 = format!("{sess_unread}-m1");
+        let unread_m2 = format!("{sess_unread}-m2");
+        let unread_m3 = format!("{sess_unread}-m3");
+        seed_chat_message_pg(pg, &unread_m1, &sess_unread, true, Some(t1)).await;
+        seed_chat_message_pg(pg, &unread_m2, &sess_unread, false, Some(t2)).await;
+        seed_chat_message_pg(pg, &unread_m3, &sess_unread, false, Some(t3)).await;
+        seed_read_status_pg(pg, &sess_unread, &viewer_id, Some(&unread_m2)).await;
+
+        // sess_read: 2 messages, viewer's last-read message is the newest
+        // one -> the UNNEST join produces no row for this session, so
+        // unread_map misses and unread_count falls back to 0.
+        let read_m1 = format!("{sess_read}-m1");
+        let read_m2 = format!("{sess_read}-m2");
+        seed_chat_message_pg(pg, &read_m1, &sess_read, false, Some(t1)).await;
+        seed_chat_message_pg(pg, &read_m2, &sess_read, false, Some(t2)).await;
+        seed_read_status_pg(pg, &sess_read, &viewer_id, Some(&read_m2)).await;
+
+        // sess_never: 2 messages, no conversation_read_status row for the
+        // viewer at all -> falls into never_read_sessions.
+        let never_m1 = format!("{sess_never}-m1");
+        let never_m2 = format!("{sess_never}-m2");
+        seed_chat_message_pg(pg, &never_m1, &sess_never, false, Some(t1)).await;
+        seed_chat_message_pg(pg, &never_m2, &sess_never, false, Some(t2)).await;
+
+        let sessions = get_user_sessions(&db, &viewer_id, &workspace_id, 50, 0, false, "chat")
+            .await
+            .expect("get_user_sessions must succeed against a real Postgres pool");
+
+        assert_eq!(
+            sessions.len(),
+            3,
+            "exactly the 3 seeded sessions must come back — a weakened WHERE clause \
+             (e.g. AND turned to OR) would leak other workspaces' or users' sessions into \
+             this result: {sessions:?}"
+        );
+
+        let by_id: std::collections::HashMap<&str, &SessionListItem> =
+            sessions.iter().map(|s| (s.session_id.as_str(), s)).collect();
+
+        let unread = by_id
+            .get(sess_unread.as_str())
+            .expect("a shared session owned by another user must be listed for the viewer");
+        assert_eq!(
+            unread.message_count, 3,
+            "fetch_session_counts regression: expected 3 messages, got {unread:?}"
+        );
+        assert_eq!(
+            unread.pinned_count, 1,
+            "fetch_session_counts regression: expected 1 pinned message, got {unread:?}"
+        );
+        assert_eq!(
+            unread.unread_count, 1,
+            "the Postgres UNNEST unread arm must count only messages strictly newer than \
+             the viewer's last-read message — a swapped sids/cutoffs bind order or a wrong \
+             ::text[]/::timestamptz[] cast would misreport this; got {unread:?}"
+        );
+
+        let read = by_id
+            .get(sess_read.as_str())
+            .expect("a shared session owned by another user must be listed for the viewer");
+        assert_eq!(read.message_count, 2, "got {read:?}");
+        assert_eq!(read.pinned_count, 0, "got {read:?}");
+        assert_eq!(
+            read.unread_count, 0,
+            "a fully-read shared session (cutoff == newest message) must report zero \
+             unread messages; got {read:?}"
+        );
+
+        let never = by_id
+            .get(sess_never.as_str())
+            .expect("a shared session owned by another user must be listed for the viewer");
+        assert_eq!(never.message_count, 2, "got {never:?}");
+        assert_eq!(never.pinned_count, 0, "got {never:?}");
+        assert_eq!(
+            never.unread_count, never.message_count,
+            "a session with no conversation_read_status row for the viewer must fall into \
+             never_read_sessions and report the full message_count as unread; got {never:?}"
+        );
+
+        cleanup_pg(pg, &workspace_id, &[&owner_id, &viewer_id]).await;
     }
 }
