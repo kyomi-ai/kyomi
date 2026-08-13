@@ -264,19 +264,14 @@ column = "expires_at"
 reason = "Postgres default `(now() + '7 days'::interval)` — SQLite has no INTERVAL arithmetic; apps/server/migrations-sqlite/00001_baseline.sql computes the same 7-day expiry in the Rust application layer before insert instead (see its 'skip INTERVAL default' comment)."
 
 # ---------------------------------------------------------------------------
-# KYO-296 findings: real bugs surfaced by the new index/foreign-key checks.
-# Neither is a deliberate design difference. Both are filed as new tickets
-# rather than fixed in this PR — fixing them here would destroy the
-# evidence that the check works (this is exactly how KYO-293/294 came out
-# of KYO-206). Delete each waiver as soon as its ticket lands.
+# KYO-296 findings: a real bug surfaced by the new index/foreign-key checks.
+# Not a deliberate design difference. Filed as a new ticket rather than fixed
+# in this PR — fixing it here would destroy the evidence that the check
+# works (this is exactly how KYO-293/294 came out of KYO-206). Delete this
+# waiver as soon as its ticket lands.
 # ---------------------------------------------------------------------------
 
 [[entry]]
 table = "watches"
 index = "idx_watches_name_workspace_unique"
 reason = "KYO-295 (open bug, not a deliberate design difference): Postgres enforces case-insensitive uniqueness via lower(name) (apps/server/migrations/20260215000000_baseline.sql:3134); SQLite's index is case-sensitive on the raw name column (apps/server/migrations-sqlite/00001_baseline.sql:755). Delete this waiver when KYO-295 lands."
-
-[[entry]]
-table = "agent_learnings"
-foreign_key = "superseded_by"
-reason = "KYO-346 (open bug, not a deliberate design difference): apps/server/migrations/20260315000000_uuid_columns_to_text.sql:31-33 drops and re-adds agent_learnings_superseded_by_fkey while converting the column from uuid to text, but the re-added constraint omits the ON DELETE SET NULL that the original baseline had (apps/server/migrations/20260215000000_baseline.sql:3302). SQLite's baseline (apps/server/migrations-sqlite/00001_baseline.sql:97) was never touched by an equivalent migration and still has ON DELETE SET NULL. On Postgres this now blocks deleting a superseding agent_learnings row (FK violation) instead of nulling out the superseded row's superseded_by, as originally intended. Delete this waiver when KYO-346 lands."
