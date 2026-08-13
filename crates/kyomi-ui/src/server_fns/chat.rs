@@ -595,7 +595,14 @@ pub async fn send_chat_message(
         message_source: Some("web".to_string()),
         system_prompt: None,
         tools_subset: None,
-        max_iterations: 25,
+        // Main chat: a human is waiting and benefits from the extra room —
+        // real warehouse analysis routinely needs more than 25 round-trips.
+        // Raised from 25 to 50 in KYO-345; the paired duration/token guards
+        // below exist so this higher ceiling cannot double worst-case spend
+        // on a pathological tool loop.
+        max_iterations: 50,
+        max_duration: Some(std::time::Duration::from_secs(15 * 60)),
+        max_total_tokens: Some(1_500_000),
         component: "custom_agent".to_string(),
         user_message_id: Some(user_message_id.clone()),
         assistant_message_id: Some(assistant_message_id.clone()),

@@ -62,7 +62,21 @@ struct UserLearningRow {
 const MAX_VALIDATION_RETRIES: u32 = 2;
 
 /// Maximum agent iterations for watch executions.
+///
+/// Unattended and re-run on a schedule, so a longer leash spends money with
+/// nobody in the room, every run — kept well below chat's ceiling
+/// (KYO-345). See `MAX_WATCH_DURATION` / `MAX_WATCH_TOTAL_TOKENS` for the
+/// paired non-iteration guards.
 const MAX_WATCH_ITERATIONS: u32 = 10;
+
+/// Wall-clock deadline for a single watch agent run. Tighter than chat's —
+/// nobody is watching a watch execute, so there is no UX cost to cutting it
+/// off earlier, only a cost-control benefit.
+const MAX_WATCH_DURATION: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// Cumulative billable-token ceiling for a single watch agent run. Tighter
+/// than chat's — same reasoning as `MAX_WATCH_DURATION`.
+const MAX_WATCH_TOTAL_TOKENS: u64 = 750_000;
 
 // ---------------------------------------------------------------------------
 // System prompt constants — ported CHARACTER FOR CHARACTER from Python
@@ -1190,6 +1204,8 @@ async fn execute_watch_inner(
         system_prompt: Some(enhanced_system_prompt),
         tools_subset: Some(tools_subset),
         max_iterations: MAX_WATCH_ITERATIONS,
+        max_duration: Some(MAX_WATCH_DURATION),
+        max_total_tokens: Some(MAX_WATCH_TOTAL_TOKENS),
         component: "kyomi_watch".into(),
         user_message_id: None,
         assistant_message_id: None,
@@ -1297,6 +1313,8 @@ async fn execute_watch_inner(
                         system_prompt: None, // reuse existing context
                         tools_subset: Some(WATCH_TOOLS.iter().map(|s| s.to_string()).collect()),
                         max_iterations: MAX_WATCH_ITERATIONS,
+                        max_duration: Some(MAX_WATCH_DURATION),
+                        max_total_tokens: Some(MAX_WATCH_TOTAL_TOKENS),
                         component: "kyomi_watch".into(),
                         user_message_id: None,
                         assistant_message_id: None,
@@ -1835,6 +1853,12 @@ mod tests {
     #[test]
     fn max_watch_iterations_is_ten() {
         assert_eq!(MAX_WATCH_ITERATIONS, 10);
+    }
+
+    #[test]
+    fn max_watch_duration_and_tokens_are_tighter_than_chat() {
+        assert_eq!(MAX_WATCH_DURATION, std::time::Duration::from_secs(10 * 60));
+        assert_eq!(MAX_WATCH_TOTAL_TOKENS, 750_000);
     }
 
     // -- System prompt constants match Python --

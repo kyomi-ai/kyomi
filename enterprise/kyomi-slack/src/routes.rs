@@ -1827,7 +1827,12 @@ async fn run_slack_query(
         message_source: Some("slack".into()),
         system_prompt: None, // build from standard prompt
         tools_subset: None,  // all tools available
+        // Slack: interactive, but there is no streaming UI — a long silent
+        // loop reads as a hang, and the user can simply ask again. Kept at
+        // 25, unlike chat's 50 (KYO-345).
         max_iterations: 25,
+        max_duration: Some(std::time::Duration::from_secs(10 * 60)),
+        max_total_tokens: Some(1_500_000),
         component: "slack_agent".into(),
         user_message_id: Some(user_message_id),
         assistant_message_id: None,
