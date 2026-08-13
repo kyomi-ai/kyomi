@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use regex::Regex;
+use regex::{Regex, Replacer};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -806,6 +806,14 @@ impl CustomAgent {
         // stays out of `self.state.messages` for the same reason the budget
         // notice does — it must never reach the transcript.
         let mut wrap_up_messages = self.build_llm_context();
+        // Carry over any ChartML retry messages still pending when the budget
+        // ran out, in the same order the loop above uses (context, then
+        // retry messages, then the most-recent ephemeral instruction last —
+        // see the `llm_messages` construction near the top of the loop).
+        // Without this the model has no memory of why its last chart attempt
+        // failed and is likely to re-emit the same invalid block into the
+        // wrap-up answer, which strip-and-degrade would then have to remove.
+        wrap_up_messages.extend(chartml_retry_messages.iter().cloned());
         wrap_up_messages.push(Message::user(WRAP_UP_INSTRUCTION));
 
         if let Some(ref cb) = self.callbacks.on_preparing_response {
@@ -838,6 +846,49 @@ impl CustomAgent {
         };
 
         let content = final_response_text(response);
+
+        // Strip-and-degrade: the wrap-up turn has no tool-use budget left,
+        // so a failing ChartML block cannot be sent back to the model for a
+        // retry the way the two earlier validation sites (no-tool-calls and
+        // tool-calls paths, above) do. Validate anyway, and on failure
+        // replace the offending block(s) with a plain-text note rather than
+        // returning (and persisting) a broken render.
+        let content = if has_chartml_blocks(&content) {
+            match self.validate_chartml_blocks_detailed(&content).await {
+                Some((failing_indices, error_msg)) => {
+                    warn!(
+                        error = %error_msg,
+                        "ChartML validation failed on the wrap-up turn — stripping the \
+                         block(s) rather than retrying, since no tool-use budget remains"
+                    );
+                    // `retry_attempt` here is an upper bound, not an exact
+                    // count: the no-tool-calls loop path pushes 2 ephemeral
+                    // messages per retry (assistant + user) while the
+                    // tool-calls path pushes 1 (user only), and the wrap-up
+                    // can be reached after either shape. Using `len()`
+                    // directly (rather than the no-tool-calls path's `/ 2`
+                    // convention) never undercounts, at the cost of
+                    // overcounting when the last retries came from the
+                    // no-tool-calls path.
+                    self.log_chartml_validation_error(
+                        &content,
+                        &error_msg,
+                        chartml_retry_messages.len() as i32,
+                        "chat_wrap_up",
+                    )
+                    .await;
+                    // Only the failing block(s) are replaced — any other
+                    // ChartML block in the same response is left
+                    // byte-identical. See `strip_chartml_blocks`'s doc
+                    // comment for the index contract.
+                    strip_chartml_blocks(&content, &failing_indices)
+                }
+                None => content,
+            }
+        } else {
+            content
+        };
+
         self.state.messages.push(Message::assistant(&content));
         Ok(content)
     }
@@ -958,16 +1009,53 @@ impl CustomAgent {
     /// sees it.
     ///
     /// Returns `None` if all blocks are valid, or `Some(error_message)` if
-    /// any block fails validation.
+    /// any block fails validation. Thin wrapper over
+    /// [`Self::validate_chartml_blocks_detailed`] that discards the failing
+    /// block indices — used by the two loop call sites (no-tool-calls and
+    /// tool-calls paths), which retry the whole turn on failure and never
+    /// need to know which specific block was at fault.
     async fn validate_chartml_blocks(&self, text: &str) -> Option<String> {
+        self.validate_chartml_blocks_detailed(text)
+            .await
+            .map(|(_, message)| message)
+    }
+
+    /// Detailed sibling of [`Self::validate_chartml_blocks`] used only by the
+    /// wrap-up path (`chat()`'s forced final turn), which has no retry budget
+    /// left and must strip only the specific block(s) that failed rather than
+    /// the whole response — see [`strip_chartml_blocks`].
+    ///
+    /// Runs the identical two-step validation as
+    /// [`Self::validate_chartml_blocks`] (YAML structure first, short-
+    /// circuiting before the SQL dry-run on failure — same as that method),
+    /// so the two must never diverge in what they consider invalid. Returns
+    /// `None` if all blocks are valid; otherwise the 0-based indices of every
+    /// failing block (see [`chartml_block_errors`] for the indexing
+    /// contract) plus the same joined error message
+    /// [`Self::validate_chartml_blocks`] would have returned.
+    async fn validate_chartml_blocks_detailed(&self, text: &str) -> Option<(Vec<usize>, String)> {
+        fn split(errors: Vec<(usize, String)>) -> Option<(Vec<usize>, String)> {
+            if errors.is_empty() {
+                return None;
+            }
+            let indices = errors.iter().map(|(i, _)| *i).collect();
+            let message = errors.iter().map(|(_, msg)| msg.as_str()).collect::<Vec<_>>().join("; ");
+            Some((indices, message))
+        }
+
         // Step 1: YAML structure validation (fast, synchronous).
-        if let Some(yaml_errors) = validate_chartml_blocks(text) {
-            return Some(yaml_errors);
+        let yaml_errors = chartml_block_errors(text);
+        if !yaml_errors.is_empty() {
+            return split(yaml_errors);
         }
 
         // Step 2: SQL dry-run via shared utility (same code path as dashboard tools).
-        crate::tools::query_utils::validate_chartml_sql(&self.tool_context.query_context(), text)
-            .await
+        let sql_errors = crate::tools::query_utils::chartml_sql_block_errors(
+            &self.tool_context.query_context(),
+            text,
+        )
+        .await;
+        split(sql_errors)
     }
 
     // -----------------------------------------------------------------------
@@ -1053,24 +1141,50 @@ fn has_chartml_blocks(text: &str) -> bool {
     text.contains("```chartml")
 }
 
-/// Validate ChartML blocks in the text (YAML structure only, no SQL).
+/// Compiled regex for extracting ChartML fenced code blocks.
 ///
-/// Extracts all ` ```chartml ... ``` ` blocks, parses each as YAML, and
-/// checks for required keys (`data` and `visualize`).
+/// Mirrors `crates/kyomi-agent/src/tools/query_utils.rs`'s `chartml_re()` —
+/// same literal pattern, because [`crate::tools::query_utils::extract_chartml_queries`]
+/// (the SQL dry-run path) must recognize exactly the blocks this module's
+/// validation and stripping both operate on. If the pattern ever needs to
+/// change, it must change in both places together.
+static CHARTML_RE: OnceLock<Regex> = OnceLock::new();
+
+fn chartml_re() -> &'static Regex {
+    CHARTML_RE
+        .get_or_init(|| Regex::new(r"```chartml\s*\n([\s\S]*?)\n```").expect("valid regex literal"))
+}
+
+/// Plain-text note substituted for a ChartML block stripped by
+/// [`strip_chartml_blocks`].
 ///
-/// Returns `None` if all blocks are valid, or `Some(error_message)` if
-/// any block fails validation.
-fn validate_chartml_blocks(text: &str) -> Option<String> {
-    static CHARTML_RE: OnceLock<Regex> = OnceLock::new();
-    let re = CHARTML_RE.get_or_init(|| {
-        Regex::new(r"```chartml\s*\n([\s\S]*?)\n```").expect("valid regex literal")
-    });
+/// Unlike [`WRAP_UP_FAILED_MESSAGE`], this string is never embedded inside a
+/// larger sentence — it lands verbatim in the middle of the model's prose
+/// wrap-up answer, in place of a block that failed validation with no
+/// tool-use budget left to retry. It must therefore read as a complete,
+/// standalone sentence: plain, short, and non-apologising, matching the tone
+/// `WRAP_UP_FAILED_MESSAGE` documents for user-facing exhaustion text.
+pub(crate) const CHARTML_STRIPPED_NOTE: &str = "A chart could not be generated for this answer.";
+
+/// Per-block YAML structure validation errors.
+///
+/// The primitive both [`validate_chartml_blocks`] (aggregate) and
+/// [`CustomAgent::validate_chartml_blocks_detailed`] (per-block) build on.
+/// Each entry's `usize` is the block's **0-based position** in
+/// `chartml_re()`'s capture-iteration order (`captures_iter(text)
+/// .enumerate()`), regardless of the 1-based block numbers embedded in the
+/// human-readable message text. This is the same indexing contract
+/// [`crate::tools::query_utils::chartml_sql_block_errors`] and
+/// [`strip_chartml_blocks`] use — every function in this file and
+/// `query_utils.rs` that produces or consumes a block index agrees on it. A
+/// block that passes validation contributes no entry.
+fn chartml_block_errors(text: &str) -> Vec<(usize, String)> {
+    let re = chartml_re();
     let mut errors = Vec::new();
 
-    let mut found_any = false;
     for (i, cap) in re.captures_iter(text).enumerate() {
-        found_any = true;
         let block_content = &cap[1];
+        let mut block_errors = Vec::new();
 
         // Try to parse as YAML.
         let parsed: Result<serde_yaml::Value, _> = serde_yaml::from_str(block_content);
@@ -1086,29 +1200,103 @@ fn validate_chartml_blocks(text: &str) -> Option<String> {
                     .unwrap_or(false);
 
                 if !has_data {
-                    errors.push(format!("Block {}: missing required key 'data'", i + 1));
+                    block_errors.push(format!("Block {}: missing required key 'data'", i + 1));
                 }
                 if !has_visualize {
-                    errors.push(format!("Block {}: missing required key 'visualize'", i + 1));
+                    block_errors
+                        .push(format!("Block {}: missing required key 'visualize'", i + 1));
                 }
             }
             Err(e) => {
-                errors.push(format!("Block {}: invalid YAML: {}", i + 1, e));
+                block_errors.push(format!("Block {}: invalid YAML: {}", i + 1, e));
             }
+        }
+
+        if !block_errors.is_empty() {
+            errors.push((i, block_errors.join("; ")));
         }
     }
 
-    if !found_any {
-        // No blocks found despite has_chartml_blocks returning true.
-        // This could happen with malformed blocks (no closing ```).
-        return None;
-    }
+    errors
+}
 
+/// Validate ChartML blocks in the text (YAML structure only, no SQL).
+///
+/// Extracts all ` ```chartml ... ``` ` blocks, parses each as YAML, and
+/// checks for required keys (`data` and `visualize`). Thin aggregate wrapper
+/// over [`chartml_block_errors`] — see that function for the per-block
+/// primitive.
+///
+/// `#[cfg(test)]`: production code needs failing-block *indices*
+/// ([`CustomAgent::validate_chartml_blocks_detailed`] calls
+/// [`chartml_block_errors`] directly for that), so the message-only
+/// aggregate has no remaining production caller. Kept for the YAML-structure
+/// unit tests below, which pin the aggregate error-message contract without
+/// needing the index bookkeeping.
+///
+/// Returns `None` if all blocks are valid, or `Some(error_message)` if
+/// any block fails validation.
+#[cfg(test)]
+fn validate_chartml_blocks(text: &str) -> Option<String> {
+    let errors = chartml_block_errors(text);
     if errors.is_empty() {
         None
     } else {
-        Some(errors.join("; "))
+        let message = errors.iter().map(|(_, msg)| msg.as_str()).collect::<Vec<_>>().join("; ");
+        Some(message)
     }
+}
+
+/// Replace only the ChartML blocks at `failing_indices` with a literal
+/// `replacement`, leaving every other block byte-identical. Used by
+/// [`strip_chartml_blocks`]; split out so tests can exercise the
+/// `$`-expansion guard directly (see
+/// `strip_chartml_blocks_replacement_is_not_dollar_expanded`) without
+/// depending on [`CHARTML_STRIPPED_NOTE`] staying free of `$` forever.
+///
+/// `failing_indices` must be 0-based positions in `chartml_re()`'s
+/// capture-iteration order — see [`chartml_block_errors`]'s doc comment for
+/// the shared contract. Passing indices computed under a different ordering
+/// silently strips the wrong block.
+///
+/// The replacement is applied via [`regex::NoExpand`], not passed as a bare
+/// `&str` to `replace_all`. `regex`'s `Replacer` impl for `&str` expands
+/// `$1`/`${name}` capture references, and the pattern here has exactly one
+/// capture group holding the raw (possibly invalid) block content —
+/// passing `replacement` directly would silently reinject that content into
+/// the "sanitized" output the moment `replacement` ever contains a `$`.
+/// `NoExpand` closes that off by construction: it copies its string
+/// verbatim, so no future edit to a replacement string can reopen this bug
+/// without also changing this function.
+fn strip_chartml_blocks_with(text: &str, failing_indices: &[usize], replacement: &str) -> String {
+    let mut index = 0usize;
+    chartml_re()
+        .replace_all(text, |caps: &regex::Captures<'_>| {
+            let this_index = index;
+            index += 1;
+            let mut out = String::new();
+            if failing_indices.contains(&this_index) {
+                regex::NoExpand(replacement).replace_append(caps, &mut out);
+            } else {
+                out.push_str(&caps[0]);
+            }
+            out
+        })
+        .into_owned()
+}
+
+/// Replace only the ChartML blocks at `failing_indices` with
+/// [`CHARTML_STRIPPED_NOTE`], leaving every other block byte-identical.
+///
+/// Used only on the wrap-up path (`chat()`'s forced final turn): that turn
+/// has no remaining tool-use budget to send a failing block back to the
+/// model for a retry, so invalid blocks are stripped instead of returned to
+/// the user — but valid blocks in the same response must survive untouched,
+/// so the caller must pass the specific failing indices, not blanket-strip
+/// every match. See [`strip_chartml_blocks_with`] for the indexing contract
+/// and the `$`-expansion guard.
+fn strip_chartml_blocks(text: &str, failing_indices: &[usize]) -> String {
+    strip_chartml_blocks_with(text, failing_indices, CHARTML_STRIPPED_NOTE)
 }
 
 // ---------------------------------------------------------------------------
@@ -1241,6 +1429,118 @@ Chart 2:\n```chartml\ntitle: Bad\n```";
         assert!(has_chartml_blocks(text));
         // Regex requires `\n` ``` ` so unclosed blocks are not captured.
         assert!(validate_chartml_blocks(text).is_none());
+    }
+
+    // -- strip_chartml_blocks tests (KYO-347) --------------------------------
+
+    #[test]
+    fn strip_chartml_blocks_single_block() {
+        let text = "Before\n```chartml\ndata:\n  x: 1\n```\nAfter";
+        assert_eq!(
+            strip_chartml_blocks(text, &[0]),
+            format!("Before\n{CHARTML_STRIPPED_NOTE}\nAfter")
+        );
+    }
+
+    #[test]
+    fn strip_chartml_blocks_multiple_blocks_all_failing() {
+        let text = "One\n```chartml\na: 1\n```\nTwo\n```chartml\nb: 2\n```\nThree";
+        assert_eq!(
+            strip_chartml_blocks(text, &[0, 1]),
+            format!("One\n{CHARTML_STRIPPED_NOTE}\nTwo\n{CHARTML_STRIPPED_NOTE}\nThree")
+        );
+    }
+
+    /// The regression the reviewer caught: `strip_chartml_blocks` must not
+    /// blanket-replace every match — a valid block sharing a response with an
+    /// invalid one must survive byte-identically.
+    #[test]
+    fn strip_chartml_blocks_mixed_valid_and_invalid_only_strips_the_invalid_one() {
+        let text = "One\n```chartml\nvalid: block\n```\nTwo\n```chartml\ninvalid: block\n```\nThree";
+        // Only block 1 (0-based) — the second block — is failing.
+        let result = strip_chartml_blocks(text, &[1]);
+        assert_eq!(
+            result,
+            format!("One\n```chartml\nvalid: block\n```\nTwo\n{CHARTML_STRIPPED_NOTE}\nThree")
+        );
+    }
+
+    /// Pins index alignment against a three-block case rather than a
+    /// first/last coincidence: the failing block sits in the middle, with a
+    /// valid block on each side.
+    #[test]
+    fn strip_chartml_blocks_middle_of_three_only_strips_the_middle_one() {
+        let text = "\
+A\n```chartml\nfirst: valid\n```\n\
+B\n```chartml\nsecond: invalid\n```\n\
+C\n```chartml\nthird: valid\n```\n\
+D";
+        let result = strip_chartml_blocks(text, &[1]);
+        assert_eq!(
+            result,
+            format!(
+                "A\n```chartml\nfirst: valid\n```\nB\n{CHARTML_STRIPPED_NOTE}\nC\n```chartml\nthird: valid\n```\nD"
+            )
+        );
+    }
+
+    #[test]
+    fn strip_chartml_blocks_preserves_surrounding_prose_verbatim() {
+        let text = "Intro paragraph with **markdown**.\n\n```chartml\ndata:\n  x: 1\n```\n\nOutro paragraph.";
+        let result = strip_chartml_blocks(text, &[0]);
+        assert!(
+            result.starts_with("Intro paragraph with **markdown**.\n\n"),
+            "prose before the block must be untouched: {result}"
+        );
+        assert!(
+            result.ends_with("\n\nOutro paragraph."),
+            "prose after the block must be untouched: {result}"
+        );
+        assert!(!result.contains("```chartml"));
+    }
+
+    #[test]
+    fn strip_chartml_blocks_no_blocks_returns_input_unchanged() {
+        let text = "Just plain prose, no charts here.";
+        assert_eq!(strip_chartml_blocks(text, &[]), text);
+    }
+
+    #[test]
+    fn strip_chartml_blocks_unterminated_fence_is_unchanged() {
+        // No closing fence -- the same asymmetry as
+        // `validate_chartml_blocks_partial_closing_fence` above: the regex
+        // requires `\n` ``` ` to close a block, so an unterminated fence
+        // never matches and passes through untouched.
+        let text = "```chartml\ndata:\n  x: 1\n";
+        assert_eq!(strip_chartml_blocks(text, &[0]), text);
+    }
+
+    #[test]
+    fn strip_chartml_blocks_empty_failing_indices_leaves_all_blocks_untouched() {
+        // No block index is marked failing, even though blocks are present —
+        // every match must pass through as the original, unmodified capture.
+        let text = "One\n```chartml\na: 1\n```\nTwo\n```chartml\nb: 2\n```\nThree";
+        assert_eq!(strip_chartml_blocks(text, &[]), text);
+    }
+
+    /// Regression pin for the `$`-expansion trap: `regex`'s `Replacer` impl
+    /// for `&str` expands `$1`/`${name}` capture references, and the pattern
+    /// has exactly one capture group holding the raw block content. If a
+    /// replacement string is ever passed straight to `replace_all` instead of
+    /// through `regex::NoExpand`, a `$1` in that string would silently
+    /// reinject the failing block's own (invalid) content into the
+    /// "sanitized" output. `CHARTML_STRIPPED_NOTE` has no `$` today, so this
+    /// exercises the mechanism directly via `strip_chartml_blocks_with`
+    /// rather than depending on that staying true.
+    #[test]
+    fn strip_chartml_blocks_replacement_is_not_dollar_expanded() {
+        let text = "```chartml\nSECRET_INVALID_CONTENT\n```";
+        let result = strip_chartml_blocks_with(text, &[0], "replaced: $1");
+        assert_eq!(result, "replaced: $1");
+        assert!(
+            !result.contains("SECRET_INVALID_CONTENT"),
+            "the raw captured block content must never be reinjected via $-expansion: {result}"
+        );
     }
 
     // -- build_llm_context tests ---------------------------------------------
@@ -2146,6 +2446,192 @@ Chart 2:\n```chartml\ndata:\n  query: SELECT 2\nvisualize:\n  type: line\n```";
             MessageRole::Tool,
             "a failed wrap-up must append nothing — the last message is still the \
              final tool result, not a substituted apology"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // KYO-347: strip-and-degrade — ChartML validation on the wrap-up path
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn wrap_up_response_with_invalid_chartml_is_stripped_and_not_persisted() {
+        // Missing the required `data` key -- fails YAML structure validation
+        // (step 1), so this never reaches the SQL dry-run step and needs no
+        // real datasource.
+        let invalid_chartml =
+            "Summary:\n```chartml\nvisualize:\n  type: bar\n```\nThat's the chart.";
+        let script = vec![Reply::ToolCall; 2];
+        let (mut agent, _calls) =
+            scripted_agent(2, script, Reply::Text(invalid_chartml.to_string())).await;
+
+        let answer = agent
+            .chat("hello", CancellationToken::new(), None, None, None)
+            .await
+            .expect("chat should complete — strip-and-degrade, not an error");
+
+        assert!(
+            answer.contains(CHARTML_STRIPPED_NOTE),
+            "the returned answer must carry the stripped-block note: {answer}"
+        );
+        assert!(
+            !answer.contains("```chartml"),
+            "the invalid block must not reach the user: {answer}"
+        );
+        assert!(
+            answer.contains("Summary:") && answer.contains("That's the chart."),
+            "surrounding prose must be preserved: {answer}"
+        );
+
+        let last_state_message = agent
+            .state()
+            .messages
+            .last()
+            .expect("state has messages");
+        assert!(
+            !last_state_message.content.contains("```chartml"),
+            "the invalid block must never reach state.messages, or persist_after_chat \
+             would write it straight into chat_messages: {}",
+            last_state_message.content
+        );
+        assert_eq!(
+            last_state_message.content, answer,
+            "the message pushed to state and the returned answer must be identical — \
+             never push one version and return another"
+        );
+    }
+
+    #[tokio::test]
+    async fn wrap_up_response_with_valid_chartml_is_returned_unchanged() {
+        // `data` has no nested `query`/`datasource`, so
+        // `query_utils::extract_chartml_queries` finds nothing to dry-run and
+        // `validate_chartml_sql` returns `None` without touching a real
+        // datasource — this block is valid on structure alone.
+        let valid_chartml =
+            "Here is your chart:\n```chartml\ndata:\n  values: []\nvisualize:\n  type: bar\n```\nDone.";
+        let script = vec![Reply::ToolCall; 2];
+        let (mut agent, _calls) =
+            scripted_agent(2, script, Reply::Text(valid_chartml.to_string())).await;
+
+        let answer = agent
+            .chat("hello", CancellationToken::new(), None, None, None)
+            .await
+            .expect("chat should complete");
+
+        // Exact equality against `valid_chartml` (which is known at authoring
+        // time not to contain the note) already pins the absence of
+        // `CHARTML_STRIPPED_NOTE` — a separate `!contains` assertion here
+        // would be dead weight, not an extra guard.
+        assert_eq!(
+            answer, valid_chartml,
+            "a valid block must pass through the wrap-up path unchanged"
+        );
+    }
+
+    /// The regression the reviewer caught, exercised end-to-end through
+    /// `chat()`: a wrap-up answer with two ChartML blocks, one valid and one
+    /// invalid, must keep the valid chart and only degrade the invalid one —
+    /// not lose both to a blanket strip.
+    #[tokio::test]
+    async fn wrap_up_response_with_mixed_valid_and_invalid_chartml_only_strips_the_invalid_block()
+    {
+        // First block: has `data` and `visualize`, no nested `query`/
+        // `datasource`, so it is valid on structure alone (same reasoning as
+        // `wrap_up_response_with_valid_chartml_is_returned_unchanged`).
+        // Second block: missing the required `data` key entirely.
+        let mixed_chartml = "First chart:\n```chartml\ndata:\n  values: []\n\
+visualize:\n  type: bar\n```\nSecond chart:\n```chartml\nvisualize:\n  type: line\n```\nDone.";
+        let script = vec![Reply::ToolCall; 2];
+        let (mut agent, _calls) =
+            scripted_agent(2, script, Reply::Text(mixed_chartml.to_string())).await;
+
+        let answer = agent
+            .chat("hello", CancellationToken::new(), None, None, None)
+            .await
+            .expect("chat should complete — strip-and-degrade, not an error");
+
+        let expected = format!(
+            "First chart:\n```chartml\ndata:\n  values: []\nvisualize:\n  type: bar\n```\n\
+Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
+        );
+        assert_eq!(
+            answer, expected,
+            "the valid first block must survive byte-identically; only the invalid \
+             second block becomes the stripped-note text"
+        );
+    }
+
+    #[tokio::test]
+    async fn wrap_up_response_without_chartml_is_unchanged() {
+        // Regression guard on the common path: the new `has_chartml_blocks`
+        // check added to the end of `chat()` must not touch a wrap-up answer
+        // that never had a chart in it.
+        let script = vec![Reply::ToolCall; 2];
+        let (mut agent, _calls) = scripted_agent(
+            2,
+            script,
+            Reply::Text("Revenue grew 12% last quarter.".to_string()),
+        )
+        .await;
+
+        let answer = agent
+            .chat("hello", CancellationToken::new(), None, None, None)
+            .await
+            .expect("chat should complete");
+
+        assert_eq!(answer, "Revenue grew 12% last quarter.");
+    }
+
+    #[tokio::test]
+    async fn wrap_up_context_carries_pending_chartml_retry_messages() {
+        // A response with an invalid ChartML block and no tool calls takes
+        // the no-tool-calls validation path (chat(), the `response.tool_calls
+        // .is_none()` branch), which queues two ephemeral retry messages and
+        // `continue`s. With max_iterations = 1 the loop has no budget left to
+        // actually act on the retry, so those messages must still reach the
+        // forced wrap-up call — otherwise the model has no memory of why its
+        // last chart attempt failed and is likely to repeat it.
+        let invalid_chartml = "Here is a chart:\n```chartml\nvisualize:\n  type: bar\n```\n";
+        let script = vec![Reply::Text(invalid_chartml.to_string())];
+        let (mut agent, calls) = scripted_agent(
+            1,
+            script,
+            Reply::Text("Wrap-up answer, no chart.".to_string()),
+        )
+        .await;
+
+        let answer = agent
+            .chat("hello", CancellationToken::new(), None, None, None)
+            .await
+            .expect("chat should complete");
+
+        assert_eq!(answer, "Wrap-up answer, no chart.");
+
+        let recorded = std::mem::take(&mut *calls.lock().expect("call log mutex"));
+        assert_eq!(
+            recorded.len(),
+            2,
+            "1 loop iteration (validation failure, no retry budget left) plus the \
+             wrap-up call: {recorded:?}"
+        );
+
+        let wrap_up_call = recorded.last().expect("has calls");
+        assert!(
+            wrap_up_call
+                .messages
+                .iter()
+                .any(|m| m.content.contains("ChartML validation failed")),
+            "the wrap-up call must carry the pending ChartML retry context: {:?}",
+            wrap_up_call.messages
+        );
+        assert_eq!(
+            wrap_up_call
+                .messages
+                .last()
+                .expect("wrap-up call has messages")
+                .content,
+            WRAP_UP_INSTRUCTION,
+            "the wrap-up instruction must still be last, after the carried-over retry \
+             messages"
         );
     }
 
