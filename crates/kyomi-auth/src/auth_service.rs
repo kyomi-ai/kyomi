@@ -1331,7 +1331,10 @@ pub async fn recovery_set_password_service(
         tracing::info!(user_id = %user_id, "TOTP disabled during account recovery");
     }
 
-    let sess = create_authenticated_session(db, kv, jwt_secret, &user, device).await?;
+    let sess = revoke_sessions_and_mint_recovery_session(
+        db, kv, jwt_secret, &user, device, "password",
+    )
+    .await?;
     Ok(RecoverySetPasswordServiceResult::Success(Box::new(sess)))
 }
 
@@ -1759,8 +1762,10 @@ pub async fn passkey_recovery_complete_service(
     // fix here is the session binding above; the additional fix here is
     // that any session an attacker held before recovery does not survive
     // it (KYO-287) — see `revoke_sessions_and_mint_recovery_session`.
-    let sess =
-        revoke_sessions_and_mint_recovery_session(db, kv, jwt_secret, &user, device).await?;
+    let sess = revoke_sessions_and_mint_recovery_session(
+        db, kv, jwt_secret, &user, device, "passkey",
+    )
+    .await?;
     tracing::info!(
         user_id = %user.user_id,
         credential_id = %credential_id_b64,
@@ -1771,9 +1776,16 @@ pub async fn passkey_recovery_complete_service(
 
 /// Revoke every refresh token issued to `user` before this recovery
 /// ceremony, then mint the fresh session the recovering user is
-/// establishing right now (KYO-287).
+/// establishing right now.
 ///
-/// Split out of [`passkey_recovery_complete_service`] so the
+/// Shared by two callers: `passkey_recovery_complete_service` (KYO-287) and
+/// `recovery_set_password_service` (KYO-339) — both are "wrest back control
+/// of a possibly-compromised account" flows, and both need the same
+/// ordering guarantee below. `flow` is a tracing field only (`"passkey"` /
+/// `"password"`), so the log line still distinguishes which recovery path
+/// produced a given revocation without duplicating this function.
+///
+/// Originally split out of [`passkey_recovery_complete_service`] so the
 /// revoke-before-mint ordering can be tested directly against the
 /// database, independent of a real WebAuthn ceremony:
 /// `verify_and_store_passkey` requires a credential that cryptographically
@@ -1781,18 +1793,23 @@ pub async fn passkey_recovery_complete_service(
 /// challenge, which none of this module's test fixture credentials do (see
 /// the `tests` module's module-level comment below), so no test in this
 /// file can drive `passkey_recovery_complete_service` end-to-end to a
-/// successful `Ok(_)`.
+/// successful `Ok(_)`. This constraint is specific to the passkey caller —
+/// `recovery_set_password_service` has no cryptographic ceremony in its
+/// path and its tests drive it end-to-end through the real entry point.
 ///
-/// Recovery happens precisely because the previous authenticator was lost
-/// or stolen, so whoever holds it must not keep a renewable session after
-/// the account owner regains control. The revoke below must run BEFORE
-/// `create_authenticated_session` — that call both mints and persists the
-/// recovering user's own new refresh token, and revoking after it would
-/// immediately log the user back out of the session they are in the
-/// middle of establishing.
+/// Recovery happens precisely because the account may be compromised —
+/// the previous authenticator lost or stolen, or the password recovery
+/// flow deliberately wresting back control (it also disables TOTP for the
+/// same reason) — so whoever held prior access must not keep a renewable
+/// session after the account owner regains control. The revoke below must
+/// run BEFORE `create_authenticated_session` — that call both mints and
+/// persists the recovering user's own new refresh token, and revoking
+/// after it would immediately log the user back out of the session they
+/// are in the middle of establishing.
 ///
-/// This revokes refresh tokens only. It does NOT invalidate access tokens
-/// already issued to an attacker: `AuthUser::from_request_parts`
+/// This revokes refresh tokens only — it does not log the user out
+/// everywhere. It does NOT invalidate access tokens already issued to an
+/// attacker: `AuthUser::from_request_parts`
 /// (`crates/kyomi-auth/src/middleware.rs`) authenticates purely by
 /// cryptographic JWT validation and never consults `refresh_tokens` or
 /// checks `token_jti` against any revocation record. A stolen access token
@@ -1800,20 +1817,22 @@ pub async fn passkey_recovery_complete_service(
 /// (`access_token_expire_minutes` in `data/constants.toml`, 15 minutes by
 /// default) regardless of this call. Full immediate revocation would
 /// require an access-token allow/deny list keyed on `jti`, which does not
-/// exist in this codebase today.
+/// exist in this codebase today (tracked as KYO-341).
 async fn revoke_sessions_and_mint_recovery_session(
     db: &DbPool,
     kv: &KVPool,
     jwt_secret: &str,
     user: &kyomi_core::models::User,
     device: &DeviceInfo,
+    flow: &'static str,
 ) -> kyomi_core::Result<AuthenticatedSession> {
     let revoked_count =
         crate::token_service::revoke_all_user_refresh_tokens(db, &user.user_id).await?;
     tracing::info!(
         user_id = %user.user_id,
         revoked_count,
-        "Refresh tokens revoked during passkey recovery"
+        recovery_flow = flow,
+        "Refresh tokens revoked during account recovery"
     );
 
     create_authenticated_session(db, kv, jwt_secret, user, device).await
@@ -3255,9 +3274,11 @@ mod tests {
         .await
         .expect("seed pre-existing refresh token");
 
-        revoke_sessions_and_mint_recovery_session(&db, &kv, "test-secret", &user, &device)
-            .await
-            .expect("revoke + mint should not error");
+        revoke_sessions_and_mint_recovery_session(
+            &db, &kv, "test-secret", &user, &device, "passkey",
+        )
+        .await
+        .expect("revoke + mint should not error");
 
         let (is_active, revoked_at) = refresh_token_state(&db, &pre_existing_hash).await;
         assert_eq!(
@@ -3284,10 +3305,11 @@ mod tests {
         .await
         .expect("create user");
 
-        let sess =
-            revoke_sessions_and_mint_recovery_session(&db, &kv, "test-secret", &user, &device)
-                .await
-                .expect("revoke + mint should not error");
+        let sess = revoke_sessions_and_mint_recovery_session(
+            &db, &kv, "test-secret", &user, &device, "passkey",
+        )
+        .await
+        .expect("revoke + mint should not error");
 
         let new_hash = crate::token_service::hash_refresh_token(&sess.refresh_token);
         let (is_active, revoked_at) = refresh_token_state(&db, &new_hash).await;
@@ -3300,6 +3322,127 @@ mod tests {
         assert!(
             revoked_at.is_none(),
             "the refresh token minted by recovery itself must not be revoked"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Session revocation on password recovery (KYO-339)
+    // -----------------------------------------------------------------
+    //
+    // Unlike the passkey path above, `recovery_set_password_service` has no
+    // cryptographic ceremony blocking it — `store_recovery_session` can seed
+    // a real recovery session directly into the in-memory KV store, so these
+    // tests drive the real production entry point end-to-end rather than
+    // calling `revoke_sessions_and_mint_recovery_session` directly. This
+    // proves the call site is actually wired up, not just the shared helper.
+
+    #[tokio::test]
+    async fn password_recovery_revokes_pre_existing_refresh_tokens() {
+        let db = test_pool().await;
+        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+        let device = test_device();
+        let user = crate::user_service::create_user(
+            &db,
+            "password-recovery-revoke-old@example.com",
+            Some("Test User"),
+            true,
+        )
+        .await
+        .expect("create user");
+
+        // Seed a refresh token as if a (possibly compromised) session had
+        // logged in before recovery.
+        let pre_existing_raw = "rt_pre-existing-password-recovery-session";
+        let pre_existing_hash = crate::token_service::hash_refresh_token(pre_existing_raw);
+        crate::token_service::store_refresh_token(
+            &db,
+            &user.user_id,
+            &pre_existing_hash,
+            chrono::Utc::now() + chrono::Duration::days(7),
+            &device,
+            "fam_pre-existing-password-recovery",
+        )
+        .await
+        .expect("seed pre-existing refresh token");
+
+        let recovery_session_id = "recovery-session-revoke-old";
+        crate::redis_ops::store_recovery_session(&kv, recovery_session_id, &user.user_id)
+            .await
+            .expect("seed recovery session");
+
+        let result = recovery_set_password_service(
+            &db,
+            &kv,
+            "test-secret",
+            recovery_session_id,
+            "a-brand-new-password-123",
+            &device,
+        )
+        .await
+        .expect("recovery_set_password_service should not error");
+
+        assert!(
+            matches!(result, RecoverySetPasswordServiceResult::Success(_)),
+            "expected Success, got a different result variant"
+        );
+
+        let (is_active, revoked_at) = refresh_token_state(&db, &pre_existing_hash).await;
+        assert_eq!(
+            is_active, 0,
+            "pre-existing refresh token must be revoked (is_active) after password recovery"
+        );
+        assert!(
+            revoked_at.is_some(),
+            "pre-existing refresh token must have revoked_at set after password recovery"
+        );
+    }
+
+    #[tokio::test]
+    async fn password_recovery_leaves_the_newly_minted_refresh_token_active() {
+        let db = test_pool().await;
+        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+        let device = test_device();
+        let user = crate::user_service::create_user(
+            &db,
+            "password-recovery-revoke-new@example.com",
+            Some("Test User"),
+            true,
+        )
+        .await
+        .expect("create user");
+
+        let recovery_session_id = "recovery-session-revoke-new";
+        crate::redis_ops::store_recovery_session(&kv, recovery_session_id, &user.user_id)
+            .await
+            .expect("seed recovery session");
+
+        let result = recovery_set_password_service(
+            &db,
+            &kv,
+            "test-secret",
+            recovery_session_id,
+            "a-brand-new-password-123",
+            &device,
+        )
+        .await
+        .expect("recovery_set_password_service should not error");
+
+        let sess = match result {
+            RecoverySetPasswordServiceResult::Success(sess) => sess,
+            _ => panic!("expected Success, got a different result variant"),
+        };
+
+        let new_hash = crate::token_service::hash_refresh_token(&sess.refresh_token);
+        let (is_active, revoked_at) = refresh_token_state(&db, &new_hash).await;
+        assert_eq!(
+            is_active, 1,
+            "the refresh token minted by password recovery itself must still be active — \
+             revoking after minting would log the user out of the session they \
+             just established"
+        );
+        assert!(
+            revoked_at.is_none(),
+            "the refresh token minted by password recovery itself must not be revoked"
         );
     }
 
