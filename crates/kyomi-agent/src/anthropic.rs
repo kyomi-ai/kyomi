@@ -214,7 +214,7 @@ impl AnthropicClient {
     /// Split out of [`complete`](Self::complete) so the wire shape can be
     /// asserted without an HTTP round-trip. Most importantly, the `tools` key
     /// is **omitted entirely** for an empty slice — the agent relies on that
-    /// to force a no-tools wrap-up turn when its iteration budget runs out.
+    /// to force a no-tools wrap-up turn when its tool-use budget runs out.
     pub(crate) fn build_request_body(
         model: &str,
         system_prompt: Option<serde_json::Value>,

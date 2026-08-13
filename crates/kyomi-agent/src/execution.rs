@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -77,6 +78,17 @@ pub struct AgentExecutionConfig {
     pub system_prompt: Option<String>,
     pub tools_subset: Option<Vec<String>>,
     pub max_iterations: u32,
+    /// Wall-clock deadline for the agent's `chat()` call, mirrored onto
+    /// [`AgentConfig::max_duration`](crate::agent::AgentConfig::max_duration).
+    /// `None` disables the guard. Per-surface values are set by each call
+    /// site (chat, copilot, Slack, watches) — see KYO-345.
+    pub max_duration: Option<Duration>,
+    /// Cumulative billable-token ceiling for the agent's `chat()` call,
+    /// mirrored onto
+    /// [`AgentConfig::max_total_tokens`](crate::agent::AgentConfig::max_total_tokens).
+    /// `None` disables the guard. Excludes prompt-cache reads — see that
+    /// field's doc for why.
+    pub max_total_tokens: Option<u64>,
     pub component: String,
     pub user_message_id: Option<String>,
     pub assistant_message_id: Option<String>,
@@ -118,6 +130,11 @@ impl Default for AgentExecutionConfig {
             system_prompt: None,
             tools_subset: None,
             max_iterations: 25,
+            // Conservative library defaults — see `AgentConfig::default()`.
+            // A caller that does not think about these guards should not
+            // silently inherit interactive chat's more generous ceiling.
+            max_duration: Some(Duration::from_secs(15 * 60)),
+            max_total_tokens: Some(1_500_000),
             component: "custom_agent".into(),
             user_message_id: None,
             assistant_message_id: None,
@@ -328,6 +345,8 @@ pub async fn execute_agent_chat(
 
     let agent_config = AgentConfig {
         max_iterations: config.max_iterations,
+        max_duration: config.max_duration,
+        max_total_tokens: config.max_total_tokens,
         temperature: Some(config.temperature),
         tool_filter,
         ..Default::default()
@@ -1149,6 +1168,8 @@ mod tests {
         let config = AgentExecutionConfig::default();
         assert_eq!(config.temperature, 0.7);
         assert_eq!(config.max_iterations, 25);
+        assert_eq!(config.max_duration, Some(Duration::from_secs(15 * 60)));
+        assert_eq!(config.max_total_tokens, Some(1_500_000));
         assert_eq!(config.component, "custom_agent");
         assert_eq!(config.context_type, "chat");
         assert!(config.model_name.is_none());
@@ -1213,6 +1234,8 @@ mod tests {
         assert!(config.system_prompt.is_none());
         assert!(config.tools_subset.is_none());
         assert_eq!(config.max_iterations, 25);
+        assert_eq!(config.max_duration, Some(Duration::from_secs(15 * 60)));
+        assert_eq!(config.max_total_tokens, Some(1_500_000));
         assert_eq!(config.component, "custom_agent");
         assert!(config.assistant_message_id.is_none());
         assert_eq!(config.context_window, 0);
@@ -1242,6 +1265,8 @@ mod tests {
             system_prompt: Some("Custom prompt.".into()),
             tools_subset: Some(vec!["search_knowledge".into(), "query_datasource".into()]),
             max_iterations: 10,
+            max_duration: Some(Duration::from_secs(600)),
+            max_total_tokens: Some(500_000),
             component: "watch_agent".into(),
             assistant_message_id: Some("msg-pre-created".into()),
             user_message_id: Some("msg-user-123".into()),
@@ -1261,6 +1286,8 @@ mod tests {
         assert_eq!(config.workspace_user_ids.as_ref().unwrap().len(), 2);
         assert_eq!(config.tools_subset.as_ref().unwrap().len(), 2);
         assert_eq!(config.max_iterations, 10);
+        assert_eq!(config.max_duration, Some(Duration::from_secs(600)));
+        assert_eq!(config.max_total_tokens, Some(500_000));
         assert_eq!(config.conversation_history.as_ref().unwrap().len(), 2);
         assert_eq!(config.workspace_roles, vec![WorkspaceRole::WorkspaceAdmin]);
     }

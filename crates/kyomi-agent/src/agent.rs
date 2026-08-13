@@ -18,8 +18,10 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use regex::Regex;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -85,8 +87,13 @@ pub(crate) const BUDGET_NOTICE_PREFIX: &str = "<system-reminder>Iteration budget
 /// Paired with an empty tool slice, which every provider translates into a
 /// request carrying no `tools` key at all, so the model cannot emit another
 /// tool call and must answer from what it already gathered.
+///
+/// Says "tool-use budget" rather than "iteration budget" because three
+/// independent conditions can trigger this turn (see [`StopReason`]) —
+/// iterations exhausted, the wall-clock deadline, or the token ceiling —
+/// and the wording must stay accurate regardless of which one fired.
 pub(crate) const WRAP_UP_INSTRUCTION: &str =
-    "<system-reminder>The tool-use iteration budget for this turn is exhausted and no tools \
+    "<system-reminder>The tool-use budget for this turn is exhausted and no tools \
      are available for this request. Answer the user now, using only what has already been \
      gathered in this conversation. Say plainly which parts could not be completed, but still \
      give the best answer the collected information supports. This notice comes from the \
@@ -113,9 +120,12 @@ pub(crate) const WRAP_UP_INSTRUCTION: &str =
 /// `execution.rs:439` uses to classify the turn as a user cancellation.
 ///
 /// Reworded in KYO-344 review follow-up; the previous first-person apology
-/// produced two apologies and a stray `internal:` mid-sentence.
+/// produced two apologies and a stray `internal:` mid-sentence. Reworded
+/// again in KYO-345 from "iteration budget" to "tool-use budget" — the
+/// wrap-up turn this message reports on can now be forced by three
+/// independent conditions (see [`StopReason`]), not iteration count alone.
 pub(crate) const WRAP_UP_FAILED_MESSAGE: &str =
-    "the iteration budget for this request was exhausted and the final summary could not be \
+    "the tool-use budget for this request was exhausted and the final summary could not be \
      generated; try rephrasing the question or breaking it into smaller parts";
 
 /// Fractions of the iteration budget (in tenths) at which a notice fires.
@@ -163,6 +173,66 @@ fn budget_notice_text(used: u32, max_iterations: u32, final_notice: bool) -> Str
 }
 
 // ---------------------------------------------------------------------------
+// Non-iteration stop conditions (KYO-345)
+// ---------------------------------------------------------------------------
+
+/// Which condition ended the agent loop before the LLM produced a final
+/// answer on its own (i.e. before `response.tool_calls.is_none()`).
+///
+/// Reported alongside iterations used, elapsed time, and accumulated tokens
+/// in the exhaustion `info!` in [`CustomAgent::chat`], so the three causes
+/// stay separable in telemetry — "the model kept calling tools for 50
+/// turns," "a single slow tool call blew the wall-clock deadline," and "the
+/// model looped through a context-heavy tool" are different operational
+/// problems and must not collapse into one counter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StopReason {
+    /// `AgentConfig::max_iterations` tool-use iterations were consumed.
+    Iterations,
+    /// `AgentConfig::max_duration` wall-clock elapsed.
+    Deadline,
+    /// `AgentConfig::max_total_tokens` cumulative billable tokens were
+    /// consumed.
+    TokenBudget,
+}
+
+impl std::fmt::Display for StopReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            StopReason::Iterations => "iterations",
+            StopReason::Deadline => "deadline",
+            StopReason::TokenBudget => "token_budget",
+        })
+    }
+}
+
+/// Check the two non-iteration stop conditions.
+///
+/// Pure — no I/O, no side effects, no access to `self` — so it can be
+/// unit-tested directly without driving the agent loop. Deliberately does
+/// **not** check `max_iterations`; that bound is the `for` loop's own range
+/// in [`CustomAgent::chat`], not this function's concern.
+///
+/// Returns `None` if neither limit is configured, or if the configured
+/// limit(s) have not yet been reached. When both limits are breached on the
+/// same check, [`StopReason::Deadline`] is reported — an arbitrary but
+/// fixed tie-break, so the same inputs always report the same reason.
+pub(crate) fn check_stop_conditions(
+    max_duration: Option<Duration>,
+    max_total_tokens: Option<u64>,
+    elapsed: Duration,
+    accumulated_tokens: u64,
+) -> Option<StopReason> {
+    if max_duration.is_some_and(|limit| elapsed >= limit) {
+        return Some(StopReason::Deadline);
+    }
+    if max_total_tokens.is_some_and(|limit| accumulated_tokens >= limit) {
+        return Some(StopReason::TokenBudget);
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
 // Callback type aliases (to satisfy clippy::type_complexity)
 // ---------------------------------------------------------------------------
 
@@ -186,6 +256,31 @@ type ToolEndCallback = Box<dyn Fn(&str, &str, bool) + Send + Sync>;
 pub struct AgentConfig {
     /// Maximum number of LLM iterations before giving up.
     pub max_iterations: u32,
+    /// Wall-clock deadline for a single `chat()` call, checked at the top of
+    /// every loop iteration via [`tokio::time::Instant::elapsed`]. `None`
+    /// disables the guard.
+    ///
+    /// `max_iterations` alone cannot bound wall-clock time: a single slow
+    /// tool call or LLM round-trip can consume most of a request's latency
+    /// budget without touching the iteration counter. This is the
+    /// independent guard for that case, so raising `max_iterations` (KYO-345
+    /// raised chat's to 50) cannot silently double worst-case latency.
+    pub max_duration: Option<Duration>,
+    /// Cumulative billable-token ceiling across a single `chat()` call.
+    /// `None` disables the guard.
+    ///
+    /// **Deliberately excludes `cache_read_input_tokens`.** Anthropic (and
+    /// other providers') prompt-cache reads are billed at roughly a tenth of
+    /// a fresh input token, so counting them at full weight would turn this
+    /// guard into a measure of context size rather than the cost proxy it is
+    /// meant to be — a long conversation with a large cached prefix would
+    /// trip the ceiling on cache traffic alone, punishing exactly the case
+    /// prompt caching exists to make cheap. Each iteration instead
+    /// contributes `input_tokens + cache_creation_input_tokens +
+    /// output_tokens` — the three components that are billed at (near) full
+    /// price. Do not "fix" this to include cache reads without re-deriving
+    /// the cost model first.
+    pub max_total_tokens: Option<u64>,
     /// Sampling temperature (0.0-1.0). `None` uses model default.
     pub temperature: Option<f32>,
     /// Maximum tokens to generate per LLM call.
@@ -206,6 +301,11 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             max_iterations: 25,
+            // Conservative library defaults: a caller that does not think
+            // about these guards should not silently inherit interactive
+            // chat's more generous ceiling (KYO-345).
+            max_duration: Some(Duration::from_secs(15 * 60)),
+            max_total_tokens: Some(1_500_000),
             temperature: None,
             max_tokens: 4096,
             log_context: false,
@@ -399,11 +499,36 @@ impl CustomAgent {
         let mut budget_notices_fired = 0usize;
         let budget_thresholds = budget_notice_thresholds(self.config.max_iterations);
 
+        // Wall-clock start of this `chat()` call, for `max_duration`.
+        // `tokio::time::Instant`, not `std::time::Instant`: the former
+        // advances under a paused test clock (`#[tokio::test(start_paused =
+        // true)]`), which the deadline test relies on for determinism.
+        let loop_start = Instant::now();
+        // Cumulative billable tokens across this call, for `max_total_tokens`.
+        // Excludes cache reads — see `AgentConfig::max_total_tokens` doc.
+        let mut accumulated_tokens: u64 = 0;
+        // Number of LLM calls made in the loop below (not counting the
+        // wrap-up call), for the exhaustion `info!`.
+        let mut iterations_used: u32 = 0;
+        // Which condition ended the loop. Overwritten if a non-iteration
+        // guard fires; left at `Iterations` if the loop runs to completion.
+        let mut stop_reason = StopReason::Iterations;
+
         // Iteration loop.
         for iteration in 0..self.config.max_iterations {
             // Check cancellation.
             if cancel_token.is_cancelled() {
                 return Err(kyomi_core::Error::Internal("Request cancelled".into()));
+            }
+
+            if let Some(reason) = check_stop_conditions(
+                self.config.max_duration,
+                self.config.max_total_tokens,
+                loop_start.elapsed(),
+                accumulated_tokens,
+            ) {
+                stop_reason = reason;
+                break;
             }
 
             self.state.global_iteration += 1;
@@ -464,6 +589,11 @@ impl CustomAgent {
                 return Err(kyomi_core::Error::Internal("Request cancelled".into()));
             }
 
+            // This LLM call happened, so it counts toward the exhaustion log
+            // regardless of which branch below the response takes next
+            // (return, continue, or fall through to tool execution).
+            iterations_used += 1;
+
             // Track token usage.
             // Total input tokens = regular + cache-creation + cache-read.
             // `input_tokens` alone excludes cached tokens, which makes the
@@ -479,6 +609,15 @@ impl CustomAgent {
                     response.cost,
                 );
             }
+
+            // Billable-cost accumulator for `max_total_tokens`. Deliberately
+            // excludes `cache_read_input_tokens` — see the field doc on
+            // `AgentConfig::max_total_tokens`. Not the same quantity as
+            // `total_input` above, which includes cache reads for the
+            // (unrelated) context-size display.
+            accumulated_tokens += u64::from(response.usage.input_tokens)
+                + u64::from(response.usage.cache_creation_input_tokens)
+                + u64::from(response.usage.output_tokens);
 
             // Fire thinking callback with structured reasoning content
             // (e.g., OpenAI o-series reasoning_content/reasoning fields).
@@ -628,10 +767,17 @@ impl CustomAgent {
 
         }
 
-        // Exhausted all iterations.
+        // The loop above ended without the LLM producing a final answer —
+        // either `max_iterations` ran out, or a non-iteration guard broke
+        // out early (`stop_reason` was set to `Deadline`/`TokenBudget` at
+        // the break site above; it stays `Iterations` otherwise).
         info!(
             max_iterations = self.config.max_iterations,
-            "agent loop exhausted max iterations"
+            iterations_used,
+            elapsed_secs = loop_start.elapsed().as_secs_f64(),
+            accumulated_tokens,
+            stop_reason = %stop_reason,
+            "agent loop exhausted tool-use budget"
         );
 
         // Mark any pending ChartML validation rows as not succeeded.
@@ -1180,6 +1326,11 @@ Chart 2:\n```chartml\ntitle: Bad\n```";
     fn agent_config_default_values() {
         let config = AgentConfig::default();
         assert_eq!(config.max_iterations, 25);
+        // Conservative library defaults (KYO-345) — a caller that does not
+        // think about these guards should not silently inherit interactive
+        // chat's more generous ceiling.
+        assert_eq!(config.max_duration, Some(Duration::from_secs(15 * 60)));
+        assert_eq!(config.max_total_tokens, Some(1_500_000));
         assert!(config.temperature.is_none());
         assert_eq!(config.max_tokens, 4096);
         assert!(!config.log_context);
@@ -1491,12 +1642,45 @@ Chart 2:\n```chartml\ndata:\n  query: SELECT 2\nvisualize:\n  type: line\n```";
     /// What [`ScriptedProvider`] returns for one `complete` call.
     #[derive(Clone)]
     enum Reply {
-        /// A plain text answer — ends the agent loop.
+        /// A plain text answer — ends the agent loop. Carries the default
+        /// (zero) token usage; use `TextWithUsage` when a test needs to
+        /// drive `max_total_tokens`.
         Text(String),
         /// A single tool call — drives the loop into another iteration.
+        /// Carries the default (zero) token usage; use `ToolCallWithUsage`
+        /// when a test needs to drive `max_total_tokens`.
         ToolCall,
+        /// A single tool call carrying explicit token usage — needed by the
+        /// token-ceiling and cache-read tests, which must control exactly
+        /// how many billable tokens each iteration contributes.
+        ToolCallWithUsage(AgentTokenUsage),
+        /// A single tool call preceded by `tokio::time::sleep(duration)` —
+        /// needed by the deadline test, which drives the wall-clock guard
+        /// under a paused tokio clock (`#[tokio::test(start_paused =
+        /// true)]`) rather than a real sleep.
+        SlowToolCall(Duration),
         /// A provider failure.
         Failure(String),
+    }
+
+    /// Build a single-tool-call [`LLMResponse`] carrying the given usage.
+    ///
+    /// Shared by the `ToolCall`, `ToolCallWithUsage`, and `SlowToolCall`
+    /// branches of [`ScriptedProvider::complete`] so the noop-tool-call
+    /// shape (id, name, empty arguments) is defined exactly once.
+    fn tool_call_response(usage: AgentTokenUsage) -> LLMResponse {
+        LLMResponse {
+            content: String::new(),
+            finish_reason: "tool_use".to_string(),
+            usage,
+            tool_calls: Some(vec![ToolCall {
+                id: "tc_1".to_string(),
+                name: NOOP_TOOL_NAME.to_string(),
+                arguments: json!({}),
+            }]),
+            cost: None,
+            thinking_content: None,
+        }
     }
 
     /// One recorded `LLMProvider::complete` invocation.
@@ -1559,18 +1743,12 @@ Chart 2:\n```chartml\ndata:\n  query: SELECT 2\nvisualize:\n  type: line\n```";
                     cost: None,
                     thinking_content: None,
                 }),
-                Reply::ToolCall => Ok(LLMResponse {
-                    content: String::new(),
-                    finish_reason: "tool_use".to_string(),
-                    usage: AgentTokenUsage::default(),
-                    tool_calls: Some(vec![ToolCall {
-                        id: "tc_1".to_string(),
-                        name: NOOP_TOOL_NAME.to_string(),
-                        arguments: json!({}),
-                    }]),
-                    cost: None,
-                    thinking_content: None,
-                }),
+                Reply::ToolCall => Ok(tool_call_response(AgentTokenUsage::default())),
+                Reply::ToolCallWithUsage(usage) => Ok(tool_call_response(usage)),
+                Reply::SlowToolCall(duration) => {
+                    tokio::time::sleep(duration).await;
+                    Ok(tool_call_response(AgentTokenUsage::default()))
+                }
                 Reply::Failure(message) => Err(kyomi_core::Error::Internal(message)),
             }
         }
@@ -1607,9 +1785,10 @@ Chart 2:\n```chartml\ndata:\n  query: SELECT 2\nvisualize:\n  type: line\n```";
         }
     }
 
-    /// Build an agent wired to a scripted provider and a one-tool registry.
-    async fn scripted_agent(
-        max_iterations: u32,
+    /// Build an agent wired to a scripted provider and a one-tool registry,
+    /// with full control over the config fields a test cares about.
+    async fn scripted_agent_with_config(
+        config: AgentConfig,
         script: Vec<Reply>,
         after_script: Reply,
     ) -> (CustomAgent, Arc<Mutex<Vec<RecordedCall>>>) {
@@ -1625,16 +1804,33 @@ Chart 2:\n```chartml\ndata:\n  query: SELECT 2\nvisualize:\n  type: line\n```";
 
         let agent = CustomAgent::new(
             Box::new(provider),
-            AgentConfig {
-                max_iterations,
-                ..Default::default()
-            },
+            config,
             Arc::new(registry),
             test_tool_context().await,
             HashMap::new(),
         );
 
         (agent, calls)
+    }
+
+    /// Build an agent wired to a scripted provider and a one-tool registry,
+    /// with every stop-condition field but `max_iterations` at its library
+    /// default (15 min / 1.5M tokens — high enough that the fast, low-token
+    /// scripted tests never trip them incidentally).
+    async fn scripted_agent(
+        max_iterations: u32,
+        script: Vec<Reply>,
+        after_script: Reply,
+    ) -> (CustomAgent, Arc<Mutex<Vec<RecordedCall>>>) {
+        scripted_agent_with_config(
+            AgentConfig {
+                max_iterations,
+                ..Default::default()
+            },
+            script,
+            after_script,
+        )
+        .await
     }
 
     /// Run a full budget (`max_iterations` tool-calling iterations) and return
@@ -1951,5 +2147,258 @@ Chart 2:\n```chartml\ndata:\n  query: SELECT 2\nvisualize:\n  type: line\n```";
             "a failed wrap-up must append nothing — the last message is still the \
              final tool result, not a substituted apology"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // KYO-345: non-iteration stop conditions — pure predicate
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn check_stop_conditions_never_breaches_with_no_limits_configured() {
+        assert_eq!(
+            check_stop_conditions(None, None, Duration::from_secs(999_999), u64::MAX),
+            None,
+            "with both limits disabled, no elapsed time or token count can breach"
+        );
+    }
+
+    #[test]
+    fn check_stop_conditions_deadline_at_below_and_above_the_limit() {
+        let limit = Duration::from_secs(60);
+        assert_eq!(
+            check_stop_conditions(Some(limit), None, Duration::from_secs(59), 0),
+            None,
+            "below the deadline: no breach"
+        );
+        assert_eq!(
+            check_stop_conditions(Some(limit), None, Duration::from_secs(60), 0),
+            Some(StopReason::Deadline),
+            "at the deadline: breach"
+        );
+        assert_eq!(
+            check_stop_conditions(Some(limit), None, Duration::from_secs(61), 0),
+            Some(StopReason::Deadline),
+            "past the deadline: breach"
+        );
+    }
+
+    #[test]
+    fn check_stop_conditions_token_budget_at_below_and_above_the_limit() {
+        assert_eq!(
+            check_stop_conditions(None, Some(1_000), Duration::ZERO, 999),
+            None,
+            "below the token budget: no breach"
+        );
+        assert_eq!(
+            check_stop_conditions(None, Some(1_000), Duration::ZERO, 1_000),
+            Some(StopReason::TokenBudget),
+            "at the token budget: breach"
+        );
+        assert_eq!(
+            check_stop_conditions(None, Some(1_000), Duration::ZERO, 1_001),
+            Some(StopReason::TokenBudget),
+            "past the token budget: breach"
+        );
+    }
+
+    #[test]
+    fn check_stop_conditions_reports_deadline_when_both_limits_breach() {
+        // Both the deadline and the token budget are breached here. The
+        // reported reason must be deterministic — always the same one for
+        // the same inputs — regardless of which limit a future reader might
+        // expect to "win".
+        assert_eq!(
+            check_stop_conditions(
+                Some(Duration::from_secs(1)),
+                Some(1),
+                Duration::from_secs(2),
+                2
+            ),
+            Some(StopReason::Deadline),
+            "deadline is checked first and reported when both breach"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // KYO-345: non-iteration stop conditions — scripted-provider integration
+    // -----------------------------------------------------------------------
+
+    /// Token usage that contributes a fixed, known amount to
+    /// `max_total_tokens`'s accumulator (`input_tokens +
+    /// cache_creation_input_tokens + output_tokens`).
+    fn billable_usage(tokens: u32) -> AgentTokenUsage {
+        AgentTokenUsage {
+            input_tokens: tokens,
+            output_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            reasoning_tokens: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn token_ceiling_short_circuits_the_iteration_ceiling() {
+        // Each iteration contributes 100_000 billable tokens; the ceiling is
+        // 250_000, so the breach fires at the top of the 4th iteration
+        // (after 3 iterations have run: 0, 100k, 200k, 300k >= 250k). The
+        // script has exactly 3 entries — one per iteration expected to run
+        // — so the queue is empty by the wrap-up call and it correctly
+        // falls back to `after_script` rather than consuming a 4th scripted
+        // tool call (which would make the wrap-up call itself request a
+        // tool and return empty content instead of the wrap-up text).
+        let script = vec![Reply::ToolCallWithUsage(billable_usage(100_000)); 3];
+        let (mut agent, calls) = scripted_agent_with_config(
+            AgentConfig {
+                max_iterations: 25,
+                max_duration: None,
+                max_total_tokens: Some(250_000),
+                ..Default::default()
+            },
+            script,
+            Reply::Text("Summary from partial data.".to_string()),
+        )
+        .await;
+
+        let answer = agent
+            .chat("hello", CancellationToken::new(), None, None, None)
+            .await
+            .expect("chat should complete, not error");
+
+        let recorded = std::mem::take(&mut *calls.lock().expect("call log mutex"));
+        assert_eq!(
+            recorded.len(),
+            4,
+            "3 tool-calling iterations (accumulating 300_000 >= 250_000 ceiling) \
+             plus the wrap-up call — must stop well short of the 25-iteration \
+             ceiling: {recorded:?}"
+        );
+        assert!(
+            recorded.last().expect("has calls").tools.is_empty(),
+            "the final call must carry no tools"
+        );
+        assert_eq!(
+            recorded
+                .last()
+                .expect("has calls")
+                .messages
+                .last()
+                .expect("wrap-up call has messages")
+                .content,
+            WRAP_UP_INSTRUCTION,
+            "the final call must carry the wrap-up instruction at its tail"
+        );
+        assert_eq!(
+            answer, "Summary from partial data.",
+            "chat() must return the wrap-up's substantive content, not an error \
+             or a canned apology"
+        );
+    }
+
+    #[tokio::test]
+    async fn deadline_short_circuits_the_iteration_ceiling() {
+        // The script has exactly 1 entry, matching the 1 iteration expected
+        // to run before the deadline breach — see the token-ceiling test
+        // above for why an oversized script would corrupt the wrap-up call.
+        let script = vec![Reply::SlowToolCall(Duration::from_secs(400))];
+        let (mut agent, calls) = scripted_agent_with_config(
+            AgentConfig {
+                max_iterations: 25,
+                max_duration: Some(Duration::from_secs(300)),
+                max_total_tokens: None,
+                ..Default::default()
+            },
+            script,
+            Reply::Text("Summary before the deadline.".to_string()),
+        )
+        .await;
+
+        // Pause the clock only now, after real setup (the in-memory SQLite
+        // pool `scripted_agent_with_config` connects above) has completed
+        // using real time. Pausing from the start via `#[tokio::test(
+        // start_paused = true)]` races the virtual clock's auto-advance
+        // against sqlx's `spawn_blocking` connect work and loses —
+        // `PoolTimedOut` — because the executor sees no runnable task and
+        // fast-forwards to the next timer deadline before the blocking
+        // thread reports back. Pausing here, and sleeping only inside the
+        // scripted provider below, avoids that race entirely; the deadline
+        // check is still driven by a virtual clock, not a real sleep.
+        tokio::time::pause();
+
+        let answer = agent
+            .chat("hello", CancellationToken::new(), None, None, None)
+            .await
+            .expect("chat should complete, not error");
+
+        let recorded = std::mem::take(&mut *calls.lock().expect("call log mutex"));
+        assert_eq!(
+            recorded.len(),
+            2,
+            "1 slow tool-calling iteration (elapsed ~400s >= 300s deadline) plus \
+             the wrap-up call — must stop well short of the 25-iteration \
+             ceiling: {recorded:?}"
+        );
+        assert!(
+            recorded.last().expect("has calls").tools.is_empty(),
+            "the final call must carry no tools"
+        );
+        assert_eq!(
+            recorded
+                .last()
+                .expect("has calls")
+                .messages
+                .last()
+                .expect("wrap-up call has messages")
+                .content,
+            WRAP_UP_INSTRUCTION,
+            "the final call must carry the wrap-up instruction at its tail"
+        );
+        assert_eq!(
+            answer, "Summary before the deadline.",
+            "chat() must return the wrap-up's substantive content, not an error \
+             or a canned apology"
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_reads_do_not_count_toward_the_token_ceiling() {
+        // Every iteration reports 500_000 cache-read tokens and nothing
+        // else. If cache reads counted toward `max_total_tokens`, a ceiling
+        // of 100_000 would breach after the very first iteration. Because
+        // they must not count, the accumulator stays at 0 for the whole
+        // run and the loop runs to its full 5-iteration ceiling.
+        let cache_heavy = AgentTokenUsage {
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 500_000,
+            reasoning_tokens: 0,
+        };
+        let script = vec![Reply::ToolCallWithUsage(cache_heavy); 5];
+        let (mut agent, calls) = scripted_agent_with_config(
+            AgentConfig {
+                max_iterations: 5,
+                max_duration: None,
+                max_total_tokens: Some(100_000),
+                ..Default::default()
+            },
+            script,
+            Reply::Text("Ran to completion.".to_string()),
+        )
+        .await;
+
+        let answer = agent
+            .chat("hello", CancellationToken::new(), None, None, None)
+            .await
+            .expect("chat should complete, not error");
+
+        let recorded = std::mem::take(&mut *calls.lock().expect("call log mutex"));
+        assert_eq!(
+            recorded.len(),
+            6,
+            "5 loop iterations plus the wrap-up call — cache-read tokens must \
+             never count toward max_total_tokens, or this would have stopped \
+             after 1 iteration: {recorded:?}"
+        );
+        assert_eq!(answer, "Ran to completion.");
     }
 }

@@ -172,7 +172,11 @@ pub async fn send_copilot_message(
         message_source: Some("web".to_string()),
         system_prompt: Some(system_prompt),
         tools_subset: Some(kyomi_agent::copilot::tools_for_context(context_type)),
+        // Copilot: inline assist — a long loop is a UX failure regardless of
+        // cost, so it keeps the tightest guards of any surface (KYO-345).
         max_iterations: 20,
+        max_duration: Some(std::time::Duration::from_secs(3 * 60)),
+        max_total_tokens: Some(400_000),
         component: context_type.to_string(),
         user_message_id: None,
         assistant_message_id: Some(prep.assistant_message_id.clone()),
