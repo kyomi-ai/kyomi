@@ -46,7 +46,11 @@ pub struct ChartMLValidationLog {
     /// `None` while the session is still in-flight.
     pub retry_succeeded: Option<bool>,
 
-    /// Which agent component produced the failure ("chat" or "watch").
+    /// Which agent component produced the failure. One of `"chat"` (found
+    /// within the tool-use loop and sent back to the model for a retry),
+    /// `"chat_wrap_up"` (found in the forced wrap-up turn after the
+    /// tool-use budget ran out — no retry is possible there, so the
+    /// offending block(s) are stripped instead; see KYO-347), or `"watch"`.
     pub component: String,
 
     /// LLM model that generated the invalid response (e.g. "claude-sonnet-4-5").

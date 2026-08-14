@@ -315,23 +315,26 @@ pub fn extract_chartml_queries(text: &str) -> Vec<(usize, String, String)> {
     queries
 }
 
-/// Validate all SQL queries inside ChartML blocks via dry-run.
+/// Per-block SQL dry-run validation errors.
 ///
-/// Returns `None` if all queries are valid (or there are no queries).
-/// Returns `Some(error_message)` with details of any invalid SQL.
+/// The primitive [`validate_chartml_sql`] (aggregate) wraps. Each entry's
+/// `usize` is the block's **0-based position** in `chartml_re()`'s
+/// capture-iteration order — `extract_chartml_queries`'s 1-based
+/// `block_number` minus one. This is the same 0-based indexing contract
+/// `agent.rs`'s `chartml_block_errors` and `strip_chartml_blocks` use; the
+/// `Block N` text embedded in each message stays 1-based for readability,
+/// but the index used for stripping is always 0-based. A block that passes
+/// validation (or is skipped as an infra error, or has no query/datasource
+/// pair to dry-run) contributes no entry.
 ///
-/// Datasource resolution or credential errors are logged but do not
-/// block the save — only actual SQL syntax errors are reported.
-pub async fn validate_chartml_sql(
+/// Datasource resolution or credential errors are logged but do not produce
+/// an entry — only actual SQL syntax errors do.
+pub async fn chartml_sql_block_errors(
     ctx: &QueryContext,
     content: &str,
-) -> Option<String> {
+) -> Vec<(usize, String)> {
     let queries = extract_chartml_queries(content);
-    if queries.is_empty() {
-        return None;
-    }
-
-    let mut sql_errors = Vec::new();
+    let mut errors = Vec::new();
 
     for (block_num, sql, slug) in &queries {
         match dry_run_datasource_query(ctx, slug, sql).await {
@@ -347,16 +350,34 @@ pub async fn validate_chartml_sql(
                         "ChartML SQL validation: infra error, skipping block"
                     );
                 } else {
-                    sql_errors.push(format!("Block {block_num}: SQL error: {e}"));
+                    // `block_num` is 1-based (see `extract_chartml_queries`);
+                    // the index carried alongside the message is 0-based, per
+                    // this function's doc comment.
+                    errors.push((block_num - 1, format!("Block {block_num}: SQL error: {e}")));
                 }
             }
         }
     }
 
-    if sql_errors.is_empty() {
+    errors
+}
+
+/// Validate all SQL queries inside ChartML blocks via dry-run.
+///
+/// Returns `None` if all queries are valid (or there are no queries).
+/// Returns `Some(error_message)` with details of any invalid SQL. Thin
+/// aggregate wrapper over [`chartml_sql_block_errors`] — see that function
+/// for the per-block primitive.
+pub async fn validate_chartml_sql(
+    ctx: &QueryContext,
+    content: &str,
+) -> Option<String> {
+    let errors = chartml_sql_block_errors(ctx, content).await;
+    if errors.is_empty() {
         None
     } else {
-        Some(sql_errors.join("; "))
+        let message = errors.iter().map(|(_, msg)| msg.as_str()).collect::<Vec<_>>().join("; ");
+        Some(message)
     }
 }
 
