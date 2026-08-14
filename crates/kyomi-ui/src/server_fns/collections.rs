@@ -199,9 +199,14 @@ pub async fn update_collection(
 pub async fn delete_collection(collection_id: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    kyomi_auth::collection_service::delete_collection(ac.db(), &collection_id, &ac.ws_id)
-        .await
-        .into_sfn()?;
+    kyomi_auth::collection_service::delete_collection(
+        ac.db(),
+        &collection_id,
+        &ac.ws_id,
+        ac.ctx.ws_manager.as_ref(),
+    )
+    .await
+    .into_sfn()?;
 
     Ok(())
 }
