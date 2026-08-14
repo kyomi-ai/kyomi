@@ -710,7 +710,7 @@ pub async fn send_chat_message(
                         user_id: &spawn_user_id,
                         assistant_message_id: &spawn_assistant_message_id,
                         context_type: &context_type,
-                        error: &e.to_string(),
+                        error: e.user_message(),
                     },
                 )
                 .await;

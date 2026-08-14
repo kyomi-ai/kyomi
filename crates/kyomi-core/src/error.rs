@@ -88,6 +88,44 @@ impl Error {
             Error::TooManyRequests(_, _) | Error::ServiceUnavailable(_)
         )
     }
+
+    /// Returns the message that may be shown to a user, with no variant tag.
+    ///
+    /// `Display` (via `#[error(...)]` above) is the **log** representation —
+    /// it deliberately includes the variant tag (`"internal: {0}"`,
+    /// `"not found: {0}"`, ...) so a log line identifies which branch fired
+    /// without needing the source location. `user_message()` is the **user**
+    /// representation: the inner message alone, so callers building a
+    /// user-facing sentence (e.g. `format!("I encountered an error while
+    /// processing your request: {}", err.user_message())`) don't leak that
+    /// tag into copy a person reads. The two must never be swapped — logging
+    /// `user_message()` loses the variant, and showing `Display` to a user
+    /// reads as `"...: internal: <message>"`.
+    ///
+    /// For the four `#[error(transparent)]` variants (`Sqlx`, `Migrate`,
+    /// `Redis`, `SerdeJson`), this returns the same fixed
+    /// `"internal server error"` string that `IntoResponse` already returns
+    /// for them (see the `match` below) — raw database/cache/serialization
+    /// detail is never appropriate to show a user, so there is no inner
+    /// message to strip a tag from.
+    pub fn user_message(&self) -> &str {
+        match self {
+            Error::NotFound(msg)
+            | Error::Unauthorized(msg)
+            | Error::Forbidden(msg)
+            | Error::BadRequest(msg)
+            | Error::Conflict(msg)
+            | Error::TooManyRequests(msg, _)
+            | Error::NotImplemented(msg)
+            | Error::ServiceUnavailable(msg)
+            | Error::DatasourceConnection(msg)
+            | Error::CredentialDecryptionFailed(msg)
+            | Error::Internal(msg) => msg,
+            Error::Sqlx(_) | Error::Migrate(_) | Error::Redis(_) | Error::SerdeJson(_) => {
+                "internal server error"
+            }
+        }
+    }
 }
 
 /// Convenience alias used throughout the codebase.
@@ -184,5 +222,37 @@ mod tests {
             err.to_string(),
             "credential could not be decrypted — check the encryption key (field: shared_password)"
         );
+    }
+
+    #[test]
+    fn internal_display_still_carries_the_log_prefix() {
+        // The log representation must not regress — Display is what shows up
+        // in tracing output and must keep identifying the variant.
+        let err = Error::Internal("the tool-use budget was exhausted".into());
+        assert_eq!(
+            err.to_string(),
+            "internal: the tool-use budget was exhausted"
+        );
+    }
+
+    #[test]
+    fn internal_user_message_strips_the_log_prefix() {
+        // KYO-350: user_message() is the user representation — no "internal: "
+        // tag, just the inner message.
+        let err = Error::Internal("the tool-use budget was exhausted".into());
+        assert!(!err.user_message().contains("internal:"));
+        assert_eq!(err.user_message(), "the tool-use budget was exhausted");
+    }
+
+    #[test]
+    fn transparent_variant_user_message_does_not_leak_raw_detail() {
+        // KYO-350: transparent variants (Sqlx, Migrate, Redis, SerdeJson) must
+        // never show their raw wrapped error to a user — mirrors the same
+        // policy IntoResponse already applies to them (see the `match` in
+        // `IntoResponse::into_response` above).
+        let serde_err = serde_json::from_str::<i32>("x").unwrap_err();
+        let err = Error::SerdeJson(serde_err);
+        assert_eq!(err.user_message(), "internal server error");
+        assert!(!err.user_message().contains("expected"));
     }
 }
