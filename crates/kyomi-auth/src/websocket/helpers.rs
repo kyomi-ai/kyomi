@@ -754,6 +754,15 @@ pub async fn send_sync_action(
 /// Fetches the full entity snapshot from the database and resolves the correct
 /// `entity_type` (dashboard vs knowledge) from the stored `doc_type`. For
 /// delete actions the snapshot is skipped (the entity is already gone).
+///
+/// Routes on visibility: public docs broadcast to the whole workspace,
+/// private docs go only to the owner via `manager.send_to_user`. If the
+/// visibility read itself fails, this does **not** fall back to either
+/// routing (KYO-354) — a mis-routed broadcast would silently drop a public
+/// doc's update for every non-owner, which is worse than skipping the
+/// broadcast outright. On a failed read it logs and returns without
+/// broadcasting; the matching `sync_log` write still lets the client
+/// converge on its next delta.
 pub async fn broadcast_dashboard_sync(
     db: &kyomi_core::DbPool,
     manager: &WebSocketManager,
@@ -805,9 +814,21 @@ pub async fn broadcast_dashboard_sync(
     };
 
     // Route based on visibility: public docs go to all workspace members;
-    // private docs go only to the document owner.
-    let is_public =
-        crate::dashboard_service::is_doc_publicly_visible(db, dashboard_id).await;
+    // private docs go only to the document owner. A failed read must not be
+    // guessed into either route (KYO-354) — skip the broadcast entirely,
+    // matching the `fetch_dashboard_snapshot` Err arm above.
+    let is_public = match crate::dashboard_service::is_doc_publicly_visible(db, dashboard_id).await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(
+                dashboard_id,
+                error = %e,
+                "dashboard sync: visibility read failed; skipping broadcast"
+            );
+            return;
+        }
+    };
     if is_public {
         send_sync_action(manager, workspace_id, &sync_action, None).await;
     } else {
