@@ -23,8 +23,9 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use crate::catalog::helpers::{
-    archive_missing_tables, cache_table, resolve_final_status, update_datasource_last_refresh,
-    update_datasource_status, IndexerContext,
+    archive_missing_tables, cache_table, fold_table_outcomes, resolve_final_status,
+    update_datasource_last_refresh, update_datasource_status, DatasetOutcome, IndexerContext,
+    TableOutcome,
 };
 use crate::catalog::types::{CatalogIndexResult, ColumnEntry};
 
@@ -298,9 +299,9 @@ struct RunOutcome {
 ///   (`TableOutcome::WriteFailed`, KYO-364), so naming the read specifically
 ///   would overclaim on that path.
 ///
-/// Pure and I/O-free (mirrors `fold_dataset_outcomes` / `fold_table_outcomes`
-/// above) so this exact decision — not a re-derivation of it — can be
-/// exercised directly by a unit test; see
+/// Pure and I/O-free (mirrors `fold_dataset_outcomes` above and
+/// `fold_table_outcomes` in `catalog::helpers`) so this exact decision — not
+/// a re-derivation of it — can be exercised directly by a unit test; see
 /// `all_tables_listed_all_schemas_denied_resolves_to_failed` et al.
 fn resolve_run_outcome(
     seen_any_table: bool,
@@ -455,115 +456,6 @@ fn fold_dataset_outcomes(
     }
 
     (tables_indexed, errors)
-}
-
-/// Cap on how many per-table failures — schema-fetch denials
-/// (`TableOutcome::SchemaUnreadable`) and catalog write failures
-/// (`TableOutcome::WriteFailed`, KYO-364) alike, sharing this one cap — a
-/// single dataset contributes to the run's `errors` (and the persisted
-/// failure reason) before further failures are collapsed into one summary
-/// line.
-///
-/// Every real caller of `index_workspace_catalog` passes
-/// `max_tables_per_dataset: None` (verified: `catalog_scheduler.rs:489`,
-/// `catalog_scheduler.rs:638`, `indexing_service.rs:355/423`,
-/// `sql_editor.rs:760` all pass `None`), so nothing upstream bounds how many
-/// tables a single dataset can enumerate. Without this cap, a dataset with
-/// thousands of tables under a blanket `bigquery.tables.get` denial, or a
-/// blanket `cache_table` write failure, would grow both
-/// `CatalogIndexResult::errors` and the summarised persisted failure reason
-/// to thousands of near-identical lines.
-const MAX_TABLE_ERRORS_PER_DATASET: usize = 5;
-
-/// What happened to one table inside `index_dataset_tables`.
-enum TableOutcome {
-    /// Schema read and `cache_table` wrote the catalog row.
-    Indexed,
-    /// Schema read, but `cache_table` failed to write the row. Carries the
-    /// underlying error text (KYO-364) — before `cache_table` returned
-    /// `Result`, this state was `NotCached`, a bare `false` with no
-    /// attached reason, and was silently dropped from `table_errors`.
-    WriteFailed(String),
-    /// The table was listed, but its schema could not be read.
-    SchemaUnreadable(String),
-}
-
-/// The result of indexing every table listed in one BigQuery dataset.
-struct DatasetOutcome {
-    tables_indexed: usize,
-    /// Fully-qualified ids of EVERY table the listing returned — readable or
-    /// not. Archiving keys off this set, so a table whose schema fetch was
-    /// denied must still appear here or the run would evict a table that
-    /// demonstrably still exists (KYO-324).
-    seen_table_ids: Vec<String>,
-    /// Bounded, formatted per-table failures — schema-fetch denials and
-    /// catalog write failures alike (KYO-364).
-    table_errors: Vec<String>,
-}
-
-/// Fold per-table indexing outcomes from one dataset into a
-/// [`DatasetOutcome`].
-///
-/// Mirrors `fold_dataset_outcomes` (KYO-264) one level down: every outcome —
-/// whether the schema read succeeded, the catalog write failed, or the
-/// schema itself could not be read — contributes its `full_table_id` to
-/// `seen_table_ids`. That is the archiving invariant this ticket (KYO-324,
-/// extended by KYO-364) exists to protect: a table whose schema fetch was
-/// denied, or whose `cache_table` write failed, was still *listed*, so it
-/// must not be treated as gone. Both `SchemaUnreadable` and `WriteFailed`
-/// contribute to `table_errors`, sharing a single
-/// `MAX_TABLE_ERRORS_PER_DATASET` cap with a trailing summary line for
-/// anything beyond it — a blanket `cache_table` failure (e.g. the DB
-/// connection dropped) fails every table in the dataset exactly like a
-/// blanket schema-read denial does, so it needs the same bound.
-///
-/// Deliberately free of I/O (`outcomes` are already-resolved `TableOutcome`s)
-/// so this can be exercised directly by a unit test without an
-/// HTTP-mocking dependency — none exists in this workspace. Matches the
-/// style and doc-comment depth of `fold_dataset_outcomes` above, its
-/// established precedent.
-fn fold_table_outcomes(
-    dataset_label: &str,
-    outcomes: Vec<(String, TableOutcome)>,
-) -> DatasetOutcome {
-    let mut tables_indexed = 0usize;
-    let mut seen_table_ids = Vec::with_capacity(outcomes.len());
-    let mut table_errors = Vec::new();
-    let mut errors_beyond_cap = 0usize;
-
-    for (full_table_id, outcome) in outcomes {
-        seen_table_ids.push(full_table_id.clone());
-
-        let failure_msg = match outcome {
-            TableOutcome::Indexed => None,
-            TableOutcome::SchemaUnreadable(msg) => Some(msg),
-            TableOutcome::WriteFailed(msg) => Some(msg),
-        };
-
-        match failure_msg {
-            None => tables_indexed += 1,
-            Some(msg) => {
-                if table_errors.len() < MAX_TABLE_ERRORS_PER_DATASET {
-                    table_errors.push(format!("{full_table_id}: {msg}"));
-                } else {
-                    errors_beyond_cap += 1;
-                }
-            }
-        }
-    }
-
-    if errors_beyond_cap > 0 {
-        table_errors.push(format!(
-            "{dataset_label}: {errors_beyond_cap} further table failure{} not shown",
-            if errors_beyond_cap == 1 { "" } else { "s" }
-        ));
-    }
-
-    DatasetOutcome {
-        tables_indexed,
-        seen_table_ids,
-        table_errors,
-    }
 }
 
 /// Index all tables in a single BigQuery dataset.
@@ -968,17 +860,14 @@ mod tests {
         assert_eq!(run_outcome.failure_reason, None);
     }
 
-    // ── fold_table_outcomes (KYO-324) ──────────────────────────────────
-    //
-    // `fold_table_outcomes` is the pure seam this ticket exists to add.
-    // `index_dataset_tables` inserted every listed table id into
-    // `seen_table_ids` BEFORE fetching its schema, so a schema-fetch denial
-    // never wrongly archived the table (see `archive_missing_tables`) — but
-    // the denial itself was dropped (`warn!` + `continue`), so a dataset
-    // where every schema fetch was denied looked identical to a genuinely
-    // empty dataset: `tables_indexed == 0`, `seen_table_ids` non-empty
-    // (implying `nothing_found == false`), `errors` empty — which the old
-    // single `nothing_found` predicate resolved to `"idle"`.
+    // `fold_table_outcomes` / `TableOutcome` / `DatasetOutcome` /
+    // `MAX_TABLE_ERRORS_PER_DATASET` themselves — and the pure fold tests
+    // that exercise them directly — moved to `catalog::helpers` (KYO-365),
+    // which `bigquery_public.rs` now shares. `schema_denied`/`write_failed`
+    // stay here as tiny fixture builders for the `resolve_run_outcome`
+    // end-to-end tests below, which are specific to this module (public
+    // dataset indexing has no `resolve_run_outcome` — no archiving to
+    // decide — so there is nothing there to share).
 
     fn schema_denied(table: &str) -> TableOutcome {
         TableOutcome::SchemaUnreadable(format!("HTTP 403: permission denied reading {table}"))
@@ -989,163 +878,6 @@ mod tests {
     /// embedding generation/storage) returned `Err`.
     fn write_failed(table: &str) -> TableOutcome {
         TableOutcome::WriteFailed(format!("failed to insert cache entry for {table}: db closed"))
-    }
-
-    #[test]
-    fn all_tables_indexed_counts_and_seen_ids_match() {
-        let outcomes = vec![
-            ("proj-1.ds_a.t1".to_string(), TableOutcome::Indexed),
-            ("proj-1.ds_a.t2".to_string(), TableOutcome::Indexed),
-        ];
-        let result = fold_table_outcomes("proj-1.ds_a", outcomes);
-        assert_eq!(result.tables_indexed, 2);
-        assert_eq!(
-            result.seen_table_ids,
-            vec!["proj-1.ds_a.t1".to_string(), "proj-1.ds_a.t2".to_string()]
-        );
-        assert!(result.table_errors.is_empty());
-    }
-
-    /// AC3 / the trap this ticket calls out explicitly: every table's
-    /// schema fetch is denied, but every one of them was still *listed*.
-    /// `seen_table_ids` must contain ALL of them — that set is what
-    /// `archive_missing_tables` uses to decide what still exists. If this
-    /// regresses (a table dropped from `seen_table_ids` because its schema
-    /// fetch failed), a total `bigquery.tables.get` denial would archive
-    /// the entire existing catalog instead of just failing the run.
-    #[test]
-    fn all_schema_unreadable_still_populates_seen_table_ids_completely() {
-        let table_ids = ["proj-1.ds_a.t1", "proj-1.ds_a.t2", "proj-1.ds_a.t3"];
-        let outcomes: Vec<(String, TableOutcome)> = table_ids
-            .iter()
-            .map(|t| (t.to_string(), schema_denied(t)))
-            .collect();
-
-        let result = fold_table_outcomes("proj-1.ds_a", outcomes);
-
-        assert_eq!(result.tables_indexed, 0);
-        assert_eq!(
-            result.seen_table_ids.len(),
-            table_ids.len(),
-            "every listed table must appear in seen_table_ids even when its schema fetch failed"
-        );
-        for t in &table_ids {
-            assert!(
-                result.seen_table_ids.contains(&t.to_string()),
-                "{t} missing from seen_table_ids — archive_missing_tables would wrongly evict it"
-            );
-        }
-        assert_eq!(result.table_errors.len(), table_ids.len());
-        for (t, err) in table_ids.iter().zip(result.table_errors.iter()) {
-            assert!(
-                err.starts_with(&format!("{t}: ")),
-                "expected table-id-prefixed error, got: {err}"
-            );
-        }
-    }
-
-    #[test]
-    fn mixed_indexed_unreadable_and_write_failed_counts_and_errors_correctly() {
-        let outcomes = vec![
-            ("proj-1.ds_a.t1".to_string(), TableOutcome::Indexed),
-            ("proj-1.ds_a.t2".to_string(), schema_denied("proj-1.ds_a.t2")),
-            ("proj-1.ds_a.t3".to_string(), write_failed("proj-1.ds_a.t3")),
-        ];
-        let result = fold_table_outcomes("proj-1.ds_a", outcomes);
-
-        assert_eq!(result.tables_indexed, 1);
-        assert_eq!(
-            result.seen_table_ids.len(),
-            3,
-            "a write failure must still count as seen — the table demonstrably exists"
-        );
-        assert_eq!(result.table_errors.len(), 2);
-        assert!(result.table_errors[0].starts_with("proj-1.ds_a.t2: "));
-        assert!(result.table_errors[1].starts_with("proj-1.ds_a.t3: "));
-    }
-
-    /// Criterion 5 (shared cap): a mix of `SchemaUnreadable` and
-    /// `WriteFailed` outcomes in one dataset must share the single
-    /// `MAX_TABLE_ERRORS_PER_DATASET` cap rather than getting one cap each —
-    /// they're both "this table failed" from `table_errors`' point of view.
-    #[test]
-    fn schema_unreadable_and_write_failed_share_one_cap() {
-        // One kind's worth exactly fills the cap, so neither kind alone
-        // overflows. Only a *shared* cap overflows on the combined 2×
-        // fixture — a per-kind cap would admit all 10 with no summary line,
-        // which is precisely what the length assertion below rules out.
-        let half = MAX_TABLE_ERRORS_PER_DATASET;
-        let mut outcomes: Vec<(String, TableOutcome)> = (0..half)
-            .map(|i| {
-                let t = format!("proj-1.ds_a.unreadable{i}");
-                (t.clone(), schema_denied(&t))
-            })
-            .collect();
-        outcomes.extend((0..half).map(|i| {
-            let t = format!("proj-1.ds_a.writefail{i}");
-            (t.clone(), write_failed(&t))
-        }));
-        let total = outcomes.len();
-        assert!(
-            total > MAX_TABLE_ERRORS_PER_DATASET,
-            "test fixture must exceed the cap to be meaningful"
-        );
-
-        let result = fold_table_outcomes("proj-1.ds_a", outcomes);
-
-        assert_eq!(result.seen_table_ids.len(), total);
-        assert_eq!(
-            result.table_errors.len(),
-            MAX_TABLE_ERRORS_PER_DATASET + 1,
-            "SchemaUnreadable and WriteFailed must share one cap, not one each"
-        );
-        let summary = result.table_errors.last().expect("summary line present");
-        assert!(summary.starts_with("proj-1.ds_a: "));
-        assert!(summary.contains(&(total - MAX_TABLE_ERRORS_PER_DATASET).to_string()));
-    }
-
-    /// More `SchemaUnreadable` outcomes than `MAX_TABLE_ERRORS_PER_DATASET`:
-    /// the individual error list must be bounded, with one trailing summary
-    /// line for the rest — but `seen_table_ids` must remain complete, since
-    /// archiving must not be affected by the error cap.
-    #[test]
-    fn table_errors_are_capped_with_a_summary_line_but_seen_ids_stay_complete() {
-        let total = MAX_TABLE_ERRORS_PER_DATASET + 3;
-        let table_ids: Vec<String> = (0..total)
-            .map(|i| format!("proj-1.ds_a.t{i}"))
-            .collect();
-        let outcomes: Vec<(String, TableOutcome)> = table_ids
-            .iter()
-            .map(|t| (t.clone(), schema_denied(t)))
-            .collect();
-
-        let result = fold_table_outcomes("proj-1.ds_a", outcomes);
-
-        assert_eq!(result.tables_indexed, 0);
-        assert_eq!(
-            result.seen_table_ids.len(),
-            total,
-            "the error cap must not drop any table from seen_table_ids"
-        );
-
-        // MAX_TABLE_ERRORS_PER_DATASET individual errors, plus one summary line.
-        assert_eq!(result.table_errors.len(), MAX_TABLE_ERRORS_PER_DATASET + 1);
-        for i in 0..MAX_TABLE_ERRORS_PER_DATASET {
-            assert!(
-                result.table_errors[i].starts_with(&format!("proj-1.ds_a.t{i}: ")),
-                "expected table {i}'s error to be individually listed, got: {}",
-                result.table_errors[i]
-            );
-        }
-        let summary = result.table_errors.last().expect("summary line present");
-        assert!(
-            summary.starts_with("proj-1.ds_a: "),
-            "summary line must be labeled with the dataset, got: {summary}"
-        );
-        assert!(
-            summary.contains(&(total - MAX_TABLE_ERRORS_PER_DATASET).to_string()),
-            "summary line must name how many further failures were dropped, got: {summary}"
-        );
     }
 
     // ── end-to-end through resolve_run_outcome (KYO-324 acceptance) ───────
@@ -1355,58 +1087,6 @@ mod tests {
         assert!(
             run_outcome.archive,
             "tables were listed, so archiving must run and use the full seen_table_ids set"
-        );
-    }
-
-    /// Criterion 4 (cap): more than `MAX_TABLE_ERRORS_PER_DATASET` write
-    /// failures in one dataset ⇒ exactly `MAX + 1` entries (the cap plus one
-    /// summary line), with correct singular/plural wording and `seen_table_ids`
-    /// left uncapped.
-    #[test]
-    fn write_failures_are_capped_with_a_correctly_pluralized_summary_line() {
-        // Exactly one over the cap so the summary line is singular ("1
-        // further table failure"), proving the singular/plural branch.
-        let total = MAX_TABLE_ERRORS_PER_DATASET + 1;
-        let table_ids: Vec<String> = (0..total)
-            .map(|i| format!("proj-1.ds_a.t{i}"))
-            .collect();
-        let outcomes: Vec<(String, TableOutcome)> = table_ids
-            .iter()
-            .map(|t| (t.clone(), write_failed(t)))
-            .collect();
-
-        let result = fold_table_outcomes("proj-1.ds_a", outcomes);
-
-        assert_eq!(result.tables_indexed, 0);
-        assert_eq!(
-            result.seen_table_ids.len(),
-            total,
-            "the error cap must not drop any table from seen_table_ids"
-        );
-        assert_eq!(result.table_errors.len(), MAX_TABLE_ERRORS_PER_DATASET + 1);
-        let summary = result.table_errors.last().expect("summary line present");
-        assert_eq!(
-            summary, "proj-1.ds_a: 1 further table failure not shown",
-            "singular wording must be exact for a one-over-cap overflow"
-        );
-
-        // Companion case: comfortably over the cap, plural wording.
-        let total_plural = MAX_TABLE_ERRORS_PER_DATASET + 3;
-        let table_ids_plural: Vec<String> = (0..total_plural)
-            .map(|i| format!("proj-1.ds_b.t{i}"))
-            .collect();
-        let outcomes_plural: Vec<(String, TableOutcome)> = table_ids_plural
-            .iter()
-            .map(|t| (t.clone(), write_failed(t)))
-            .collect();
-        let result_plural = fold_table_outcomes("proj-1.ds_b", outcomes_plural);
-        let summary_plural = result_plural
-            .table_errors
-            .last()
-            .expect("summary line present");
-        assert_eq!(
-            summary_plural, "proj-1.ds_b: 3 further table failures not shown",
-            "plural wording must be exact for a multi-over-cap overflow"
         );
     }
 
