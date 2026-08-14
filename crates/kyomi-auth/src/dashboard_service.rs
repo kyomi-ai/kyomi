@@ -440,22 +440,41 @@ pub async fn create_dashboard(
         };
         match fetch_dashboard_snapshot(db, &dashboard_id, user_id).await {
             Ok(Some(snapshot)) => {
-                let is_visible = is_doc_publicly_visible(db, &dashboard_id).await;
-                if let Err(e) = sync_log_service::write_sync_entry(
-                    db,
-                    sync_log_service::SyncEntryParams {
-                        entity_type,
-                        entity_id: &dashboard_id,
-                        workspace_id,
-                        action: SyncActionType::Insert,
-                        data: Some(snapshot),
-                        owner_user_id: Some(user_id),
-                        is_workspace_visible: is_visible,
-                    },
-                )
-                .await
-                {
-                    tracing::warn!(error = %e, dashboard_id = %dashboard_id, "Failed to write sync log entry");
+                // Same KYO-245 rule applied to the visibility read (KYO-354):
+                // the row was already written above, so returning `Err` here
+                // would report failure for a create that actually succeeded.
+                // On a failed read, skip the sync_log write entirely rather
+                // than guess a visibility value — a missing row means "not
+                // converged yet" and is recoverable on the next mutation or a
+                // bootstrap, whereas a wrong `Delete`-shaped guess never
+                // self-heals for other entity types and a wrong `Insert`
+                // guess here would still misroute this one.
+                match is_doc_publicly_visible(db, &dashboard_id).await {
+                    Ok(is_visible) => {
+                        if let Err(e) = sync_log_service::write_sync_entry(
+                            db,
+                            sync_log_service::SyncEntryParams {
+                                entity_type,
+                                entity_id: &dashboard_id,
+                                workspace_id,
+                                action: SyncActionType::Insert,
+                                data: Some(snapshot),
+                                owner_user_id: Some(user_id),
+                                is_workspace_visible: is_visible,
+                            },
+                        )
+                        .await
+                        {
+                            tracing::warn!(error = %e, dashboard_id = %dashboard_id, "Failed to write sync log entry");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            dashboard_id = %dashboard_id,
+                            error = %e,
+                            "sync log: failed to read visibility after create; skipping write"
+                        );
+                    }
                 }
             }
             Ok(None) => {
@@ -736,22 +755,39 @@ pub async fn update_dashboard(
         };
         match fetch_dashboard_snapshot(db, dashboard_id, user_id).await {
             Ok(Some(snapshot)) => {
-                let is_visible = is_doc_publicly_visible(db, dashboard_id).await;
-                if let Err(e) = sync_log_service::write_sync_entry(
-                    db,
-                    sync_log_service::SyncEntryParams {
-                        entity_type,
-                        entity_id: dashboard_id,
-                        workspace_id,
-                        action: SyncActionType::Update,
-                        data: Some(snapshot),
-                        owner_user_id: Some(user_id),
-                        is_workspace_visible: is_visible,
-                    },
-                )
-                .await
-                {
-                    tracing::warn!(error = %e, dashboard_id = %dashboard_id, "Failed to write sync log entry");
+                // Same KYO-245 rule applied to the visibility read (KYO-354):
+                // the row was already written above, so returning `Err` here
+                // would report failure for an update that actually
+                // succeeded. On a failed read, skip the sync_log write
+                // entirely rather than guess a visibility value — a missing
+                // row means "not converged yet" and is recoverable on the
+                // next mutation or a bootstrap.
+                match is_doc_publicly_visible(db, dashboard_id).await {
+                    Ok(is_visible) => {
+                        if let Err(e) = sync_log_service::write_sync_entry(
+                            db,
+                            sync_log_service::SyncEntryParams {
+                                entity_type,
+                                entity_id: dashboard_id,
+                                workspace_id,
+                                action: SyncActionType::Update,
+                                data: Some(snapshot),
+                                owner_user_id: Some(user_id),
+                                is_workspace_visible: is_visible,
+                            },
+                        )
+                        .await
+                        {
+                            tracing::warn!(error = %e, dashboard_id = %dashboard_id, "Failed to write sync log entry");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            dashboard_id = %dashboard_id,
+                            error = %e,
+                            "sync log: failed to read visibility after update; skipping write"
+                        );
+                    }
                 }
             }
             Ok(None) => {
@@ -805,7 +841,12 @@ pub async fn delete_dashboard(
     // every deletion from non-owners' deltas, stranding the document in their
     // caches forever. Guarded by
     // `delete_of_public_dashboard_reaches_non_owners`.
-    let was_visible = is_doc_publicly_visible(db, dashboard_id).await;
+    //
+    // Propagate on error rather than defaulting to a guessed visibility
+    // (KYO-354): the read runs before the DELETE, so an `Err` here aborts
+    // the operation with nothing destructive having happened yet, and the
+    // caller can safely retry.
+    let was_visible = is_doc_publicly_visible(db, dashboard_id).await?;
 
     let result = db_execute!(
         db,
@@ -1903,11 +1944,18 @@ async fn list_docs_for_sync(
 
 /// Check whether a dashboard is in any public collection.
 ///
-/// Used by the live-sync broadcast path to decide whether to send a doc-mutation
-/// event to all workspace members (public) or only to the document owner
-/// (private).  Returns `false` on any database error so that failures default
-/// to the safer, narrower delivery.
-pub(crate) async fn is_doc_publicly_visible(db: &DbPool, dashboard_id: &str) -> bool {
+/// Used by the live-sync broadcast path and every `sync_log` write site to
+/// decide whether a doc-mutation event goes to all workspace members
+/// (public) or only to the document owner (private). A query error is not a
+/// visibility answer — collapsing it into `false` silently writes an
+/// incorrect "private" row that, for a `Delete` action, can never be
+/// corrected afterward (the entity is gone, so nothing will ever mutate it
+/// again). Callers must handle the error explicitly rather than receive a
+/// guessed boolean.
+pub(crate) async fn is_doc_publicly_visible(
+    db: &DbPool,
+    dashboard_id: &str,
+) -> kyomi_core::Result<bool> {
     let is_pg = db.is_postgres();
     let bool_val = sql_compat::bool_true(is_pg);
     let sql = format!(
@@ -1917,13 +1965,11 @@ pub(crate) async fn is_doc_publicly_visible(db: &DbPool, dashboard_id: &str) -> 
          LIMIT 1"
     );
 
-    kyomi_core::db_fetch_optional!(db, (i32,), &sql, dashboard_id)
-        .map_err(|e| {
-            tracing::warn!(dashboard_id, error = %e, "is_doc_publicly_visible query failed");
-        })
-        .ok()
-        .flatten()
-        .is_some()
+    let row = kyomi_core::db_fetch_optional!(db, (i32,), &sql, dashboard_id).map_err(|e| {
+        kyomi_core::Error::Internal(format!("failed to read document visibility: {e}"))
+    })?;
+
+    Ok(row.is_some())
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -2980,5 +3026,77 @@ visualize:
              got delta: {delta_a:?}"
         );
         assert_eq!(owner_deletes[0].entity_type, entity_types::DASHBOARD);
+    }
+
+    // ── Visibility-read failure must not write a wrong Delete row (KYO-354) ─
+    //
+    // Before this fix, `is_doc_publicly_visible` swallowed its own query
+    // error and returned `false`. For `delete_dashboard`, that meant a
+    // transient DB error on the visibility read collapsed into "private" and
+    // let the DELETE proceed, permanently stranding the document in
+    // non-owners' caches (a deleted entity is never mutated again, so the
+    // wrong value could never self-heal). This test breaks only the
+    // visibility read (by dropping the table it joins against) and asserts
+    // three things: the call returns `Err`, the dashboard row still exists,
+    // and no `Delete` row reaches either user's delta — proving the DELETE
+    // itself never ran, not just that the return value looked like failure.
+
+    #[tokio::test]
+    async fn delete_dashboard_propagates_visibility_read_failure_instead_of_writing_wrong_delete()
+    {
+        let db = test_pool().await;
+        seed_two_member_workspace(&db).await;
+
+        let doc_id = create_dashboard(
+            &db, "user-a", "ws-1", "Shared Dash", "# content",
+            DocType::Dashboard, None,
+        )
+        .await
+        .expect("create shared dashboard");
+        share_via_public_collection(&db, &doc_id, "dashboard", "Public Dashboards").await;
+
+        // Break only the visibility read: `is_doc_publicly_visible` joins
+        // `collection_dashboards` to `collections`. Dropping the join table
+        // leaves the ownership check (`get_dashboard_unchecked`, a plain
+        // `SELECT ... FROM dashboards`) and the DELETE itself untouched, so
+        // any success would come from the fix under test, not a broader
+        // outage.
+        sqlx::query("DROP TABLE collection_dashboards")
+            .execute(sqlite_pool(&db))
+            .await
+            .expect("drop collection_dashboards");
+
+        let result = delete_dashboard(&db, &doc_id, "ws-1", "user-a").await;
+        assert!(
+            result.is_err(),
+            "a failed visibility read must propagate as an error, not \
+             collapse into a successful delete: {result:?}"
+        );
+
+        let still_exists: Option<(String,)> = sqlx::query_as(
+            "SELECT dashboard_id FROM dashboards WHERE dashboard_id = $1",
+        )
+        .bind(&doc_id)
+        .fetch_optional(sqlite_pool(&db))
+        .await
+        .expect("query dashboards");
+        assert!(
+            still_exists.is_some(),
+            "the dashboard row must survive a failed visibility read -- the \
+             DELETE must not run when the read ahead of it fails"
+        );
+
+        let delta_a = delta_for(&db, "user-a").await;
+        let delta_b = delta_for(&db, "user-b").await;
+        assert!(
+            delete_rows_for(&delta_a, &doc_id).is_empty(),
+            "owner delta must carry no Delete row for a delete that never \
+             happened, got delta: {delta_a:?}"
+        );
+        assert!(
+            delete_rows_for(&delta_b, &doc_id).is_empty(),
+            "non-owner delta must carry no Delete row for a delete that \
+             never happened, got delta: {delta_b:?}"
+        );
     }
 }

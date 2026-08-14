@@ -1332,6 +1332,30 @@ pub async fn delete_session(
         }
     };
 
+    // Capture visibility before EITHER delete — this ordering is load-bearing
+    // (KYO-313, widened by KYO-354). The `chat_sessions` row is gone after the
+    // session DELETE, so `shared` can never be recomputed: the `Delete` row
+    // written below is the only surviving record of whether non-owners could
+    // see this session, and a deleted entity is never mutated again, so a
+    // wrong value never self-heals. Moving this read after the session DELETE
+    // would silently strip every deletion from non-owners' deltas, stranding
+    // the session in their caches forever — that's the KYO-313 constraint.
+    // It also now runs ahead of the `chat_messages` DELETE below and
+    // propagates on error (KYO-354): a failed read must abort the whole
+    // operation rather than default to `false` and write a wrong,
+    // never-self-healing "private" row, and it must do so before any
+    // destructive statement — including the message delete — runs, or a
+    // retry would find messages gone but the session intact. Guarded by
+    // `delete_of_shared_session_reaches_non_owners`.
+    let is_pg = db.is_postgres();
+    let bf = kyomi_core::sql_compat::bool_false(is_pg);
+    let shared_sql = format!(
+        "SELECT COALESCE(shared, {bf}) AS shared FROM chat_sessions WHERE session_id = $1"
+    );
+    let was_shared: bool = kyomi_core::db_fetch_optional!(db, (bool,), &shared_sql, session_id)?
+        .map(|(s,)| s)
+        .unwrap_or(false);
+
     // Delete messages first (explicit cascade for safety, matching Python).
     kyomi_core::db_execute!(
         db,
@@ -1339,26 +1363,6 @@ pub async fn delete_session(
         session_id
     )
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to delete messages: {e}")))?;
-
-    // Capture visibility before the DELETE — this ordering is load-bearing
-    // (KYO-313). The `chat_sessions` row is gone afterwards, so `shared` can
-    // never be recomputed: the `Delete` row written below is the only
-    // surviving record of whether non-owners could see this session, and a
-    // deleted entity is never mutated again, so a wrong value never
-    // self-heals. Moving this read after the DELETE would silently strip
-    // every deletion from non-owners' deltas, stranding the session in their
-    // caches forever. Guarded by
-    // `delete_of_shared_session_reaches_non_owners`.
-    let is_pg = db.is_postgres();
-    let bf = kyomi_core::sql_compat::bool_false(is_pg);
-    let shared_sql = format!(
-        "SELECT COALESCE(shared, {bf}) AS shared FROM chat_sessions WHERE session_id = $1"
-    );
-    let was_shared: bool = kyomi_core::db_fetch_optional!(db, (bool,), &shared_sql, session_id)
-        .ok()
-        .flatten()
-        .map(|(s,)| s)
-        .unwrap_or(false);
 
     // Delete the session.
     let result = if let Some(wid) = workspace_id {
@@ -1464,6 +1468,12 @@ pub async fn bulk_delete_sessions(
     // would then stamp every row owner-only — silently stripping shared-session
     // deletions from non-owners' deltas. Guarded by
     // `bulk_delete_sessions_scopes_delete_rows_per_session_visibility`.
+    //
+    // Propagate on error rather than defaulting to an empty map (KYO-354): an
+    // empty map has the exact same failure shape described above — every
+    // lookup below falls through to `unwrap_or(false)` and silently strips
+    // shared-session deletions from non-owners' deltas. This read runs before
+    // either DELETE, so an `Err` here aborts with nothing done yet.
     let shared_map: std::collections::HashMap<String, bool> = match db {
         kyomi_core::db::DbPool::Postgres(pg) => {
             sqlx::query_as::<_, (String, bool)>(
@@ -1472,8 +1482,7 @@ pub async fn bulk_delete_sessions(
             )
             .bind(&owned_ids)
             .fetch_all(pg)
-            .await
-            .unwrap_or_default()
+            .await?
             .into_iter()
             .collect()
         }
@@ -1487,12 +1496,7 @@ pub async fn bulk_delete_sessions(
             for sid in &owned_ids {
                 query = query.bind(sid);
             }
-            query
-                .fetch_all(sq)
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .collect()
+            query.fetch_all(sq).await?.into_iter().collect()
         }
     };
 
@@ -1535,6 +1539,13 @@ pub async fn bulk_delete_sessions(
 
     // Sync log — one Delete entry per removed session, best-effort.
     for sid in &owned_ids {
+        // Not an error swallow (KYO-354): `shared_map` was built with `?`
+        // above, so a query failure already returned early — every `sid` here
+        // came from `owned_ids`, which was read from the same `chat_sessions`
+        // table the map query just succeeded against. A missing entry means
+        // the row vanished between the two queries, which only happens if
+        // another delete path (e.g. a concurrent `delete_session`) already
+        // raced it out and wrote its own correct `Delete` row for it.
         let was_shared = shared_map.get(sid).copied().unwrap_or(false);
         if let Err(e) = sync_log_service::write_sync_entry(
             db,
@@ -3185,6 +3196,163 @@ mod tests {
             1,
             "owner must receive the Delete row for their own private session, \
              got delta: {delta_a:?}"
+        );
+    }
+
+    // ── Visibility-read failure must not write a wrong Delete row (KYO-354) ─
+    //
+    // Before this fix, the `shared` read in both delete paths swallowed its
+    // own query error via `.ok().flatten()` and defaulted to `false`. A
+    // transient DB error on that read therefore collapsed into "private" and
+    // let the DELETE(s) proceed, permanently stranding the session in
+    // non-owners' caches. `delete_session`'s read also moved earlier in this
+    // change -- ahead of the `chat_messages` DELETE, not just the
+    // `chat_sessions` DELETE -- so its test additionally asserts the
+    // messages survive, which is what proves the reordering rather than just
+    // the error propagation.
+    //
+    // These break only the visibility read by dropping the `shared` column
+    // itself (SQLite >= 3.35 `ALTER TABLE ... DROP COLUMN`, confirmed against
+    // this crate's bundled libsqlite3-sys 0.30.1). No other query in either
+    // function references `shared`, so the ownership lookups and the
+    // `owned_ids` query in `bulk_delete_sessions` are unaffected -- a pass
+    // here isolates the fix under test rather than a broader outage.
+    //
+    // SQLite refuses to drop a column that a partial index still references
+    // (`idx_chat_sessions_shared`, `00001_baseline.sql:608`), so the index
+    // has to go first -- verified empirically: the bare `DROP COLUMN`
+    // failed with "error in index idx_chat_sessions_shared after drop
+    // column: no such column: shared" until the index drop was added.
+
+    #[tokio::test]
+    async fn delete_session_propagates_visibility_read_failure_instead_of_writing_wrong_delete()
+    {
+        let db = test_pool().await;
+        seed_two_member_workspace(&db).await;
+        let sq = sqlite_pool(&db);
+        seed_chat_session(
+            sq,
+            SeedSession::new("sess-shared", "user-a", "ws-1", "Shared").shared(true),
+        )
+        .await;
+        seed_chat_message(sq, "msg-1", "sess-shared", false, None).await;
+
+        sqlx::query("DROP INDEX idx_chat_sessions_shared")
+            .execute(sq)
+            .await
+            .expect("drop shared index");
+        sqlx::query("ALTER TABLE chat_sessions DROP COLUMN shared")
+            .execute(sq)
+            .await
+            .expect("drop shared column");
+
+        let result = delete_session(&db, "user-a", "sess-shared", Some("ws-1")).await;
+        assert!(
+            result.is_err(),
+            "a failed visibility read must propagate as an error, not \
+             collapse into a successful delete: {result:?}"
+        );
+
+        let session_still_exists: Option<(String,)> =
+            sqlx::query_as("SELECT session_id FROM chat_sessions WHERE session_id = $1")
+                .bind("sess-shared")
+                .fetch_optional(sq)
+                .await
+                .expect("query chat_sessions");
+        assert!(
+            session_still_exists.is_some(),
+            "the session row must survive a failed visibility read -- the \
+             DELETE must not run when the read ahead of it fails"
+        );
+
+        let messages_still_exist: Vec<(String,)> =
+            sqlx::query_as("SELECT message_id FROM chat_messages WHERE session_id = $1")
+                .bind("sess-shared")
+                .fetch_all(sq)
+                .await
+                .expect("query chat_messages");
+        assert_eq!(
+            messages_still_exist.len(),
+            1,
+            "the messages must survive too -- this is what proves the \
+             visibility read now runs ahead of the message DELETE, not just \
+             the session DELETE"
+        );
+
+        let delta_b = delta_for(&db, "user-b").await;
+        assert!(
+            delete_rows_for(&delta_b, "sess-shared").is_empty(),
+            "non-owner delta must carry no Delete row for a delete that \
+             never happened, got delta: {delta_b:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bulk_delete_sessions_propagates_visibility_read_failure_instead_of_writing_wrong_delete()
+     {
+        let db = test_pool().await;
+        seed_two_member_workspace(&db).await;
+        let sq = sqlite_pool(&db);
+        seed_chat_session(sq, SeedSession::new("sess-private", "user-a", "ws-1", "Private")).await;
+        seed_chat_session(
+            sq,
+            SeedSession::new("sess-shared", "user-a", "ws-1", "Shared").shared(true),
+        )
+        .await;
+        seed_chat_message(sq, "msg-private", "sess-private", false, None).await;
+        seed_chat_message(sq, "msg-shared", "sess-shared", false, None).await;
+
+        sqlx::query("DROP INDEX idx_chat_sessions_shared")
+            .execute(sq)
+            .await
+            .expect("drop shared index");
+        sqlx::query("ALTER TABLE chat_sessions DROP COLUMN shared")
+            .execute(sq)
+            .await
+            .expect("drop shared column");
+
+        let result = bulk_delete_sessions(
+            &db,
+            "user-a",
+            &["sess-private".to_string(), "sess-shared".to_string()],
+            "ws-1",
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "a failed visibility read must propagate as an error, not \
+             collapse into a successful bulk delete: {result:?}"
+        );
+
+        let remaining_sessions: Vec<(String,)> =
+            sqlx::query_as("SELECT session_id FROM chat_sessions ORDER BY session_id")
+                .fetch_all(sq)
+                .await
+                .expect("query chat_sessions");
+        assert_eq!(
+            remaining_sessions.len(),
+            2,
+            "both session rows must survive a failed visibility read, got: \
+             {remaining_sessions:?}"
+        );
+
+        let remaining_messages: Vec<(String,)> =
+            sqlx::query_as("SELECT message_id FROM chat_messages ORDER BY message_id")
+                .fetch_all(sq)
+                .await
+                .expect("query chat_messages");
+        assert_eq!(
+            remaining_messages.len(),
+            2,
+            "both messages must survive a failed visibility read, got: \
+             {remaining_messages:?}"
+        );
+
+        let delta_b = delta_for(&db, "user-b").await;
+        assert!(
+            delete_rows_for(&delta_b, "sess-shared").is_empty(),
+            "non-owner delta must carry no Delete row for a bulk delete that \
+             never happened, got delta: {delta_b:?}"
         );
     }
 

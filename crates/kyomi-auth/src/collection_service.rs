@@ -499,13 +499,20 @@ async fn write_visibility_sync_log(
 /// Returns `None` when visibility did not change — e.g. the dashboard
 /// remained visible through a different public collection, or was never
 /// visible at all — so the caller knows not to fire a live broadcast.
+///
+/// This read runs *after* the membership mutation, unlike `was_visible`
+/// above. If it fails, we propagate the error (KYO-354) rather than guess a
+/// value: the membership change has already landed, and the trade-off is
+/// that the transition row goes unwritten (recoverable — the caller's own
+/// next mutation or a bootstrap will reconcile it) rather than writing the
+/// wrong half of a Delete+Update pair for a value we can't verify.
 async fn record_dashboard_visibility_transition(
     db: &DbPool,
     dashboard_id: &str,
     workspace_id: &str,
     was_visible: bool,
 ) -> Result<Option<DashboardVisibilityTransition>> {
-    let now_visible = dashboard_service::is_doc_publicly_visible(db, dashboard_id).await;
+    let now_visible = dashboard_service::is_doc_publicly_visible(db, dashboard_id).await?;
     if was_visible == now_visible {
         return Ok(None);
     }
@@ -903,8 +910,9 @@ pub async fn add_dashboard(
     // Capture visibility before the insert so the post-insert comparison in
     // `record_dashboard_visibility_transition` can tell a genuine
     // private->public transition apart from "already visible via another
-    // public collection".
-    let was_visible = dashboard_service::is_doc_publicly_visible(db, dashboard_id).await;
+    // public collection". Propagate on error (KYO-354): this runs before
+    // the insert, so an `Err` here aborts with nothing done yet.
+    let was_visible = dashboard_service::is_doc_publicly_visible(db, dashboard_id).await?;
 
     let is_pg = db.is_postgres();
     let now_expr = sql_compat::now(is_pg);
@@ -960,8 +968,9 @@ pub async fn remove_dashboard(
     }
 
     // Capture visibility before the delete — see the matching comment in
-    // `add_dashboard`.
-    let was_visible = dashboard_service::is_doc_publicly_visible(db, dashboard_id).await;
+    // `add_dashboard`. Propagate on error (KYO-354): this runs before the
+    // delete, so an `Err` here aborts with nothing done yet.
+    let was_visible = dashboard_service::is_doc_publicly_visible(db, dashboard_id).await?;
 
     let result = db_execute!(
         db,
