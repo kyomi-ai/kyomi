@@ -658,7 +658,7 @@ pub async fn index_catalog_sql(
                 .unwrap_or("TABLE");
 
             // Cache table with embeddings
-            let cached = cache_table(CacheTableParams {
+            match cache_table(CacheTableParams {
                 db,
                 embedding,
                 ctx,
@@ -669,10 +669,14 @@ pub async fn index_catalog_sql(
                 columns: &columns,
                 full_table_id: &full_table_id,
             })
-            .await;
-
-            if cached {
-                tables_indexed += 1;
+            .await
+            {
+                Ok(()) => tables_indexed += 1,
+                Err(e) => {
+                    let msg = format!("Failed to cache table {full_table_id}: {e}");
+                    warn!("{msg}");
+                    errors.push(msg);
+                }
             }
         }
     }
@@ -1470,10 +1474,27 @@ mod tests {
         )
         .await;
 
+        // Two errors, not one: the schema-list partial failure PLUS a
+        // `cache_table` write failure for `orders` (KYO-364) — pgvector
+        // storage is unsupported on the in-memory SQLite pool this test runs
+        // against (see the comment below), so `cache_table` always returns
+        // `Err` here. Before KYO-364, `cache_table` returned a bare `false`
+        // on any failure, and this loop's `if cached { tables_indexed += 1 }`
+        // simply didn't increment — the failure never reached `errors` at
+        // all. It now does.
         assert_eq!(
             result.errors.as_deref().map(<[String]>::len),
-            Some(1),
-            "the one partial failure must still surface in the result on an otherwise-successful run"
+            Some(2),
+            "the schema-list partial failure and the orders cache_table write failure must both surface"
+        );
+        let errors = result.errors.as_deref().expect("errors present");
+        assert!(
+            errors.iter().any(|e| e.contains("main.marketing")),
+            "schema-list partial failure must be present, got: {errors:?}"
+        );
+        assert!(
+            errors.iter().any(|e| e.contains("orders")),
+            "cache_table write failure for orders must be present, got: {errors:?}"
         );
 
         // Not `result.tables_indexed` — `cache_table` only counts a table as
@@ -1486,6 +1507,18 @@ mod tests {
         // schema doesn't fail the whole catalog — is `seen_table_ids`, which
         // is populated as soon as a table is discovered, independent of
         // whether its embeddings could be stored.
+        //
+        // KYO-385: that last property is also a live bug, not just a
+        // fixture quirk. Because `seen_table_ids` is populated before
+        // `cache_table` runs, a run where every discovered table's write
+        // fails still resolves to `"idle"` here — the `status` assertion at
+        // the bottom of this test is asserting exactly that, on a fixture
+        // where 0 of 1 tables were successfully cached. KYO-364 fixed this
+        // on the BigQuery REST path (`resolve_run_outcome` in
+        // `kyomi_auth::catalog::indexers::user_dataset`, which keys status
+        // off `tables_indexed` and archiving off `seen_table_ids`
+        // separately); porting that split here is KYO-385, which will
+        // rename and re-assert this test.
         let cached_rows: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM datasource_table_cache WHERE datasource_config_id = ? AND is_archived = 0",
         )

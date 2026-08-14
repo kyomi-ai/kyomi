@@ -224,7 +224,7 @@ async fn process_discovered_catalog(params: ProcessDiscoveredCatalogParams<'_>) 
         db,
         embedding,
         ctx,
-        catalog_result,
+        mut catalog_result,
         explicit_empty,
         start_time,
     } = params;
@@ -261,7 +261,7 @@ async fn process_discovered_catalog(params: ProcessDiscoveredCatalogParams<'_>) 
             let archive_id = kyomi_core::build_full_table_name(project_id, dataset_id, table_name);
             seen_table_ids.insert(archive_id);
 
-            let cached = cache_table(CacheTableParams {
+            match cache_table(CacheTableParams {
                 db,
                 embedding,
                 ctx,
@@ -272,10 +272,14 @@ async fn process_discovered_catalog(params: ProcessDiscoveredCatalogParams<'_>) 
                 columns: &columns,
                 full_table_id: &full_table_id,
             })
-            .await;
-
-            if cached {
-                tables_indexed += 1;
+            .await
+            {
+                Ok(()) => tables_indexed += 1,
+                Err(e) => {
+                    let msg = format!("Failed to cache table {full_table_id}: {e}");
+                    warn!("{msg}");
+                    catalog_result.errors.push(msg);
+                }
             }
         }
     }
@@ -729,10 +733,25 @@ mod tests {
         })
         .await;
 
-        assert_eq!(
-            result.errors.as_deref(),
-            Some(&["container 'restricted': permission denied".to_string()][..]),
-            "the denied container's error must reach the caller-visible result, not just logs"
+        // Two errors, not one: the denied-container error PLUS a
+        // `cache_table` write failure for `orders` (KYO-364) — pgvector
+        // storage is unsupported on the in-memory SQLite pool this test runs
+        // against (see the "Not `result.tables_indexed`" comment below), so
+        // `cache_table` always returns `Err` here, and that `Err` is now
+        // correctly folded into `catalog_result.errors` instead of being
+        // silently dropped.
+        let errors = result
+            .errors
+            .as_deref()
+            .expect("both failures must reach the caller-visible result, not just logs");
+        assert_eq!(errors.len(), 2, "got: {errors:?}");
+        assert!(
+            errors.contains(&"container 'restricted': permission denied".to_string()),
+            "denied-container error must be present, got: {errors:?}"
+        );
+        assert!(
+            errors.iter().any(|e| e.contains("orders")),
+            "cache_table write failure for orders must be present, got: {errors:?}"
         );
 
         // See the "Not `result.tables_indexed`" comment on
@@ -870,6 +889,14 @@ mod tests {
         })
         .await;
 
+        // KYO-385: this fixture is partial on the *discovery* axis (one
+        // container denied, one listed fine) but 0-of-N on the *write* axis
+        // — `cache_table` fails for `public.orders` on this SQLite pool. The
+        // run therefore still reports `"idle"` with zero tables actually
+        // cached, which is the KYO-364 bug surviving on this path:
+        // `nothing_found` below keys off `seen_table_ids`, populated before
+        // the write. KYO-364 fixed it for the BigQuery REST path only;
+        // KYO-385 ports that fix here and will re-assert this test.
         assert_eq!(
             datasource_status(sq, &ctx.datasource_config_id).await,
             "idle",
@@ -881,12 +908,23 @@ mod tests {
             .get("warnings")
             .and_then(|w| w.as_array())
             .expect("warnings must be a present JSON array");
+        // Two warnings, not one. The denied container is the one this test
+        // was written for; the second is a real `cache_table` failure for
+        // `public.orders`, because `store_search_embeddings` is unsupported
+        // on this in-memory SQLite pool. Before KYO-364 `cache_table`
+        // returned a bare `false` and that failure was silently dropped, so
+        // this assertion used to see only the denial. Asserting the exact
+        // vector (rather than "contains the denial") is deliberate: it still
+        // proves nothing *else* is persisted.
         assert_eq!(
             warnings,
-            &vec![serde_json::json!(
-                "container 'restricted': permission denied"
-            )],
-            "the denied container's error must be persisted in the warnings array, got: {envelope}"
+            &vec![
+                serde_json::json!("container 'restricted': permission denied"),
+                serde_json::json!(
+                    "Failed to cache table public.orders: internal: failed to store embeddings for public.orders: internal: pgvector embeddings are not supported on SQLite"
+                ),
+            ],
+            "the denied container's error and the real cache_table write failure must both be persisted, got: {envelope}"
         );
     }
 
@@ -894,6 +932,17 @@ mod tests {
     /// errors must persist an empty `warnings` array — always present, never
     /// missing/null, so `get_catalog_stats` never needs null-handling — and
     /// must not surface a warning to the user.
+    ///
+    /// The container deliberately lists **no tables**, because on this
+    /// in-memory SQLite pool a genuinely clean run is the only run with no
+    /// tables in it: `store_search_embeddings` returns "pgvector embeddings
+    /// are not supported on SQLite" for every real table, so any table here
+    /// makes `cache_table` fail for real. Since KYO-364 that failure is
+    /// correctly surfaced as a warning instead of being swallowed as a bare
+    /// `false`, so a one-table fixture no longer *is* a clean run and cannot
+    /// test this property. Zero tables keeps the assertion honest: the
+    /// terminal write still runs (`nothing_found` skips archiving but not
+    /// the status write), and it must still persist `warnings: []`.
     #[tokio::test]
     async fn clean_run_persists_empty_warnings_array() {
         let db = DbPool::connect("sqlite::memory:")
@@ -908,15 +957,7 @@ mod tests {
         let catalog_result = CatalogResult {
             containers: vec![kyomi_core::connect_protocol::CatalogContainer {
                 name: "public".to_string(),
-                tables: vec![kyomi_core::connect_protocol::CatalogTable {
-                    name: "orders".to_string(),
-                    native_type: Some("BASE TABLE".to_string()),
-                    columns: vec![kyomi_core::connect_protocol::CatalogColumn {
-                        name: "id".to_string(),
-                        native_type: "int4".to_string(),
-                        description: None,
-                    }],
-                }],
+                tables: Vec::new(),
             }],
             errors: Vec::new(),
         };

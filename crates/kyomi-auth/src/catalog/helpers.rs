@@ -422,17 +422,6 @@ pub async fn index_started_within(
     }
 }
 
-/// Cache a table and generate embeddings for its search entries.
-///
-/// This is the core caching + embedding function used by all indexers.
-///
-/// Flow:
-/// 1. Build table_metadata JSON from columns
-/// 2. Check if table exists in cache
-/// 3. If exists AND schema unchanged AND embeddings exist → skip (update last_verified)
-/// 4. Otherwise → upsert cache entry, delete old embeddings, generate new ones
-///
-/// Returns `true` if the table was cached/updated, `false` on error.
 /// Parameters for [`cache_table`].
 pub struct CacheTableParams<'a> {
     pub db: &'a DbPool,
@@ -446,7 +435,21 @@ pub struct CacheTableParams<'a> {
     pub full_table_id: &'a str,
 }
 
-pub async fn cache_table(params: CacheTableParams<'_>) -> bool {
+/// Cache a table and generate embeddings for its search entries.
+///
+/// This is the core caching + embedding function used by all indexers.
+///
+/// Flow:
+/// 1. Build table_metadata JSON from columns
+/// 2. Check if table exists in cache
+/// 3. If exists AND schema unchanged AND embeddings exist → skip (update last_verified)
+/// 4. Otherwise → upsert cache entry, delete old embeddings, generate new ones
+///
+/// Returns `Ok(())` if the table was cached/updated, `Err` naming the
+/// underlying failure and `full_table_id` on any error along that path
+/// (KYO-364) — every caller must treat a write failure as a table that
+/// still needs to count toward its run's `errors`, not a silent no-op.
+pub async fn cache_table(params: CacheTableParams<'_>) -> kyomi_core::Result<()> {
     let CacheTableParams {
         db,
         embedding,
@@ -508,12 +511,9 @@ pub async fn cache_table(params: CacheTableParams<'_>) -> bool {
     let existing = match existing {
         Ok(row) => row,
         Err(e) => {
-            warn!(
-                table = full_table_id,
-                error = %e,
-                "failed to check existing cache entry"
-            );
-            return false;
+            return Err(kyomi_core::Error::Internal(format!(
+                "failed to check existing cache entry for {full_table_id}: {e}"
+            )));
         }
     };
 
@@ -544,10 +544,14 @@ pub async fn cache_table(params: CacheTableParams<'_>) -> bool {
                 let sql = format!(
                     "UPDATE datasource_table_cache SET last_verified = {now_expr}, is_archived = {false_val} WHERE id = $1"
                 );
-                let _ = kyomi_core::db_execute!(db, &sql, cache_id);
+                kyomi_core::db_execute!(db, &sql, cache_id).map_err(|e| {
+                    kyomi_core::Error::Internal(format!(
+                        "failed to touch last_verified for {full_table_id}: {e}"
+                    ))
+                })?;
 
                 debug!(table = full_table_id, "schema unchanged, skipping re-index");
-                return true;
+                return Ok(());
             }
         }
 
@@ -563,8 +567,9 @@ pub async fn cache_table(params: CacheTableParams<'_>) -> bool {
         let update_result = kyomi_core::db_execute!(db, &sql, &table_metadata, cache_id);
 
         if let Err(e) = update_result {
-            warn!(table = full_table_id, error = %e, "failed to update cache entry");
-            return false;
+            return Err(kyomi_core::Error::Internal(format!(
+                "failed to update cache entry for {full_table_id}: {e}"
+            )));
         }
 
         // Delete old embeddings
@@ -618,8 +623,9 @@ pub async fn cache_table(params: CacheTableParams<'_>) -> bool {
     let cache_id = match insert_result {
         Ok(row) => row.id,
         Err(e) => {
-            warn!(table = full_table_id, error = %e, "failed to insert cache entry");
-            return false;
+            return Err(kyomi_core::Error::Internal(format!(
+                "failed to insert cache entry for {full_table_id}: {e}"
+            )));
         }
     };
 
@@ -682,7 +688,9 @@ struct GenerateEmbeddingsParams<'a> {
 }
 
 /// Generate search entries, compute embeddings, and store them.
-async fn generate_and_store_embeddings(params: GenerateEmbeddingsParams<'_>) -> bool {
+async fn generate_and_store_embeddings(
+    params: GenerateEmbeddingsParams<'_>,
+) -> kyomi_core::Result<()> {
     let GenerateEmbeddingsParams {
         db,
         embedding,
@@ -697,7 +705,7 @@ async fn generate_and_store_embeddings(params: GenerateEmbeddingsParams<'_>) -> 
     let entries = create_search_entries(dataset_id, table_name, table_name, columns);
 
     if entries.is_empty() {
-        return true;
+        return Ok(());
     }
 
     // Collect texts for batch embedding
@@ -706,23 +714,18 @@ async fn generate_and_store_embeddings(params: GenerateEmbeddingsParams<'_>) -> 
     let vectors = match embedding.embed_passages(&texts) {
         Ok(vecs) => vecs,
         Err(e) => {
-            warn!(
-                table = %format!("{dataset_id}.{table_name}"),
-                error = %e,
-                "failed to compute embeddings"
-            );
-            return false;
+            return Err(kyomi_core::Error::Internal(format!(
+                "failed to compute embeddings for {dataset_id}.{table_name}: {e}"
+            )));
         }
     };
 
     if vectors.len() != entries.len() {
-        warn!(
-            table = %format!("{dataset_id}.{table_name}"),
-            expected = entries.len(),
-            got = vectors.len(),
-            "embedding count mismatch"
-        );
-        return false;
+        return Err(kyomi_core::Error::Internal(format!(
+            "embedding count mismatch for {dataset_id}.{table_name}: expected {}, got {}",
+            entries.len(),
+            vectors.len()
+        )));
     }
 
     // Build insertion records
@@ -745,15 +748,12 @@ async fn generate_and_store_embeddings(params: GenerateEmbeddingsParams<'_>) -> 
         .collect();
 
     if let Err(e) = store_search_embeddings(db, &inserts).await {
-        warn!(
-            table = %format!("{dataset_id}.{table_name}"),
-            error = %e,
-            "failed to store embeddings"
-        );
-        return false;
+        return Err(kyomi_core::Error::Internal(format!(
+            "failed to store embeddings for {dataset_id}.{table_name}: {e}"
+        )));
     }
 
-    true
+    Ok(())
 }
 
 // ─── Tests ─────────────────────────────────────────────────────────────────────

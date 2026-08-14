@@ -129,6 +129,7 @@ impl BigQueryPublicIndexer {
         let mut tables_indexed = 0usize;
         let mut datasets_processed = 0usize;
         let mut errors = Vec::new();
+        let mut write_failures_total = 0usize;
 
         info!(
             datasets = TOP_PUBLIC_DATASETS.len(),
@@ -156,8 +157,9 @@ impl BigQueryPublicIndexer {
             })
             .await
             {
-                Ok(count) => {
+                Ok((count, write_failures)) => {
                     tables_indexed += count;
+                    write_failures_total += write_failures;
                     datasets_processed += 1;
                 }
                 Err(e) => {
@@ -174,6 +176,7 @@ impl BigQueryPublicIndexer {
         info!(
             datasets_processed,
             tables_indexed,
+            write_failures = write_failures_total,
             errors = errors.len(),
             elapsed_secs = elapsed,
             "BigQuery public dataset indexing complete"
@@ -215,10 +218,16 @@ struct IndexPublicDatasetParams<'a> {
 
 /// Index all tables in a single public BigQuery dataset.
 ///
-/// Returns the number of tables indexed.
+/// Returns `(tables_indexed, write_failures)` — `write_failures` counts
+/// tables whose schema read succeeded but whose `cache_table` write failed
+/// (KYO-364). This indexer has no `errors`/status-resolution machinery at
+/// all (that is tracked separately as KYO-365); the count only feeds this
+/// run's summary `info!` log so a blanket write-failure run is at least
+/// visible in logs rather than silently dropped, as it was when `cache_table`
+/// returned a bare `false`.
 async fn index_public_dataset_tables(
     params: IndexPublicDatasetParams<'_>,
-) -> Result<usize> {
+) -> Result<(usize, usize)> {
     let IndexPublicDatasetParams {
         client,
         db,
@@ -278,6 +287,7 @@ async fn index_public_dataset_tables(
     }
 
     let mut tables_indexed = 0usize;
+    let mut write_failures = 0usize;
 
     for table_id in &table_ids {
         let full_table_id = format!("{project_id}.{dataset_id}.{table_id}");
@@ -303,7 +313,7 @@ async fn index_public_dataset_tables(
             }
         };
 
-        let cached = cache_table(crate::catalog::helpers::CacheTableParams {
+        match cache_table(crate::catalog::helpers::CacheTableParams {
             db,
             embedding,
             ctx,
@@ -314,14 +324,21 @@ async fn index_public_dataset_tables(
             columns: &columns,
             full_table_id: &full_table_id,
         })
-        .await;
-
-        if cached {
-            tables_indexed += 1;
+        .await
+        {
+            Ok(()) => tables_indexed += 1,
+            Err(e) => {
+                warn!(
+                    table = full_table_id,
+                    error = %e,
+                    "failed to cache public table"
+                );
+                write_failures += 1;
+            }
         }
     }
 
-    Ok(tables_indexed)
+    Ok((tables_indexed, write_failures))
 }
 
 /// Fetch column schema for a public BigQuery table.
