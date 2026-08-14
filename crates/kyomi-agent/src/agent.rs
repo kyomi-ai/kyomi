@@ -104,20 +104,24 @@ pub(crate) const WRAP_UP_INSTRUCTION: &str =
 /// a successful answer would hide the provider failure behind a plausible
 /// reply.
 ///
-/// **This is not user-facing text on its own.** Two prefixes are prepended
-/// before it reaches a user:
+/// **This is not user-facing text on its own.** Exactly one prefix is
+/// prepended before it reaches a user, by `classify_agent_failure`
+/// (`crates/kyomi-agent/src/execution.rs`): `"I encountered an error while
+/// processing your request: "`. The `internal: ` variant tag that
+/// `Error::Internal`'s `Display` also carries is *not* part of that prefix —
+/// [`kyomi_core::Error::user_message`] strips it before the chat wrapper ever
+/// sees this string (KYO-350). So this constant must still read as a
+/// lowercase, non-apologising *clause*, not a standalone sentence addressed
+/// to the user — what the user reads is `"I encountered an error while
+/// processing your request: "` immediately followed by this string, one
+/// sentence, no `internal:` in the middle.
 ///
-/// 1. `Error::Internal`'s `Display`, `internal: {0}` —
-///    `crates/kyomi-core/src/error.rs:55`.
-/// 2. The chat error wrapper, `I encountered an error while processing your
-///    request: {error_str}` — `crates/kyomi-agent/src/execution.rs:450`.
-///
-/// So it must read as a lowercase, non-apologising *clause*, not a standalone
-/// sentence addressed to the user: what the user reads is
-/// `"I encountered an error while processing your request: internal: "`
-/// immediately followed by this string, and the whole thing has to parse as one
-/// sentence. It must also avoid the substring `cancelled`, which
-/// `execution.rs:439` uses to classify the turn as a user cancellation.
+/// It must also avoid the substring `cancelled`. That check still runs
+/// against `Display` (`error.to_string()` in `classify_agent_failure`), not
+/// `user_message()` — for `Error::Internal` specifically, `Display` is
+/// `"internal: "` plus this string, so the substring constraint is unchanged
+/// by the KYO-350 fix even though the *rendered* user copy no longer carries
+/// that prefix.
 ///
 /// Reworded in KYO-344 review follow-up; the previous first-person apology
 /// produced two apologies and a stray `internal:` mid-sentence. Reworded

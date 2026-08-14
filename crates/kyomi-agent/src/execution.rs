@@ -160,6 +160,37 @@ pub struct AgentExecutionResult {
     pub error: Option<String>,
 }
 
+/// Classify a failed agent turn into (status, user-facing response text).
+///
+/// Pure — no I/O, no logging — so it can be unit-tested directly. Callers
+/// still need the `Display` form (with the variant tag intact) for their own
+/// `error!` log and for the diagnostic `AgentExecutionResult::error` field;
+/// this helper only decides what a *user* reads, via
+/// [`kyomi_core::Error::user_message`].
+///
+/// Cancellation is classified against `error.to_string()` (`Display`), not
+/// `user_message()` — cancellation errors are constructed as
+/// `Error::Internal("Request cancelled".into())`
+/// ([`crate::agent`](crate::agent)), whose `Display` is `"internal: Request
+/// cancelled"` and whose `user_message()` is `"Request cancelled"`; both
+/// contain `"cancelled"`, so this choice doesn't change behavior today, but
+/// `Display` is the more conservative substring to key off because it can
+/// only gain content relative to `user_message()`, never lose it.
+fn classify_agent_failure(error: &kyomi_core::Error) -> (&'static str, String) {
+    let is_cancelled = error.to_string().contains("cancelled");
+    if is_cancelled {
+        ("cancelled", "Request was cancelled.".to_string())
+    } else {
+        (
+            "error",
+            format!(
+                "I encountered an error while processing your request: {}",
+                error.user_message()
+            ),
+        )
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Main execution
 // ---------------------------------------------------------------------------
@@ -454,23 +485,16 @@ pub async fn execute_agent_chat(
             (text, "completed".to_string(), None)
         }
         Err(e) => {
+            // `Display` (variant tag intact) for the log and the diagnostic
+            // `error` field — both are for operators, not users.
             let error_str = e.to_string();
-            let is_cancelled = error_str.contains("cancelled");
-            let status = if is_cancelled { "cancelled" } else { "error" };
+            let (status, response_text) = classify_agent_failure(&e);
 
-            if !is_cancelled {
+            if status != "cancelled" {
                 error!(error = %error_str, "Agent execution failed");
             }
 
-            (
-                if is_cancelled {
-                    "Request was cancelled.".to_string()
-                } else {
-                    format!("I encountered an error while processing your request: {error_str}")
-                },
-                status.to_string(),
-                Some(error_str),
-            )
+            (response_text, status.to_string(), Some(error_str))
         }
     };
 
@@ -1368,6 +1392,52 @@ mod tests {
         assert!(json["thinking_events"].as_array().unwrap().is_empty());
         assert!(json["token_usage"].is_null());
         assert!(json["model"].is_null());
+    }
+
+    // -- Contract: classify_agent_failure (KYO-350) --------------------------
+    //
+    // Guards the fix for the "internal:" prefix leaking into user-facing chat
+    // copy, and the cancellation-classification parity that fix must not
+    // disturb (cancellation is still keyed off `Display`, not `user_message`).
+
+    #[test]
+    fn classify_agent_failure_non_cancellation_internal_error_is_status_error() {
+        // A non-cancellation Error::Internal must classify as "error", not
+        // "cancelled" — the acceptance criterion this ticket must not break.
+        let err = kyomi_core::Error::Internal(
+            "the tool-use budget for this request was exhausted and the final summary could \
+             not be generated"
+                .into(),
+        );
+        let (status, _) = classify_agent_failure(&err);
+        assert_eq!(status, "error");
+    }
+
+    #[test]
+    fn classify_agent_failure_cancellation_error_is_status_cancelled() {
+        // Real form the cancel path produces (see crate::agent, e.g. line
+        // `Error::Internal("Request cancelled".into())`).
+        let err = kyomi_core::Error::Internal("Request cancelled".into());
+        let (status, response_text) = classify_agent_failure(&err);
+        assert_eq!(status, "cancelled");
+        assert_eq!(response_text, "Request was cancelled.");
+    }
+
+    #[test]
+    fn classify_agent_failure_renders_user_message_without_internal_prefix() {
+        // End-to-end: the rendered sentence must equal exactly this shape,
+        // with no "internal:" tag anywhere — the reported symptom.
+        let err = kyomi_core::Error::Internal(crate::agent::WRAP_UP_FAILED_MESSAGE.to_string());
+        let (status, response_text) = classify_agent_failure(&err);
+        assert_eq!(status, "error");
+        assert_eq!(
+            response_text,
+            format!(
+                "I encountered an error while processing your request: {}",
+                crate::agent::WRAP_UP_FAILED_MESSAGE
+            )
+        );
+        assert!(!response_text.contains("internal:"));
     }
 
     // -- Contract: Streaming constants are reasonable -----------------------

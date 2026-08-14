@@ -259,7 +259,7 @@ pub async fn send_copilot_message(
                         session_id: &spawn_session_id,
                         assistant_message_id: &spawn_assistant_message_id,
                         context_type: &spawn_context_type,
-                        error: &e.to_string(),
+                        error: e.user_message(),
                     },
                 )
                 .await;
