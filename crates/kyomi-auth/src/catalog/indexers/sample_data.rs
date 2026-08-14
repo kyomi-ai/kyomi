@@ -247,7 +247,7 @@ impl SampleDataIndexer {
 
             let full_table_id = format!("{}.{table_name}", config.database);
 
-            let cached = cache_table(crate::catalog::helpers::CacheTableParams {
+            match cache_table(crate::catalog::helpers::CacheTableParams {
                 db,
                 embedding,
                 ctx: &ctx,
@@ -258,10 +258,17 @@ impl SampleDataIndexer {
                 columns: &columns,
                 full_table_id: &full_table_id,
             })
-            .await;
-
-            if cached {
-                tables_indexed += 1;
+            .await
+            {
+                Ok(()) => tables_indexed += 1,
+                Err(e) => {
+                    warn!(
+                        table = table_name.as_str(),
+                        error = %e,
+                        "failed to cache table"
+                    );
+                    errors.push(format!("{table_name}: {e}"));
+                }
             }
         }
 

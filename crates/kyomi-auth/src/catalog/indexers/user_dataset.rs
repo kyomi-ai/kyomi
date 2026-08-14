@@ -287,15 +287,16 @@ struct RunOutcome {
 /// - **Status** needs the second question. `resolve_final_status` (shared
 ///   with the SQL path, KYO-126) draws the idle/failed line using `errors`,
 ///   which include per-dataset failures via `fold_dataset_outcomes` AND
-///   per-table schema-fetch failures via `fold_table_outcomes` (KYO-324).
+///   per-table schema-fetch failures AND per-table catalog write failures
+///   via `fold_table_outcomes` (KYO-324, extended by KYO-364).
 /// - **The returned error message** must not claim more than what actually
 ///   happened: when nothing was ever listed, no archiving ran; when tables
 ///   WERE listed but none of them ended up indexed, archiving already ran and
 ///   preserved exactly those listed tables. Note the second message says
 ///   "indexed", not "read": a listed table also fails to be indexed when its
-///   schema read succeeded but `cache_table` declined the write
-///   (`TableOutcome::NotCached`), so naming the read specifically would
-///   overclaim on that path.
+///   schema read succeeded but the `cache_table` write itself failed
+///   (`TableOutcome::WriteFailed`, KYO-364), so naming the read specifically
+///   would overclaim on that path.
 ///
 /// Pure and I/O-free (mirrors `fold_dataset_outcomes` / `fold_table_outcomes`
 /// above) so this exact decision — not a re-derivation of it — can be
@@ -456,26 +457,33 @@ fn fold_dataset_outcomes(
     (tables_indexed, errors)
 }
 
-/// Cap on how many per-table schema-fetch failures a single dataset
-/// contributes to the run's `errors` (and the persisted failure reason)
-/// before further failures are collapsed into one summary line.
+/// Cap on how many per-table failures — schema-fetch denials
+/// (`TableOutcome::SchemaUnreadable`) and catalog write failures
+/// (`TableOutcome::WriteFailed`, KYO-364) alike, sharing this one cap — a
+/// single dataset contributes to the run's `errors` (and the persisted
+/// failure reason) before further failures are collapsed into one summary
+/// line.
 ///
 /// Every real caller of `index_workspace_catalog` passes
 /// `max_tables_per_dataset: None` (verified: `catalog_scheduler.rs:489`,
 /// `catalog_scheduler.rs:638`, `indexing_service.rs:355/423`,
 /// `sql_editor.rs:760` all pass `None`), so nothing upstream bounds how many
 /// tables a single dataset can enumerate. Without this cap, a dataset with
-/// thousands of tables under a blanket `bigquery.tables.get` denial would
-/// grow both `CatalogIndexResult::errors` and the summarised persisted
-/// failure reason to thousands of near-identical lines.
+/// thousands of tables under a blanket `bigquery.tables.get` denial, or a
+/// blanket `cache_table` write failure, would grow both
+/// `CatalogIndexResult::errors` and the summarised persisted failure reason
+/// to thousands of near-identical lines.
 const MAX_TABLE_ERRORS_PER_DATASET: usize = 5;
 
 /// What happened to one table inside `index_dataset_tables`.
 enum TableOutcome {
     /// Schema read and `cache_table` wrote the catalog row.
     Indexed,
-    /// Schema read, but `cache_table` declined to write the row.
-    NotCached,
+    /// Schema read, but `cache_table` failed to write the row. Carries the
+    /// underlying error text (KYO-364) — before `cache_table` returned
+    /// `Result`, this state was `NotCached`, a bare `false` with no
+    /// attached reason, and was silently dropped from `table_errors`.
+    WriteFailed(String),
     /// The table was listed, but its schema could not be read.
     SchemaUnreadable(String),
 }
@@ -488,7 +496,8 @@ struct DatasetOutcome {
     /// denied must still appear here or the run would evict a table that
     /// demonstrably still exists (KYO-324).
     seen_table_ids: Vec<String>,
-    /// Bounded, formatted schema-fetch failures.
+    /// Bounded, formatted per-table failures — schema-fetch denials and
+    /// catalog write failures alike (KYO-364).
     table_errors: Vec<String>,
 }
 
@@ -496,13 +505,17 @@ struct DatasetOutcome {
 /// [`DatasetOutcome`].
 ///
 /// Mirrors `fold_dataset_outcomes` (KYO-264) one level down: every outcome —
-/// whether the schema read succeeded, was declined by `cache_table`, or
-/// failed outright — contributes its `full_table_id` to `seen_table_ids`.
-/// That is the archiving invariant this ticket (KYO-324) exists to protect:
-/// a table whose schema fetch was denied was still *listed*, so it must not
-/// be treated as gone. Only `SchemaUnreadable` contributes to
-/// `table_errors`, capped at `MAX_TABLE_ERRORS_PER_DATASET` with a trailing
-/// summary line for anything beyond the cap.
+/// whether the schema read succeeded, the catalog write failed, or the
+/// schema itself could not be read — contributes its `full_table_id` to
+/// `seen_table_ids`. That is the archiving invariant this ticket (KYO-324,
+/// extended by KYO-364) exists to protect: a table whose schema fetch was
+/// denied, or whose `cache_table` write failed, was still *listed*, so it
+/// must not be treated as gone. Both `SchemaUnreadable` and `WriteFailed`
+/// contribute to `table_errors`, sharing a single
+/// `MAX_TABLE_ERRORS_PER_DATASET` cap with a trailing summary line for
+/// anything beyond it — a blanket `cache_table` failure (e.g. the DB
+/// connection dropped) fails every table in the dataset exactly like a
+/// blanket schema-read denial does, so it needs the same bound.
 ///
 /// Deliberately free of I/O (`outcomes` are already-resolved `TableOutcome`s)
 /// so this can be exercised directly by a unit test without an
@@ -516,28 +529,33 @@ fn fold_table_outcomes(
     let mut tables_indexed = 0usize;
     let mut seen_table_ids = Vec::with_capacity(outcomes.len());
     let mut table_errors = Vec::new();
-    let mut unreadable_beyond_cap = 0usize;
+    let mut errors_beyond_cap = 0usize;
 
     for (full_table_id, outcome) in outcomes {
         seen_table_ids.push(full_table_id.clone());
 
-        match outcome {
-            TableOutcome::Indexed => tables_indexed += 1,
-            TableOutcome::NotCached => {}
-            TableOutcome::SchemaUnreadable(msg) => {
+        let failure_msg = match outcome {
+            TableOutcome::Indexed => None,
+            TableOutcome::SchemaUnreadable(msg) => Some(msg),
+            TableOutcome::WriteFailed(msg) => Some(msg),
+        };
+
+        match failure_msg {
+            None => tables_indexed += 1,
+            Some(msg) => {
                 if table_errors.len() < MAX_TABLE_ERRORS_PER_DATASET {
                     table_errors.push(format!("{full_table_id}: {msg}"));
                 } else {
-                    unreadable_beyond_cap += 1;
+                    errors_beyond_cap += 1;
                 }
             }
         }
     }
 
-    if unreadable_beyond_cap > 0 {
+    if errors_beyond_cap > 0 {
         table_errors.push(format!(
-            "{dataset_label}: {unreadable_beyond_cap} further table schema failure{} not shown",
-            if unreadable_beyond_cap == 1 { "" } else { "s" }
+            "{dataset_label}: {errors_beyond_cap} further table failure{} not shown",
+            if errors_beyond_cap == 1 { "" } else { "s" }
         ));
     }
 
@@ -552,9 +570,10 @@ fn fold_table_outcomes(
 ///
 /// Returns a [`DatasetOutcome`] carrying the indexed-table count, every
 /// listed table id (readable or not — see `fold_table_outcomes`), and any
-/// bounded per-table schema-fetch errors. The `Err` return here is reserved
-/// for the table *listing* call itself failing; a per-table schema-fetch
-/// failure is captured as `TableOutcome::SchemaUnreadable` and folded into
+/// bounded per-table failures. The `Err` return here is reserved for the
+/// table *listing* call itself failing; a per-table schema-fetch failure is
+/// captured as `TableOutcome::SchemaUnreadable` and a per-table `cache_table`
+/// write failure as `TableOutcome::WriteFailed` (KYO-364), both folded into
 /// the `Ok` result instead (KYO-324), because the table was still
 /// demonstrably listed and must still count toward `seen_table_ids`.
 async fn index_dataset_tables(
@@ -600,7 +619,7 @@ async fn index_dataset_tables(
                 }
             };
 
-        let cached = cache_table(crate::catalog::helpers::CacheTableParams {
+        let outcome = match cache_table(crate::catalog::helpers::CacheTableParams {
             db,
             embedding,
             ctx,
@@ -611,12 +630,17 @@ async fn index_dataset_tables(
             columns: &columns,
             full_table_id: &full_table_id,
         })
-        .await;
-
-        let outcome = if cached {
-            TableOutcome::Indexed
-        } else {
-            TableOutcome::NotCached
+        .await
+        {
+            Ok(()) => TableOutcome::Indexed,
+            Err(e) => {
+                warn!(
+                    table = full_table_id,
+                    error = %e,
+                    "failed to cache table"
+                );
+                TableOutcome::WriteFailed(format!("{e}"))
+            }
         };
         outcomes.push((full_table_id, outcome));
     }
@@ -960,6 +984,13 @@ mod tests {
         TableOutcome::SchemaUnreadable(format!("HTTP 403: permission denied reading {table}"))
     }
 
+    /// A `cache_table` write failure (KYO-364) — the schema read succeeded,
+    /// but the catalog write itself (existing-row lookup, UPDATE, INSERT, or
+    /// embedding generation/storage) returned `Err`.
+    fn write_failed(table: &str) -> TableOutcome {
+        TableOutcome::WriteFailed(format!("failed to insert cache entry for {table}: db closed"))
+    }
+
     #[test]
     fn all_tables_indexed_counts_and_seen_ids_match() {
         let outcomes = vec![
@@ -1014,18 +1045,63 @@ mod tests {
     }
 
     #[test]
-    fn mixed_indexed_and_unreadable_counts_and_errors_correctly() {
+    fn mixed_indexed_unreadable_and_write_failed_counts_and_errors_correctly() {
         let outcomes = vec![
             ("proj-1.ds_a.t1".to_string(), TableOutcome::Indexed),
             ("proj-1.ds_a.t2".to_string(), schema_denied("proj-1.ds_a.t2")),
-            ("proj-1.ds_a.t3".to_string(), TableOutcome::NotCached),
+            ("proj-1.ds_a.t3".to_string(), write_failed("proj-1.ds_a.t3")),
         ];
         let result = fold_table_outcomes("proj-1.ds_a", outcomes);
 
         assert_eq!(result.tables_indexed, 1);
-        assert_eq!(result.seen_table_ids.len(), 3, "NotCached must still count as seen");
-        assert_eq!(result.table_errors.len(), 1);
+        assert_eq!(
+            result.seen_table_ids.len(),
+            3,
+            "a write failure must still count as seen — the table demonstrably exists"
+        );
+        assert_eq!(result.table_errors.len(), 2);
         assert!(result.table_errors[0].starts_with("proj-1.ds_a.t2: "));
+        assert!(result.table_errors[1].starts_with("proj-1.ds_a.t3: "));
+    }
+
+    /// Criterion 5 (shared cap): a mix of `SchemaUnreadable` and
+    /// `WriteFailed` outcomes in one dataset must share the single
+    /// `MAX_TABLE_ERRORS_PER_DATASET` cap rather than getting one cap each —
+    /// they're both "this table failed" from `table_errors`' point of view.
+    #[test]
+    fn schema_unreadable_and_write_failed_share_one_cap() {
+        // One kind's worth exactly fills the cap, so neither kind alone
+        // overflows. Only a *shared* cap overflows on the combined 2×
+        // fixture — a per-kind cap would admit all 10 with no summary line,
+        // which is precisely what the length assertion below rules out.
+        let half = MAX_TABLE_ERRORS_PER_DATASET;
+        let mut outcomes: Vec<(String, TableOutcome)> = (0..half)
+            .map(|i| {
+                let t = format!("proj-1.ds_a.unreadable{i}");
+                (t.clone(), schema_denied(&t))
+            })
+            .collect();
+        outcomes.extend((0..half).map(|i| {
+            let t = format!("proj-1.ds_a.writefail{i}");
+            (t.clone(), write_failed(&t))
+        }));
+        let total = outcomes.len();
+        assert!(
+            total > MAX_TABLE_ERRORS_PER_DATASET,
+            "test fixture must exceed the cap to be meaningful"
+        );
+
+        let result = fold_table_outcomes("proj-1.ds_a", outcomes);
+
+        assert_eq!(result.seen_table_ids.len(), total);
+        assert_eq!(
+            result.table_errors.len(),
+            MAX_TABLE_ERRORS_PER_DATASET + 1,
+            "SchemaUnreadable and WriteFailed must share one cap, not one each"
+        );
+        let summary = result.table_errors.last().expect("summary line present");
+        assert!(summary.starts_with("proj-1.ds_a: "));
+        assert!(summary.contains(&(total - MAX_TABLE_ERRORS_PER_DATASET).to_string()));
     }
 
     /// More `SchemaUnreadable` outcomes than `MAX_TABLE_ERRORS_PER_DATASET`:
@@ -1085,7 +1161,8 @@ mod tests {
     // predicates is what fails these tests, not a mutation to a copy living
     // in the test body.
     //
-    // Four cases, matching `resolve_run_outcome`'s full input matrix:
+    // Four cases, matching `resolve_run_outcome`'s full input matrix as
+    // reachable through `fold_table_outcomes`:
     //   seen_any_table | tables_indexed | errors     | archive | status | error_message
     //   false          | 0              | empty      | false   | idle   | Some("No tables discovered...")
     //   true            | 0              | non-empty | true    | failed | Some("Tables were listed but none could be indexed...")
@@ -1093,6 +1170,19 @@ mod tests {
     // (seen_any_table=false with non-empty errors is exercised indirectly —
     // it can only arise from a whole-project listing failure, not from
     // `fold_table_outcomes`, so it isn't representable via this fixture.)
+    //
+    // This enumeration is now exhaustive over `fold_table_outcomes`'s output
+    // (KYO-364). Before this ticket, a fifth, buggy state was reachable:
+    // `seen_any_table = true, tables_indexed == 0, errors == empty` — every
+    // table listed, every `cache_table` write failing, but `TableOutcome::
+    // NotCached` contributed nothing to `table_errors`, so `resolve_run_outcome`
+    // resolved it to `"idle"` (the headline KYO-364 bug). With `NotCached`
+    // removed and every failing `TableOutcome` (`SchemaUnreadable` and
+    // `WriteFailed` alike) contributing to `table_errors`, that state can no
+    // longer be produced by `fold_table_outcomes` — `tables_indexed == 0`
+    // with `seen_any_table == true` now always carries non-empty `errors`,
+    // landing on row two above. `all_tables_listed_all_writes_failed_resolves_to_failed`
+    // below exercises exactly the scenario that used to hit the missing row.
 
     /// AC1: every table listed, every schema fetch denied ⇒ `"failed"` with
     /// a reason naming the underlying error (not the generic message), and
@@ -1133,6 +1223,191 @@ mod tests {
         );
         assert!(reason.contains("proj-1.ds_a.t1"));
         assert!(reason.contains("permission denied"));
+    }
+
+    // ── KYO-364: cache_table write failures ────────────────────────────
+    //
+    // These mirror the KYO-324 suite above but exercise `TableOutcome::
+    // WriteFailed` instead of `SchemaUnreadable` — the state that used to be
+    // `TableOutcome::NotCached`, a bare `false` with no attached reason that
+    // contributed nothing to `table_errors`. Before this ticket, a run where
+    // every table was listed fine, every schema read succeeded, but every
+    // `cache_table` write failed produced `seen_any_table = true,
+    // tables_indexed = 0, errors = []`, which `resolve_run_outcome` resolved
+    // to `"idle"` — a silent success indistinguishable from a healthy run
+    // with zero tables. This is the fourth variant of the KYO-126/KYO-264/
+    // KYO-324 family, on the catalog *write* path this time.
+
+    /// Criterion 1 (headline): every table listed, every schema read OK,
+    /// every `cache_table` write failing ⇒ `"failed"` with a reason naming
+    /// the real underlying write error — not the generic empty-discovery
+    /// message — and archiving must still run.
+    #[test]
+    fn all_tables_listed_all_writes_failed_resolves_to_failed() {
+        let table_ids = ["proj-1.ds_a.t1", "proj-1.ds_a.t2"];
+        let outcomes: Vec<(String, TableOutcome)> = table_ids
+            .iter()
+            .map(|t| (t.to_string(), write_failed(t)))
+            .collect();
+        let dataset_outcome = fold_table_outcomes("proj-1.ds_a", outcomes);
+        let seen_any_table = !dataset_outcome.seen_table_ids.is_empty();
+
+        assert!(seen_any_table, "every table was listed");
+        assert_eq!(dataset_outcome.tables_indexed, 0);
+        assert!(
+            !dataset_outcome.table_errors.is_empty(),
+            "write failures must reach table_errors — this is the exact KYO-364 bug"
+        );
+
+        let run_outcome = resolve_run_outcome(
+            seen_any_table,
+            dataset_outcome.tables_indexed,
+            &dataset_outcome.table_errors,
+        );
+
+        assert!(
+            run_outcome.archive,
+            "tables were listed — archiving must still run"
+        );
+        assert_eq!(run_outcome.status, "failed");
+        let reason = run_outcome
+            .failure_reason
+            .expect("failed status must carry a reason");
+        assert_ne!(
+            reason, "No tables discovered — existing catalog preserved",
+            "reason must name the real cache_table write error, not the generic message"
+        );
+        assert!(
+            reason.contains("proj-1.ds_a.t1"),
+            "reason must name the failing table, got: {reason}"
+        );
+        assert!(
+            reason.contains("failed to insert cache entry"),
+            "reason must contain the real underlying cache_table error text, got: {reason}"
+        );
+    }
+
+    /// Criterion 2 (partial): some tables cache_table-succeed, some
+    /// cache_table-fail ⇒ status stays `"idle"` and the write failure is
+    /// still present in `table_errors` (which the real caller folds into
+    /// `CatalogIndexResult::errors`).
+    #[test]
+    fn partial_write_failure_resolves_to_idle_with_errors_still_surfaced() {
+        let outcomes = vec![
+            ("proj-1.ds_a.t1".to_string(), TableOutcome::Indexed),
+            ("proj-1.ds_a.t2".to_string(), write_failed("proj-1.ds_a.t2")),
+        ];
+        let dataset_outcome = fold_table_outcomes("proj-1.ds_a", outcomes);
+        let seen_any_table = !dataset_outcome.seen_table_ids.is_empty();
+
+        let run_outcome = resolve_run_outcome(
+            seen_any_table,
+            dataset_outcome.tables_indexed,
+            &dataset_outcome.table_errors,
+        );
+
+        assert!(
+            run_outcome.archive,
+            "one table indexed successfully — archiving must run"
+        );
+        assert_eq!(
+            run_outcome.status, "idle",
+            "partial success must not be reported as failed"
+        );
+        assert_eq!(run_outcome.failure_reason, None);
+        assert_eq!(
+            dataset_outcome.table_errors.len(),
+            1,
+            "the write failure must still be present for CatalogIndexResult::errors"
+        );
+        assert!(dataset_outcome.table_errors[0].starts_with("proj-1.ds_a.t2: "));
+    }
+
+    /// Criterion 3 (archiving invariant): an all-write-failed dataset must
+    /// still return EVERY listed table id in `seen_table_ids` — the
+    /// archiving invariant this whole family of fixes protects, since a
+    /// table whose write failed was still demonstrably present in the
+    /// datasource and must not be evicted. `resolve_run_outcome` must still
+    /// report `archive: true`.
+    #[test]
+    fn all_write_failed_still_populates_seen_table_ids_completely_and_archives() {
+        let table_ids = ["proj-1.ds_a.t1", "proj-1.ds_a.t2", "proj-1.ds_a.t3"];
+        let outcomes: Vec<(String, TableOutcome)> = table_ids
+            .iter()
+            .map(|t| (t.to_string(), write_failed(t)))
+            .collect();
+        let dataset_outcome = fold_table_outcomes("proj-1.ds_a", outcomes);
+
+        let expected: HashSet<String> = table_ids.iter().map(|t| t.to_string()).collect();
+        let actual: HashSet<String> = dataset_outcome.seen_table_ids.iter().cloned().collect();
+        assert_eq!(
+            actual, expected,
+            "every listed table must appear in seen_table_ids even when its cache_table write failed"
+        );
+        assert_eq!(dataset_outcome.seen_table_ids.len(), table_ids.len());
+
+        let seen_any_table = !dataset_outcome.seen_table_ids.is_empty();
+        let run_outcome = resolve_run_outcome(
+            seen_any_table,
+            dataset_outcome.tables_indexed,
+            &dataset_outcome.table_errors,
+        );
+        assert!(
+            run_outcome.archive,
+            "tables were listed, so archiving must run and use the full seen_table_ids set"
+        );
+    }
+
+    /// Criterion 4 (cap): more than `MAX_TABLE_ERRORS_PER_DATASET` write
+    /// failures in one dataset ⇒ exactly `MAX + 1` entries (the cap plus one
+    /// summary line), with correct singular/plural wording and `seen_table_ids`
+    /// left uncapped.
+    #[test]
+    fn write_failures_are_capped_with_a_correctly_pluralized_summary_line() {
+        // Exactly one over the cap so the summary line is singular ("1
+        // further table failure"), proving the singular/plural branch.
+        let total = MAX_TABLE_ERRORS_PER_DATASET + 1;
+        let table_ids: Vec<String> = (0..total)
+            .map(|i| format!("proj-1.ds_a.t{i}"))
+            .collect();
+        let outcomes: Vec<(String, TableOutcome)> = table_ids
+            .iter()
+            .map(|t| (t.clone(), write_failed(t)))
+            .collect();
+
+        let result = fold_table_outcomes("proj-1.ds_a", outcomes);
+
+        assert_eq!(result.tables_indexed, 0);
+        assert_eq!(
+            result.seen_table_ids.len(),
+            total,
+            "the error cap must not drop any table from seen_table_ids"
+        );
+        assert_eq!(result.table_errors.len(), MAX_TABLE_ERRORS_PER_DATASET + 1);
+        let summary = result.table_errors.last().expect("summary line present");
+        assert_eq!(
+            summary, "proj-1.ds_a: 1 further table failure not shown",
+            "singular wording must be exact for a one-over-cap overflow"
+        );
+
+        // Companion case: comfortably over the cap, plural wording.
+        let total_plural = MAX_TABLE_ERRORS_PER_DATASET + 3;
+        let table_ids_plural: Vec<String> = (0..total_plural)
+            .map(|i| format!("proj-1.ds_b.t{i}"))
+            .collect();
+        let outcomes_plural: Vec<(String, TableOutcome)> = table_ids_plural
+            .iter()
+            .map(|t| (t.clone(), write_failed(t)))
+            .collect();
+        let result_plural = fold_table_outcomes("proj-1.ds_b", outcomes_plural);
+        let summary_plural = result_plural
+            .table_errors
+            .last()
+            .expect("summary line present");
+        assert_eq!(
+            summary_plural, "proj-1.ds_b: 3 further table failures not shown",
+            "plural wording must be exact for a multi-over-cap overflow"
+        );
     }
 
     /// AC2: some tables indexed, some schema fetches failed ⇒ still
