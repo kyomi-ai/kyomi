@@ -546,6 +546,117 @@ async fn record_dashboard_visibility_transition(
     }))
 }
 
+/// A row from the fan-out bulk membership query: one dashboard in a
+/// collection, its owner, its doc type, and whether it remains visible
+/// through a *different* public collection membership. See
+/// `load_collection_fanout_rows`.
+#[derive(sqlx::FromRow)]
+struct FanoutRow {
+    dashboard_id: String,
+    owner_user_id: String,
+    doc_type: String,
+    // 1/0, not a native bool column — see `is_publicly_shared` in
+    // dashboard_service.rs for why CASE WHEN...THEN 1 ELSE 0 is
+    // decoded as an integer rather than trusted as bool cross-db.
+    visible_via_other_collections: i32,
+}
+
+/// Bulk-load every dashboard in `collection_id`, along with whether each one
+/// remains visible through a *different* public collection membership.
+///
+/// Single round trip for the whole collection, not one query per dashboard:
+/// a dashboard already visible through a second public collection does not
+/// need a broadcast just because this collection's membership or `is_public`
+/// changed, and this query answers that for every dashboard in the
+/// collection at once.
+///
+/// Callers that run this *before* a mutation that removes
+/// `collection_dashboards` rows for this collection (e.g. deleting the
+/// collection, which CASCADEs them) must do so — once those rows are gone,
+/// this join can no longer answer who could see what.
+async fn load_collection_fanout_rows(db: &DbPool, collection_id: &str) -> Result<Vec<FanoutRow>> {
+    let is_pg = db.is_postgres();
+    let bool_true = sql_compat::bool_true(is_pg);
+    let sql = format!(
+        r#"
+        SELECT cd.dashboard_id AS dashboard_id,
+               d.user_id AS owner_user_id,
+               d.doc_type AS doc_type,
+               CASE WHEN EXISTS (
+                   SELECT 1 FROM collection_dashboards cd2
+                   JOIN collections c2 ON cd2.collection_id = c2.id
+                   WHERE cd2.dashboard_id = cd.dashboard_id
+                     AND cd2.collection_id != $1
+                     AND c2.is_public = {bool_true}
+               ) THEN 1 ELSE 0 END AS visible_via_other_collections
+        FROM collection_dashboards cd
+        JOIN dashboards d ON cd.dashboard_id = d.dashboard_id
+        WHERE cd.collection_id = $1
+        "#
+    );
+
+    db_fetch_all!(db, FanoutRow, &sql, collection_id).map_err(|e| {
+        kyomi_core::Error::Internal(format!(
+            "failed to load collection membership for fan-out: {e}"
+        ))
+    })
+}
+
+/// Run the per-row visibility-transition loop over already-loaded fan-out
+/// rows: for every dashboard whose overall sync-visibility changes as a
+/// result of `old_is_public -> new_is_public`, persist the matching
+/// `sync_log` row(s) (`write_visibility_sync_log`) and fire the live
+/// broadcast (`broadcast_dashboard_visibility_change`).
+///
+/// `row.visible_via_other_collections` is what prevents evicting a
+/// dashboard that remains visible through a *different* public collection —
+/// callers must not bypass it by pre-filtering `rows`.
+async fn run_collection_visibility_fanout(
+    db: &DbPool,
+    rows: &[FanoutRow],
+    workspace_id: &str,
+    old_is_public: bool,
+    new_is_public: bool,
+    ws_manager: Option<&WebSocketManager>,
+) {
+    for row in rows {
+        let visible_via_other_collections = row.visible_via_other_collections != 0;
+        let was_visible = visible_via_other_collections || old_is_public;
+        let now_visible = visible_via_other_collections || new_is_public;
+        if was_visible == now_visible {
+            continue;
+        }
+
+        let entity_type = if row.doc_type == "knowledge" {
+            entity_types::KNOWLEDGE
+        } else {
+            entity_types::DASHBOARD
+        };
+
+        write_visibility_sync_log(
+            db,
+            &row.dashboard_id,
+            workspace_id,
+            &row.owner_user_id,
+            entity_type,
+            now_visible,
+        )
+        .await;
+
+        if let Some(manager) = ws_manager {
+            crate::websocket::helpers::broadcast_dashboard_visibility_change(
+                db,
+                manager,
+                &row.dashboard_id,
+                workspace_id,
+                &row.owner_user_id,
+                now_visible,
+            )
+            .await;
+        }
+    }
+}
+
 /// Fan a collection's `is_public` flip out to every dashboard it contains,
 /// off the request path.
 ///
@@ -558,11 +669,13 @@ async fn record_dashboard_visibility_transition(
 /// count off the interactive request path — `update_collection` returns as
 /// soon as the `collections` row itself is updated.
 ///
-/// The membership query that decides *which* dashboards actually changed
-/// visibility is a single bulk query, not one round trip per dashboard: a
-/// dashboard already visible through a second public collection does not
-/// need a broadcast just because this collection flipped, and this query
-/// answers that for every dashboard in the collection at once.
+/// Unlike `delete_collection` (which must capture the fan-out rows *before*
+/// its mutation — see `delete_collection_inner`), `update_collection`'s
+/// mutation never touches `collection_dashboards`, so the membership rows
+/// this reads are still there no matter when the read happens. Loading them
+/// here, inside the spawned task, is what keeps that load off the request
+/// path; `spawn_collection_visibility_fanout_for_rows` is the sibling for
+/// callers that must load before spawning instead.
 ///
 /// Returns the `JoinHandle` so tests can await completion; production call
 /// sites drop it (fire-and-forget, matching `spawn_rechunk_document`).
@@ -575,38 +688,7 @@ fn spawn_collection_visibility_fanout(
     ws_manager: Option<WebSocketManager>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        #[derive(sqlx::FromRow)]
-        struct FanoutRow {
-            dashboard_id: String,
-            owner_user_id: String,
-            doc_type: String,
-            // 1/0, not a native bool column — see `is_publicly_shared` in
-            // dashboard_service.rs for why CASE WHEN...THEN 1 ELSE 0 is
-            // decoded as an integer rather than trusted as bool cross-db.
-            visible_via_other_collections: i32,
-        }
-
-        let is_pg = db.is_postgres();
-        let bool_true = sql_compat::bool_true(is_pg);
-        let sql = format!(
-            r#"
-            SELECT cd.dashboard_id AS dashboard_id,
-                   d.user_id AS owner_user_id,
-                   d.doc_type AS doc_type,
-                   CASE WHEN EXISTS (
-                       SELECT 1 FROM collection_dashboards cd2
-                       JOIN collections c2 ON cd2.collection_id = c2.id
-                       WHERE cd2.dashboard_id = cd.dashboard_id
-                         AND cd2.collection_id != $1
-                         AND c2.is_public = {bool_true}
-                   ) THEN 1 ELSE 0 END AS visible_via_other_collections
-            FROM collection_dashboards cd
-            JOIN dashboards d ON cd.dashboard_id = d.dashboard_id
-            WHERE cd.collection_id = $1
-            "#
-        );
-
-        let rows: Vec<FanoutRow> = match db_fetch_all!(db, FanoutRow, &sql, &collection_id) {
+        let rows = match load_collection_fanout_rows(&db, &collection_id).await {
             Ok(rows) => rows,
             Err(e) => {
                 tracing::error!(
@@ -617,42 +699,50 @@ fn spawn_collection_visibility_fanout(
             }
         };
 
-        for row in rows {
-            let visible_via_other_collections = row.visible_via_other_collections != 0;
-            let was_visible = visible_via_other_collections || old_is_public;
-            let now_visible = visible_via_other_collections || new_is_public;
-            if was_visible == now_visible {
-                continue;
-            }
+        run_collection_visibility_fanout(
+            &db,
+            &rows,
+            &workspace_id,
+            old_is_public,
+            new_is_public,
+            ws_manager.as_ref(),
+        )
+        .await;
+    })
+}
 
-            let entity_type = if row.doc_type == "knowledge" {
-                entity_types::KNOWLEDGE
-            } else {
-                entity_types::DASHBOARD
-            };
-
-            write_visibility_sync_log(
-                &db,
-                &row.dashboard_id,
-                &workspace_id,
-                &row.owner_user_id,
-                entity_type,
-                now_visible,
-            )
-            .await;
-
-            if let Some(ref manager) = ws_manager {
-                crate::websocket::helpers::broadcast_dashboard_visibility_change(
-                    &db,
-                    manager,
-                    &row.dashboard_id,
-                    &workspace_id,
-                    &row.owner_user_id,
-                    now_visible,
-                )
-                .await;
-            }
-        }
+/// Spawn the shared fan-out loop over rows the caller already loaded,
+/// off the request path.
+///
+/// Sibling to `spawn_collection_visibility_fanout` for callers where the
+/// membership rows cannot be loaded *inside* the spawned task — because the
+/// caller's own mutation removes them first. `delete_collection_inner` is
+/// the only caller: it loads via `load_collection_fanout_rows` before
+/// `DELETE FROM collections` (whose CASCADE removes `collection_dashboards`
+/// rows), then hands the already-loaded rows here to run the fan-out after
+/// the delete has committed.
+///
+/// Returns the `JoinHandle` for the same reason
+/// `spawn_collection_visibility_fanout` does — so tests can await
+/// completion; production call sites drop it.
+fn spawn_collection_visibility_fanout_for_rows(
+    db: DbPool,
+    rows: Vec<FanoutRow>,
+    workspace_id: String,
+    old_is_public: bool,
+    new_is_public: bool,
+    ws_manager: Option<WebSocketManager>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        run_collection_visibility_fanout(
+            &db,
+            &rows,
+            &workspace_id,
+            old_is_public,
+            new_is_public,
+            ws_manager.as_ref(),
+        )
+        .await;
     })
 }
 
@@ -784,13 +874,73 @@ pub async fn update_collection(
 // ─── Delete collection ──────────────────────────────────────────────────────
 
 /// Delete a collection. CASCADE removes junction rows.
+///
+/// `ws_manager` is used only when the collection was public — see
+/// `delete_collection_inner`, which does the real work and additionally
+/// returns the fan-out `JoinHandle` for tests.
 pub async fn delete_collection(
     db: &DbPool,
     collection_id: &str,
     workspace_id: &str,
+    ws_manager: Option<&WebSocketManager>,
 ) -> Result<bool> {
+    let (deleted, _handle) =
+        delete_collection_inner(db, collection_id, workspace_id, ws_manager).await?;
+    Ok(deleted)
+}
+
+/// Implementation of `delete_collection`, additionally returning the
+/// fan-out `JoinHandle` (when one was spawned) so tests can await its
+/// completion before asserting on `sync_log` — a test that only calls the
+/// public `delete_collection` has no way to know the fan-out has finished,
+/// and calling `spawn_collection_visibility_fanout_for_rows` directly (like
+/// `collection_visibility_fanout_reaches_every_dashboard` does for the
+/// `update_collection` fan-out) would skip `delete_collection`'s own
+/// row-capture step entirely, so it couldn't fail if that ordering ever
+/// regressed. Production call sites use `delete_collection`, which drops
+/// the handle.
+async fn delete_collection_inner(
+    db: &DbPool,
+    collection_id: &str,
+    workspace_id: &str,
+    ws_manager: Option<&WebSocketManager>,
+) -> Result<(bool, Option<tokio::task::JoinHandle<()>>)> {
     uuid::Uuid::parse_str(collection_id)
         .map_err(|e| kyomi_core::Error::BadRequest(format!("Invalid collection_id: {e}")))?;
+
+    // Capture the pre-delete is_public value, mirroring `update_collection`'s
+    // capture above. `db_fetch_optional!` (not `_scalar!`, which uses
+    // `fetch_one`) so a nonexistent collection_id falls through to the
+    // existing rows_affected() == 0 / NotFound handling below, unchanged —
+    // it reads as "not public" here, which correctly skips the fan-out load,
+    // and the DELETE below still catches the nonexistent-id case.
+    let old_is_public: bool = db_fetch_optional!(
+        db,
+        (bool,),
+        "SELECT is_public FROM collections WHERE id = $1 AND workspace_id = $2",
+        collection_id,
+        workspace_id
+    )
+    .map_err(|e| {
+        kyomi_core::Error::Internal(format!("failed to read collection visibility: {e}"))
+    })?
+    .map(|(v,)| v)
+    .unwrap_or(false);
+
+    // Load the fan-out rows *before* the DELETE — this ordering is the
+    // load-bearing part of the fix (KYO-355, same reasoning KYO-313 already
+    // locked in for `update_collection`): `collection_dashboards` rows
+    // CASCADE-delete along with the collection, so once `DELETE FROM
+    // collections` below has run, the join in `load_collection_fanout_rows`
+    // can no longer tell us which dashboards were members or who owns them.
+    // If the collection was private, no document's visibility derives from
+    // it, so there is nothing to transition — skip the load and the fan-out
+    // entirely rather than run a wasted query.
+    let fanout_rows = if old_is_public {
+        Some(load_collection_fanout_rows(db, collection_id).await?)
+    } else {
+        None
+    };
 
     let result = db_execute!(
         db,
@@ -807,7 +957,24 @@ pub async fn delete_collection(
     }
 
     tracing::info!(collection_id = %collection_id, "Deleted collection");
-    Ok(true)
+
+    // Fan the deletion's visibility change out to every dashboard that was
+    // a member, off the request path. `run_collection_visibility_fanout`'s
+    // own `visible_via_other_collections` check (carried in `fanout_rows`)
+    // is what stops this from evicting a dashboard that stays public
+    // through a different collection.
+    let handle = fanout_rows.map(|rows| {
+        spawn_collection_visibility_fanout_for_rows(
+            db.clone(),
+            rows,
+            workspace_id.to_string(),
+            true,
+            false,
+            ws_manager.cloned(),
+        )
+    });
+
+    Ok((true, handle))
 }
 
 // ─── Add dashboard to collection ─────────────────────────────────────────────
@@ -1733,6 +1900,281 @@ mod tests {
             owner_entries[0].sync_id < owner_entries[1].sync_id,
             "Delete must be applied before Update, or the owner ends up evicted too"
         );
+    }
+
+    // ─── delete_collection visibility fan-out (KYO-355) ──────────────────────
+    //
+    // `delete_collection` issues a bare `DELETE FROM collections`.
+    // `collection_dashboards` rows CASCADE-delete with it, so any dashboard
+    // that was public *only* through this collection loses its public
+    // visibility the instant the delete commits — with no `sync_log` row and
+    // no live broadcast unless `delete_collection` fans it out itself, the
+    // same way `update_collection`'s `is_public` flip and
+    // `add_dashboard`/`remove_dashboard` already do. These tests drive
+    // `delete_collection_inner` directly (not the spawn helpers) so they
+    // exercise the real ordering: the fan-out rows must be captured *before*
+    // the CASCADE, or there is nothing left to fan out from.
+
+    #[tokio::test]
+    async fn delete_collection_evicts_non_owner_and_updates_owner() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        seed_two_users_one_workspace(sq).await;
+
+        let dashboard_id = create_test_dashboard(&db, "user-a", "ws-1", "Shared Dash").await;
+        let collection = create_collection(NewCollectionParams {
+            db: &db,
+            workspace_id: "ws-1",
+            name: "Public Folder",
+            description: None,
+            color: None,
+            is_public: true,
+            doc_type: "dashboard",
+            created_by: "user-a",
+        })
+        .await
+        .expect("create public collection");
+        add_dashboard(&db, &collection.id, &dashboard_id, "ws-1", "user-a", None)
+            .await
+            .expect("add_dashboard");
+
+        let cursor = sync_log_service::get_latest_sync_id(&db, "ws-1")
+            .await
+            .expect("cursor");
+
+        let (deleted, handle) = delete_collection_inner(&db, &collection.id, "ws-1", None)
+            .await
+            .expect("delete_collection_inner");
+        assert!(deleted);
+        handle
+            .expect("a public collection with a member must spawn a fan-out")
+            .await
+            .expect("fan-out task must not panic");
+
+        let non_owner_entries =
+            sync_log_service::get_entries_since(&db, "ws-1", cursor, "user-b", 50)
+                .await
+                .expect("get_entries_since for user-b");
+        assert_eq!(
+            non_owner_entries.len(),
+            1,
+            "non-owner must see exactly the eviction, nothing else \
+             (a presence-only check cannot catch an over-broad eviction): {non_owner_entries:?}"
+        );
+        assert!(matches!(non_owner_entries[0].action, SyncActionType::Delete));
+        assert_eq!(non_owner_entries[0].entity_id, dashboard_id);
+
+        let owner_entries = sync_log_service::get_entries_since(&db, "ws-1", cursor, "user-a", 50)
+            .await
+            .expect("get_entries_since for user-a");
+        assert_eq!(
+            owner_entries.len(),
+            2,
+            "owner's delta must contain both the eviction row and the follow-up \
+             snapshot that restores it: {owner_entries:?}"
+        );
+        assert!(matches!(owner_entries[0].action, SyncActionType::Delete));
+        assert!(matches!(owner_entries[1].action, SyncActionType::Update));
+        assert!(
+            owner_entries[1].data.is_some(),
+            "owner's restoring update must carry the fresh snapshot: {owner_entries:?}"
+        );
+        assert!(
+            owner_entries[0].sync_id < owner_entries[1].sync_id,
+            "Delete must be applied before Update, or the owner ends up evicted too"
+        );
+    }
+
+    /// The load-bearing negative case: a dashboard that is a member of
+    /// *two* public collections must not be evicted when only one of them
+    /// is deleted — it is still visible via the other one. This is what
+    /// `run_collection_visibility_fanout`'s `visible_via_other_collections`
+    /// check exists to prevent.
+    #[tokio::test]
+    async fn delete_collection_does_not_evict_dashboard_still_public_via_another_collection() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        seed_two_users_one_workspace(sq).await;
+
+        let dashboard_id = create_test_dashboard(&db, "user-a", "ws-1", "Doubly Shared Dash").await;
+        let collection_1 = create_collection(NewCollectionParams {
+            db: &db,
+            workspace_id: "ws-1",
+            name: "Public Folder One",
+            description: None,
+            color: None,
+            is_public: true,
+            doc_type: "dashboard",
+            created_by: "user-a",
+        })
+        .await
+        .expect("create public collection one");
+        let collection_2 = create_collection(NewCollectionParams {
+            db: &db,
+            workspace_id: "ws-1",
+            name: "Public Folder Two",
+            description: None,
+            color: None,
+            is_public: true,
+            doc_type: "dashboard",
+            created_by: "user-a",
+        })
+        .await
+        .expect("create public collection two");
+
+        add_dashboard(&db, &collection_1.id, &dashboard_id, "ws-1", "user-a", None)
+            .await
+            .expect("add_dashboard to collection one");
+        add_dashboard(&db, &collection_2.id, &dashboard_id, "ws-1", "user-a", None)
+            .await
+            .expect("add_dashboard to collection two");
+
+        let cursor = sync_log_service::get_latest_sync_id(&db, "ws-1")
+            .await
+            .expect("cursor");
+
+        let (deleted, handle) = delete_collection_inner(&db, &collection_1.id, "ws-1", None)
+            .await
+            .expect("delete_collection_inner");
+        assert!(deleted);
+        if let Some(handle) = handle {
+            handle.await.expect("fan-out task must not panic");
+        }
+
+        let non_owner_entries =
+            sync_log_service::get_entries_since(&db, "ws-1", cursor, "user-b", 50)
+                .await
+                .expect("get_entries_since for user-b");
+        assert_eq!(
+            non_owner_entries.len(),
+            0,
+            "dashboard is still public via the surviving collection — deleting \
+             one of two public collections must not evict it: {non_owner_entries:?}"
+        );
+    }
+
+    /// Mirrors `collection_visibility_fanout_reaches_every_dashboard`'s
+    /// `WebSocketManager` setup: a member online at the moment of the delete
+    /// must receive the live visibility-change broadcast, so they converge
+    /// immediately instead of waiting for their next delta sync.
+    #[tokio::test]
+    async fn delete_collection_pushes_live_broadcast_to_non_owner() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        seed_two_users_one_workspace(sq).await;
+
+        let dashboard_id = create_test_dashboard(&db, "user-a", "ws-1", "Live Shared Dash").await;
+        let collection = create_collection(NewCollectionParams {
+            db: &db,
+            workspace_id: "ws-1",
+            name: "Public Folder",
+            description: None,
+            color: None,
+            is_public: true,
+            doc_type: "dashboard",
+            created_by: "user-a",
+        })
+        .await
+        .expect("create public collection");
+        add_dashboard(&db, &collection.id, &dashboard_id, "ws-1", "user-a", None)
+            .await
+            .expect("add_dashboard");
+
+        let manager = crate::websocket::WebSocketManager::new(None, db.clone());
+        let (_conn_a, mut rx_a) = manager.connect("user-a").expect("connect user-a");
+        let (_conn_b, mut rx_b) = manager.connect("user-b").expect("connect user-b");
+        rx_a.try_recv().expect("heartbeat for user-a");
+        rx_b.try_recv().expect("heartbeat for user-b");
+
+        let (deleted, handle) =
+            delete_collection_inner(&db, &collection.id, "ws-1", Some(&manager))
+                .await
+                .expect("delete_collection_inner");
+        assert!(deleted);
+        handle
+            .expect("a public collection with a member must spawn a fan-out")
+            .await
+            .expect("fan-out task must not panic");
+
+        let msg_b: serde_json::Value = serde_json::from_str(
+            &rx_b
+                .try_recv()
+                .expect("non-owner should receive the live eviction broadcast"),
+        )
+        .expect("valid JSON");
+        assert_eq!(msg_b["data"]["action"], "delete");
+        assert_eq!(msg_b["data"]["entity_id"], dashboard_id);
+        assert!(msg_b["data"]["data"].is_null());
+
+        let msg_a: serde_json::Value = serde_json::from_str(
+            &rx_a
+                .try_recv()
+                .expect("owner should receive a refreshed snapshot, not be evicted"),
+        )
+        .expect("valid JSON");
+        assert_eq!(msg_a["data"]["action"], "update");
+        assert!(
+            !msg_a["data"]["data"].is_null(),
+            "owner's update must carry the snapshot: {msg_a}"
+        );
+
+        assert!(
+            rx_a.try_recv().is_err(),
+            "owner must not also receive a Delete broadcast"
+        );
+        assert!(
+            rx_b.try_recv().is_err(),
+            "non-owner must not receive more than the one eviction broadcast"
+        );
+    }
+
+    /// A knowledge doc's `sync_log` rows must be tagged `entity_type:
+    /// "knowledge"`, not the `dashboard` default — the shared fan-out loop
+    /// resolves this from `FanoutRow::doc_type`, same as
+    /// `record_dashboard_visibility_transition` does for add/remove.
+    #[tokio::test]
+    async fn delete_collection_tags_knowledge_doc_sync_log_entries_correctly() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        seed_two_users_one_workspace(sq).await;
+
+        let doc_id = create_test_knowledge_doc(&db, "user-a", "ws-1", "Shared Knowledge Doc").await;
+        let collection = create_collection(NewCollectionParams {
+            db: &db,
+            workspace_id: "ws-1",
+            name: "Public Knowledge Folder",
+            description: None,
+            color: None,
+            is_public: true,
+            doc_type: "knowledge",
+            created_by: "user-a",
+        })
+        .await
+        .expect("create public collection");
+        add_dashboard(&db, &collection.id, &doc_id, "ws-1", "user-a", None)
+            .await
+            .expect("add_dashboard");
+
+        let cursor = sync_log_service::get_latest_sync_id(&db, "ws-1")
+            .await
+            .expect("cursor");
+
+        let (deleted, handle) = delete_collection_inner(&db, &collection.id, "ws-1", None)
+            .await
+            .expect("delete_collection_inner");
+        assert!(deleted);
+        handle
+            .expect("a public collection with a member must spawn a fan-out")
+            .await
+            .expect("fan-out task must not panic");
+
+        let non_owner_entries =
+            sync_log_service::get_entries_since(&db, "ws-1", cursor, "user-b", 50)
+                .await
+                .expect("get_entries_since for user-b");
+        assert_eq!(non_owner_entries.len(), 1, "{non_owner_entries:?}");
+        assert_eq!(non_owner_entries[0].entity_type, entity_types::KNOWLEDGE);
+        assert_eq!(non_owner_entries[0].entity_id, doc_id);
     }
 
     // ─── Live broadcast — content sync (KYO-245) ─────────────────────────────
