@@ -1,6 +1,7 @@
 #!/bin/bash
-# Pre-commit hook: blocks lint suppressions, server_fn/REST divergence, and
-# unreviewed commits. Clippy runs in CI on PRs (not locally).
+# Pre-commit hook: blocks lint suppressions, server_fn/REST divergence,
+# Leptos signal disposal-safety violations, and unreviewed commits. Clippy
+# runs in CI on PRs (not locally).
 
 set -e
 
@@ -48,6 +49,32 @@ if [ -n "$staged_server_fns" ]; then
     echo "✅ server_fn lint clean."
 else
     echo "✅ server_fn lint skipped (no server_fns files staged)."
+fi
+
+# --- Check 2b: Leptos signal disposal-safety lint ---
+# Runs before clippy for the same reason as Check 2 (pure bash+awk, ~200ms).
+# Only fires when staged changes touch `crates/kyomi-ui/src/**/*.rs`. This
+# is Rule A only (bare .set()/.update() in spawn_local/deferred contexts) —
+# the only blocking rule; Rule B is advisory and does not affect exit status.
+echo "🔍 Checking Leptos signal disposal safety..."
+
+staged_disposal_files=$(git diff --cached --name-only --diff-filter=ACM \
+    | grep '^crates/kyomi-ui/src/.*\.rs$' || true)
+
+if [ -n "$staged_disposal_files" ]; then
+    # shellcheck disable=SC2086  # word-splitting is intentional here
+    if ! ./scripts/lint/check-disposal-safety.sh $staged_disposal_files; then
+        echo ""
+        echo "❌ disposal-safety lint failed — commit blocked."
+        echo "   Fix the reported violations (use .try_set()/.try_update()) or"
+        echo "   add a justified escape-hatch comment: // lint-allow: disposal-safe=<why>"
+        echo "   (justification needs >= 5 characters). See scripts/lint/check-disposal-safety.sh"
+        echo "   header for details."
+        exit 1
+    fi
+    echo "✅ disposal-safety lint clean."
+else
+    echo "✅ disposal-safety lint skipped (no kyomi-ui src files staged)."
 fi
 
 # --- Check 3: Verify code review signature ---
