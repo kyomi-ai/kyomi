@@ -1648,21 +1648,6 @@ mod tests {
         crate::test_pg::seed_workspace_pg(pg, workspace_id, owner_user_id).await;
     }
 
-    /// Cosine self-similarity between `agent_learnings.embedding` at
-    /// `learning_id` and `expected`: `1 - (embedding <=> $1::vector)`,
-    /// which is `1.0` for an exact match (modulo pgvector's own storage
-    /// rounding) and drops the more the two vectors diverge.
-    async fn learning_embedding_similarity(pg: &sqlx::PgPool, learning_id: &str, expected: Vec<f32>) -> f64 {
-        sqlx::query_scalar(
-            "SELECT 1 - (embedding <=> $1::vector) FROM agent_learnings WHERE learning_id = $2",
-        )
-        .bind(Vector::from(expected))
-        .bind(learning_id)
-        .fetch_one(pg)
-        .await
-        .expect("fetch embedding similarity")
-    }
-
     /// Delete everything a Postgres embedding-bind test in this module
     /// inserted, scoped by `workspace_id`. `agent_learnings.workspace_id`
     /// cascades on workspace delete, but this deletes it explicitly first
@@ -1716,7 +1701,9 @@ mod tests {
         // "the same vector" the ticket requires, not a re-derivation of the
         // bind logic under test.
         let expected = embedding_svc.embed_one(insight).expect("embed_one (expected)");
-        let similarity = learning_embedding_similarity(pg, &learning_id, expected).await;
+        let similarity =
+            crate::test_pg::cosine_similarity_pg(pg, "agent_learnings", "learning_id", &learning_id, expected)
+                .await;
         assert!(
             (similarity - 1.0).abs() < 1e-4,
             "self-similarity should be ~1.0 for the same embedding, got {similarity}"
@@ -1728,7 +1715,14 @@ mod tests {
         let unrelated = embedding_svc
             .embed_one("The quarterly bake sale raised money for the school library")
             .expect("embed_one (control)");
-        let control_similarity = learning_embedding_similarity(pg, &learning_id, unrelated).await;
+        let control_similarity = crate::test_pg::cosine_similarity_pg(
+            pg,
+            "agent_learnings",
+            "learning_id",
+            &learning_id,
+            unrelated,
+        )
+        .await;
         assert!(
             control_similarity < 0.5,
             "unrelated embedding must not score near 1.0, got {control_similarity}"
@@ -1788,7 +1782,9 @@ mod tests {
         let expected = embedding_svc
             .embed_one(updated_insight)
             .expect("embed_one (expected)");
-        let similarity = learning_embedding_similarity(pg, &learning_id, expected).await;
+        let similarity =
+            crate::test_pg::cosine_similarity_pg(pg, "agent_learnings", "learning_id", &learning_id, expected)
+                .await;
         assert!(
             (similarity - 1.0).abs() < 1e-4,
             "self-similarity should be ~1.0 for the updated embedding, got {similarity}"
@@ -1799,7 +1795,14 @@ mod tests {
         let unrelated = embedding_svc
             .embed_one("The neighborhood cat show is next Saturday at the community center")
             .expect("embed_one (control)");
-        let control_similarity = learning_embedding_similarity(pg, &learning_id, unrelated).await;
+        let control_similarity = crate::test_pg::cosine_similarity_pg(
+            pg,
+            "agent_learnings",
+            "learning_id",
+            &learning_id,
+            unrelated,
+        )
+        .await;
         assert!(
             control_similarity < 0.5,
             "unrelated embedding must not score near 1.0, got {control_similarity}"
