@@ -21,7 +21,10 @@ use serde_json::Value;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-use crate::catalog::helpers::{cache_table, IndexerContext};
+use crate::catalog::helpers::{
+    cache_table, fold_table_outcomes, resolve_final_status, DatasetOutcome, IndexerContext,
+    TableOutcome,
+};
 use crate::catalog::types::{CatalogIndexResult, ColumnEntry};
 
 /// Sentinel workspace ID for shared public BigQuery data.
@@ -129,7 +132,6 @@ impl BigQueryPublicIndexer {
         let mut tables_indexed = 0usize;
         let mut datasets_processed = 0usize;
         let mut errors = Vec::new();
-        let mut write_failures_total = 0usize;
 
         info!(
             datasets = TOP_PUBLIC_DATASETS.len(),
@@ -157,9 +159,13 @@ impl BigQueryPublicIndexer {
             })
             .await
             {
-                Ok((count, write_failures)) => {
-                    tables_indexed += count;
-                    write_failures_total += write_failures;
+                Ok(dataset_outcome) => {
+                    tables_indexed += dataset_outcome.tables_indexed;
+                    // `seen_table_ids` is ignored here — this indexer has no
+                    // archiving machinery (see the status-persistence note
+                    // below), so the only field of `DatasetOutcome` this
+                    // caller needs is `table_errors`.
+                    errors.extend(dataset_outcome.table_errors);
                     datasets_processed += 1;
                 }
                 Err(e) => {
@@ -176,20 +182,25 @@ impl BigQueryPublicIndexer {
         info!(
             datasets_processed,
             tables_indexed,
-            write_failures = write_failures_total,
             errors = errors.len(),
             elapsed_secs = elapsed,
             "BigQuery public dataset indexing complete"
         );
 
-        let mut result = CatalogIndexResult::completed(tables_indexed, 0)
-            .with_times(&start_time.to_rfc3339(), &end_time.to_rfc3339());
-
-        if !errors.is_empty() {
-            result.errors = Some(errors);
-        }
-
-        result
+        // No status is persisted anywhere for this indexer (KYO-365). Unlike
+        // `UserDatasetIndexer::index_workspace_catalog`, which calls
+        // `update_datasource_status` against a real `datasource_configs`
+        // row, this run's `IndexerContext` uses the sentinel ids
+        // `PUBLIC_DATASOURCE_CONFIG_ID` / `PUBLIC_DATA_WORKSPACE_ID` — no
+        // `datasource_configs` row and no `workspaces` row exist for those
+        // ids (verified against every migration and write site), so an
+        // `update_datasource_status` call here would match zero rows and
+        // silently no-op. That would be worse than not calling it: it would
+        // look like status is handled when it isn't. The only place this
+        // run's outcome is visible to a caller is the returned
+        // `CatalogIndexResult` — see `resolve_public_index_result`.
+        resolve_public_index_result(tables_indexed, errors)
+            .with_times(&start_time.to_rfc3339(), &end_time.to_rfc3339())
     }
 
     /// Get cached public tables.
@@ -202,6 +213,51 @@ impl BigQueryPublicIndexer {
         )
         .unwrap_or(0)
     }
+}
+
+/// Resolve the terminal [`CatalogIndexResult`] for a public-dataset indexing
+/// run from its two summary values — the total tables indexed and the
+/// collected per-dataset/per-table errors — mirroring `resolve_run_outcome`
+/// in `catalog::indexers::user_dataset`.
+///
+/// This indexer has no archiving and persists no status anywhere (see the
+/// comment at the `resolve_public_index_result` call site in
+/// `index_public_datasets`), so unlike `resolve_run_outcome` there is no
+/// "should we archive?" question and no status to write to
+/// `datasource_configs` — the only decision left is what
+/// `CatalogIndexResult` to hand back, via the shared `resolve_final_status`
+/// (KYO-126/KYO-264/KYO-324/KYO-364).
+///
+/// - `"failed"` (every table that was listed ended up unusable, or a
+///   dataset-level error occurred with nothing usable produced) ⇒
+///   `CatalogIndexResult::error(&reason)`, with `result.errors` then
+///   overwritten to the FULL `errors` list — `error()` on its own only
+///   stores a single-element `vec![message]`, which would silently drop
+///   every error but the first.
+/// - `"idle"` (anything indexed, or a genuinely empty run with no errors at
+///   all) ⇒ `CatalogIndexResult::completed(tables_indexed, 0)`, with
+///   `result.errors` set when the run had partial failures alongside its
+///   successes.
+///
+/// Pure and I/O-free (mirrors `fold_table_outcomes` in `catalog::helpers`)
+/// so this exact decision can be exercised directly by a unit test; see
+/// `all_tables_listed_all_schemas_denied_resolves_to_failed` et al.
+fn resolve_public_index_result(tables_indexed: usize, errors: Vec<String>) -> CatalogIndexResult {
+    let nothing_usable = tables_indexed == 0;
+    let (status, failure_reason) = resolve_final_status(nothing_usable, &errors);
+
+    if status == "failed" {
+        let reason = failure_reason.expect("a \"failed\" status always carries a reason");
+        let mut result = CatalogIndexResult::error(&reason);
+        result.errors = Some(errors);
+        return result;
+    }
+
+    let mut result = CatalogIndexResult::completed(tables_indexed, 0);
+    if !errors.is_empty() {
+        result.errors = Some(errors);
+    }
+    result
 }
 
 /// Parameters for [`index_public_dataset_tables`].
@@ -218,16 +274,21 @@ struct IndexPublicDatasetParams<'a> {
 
 /// Index all tables in a single public BigQuery dataset.
 ///
-/// Returns `(tables_indexed, write_failures)` — `write_failures` counts
-/// tables whose schema read succeeded but whose `cache_table` write failed
-/// (KYO-364). This indexer has no `errors`/status-resolution machinery at
-/// all (that is tracked separately as KYO-365); the count only feeds this
-/// run's summary `info!` log so a blanket write-failure run is at least
-/// visible in logs rather than silently dropped, as it was when `cache_table`
-/// returned a bare `false`.
+/// Returns a [`DatasetOutcome`] carrying the indexed-table count and any
+/// bounded per-table failures — schema-fetch denials
+/// (`TableOutcome::SchemaUnreadable`) and `cache_table` write failures
+/// (`TableOutcome::WriteFailed`) alike, folded by the shared
+/// `fold_table_outcomes` (KYO-365, sharing the machinery
+/// `catalog::indexers::user_dataset` gained in KYO-324/KYO-364). The `Err`
+/// return here is reserved for the table *listing* call itself failing; a
+/// per-table failure never short-circuits the loop — it is captured as a
+/// `TableOutcome` and folded into the `Ok` result instead, exactly like
+/// `user_dataset::index_dataset_tables`. This indexer has no archiving, so
+/// `seen_table_ids` on the returned `DatasetOutcome` is folded but ignored
+/// by the caller.
 async fn index_public_dataset_tables(
     params: IndexPublicDatasetParams<'_>,
-) -> Result<(usize, usize)> {
+) -> Result<DatasetOutcome> {
     let IndexPublicDatasetParams {
         client,
         db,
@@ -286,8 +347,7 @@ async fn index_public_dataset_tables(
         table_ids.truncate(max);
     }
 
-    let mut tables_indexed = 0usize;
-    let mut write_failures = 0usize;
+    let mut outcomes = Vec::with_capacity(table_ids.len());
 
     for table_id in &table_ids {
         let full_table_id = format!("{project_id}.{dataset_id}.{table_id}");
@@ -309,11 +369,12 @@ async fn index_public_dataset_tables(
                     error = %e,
                     "could not fetch schema for public table, skipping"
                 );
+                outcomes.push((full_table_id, TableOutcome::SchemaUnreadable(format!("{e}"))));
                 continue;
             }
         };
 
-        match cache_table(crate::catalog::helpers::CacheTableParams {
+        let outcome = match cache_table(crate::catalog::helpers::CacheTableParams {
             db,
             embedding,
             ctx,
@@ -326,19 +387,21 @@ async fn index_public_dataset_tables(
         })
         .await
         {
-            Ok(()) => tables_indexed += 1,
+            Ok(()) => TableOutcome::Indexed,
             Err(e) => {
                 warn!(
                     table = full_table_id,
                     error = %e,
                     "failed to cache public table"
                 );
-                write_failures += 1;
+                TableOutcome::WriteFailed(format!("{e}"))
             }
-        }
+        };
+        outcomes.push((full_table_id, outcome));
     }
 
-    Ok((tables_indexed, write_failures))
+    let dataset_label = format!("{project_id}.{dataset_id}");
+    Ok(fold_table_outcomes(&dataset_label, outcomes))
 }
 
 /// Fetch column schema for a public BigQuery table.
@@ -430,5 +493,137 @@ mod tests {
     #[test]
     fn public_project_id_is_correct() {
         assert_eq!(PUBLIC_PROJECT_ID, "bigquery-public-data");
+    }
+
+    // ── resolve_public_index_result (KYO-365) ────────────────────────────
+    //
+    // These exercise the same composition `index_public_datasets` calls —
+    // `fold_table_outcomes` (shared with `user_dataset.rs`, KYO-324/KYO-364)
+    // feeding `resolve_public_index_result` (which wraps the shared
+    // `resolve_final_status`, KYO-126/KYO-264) — rather than re-deriving the
+    // idle/failed decision inline. A test that re-derives the production
+    // decision instead of calling it would keep passing even if
+    // `index_public_datasets`'s call site regressed back to an unconditional
+    // `completed(..)`, which is exactly the bug this ticket exists to fix.
+
+    fn schema_denied(table: &str) -> TableOutcome {
+        TableOutcome::SchemaUnreadable(format!("HTTP 403: permission denied reading {table}"))
+    }
+
+    fn write_failed(table: &str) -> TableOutcome {
+        TableOutcome::WriteFailed(format!("failed to insert cache entry for {table}: db closed"))
+    }
+
+    /// AC1 (headline): every table listed, every schema fetch denied ⇒ a
+    /// failure whose reason names the real underlying error — NOT
+    /// `completed(0, 0)`. This is the exact KYO-365 scenario: a public
+    /// dataset the token can list but not read (`bigquery.tables.list`
+    /// granted, `bigquery.tables.get` denied on every table).
+    #[test]
+    fn all_tables_listed_all_schemas_denied_resolves_to_failed() {
+        let table_ids = ["bigquery-public-data.chicago_taxi_trips.t1", "bigquery-public-data.chicago_taxi_trips.t2"];
+        let outcomes: Vec<(String, TableOutcome)> = table_ids
+            .iter()
+            .map(|t| (t.to_string(), schema_denied(t)))
+            .collect();
+        let dataset_outcome = fold_table_outcomes("bigquery-public-data.chicago_taxi_trips", outcomes);
+
+        let result = resolve_public_index_result(
+            dataset_outcome.tables_indexed,
+            dataset_outcome.table_errors,
+        );
+
+        assert_eq!(
+            result.status, "error",
+            "a run where every listed table's schema fetch was denied must not report completed(0, 0)"
+        );
+        assert_eq!(result.tables_indexed, 0);
+        let errors = result.errors.expect("error status must carry errors");
+        assert!(
+            errors[0].contains("bigquery-public-data.chicago_taxi_trips.t1"),
+            "reason must name the real underlying error, got: {}",
+            errors[0]
+        );
+        assert!(
+            errors[0].contains("permission denied"),
+            "reason must name the real underlying error, got: {}",
+            errors[0]
+        );
+    }
+
+    /// Criterion 4: a blanket `cache_table` write failure (schema reads all
+    /// succeeded, every write failed) gets the same failure treatment as a
+    /// blanket schema denial — not a silent `completed(0, 0)`.
+    #[test]
+    fn all_tables_listed_all_writes_failed_resolves_to_failed() {
+        let table_ids = ["bigquery-public-data.samples.t1", "bigquery-public-data.samples.t2"];
+        let outcomes: Vec<(String, TableOutcome)> = table_ids
+            .iter()
+            .map(|t| (t.to_string(), write_failed(t)))
+            .collect();
+        let dataset_outcome = fold_table_outcomes("bigquery-public-data.samples", outcomes);
+
+        let result = resolve_public_index_result(
+            dataset_outcome.tables_indexed,
+            dataset_outcome.table_errors,
+        );
+
+        assert_eq!(result.status, "error");
+        assert_eq!(result.tables_indexed, 0);
+        let errors = result.errors.expect("error status must carry errors");
+        assert!(
+            errors[0].contains("bigquery-public-data.samples.t1"),
+            "reason must name the failing table, got: {}",
+            errors[0]
+        );
+        assert!(
+            errors[0].contains("failed to insert cache entry"),
+            "reason must contain the real underlying cache_table error text, got: {}",
+            errors[0]
+        );
+    }
+
+    /// AC2: some tables indexed, some schema fetches failed ⇒ still success
+    /// (`"completed"`), with the failures surfaced via
+    /// `CatalogIndexResult::errors` rather than silently dropped.
+    #[test]
+    fn partial_success_still_completes_with_errors_surfaced() {
+        let outcomes = vec![
+            ("bigquery-public-data.github_repos.t1".to_string(), TableOutcome::Indexed),
+            (
+                "bigquery-public-data.github_repos.t2".to_string(),
+                schema_denied("bigquery-public-data.github_repos.t2"),
+            ),
+        ];
+        let dataset_outcome = fold_table_outcomes("bigquery-public-data.github_repos", outcomes);
+
+        let result = resolve_public_index_result(
+            dataset_outcome.tables_indexed,
+            dataset_outcome.table_errors,
+        );
+
+        assert_eq!(result.status, "completed");
+        assert_eq!(result.tables_indexed, 1);
+        let errors = result.errors.expect("partial failures must still be surfaced");
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].starts_with("bigquery-public-data.github_repos.t2: "));
+    }
+
+    /// AC3 (regression guard on `resolve_final_status`'s idle branch): a
+    /// genuinely empty run — no tables, no errors — must still be
+    /// `"completed"`, not a failure. A dataset that is accessible and
+    /// genuinely has zero tables is not an error.
+    #[test]
+    fn genuinely_empty_run_still_completes() {
+        let dataset_outcome = fold_table_outcomes("bigquery-public-data.empty_dataset", Vec::new());
+
+        let result = resolve_public_index_result(
+            dataset_outcome.tables_indexed,
+            dataset_outcome.table_errors,
+        );
+
+        assert_eq!(result.status, "completed");
+        assert_eq!(result.tables_indexed, 0);
+        assert_eq!(result.errors, None);
     }
 }
