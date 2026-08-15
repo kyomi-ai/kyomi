@@ -53,6 +53,7 @@
 //! non-negotiable constraint above). In CI, no Postgres → hard failure.
 
 use kyomi_core::DbPool;
+use pgvector::Vector;
 
 /// Env var that, when set to `"1"`, turns a Postgres-unreachable skip into a
 /// panic. Set by CI (`.github/workflows/ci.yml`) on the one step that runs
@@ -190,4 +191,35 @@ pub(crate) async fn cleanup_workspace_and_users_pg(
             .await
             .expect("cleanup users (postgres)");
     }
+}
+
+/// Cosine self-similarity between the `vector` column at `id_col = id` in
+/// `table` and `expected`: `1 - (embedding <=> $1::vector)`, which is `1.0`
+/// for an exact match (modulo pgvector's own storage rounding) and drops the
+/// more the two vectors diverge.
+///
+/// `table` and `id_col` are always test-internal literals (`"agent_learnings"`
+/// / `"learning_id"`, `"knowledge_chunks"` / `"id"`, `"dashboards"` /
+/// `"dashboard_id"`) supplied by the calling test, never user input, so
+/// building the query with `format!` is safe here — this is not a pattern to
+/// copy anywhere a caller-controlled value could reach the SQL string.
+///
+/// Third extraction of this exact query, after independent copies in
+/// `dashboard_service`'s rechunk test and `learning_service`'s
+/// `learning_embedding_similarity` — see `docs/CODING_STANDARDS.md`'s "third
+/// copy of a test helper is the extraction trigger" rule (KYO-371).
+pub(crate) async fn cosine_similarity_pg(
+    pg: &sqlx::PgPool,
+    table: &str,
+    id_col: &str,
+    id: &str,
+    expected: Vec<f32>,
+) -> f64 {
+    let sql = format!("SELECT 1 - (embedding <=> $1::vector) FROM {table} WHERE {id_col} = $2");
+    sqlx::query_scalar(&sql)
+        .bind(Vector::from(expected))
+        .bind(id)
+        .fetch_one(pg)
+        .await
+        .expect("fetch embedding similarity")
 }

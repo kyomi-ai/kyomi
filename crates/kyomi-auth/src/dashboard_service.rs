@@ -1751,10 +1751,76 @@ pub async fn restore_version(
 
 // ─── Background embedding generation ─────────────────────────────────────────
 
+/// Generate an embedding from `"{title}\n{content}"` and store it on the
+/// dashboard row identified by `dashboard_id`/`workspace_id`.
+///
+/// This is the awaitable core of [`spawn_embedding_generation`], extracted so
+/// tests can `.await` the real bind path directly instead of racing a
+/// detached `tokio::spawn`. It owns all three production log outcomes
+/// (embed success/store, DB write failure, embed failure) itself, so the
+/// `tokio::spawn` wrapper doesn't need to inspect the returned `Result` to
+/// reproduce today's log output — it only needs to drive the future.
+async fn store_dashboard_embedding(
+    db: &DbPool,
+    embedding_svc: &EmbeddingService,
+    dashboard_id: &str,
+    workspace_id: &str,
+    title: &str,
+    content: &str,
+) -> Result<()> {
+    let text = format!("{title}\n{content}");
+    let vec = match embedding_svc.embed_one(&text) {
+        Ok(vec) => vec,
+        Err(e) => {
+            tracing::error!(dashboard_id = %dashboard_id, error = %e, "Failed to generate dashboard embedding");
+            return Err(kyomi_core::Error::Internal(format!(
+                "failed to generate dashboard embedding: {e}"
+            )));
+        }
+    };
+
+    let embedding_bytes = embedding_to_bytes(&vec);
+    let is_pg = db.is_postgres();
+    let sql = format!(
+        "UPDATE dashboards SET embedding = {embedding} WHERE dashboard_id = $2 AND workspace_id = $3",
+        embedding = sql_compat::embedding_placeholder(is_pg, "$1"),
+    );
+    let result = match db {
+        kyomi_core::db::DbPool::Postgres(pg) => sqlx::query(&sql)
+            .bind(bytes_to_pg_vector(&embedding_bytes))
+            .bind(dashboard_id)
+            .bind(workspace_id)
+            .execute(pg)
+            .await
+            .map(|_| ()),
+        kyomi_core::db::DbPool::Sqlite(sq) => sqlx::query(&sql)
+            .bind(&embedding_bytes)
+            .bind(dashboard_id)
+            .bind(workspace_id)
+            .execute(sq)
+            .await
+            .map(|_| ()),
+    };
+
+    match result {
+        Ok(()) => {
+            tracing::info!(dashboard_id = %dashboard_id, "Stored dashboard embedding");
+            Ok(())
+        }
+        Err(e) => {
+            tracing::error!(dashboard_id = %dashboard_id, error = %e, "Failed to store dashboard embedding");
+            Err(kyomi_core::Error::Internal(format!(
+                "failed to store dashboard embedding: {e}"
+            )))
+        }
+    }
+}
+
 /// Spawn background embedding generation for a dashboard.
 ///
 /// Generates an embedding from `"{title}\n{content}"` and stores it on the
-/// dashboard row. Fire-and-forget — errors are logged but don't propagate.
+/// dashboard row. Fire-and-forget — errors are logged (by
+/// [`store_dashboard_embedding`]) but don't propagate.
 pub fn spawn_embedding_generation(
     db: DbPool,
     embedding_svc: kyomi_embed::EmbeddingService,
@@ -1764,41 +1830,15 @@ pub fn spawn_embedding_generation(
     content: String,
 ) {
     tokio::spawn(async move {
-        let text = format!("{title}\n{content}");
-        match embedding_svc.embed_one(&text) {
-            Ok(vec) => {
-                let embedding_bytes = embedding_to_bytes(&vec);
-                let is_pg = db.is_postgres();
-                let sql = format!(
-                    "UPDATE dashboards SET embedding = {embedding} WHERE dashboard_id = $2 AND workspace_id = $3",
-                    embedding = sql_compat::embedding_placeholder(is_pg, "$1"),
-                );
-                let result = match &db {
-                    kyomi_core::db::DbPool::Postgres(pg) => sqlx::query(&sql)
-                        .bind(bytes_to_pg_vector(&embedding_bytes))
-                        .bind(&dashboard_id)
-                        .bind(&workspace_id)
-                        .execute(pg)
-                        .await
-                        .map(|_| ()),
-                    kyomi_core::db::DbPool::Sqlite(sq) => sqlx::query(&sql)
-                        .bind(&embedding_bytes)
-                        .bind(&dashboard_id)
-                        .bind(&workspace_id)
-                        .execute(sq)
-                        .await
-                        .map(|_| ()),
-                };
-
-                match result {
-                    Ok(_) => tracing::info!(dashboard_id = %dashboard_id, "Stored dashboard embedding"),
-                    Err(e) => tracing::error!(dashboard_id = %dashboard_id, error = %e, "Failed to store dashboard embedding"),
-                }
-            }
-            Err(e) => {
-                tracing::error!(dashboard_id = %dashboard_id, error = %e, "Failed to generate dashboard embedding");
-            }
-        }
+        let _ = store_dashboard_embedding(
+            &db,
+            &embedding_svc,
+            &dashboard_id,
+            &workspace_id,
+            &title,
+            &content,
+        )
+        .await;
     });
 }
 
@@ -2334,14 +2374,8 @@ visualize:
             .next()
             .expect("one embedding for one chunk");
 
-        let similarity: f64 = sqlx::query_scalar(
-            "SELECT 1 - (embedding <=> $1::vector) FROM knowledge_chunks WHERE id = $2",
-        )
-        .bind(pgvector::Vector::from(expected))
-        .bind(&chunk_id)
-        .fetch_one(pg)
-        .await
-        .expect("fetch embedding similarity");
+        let similarity =
+            crate::test_pg::cosine_similarity_pg(pg, "knowledge_chunks", "id", &chunk_id, expected).await;
         assert!(
             (similarity - 1.0).abs() < 1e-4,
             "self-similarity should be ~1.0 for the same embedding, got {similarity}"
@@ -2361,20 +2395,134 @@ visualize:
             .into_iter()
             .next()
             .expect("one embedding for one control chunk");
-        let control_similarity: f64 = sqlx::query_scalar(
-            "SELECT 1 - (embedding <=> $1::vector) FROM knowledge_chunks WHERE id = $2",
-        )
-        .bind(pgvector::Vector::from(unrelated))
-        .bind(&chunk_id)
-        .fetch_one(pg)
-        .await
-        .expect("fetch control similarity");
+        let control_similarity =
+            crate::test_pg::cosine_similarity_pg(pg, "knowledge_chunks", "id", &chunk_id, unrelated).await;
         assert!(
             control_similarity < 0.5,
             "unrelated embedding must not score near 1.0, got {control_similarity}"
         );
 
         cleanup_rechunk_pg(pg, &workspace_id, &owner_id, &dashboard_id).await;
+    }
+
+    // ─── store_dashboard_embedding Postgres coverage (KYO-371) ─────────────
+    //
+    // `store_dashboard_embedding` (the extracted, awaitable core of
+    // `spawn_embedding_generation`) is the fourth production `pgvector::Vector`
+    // bind site and the only one KYO-334 left uncovered — see that function's
+    // doc comment. It binds `bytes_to_pg_vector(&embedding_bytes)`, the same
+    // helper-mediated bind shape `learning_service.rs` uses, making this the
+    // third production site of that shape (after `save_learning` and
+    // `update_learning` in `learning_service.rs`) — distinct only from
+    // `rechunk_document`'s direct `pgvector::Vector::from(embedding.clone())`
+    // above — so a wrong bind here type-checks, does not error at query time,
+    // and silently degrades dashboard semantic search. This test writes through
+    // the real `store_dashboard_embedding` production function against a real
+    // Postgres+pgvector database and asserts cosine self-similarity between the
+    // stored embedding and the same embedding recomputed from the same input
+    // text, with a non-vacuity control asserting an unrelated embedding scores
+    // far from 1.0 — see `crate::test_pg` module docs for the harness.
+
+    /// Delete everything the `store_dashboard_embedding` Postgres test
+    /// inserted, scoped by `workspace_id`/`dashboard_id`. `dashboards`
+    /// has no `ON DELETE CASCADE` from `workspaces`/`users`, so it must go
+    /// before `cleanup_workspace_and_users_pg` deletes those. `sync_log` is
+    /// deleted too because `create_dashboard` writes one on every insert —
+    /// mirrors `cleanup_rechunk_pg`'s tail above.
+    async fn cleanup_dashboard_embedding_pg(
+        pg: &sqlx::PgPool,
+        workspace_id: &str,
+        owner_user_id: &str,
+        dashboard_id: &str,
+    ) {
+        sqlx::query("DELETE FROM dashboards WHERE dashboard_id = $1")
+            .bind(dashboard_id)
+            .execute(pg)
+            .await
+            .expect("cleanup dashboards (postgres)");
+        sqlx::query("DELETE FROM sync_log WHERE workspace_id = $1")
+            .bind(workspace_id)
+            .execute(pg)
+            .await
+            .expect("cleanup sync_log (postgres)");
+        crate::test_pg::cleanup_workspace_and_users_pg(pg, workspace_id, &[owner_user_id]).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_store_dashboard_embedding_roundtrips_through_pgvector_bind() {
+        let test_name = "postgres_store_dashboard_embedding_roundtrips_through_pgvector_bind";
+        let Some(db) = crate::test_pg::postgres_test_pool_or_skip(test_name).await else {
+            return;
+        };
+        let pg = crate::test_pg::postgres_pool(&db);
+
+        let workspace_id = crate::test_pg::unique_test_id("ws");
+        let owner_id = crate::test_pg::unique_test_id("owner");
+        crate::test_pg::seed_user_pg(pg, &owner_id, &format!("{owner_id}@test.local")).await;
+        crate::test_pg::seed_workspace_pg(pg, &workspace_id, &owner_id).await;
+
+        let embed = EmbeddingService::new().expect("load embedding model");
+        let title = "Campaign performance rollups";
+        let content = "Our nightly ETL job aggregates click-through rates from the \
+            marketing_events table and writes hourly rollups into the \
+            campaign_performance table for the growth team's weekly review.";
+
+        // embed=None: create_dashboard's own `embed` param spawns a
+        // background `rechunk_document` call (writes `knowledge_chunks`),
+        // not the embedding generation under test here — but passing None
+        // keeps this test's only background work the explicit
+        // `store_dashboard_embedding` call below, rather than leaving an
+        // unrelated fire-and-forget task outliving the test's cleanup.
+        let dashboard_id = create_dashboard(
+            &db,
+            &owner_id,
+            &workspace_id,
+            title,
+            content,
+            DocType::Knowledge,
+            None,
+        )
+        .await
+        .expect("create_dashboard (postgres)");
+
+        store_dashboard_embedding(&db, &embed, &dashboard_id, &workspace_id, title, content)
+            .await
+            .expect("store_dashboard_embedding (postgres)");
+
+        // Same production embedding call `store_dashboard_embedding` makes
+        // internally (`embed_one` over "{title}\n{content}") — deterministic
+        // for identical input text, so this is "the same vector" the ticket
+        // requires, not a re-derivation of the bind logic under test.
+        let expected = embed
+            .embed_one(&format!("{title}\n{content}"))
+            .expect("embed_one (expected)");
+
+        let similarity =
+            crate::test_pg::cosine_similarity_pg(pg, "dashboards", "dashboard_id", &dashboard_id, expected)
+                .await;
+        assert!(
+            (similarity - 1.0).abs() < 1e-4,
+            "self-similarity should be ~1.0 for the same embedding, got {similarity}"
+        );
+
+        // Non-vacuity control: an unrelated embedding must not score near
+        // 1.0 against the stored vector — without this, the assertion above
+        // would pass equally well on a table of zeroes.
+        let unrelated = embed
+            .embed_one(
+                "The community garden's tomato harvest this year was the largest \
+                 on record thanks to an unusually warm and rainy June.",
+            )
+            .expect("embed_one (control)");
+        let control_similarity =
+            crate::test_pg::cosine_similarity_pg(pg, "dashboards", "dashboard_id", &dashboard_id, unrelated)
+                .await;
+        assert!(
+            control_similarity < 0.5,
+            "unrelated embedding must not score near 1.0, got {control_similarity}"
+        );
+
+        cleanup_dashboard_embedding_pg(pg, &workspace_id, &owner_id, &dashboard_id).await;
     }
 }
 
