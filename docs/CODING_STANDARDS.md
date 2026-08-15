@@ -848,6 +848,26 @@ $ cargo test -p kyomi-auth --locked --lib passkey_signup_verify_only_accepts_its
 
 Applied in almost every review in the 2026-08-01 → 2026-08-07 window, and load-bearing in several: KYO-256 mutated both auto-heal branches to echo the bogus session id back, and confirmed each `assert_ne!` duly failed with `Some(x)` on both sides rather than passing vacuously; KYO-263 mutated both guard conditions to show the fail-closed branch was covered by a real assertion rather than only by prose; KYO-222 cycle 2 re-ran the implementer's `#[serde(rename)]` mutation rather than trusting the claim; KYO-281 and KYO-282 each reverted the shipped fix to reproduce the exact panic; KYO-259 broke a matrix expression to prove `actionlint` catches it. Each of those reviews also re-confirmed the staged diff byte-for-byte after restoring.
 
+### Never `git stash` to get a clean tree — copy the file instead
+
+The rule above tells you to restore from a pre-mutation copy. `git stash` looks like a cheaper way to get the same clean tree for a before/after comparison. It is not: `stash`/`pop` destroys state that lives outside the index, and it destroys it silently.
+
+The sharpest case is a merge in progress. `git stash` drops `MERGE_HEAD` / `MERGE_MSG` / `MERGE_MODE`, and `pop` does not put them back — a staged conflict resolution becomes an ordinary unstaged diff with no record that it was ever a merge. Recovering means re-identifying the original `MERGE_HEAD` commit and hand-writing those three files back into the gitdir, which for a linked worktree is `.git/worktrees/<name>/`, not the top-level `.git`. A plain stash/pop on a non-merge tree is less destructive but still unstages content that was deliberately staged.
+
+**Rule:** When you need to compare against a clean tree mid-verification, `cp` the files you care about to a scratch location and compare against `git show <ref>:<path>`, or use a throwaway `git worktree`. Never `git stash` — and never at all when `git status` says a merge, rebase, or cherry-pick is in progress. Afterwards, confirm `git diff --cached --stat` matches what you staged before you started.
+
+Two incidents in two days, both during review verification: the KYO-329 review (2026-08-11) stashed mid-investigation and silently unstaged the file under review; the KYO-327 merge-conflict review (2026-08-12) stashed with a resolved merge staged and lost the merge markers entirely. Both were caught and fully recovered only because the reviewer re-checked `git status` and diffed byte-for-byte before signing.
+
+### Mutate by relocating the real code, not by a cheap proxy — especially on a tests-only PR
+
+A PR that adds only tests and comments is the class where a green suite proves least: there is no production change to point at, so the only evidence the tests are load-bearing is a mutation that turns them red. Two refinements follow from that.
+
+First, **the reviewer re-runs the mutations rather than trusting the implementer's report.** A mutation table in a PR body is a claim, not a result.
+
+Second, **prefer physically relocating the code under test over a proxy that merely disables it.** For an ordering invariant — "this read must happen before that `DELETE`" — moving the block below the `DELETE` is the honest mutation; a `WHERE 1 = 0` on the read is the cheap one. The relocation also proves the mutated arrangement still *compiles*, which is what makes "a future refactor could reintroduce this" a real risk rather than a hypothetical. A proxy that does not compile in the shape a refactor would actually produce has not tested the risk the comment claims to guard.
+
+Applied in the KYO-313 review (2026-08-10), a zero-production-logic PR of 6 regression tests pinning the capture-visibility-before-`DELETE` ordering at three hard-delete sites: 5 mutations were applied, compiled and run, and all killed their targets. Mutation B physically moved the `shared_map` construction below the deletes and reproduced the exact failure the comment predicts (`got delta: []`).
+
 ### A `!contains(...)` assertion after an `assert_eq!` on the same value is dead
 
 If a test already asserts `assert_eq!(actual, "the exact expected string")`, every following `assert!(!actual.contains(X))` on that same value is unreachable as a failure. For any mutation that changes `actual`, the equality fires first; for any mutation that leaves `actual` unchanged, the `!contains` cannot fire either — the expected literal is fixed, so whether it contains `X` is decided at authoring time, not at run time. The line reads like a second guard and carries no weight.
