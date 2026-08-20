@@ -334,6 +334,79 @@ pub fn resolve_final_status(nothing_found: bool, errors: &[String]) -> (&'static
     ("failed", Some(reason))
 }
 
+/// The two decisions every catalog indexer needs once discovery and caching
+/// for a run are complete: whether `archive_missing_tables` should run at
+/// all, and what final status this run resolves to.
+///
+/// Ported from `kyomi_auth::catalog::indexers::user_dataset::resolve_run_outcome`
+/// (KYO-324) into this shared module for KYO-385, once a third and fourth
+/// hand-rolled copy of the same decision (`kyomi-agent`'s SQL-indexer
+/// template `index_catalog_sql` and its Connect indexer) would otherwise
+/// have been written — see `docs/CODING_STANDARDS.md`, "the third copy of a
+/// test helper is the extraction trigger": the same reasoning applies to a
+/// production decision. `resolve_final_status` already crosses this exact
+/// `kyomi-auth` → `kyomi-agent` boundary, so this is not a new dependency
+/// shape.
+pub struct RunOutcome {
+    /// Whether `archive_missing_tables` should run at all.
+    pub archive: bool,
+    /// Value to write to `datasource_configs.catalog_refresh_status`.
+    pub status: &'static str,
+    /// Failure reason to persist alongside a `"failed"` status.
+    pub failure_reason: Option<String>,
+}
+
+/// Resolve the archive/status decision for one indexing run.
+///
+/// `seen_any_table` answers "did discovery (listing) see anything?" — a
+/// table that was listed but never successfully cached (a schema-read
+/// denial, or a `cache_table` write failure) still counts, because it
+/// demonstrably exists and must not be evicted by `archive_missing_tables`
+/// (the KYO-324 invariant: archiving keys off *listed*, not *usable*).
+///
+/// `tables_indexed` / `errors` answer "did we get anything *usable*?" —
+/// this is the question `status` must answer instead. Conflating the two
+/// into one predicate is the exact KYO-324/KYO-364/KYO-385 family of
+/// regressions: every caller of this function populates its "seen" set
+/// (`seen_table_ids` or equivalent) *before* attempting to cache a table, so
+/// a run where every table was listed and read fine but every `cache_table`
+/// write failed has `seen_any_table == true` — a predicate built only from
+/// `seen_any_table` reports `"idle"` no matter how many `errors`
+/// accumulated. See `resolve_final_status` for how `tables_indexed == 0`
+/// and `errors` combine into an actual status.
+///
+/// `empty_scope_is_expected` is the one input this function needs beyond
+/// `user_dataset.rs`'s original two-question split (KYO-385). The SQL and
+/// Connect indexers both have a configuration state where an empty result
+/// is intentional — zero containers configured (SQL path), or an explicitly
+/// cleared container selection (Connect path) — and that state must be
+/// treated differently from either "nothing was listed" or "nothing was
+/// usable": the existing catalog should be archived (the user intentionally
+/// emptied the scope, so stale cached tables are genuinely stale), and the
+/// run must not be reported as `"failed"` (there is nothing to fail at;
+/// discovery was never attempted). When `true`, this overrides both
+/// `seen_any_table` and `tables_indexed` for their respective decisions.
+/// `user_dataset.rs` has no equivalent state — an empty `project_ids`
+/// returns `CatalogIndexResult::skipped(..)` before ever reaching this
+/// function — so it always passes `false`.
+pub fn resolve_run_outcome(
+    seen_any_table: bool,
+    tables_indexed: usize,
+    errors: &[String],
+    empty_scope_is_expected: bool,
+) -> RunOutcome {
+    let nothing_listed = !seen_any_table && !empty_scope_is_expected;
+    let nothing_usable = tables_indexed == 0 && !empty_scope_is_expected;
+
+    let (status, failure_reason) = resolve_final_status(nothing_usable, errors);
+
+    RunOutcome {
+        archive: !nothing_listed,
+        status,
+        failure_reason,
+    }
+}
+
 /// Update the datasource's last_catalog_refresh timestamp.
 pub async fn update_datasource_last_refresh(
     db: &DbPool,
@@ -932,6 +1005,97 @@ mod tests {
         let (status, reason) = resolve_final_status(false, &errors);
         assert_eq!(status, "idle");
         assert_eq!(reason, None);
+    }
+
+    // ── resolve_run_outcome (KYO-324, extracted for KYO-385) ─────────────
+    //
+    // `user_dataset.rs` already exercises this decision end-to-end through
+    // its own local `resolve_run_outcome` wrapper (which delegates here with
+    // `empty_scope_is_expected = false`), so those tests are not repeated.
+    // These cover the one input `user_dataset.rs` never exercises:
+    // `empty_scope_is_expected = true`, which is new in KYO-385.
+
+    /// Headline KYO-385 case: every table listed, every schema read OK,
+    /// every `cache_table` write failed. `seen_any_table` is `true` (every
+    /// listed table demonstrably exists) but `tables_indexed == 0` — the
+    /// two questions this function exists to keep separate disagree, and
+    /// status must follow `tables_indexed`, not `seen_any_table`.
+    #[test]
+    fn all_listed_all_write_failed_archives_but_reports_failed() {
+        let errors = vec!["failed to insert cache entry for t1: db closed".to_string()];
+        let outcome = resolve_run_outcome(true, 0, &errors, false);
+        assert!(
+            outcome.archive,
+            "every table was listed — archiving must still run and preserve them"
+        );
+        assert_eq!(outcome.status, "failed");
+        assert_eq!(
+            outcome.failure_reason,
+            Some("failed to insert cache entry for t1: db closed".to_string())
+        );
+    }
+
+    #[test]
+    fn partial_write_failure_still_archives_and_reports_idle() {
+        let errors = vec!["failed to insert cache entry for t2: db closed".to_string()];
+        let outcome = resolve_run_outcome(true, 1, &errors, false);
+        assert!(outcome.archive);
+        assert_eq!(
+            outcome.status, "idle",
+            "one table indexed successfully is still a partial success, not a failure"
+        );
+        assert_eq!(outcome.failure_reason, None);
+    }
+
+    #[test]
+    fn nothing_listed_skips_archiving_and_reports_idle_when_no_errors() {
+        let outcome = resolve_run_outcome(false, 0, &[], false);
+        assert!(
+            !outcome.archive,
+            "nothing was listed — archiving must be skipped so the existing catalog is preserved"
+        );
+        assert_eq!(outcome.status, "idle");
+        assert_eq!(outcome.failure_reason, None);
+    }
+
+    /// `empty_scope_is_expected = true`: the user configured zero containers
+    /// (SQL path) or explicitly cleared the container selection (Connect
+    /// path). Nothing was ever listed and nothing was ever attempted, so
+    /// this must archive (evict the now-out-of-scope catalog) and report
+    /// `"idle"` — never `"failed"` — regardless of `errors`, which will be
+    /// empty in practice (discovery is skipped entirely in this state) but
+    /// is deliberately not trusted to stay that way by this test.
+    #[test]
+    fn empty_scope_is_expected_archives_and_reports_idle_even_with_errors() {
+        let errors = vec!["this should never be produced when scope is intentionally empty".to_string()];
+        let outcome = resolve_run_outcome(false, 0, &errors, true);
+        assert!(
+            outcome.archive,
+            "an intentionally emptied scope must still archive the now-stale catalog"
+        );
+        assert_eq!(
+            outcome.status, "idle",
+            "an intentionally emptied scope must never be reported as failed"
+        );
+        assert_eq!(outcome.failure_reason, None);
+    }
+
+    /// `empty_scope_is_expected` is not just "always idle" — confirm it
+    /// overrides `seen_any_table`'s archive gate independently of overriding
+    /// `tables_indexed`'s status gate, by checking `archive` and `status`
+    /// each mutate correctly rather than one masking the other.
+    #[test]
+    fn empty_scope_is_expected_overrides_archive_and_status_independently() {
+        let never_true = resolve_run_outcome(false, 0, &[], false);
+        assert!(!never_true.archive);
+        assert_eq!(never_true.status, "idle");
+
+        let with_carve_out = resolve_run_outcome(false, 0, &[], true);
+        assert!(
+            with_carve_out.archive,
+            "the carve-out alone must flip archive from false to true"
+        );
+        assert_eq!(with_carve_out.status, "idle");
     }
 
     // ── build_progress_envelope (KYO-126) ────────────────────────────────
