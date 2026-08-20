@@ -90,6 +90,7 @@ apps/mcp-chart-app-wasm/dist/
 # Internal docs (public-facing product docs are tracked)
 docs/*
 !docs/product/
+!docs/standards/
 
 # Internal infrastructure and production scripts
 infra/arc/

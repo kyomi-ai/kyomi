@@ -28,9 +28,10 @@ silently miss it.
 |---|---|
 | **`~/repos/kyomi-private/docs/`** | **Canonical.** Architecture, per-provider reference, ops runbooks, and the required-reading set. Start at its `README.md`. |
 | `docs/product/` (this repo, tracked) | Public-facing product documentation |
-| `docs/CODING_STANDARDS.md` (this repo, tracked) | Coding standards mined from code reviews |
+| `docs/CODING_STANDARDS.md` (this repo, tracked) | Index over `docs/standards/` — one file per rule (see KYO-375), grouped into section directories. Read the index for the list of sections; `ls docs/standards/<section>/` to see a section's rules. |
+| `docs/standards/<section>/` (this repo, tracked) | The coding standards themselves, mined from code reviews — one `README.md` blurb plus one `.md` file per rule. |
 | `DESIGN.md` (this repo, tracked) | Design system — visual/UI decisions |
-| `docs/*.md` (this repo, **untracked**) | Completed migration plans and historical reports only. `.gitignore` has `docs/*` with `!docs/product/`, so these exist on one machine and are not authoritative. |
+| `docs/*.md` (this repo, **untracked**) | Completed migration plans and historical reports only. `.gitignore` has `docs/*` with `!docs/product/` and `!docs/standards/`, so these exist on one machine and are not authoritative. |
 
 **Do not add new engineering docs to this repo's `docs/`** — they will be
 gitignored, invisible to everyone else, and will drift. Put them in
