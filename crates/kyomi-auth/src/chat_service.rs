@@ -1313,22 +1313,25 @@ pub async fn delete_session(
     }
 
     // Resolve workspace_id BEFORE deletion so the sync log entry has it even
-    // when the caller passes workspace_id=None.
+    // when the caller passes workspace_id=None. Only `workspace_id` itself is
+    // needed here, so it is fetched directly as a scalar (KYO-381) rather
+    // than through `SessionSnapshotRow` — that struct has 11 fields and only
+    // `shared` is `#[sqlx(default)]`, so decoding it against a query that
+    // selects a strict subset of its columns fails with `ColumnNotFound` on
+    // every call, healthy or not. A query failure here must propagate as
+    // `Err` (retryable — nothing has been deleted yet), while a genuinely
+    // absent session must still resolve to `None`, matching the distinction
+    // `fetch_session_snapshot` already draws between the two.
     let resolved_wid: Option<String> = match workspace_id {
         Some(w) => Some(w.to_string()),
         None => {
-            let row = kyomi_core::db_fetch_optional!(
+            kyomi_core::db_fetch_optional!(
                 db,
-                SessionSnapshotRow,
-                r#"SELECT session_id, user_id, workspace_id, title, session_type,
-                          CAST(updated_at AS TEXT) AS updated_at,
-                          CAST(created_at AS TEXT) AS created_at
-                   FROM chat_sessions WHERE session_id = $1"#,
+                (String,),
+                "SELECT workspace_id FROM chat_sessions WHERE session_id = $1",
                 session_id
-            )
-            .ok()
-            .flatten();
-            row.map(|r| r.workspace_id)
+            )?
+            .map(|(wid,)| wid)
         }
     };
 
@@ -3284,6 +3287,183 @@ mod tests {
             delete_rows_for(&delta_b, "sess-shared").is_empty(),
             "non-owner delta must carry no Delete row for a delete that \
              never happened, got delta: {delta_b:?}"
+        );
+    }
+
+    // ── workspace_id resolution failure must not write a wrong Delete row
+    //    (KYO-381) ───────────────────────────────────────────────────────
+    //
+    // When the caller omits workspace_id, delete_session resolves it itself
+    // by reading it back from the row before deleting. Before this fix, a
+    // failed read there was swallowed via `.ok().flatten()` into `None`,
+    // which (a) let both deletes proceed anyway and (b) then hit the
+    // `resolved_wid.is_none()` branch below, which only logs a `warn!` and
+    // skips the sync_log write entirely -- for every workspace member,
+    // including the owner. A deleted entity is never mutated again, so a
+    // missing Delete row here is never corrected: the session stays cached
+    // forever on every client.
+    //
+    // This test drops the `workspace_id` column itself (after seeding, so
+    // the insert still succeeds) rather than a column from the earlier
+    // ownership-verification query. That query, for the `workspace_id: None`
+    // path exercised here, is `SELECT session_id FROM chat_sessions WHERE
+    // session_id = $1 AND user_id = $2` -- it selects and filters on neither
+    // `workspace_id` nor any other droppable column, so it is unaffected by
+    // this drop. The resolution query under test is the only one in this
+    // path that reads `workspace_id`, so a pass here isolates its failure
+    // rather than exercising a broader outage.
+    //
+    // SQLite refuses to drop a column referenced by an index (same
+    // constraint the KYO-354 tests above hit for `shared`), and
+    // `workspace_id` is referenced by two: the partial `idx_chat_sessions_shared`
+    // (whose leading column is `workspace_id`, not just its WHERE clause)
+    // and `idx_chat_sessions_workspace` -- both have to go first, verified
+    // empirically the same way the KYO-354 tests were.
+
+    #[tokio::test]
+    async fn delete_session_propagates_workspace_id_resolution_failure_instead_of_writing_wrong_delete()
+    {
+        let db = test_pool().await;
+        seed_two_member_workspace(&db).await;
+        let sq = sqlite_pool(&db);
+        seed_chat_session(
+            sq,
+            SeedSession::new("sess-unresolved", "user-a", "ws-1", "Unresolved").shared(true),
+        )
+        .await;
+        seed_chat_message(sq, "msg-1", "sess-unresolved", false, None).await;
+
+        sqlx::query("DROP INDEX idx_chat_sessions_shared")
+            .execute(sq)
+            .await
+            .expect("drop shared index");
+        sqlx::query("DROP INDEX idx_chat_sessions_workspace")
+            .execute(sq)
+            .await
+            .expect("drop workspace index");
+        sqlx::query("ALTER TABLE chat_sessions DROP COLUMN workspace_id")
+            .execute(sq)
+            .await
+            .expect("drop workspace_id column");
+
+        // workspace_id: None is required -- the Some(w) branch never reaches
+        // the resolution query under test.
+        let result = delete_session(&db, "user-a", "sess-unresolved", None).await;
+        assert!(
+            result.is_err(),
+            "a failed workspace_id resolution must propagate as an error, \
+             not collapse into a successful delete: {result:?}"
+        );
+
+        let session_still_exists: Option<(String,)> =
+            sqlx::query_as("SELECT session_id FROM chat_sessions WHERE session_id = $1")
+                .bind("sess-unresolved")
+                .fetch_optional(sq)
+                .await
+                .expect("query chat_sessions");
+        assert!(
+            session_still_exists.is_some(),
+            "the session row must survive a failed workspace_id resolution \
+             -- the DELETE must not run when the read ahead of it fails"
+        );
+
+        let messages_still_exist: Vec<(String,)> =
+            sqlx::query_as("SELECT message_id FROM chat_messages WHERE session_id = $1")
+                .bind("sess-unresolved")
+                .fetch_all(sq)
+                .await
+                .expect("query chat_messages");
+        assert_eq!(
+            messages_still_exist.len(),
+            1,
+            "the messages must survive too -- the resolution read runs ahead \
+             of the message DELETE"
+        );
+
+        let delta_owner = delta_for(&db, "user-a").await;
+        assert!(
+            delete_rows_for(&delta_owner, "sess-unresolved").is_empty(),
+            "the owner must not receive a Delete row for a delete that never \
+             happened, got delta: {delta_owner:?}"
+        );
+    }
+
+    // ── workspace_id resolution success must actually write the Delete row
+    //    (KYO-381 healthy path) ────────────────────────────────────────────
+    //
+    // The failure-path test above proves a broken resolution read aborts the
+    // delete. It does not prove a *healthy* read ever worked -- and before
+    // this fix it never did: `SessionSnapshotRow` (11 fields, only `shared`
+    // marked `#[sqlx(default)]`) was decoded against a 7-column SELECT, so
+    // the query returned `Err(ColumnNotFound("model"))` on every single
+    // call, swallowed by `.ok().flatten()` into `None`. `delete_session(...,
+    // None)` therefore never wrote a `Delete` sync_log row for anyone, ever
+    // -- not on transient failure, unconditionally. This test drives the
+    // healthy path end to end against a real, unmodified schema and asserts
+    // the row that was previously never written, including that its
+    // `workspace_id` is the one actually resolved from the row rather than
+    // a placeholder.
+
+    #[tokio::test]
+    async fn delete_session_with_none_workspace_id_writes_delete_row_with_resolved_workspace_id()
+    {
+        let db = test_pool().await;
+        seed_two_member_workspace(&db).await;
+        let sq = sqlite_pool(&db);
+        seed_chat_session(
+            sq,
+            SeedSession::new("sess-resolved", "user-a", "ws-1", "Resolved").shared(true),
+        )
+        .await;
+        seed_chat_message(sq, "msg-1", "sess-resolved", false, None).await;
+
+        // workspace_id: None is required -- the Some(w) branch never reaches
+        // the resolution query under test.
+        let result = delete_session(&db, "user-a", "sess-resolved", None).await;
+        assert!(
+            result.is_ok(),
+            "a healthy workspace_id resolution must let the delete succeed: {result:?}"
+        );
+        assert!(
+            result.expect("checked Ok above"),
+            "the seeded session should have been deleted"
+        );
+
+        let session_gone: Option<(String,)> =
+            sqlx::query_as("SELECT session_id FROM chat_sessions WHERE session_id = $1")
+                .bind("sess-resolved")
+                .fetch_optional(sq)
+                .await
+                .expect("query chat_sessions");
+        assert!(
+            session_gone.is_none(),
+            "the session row must actually be deleted on the healthy path"
+        );
+
+        let messages_gone: Vec<(String,)> =
+            sqlx::query_as("SELECT message_id FROM chat_messages WHERE session_id = $1")
+                .bind("sess-resolved")
+                .fetch_all(sq)
+                .await
+                .expect("query chat_messages");
+        assert!(
+            messages_gone.is_empty(),
+            "the messages must actually be deleted on the healthy path"
+        );
+
+        // This is the assertion that fails before the fix: the resolution
+        // read errored on every call, so no Delete row was ever written.
+        let delta_owner = delta_for(&db, "user-a").await;
+        let owner_deletes = delete_rows_for(&delta_owner, "sess-resolved");
+        assert_eq!(
+            owner_deletes.len(),
+            1,
+            "the owner must receive exactly one Delete row for a session              deleted via workspace_id: None, got delta: {delta_owner:?}"
+        );
+        assert_eq!(
+            owner_deletes[0].workspace_id, "ws-1",
+            "the Delete row must carry the workspace_id resolved from the              row itself, not a placeholder, got: {:?}",
+            owner_deletes[0]
         );
     }
 
