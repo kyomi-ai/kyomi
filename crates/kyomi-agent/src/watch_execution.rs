@@ -218,6 +218,20 @@ pub fn sanitize_null_bytes(s: &str) -> String {
     s.replace('\x00', "")
 }
 
+/// Build the `error_message` persisted to `WatchExecution` for a failed
+/// watch execution.
+///
+/// Uses `Error::user_message()`, not `Display`, so the stored message never
+/// carries a developer-facing variant tag (e.g. `"internal: "`) into a
+/// string rendered verbatim to users by `execution_log_viewer.rs` and the
+/// copilot `watch` tool. The `Display` form (with the tag) still reaches the
+/// log line this is called alongside — only the persisted, user-facing copy
+/// changes. See `kyomi_core::Error::user_message` for why the two must never
+/// be swapped, and KYO-350 for the three sibling fixes this completes.
+pub fn watch_execution_error_message(e: &kyomi_core::Error) -> String {
+    sanitize_null_bytes(e.user_message())
+}
+
 /// Recursively sanitize null bytes from a JSON value.
 fn sanitize_json_null_bytes(value: serde_json::Value) -> serde_json::Value {
     match value {
@@ -887,7 +901,7 @@ pub async fn execute_watch(
             error!(watch_id = %watch_id, error = %e, "Watch execution failed");
 
             // Mark execution as failed
-            let error_msg = sanitize_null_bytes(&e.to_string());
+            let error_msg = watch_execution_error_message(&e);
             if let Err(complete_err) = watch_service::complete_execution(
                 db,
                 execution_id,
@@ -1702,6 +1716,41 @@ mod tests {
     #[test]
     fn sanitize_null_bytes_empty_string() {
         assert_eq!(sanitize_null_bytes(""), "");
+    }
+
+    // -- watch_execution_error_message (KYO-380) ----------------------------
+    //
+    // Guards the fourth instance of the "internal:" prefix leak KYO-350 fixed
+    // for the three chat/copilot render sites: the persisted
+    // `WatchExecution.error_message`, read verbatim by
+    // `execution_log_viewer.rs` and the copilot `watch` tool result.
+
+    #[test]
+    fn watch_execution_error_message_renders_without_internal_prefix() {
+        // `Error::Internal`'s `Display` is "internal: {0}" — the tag must
+        // not reach the persisted, user-facing message, but the actual
+        // failure text must still be present verbatim (an assertion that
+        // only checked the *absence* of "internal:" would pass on an empty
+        // string too).
+        let err = kyomi_core::Error::Internal(
+            "the tool-use budget for this request was exhausted and the final summary could \
+             not be generated"
+                .into(),
+        );
+        assert_eq!(
+            watch_execution_error_message(&err),
+            "the tool-use budget for this request was exhausted and the final summary could \
+             not be generated"
+        );
+    }
+
+    #[test]
+    fn watch_execution_error_message_strips_null_bytes() {
+        // Postgres text/JSONB columns can't store `\x00` — the extraction
+        // must still route through `sanitize_null_bytes`, not just
+        // `user_message()`.
+        let err = kyomi_core::Error::Internal("bad\x00value".into());
+        assert_eq!(watch_execution_error_message(&err), "badvalue");
     }
 
     // -- sanitize_json_null_bytes --
