@@ -10,6 +10,23 @@ use kyomi_types::truncate_preview;
 use crate::tools::{AgentTool, ToolContext};
 use crate::types::ToolAnnotations;
 
+/// Build the `preview_watch` tool-result payload for a schedule that failed
+/// `kyomi_auth::watch_service::parse_schedule`.
+///
+/// Uses `e.user_message()` rather than `e.to_string()` (`Display`):
+/// `parse_schedule` always fails with `kyomi_core::Error::BadRequest`, whose
+/// `Display` prepends the variant tag (`"bad request: {0}"`) for log lines.
+/// That tag is meaningless to the model and the user reading this tool
+/// result — they need the cron-format guidance alone, not a label
+/// identifying which `Error` variant produced it.
+fn schedule_validation_failure(e: &kyomi_core::Error) -> String {
+    serde_json::json!({
+        "success": false,
+        "error": e.user_message(),
+    })
+    .to_string()
+}
+
 // ---------------------------------------------------------------------------
 // CreateWatchTool
 // ---------------------------------------------------------------------------
@@ -370,11 +387,7 @@ impl AgentTool for PreviewWatchTool {
 
         // Validate cron schedule
         if let Err(e) = kyomi_auth::watch_service::parse_schedule(schedule) {
-            return Ok(serde_json::json!({
-                "success": false,
-                "error": e.to_string(),
-            })
-            .to_string());
+            return Ok(schedule_validation_failure(&e));
         }
 
         let schedule_description =
@@ -1122,6 +1135,117 @@ mod tests {
     // or deleted through chat instead of the Watches page. These tests
     // exercise the real tool `execute()` path end-to-end (real sqlite DB,
     // real `WebSocketManager`) and assert the non-owner receives nothing.
+
+    // ── Schedule-validation error payload (KYO-397) ─────────────────────
+    //
+    // `PreviewWatchTool::execute` used to build its invalid-schedule result
+    // with `e.to_string()`, which is `Error`'s `Display` impl. `parse_schedule`
+    // always fails with `Error::BadRequest`, whose `Display` is
+    // `"bad request: {0}"` — so the model and the user saw the variant tag
+    // prepended to the cron-format guidance instead of the guidance alone.
+    // These tests drive two *real* `parse_schedule` failures (wrong field
+    // count, invalid character) rather than hand-constructing a
+    // `BadRequest`, so they pin the actual production input path.
+
+    mod schedule_validation {
+        use super::*;
+
+        const EXPECTED_MESSAGE: &str = "Invalid cron expression. Use standard cron format \
+             (5 fields): 'minute hour day-of-month month day-of-week'. \
+             Example: '0 9 * * *' (daily at 9am UTC), '0 15 * * 1-5' (weekdays at 3pm UTC).";
+
+        #[test]
+        fn schedule_validation_failure_strips_tag_for_wrong_field_count() {
+            // 4 fields instead of 5.
+            let err = kyomi_auth::watch_service::parse_schedule("0 9 * *")
+                .expect_err("4-field schedule must be rejected");
+
+            let payload = schedule_validation_failure(&err);
+            let parsed: serde_json::Value =
+                serde_json::from_str(&payload).expect("payload is JSON");
+
+            assert_eq!(parsed["success"], serde_json::json!(false), "{payload}");
+            assert_eq!(
+                parsed["error"],
+                serde_json::json!(EXPECTED_MESSAGE),
+                "error field must be the user_message() text with no \"bad request:\" tag: {payload}"
+            );
+        }
+
+        #[test]
+        fn schedule_validation_failure_strips_tag_for_invalid_character() {
+            // 5 fields, but letters are not valid cron characters.
+            let err = kyomi_auth::watch_service::parse_schedule("0 9 * * abc")
+                .expect_err("schedule with letters must be rejected");
+
+            let payload = schedule_validation_failure(&err);
+            let parsed: serde_json::Value =
+                serde_json::from_str(&payload).expect("payload is JSON");
+
+            assert_eq!(parsed["success"], serde_json::json!(false), "{payload}");
+            assert_eq!(
+                parsed["error"],
+                serde_json::json!(EXPECTED_MESSAGE),
+                "error field must be the user_message() text with no \"bad request:\" tag: {payload}"
+            );
+        }
+
+        /// End-to-end: `PreviewWatchTool::execute()` takes its `ToolContext`
+        /// argument as `_ctx` and never reads it — the tool has no DB, KV,
+        /// or websocket access at all — so a bare in-memory pool with no
+        /// migrations is enough to build a valid `ToolContext` that this
+        /// test never actually touches.
+        fn unused_ctx() -> ToolContext {
+            let pool = sqlx::sqlite::SqlitePool::connect_lazy("sqlite::memory:")
+                .expect("lazy in-memory sqlite pool");
+            ToolContext {
+                db: kyomi_core::DbPool::Sqlite(pool),
+                kv: kyomi_core::kv_store_memory::InMemoryKVStore::new_pool(),
+                user_id: "user-a".to_string(),
+                workspace_id: "ws-1".to_string(),
+                encryption_key: std::sync::Arc::new([0u8; 32]),
+                embedding: kyomi_embed::LazyEmbedding::new(),
+                ws_manager: kyomi_auth::websocket::WebSocketManager::new(
+                    None,
+                    kyomi_core::DbPool::Sqlite(
+                        sqlx::sqlite::SqlitePool::connect_lazy("sqlite::memory:")
+                            .expect("lazy in-memory sqlite pool"),
+                    ),
+                ),
+                config: std::sync::Arc::new(kyomi_core::Config::test_config()),
+                session_id: None,
+                supports_mcp_apps: false,
+                workspace_roles: Vec::new(),
+                connect_registry: None,
+                platforms: std::sync::Arc::new(kyomi_core::platform::PlatformRegistry::new()),
+                user_display_name: "User A".to_string(),
+            }
+        }
+
+        #[tokio::test]
+        async fn preview_watch_tool_execute_strips_tag_for_invalid_schedule() {
+            let ctx = unused_ctx();
+            let args = serde_json::json!({
+                "name": "Agent-created watch",
+                "prompt": "Check if revenue drops more than 10 percent",
+                "schedule": "0 9 * *",
+            });
+
+            let result = PreviewWatchTool
+                .execute(args, &ctx)
+                .await
+                .expect("preview_watch tool execution");
+            let parsed: serde_json::Value =
+                serde_json::from_str(&result).expect("tool result is JSON");
+
+            assert_eq!(parsed["success"], serde_json::json!(false), "{result}");
+            assert_eq!(
+                parsed["error"],
+                serde_json::json!(EXPECTED_MESSAGE),
+                "error field must be the user_message() text with no \"bad request:\" tag: {result}"
+            );
+        }
+    }
 
     mod broadcast_routing {
         use std::sync::Arc;
