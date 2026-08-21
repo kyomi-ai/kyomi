@@ -6,7 +6,7 @@ Kyomi supports three authentication methods for BigQuery. Choose the one that be
 
 | Method | Best For | Setup Complexity |
 |--------|----------|------------------|
-| **Kyomi OAuth** | Individuals, small teams | Easy - just click "Connect with Google" |
+| **Kyomi OAuth** | Individuals, small teams | Easy - just click "Connect BigQuery" |
 | **Service Account** | Shared team access, automation | Medium - create key in GCP Console |
 | **Enterprise OAuth** | Organizations with Google Workspace | Advanced - configure OAuth consent screen |
 
@@ -20,11 +20,11 @@ The simplest way to connect - sign in with your Google account and authorize Kyo
 
 1. In the datasource modal, select **BigQuery** as the datasource type
 2. Choose **Kyomi OAuth** as the authentication method (this is the default)
-3. Click **Connect with Google**
+3. Click **Connect BigQuery**
 4. Sign in with your Google account and grant the requested permissions
 5. Select your **Billing Project** (the GCP project that will be charged for queries)
 6. Optionally select a **Default Project** for queries
-7. Click **Save**
+7. Click **Next**, then **Create**
 
 ::: info Note
 Your Google account must have the necessary BigQuery permissions (e.g., `bigquery.jobs.create`, `bigquery.tables.getData`) in the projects you want to query.
