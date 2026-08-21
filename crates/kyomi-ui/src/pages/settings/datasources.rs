@@ -211,6 +211,43 @@ fn bq_kyomi_oauth_access_gate_satisfied(
     !(ds_type == "bigquery" && bq_auth_mode == "kyomi_oauth") || oauth_connected || access_confirmed
 }
 
+/// Whether the create-mode Connection step is satisfied (KYO-404, extended
+/// KYO-411) — a pure predicate so it's directly unit-testable, following
+/// the same shape as [`bq_kyomi_oauth_access_gate_satisfied`] above. Called
+/// from the `connection_step_satisfied` `Signal::derive` in
+/// `DatasourceModal`, which is the single source of truth read by the
+/// create-mode footer's `can_next` and by all three states of the Catalog
+/// tab pill (class, disabled, on:click) — see that call site for why this
+/// must stay one signal rather than independent copies of the same check.
+///
+/// Returns `true` when any of:
+/// - `ds_type == "bigquery" && bq_auth_mode == "enterprise_oauth"` — no
+///   slug-scoped connect endpoint exists before the datasource is saved
+///   (`enterprise_oauth_url` needs `datasource_slug`), so `test_succeeded`
+///   can never be true for this one type/mode in create mode (KYO-404).
+/// - `ds_type == "bigquery" && bq_auth_mode == "kyomi_oauth" && oauth_connected`
+///   — a proven Google OAuth connection is equally trustworthy whether it
+///   arrived via the popup's `GoogleSuccess` postMessage arm (which itself
+///   sets `test_result`) or via `use_oauth_status_refetch`'s account-level
+///   status fetch on modal open (KYO-411). Without this arm, a returning,
+///   already-linked user's modal renders "Connected" with nothing left to
+///   click, `test_result` never gets set, and Next stays permanently
+///   disabled — the exact KYO-404 deadlock, reintroduced for exactly the
+///   users KYO-411 exists to help.
+/// - `test_succeeded` — every other type/mode requires an actual
+///   successful Test & Discover.
+fn connection_step_satisfied_from(
+    ds_type: &str,
+    bq_auth_mode: &str,
+    oauth_connected: bool,
+    test_succeeded: bool,
+) -> bool {
+    let bq_enterprise_oauth_precreate = ds_type == "bigquery" && bq_auth_mode == "enterprise_oauth";
+    let bq_kyomi_oauth_already_connected =
+        ds_type == "bigquery" && bq_auth_mode == "kyomi_oauth" && oauth_connected;
+    bq_enterprise_oauth_precreate || bq_kyomi_oauth_already_connected || test_succeeded
+}
+
 /// Builds `<Select>` options for an Authentication Mode selector from
 /// registry-provided auth modes (KYO-274).
 ///
@@ -2789,13 +2826,21 @@ pub fn DatasourceModal(
         discovery_status.get() == "success"
     });
 
-    // ── Connection-step-satisfied predicate (KYO-404) ──────────────────────
+    // ── Connection-step-satisfied predicate (KYO-404, extended KYO-411) ────
     // BigQuery enterprise_oauth has no slug-scoped connect endpoint before
     // the datasource exists (`enterprise_oauth_url` needs `datasource_slug`),
     // so `test_result` can never become `Some` for that one type/mode in
     // create mode — the OAuth connect button for it stays gated behind
     // "save first" (see the `!is_create_mode` Show around the
-    // enterprise_oauth `ModalOAuthStatusPanel`). Every other type/mode
+    // enterprise_oauth `ModalOAuthStatusPanel`). BigQuery kyomi_oauth is
+    // satisfied by `modal_oauth_connected` alone (KYO-411): that signal is
+    // written both by the popup's `GoogleSuccess` postMessage arm (which
+    // also sets `test_result` itself) and by `use_oauth_status_refetch`'s
+    // account-level status fetch on modal open — an already-linked user has
+    // nothing to click that would ever produce a `test_result`, so without
+    // this arm Next stays permanently disabled for them (see
+    // `connection_step_satisfied_from`'s doc comment for the full KYO-404
+    // deadlock this reintroduces if omitted). Every other type/mode
     // requires an actual successful test. This is the single source of
     // truth for "is the Connection tab done" — read by the create-mode
     // footer's `can_next` and by all three states of the Catalog tab pill
@@ -2804,9 +2849,12 @@ pub fn DatasourceModal(
     // (docs/CODING_STANDARDS.md: reserve `Signal::derive` for cheap, pure
     // projections; use `Memo` only when the body does more than read).
     let connection_step_satisfied: Signal<bool> = Signal::derive(move || {
-        let bq_enterprise_oauth_precreate =
-            ds_type.get() == "bigquery" && bq_auth_mode.get() == "enterprise_oauth";
-        bq_enterprise_oauth_precreate || test_result.get().map(|r| r.success).unwrap_or(false)
+        connection_step_satisfied_from(
+            &ds_type.get(),
+            &bq_auth_mode.get(),
+            modal_oauth_connected.get(),
+            test_result.get().map(|r| r.success).unwrap_or(false),
+        )
     });
 
     // ── BigQuery kyomi_oauth access-confirmation gate (KYO-408) ─────────────
@@ -4380,6 +4428,32 @@ struct OAuthStatusSetters {
 /// because each fix copy-pasted the Effect instead of sharing it (KYO-197).
 /// Any new provider's OAuth status panel must call this hook rather than
 /// hand-rolling another copy of the Effect.
+/// Resolves which OAuth status source (if any) [`use_oauth_status_refetch`]
+/// should fetch for the current auth mode — a pure predicate so the KYO-411
+/// slug-guard fix is directly testable, extracted from the `Effect` body
+/// rather than exercised via the view tree (the rest of this hook's
+/// coverage uses the source-text idiom the other tests in this file share,
+/// since it lives inside a reactive closure).
+///
+/// The empty-slug guard applies ONLY to `Datasource(_)` sources, which need
+/// a real slug (`get_datasource_oauth_status(provider_key, slug)`).
+/// `GoogleAccount` is an account-level fetch (`get_google_oauth_status()`)
+/// that takes no slug at all, so it must run even when `slug` is empty —
+/// notably in create mode, where BigQuery kyomi_oauth otherwise never
+/// learns an already-linked Google account is connected (KYO-411). Before
+/// this fix the guard ran ahead of `source_for_mode` and applied
+/// indiscriminately to both source kinds.
+fn oauth_status_source_to_fetch(
+    current_mode: &str,
+    slug_val: &str,
+    source_for_mode: fn(&str) -> Option<OAuthStatusSource>,
+) -> Option<OAuthStatusSource> {
+    match source_for_mode(current_mode) {
+        Some(OAuthStatusSource::Datasource(_)) if slug_val.is_empty() => None,
+        other => other,
+    }
+}
+
 fn use_oauth_status_refetch(
     auth_mode: ReadSignal<String>,
     slug: ReadSignal<String>,
@@ -4389,13 +4463,13 @@ fn use_oauth_status_refetch(
     Effect::new(move |_| {
         let current_mode = auth_mode.get(); // subscribe to mode changes
         let slug_val = slug.get();
-        // Skip create mode (no slug) and modes with no OAuth status to fetch.
-        let source = if slug_val.is_empty() {
-            None
-        } else {
-            source_for_mode(&current_mode)
-        };
-        let Some(source) = source else {
+        // Modes with no OAuth status to fetch are skipped by
+        // source_for_mode itself; a Datasource(_) source additionally needs
+        // a non-empty slug (create mode has none yet). GoogleAccount is
+        // account-level and needs no slug — see
+        // oauth_status_source_to_fetch's doc comment (KYO-411).
+        let Some(source) = oauth_status_source_to_fetch(&current_mode, &slug_val, source_for_mode)
+        else {
             return;
         };
         // Reset to disconnected state while the fetch is in flight.
@@ -8659,6 +8733,156 @@ mod tests {
         }
     }
 
+    // ── KYO-411: create-mode BigQuery kyomi_oauth status fetch ─────────
+    //
+    // `use_oauth_status_refetch` skipped its fetch whenever `slug` was
+    // empty, applying that guard BEFORE consulting `source_for_mode`. That
+    // suppressed both status sources indiscriminately — correct for
+    // `Datasource(_)` (needs a real slug) but wrong for `GoogleAccount`
+    // (an account-level fetch that takes none). BigQuery kyomi_oauth is the
+    // only mode mapping to `GoogleAccount`, so in create mode a user whose
+    // Google account was already linked never had `oauth_connected`
+    // initialised from the server — the panel showed "not connected" with
+    // a Connect button despite being connected. The fix moves the guard
+    // into a pure `oauth_status_source_to_fetch` predicate that consults
+    // `source_for_mode` first and scopes the slug requirement to the
+    // `Datasource(_)` arm alone.
+    //
+    // Simply letting `GoogleAccount` through was not enough on its own: it
+    // reintroduces the KYO-404 deadlock for exactly the users this fixes,
+    // because `can_next` keyed only on `test_result`, and an
+    // already-connected user has nothing left to click that would ever set
+    // it. `connection_step_satisfied_from` (extended below) is the other
+    // half — it must also accept an already-established connection, not
+    // just a freshly completed popup.
+
+    use super::{connection_step_satisfied_from, oauth_status_source_to_fetch};
+
+    /// `oauth_status_source_to_fetch` — the pure predicate behind the
+    /// KYO-411 guard fix — exercised directly for all four providers'
+    /// mapping functions. Covers the actual bug (GoogleAccount must run on
+    /// an empty slug) and the regression risk the ticket calls out by name
+    /// (the other three providers, all `Datasource(_)`, must stay blocked).
+    #[test]
+    fn oauth_status_source_to_fetch_lets_google_account_through_empty_slug() {
+        assert_eq!(
+            oauth_status_source_to_fetch("kyomi_oauth", "", bigquery_oauth_source),
+            Some(OAuthStatusSource::GoogleAccount),
+            "GoogleAccount is an account-level fetch with no slug parameter — it must run \
+             in create mode (empty slug) so an already-linked user's status is fetched at \
+             all (KYO-411)"
+        );
+    }
+
+    #[test]
+    fn oauth_status_source_to_fetch_blocks_datasource_source_on_empty_slug() {
+        assert_eq!(
+            oauth_status_source_to_fetch("enterprise_oauth", "", bigquery_oauth_source),
+            None,
+            "Datasource(_) sources need a real slug (get_datasource_oauth_status(key, \
+             slug)) — create mode must not fire this fetch, even for BigQuery"
+        );
+        assert_eq!(
+            oauth_status_source_to_fetch("oauth", "", snowflake_oauth_source),
+            None,
+            "Snowflake's oauth mode maps to Datasource(_) — must stay blocked on an empty \
+             slug (regression guard: the other three providers must not change behavior)"
+        );
+        assert_eq!(
+            oauth_status_source_to_fetch("oauth", "", databricks_oauth_source),
+            None,
+            "Databricks's oauth mode maps to Datasource(_) — must stay blocked on an empty \
+             slug"
+        );
+        assert_eq!(
+            oauth_status_source_to_fetch("enterprise_oauth", "", synapse_oauth_source),
+            None,
+            "Synapse's enterprise_oauth mode maps to Datasource(_) — must stay blocked on \
+             an empty slug"
+        );
+    }
+
+    #[test]
+    fn oauth_status_source_to_fetch_runs_datasource_source_with_a_slug() {
+        assert_eq!(
+            oauth_status_source_to_fetch("oauth", "my-slug", snowflake_oauth_source),
+            Some(OAuthStatusSource::Datasource("snowflake")),
+            "a non-empty slug must let the Datasource(_) source through unchanged — edit \
+             mode is unaffected by KYO-411"
+        );
+    }
+
+    #[test]
+    fn oauth_status_source_to_fetch_passes_through_none_regardless_of_slug() {
+        assert_eq!(
+            oauth_status_source_to_fetch("service_account", "", bigquery_oauth_source),
+            None,
+            "a mode with no OAuth status source at all must stay None on an empty slug"
+        );
+        assert_eq!(
+            oauth_status_source_to_fetch("service_account", "my-slug", bigquery_oauth_source),
+            None,
+            "a mode with no OAuth status source at all must stay None on a non-empty slug too"
+        );
+    }
+
+    /// Wiring guard: `use_oauth_status_refetch`'s `Effect` must resolve its
+    /// source via the shared `oauth_status_source_to_fetch` predicate rather
+    /// than reimplementing (or re-inlining) the guard — an inlined copy
+    /// could silently diverge from the coverage above.
+    #[test]
+    fn use_oauth_status_refetch_calls_the_shared_guard_predicate() {
+        let body = extract_between(SRC, "fn use_oauth_status_refetch(", "fn bigquery_oauth_source(");
+        assert!(
+            body.contains(
+                "oauth_status_source_to_fetch(&current_mode, &slug_val, source_for_mode)"
+            ),
+            "use_oauth_status_refetch's Effect must resolve its source via \
+             oauth_status_source_to_fetch — inlining the guard again risks reintroducing \
+             the KYO-411 bug invisibly to the unit tests above, which only cover the \
+             extracted predicate, not the Effect body itself"
+        );
+    }
+
+    /// `connection_step_satisfied_from` — extended by KYO-411 — must accept
+    /// an OAuth connection that was already established before the modal
+    /// opened (via the status fetch fixed above), not only one just
+    /// completed through the popup. Without this, letting the status fetch
+    /// run is actively harmful: the panel would show "Connected" with no
+    /// popup left to run, `test_result` would never be set, and Next would
+    /// stay permanently disabled — a narrower recurrence of the KYO-404
+    /// deadlock, scoped to exactly the already-linked users this ticket is
+    /// meant to help.
+    #[test]
+    fn connection_step_satisfied_from_accepts_an_already_connected_kyomi_oauth_account() {
+        assert!(
+            connection_step_satisfied_from("bigquery", "kyomi_oauth", true, false),
+            "an already-connected Google account must satisfy the Connection step for \
+             BigQuery kyomi_oauth even with no test_result yet (KYO-411)"
+        );
+        assert!(
+            connection_step_satisfied_from("bigquery", "kyomi_oauth", false, true),
+            "test_result success must still satisfy the step independently of \
+             oauth_connected — this is the KYO-404 popup path and must not regress"
+        );
+        assert!(
+            !connection_step_satisfied_from("bigquery", "kyomi_oauth", false, false),
+            "with neither a live connection nor a test_result, kyomi_oauth must not be \
+             satisfied — only enterprise_oauth gets the unconditional precreate exception"
+        );
+        assert!(
+            !connection_step_satisfied_from("bigquery", "service_account", true, false),
+            "the connected-account exception must not leak into service_account, which has \
+             no OAuth connection concept at all"
+        );
+        assert!(
+            !connection_step_satisfied_from("snowflake", "kyomi_oauth", true, false),
+            "the connected-account exception is BigQuery-specific — a non-bigquery type \
+             must not be satisfied even if its auth_mode string happened to be \
+             \"kyomi_oauth\""
+        );
+    }
+
     // ── KYO-274: connection auth modes come from the registry ──────────
     //
     // The four `*AuthModeSection` components each hardcoded their own
@@ -9155,34 +9379,65 @@ mod tests {
     /// "Next" for kyomi_oauth with no connection at all, reintroducing a
     /// create path that produces a datasource with no verified credentials.
     ///
-    /// The exception now lives in `connection_step_satisfied`'s own
+    /// The exception now lives in `connection_step_satisfied_from`'s own
     /// definition rather than inline in the footer (KYO-404 follow-up: the
     /// footer, and the Catalog tab pill's class/disabled/on:click closures,
-    /// all read the same signal instead of each carrying their own copy of
-    /// the predicate). This test checks both halves independently: the
-    /// predicate's definition still encodes the AND'd exception, and the
-    /// footer still ANDs the name check onto the shared signal rather than
-    /// folding name emptiness into the shared predicate itself (which would
-    /// wrongly make the Catalog tab pill require a name too).
+    /// all read the same `connection_step_satisfied` signal instead of each
+    /// carrying their own copy of the predicate). KYO-411 moved the
+    /// predicate's body out of the `Signal::derive` closure and into a pure,
+    /// directly-testable function (`connection_step_satisfied_from`, next to
+    /// `bq_kyomi_oauth_access_gate_satisfied`) so it could add the
+    /// already-connected-account exception without a fourth inline special
+    /// case at the `can_next` call site. This test checks three things: the
+    /// derive delegates to the pure function with the right arguments, the
+    /// AND'd exception behavior itself (exercised directly, not via string
+    /// matching), and that the footer still ANDs the name check onto the
+    /// shared signal rather than folding name emptiness into the shared
+    /// predicate itself (which would wrongly make the Catalog tab pill
+    /// require a name too).
     #[test]
     fn create_mode_can_next_bigquery_exception_requires_enterprise_oauth_mode() {
-        let predicate = extract_between(
+        let derive_body = extract_between(
             SRC,
             "let connection_step_satisfied: Signal<bool> = Signal::derive(move || {",
             "});",
         );
         assert!(
-            predicate.contains(
-                "ds_type.get() == \"bigquery\" && bq_auth_mode.get() == \"enterprise_oauth\""
-            ),
-            "the bigquery test_result exception must require BOTH ds_type == \"bigquery\" \
-             AND bq_auth_mode == \"enterprise_oauth\" — a bigquery-only relaxation would \
-             re-enable Next for kyomi_oauth with zero connection (KYO-404 regression risk)"
+            derive_body.contains("connection_step_satisfied_from("),
+            "connection_step_satisfied must delegate to the pure \
+             connection_step_satisfied_from predicate rather than reimplementing the \
+             exceptions inline (KYO-411 follow-up to the KYO-404 shared-signal fix)"
         );
         assert!(
-            predicate.contains("test_result.get().map(|r| r.success).unwrap_or(false)"),
-            "the original test_result.success requirement must remain for every type/mode \
-             other than the bigquery enterprise_oauth exception"
+            derive_body.contains("modal_oauth_connected.get()"),
+            "the derive must pass modal_oauth_connected as the oauth_connected argument \
+             (KYO-411) — without it, connection_step_satisfied_from's kyomi_oauth exception \
+             can never see a live connection"
+        );
+        assert!(
+            derive_body.contains("test_result.get().map(|r| r.success).unwrap_or(false)"),
+            "the derive must still pass test_result's success as the test_succeeded \
+             argument — the original requirement for every type/mode other than the two \
+             BigQuery exceptions"
+        );
+
+        // The exception logic itself, exercised directly: it must require
+        // BOTH ds_type == "bigquery" AND bq_auth_mode == "enterprise_oauth"
+        // — a bigquery-only relaxation would re-enable Next for kyomi_oauth
+        // with zero connection (KYO-404 regression risk).
+        assert!(
+            connection_step_satisfied_from("bigquery", "enterprise_oauth", false, false),
+            "the enterprise_oauth precreate exception must be satisfied on its own"
+        );
+        assert!(
+            !connection_step_satisfied_from("bigquery", "kyomi_oauth", false, false),
+            "kyomi_oauth with no connection and no test_result must NOT be satisfied — \
+             only enterprise_oauth gets the unconditional precreate exception"
+        );
+        assert!(
+            !connection_step_satisfied_from("snowflake", "enterprise_oauth", false, false),
+            "the enterprise_oauth exception is bigquery-specific — ds_type must be \
+             checked, not auth_mode alone"
         );
 
         let footer = extract_between(
