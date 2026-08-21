@@ -13,6 +13,34 @@ use crate::tools::{AgentTool, ToolContext};
 use crate::types::ToolAnnotations;
 
 // ---------------------------------------------------------------------------
+// Shared validation-failure result
+// ---------------------------------------------------------------------------
+
+/// Build the structured tool result for a copilot input-validation failure.
+///
+/// Uses [`kyomi_core::Error::user_message`] rather than `Display` so the
+/// variant tag (`bad request: `) never reaches the retry guidance shown to
+/// the model or the text rendered to the user (KYO-389, same species as
+/// KYO-380's `watch_execution_error_message`).
+///
+/// No `tracing` call here deliberately: unlike KYO-380, these are user-input
+/// validation failures (the model supplied bad ChartML / a bad cron
+/// expression / a bad mode), not system faults. They're already surfaced to
+/// both the model and the user via this result, and the model retries.
+/// Logging every rejected model draft would be noise, not signal.
+fn validation_failure_result(headline: &str, e: &kyomi_core::Error) -> String {
+    let error_message = e.user_message();
+    serde_json::json!({
+        "success": false,
+        "validation_failed": true,
+        "error_count": 1,
+        "errors": [error_message],
+        "message": format!("{headline}\n{error_message}"),
+    })
+    .to_string()
+}
+
+// ---------------------------------------------------------------------------
 // UpdateDashboardCopilotTool
 // ---------------------------------------------------------------------------
 
@@ -178,17 +206,10 @@ impl AgentTool for UpdateChartCopilotTool {
         // Validate ChartML content — wrap in a fenced block for the validator
         let fenced = format!("```chartml\n{content}\n```");
         if let Err(e) = kyomi_auth::dashboard_service::validate_dashboard_content(&fenced) {
-            let error_message = e.to_string();
-            return Ok(serde_json::json!({
-                "success": false,
-                "validation_failed": true,
-                "error_count": 1,
-                "errors": [error_message],
-                "message": format!(
-                    "ChartML validation failed. Fix these issues and try again:\n{error_message}"
-                ),
-            })
-            .to_string());
+            return Ok(validation_failure_result(
+                "ChartML validation failed. Fix these issues and try again:",
+                &e,
+            ));
         }
 
         let mut msg = WebSocketMessage::new(MessageType::ChartUpdate)
@@ -339,34 +360,20 @@ impl AgentTool for UpdateWatchCopilotTool {
         if let Some(schedule) = args.get("schedule").and_then(|v| v.as_str())
             && let Err(e) = kyomi_auth::watch_service::parse_schedule(schedule)
         {
-            let error_message = e.to_string();
-            return Ok(serde_json::json!({
-                "success": false,
-                "validation_failed": true,
-                "error_count": 1,
-                "errors": [error_message],
-                "message": format!(
-                    "Watch schedule validation failed. Fix the cron expression and try again:\n{error_message}"
-                ),
-            })
-            .to_string());
+            return Ok(validation_failure_result(
+                "Watch schedule validation failed. Fix the cron expression and try again:",
+                &e,
+            ));
         }
 
         // Validate mode if provided.
         if let Some(mode) = args.get("mode").and_then(|v| v.as_str())
             && let Err(e) = kyomi_auth::watch_service::validate_watch_mode(mode)
         {
-            let error_message = e.to_string();
-            return Ok(serde_json::json!({
-                "success": false,
-                "validation_failed": true,
-                "error_count": 1,
-                "errors": [error_message],
-                "message": format!(
-                    "Watch mode validation failed. Fix the mode and try again:\n{error_message}"
-                ),
-            })
-            .to_string());
+            return Ok(validation_failure_result(
+                "Watch mode validation failed. Fix the mode and try again:",
+                &e,
+            ));
         }
 
         // Build the data payload with every provided field. Summary and
@@ -543,5 +550,81 @@ mod tests {
             .expect("has annotations");
         assert_eq!(ann.read_only_hint, Some(false));
         assert!(ann.destructive_hint.is_none());
+    }
+
+    // -- validation_failure_result (KYO-389) ---------------------------------
+    //
+    // The three copilot tool paths above all fail validation through
+    // `kyomi_core::Error::BadRequest`, whose `Display` is `"bad request: {0}"`.
+    // These tests drive `validation_failure_result` — the exact function each
+    // of the three sites calls, with the exact headline literal each site
+    // uses — through a real `BadRequest` and confirm the variant tag never
+    // reaches either the `errors` array or the `message` field the model and
+    // user see.
+
+    #[test]
+    fn validation_failure_result_chartml_strips_tag_and_keeps_detail() {
+        let e = kyomi_core::Error::BadRequest(
+            "line 4: unknown chart type 'foo-bar'".to_string(),
+        );
+        let result = validation_failure_result(
+            "ChartML validation failed. Fix these issues and try again:",
+            &e,
+        );
+        let json: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+
+        assert_eq!(
+            json["errors"][0].as_str().unwrap(),
+            "line 4: unknown chart type 'foo-bar'"
+        );
+        assert_eq!(
+            json["message"].as_str().unwrap(),
+            "ChartML validation failed. Fix these issues and try again:\n\
+             line 4: unknown chart type 'foo-bar'"
+        );
+    }
+
+    #[test]
+    fn validation_failure_result_watch_schedule_strips_tag_and_keeps_detail() {
+        let e = kyomi_core::Error::BadRequest(
+            "cron expression must have 5 fields, got 3".to_string(),
+        );
+        let result = validation_failure_result(
+            "Watch schedule validation failed. Fix the cron expression and try again:",
+            &e,
+        );
+        let json: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+
+        assert_eq!(
+            json["errors"][0].as_str().unwrap(),
+            "cron expression must have 5 fields, got 3"
+        );
+        assert_eq!(
+            json["message"].as_str().unwrap(),
+            "Watch schedule validation failed. Fix the cron expression and try again:\n\
+             cron expression must have 5 fields, got 3"
+        );
+    }
+
+    #[test]
+    fn validation_failure_result_watch_mode_strips_tag_and_keeps_detail() {
+        let e = kyomi_core::Error::BadRequest(
+            "mode must be 'alert' or 'report', got 'summary'".to_string(),
+        );
+        let result = validation_failure_result(
+            "Watch mode validation failed. Fix the mode and try again:",
+            &e,
+        );
+        let json: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+
+        assert_eq!(
+            json["errors"][0].as_str().unwrap(),
+            "mode must be 'alert' or 'report', got 'summary'"
+        );
+        assert_eq!(
+            json["message"].as_str().unwrap(),
+            "Watch mode validation failed. Fix the mode and try again:\n\
+             mode must be 'alert' or 'report', got 'summary'"
+        );
     }
 }
