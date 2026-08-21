@@ -53,6 +53,7 @@ use tokio::sync::mpsc;
 use kyomi_agent::tools::{create_default_registry, ToolContext, ToolFilter, ToolRegistry};
 use kyomi_auth::middleware::AuthUser;
 
+use super::route_error::RouteError;
 use crate::state::AppState;
 
 // ===========================================================================
@@ -257,8 +258,8 @@ async fn handle_mcp_request(
     user: AuthUser,
     headers: HeaderMap,
     Json(request): Json<JsonRpcRequest>,
-) -> Result<Response, Response> {
-    let workspace_id = get_workspace_id(&user).map_err(IntoResponse::into_response)?;
+) -> Result<Response, RouteError> {
+    let workspace_id = get_workspace_id(&user)?;
     let msg_id = request.id.clone();
     let params = request.params.unwrap_or(Value::Null);
 
@@ -394,17 +395,17 @@ async fn handle_mcp_sse(
     State(state): State<AppState>,
     user: AuthUser,
     headers: HeaderMap,
-) -> Result<Response, Response> {
+) -> Result<Response, RouteError> {
     // GET SSE requires a session ID header
     let session_id_str = headers
         .get(MCP_SESSION_ID_HEADER)
         .and_then(|v| v.to_str().ok())
         .ok_or_else(|| {
             let body = json!({"detail": "Missing Mcp-Session-Id header"});
-            (StatusCode::BAD_REQUEST, Json(body)).into_response()
+            RouteError::from((StatusCode::BAD_REQUEST, Json(body)))
         })?;
 
-    let workspace_id = get_workspace_id(&user).map_err(IntoResponse::into_response)?;
+    let workspace_id = get_workspace_id(&user)?;
 
     // Auto-heal stale sessions instead of returning 404 (same rationale as POST handler)
     let session_id_str = if state.mcp_sessions.validate_session(session_id_str).await.is_none() {
@@ -463,7 +464,7 @@ async fn handle_mcp_delete(
     // extractor it still runs auth on every DELETE /mcp request.
     _user: AuthUser,
     headers: HeaderMap,
-) -> Result<StatusCode, Response> {
+) -> Result<StatusCode, RouteError> {
     if let Some(session_id_value) = headers.get(MCP_SESSION_ID_HEADER) {
         let session_id = session_id_value.to_str().unwrap_or("");
         state.mcp_sessions.remove_session(session_id).await;
