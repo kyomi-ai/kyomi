@@ -1514,6 +1514,20 @@ pub fn DatasourceModal(
                             };
                             set_cred_billing_project.try_set(user_str("billing_project"));
                             set_cred_default_project.try_set(user_str("default_project"));
+                            // BigQuery service_account mode stores these two
+                            // fields in connection_config instead (workspace-
+                            // level, not per-user) — see `build_connection_config`
+                            // (KYO-405). Override the per-user load above when
+                            // that's the active mode, so the fields the admin
+                            // configured are still shown on reopen.
+                            if cfg.get("auth_mode").and_then(|v| v.as_str()) == Some("service_account") {
+                                if let Some(bp) = cfg.get("billing_project").and_then(|v| v.as_str()) {
+                                    set_cred_billing_project.try_set(bp.to_string());
+                                }
+                                if let Some(dp) = cfg.get("default_project").and_then(|v| v.as_str()) {
+                                    set_cred_default_project.try_set(dp.to_string());
+                                }
+                            }
                             // Restore the stored (non-sensitive) username so the user
                             // doesn't have to re-type it. Reuses `user_str` (empty
                             // string when absent, matching the reset-form default).
@@ -1846,7 +1860,8 @@ pub fn DatasourceModal(
                 }
             }
             "bigquery" => {
-                map.insert("auth_mode".to_string(), serde_json::json!(bq_auth_mode.get_untracked()));
+                let bq_mode = bq_auth_mode.get_untracked();
+                map.insert("auth_mode".to_string(), serde_json::json!(bq_mode));
                 if !cfg_oauth_client_id.get_untracked().is_empty() {
                     map.insert("oauth_client_id".to_string(), serde_json::json!(cfg_oauth_client_id.get_untracked()));
                 }
@@ -1855,6 +1870,21 @@ pub fn DatasourceModal(
                 }
                 if !cfg_service_account_json.get_untracked().is_empty() {
                     map.insert("service_account_json".to_string(), serde_json::json!(cfg_service_account_json.get_untracked()));
+                }
+                // A service account is shared by the whole workspace, so its
+                // billing/default project belong in workspace-level
+                // connection_config — not per-user credentials (the OAuth
+                // modes' storage below in `build_credentials`). The driver
+                // corroborates this: `resolve_billing_project`
+                // (bigquery.rs:61-79) reads `connection_config["billing_project"]`
+                // before ever looking at credentials (KYO-405).
+                if bq_mode == "service_account" {
+                    if !cred_billing_project.get_untracked().is_empty() {
+                        map.insert("billing_project".to_string(), serde_json::json!(cred_billing_project.get_untracked()));
+                    }
+                    if !cred_default_project.get_untracked().is_empty() {
+                        map.insert("default_project".to_string(), serde_json::json!(cred_default_project.get_untracked()));
+                    }
                 }
             }
             _ => {}
@@ -2081,6 +2111,9 @@ pub fn DatasourceModal(
                             map.insert("default_project".to_string(), serde_json::json!(cred_default_project.get_untracked()));
                         }
                     }
+                    // service_account: these are shared workspace config, not
+                    // a personal credential — written into connection_config
+                    // by `build_connection_config` above instead (KYO-405).
                     _ => {}
                 }
             }
@@ -2184,6 +2217,22 @@ pub fn DatasourceModal(
                         if let Some(cats) = r.resources.get("catalogs") {
                             set_discovered_catalogs.set(cats.clone());
                         }
+                        // BigQuery service_account mode (KYO-405) — the
+                        // server's `list_projects()` arm returns bare project
+                        // ids (no display name, unlike the richer
+                        // `get_google_oauth_projects()` used by kyomi_oauth
+                        // mode below), so id and label are the same string.
+                        // Absent entirely (not an empty vec) when the service
+                        // account lacks resourcemanager.projects.list — see
+                        // `build_resources_map` server-side — in which case
+                        // `bq_projects` stays at the empty vec `do_test_and_discover`
+                        // reset it to, and `BqProjectField` falls back to a
+                        // free-text input.
+                        if let Some(projects) = r.resources.get("projects") {
+                            let opts: Vec<(String, String)> =
+                                projects.iter().map(|p| (p.clone(), p.clone())).collect();
+                            set_bq_projects.set(opts);
+                        }
                     } else {
                         set_test_result.set(Some(TestConnectionResult {
                             success: false,
@@ -2214,6 +2263,10 @@ pub fn DatasourceModal(
         set_discovered_schemas.set(vec![]);
         set_discovered_warehouses.set(vec![]);
         set_discovered_catalogs.set(vec![]);
+        // BigQuery service_account mode (KYO-405) — clear any stale project
+        // list from a previous validate before dispatching a fresh one.
+        // No-op for every other provider/mode, which never populate this.
+        set_bq_projects.set(vec![]);
 
         let ds_type_val = ds_type.get_untracked();
         let conn_cfg = build_connection_config();
@@ -2223,6 +2276,18 @@ pub fn DatasourceModal(
 
         test_action.dispatch((ds_type_val, conn_cfg, creds, ds_id, slug_val));
     };
+
+    // BigQuery service_account mode's "Validate & Discover Projects" button
+    // (KYO-405) — a Callback wrapper so `BigQueryAuthModeSection` can trigger
+    // the same `do_test_and_discover`/`test_action` every other provider's
+    // Test & Discover button uses, without needing the parent's private
+    // `TestDiscoverInput` type in its own signature.
+    let bq_test_pending = Signal::derive(move || test_action.pending().get());
+    let on_bq_validate = Callback::new(move |()| {
+        if !test_action.pending().get_untracked() {
+            do_test_and_discover();
+        }
+    });
 
     // ── OAuth disconnect actions ─────────────────────────────────────────
     // Two separate Actions — one for Google OAuth (BigQuery kyomi_oauth mode),
@@ -3353,6 +3418,9 @@ pub fn DatasourceModal(
                                             bq_projects_error=bq_projects_error
                                             is_admin=is_admin
                                             auth_modes=connection_auth_modes
+                                            test_result=test_result
+                                            test_pending=bq_test_pending
+                                            on_validate=on_bq_validate
                                         />
                                     </Show>
 
@@ -4340,6 +4408,19 @@ fn BigQueryAuthModeSection(
     /// and descriptions for the Authentication Mode selector below. Sourced
     /// from `get_datasource_types()` by the parent `DatasourceModal`.
     auth_modes: Signal<Vec<AuthModeOption>>,
+    /// Result of the last Test & Discover / Validate call — shared with the
+    /// generic Test & Discover button other providers use. Drives the
+    /// service_account mode's Valid/Failed indicator (KYO-405).
+    test_result: ReadSignal<Option<TestConnectionResult>>,
+    /// True while `test_action` (the parent's Test & Discover Action) is
+    /// pending — drives the "Validate & Discover Projects" button's
+    /// disabled/"Validating..." state (KYO-405).
+    test_pending: Signal<bool>,
+    /// Dispatches the parent's `do_test_and_discover` for the
+    /// service_account mode's "Validate & Discover Projects" button
+    /// (KYO-405). A `Callback` rather than the raw closure so this component
+    /// doesn't need the parent's private `TestDiscoverInput` type.
+    on_validate: Callback<()>,
 ) -> impl IntoView {
     // Parse service account email from JSON
     let handle_service_account_json = move |json_text: String| {
@@ -4651,6 +4732,79 @@ fn BigQueryAuthModeSection(
                                 </div>
                             })
                         }}
+                        // "Validate & Discover Projects" — only once a service
+                        // account is uploaded (matches React's
+                        // `{serviceAccountEmail && (...)}` gate). Wrapped in
+                        // its own `<Show>` rather than the `{move || ...}.then()`
+                        // pattern used for the chip above, because
+                        // `BqProjectField` mounts `Select`, which owns an
+                        // internal `Effect` — branching that inside a plain
+                        // reactive closure would destroy/recreate it on every
+                        // service_account_email change (docs/CODING_STANDARDS.md
+                        // "Use <Show> for conditional component rendering").
+                        <Show when=move || !service_account_email.get().is_empty()>
+                            <div class="space-y-4">
+                                <div class="flex items-center gap-3">
+                                    <Button
+                                        variant=ButtonVariant::Outline
+                                        disabled=Signal::derive(move || test_pending.get())
+                                        on:click=move |_| on_validate.run(())
+                                    >
+                                        {move || if test_pending.get() {
+                                            view! {
+                                                <span class="flex items-center gap-1.5">
+                                                    <Spinner size="h-3 w-3"/>
+                                                    "Validating..."
+                                                </span>
+                                            }.into_any()
+                                        } else {
+                                            view! {
+                                                <span class="flex items-center gap-1.5">
+                                                    <Icon icon=phosphor_leptos::PLUG size="14px"/>
+                                                    "Validate & Discover Projects"
+                                                </span>
+                                            }.into_any()
+                                        }}
+                                    </Button>
+                                    {move || test_result.get().map(|r| {
+                                        if r.success {
+                                            view! {
+                                                <div class="flex items-center gap-2 text-sm text-success-foreground">
+                                                    <Icon icon=phosphor_leptos::CHECK attr:class="h-4 w-4"/>
+                                                    "Valid"
+                                                </div>
+                                            }.into_any()
+                                        } else {
+                                            view! {
+                                                <div class="flex items-center gap-2 text-sm text-error-foreground">
+                                                    <Icon icon=phosphor_leptos::X attr:class="h-4 w-4"/>
+                                                    "Failed"
+                                                </div>
+                                            }.into_any()
+                                        }
+                                    })}
+                                </div>
+                                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                    <BqProjectField
+                                        label="Billing Project"
+                                        value=cred_billing_project
+                                        set_value=set_cred_billing_project
+                                        bq_projects=bq_projects
+                                        bq_projects_loading=bq_projects_loading
+                                    />
+                                    <BqProjectField
+                                        label="Default Project"
+                                        value=cred_default_project
+                                        set_value=set_cred_default_project
+                                        bq_projects=bq_projects
+                                        bq_projects_loading=bq_projects_loading
+                                    />
+                                </div>
+                                {move || bq_projects_error.get().map(|err| view! {
+                                    <p class="text-xs text-error-foreground mt-2">{err}</p>
+                                })}
+                            </div>
+                        </Show>
                     </div>
                 </Show>
             </Show>

@@ -612,8 +612,6 @@ pub async fn discover_datasource_resources(
 
     // Discover all resources using the same mapping as catalog.rs `discover_all_resources()`
     let type_str = ds_type.as_str();
-    let mut resources_map: std::collections::HashMap<String, Vec<String>> =
-        std::collections::HashMap::new();
 
     let discovery_pairs: Vec<(&str, kyomi_datasource_server::DiscoveryResult)> = match type_str {
         "postgres" | "redshift" => {
@@ -643,17 +641,24 @@ pub async fn discover_datasource_resources(
             let schemas = provider.list_schemas().await;
             vec![("schemas", schemas)]
         }
+        "bigquery" => {
+            // Unlike the other providers' `list_*` methods above, BigQuery's
+            // `list_projects()` returns a plain `Result<Vec<String>, _>` (it
+            // hits GCP's Resource Manager API, a genuinely different surface
+            // from the SQL-backed `list_databases`/`list_schemas` calls).
+            // Adapt it into the same `DiscoveryResult` shape the loop below
+            // expects. Many service accounts (e.g. anything scoped to
+            // "BigQuery Job User") lack `resourcemanager.projects.list` —
+            // that must become a captured `DiscoveryResult` error, not a
+            // propagated one, so the loop below drops the "projects" key
+            // instead of failing discovery as a whole.
+            let projects = bigquery_projects_discovery_result(provider.list_projects().await);
+            vec![("projects", projects)]
+        }
         _ => vec![],
     };
 
-    for (key, result) in discovery_pairs {
-        if result.error.is_none() {
-            resources_map.insert(
-                key.to_string(),
-                result.items, // items is already Vec<String>
-            );
-        }
-    }
+    let resources_map = build_resources_map(discovery_pairs);
 
     provider.close().await;
 
@@ -662,6 +667,51 @@ pub async fn discover_datasource_resources(
         resources: resources_map,
         message: "Connection successful and resources discovered".to_string(),
     })
+}
+
+/// Convert BigQuery's `list_projects()` result into the `DiscoveryResult`
+/// shape every other discovery call already returns natively. An `Err`
+/// (typically a service account missing `resourcemanager.projects.list`)
+/// becomes a `DiscoveryResult` carrying the error message with empty items —
+/// never a propagated `Result::Err` — so it can flow through the same
+/// drop-on-error handling in [`build_resources_map`] as every other
+/// discovery pair.
+#[cfg(feature = "ssr")]
+fn bigquery_projects_discovery_result(
+    result: kyomi_connect_protocol::Result<Vec<String>>,
+) -> kyomi_datasource_server::DiscoveryResult {
+    match result {
+        Ok(items) => kyomi_datasource_server::DiscoveryResult { items, error: None },
+        Err(e) => kyomi_datasource_server::DiscoveryResult {
+            items: vec![],
+            error: Some(e.to_string()),
+        },
+    }
+}
+
+/// Build the discovered-resources map from a set of `(key, DiscoveryResult)`
+/// pairs, dropping any pair whose discovery errored rather than surfacing
+/// that as an overall failure.
+///
+/// This is the mechanism that keeps `discover_datasource_resources` reporting
+/// `success: true` even when one discovery call (e.g. BigQuery's
+/// `list_projects()` for a service account without Resource Manager access)
+/// fails — the erroring key is simply absent from the returned map, and the
+/// caller falls back to manual entry (`BqProjectField`'s free-text input).
+#[cfg(feature = "ssr")]
+fn build_resources_map(
+    pairs: Vec<(&str, kyomi_datasource_server::DiscoveryResult)>,
+) -> std::collections::HashMap<String, Vec<String>> {
+    let mut resources_map = std::collections::HashMap::new();
+    for (key, result) in pairs {
+        if result.error.is_none() {
+            resources_map.insert(
+                key.to_string(),
+                result.items, // items is already Vec<String>
+            );
+        }
+    }
+    resources_map
 }
 
 // ---------------------------------------------------------------------------
@@ -992,6 +1042,77 @@ mod extract_refresh_warnings_tests {
             warnings.is_empty(),
             "a failed run must not surface warnings alongside its own failure reason"
         );
+    }
+}
+
+// ── BigQuery project discovery (KYO-405) ──────────────────────────────────
+
+#[cfg(all(test, feature = "ssr"))]
+mod bigquery_discovery_tests {
+    use super::{bigquery_projects_discovery_result, build_resources_map};
+
+    /// A successful `list_projects()` call becomes a `DiscoveryResult` with
+    /// the project ids as items and no error.
+    #[test]
+    fn ok_projects_become_a_discovery_result_with_no_error() {
+        let result: kyomi_connect_protocol::Result<Vec<String>> =
+            Ok(vec!["proj-a".to_string(), "proj-b".to_string()]);
+        let discovery = bigquery_projects_discovery_result(result);
+        assert_eq!(
+            discovery.items,
+            vec!["proj-a".to_string(), "proj-b".to_string()]
+        );
+        assert!(discovery.error.is_none());
+    }
+
+    /// A `list_projects()` failure (the common case: a service account
+    /// scoped to "BigQuery Job User" lacks `resourcemanager.projects.list`)
+    /// must be captured on the `DiscoveryResult`, not propagated as a
+    /// `Result::Err` out of `bigquery_projects_discovery_result` — that is
+    /// what lets the caller keep going instead of failing discovery outright.
+    #[test]
+    fn permission_denied_error_is_captured_not_propagated() {
+        let result: kyomi_connect_protocol::Result<Vec<String>> = Err(
+            kyomi_connect_protocol::Error::Provider(
+                "permission denied: resourcemanager.projects.list".to_string(),
+            ),
+        );
+        let discovery = bigquery_projects_discovery_result(result);
+        assert!(discovery.items.is_empty());
+        assert_eq!(
+            discovery.error.as_deref(),
+            Some("permission denied: resourcemanager.projects.list")
+        );
+    }
+
+    /// The exact regression this ticket fixes: a service account without
+    /// Resource Manager access must not turn the whole "Validate & Discover
+    /// Projects" call into a failure — `Next` still has to enable. That
+    /// depends on `build_resources_map` dropping the errored "projects" pair
+    /// entirely rather than inserting an empty vec (which would be
+    /// indistinguishable from a real empty project list) or aborting.
+    #[test]
+    fn errored_projects_pair_is_dropped_from_resources_map_not_fatal() {
+        let projects = bigquery_projects_discovery_result(Err(
+            kyomi_connect_protocol::Error::Provider("permission denied".to_string()),
+        ));
+        let map = build_resources_map(vec![("projects", projects)]);
+        assert!(
+            map.get("projects").is_none(),
+            "an errored discovery item must be omitted entirely, not surfaced as an empty vec"
+        );
+    }
+
+    /// A genuinely empty-but-successful project list (e.g. a fresh service
+    /// account with no projects yet) is a real result and must still appear
+    /// in the map — distinguishing it from the dropped-on-error case above is
+    /// exactly the property `BqProjectField`'s text-input fallback depends on
+    /// being safe either way.
+    #[test]
+    fn empty_but_successful_projects_list_is_present_in_resources_map() {
+        let projects = bigquery_projects_discovery_result(Ok(vec![]));
+        let map = build_resources_map(vec![("projects", projects)]);
+        assert_eq!(map.get("projects"), Some(&Vec::<String>::new()));
     }
 }
 
