@@ -13,6 +13,8 @@ const LABEL_FEEDBACK: &str = "69a2be3c-4d6d-40a4-91ee-f50308b14cc8";
 const LABEL_BUG: &str = "99a19b06-38c9-48c4-90d5-5b8697792566";
 const LABEL_FEATURE: &str = "9a552138-1d44-467d-9331-a4042603893b";
 const LABEL_IMPROVEMENT: &str = "08ba364f-b5d5-436c-ac96-0b4ac90efc9a";
+/// KYO-417: created for the BigQuery-access-request feedback type.
+const LABEL_ACCESS_REQUEST: &str = "f7dd3ab8-16e7-46bd-a9db-611373417acb";
 
 // ── Public types ────────────────────────────────────────────────────────
 
@@ -160,6 +162,7 @@ fn build_issue_title(feedback_type: &str, description: &str) -> String {
         "bug" => "\u{1f41b}",
         "feature" => "\u{1f4a1}",
         "question" => "\u{2753}",
+        "access_request" => "\u{1f511}", // key — distinguishes access requests at a glance
         _ => "\u{1f4dd}",
     };
 
@@ -259,6 +262,7 @@ fn label_ids_for_type(feedback_type: &str) -> Vec<String> {
         "bug" => LABEL_BUG,
         "feature" => LABEL_FEATURE,
         "question" => LABEL_IMPROVEMENT,
+        "access_request" => LABEL_ACCESS_REQUEST,
         _ => LABEL_IMPROVEMENT,
     };
 
@@ -270,9 +274,10 @@ fn label_ids_for_type(feedback_type: &str) -> Vec<String> {
 
 fn priority_for_type(feedback_type: &str) -> i32 {
     match feedback_type {
-        "bug" => 2,     // high
-        "feature" => 3, // medium
-        _ => 3,         // medium
+        "bug" => 2,            // high
+        "feature" => 3,        // medium
+        "access_request" => 2, // high — blocks the customer from connecting at all
+        _ => 3,                // medium
     }
 }
 
@@ -319,5 +324,33 @@ mod tests {
     #[test]
     fn priority_feature_is_medium() {
         assert_eq!(priority_for_type("feature"), 3);
+    }
+
+    // -- Access request (KYO-417) --------------------------------------
+
+    #[test]
+    fn build_title_access_request_carries_the_key_emoji() {
+        let title = build_issue_title("access_request", "Please allowlist jane@example.com");
+        assert!(
+            title.starts_with("[feedback] \u{1f511}"),
+            "access_request titles must be identifiable by their key emoji, got: {title}"
+        );
+    }
+
+    #[test]
+    fn label_ids_access_request() {
+        let labels = label_ids_for_type("access_request");
+        assert_eq!(labels.len(), 2);
+        assert!(labels.contains(&LABEL_FEEDBACK.to_string()));
+        assert!(labels.contains(&LABEL_ACCESS_REQUEST.to_string()));
+    }
+
+    #[test]
+    fn priority_access_request_is_high() {
+        assert_eq!(
+            priority_for_type("access_request"),
+            2,
+            "an access request blocks the customer from connecting at all"
+        );
     }
 }

@@ -34,7 +34,7 @@ const MAX_SCREENSHOT_BYTES: usize = 2 * 1024 * 1024;
 /// service so callers cannot accidentally skip it.
 #[derive(Debug, Clone)]
 pub struct FeedbackInput {
-    /// Feedback type — must be `"bug"`, `"feature"`, or `"question"`.
+    /// Feedback type — must be one of [`kyomi_types::FEEDBACK_TYPE_VALUES`].
     pub feedback_type: String,
     /// User-provided description (trimmed length must be >= 10).
     pub description: String,
@@ -64,12 +64,25 @@ fn is_test_account(email: &str) -> bool {
     matches!(email, "e2e-test@kyomi.dev" | "e2e-admin@kyomi.dev")
 }
 
+/// Whether `feedback_type` is one of the server's accepted values.
+///
+/// Backed by the same [`kyomi_types::FEEDBACK_TYPE_VALUES`] the UI's Type
+/// selector draws from, so the two lists cannot drift independently. This
+/// check is intentionally context-free: `"access_request"` (KYO-417) is
+/// accepted unconditionally, even though the UI only ever offers it from
+/// inside the BigQuery access-request context — that gating is a UX
+/// nicety, not something the server enforces (see
+/// `kyomi_ui::components::feedback_modal`).
+fn is_valid_feedback_type(feedback_type: &str) -> bool {
+    kyomi_types::FEEDBACK_TYPE_VALUES.contains(&feedback_type)
+}
+
 /// Submit feedback end-to-end: validate, rate-limit, persist, and fire the
 /// Linear + Slack + email notifications in a background task.
 ///
 /// ### Behaviour
 /// - Disabled in self-hosted or personal mode (returns `NotFound`).
-/// - Rejects `feedback_type` not in `{bug, feature, question}`.
+/// - Rejects `feedback_type` not in [`kyomi_types::FEEDBACK_TYPE_VALUES`].
 /// - Rejects descriptions shorter than 10 chars (after trim).
 /// - Rate-limited to 5 submissions per user per hour.
 /// - Generates a `fb-{uuid}` identifier and inserts into the `feedback` table.
@@ -91,10 +104,11 @@ pub async fn submit_feedback(
     }
 
     // Validate feedback type
-    if !["bug", "feature", "question"].contains(&input.feedback_type.as_str()) {
-        return Err(kyomi_core::Error::BadRequest(
-            "Invalid feedback type. Must be 'bug', 'feature', or 'question'.".into(),
-        ));
+    if !is_valid_feedback_type(&input.feedback_type) {
+        return Err(kyomi_core::Error::BadRequest(format!(
+            "Invalid feedback type. Must be one of: {}.",
+            kyomi_types::FEEDBACK_TYPE_VALUES.join(", ")
+        )));
     }
 
     // Validate description length
@@ -1139,6 +1153,25 @@ mod tests {
     //! inputs.
 
     use super::*;
+
+    // -- Feedback type validation (KYO-417) ----------------------------------
+
+    #[test]
+    fn access_request_is_a_valid_feedback_type() {
+        assert!(is_valid_feedback_type("access_request"));
+    }
+
+    #[test]
+    fn original_three_types_are_still_valid() {
+        assert!(is_valid_feedback_type("bug"));
+        assert!(is_valid_feedback_type("feature"));
+        assert!(is_valid_feedback_type("question"));
+    }
+
+    #[test]
+    fn unknown_feedback_type_is_rejected() {
+        assert!(!is_valid_feedback_type("not_a_real_type"));
+    }
 
     // -- Slack path (max_chars = 1497, old cut point byte offset 1497) ------
 

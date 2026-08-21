@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 pub mod datasource_contracts;
+pub mod feedback;
 pub mod permission;
 pub mod sync;
 pub mod text;
@@ -9,6 +10,7 @@ pub use datasource_contracts::{
     DatasourceOAuthDisconnectResult, DatasourceOAuthStatus, GeneratedSshKey,
     GoogleOAuthDisconnectResult, GoogleOAuthProjectsResult, GoogleOAuthStatus, GoogleProject,
 };
+pub use feedback::FEEDBACK_TYPE_VALUES;
 pub use permission::Permission;
 pub use text::truncate_preview;
 pub use websocket::{MessageType, WebSocketMessage};
