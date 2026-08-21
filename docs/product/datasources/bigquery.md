@@ -6,7 +6,7 @@ Kyomi supports three authentication methods for BigQuery. Choose the one that be
 
 | Method | Best For | Setup Complexity |
 |--------|----------|------------------|
-| **Kyomi OAuth** | Individuals, small teams | Easy - just click "Connect BigQuery" |
+| **Kyomi OAuth** | Individuals, small teams | Easy once your Google account is authorized by Kyomi |
 | **Service Account** | Shared team access, automation | Medium - create key in GCP Console |
 | **Enterprise OAuth** | Organizations with Google Workspace | Advanced - configure OAuth consent screen |
 
@@ -14,7 +14,13 @@ Kyomi supports three authentication methods for BigQuery. Choose the one that be
 
 ## Method 1: Kyomi OAuth
 
-The simplest way to connect - sign in with your Google account and authorize Kyomi to access BigQuery.
+The simplest way to connect once you're authorized - sign in with your Google account and authorize Kyomi to access BigQuery.
+
+### Prerequisites
+
+- Your Google account must be manually authorized by Kyomi staff before this method will work. This is a one-time step per account; Kyomi has no self-serve way to grant it and no way to check the list from within the app.
+- Email **support@kyomi.ai** with the Google account email you'll use to connect, and wait for confirmation before starting the steps below.
+- If you haven't been authorized yet, you'll be stopped on Google's own consent screen rather than seeing an error from Kyomi - see the Troubleshooting section below.
 
 ### Setup Steps
 
@@ -119,6 +125,13 @@ Configure your own OAuth client for branded consent screens and per-user audit t
 ---
 
 ## Troubleshooting
+
+### Google blocks sign-in with "Access blocked" or "hasn't given you access" during Kyomi OAuth
+
+If your Google account hasn't been authorized on Kyomi's OAuth app yet, Google stops you on its own consent screen - before Kyomi is ever involved - typically with an "Access blocked" or "This app hasn't been verified... the developer hasn't given you access" message. This is not a Kyomi error and Kyomi has no way to detect it happening.
+
+- Email **support@kyomi.ai** with the Google account email you're using and ask to be authorized for **Kyomi OAuth**, then retry.
+- To connect right away without waiting, use **Service Account** (Method 2) instead - it doesn't require any Kyomi-side authorization.
 
 ### "Access Denied" or "Permission Denied" errors
 

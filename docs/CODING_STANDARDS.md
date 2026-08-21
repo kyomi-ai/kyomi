@@ -500,6 +500,51 @@ use_oauth_status_refetch(
 
 This pattern was independently flagged in KYO-13 (BigQuery) and KYO-17 (Databricks) reviews, and recurred a third time in Synapse (KYO-197) because each fix copy-pasted the Effect instead of sharing it. That third recurrence is what motivated extracting `use_oauth_status_refetch`.
 
+### A gating predicate read at more than one site must be one `Signal`, not N copies
+
+When a step-gate, enable/disable condition, or any other predicate is read from
+several places — a footer button, a tab pill's `class`, its `disabled`, its
+`on:click` guard — copy-pasting the expression means the next person to add an
+exception updates one site and silently leaves the rest wrong. The UI then
+half-works: one route through the flow succeeds and a visually identical one
+dead-ends with no way to satisfy it.
+
+**Rule:** The moment a predicate has a second reader, extract it as a
+`Signal<bool>` (or `Memo`) next to the state it derives from, and have every
+site read that signal. New exceptions are then folded into the signal once, and
+reach all readers by construction. Never OR an exception into an individual call
+site.
+
+```rust
+// WRONG — same predicate re-derived at each site; an exception added to one
+// leaves the other three stale
+disabled=move || !test_result.get().map(|r| r.success).unwrap_or(false)
+// ...and, elsewhere, the footer only:
+let can_next = (bq_enterprise_oauth_precreate
+    || test_result.get().map(|r| r.success).unwrap_or(false))
+    && !name.get().is_empty();
+
+// RIGHT — one signal, exception folded in once, every site reads it
+let connection_step_satisfied: Signal<bool> = Signal::derive(move || {
+    bq_enterprise_oauth_precreate || test_result.get().map(|r| r.success).unwrap_or(false)
+});
+
+let can_next = connection_step_satisfied.get() && !name.get().is_empty();
+// ...and the tab pill's class / disabled / on:click all read the same signal.
+```
+
+Flagged in the KYO-404 review (2026-08-21): `bq_enterprise_oauth_precreate` was
+added to the footer's `can_next` but not to the three structurally identical
+`test_result.get().map(|r| r.success)` reads in the create-mode Catalog pill, so
+BigQuery + `enterprise_oauth` users who navigated back to Connection could not
+return via the tab pill — it rendered permanently disabled and its `on:click`
+silently no-oped. The fix extracted `connection_step_satisfied`
+(`crates/kyomi-ui/src/pages/settings/datasources.rs:2727`) and pointed all four
+sites at it. A guard test
+(`catalog_tab_pill_shares_connection_step_satisfied_with_can_next`) now asserts
+the tab bar contains no raw `test_result.get()` read, so a regression fails the
+build rather than waiting for another review.
+
 ## Email Templates
 
 *Standards for HTML email templates (alert.rs, email_service.rs, feedback_service.rs, analytics_notifications.rs).*
