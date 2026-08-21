@@ -10,8 +10,8 @@ use leptos::prelude::*;
 use phosphor_leptos::{Icon, IconWeight};
 use crate::components::{
     Alert, AlertDescription, AlertTitle, AlertVariant, Badge, BadgeVariant, Button, ButtonLink,
-    ButtonSize, ButtonVariant, Card, ConfirmDialog, EmptyState, Modal, ModalSize, Skeleton,
-    Spinner, Switch, ToggleButton,
+    ButtonSize, ButtonVariant, Card, Checkbox, ConfirmDialog, EmptyState, FeedbackAccessRequestHandle,
+    Modal, ModalSize, Skeleton, Spinner, Switch, ToggleButton,
 };
 use crate::components::toast::toast_error;
 #[cfg(target_arch = "wasm32")]
@@ -150,6 +150,65 @@ fn oauth_url_for_datasource(ds_type: &str, slug: &str, auth_mode: Option<&str>) 
         }
         _ => String::new(),
     }
+}
+
+/// Rewrites Google's raw OAuth denial error into a message naming the real
+/// cause, for the BigQuery Kyomi-OAuth connect flow (KYO-408).
+///
+/// Google's authorization server returns the standard OAuth2 `access_denied`
+/// error code (RFC 6749 §4.1.2.1) both when a user deliberately cancels
+/// consent and when Kyomi's shared OAuth app — permanently in "Testing"
+/// publishing status — rejects a Google account that has not been added to
+/// the test-user allowlist. Google collapses both cases to the same code
+/// and gives Kyomi no server-side way to tell them apart. Because Kyomi's
+/// app never leaves Testing status, an `access_denied` reaching this
+/// function is overwhelmingly the allowlist rejection in practice rather
+/// than a deliberate cancel, so that is the message shown. Every other
+/// error code (network failure, `invalid_client`, etc.) is passed through
+/// unchanged — this message would misdescribe those.
+///
+/// Only applies to `OAuthMessage::GoogleError` (the shared kyomi_oauth
+/// flow). `BigqueryEnterpriseError` is deliberately excluded — enterprise
+/// OAuth uses the customer's own Google Cloud OAuth app, so there is no
+/// Kyomi allowlist to be rejected from.
+///
+/// `cfg`-gated to `wasm32`-or-`test`: its only production callers live
+/// inside `#[cfg(target_arch = "wasm32")]` OAuth `postMessage` listener
+/// blocks below (the popup-listener setup is browser-only), so a native,
+/// non-test `--features ssr` build has no reachable caller at all — this
+/// mirrors the established pattern elsewhere in this crate (e.g.
+/// `dashboard_editor.rs`, `chartml_extension.rs`) for a wasm32-only helper
+/// that still needs direct, host-side unit test coverage.
+#[cfg(any(target_arch = "wasm32", test))]
+fn translate_google_oauth_error(raw: String) -> String {
+    if raw.contains("access_denied") {
+        "This Google account isn't authorized for Kyomi's OAuth app yet — \
+         request access before connecting."
+            .to_string()
+    } else {
+        raw
+    }
+}
+
+/// The BigQuery kyomi_oauth Save/Create gate (KYO-408) — a pure predicate
+/// so it's directly unit-testable, unlike the `Signal::derive` closure in
+/// `DatasourceModal` that calls it. See `bq_kyomi_oauth_access_ok`'s doc
+/// comment at its call site for the full design rationale; in short: this
+/// is a UX nudge, not a security control, and is a no-op (always
+/// satisfied) for every provider/mode except BigQuery's kyomi_oauth.
+///
+/// Returns `true` (gate satisfied, Save/Create enabled) when any of:
+/// - the datasource/mode isn't BigQuery kyomi_oauth at all
+/// - `oauth_connected` — a successful OAuth handshake is itself proof the
+///   account was already allowlisted, so there's nothing left to confirm
+/// - `access_confirmed` — the user ticked the checkbox
+fn bq_kyomi_oauth_access_gate_satisfied(
+    ds_type: &str,
+    bq_auth_mode: &str,
+    oauth_connected: bool,
+    access_confirmed: bool,
+) -> bool {
+    !(ds_type == "bigquery" && bq_auth_mode == "kyomi_oauth") || oauth_connected || access_confirmed
 }
 
 /// Builds `<Select>` options for an Authentication Mode selector from
@@ -378,8 +437,12 @@ fn DatasourcesContent(
                     toast_success("Datasource connected successfully");
                     query_cache_for_oauth.invalidate("datasources");
                 }
-                OAuthMessage::GoogleError { error }
-                | OAuthMessage::SnowflakeError { error }
+                OAuthMessage::GoogleError { error } => {
+                    set_oauth_connecting.try_set(None);
+                    leptos::logging::warn!("OAuth error: {error}");
+                    toast_error(translate_google_oauth_error(error));
+                }
+                OAuthMessage::SnowflakeError { error }
                 | OAuthMessage::DatabricksError { error }
                 | OAuthMessage::MicrosoftError { error }
                 | OAuthMessage::MicrosoftEnterpriseError { error }
@@ -1068,6 +1131,15 @@ pub fn DatasourceModal(
     let (cfg_oauth_client_secret, set_cfg_oauth_client_secret) = signal(String::new());
     let (cfg_service_account_json, set_cfg_service_account_json) = signal(String::new());
     let (service_account_email, set_service_account_email) = signal(String::new());
+    // KYO-408 — user has ticked "I have requested access and had it
+    // confirmed" for the kyomi_oauth mode's Google-account allowlist. Not
+    // persisted (see `BigQueryAuthModeSection`'s kyomi_oauth `<Show>` block
+    // for the reasoning): resets to `false` every time the modal opens,
+    // whether that's `reset_form` in create mode or the edit-mode settings
+    // load below. Deliberately separate from `bq_auth_mode` /
+    // `modal_oauth_connected` rather than folded into either — this is
+    // purely the user's self-report, not derived connection state.
+    let (bq_access_confirmed, set_bq_access_confirmed) = signal(false);
 
     // Snowflake-specific
     let (sf_auth_mode, set_sf_auth_mode) = signal("password".to_string());
@@ -1226,6 +1298,7 @@ pub fn DatasourceModal(
         set_cfg_oauth_client_secret.set(String::new());
         set_cfg_service_account_json.set(String::new());
         set_service_account_email.set(String::new());
+        set_bq_access_confirmed.set(false);
         set_sf_auth_mode.set("password".to_string());
         set_db_auth_mode.set("token".to_string());
         set_synapse_auth_mode.set("sql".to_string());
@@ -1310,6 +1383,9 @@ pub fn DatasourceModal(
                 set_error_msg.set(None);
                 set_discovery_status.set("idle".to_string());
                 set_catalog_scope_touched.set(false);
+                // KYO-408 — fresh per modal-open, same as create mode's
+                // reset_form(); see bq_access_confirmed's own doc comment.
+                set_bq_access_confirmed.set(false);
 
                 leptos::task::spawn_local(async move {
                     match get_datasource_settings(ds_id).await {
@@ -2630,8 +2706,11 @@ pub fn DatasourceModal(
                     // populate immediately after OAuth completes.
                     do_test_and_discover();
                 }
-                OAuthMessage::GoogleError { error }
-                | OAuthMessage::SnowflakeError { error }
+                OAuthMessage::GoogleError { error } => {
+                    set_modal_oauth_connecting.try_set(false);
+                    toast_error(translate_google_oauth_error(error));
+                }
+                OAuthMessage::SnowflakeError { error }
                 | OAuthMessage::DatabricksError { error }
                 | OAuthMessage::MicrosoftError { error }
                 | OAuthMessage::MicrosoftEnterpriseError { error }
@@ -2730,6 +2809,41 @@ pub fn DatasourceModal(
         bq_enterprise_oauth_precreate || test_result.get().map(|r| r.success).unwrap_or(false)
     });
 
+    // ── BigQuery kyomi_oauth access-confirmation gate (KYO-408) ─────────────
+    // Kyomi's shared Google OAuth app only accepts Google accounts a Kyomi
+    // admin has added as test users in the Cloud Console consent screen —
+    // Kyomi has no programmatic access to that list, so Google is the only
+    // enforcement layer. This gate is NOT a security control: there is
+    // nothing here for Kyomi to protect, and no dishonest tick bypasses
+    // anything Google wouldn't already stop. It exists purely so Save/
+    // Create pauses long enough for the user to request access before
+    // burning a doomed OAuth round-trip — see the notice + checkbox this
+    // reads, in `BigQueryAuthModeSection`'s kyomi_oauth `<Show>` block.
+    //
+    // Deliberately kept separate from `connection_step_satisfied` above:
+    // that signal answers "is the Connection tab done" and gates
+    // Next/the Catalog tab, matching the KYO-404 create-mode flow. This
+    // gate answers a narrower question — "has the user acknowledged the
+    // OAuth allowlist" — and, matching the React reference
+    // (`AuthModeSelector.jsx` / `DatasourceModal.jsx`), only ever gates
+    // the Save/Create action itself, never tab navigation.
+    //
+    // Auto-satisfied once `modal_oauth_connected` is true: a successful
+    // OAuth handshake IS proof the account was already allowlisted (Google
+    // would have refused it otherwise), so there is nothing left to
+    // confirm — this is also what keeps a returning, already-connected
+    // user from being nagged by the checkbox on every visit, without
+    // resorting to a client-side "remember forever" flag (see
+    // `bq_access_confirmed`'s own doc comment for why no localStorage).
+    let bq_kyomi_oauth_access_ok: Signal<bool> = Signal::derive(move || {
+        bq_kyomi_oauth_access_gate_satisfied(
+            &ds_type.get(),
+            &bq_auth_mode.get(),
+            modal_oauth_connected.get(),
+            bq_access_confirmed.get(),
+        )
+    });
+
     // ── Datasource-type registry data (KYO-274) ─────────────────────────────
     // Which auth modes the four Authentication Mode selectors below offer —
     // and their labels/descriptions — is registry-owned
@@ -2809,7 +2923,13 @@ pub fn DatasourceModal(
                             </Button>
                             <Show when=move || !is_sample.get() && !is_connect.get()>
                                 <Button
-                                    disabled=is_saving
+                                    // KYO-408: `bq_kyomi_oauth_access_ok` folds in the
+                                    // Save gate — a no-op for every non-BigQuery
+                                    // provider and every BigQuery mode other than
+                                    // kyomi_oauth (see its own doc comment above).
+                                    disabled=Signal::derive(move || {
+                                        is_saving || !bq_kyomi_oauth_access_ok.get()
+                                    })
                                     on:click=move |_| do_save()
                                 >
                                     {move || {
@@ -2911,7 +3031,13 @@ pub fn DatasourceModal(
                             } else {
                                 view! {
                                     <Button
-                                        disabled=is_saving
+                                        // KYO-408: does not gate "Next" above, only the
+                                        // final Create — matches the React reference
+                                        // (`DatasourceModal.jsx`'s requiresBetaAccess
+                                        // check lived on Create/Save only).
+                                        disabled=Signal::derive(move || {
+                                            is_saving || !bq_kyomi_oauth_access_ok.get()
+                                        })
                                         on:click=move |_| do_save()
                                     >
                                         {move || if save_action.pending().get() { "Creating..." } else { "Create" }}
@@ -3459,6 +3585,8 @@ pub fn DatasourceModal(
                                             test_result=test_result
                                             test_pending=bq_test_pending
                                             on_validate=on_bq_validate
+                                            bq_access_confirmed=bq_access_confirmed
+                                            set_bq_access_confirmed=set_bq_access_confirmed
                                         />
                                     </Show>
 
@@ -4459,6 +4587,13 @@ fn BigQueryAuthModeSection(
     /// (KYO-405). A `Callback` rather than the raw closure so this component
     /// doesn't need the parent's private `TestDiscoverInput` type.
     on_validate: Callback<()>,
+    /// KYO-408 — whether the user has ticked "I have requested access and
+    /// had it confirmed" for the kyomi_oauth Google-account allowlist.
+    /// Owned by the parent `DatasourceModal` (not local state) because the
+    /// footer's Save/Create gate (`bq_kyomi_oauth_access_ok`) reads it too.
+    bq_access_confirmed: ReadSignal<bool>,
+    /// Setter for the checkbox above.
+    set_bq_access_confirmed: WriteSignal<bool>,
 ) -> impl IntoView {
     // Parse service account email from JSON
     let handle_service_account_json = move |json_text: String| {
@@ -4476,6 +4611,15 @@ fn BigQueryAuthModeSection(
 
     // ── Kyomi OAuth: connect URL is fixed (no slug).
     let kyomi_oauth_url = Signal::stored("/api/v1/auth/google-oauth/connect".to_string());
+
+    // KYO-408 — opens the Layout's FeedbackModal, preselected on "Request
+    // BigQuery Access" (KYO-417), from the "Request access" link in the
+    // kyomi_oauth notice below. Provided by `Layout`, which every authed
+    // page (including this settings page) is guaranteed to mount under —
+    // the same guarantee `expect_context::<QueryCache>()` already relies
+    // on elsewhere in this file — so `expect_context` here is consistent
+    // with that established convention rather than an unchecked new one.
+    let feedback_access_request = expect_context::<FeedbackAccessRequestHandle>();
 
     // ── Enterprise OAuth: connect URL is slug-scoped.
     let enterprise_oauth_url = Signal::derive(move || {
@@ -4567,6 +4711,53 @@ fn BigQueryAuthModeSection(
                     <p class="text-sm text-muted-foreground">
                         "Connect your Google account to access BigQuery projects."
                     </p>
+                    // KYO-408 — Kyomi has no programmatic access to the Google
+                    // Cloud Console's test-user allowlist for its shared OAuth
+                    // app; Google is the only thing that can let a given
+                    // account through or refuse it. This notice + checkbox is
+                    // NOT a security gate (there's nothing here for Kyomi to
+                    // protect, and no dishonest tick bypasses anything Google
+                    // wouldn't already stop) — it exists purely so the user
+                    // requests access *before* burning a doomed OAuth
+                    // round-trip. Hidden once connected: a successful OAuth
+                    // handshake is itself proof the account was already
+                    // authorized, so there's nothing left to ask for
+                    // (`bq_kyomi_oauth_access_ok`'s doc comment above, in
+                    // `DatasourceModal`, has the corresponding Save/Create
+                    // gate logic).
+                    <Show when=move || !oauth_connected.get()>
+                        <Alert variant=AlertVariant::Warning>
+                            <AlertTitle>"Google account authorization required"</AlertTitle>
+                            <AlertDescription>
+                                <p class="mb-2">
+                                    "Kyomi's shared Google OAuth app only works for Google \
+                                     accounts a Kyomi admin has explicitly authorized as \
+                                     testers — everyone else is refused by Google itself, \
+                                     not by Kyomi. "
+                                    <button
+                                        type="button"
+                                        class="text-primary hover:underline font-medium"
+                                        on:click=move |_| { feedback_access_request.0.try_run(()); }
+                                    >
+                                        "Request access"
+                                    </button>
+                                    " before connecting, so you're not waiting on a sign-in \
+                                     that's bound to fail."
+                                </p>
+                                <label class="flex items-center gap-2 cursor-pointer">
+                                    <Checkbox
+                                        checked=Signal::derive(move || bq_access_confirmed.get())
+                                        on_change=Callback::new(move |v: bool| {
+                                            set_bq_access_confirmed.set(v)
+                                        })
+                                    />
+                                    <span class="text-sm">
+                                        "I have requested access and had it confirmed"
+                                    </span>
+                                </label>
+                            </AlertDescription>
+                        </Alert>
+                    </Show>
                     // 4-state OAuth status panel — shown in create mode too:
                     // `kyomi_oauth_url` (/api/v1/auth/google-oauth/connect) is
                     // not slug-scoped, so it connects identically before or
@@ -9054,6 +9245,270 @@ mod tests {
         assert!(
             footer.contains("connection_step_satisfied.get()"),
             "can_next must also read the shared connection_step_satisfied signal"
+        );
+    }
+
+    // ── KYO-408: BigQuery kyomi_oauth access-request notice + gate ─────────
+    //
+    // Kyomi's shared Google OAuth app only accepts Google accounts a Kyomi
+    // admin has manually added as testers in the Cloud Console — Kyomi has
+    // no programmatic access to that list, so Google is the only
+    // enforcement layer. The notice/checkbox added here are NOT a security
+    // control; they exist purely to make the user request access before
+    // burning a doomed OAuth round-trip. Three things are covered below:
+    // the notice renders only for kyomi_oauth, the gate itself (a pure
+    // predicate, `bq_kyomi_oauth_access_gate_satisfied`) is exercised
+    // directly, and its wiring into the Save/Create buttons (but
+    // deliberately NOT the Next button) is pinned by source-text checks.
+
+    use super::{bq_kyomi_oauth_access_gate_satisfied, translate_google_oauth_error};
+
+    /// The KYO-408 notice (Alert + "Request access" link + confirmation
+    /// checkbox) must render inside the kyomi_oauth `<Show>` block and must
+    /// not leak into enterprise_oauth or service_account — neither of
+    /// those modes has a Kyomi-side Google-account allowlist to request
+    /// access to (enterprise_oauth uses the customer's own OAuth app;
+    /// service_account has no OAuth at all).
+    #[test]
+    fn kyomi_oauth_notice_renders_only_for_kyomi_oauth_mode() {
+        let kyomi_block = extract_between(
+            SRC,
+            "<Show when=move || bq_auth_mode.get() == \"kyomi_oauth\">",
+            "<Show when=move || bq_auth_mode.get() == \"enterprise_oauth\">",
+        );
+        assert!(
+            kyomi_block.contains("Google account authorization required"),
+            "the kyomi_oauth block must render the KYO-408 access-authorization notice"
+        );
+        assert!(
+            kyomi_block.contains("\"Request access\""),
+            "the kyomi_oauth notice must include a \"Request access\" link"
+        );
+        assert!(
+            kyomi_block.contains("feedback_access_request.0.try_run(())"),
+            "the \"Request access\" link must open the feedback modal via the \
+             FeedbackAccessRequestHandle context (KYO-417's access_request_context), not \
+             navigate anywhere or no-op"
+        );
+        assert!(
+            kyomi_block.contains("I have requested access and had it confirmed"),
+            "the kyomi_oauth block must render the KYO-408 confirmation checkbox, with copy \
+             conveying access was already requested AND confirmed — not merely \"I have \
+             access\", which is what the React reference used and which Jason explicitly \
+             asked to be clearer than"
+        );
+
+        let enterprise_block = extract_between(
+            SRC,
+            "<Show when=move || bq_auth_mode.get() == \"enterprise_oauth\">",
+            "<Show when=move || bq_auth_mode.get() == \"service_account\">",
+        );
+        assert!(
+            !enterprise_block.contains("Google account authorization required"),
+            "the KYO-408 notice must not leak into enterprise_oauth — that mode uses the \
+             customer's own Google Cloud OAuth app, which has no Kyomi allowlist to request \
+             access to"
+        );
+        assert!(
+            !enterprise_block.contains("I have requested access and had it confirmed"),
+            "the KYO-408 confirmation checkbox must not leak into enterprise_oauth"
+        );
+
+        let service_account_block = extract_between(
+            SRC,
+            "<Show when=move || bq_auth_mode.get() == \"service_account\">",
+            "fn SnowflakeAuthModeSection(",
+        );
+        assert!(
+            !service_account_block.contains("Google account authorization required"),
+            "the KYO-408 notice must not leak into service_account — that mode has no OAuth \
+             flow at all, so an OAuth-allowlist notice would be nonsensical there"
+        );
+        assert!(
+            !service_account_block.contains("I have requested access and had it confirmed"),
+            "the KYO-408 confirmation checkbox must not leak into service_account"
+        );
+    }
+
+    /// `bq_kyomi_oauth_access_gate_satisfied` — the pure predicate behind
+    /// the KYO-408 Save/Create gate — exercised directly rather than via
+    /// the view tree. Covers: blocked when unchecked and unconnected;
+    /// released by ticking the checkbox; released by an already-successful
+    /// OAuth connection even with the checkbox unchecked (so a returning,
+    /// already-authorized user is never nagged); and a no-op (always
+    /// satisfied) for every other datasource type / BigQuery auth mode.
+    #[test]
+    fn bq_kyomi_oauth_access_gate_blocks_unchecked_and_releases_when_checked() {
+        // Blocked: BigQuery kyomi_oauth, not connected, checkbox unchecked.
+        assert!(
+            !bq_kyomi_oauth_access_gate_satisfied("bigquery", "kyomi_oauth", false, false),
+            "the gate must block Save/Create for BigQuery kyomi_oauth when neither \
+             connected nor confirmed"
+        );
+
+        // Released by the checkbox alone.
+        assert!(
+            bq_kyomi_oauth_access_gate_satisfied("bigquery", "kyomi_oauth", false, true),
+            "ticking the confirmation checkbox must release the gate even without a live \
+             OAuth connection"
+        );
+
+        // Released by a real OAuth connection alone — the whole point of
+        // not nagging a user who already has proven access.
+        assert!(
+            bq_kyomi_oauth_access_gate_satisfied("bigquery", "kyomi_oauth", true, false),
+            "a successful OAuth connection must release the gate on its own — it is itself \
+             proof the account was already allowlisted, so an unchecked checkbox must not \
+             re-block Save/Create"
+        );
+
+        // Unaffected: BigQuery service_account and enterprise_oauth.
+        assert!(
+            bq_kyomi_oauth_access_gate_satisfied("bigquery", "service_account", false, false),
+            "service_account has no Kyomi Google-account allowlist — the gate must never \
+             block it, regardless of connected/confirmed"
+        );
+        assert!(
+            bq_kyomi_oauth_access_gate_satisfied("bigquery", "enterprise_oauth", false, false),
+            "enterprise_oauth uses the customer's own OAuth app, not Kyomi's — the gate must \
+             never block it"
+        );
+
+        // Unaffected: a non-BigQuery provider, even if (hypothetically) its
+        // auth mode string were literally "kyomi_oauth".
+        assert!(
+            bq_kyomi_oauth_access_gate_satisfied("snowflake", "kyomi_oauth", false, false),
+            "the gate is BigQuery-specific — ds_type must be checked, not auth_mode alone"
+        );
+    }
+
+    /// The gate must be wired into the edit-mode Save button and the
+    /// create-mode Catalog-tab Create button, but deliberately NOT into
+    /// the create-mode Connection-tab Next button — matching the React
+    /// reference (`DatasourceModal.jsx`), whose `requiresBetaAccess` check
+    /// lived only on the Create/Save actions. By the time a create-mode
+    /// user can even reach the Catalog tab for BigQuery kyomi_oauth, a
+    /// successful OAuth connection has already set `test_result` (KYO-404)
+    /// — so gating Next too would be redundant, and gating Next instead of
+    /// Create would let the user pass the notice, uncheck the box, and
+    /// still complete the create.
+    #[test]
+    fn bq_kyomi_oauth_access_gate_wired_into_save_and_create_not_next() {
+        // Bounded to just the `disabled=Signal::derive(...)` body — NOT the
+        // explanatory comment directly above it, which also names
+        // `bq_kyomi_oauth_access_ok` and would otherwise make this
+        // assertion pass even if the real read were deleted from the
+        // expression itself.
+        let save_button = extract_between(
+            SRC,
+            "disabled=Signal::derive(move || {",
+            "on:click=move |_| do_save()",
+        );
+        assert!(
+            save_button.contains("bq_kyomi_oauth_access_ok"),
+            "the edit-mode Save button's disabled expression must read \
+             bq_kyomi_oauth_access_ok"
+        );
+
+        let next_button = extract_between(
+            SRC,
+            "if is_connection_tab {",
+            "\"Next\"",
+        );
+        assert!(
+            !next_button.contains("bq_kyomi_oauth_access_ok"),
+            "the create-mode Next button must NOT read bq_kyomi_oauth_access_ok — the KYO-408 \
+             gate only ever blocks Save/Create, matching the React reference and avoiding a \
+             redundant second gate (BigQuery kyomi_oauth's Next is already gated by \
+             connection_step_satisfied's test_result requirement, which cannot be true \
+             without a successful — therefore already-allowlisted — OAuth connection)"
+        );
+
+        // Bounded to the Create button's own opening-tag attributes: starts
+        // at this button's own KYO-408 comment (unique — the Save button's
+        // parallel comment reads differently) and ends at the button's own
+        // children text, just before `>` closes the opening tag — so a
+        // later, unrelated bq_kyomi_oauth_access_ok read elsewhere can't
+        // make this pass vacuously.
+        let create_button = extract_between(
+            SRC,
+            "// KYO-408: does not gate \"Next\" above, only the",
+            "\"Creating...\"",
+        );
+        assert!(
+            create_button.contains("bq_kyomi_oauth_access_ok"),
+            "the create-mode Catalog-tab Create button's disabled expression must read \
+             bq_kyomi_oauth_access_ok"
+        );
+    }
+
+    // ── KYO-408: Google OAuth denial error translation ──────────────────
+
+    #[test]
+    fn translate_google_oauth_error_rewrites_access_denied() {
+        let translated = translate_google_oauth_error(
+            "Google OAuth error: access_denied".to_string(),
+        );
+        assert_eq!(
+            translated,
+            "This Google account isn't authorized for Kyomi's OAuth app yet — \
+             request access before connecting."
+        );
+    }
+
+    #[test]
+    fn translate_google_oauth_error_passes_other_errors_through_unchanged() {
+        let raw = "Google OAuth error: invalid_client".to_string();
+        assert_eq!(
+            translate_google_oauth_error(raw.clone()),
+            raw,
+            "any error code other than access_denied must be passed through verbatim — \
+             translating it to the allowlist message would misdescribe an unrelated failure \
+             (e.g. network error, invalid_client, server misconfiguration)"
+        );
+    }
+
+    /// Both OAuth `postMessage` listeners (list-level in `DatasourcesContent`
+    /// and modal-level in `DatasourceModal`) must translate `GoogleError`
+    /// specifically, and must NOT apply that translation to the other
+    /// providers' error arms — `translate_google_oauth_error` assumes an
+    /// OAuth2 `access_denied` code from Google's shared-app allowlist
+    /// rejection specifically; applying it to a Snowflake/Databricks/
+    /// Microsoft/BigQuery-enterprise error would misdescribe those.
+    #[test]
+    fn google_error_translation_is_not_applied_to_other_providers_error_arms() {
+        let list_level = extract_between(
+            SRC,
+            "OAuthMessage::GoogleError { error } => {",
+            "OAuthMessage::SnowflakeError { error }",
+        );
+        assert!(
+            list_level.contains("translate_google_oauth_error(error)"),
+            "the list-level listener's GoogleError arm must call \
+             translate_google_oauth_error"
+        );
+
+        let list_level_others = extract_between(
+            SRC,
+            "OAuthMessage::SnowflakeError { error }\n                | OAuthMessage::DatabricksError { error }\n                \
+             | OAuthMessage::MicrosoftError { error }\n                | OAuthMessage::MicrosoftEnterpriseError { error }\n                \
+             | OAuthMessage::BigqueryEnterpriseError { error } => {",
+            "toast_error(error);\n                }",
+        );
+        assert!(
+            !list_level_others.contains("translate_google_oauth_error"),
+            "the list-level listener's non-Google error arm must pass `error` straight to \
+             toast_error, not through translate_google_oauth_error"
+        );
+
+        let modal_level = extract_between(
+            SRC,
+            "OAuthMessage::GoogleError { error } => {\n                    set_modal_oauth_connecting",
+            "OAuthMessage::SnowflakeError { error }",
+        );
+        assert!(
+            modal_level.contains("translate_google_oauth_error(error)"),
+            "the modal-level listener's GoogleError arm must call translate_google_oauth_error"
         );
     }
 }

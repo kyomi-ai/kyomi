@@ -57,6 +57,39 @@ mod tier_badge_variant_tests {
     }
 }
 
+/// Context handle letting page-scoped code open the Layout's single
+/// `FeedbackModal` instance with the "Request BigQuery Access" option
+/// preselected (KYO-408, building on KYO-417's `access_request_context`
+/// prop).
+///
+/// `FeedbackModal` is rendered once, here in `Layout`, driven by the
+/// Layout-scoped `feedback_open`/`feedback_access_request_context` signals
+/// (see the "Send Feedback" nav item below for the sibling normal-entry
+/// path). A "Request access" link belongs on the BigQuery datasource
+/// modal instead — page-scoped, and mounted only while that modal is
+/// open — so opening the shared modal from there has to cross the
+/// Layout/page reactive-scope boundary. `provide_context` is the
+/// established way this file already crosses that boundary (see
+/// `set_user_ctx_version` / `user_ctx` / `sync_store` above), so this
+/// follows the same shape: `Layout` builds a `Callback` that closes over
+/// its own signals and provides it; any descendant page reads it with
+/// `expect_context` and calls it, without needing to know the signals
+/// exist.
+///
+/// The callback body writes with `.try_set()`, not `.set()` — the
+/// signals it closes over are Layout-owned, and a caller several
+/// component-scopes away invoking this crosses exactly the kind of
+/// mixed-lifetime boundary `docs/CODING_STANDARDS.md` warns about ("Never
+/// mix signal lifetimes ... without `try_get()`"). `on_open_change` right
+/// below already guards its own `set_feedback_open` write the same way,
+/// for the same reason.
+///
+/// Wrapped in a newtype (rather than providing a bare `Callback<()>`) so
+/// it can't collide with, or be silently shadowed by, some unrelated
+/// `Callback<()>` provided elsewhere in the context tree.
+#[derive(Clone, Copy)]
+pub struct FeedbackAccessRequestHandle(pub Callback<()>);
+
 /// Main layout shell wrapping all Leptos pages.
 ///
 /// Matches React Sidebar.jsx mobile behaviour:
@@ -412,6 +445,30 @@ pub fn Layout(children: ChildrenFn) -> impl IntoView {
         });
     }
 
+    // ── Feedback modal state (KYO-408) ───────────────────────────────────
+    // Owned here, at the true common ancestor of `Sidebar` (which renders
+    // the "Send Feedback" nav item and the single `FeedbackModal` instance)
+    // and `{children_render}` (the routed page content) — those two are
+    // siblings below, not parent/child, so `provide_context` only reaches
+    // the page if it's called from here in `Layout`, not from inside
+    // `Sidebar`. `feedback_open` / `feedback_access_request_context` are
+    // threaded down to `Sidebar` as props; `FeedbackAccessRequestHandle` is
+    // provided so any descendant page (e.g. the BigQuery kyomi_oauth
+    // "Request access" link) can open the modal with KYO-417's
+    // access-request option preselected, without needing to know these
+    // signals — or `Sidebar` — exist.
+    let (feedback_open, set_feedback_open) = signal(false);
+    let (feedback_access_request_context, set_feedback_access_request_context) = signal(false);
+    let open_feedback_access_request = Callback::new(move |()| {
+        // `.try_set()`, not `.set()`: this callback is invoked from
+        // page-scoped code several component-scopes away, crossing exactly
+        // the kind of mixed-lifetime boundary `docs/CODING_STANDARDS.md`
+        // warns about — see `FeedbackAccessRequestHandle`'s doc comment.
+        let _ = set_feedback_access_request_context.try_set(true);
+        let _ = set_feedback_open.try_set(true);
+    });
+    provide_context(FeedbackAccessRequestHandle(open_feedback_access_request));
+
     let children_render = StoredValue::new(children);
 
     view! {
@@ -460,6 +517,10 @@ pub fn Layout(children: ChildrenFn) -> impl IntoView {
                             set_collapsed=set_collapsed
                             is_mobile=is_mobile
                             mobile_open=mobile_open
+                            feedback_open=feedback_open
+                            set_feedback_open=set_feedback_open
+                            feedback_access_request_context=feedback_access_request_context
+                            set_feedback_access_request_context=set_feedback_access_request_context
                         />
                         <main
                             class=move || format!(
@@ -659,6 +720,12 @@ fn Sidebar(
     set_collapsed: WriteSignal<bool>,
     is_mobile: ReadSignal<bool>,
     mobile_open: ReadSignal<bool>,
+    /// Owned by `Layout`, not `Sidebar` — see `Layout`'s body (KYO-408).
+    feedback_open: ReadSignal<bool>,
+    set_feedback_open: WriteSignal<bool>,
+    /// Owned by `Layout`, not `Sidebar` — see `Layout`'s body (KYO-408).
+    feedback_access_request_context: ReadSignal<bool>,
+    set_feedback_access_request_context: WriteSignal<bool>,
 ) -> impl IntoView {
     // Recent sessions — cached at the Layout level via QueryCache (KYO-23).
     // Stale-while-revalidate: on re-mount the sidebar shows the last-known
@@ -697,7 +764,12 @@ fn Sidebar(
         Some(Err(_)) | None => "/dashboards".to_string(),
     });
     let (user_menu_open, set_user_menu_open) = signal(false);
-    let (feedback_open, set_feedback_open) = signal(false);
+    // `feedback_open` / `feedback_access_request_context` are owned by
+    // `Layout` (passed in as props), not created here — `Sidebar` and the
+    // routed page content (`{children_render}`) are siblings under
+    // `Layout`, so a `provide_context` called from inside `Sidebar` would
+    // never reach the page. See `Layout`'s own body for where these are
+    // created and provided as `FeedbackAccessRequestHandle` (KYO-408).
     let (about_open, set_about_open) = signal(false);
     let (about_version, set_about_version) = signal(String::new());
     #[cfg(not(target_arch = "wasm32"))]
@@ -1138,6 +1210,10 @@ fn Sidebar(
                                             <button
                                                 on:click=move |_| {
                                                     set_user_menu_open.set(false);
+                                                    // Normal entry point — never preselect the
+                                                    // KYO-408 access-request option here, only
+                                                    // `open_feedback_access_request` should.
+                                                    set_feedback_access_request_context.set(false);
                                                     set_feedback_open.set(true);
                                                 }
                                                 class="w-full text-left px-4 py-2 text-sm text-[var(--color-sidebar-foreground)] transition-colors hover:bg-[var(--color-sidebar-hover)] flex items-center space-x-3"
@@ -1208,6 +1284,7 @@ fn Sidebar(
         <FeedbackModal
             open=feedback_open
             on_open_change=Callback::new(move |open: bool| { let _ = set_feedback_open.try_set(open); })
+            access_request_context=feedback_access_request_context
         />
 
         // About modal
