@@ -1098,7 +1098,7 @@ mod bigquery_discovery_tests {
         ));
         let map = build_resources_map(vec![("projects", projects)]);
         assert!(
-            map.get("projects").is_none(),
+            !map.contains_key("projects"),
             "an errored discovery item must be omitted entirely, not surfaced as an empty vec"
         );
     }
