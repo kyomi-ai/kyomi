@@ -5,9 +5,9 @@
 //! These tests verify the HTTP-level contract (request/response shapes, headers,
 //! status codes) for the Slack endpoints under `/api/v1/slack`:
 //!
-//! - `GET  /install` — Get Slack OAuth URL (admin, Team+)
+//! - `GET  /install` — Get Slack OAuth URL (admin)
 //! - `GET  /oauth/callback` — OAuth callback
-//! - `DELETE /uninstall` — Remove Slack integration (admin, Team+)
+//! - `DELETE /uninstall` — Remove Slack integration (admin)
 //! - `GET  /user/connect` — Start user Slack linking
 //! - `POST /user/disconnect` — Disconnect user's Slack account
 //! - `GET  /status` — Slack integration status
@@ -19,7 +19,7 @@
 //!
 //! Test organization:
 //! - Section 1: Unauthenticated 401 tests
-//! - Section 2: Tier gating (free tier -> 403)
+//! - Section 2: Slack endpoints are not tier-gated (free/team parity)
 //! - Section 3: Slash command form-encoded parsing
 //! - Section 4: Events API url_verification
 //! - Section 5: Slack signature verification
@@ -32,12 +32,22 @@ use kyomi_test_harness::{base_url, cleanup_test_user, AuthContext};
 // Test infrastructure
 // ===========================================================================
 
-/// Create auth context with free tier (default) for testing tier gating.
+/// Create an auth context on the default free tier.
+///
+/// Slack access is not tier-gated (KYO-224 removed the gate outright; see
+/// Section 2 below), so this is simply the default context for tests that
+/// don't care about tier, and the free-tier arm of the parity checks in
+/// Section 2.
 async fn setup_auth_context(suffix: &str) -> Option<AuthContext> {
     kyomi_test_harness::setup_auth_context("Slack Test User", "slack", suffix).await
 }
 
-/// Create auth context with Team tier for testing endpoints that require it.
+/// Create an auth context on Team tier.
+///
+/// Nothing in this file requires Team tier. This is the non-free arm of the
+/// tier-parity comparisons in Section 2; Section 3's tests also happen to run
+/// against it, but that's incidental — their responses come from the test
+/// fixture (Slack unconfigured / not installed), not from the tier.
 async fn setup_team_auth_context(suffix: &str) -> Option<AuthContext> {
     let ctx = setup_auth_context(suffix).await?;
     kyomi_core::db_execute!(
@@ -200,100 +210,206 @@ async fn default_watch_channel_get_returns_401_without_auth() {
 }
 
 // ===========================================================================
-// 2. Free tier gets 403 for Slack endpoints requiring Team tier
+// 2. Slack endpoints are not tier-gated (free/team parity)
+// ===========================================================================
+//
+// KYO-224 (adf618ed) deleted Slack's subscription-tier gate outright:
+// `require_slack_capability` and its four call sites are gone, and
+// `has_capability` no longer exists anywhere in the codebase. `status` and
+// `channels` have no 403 branch left to reach at all. `uninstall` retains
+// one (`require_workspace_admin`); `install` retains two — that same
+// `require_workspace_admin` check, plus a self-hosted + non-enterprise
+// licence check ahead of it. Neither is tier-related, and neither fires
+// here: the harness always creates workspace admins and never sets
+// `self_hosted`.
+//
+// The obvious replacement — assert whatever status free tier currently gets —
+// would test the wrong thing. Slack is unconfigured and not installed in this
+// harness, so install/uninstall/channels return 500/404/400 as *fixture*
+// artifacts of that setup, not because of tier. Those exact codes are already
+// asserted by four sibling tests below (`install_returns_500_when_slack_not_configured`,
+// `status_returns_correct_response_shape_for_team_tier`,
+// `uninstall_returns_404_when_not_installed`, `channels_returns_400_when_not_installed`),
+// all running at team tier. Duplicating them here at free tier would add a
+// second copy of an existing assertion while still saying nothing about tier.
+//
+// So each test below sends the identical request as a free-tier and a
+// team-tier workspace admin and asserts the two responses agree. That is an
+// assertion about tier and nothing else — it holds no matter what the fixture
+// returns, and it fails the moment a tier gate is reintroduced on any of
+// these four endpoints.
 // ===========================================================================
 
-#[ignore = "KYO-314: asserts pre-KYO-224 tier gating. Slack tier gating was deliberately removed in adf618ed (#263); this test's 403 expectation is stale and needs re-evaluating against intended post-KYO-224 behaviour"]
 #[tokio::test]
-async fn install_returns_403_for_free_tier() {
-    let ctx = setup_auth_context("tier-install").await;
+async fn install_is_not_tier_gated() {
+    let ctx = setup_auth_context("tier-install-free").await;
     if ctx.is_none() {
-        eprintln!("SKIP: install_returns_403_for_free_tier — requires Rust-backend mode");
+        eprintln!("SKIP: install_is_not_tier_gated — requires Rust-backend mode");
         return;
     }
-    let ctx = ctx.unwrap();
+    let free_ctx = ctx.unwrap();
+    let team_ctx = setup_team_auth_context("tier-install-team")
+        .await
+        .expect("Rust-backend mode already confirmed via the free-tier context above");
 
-    // Default tier is free, which should NOT have slack_integration capability
-    let resp = auth_get(
-        &ctx.base_url,
-        "/api/v1/slack/install",
-        &ctx.access_token,
-    )
-    .send()
-    .await
-    .expect("install request should succeed");
+    let free_status = auth_get(&free_ctx.base_url, "/api/v1/slack/install", &free_ctx.access_token)
+        .send()
+        .await
+        .expect("install request should succeed")
+        .status();
+    let team_status = auth_get(&team_ctx.base_url, "/api/v1/slack/install", &team_ctx.access_token)
+        .send()
+        .await
+        .expect("install request should succeed")
+        .status();
 
+    // No absolute status assertion here on purpose: with Slack unconfigured
+    // in this harness, install already returns 500 regardless of tier, and
+    // that exact code is asserted by `install_returns_500_when_slack_not_configured`
+    // below. The comparison here is what actually proves tier is irrelevant.
     assert_eq!(
-        resp.status(),
-        403,
-        "Slack install for free tier should return 403"
+        free_status, team_status,
+        "install response must not depend on subscription tier"
+    );
+    assert_ne!(
+        free_status,
+        reqwest::StatusCode::FORBIDDEN,
+        "free tier must not be denied access to install"
     );
 
-    let body: Value = resp.json().await.expect("should return JSON");
-    assert!(body.get("detail").is_some(), "403 response should have 'detail'");
-
-    cleanup_test_user(&ctx.db, "slack-test-tier-install@contract-test.local").await;
+    cleanup_test_user(&free_ctx.db, "slack-test-tier-install-free@contract-test.local").await;
+    cleanup_test_user(&team_ctx.db, "slack-test-tier-install-team@contract-test.local").await;
 }
 
-#[ignore = "KYO-314: asserts pre-KYO-224 tier gating. Slack tier gating was deliberately removed in adf618ed (#263); this test's 403 expectation is stale and needs re-evaluating against intended post-KYO-224 behaviour"]
 #[tokio::test]
-async fn status_returns_403_for_free_tier() {
-    let ctx = setup_auth_context("tier-status").await;
+async fn status_is_not_tier_gated() {
+    let ctx = setup_auth_context("tier-status-free").await;
     if ctx.is_none() {
-        eprintln!("SKIP: status_returns_403_for_free_tier — requires Rust-backend mode");
+        eprintln!("SKIP: status_is_not_tier_gated — requires Rust-backend mode");
         return;
     }
-    let ctx = ctx.unwrap();
+    let free_ctx = ctx.unwrap();
+    let team_ctx = setup_team_auth_context("tier-status-team")
+        .await
+        .expect("Rust-backend mode already confirmed via the free-tier context above");
 
-    let resp = auth_get(
-        &ctx.base_url,
-        "/api/v1/slack/status",
-        &ctx.access_token,
-    )
-    .send()
-    .await
-    .expect("status request should succeed");
+    let free_status = auth_get(&free_ctx.base_url, "/api/v1/slack/status", &free_ctx.access_token)
+        .send()
+        .await
+        .expect("status request should succeed")
+        .status();
+    let team_status = auth_get(&team_ctx.base_url, "/api/v1/slack/status", &team_ctx.access_token)
+        .send()
+        .await
+        .expect("status request should succeed")
+        .status();
 
+    // No absolute status assertion here on purpose: status already returns
+    // 200 for a fresh workspace regardless of tier, and the response shape is
+    // asserted by `status_returns_correct_response_shape_for_team_tier`
+    // below. The comparison here is what actually proves tier is irrelevant.
     assert_eq!(
-        resp.status(),
-        403,
-        "Slack status for free tier should return 403"
+        free_status, team_status,
+        "status response must not depend on subscription tier"
+    );
+    assert_ne!(
+        free_status,
+        reqwest::StatusCode::FORBIDDEN,
+        "free tier must not be denied access to status"
     );
 
-    cleanup_test_user(&ctx.db, "slack-test-tier-status@contract-test.local").await;
+    cleanup_test_user(&free_ctx.db, "slack-test-tier-status-free@contract-test.local").await;
+    cleanup_test_user(&team_ctx.db, "slack-test-tier-status-team@contract-test.local").await;
 }
 
-#[ignore = "KYO-314: asserts pre-KYO-224 tier gating. Slack tier gating was deliberately removed in adf618ed (#263); this test's 403 expectation is stale and needs re-evaluating against intended post-KYO-224 behaviour"]
 #[tokio::test]
-async fn uninstall_returns_403_for_free_tier() {
-    let ctx = setup_auth_context("tier-uninstall").await;
+async fn uninstall_is_not_tier_gated() {
+    let ctx = setup_auth_context("tier-uninstall-free").await;
     if ctx.is_none() {
-        eprintln!("SKIP: uninstall_returns_403_for_free_tier — requires Rust-backend mode");
+        eprintln!("SKIP: uninstall_is_not_tier_gated — requires Rust-backend mode");
         return;
     }
-    let ctx = ctx.unwrap();
+    let free_ctx = ctx.unwrap();
+    let team_ctx = setup_team_auth_context("tier-uninstall-team")
+        .await
+        .expect("Rust-backend mode already confirmed via the free-tier context above");
 
-    let resp = auth_delete(
-        &ctx.base_url,
-        "/api/v1/slack/uninstall",
-        &ctx.access_token,
-    )
-    .send()
-    .await
-    .expect("uninstall request should succeed");
+    let free_status = auth_delete(&free_ctx.base_url, "/api/v1/slack/uninstall", &free_ctx.access_token)
+        .send()
+        .await
+        .expect("uninstall request should succeed")
+        .status();
+    let team_status = auth_delete(&team_ctx.base_url, "/api/v1/slack/uninstall", &team_ctx.access_token)
+        .send()
+        .await
+        .expect("uninstall request should succeed")
+        .status();
 
+    // No absolute status assertion here on purpose: with no Slack integration
+    // installed, uninstall already returns 404 regardless of tier, and that
+    // exact code is asserted by `uninstall_returns_404_when_not_installed`
+    // below. The comparison here is what actually proves tier is irrelevant.
     assert_eq!(
-        resp.status(),
-        403,
-        "Slack uninstall for free tier should return 403"
+        free_status, team_status,
+        "uninstall response must not depend on subscription tier"
+    );
+    assert_ne!(
+        free_status,
+        reqwest::StatusCode::FORBIDDEN,
+        "free tier must not be denied access to uninstall"
     );
 
-    cleanup_test_user(&ctx.db, "slack-test-tier-uninstall@contract-test.local").await;
+    cleanup_test_user(&free_ctx.db, "slack-test-tier-uninstall-free@contract-test.local").await;
+    cleanup_test_user(&team_ctx.db, "slack-test-tier-uninstall-team@contract-test.local").await;
+}
+
+#[tokio::test]
+async fn channels_is_not_tier_gated() {
+    let ctx = setup_auth_context("tier-channels-free").await;
+    if ctx.is_none() {
+        eprintln!("SKIP: channels_is_not_tier_gated — requires Rust-backend mode");
+        return;
+    }
+    let free_ctx = ctx.unwrap();
+    let team_ctx = setup_team_auth_context("tier-channels-team")
+        .await
+        .expect("Rust-backend mode already confirmed via the free-tier context above");
+
+    let free_status = auth_get(&free_ctx.base_url, "/api/v1/slack/channels", &free_ctx.access_token)
+        .send()
+        .await
+        .expect("channels request should succeed")
+        .status();
+    let team_status = auth_get(&team_ctx.base_url, "/api/v1/slack/channels", &team_ctx.access_token)
+        .send()
+        .await
+        .expect("channels request should succeed")
+        .status();
+
+    // No absolute status assertion here on purpose: with no Slack integration
+    // installed, channels already returns 400 regardless of tier, and that
+    // exact code is asserted by `channels_returns_400_when_not_installed`
+    // below. The comparison here is what actually proves tier is irrelevant.
+    assert_eq!(
+        free_status, team_status,
+        "channels response must not depend on subscription tier"
+    );
+    assert_ne!(
+        free_status,
+        reqwest::StatusCode::FORBIDDEN,
+        "free tier must not be denied access to channels"
+    );
+
+    cleanup_test_user(&free_ctx.db, "slack-test-tier-channels-free@contract-test.local").await;
+    cleanup_test_user(&team_ctx.db, "slack-test-tier-channels-team@contract-test.local").await;
 }
 
 // ===========================================================================
-// 3. Team tier gets correct responses for Slack endpoints
+// 3. Slack endpoint responses against the unconfigured / not-installed fixture
 // ===========================================================================
+//
+// These run against a team-tier context, but team tier is incidental — see
+// Section 2 above, which proves none of these endpoints care about tier.
 
 #[tokio::test]
 async fn status_returns_correct_response_shape_for_team_tier() {
@@ -666,36 +782,6 @@ async fn user_connect_returns_500_when_slack_not_configured() {
 // ===========================================================================
 // 11. Channels returns correct error when not connected
 // ===========================================================================
-
-#[ignore = "KYO-314: asserts pre-KYO-224 tier gating. Slack tier gating was deliberately removed in adf618ed (#263); this test's 403 expectation is stale and needs re-evaluating against intended post-KYO-224 behaviour"]
-#[tokio::test]
-async fn channels_returns_403_for_free_tier() {
-    let ctx = setup_auth_context("chan-free").await;
-    if ctx.is_none() {
-        eprintln!(
-            "SKIP: channels_returns_403_for_free_tier — requires Rust-backend mode"
-        );
-        return;
-    }
-    let ctx = ctx.unwrap();
-
-    let resp = auth_get(
-        &ctx.base_url,
-        "/api/v1/slack/channels",
-        &ctx.access_token,
-    )
-    .send()
-    .await
-    .expect("channels request should succeed");
-
-    assert_eq!(
-        resp.status(),
-        403,
-        "channels for free tier should return 403"
-    );
-
-    cleanup_test_user(&ctx.db, "slack-test-chan-free@contract-test.local").await;
-}
 
 #[tokio::test]
 async fn channels_returns_400_when_not_installed() {
