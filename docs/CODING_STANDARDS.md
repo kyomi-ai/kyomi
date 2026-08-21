@@ -759,6 +759,14 @@ unsafe { std::env::set_var(key, value) };
 
 Flagged in KYO-240 (`current_user_id_from`'s doc asserted "an empty id can never match a real `member.user_id`" as inherent, when only the guard inside `is_owner_from` makes it true) and in KYO-318 cycle 2, where the per-call `SAFETY` comments claimed the env lock excluded concurrent *readers* while the module doc said the opposite — the contradiction passed a full review pass and was only caught by CI after merge.
 
+### Re-derive an enumeration comment from the source — never patch it from a review finding
+
+A comment that enumerates ("`status` and `channels` have no 403 branch; `install` and `uninstall` each retain one") is a set of independent factual claims about named functions the reader will not open. Nothing type-checks it, and the failure mode is specific: when a reviewer flags one claim, the natural fix is to rewrite the sentence *around that finding* rather than to re-read every function the sentence names — so the correction lands and a different claim in the same sentence is newly wrong.
+
+**Rule:** When you write or repair a comment that enumerates behaviour across named functions, read each named function's body fresh — every one, not just the one that was flagged. A prior review finding tells you the comment is wrong; it does not tell you the rest of it is right. Prefer a mechanical derivation you can paste (`sed -n '/async fn get_install_url/,/^}/p' … | grep -n FORBIDDEN`) over prose recalled from the previous pass.
+
+Flagged three consecutive cycles on the same six-line comment block in KYO-314 (`apps/server/tests/contract_slack.rs`). Cycle 1 caught "three of these four handlers have no 403 branch" (two do). Cycle 2's fix, written from cycle 1's finding rather than from `routes.rs`, introduced a fresh error — `install` retains *two* 403 branches, not one, and shares one of them with `uninstall`. Cycle 3 fixed it by grepping each of the four handler bodies directly. All three were 🟢, none blocked signing; the cost was three review cycles on a comment.
+
 ## String & Text Processing
 
 *Standards for safe string manipulation in Rust.*

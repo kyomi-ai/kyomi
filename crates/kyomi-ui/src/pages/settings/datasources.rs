@@ -2543,6 +2543,17 @@ pub fn DatasourceModal(
                     set_modal_oauth_email.try_set(email);
                     set_modal_oauth_expired.try_set(false);
                     set_modal_oauth_connecting.try_set(false);
+                    // BigQuery OAuth never runs Test & Discover (the generic
+                    // button is hidden for this type — the remote system is
+                    // verified by the OAuth handshake itself, not a query).
+                    // Without this, `test_result` would stay `None` forever
+                    // and the create-mode "Next" gate below would never
+                    // unlock, since that gate is the only other writer.
+                    set_test_result.try_set(Some(TestConnectionResult {
+                        success: true,
+                        message: "Connected to Google".to_string(),
+                    }));
+                    set_discovery_status.try_set("success".to_string());
                 }
                 OAuthMessage::SnowflakeSuccess { email }
                 | OAuthMessage::DatabricksSuccess { email } => {
@@ -2632,6 +2643,26 @@ pub fn DatasourceModal(
     // ── Discovery section: show post-test fields ──────────────────────────
     let discovery_succeeded = Signal::derive(move || {
         discovery_status.get() == "success"
+    });
+
+    // ── Connection-step-satisfied predicate (KYO-404) ──────────────────────
+    // BigQuery enterprise_oauth has no slug-scoped connect endpoint before
+    // the datasource exists (`enterprise_oauth_url` needs `datasource_slug`),
+    // so `test_result` can never become `Some` for that one type/mode in
+    // create mode — the OAuth connect button for it stays gated behind
+    // "save first" (see the `!is_create_mode` Show around the
+    // enterprise_oauth `ModalOAuthStatusPanel`). Every other type/mode
+    // requires an actual successful test. This is the single source of
+    // truth for "is the Connection tab done" — read by the create-mode
+    // footer's `can_next` and by all three states of the Catalog tab pill
+    // (class, disabled, on:click). A cheap, pure projection over
+    // same-scope signals with no side effect, so `Signal::derive` applies
+    // (docs/CODING_STANDARDS.md: reserve `Signal::derive` for cheap, pure
+    // projections; use `Memo` only when the body does more than read).
+    let connection_step_satisfied: Signal<bool> = Signal::derive(move || {
+        let bq_enterprise_oauth_precreate =
+            ds_type.get() == "bigquery" && bq_auth_mode.get() == "enterprise_oauth";
+        bq_enterprise_oauth_precreate || test_result.get().map(|r| r.success).unwrap_or(false)
     });
 
     // ── Datasource-type registry data (KYO-274) ─────────────────────────────
@@ -2787,7 +2818,14 @@ pub fn DatasourceModal(
 
                         // Direct create footer (original behavior).
                         let is_connection_tab = active_tab.get() == "connection";
-                        let can_next = test_result.get().map(|r| r.success).unwrap_or(false) && !name.get().is_empty();
+                        // `connection_step_satisfied` (defined above, alongside
+                        // `discovery_succeeded`) is the shared predicate — it
+                        // folds in the narrow BigQuery enterprise_oauth
+                        // precreate exception. `can_next` additionally
+                        // requires a non-empty name; that check belongs only
+                        // here, not in the shared predicate, since the
+                        // Catalog tab pill below has no such requirement.
+                        let can_next = connection_step_satisfied.get() && !name.get().is_empty();
                         let is_saving = save_action.pending().get();
                         view! {
                             <Button
@@ -3003,14 +3041,14 @@ pub fn DatasourceModal(
                                 </button>
                                 <button
                                     class=move || {
-                                        let can_go = test_result.get().map(|r| r.success).unwrap_or(false);
+                                        let can_go = connection_step_satisfied.get();
                                         if active_tab.get() == "catalog" { TAB_ACTIVE }
                                         else if can_go { TAB_INACTIVE }
                                         else { TAB_DISABLED }
                                     }
-                                    disabled=move || !test_result.get().map(|r| r.success).unwrap_or(false)
+                                    disabled=move || !connection_step_satisfied.get()
                                     on:click=move |_| {
-                                        if test_result.get_untracked().map(|r| r.success).unwrap_or(false) {
+                                        if connection_step_satisfied.get_untracked() {
                                             set_active_tab.set("catalog".to_string());
                                         }
                                     }
@@ -4448,27 +4486,22 @@ fn BigQueryAuthModeSection(
                     <p class="text-sm text-muted-foreground">
                         "Connect your Google account to access BigQuery projects."
                     </p>
-                    // 4-state OAuth status panel — hidden in create mode since
-                    // we don't know the datasource slug yet.
-                    <Show when=move || !is_create_mode.get()>
-                        <ModalOAuthStatusPanel
-                            oauth_connected=oauth_connected
-                            oauth_email=oauth_email
-                            oauth_expired=oauth_expired
-                            oauth_connecting=oauth_connecting
-                            set_oauth_connecting=set_oauth_connecting
-                            provider_name="Google"
-                            connect_url=kyomi_oauth_url
-                            cfg_missing=Signal::stored(false)
-                            on_disconnect=on_google_disconnect
-                            disconnect_pending=google_disconnect_pending
-                        />
-                    </Show>
-                    <Show when=move || is_create_mode.get()>
-                        <p class="text-xs text-muted-foreground">
-                            "After saving, connect your Google account from this settings panel."
-                        </p>
-                    </Show>
+                    // 4-state OAuth status panel — shown in create mode too:
+                    // `kyomi_oauth_url` (/api/v1/auth/google-oauth/connect) is
+                    // not slug-scoped, so it connects identically before or
+                    // after the datasource is saved.
+                    <ModalOAuthStatusPanel
+                        oauth_connected=oauth_connected
+                        oauth_email=oauth_email
+                        oauth_expired=oauth_expired
+                        oauth_connecting=oauth_connecting
+                        set_oauth_connecting=set_oauth_connecting
+                        provider_name="BigQuery"
+                        connect_url=kyomi_oauth_url
+                        cfg_missing=Signal::stored(false)
+                        on_disconnect=on_google_disconnect
+                        disconnect_pending=google_disconnect_pending
+                    />
                     <Show when=move || !oauth_connected.get()>
                         <p class="text-xs text-muted-foreground">
                             "After connecting, you can set the billing and default project."
@@ -8615,6 +8648,258 @@ mod tests {
             !row.contains("use_analytics_access("),
             "DatasourceRow must not call use_analytics_access() itself — it must receive \
              the already-computed Signal as the analytics_access prop"
+        );
+    }
+
+    // ── KYO-404: BigQuery create-mode OAuth deadlock ────────────────────
+    //
+    // BigQuery datasources could not be created at all. The create-mode
+    // "Next" button gates on `test_result.success`, but BigQuery's OAuth
+    // success arm never wrote `test_result` — BigQuery has no Test &
+    // Discover step; the OAuth handshake itself is the verification — so
+    // `test_result` stayed `None` forever and "Next" never enabled. The fix
+    // has three independent parts, each guarded by one test below: the
+    // OAuth success arm now writes `test_result`/`discovery_status` itself;
+    // the kyomi_oauth connect panel is no longer hidden in create mode (so
+    // there is something to click that produces the write above); and the
+    // create-mode `can_next` gate gained a narrow bigquery-enterprise_oauth
+    // exception for the one mode that still cannot produce a `test_result`
+    // before save.
+
+    /// The `GoogleSuccess | BigqueryEnterpriseSuccess` arm of the modal-level
+    /// OAuth `postMessage` listener must itself write `test_result` and
+    /// `discovery_status` to a success state. Before KYO-404 this arm only
+    /// updated the OAuth connected/email/expired/connecting signals, so
+    /// nothing in the BigQuery kyomi_oauth flow (which never calls
+    /// `do_test_and_discover`) ever produced a `test_result`, permanently
+    /// disabling the create-mode "Next" button.
+    ///
+    /// Bounds: the extraction runs from the exact arm pattern
+    /// `OAuthMessage::GoogleSuccess { email }` up to the next arm's pattern,
+    /// `OAuthMessage::SnowflakeSuccess { email }`, so it captures only this
+    /// arm's body. This matters because both signals are also written
+    /// elsewhere in the file for unrelated reasons: `do_test_and_discover`
+    /// (called by the very next arm, for Snowflake/Databricks) writes both
+    /// on success, and the `test_action` Effect earlier in the file writes
+    /// both directly — a whole-file or whole-listener `contains` check would
+    /// pass even with this specific arm fully reverted. The assertion that
+    /// the arm does NOT call `do_test_and_discover` pins that the extracted
+    /// span is this arm and not a slice that swallowed the next one.
+    #[test]
+    fn google_oauth_success_arm_sets_test_result_and_discovery_status() {
+        let arm = extract_between(
+            SRC,
+            "OAuthMessage::GoogleSuccess { email }",
+            "OAuthMessage::SnowflakeSuccess { email }",
+        );
+        assert!(
+            !arm.contains("do_test_and_discover"),
+            "sanity check on the extraction bounds: this arm must not reach into the \
+             next (Snowflake/Databricks) arm's do_test_and_discover() call"
+        );
+        assert!(
+            arm.contains("set_test_result.try_set(Some(TestConnectionResult {"),
+            "the GoogleSuccess | BigqueryEnterpriseSuccess arm must set test_result to \
+             Some(...) on success — without it, test_result stays None forever for \
+             BigQuery kyomi_oauth, which never runs Test & Discover, permanently \
+             disabling the create-mode Next button (KYO-404)"
+        );
+        assert!(
+            arm.contains("set_discovery_status.try_set(\"success\""),
+            "the GoogleSuccess | BigqueryEnterpriseSuccess arm must also set \
+             discovery_status to \"success\" alongside test_result"
+        );
+    }
+
+    /// The kyomi_oauth `ModalOAuthStatusPanel` in `BigQueryAuthModeSection`
+    /// must not be create-mode gated, and must pass `provider_name="BigQuery"`
+    /// so its connect button reads "Connect BigQuery" (matching the React
+    /// original) rather than "Connect Google". Before KYO-404 this panel was
+    /// hidden entirely in create mode behind
+    /// `<Show when=move || !is_create_mode.get()>`, with a dead fallback
+    /// paragraph rendered instead — leaving kyomi_oauth users with no
+    /// legitimate way to connect (and thus no way to satisfy Test A's
+    /// `test_result` write) until after save. Unlike the enterprise_oauth
+    /// panel in the same component, which legitimately keeps its create-mode
+    /// gate (its `connect_url` is slug-scoped and the slug doesn't exist
+    /// pre-save), `kyomi_oauth_url` is a fixed, non-slug-scoped endpoint, so
+    /// there is no reason to hide it before save.
+    ///
+    /// Scoped to the `kyomi_oauth` `<Show>` block specifically (bounded by
+    /// the next mode's `<Show>` opening tag), so this cannot pass or fail on
+    /// account of the enterprise_oauth block's own, textually similar
+    /// create-mode copy ("After saving, connect your BigQuery account from
+    /// this settings panel.") — that block is covered by the sibling test
+    /// below instead.
+    ///
+    /// The dead-fallback-paragraph check below is scoped to `kyomi_block`
+    /// rather than whole-file `SRC` for a second, independent reason: `SRC`
+    /// is `include_str!("datasources.rs")`, so it includes this very test
+    /// module's own source text. A whole-file `!SRC.contains(...)` on a
+    /// string literal that this assertion itself writes out verbatim always
+    /// finds that literal — inside its own `contains(...)` call — and can
+    /// never pass, regardless of what the production code does. Bounding
+    /// the search to `kyomi_block`, which ends at the next `<Show>` tag and
+    /// sits entirely above the `mod tests` block, excludes the test module
+    /// and makes the assertion satisfiable again.
+    #[test]
+    fn bigquery_kyomi_oauth_panel_is_not_create_mode_gated() {
+        let kyomi_block = extract_between(
+            SRC,
+            "<Show when=move || bq_auth_mode.get() == \"kyomi_oauth\">",
+            "<Show when=move || bq_auth_mode.get() == \"enterprise_oauth\">",
+        );
+        assert!(
+            appears_shortly_before(
+                kyomi_block,
+                "provider_name=\"BigQuery\"",
+                "connect_url=kyomi_oauth_url",
+                100,
+            ),
+            "the kyomi_oauth ModalOAuthStatusPanel (connect_url=kyomi_oauth_url) must pass \
+             provider_name=\"BigQuery\" so the connect button reads \"Connect BigQuery\", \
+             matching the React original"
+        );
+        assert!(
+            !kyomi_block.contains("is_create_mode"),
+            "the kyomi_oauth ModalOAuthStatusPanel must not be gated on is_create_mode at \
+             all, in either direction — KYO-404's bug was hiding it behind \
+             `!is_create_mode.get()` with a dead fallback paragraph shown in create mode"
+        );
+        assert!(
+            !kyomi_block.contains("After saving, connect your Google account from this settings panel."),
+            "the dead create-mode fallback paragraph for the kyomi_oauth panel must not \
+             reappear inside its <Show> block"
+        );
+    }
+
+    /// Pins the deliberate asymmetry the sibling test above depends on: the
+    /// enterprise_oauth `ModalOAuthStatusPanel` (`connect_url=enterprise_oauth_url`)
+    /// legitimately keeps its `!is_create_mode` gate and its own create-mode
+    /// fallback copy, because `enterprise_oauth_url` is slug-scoped and the
+    /// slug doesn't exist before the datasource is saved. Without this test,
+    /// a future change that correctly removed the kyomi_oauth gate could also
+    /// remove the enterprise gate — reintroducing a pre-save 404 on the
+    /// slug-scoped connect endpoint — and nothing here would notice.
+    #[test]
+    fn bigquery_enterprise_oauth_panel_keeps_create_mode_gate() {
+        let enterprise_block = extract_between(
+            SRC,
+            "<Show when=move || bq_auth_mode.get() == \"enterprise_oauth\">",
+            "<Show when=move || bq_auth_mode.get() == \"service_account\">",
+        );
+        assert!(
+            enterprise_block.contains("Show when=move || !is_create_mode.get()"),
+            "the enterprise_oauth ModalOAuthStatusPanel must stay gated on \
+             !is_create_mode — its connect_url is slug-scoped and has no slug to \
+             target before the datasource is saved"
+        );
+        assert!(
+            enterprise_block
+                .contains("After saving, connect your BigQuery account from this settings panel."),
+            "the enterprise_oauth create-mode fallback copy must still be present"
+        );
+    }
+
+    /// The create-mode footer's `can_next` must keep requiring
+    /// `!name.get().is_empty()` unconditionally, and the shared
+    /// `connection_step_satisfied` predicate it reads must relax the
+    /// `test_result.success` requirement only when BOTH the datasource type
+    /// is "bigquery" AND the BigQuery auth mode is "enterprise_oauth" — not
+    /// on datasource type alone. A bigquery-only relaxation would re-enable
+    /// "Next" for kyomi_oauth with no connection at all, reintroducing a
+    /// create path that produces a datasource with no verified credentials.
+    ///
+    /// The exception now lives in `connection_step_satisfied`'s own
+    /// definition rather than inline in the footer (KYO-404 follow-up: the
+    /// footer, and the Catalog tab pill's class/disabled/on:click closures,
+    /// all read the same signal instead of each carrying their own copy of
+    /// the predicate). This test checks both halves independently: the
+    /// predicate's definition still encodes the AND'd exception, and the
+    /// footer still ANDs the name check onto the shared signal rather than
+    /// folding name emptiness into the shared predicate itself (which would
+    /// wrongly make the Catalog tab pill require a name too).
+    #[test]
+    fn create_mode_can_next_bigquery_exception_requires_enterprise_oauth_mode() {
+        let predicate = extract_between(
+            SRC,
+            "let connection_step_satisfied: Signal<bool> = Signal::derive(move || {",
+            "});",
+        );
+        assert!(
+            predicate.contains(
+                "ds_type.get() == \"bigquery\" && bq_auth_mode.get() == \"enterprise_oauth\""
+            ),
+            "the bigquery test_result exception must require BOTH ds_type == \"bigquery\" \
+             AND bq_auth_mode == \"enterprise_oauth\" — a bigquery-only relaxation would \
+             re-enable Next for kyomi_oauth with zero connection (KYO-404 regression risk)"
+        );
+        assert!(
+            predicate.contains("test_result.get().map(|r| r.success).unwrap_or(false)"),
+            "the original test_result.success requirement must remain for every type/mode \
+             other than the bigquery enterprise_oauth exception"
+        );
+
+        let footer = extract_between(
+            SRC,
+            "// Direct create footer (original behavior).",
+            "let is_saving = save_action.pending().get();",
+        );
+        assert!(
+            footer.contains("connection_step_satisfied.get() && !name.get().is_empty()"),
+            "can_next must still require a non-empty name, ANDed onto the shared \
+             connection_step_satisfied signal — this must never become an OR'd-in \
+             exception, and the name check must not migrate into the shared predicate \
+             itself (the Catalog tab pill must not start requiring a name)"
+        );
+    }
+
+    /// The create-mode Catalog tab pill (class/disabled/on:click) and the
+    /// footer's `can_next` must read the exact same `connection_step_satisfied`
+    /// signal, not independent copies of `test_result.get().map(|r|
+    /// r.success).unwrap_or(false)`. Before this fix the tab bar re-checked
+    /// the raw predicate in all three places, so it never got the BigQuery
+    /// enterprise_oauth precreate exception applied to `can_next`: "Next"
+    /// worked, but the Catalog tab rendered permanently `TAB_DISABLED` with a
+    /// no-op click handler for that one type/mode, since it can never
+    /// produce a `test_result` before save. A future edit that changes the
+    /// condition in one of these four sites without updating the others is
+    /// exactly what this test catches.
+    ///
+    /// Scoped to the create-mode tab bar's own `<Show>` block (bounded by
+    /// the comment introducing it and the next section's comment), so it
+    /// cannot be satisfied by the edit-mode tab bar above it, which has no
+    /// Catalog-gating logic at all, or by `connection_step_satisfied`'s own
+    /// definition, which legitimately contains the raw `test_result` read.
+    #[test]
+    fn catalog_tab_pill_shares_connection_step_satisfied_with_can_next() {
+        let tab_bar = extract_between(
+            SRC,
+            "// Tab bar — hidden in Connect create-mode (the simplified",
+            "// ── Connect create-mode simplified form ──",
+        );
+        assert!(
+            !tab_bar.contains("test_result.get()"),
+            "the create-mode Catalog tab pill must read the shared \
+             connection_step_satisfied signal, not re-check test_result.get() directly \
+             — a raw copy here silently diverges from can_next's bigquery \
+             enterprise_oauth exception (KYO-404 follow-up)"
+        );
+        let shared_reads = tab_bar.matches("connection_step_satisfied").count();
+        assert_eq!(
+            shared_reads, 3,
+            "expected all three Catalog tab pill reads (class, disabled, on:click) to use \
+             connection_step_satisfied — found {shared_reads}"
+        );
+
+        let footer = extract_between(
+            SRC,
+            "// Direct create footer (original behavior).",
+            "let is_saving = save_action.pending().get();",
+        );
+        assert!(
+            footer.contains("connection_step_satisfied.get()"),
+            "can_next must also read the shared connection_step_satisfied signal"
         );
     }
 }
