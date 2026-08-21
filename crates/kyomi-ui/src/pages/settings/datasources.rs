@@ -286,6 +286,18 @@ fn auth_mode_description(modes: &[AuthModeOption], mode_id: &str) -> String {
 // Main Page
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Coarse-grained branch discriminant for [`DatasourcesPage`]'s view.
+///
+/// Deliberately collapses `Some(Ok(_))` down to a unit variant rather than
+/// carrying the fetched `Vec<DatasourceInfo>` — see the `view_state` comment
+/// in `DatasourcesPage` for why (KYO-429).
+#[derive(Clone, PartialEq)]
+enum DatasourcesViewState {
+    Loading,
+    Ready,
+    Failed(String),
+}
+
 /// Data Sources settings page content.
 #[component]
 pub fn DatasourcesPage() -> impl IntoView {
@@ -295,17 +307,63 @@ pub fn DatasourcesPage() -> impl IntoView {
     let datasources_signal =
         use_query("datasources", || (), |_: ()| list_datasources());
 
+    // KYO-429: branch on a Memo, not a raw tracked read of `datasources_signal`.
+    //
+    // `QueryCache::invalidate` re-runs every cached entry's fetcher and, on
+    // resolution, writes the result straight into the entry's signal
+    // (`build_refetch` in `query_cache/mod.rs`) — including the common case
+    // where the new value is `Some(Ok(_))` and the old value was already
+    // `Some(Ok(_))`. A plain `{move || match datasources_signal.get() {...}}`
+    // closure re-runs its whole body on *every* write regardless of whether
+    // the branch actually changed, which re-constructs `DatasourcesContent`
+    // (a fresh mount, fresh signals) on every refetch — including ones
+    // triggered by a `datasource_update` WS event from another tab or
+    // workspace member while this user has the create/edit modal open with
+    // unsaved input. `Memo` only notifies when its *output* changes
+    // (`PartialEq`), so collapsing the branch through `view_state` first
+    // means a `Some(Ok(_))` -> `Some(Ok(_))` refetch produces an unchanged
+    // `Ready` and the outer closure below does not re-run at all.
+    let view_state = Memo::new(move |_| match datasources_signal.get() {
+        None => DatasourcesViewState::Loading,
+        Some(Ok(_)) => DatasourcesViewState::Ready,
+        Some(Err(e)) => DatasourcesViewState::Failed(e.to_string()),
+    });
+
     view! {
         {move || {
-            match datasources_signal.get() {
-                None => view! { <DatasourcesLoadingSkeleton/> }.into_any(),
-                Some(Ok(datasources)) => view! {
-                    <DatasourcesContent
-                        initial_datasources=datasources
-                        datasources_signal=datasources_signal
-                    />
-                }.into_any(),
-                Some(Err(e)) => view! {
+            match view_state.get() {
+                DatasourcesViewState::Loading => view! { <DatasourcesLoadingSkeleton/> }.into_any(),
+                DatasourcesViewState::Ready => {
+                    // Untracked on purpose: this only seeds `DatasourcesContent`'s
+                    // local `datasources` signal (see its own `initial_datasources`
+                    // doc comment) — `DatasourcesContent` re-syncs itself from
+                    // `datasources_signal` via its own Effect on every later
+                    // refetch. A tracked `.get()` here would resubscribe this
+                    // closure to `datasources_signal` directly and defeat the
+                    // whole point of routing through `view_state`.
+                    //
+                    // The `Some(Ok(_))` case cannot fail to match: `view_state`
+                    // just evaluated to `Ready` above, which the Memo only
+                    // produces when its tracked read of `datasources_signal` is
+                    // `Some(Ok(_))`; Leptos's reactive graph is single-threaded
+                    // and this untracked read happens synchronously, in the same
+                    // call stack, with no `.await` or re-entrant write between
+                    // the two — so the value cannot have changed underneath it.
+                    let datasources = match datasources_signal.get_untracked() {
+                        Some(Ok(datasources)) => datasources,
+                        other => unreachable!(
+                            "view_state == Ready implies datasources_signal is \
+                             Some(Ok(_)); got {other:?}"
+                        ),
+                    };
+                    view! {
+                        <DatasourcesContent
+                            initial_datasources=datasources
+                            datasources_signal=datasources_signal
+                        />
+                    }.into_any()
+                }
+                DatasourcesViewState::Failed(e) => view! {
                     <div class="p-4 sm:p-6 space-y-6">
                         <div>
                             <h2 class="text-xl font-display text-foreground">"Datasources"</h2>
@@ -10571,6 +10629,72 @@ mod tests {
             !connection_step_satisfied_from("bigquery", "service_account", false, false),
             "removing the service account credentials must re-close Next — a stale \
              test_result from before removal must not keep it open (KYO-413)"
+        );
+    }
+
+    // ── KYO-429: memoized view-state branch, not a raw tracked get() ─────
+
+    /// `DatasourcesPage`'s view closure must branch on a memoized
+    /// discriminant, never on a raw tracked `datasources_signal.get()` read.
+    /// A raw tracked branch re-runs (and rebuilds `DatasourcesContent` — a
+    /// fresh mount, fresh signals) on every `datasources_signal` write,
+    /// including the `Some(Ok(_))` -> `Some(Ok(_))` refetch completion that
+    /// `QueryCache::invalidate` (`query_cache/mod.rs`) produces on every
+    /// cache invalidation — destroying any open create/edit modal's
+    /// in-progress, unsaved form state. Extraction is bounded to
+    /// `DatasourcesPage`'s own body so these assertions can't accidentally
+    /// match wiring belonging to a different component.
+    #[test]
+    fn datasources_page_branches_on_a_memoized_view_state_not_a_raw_tracked_get() {
+        let page_fn = extract_between(
+            SRC,
+            "pub fn DatasourcesPage(",
+            "fn DatasourcesLoadingSkeleton(",
+        );
+
+        assert!(
+            page_fn.contains("Memo::new(move |_| match datasources_signal.get()"),
+            "DatasourcesPage must derive its render-branch discriminant via \
+             Memo::new reading datasources_signal.get() — a plain closure or \
+             Signal::derive re-runs its whole body on every write to \
+             datasources_signal, not just when the branch actually changes; \
+             a Memo only notifies on a PartialEq-unequal output, which is \
+             what collapses a Some(Ok(_)) -> Some(Ok(_)) refetch into a no-op"
+        );
+
+        // `page_fn` contains several `view! {` occurrences: the outer one
+        // opening the component's returned view, plus one per match arm
+        // nested inside it. The LEFTMOST occurrence is exactly the outer
+        // one — no arm's `view! {` can appear before `match view_state.get()
+        // {`, which itself can only appear after the outer `view! {` opens —
+        // so slicing `page_fn` from the first match is the render closure's
+        // opening brace, regardless of how many further `view! {}` macros
+        // the branches themselves contain.
+        let view_start = page_fn
+            .find("view! {")
+            .expect("DatasourcesPage must still contain its outer view! {} block");
+        let view_block = &page_fn[view_start..];
+
+        assert!(
+            view_block.contains("match view_state.get()"),
+            "the outer view closure must branch on the memoized view_state, \
+             not on datasources_signal directly"
+        );
+        assert!(
+            !view_block.contains("datasources_signal.get()"),
+            "the outer view closure must not perform its own raw tracked \
+             datasources_signal.get() read — that would re-subscribe the \
+             closure (and therefore DatasourcesContent's mount) to every \
+             refetch completion, including a same-value \
+             Some(Ok(_)) -> Some(Ok(_)) transition, reintroducing the \
+             KYO-429 remount bug the Memo above exists to prevent"
+        );
+        assert!(
+            view_block.contains("datasources_signal.get_untracked()"),
+            "the Ready arm must seed DatasourcesContent's initial_datasources \
+             via an untracked read — a tracked .get() there would create a \
+             second, redundant subscription to datasources_signal and defeat \
+             the point of routing through view_state in the first place"
         );
     }
 }
