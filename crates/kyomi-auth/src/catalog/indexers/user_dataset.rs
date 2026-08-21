@@ -23,9 +23,8 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use crate::catalog::helpers::{
-    archive_missing_tables, cache_table, fold_table_outcomes, resolve_final_status,
-    update_datasource_last_refresh, update_datasource_status, DatasetOutcome, IndexerContext,
-    TableOutcome,
+    archive_missing_tables, cache_table, fold_table_outcomes, update_datasource_last_refresh,
+    update_datasource_status, DatasetOutcome, IndexerContext, TableOutcome,
 };
 use crate::catalog::types::{CatalogIndexResult, ColumnEntry};
 
@@ -263,41 +262,26 @@ struct RunOutcome {
 /// every project has been walked — "should we archive?" and "what status do
 /// we persist, with what reason and caller-facing message?"
 ///
-/// `seen_any_table` answers "did discovery (listing) see anything?" — it
-/// must be derived from `seen_table_ids`, which, since KYO-324, is
-/// populated with every table a dataset *listing* returned, including ones
-/// whose schema fetch subsequently failed (see `fold_table_outcomes`).
-/// `tables_indexed` / `errors` answer "did we get anything *usable*?" — a
-/// table can be listed and still contribute nothing if its schema read was
-/// denied. These are genuinely different questions, and conflating them
-/// back into one predicate is the exact KYO-324 regression: a run where
-/// every table listed fine but every `get_bigquery_table_schema` call was
-/// denied (a real BigQuery IAM split — `bigquery.tables.list` granted,
-/// `bigquery.tables.get` denied) used to report `catalog_refresh_status =
-/// 'idle'` with 0 tables and no reason, because the single predicate this
-/// replaces (`seen_table_ids.is_empty() && tables_indexed == 0`) is false
-/// the moment anything was listed at all — a silent success.
+/// The archive/status/failure_reason split itself — "did discovery
+/// (listing) see anything?" vs. "did we get anything *usable*?" — is not
+/// re-derived here. It's delegated to `catalog::helpers::resolve_run_outcome`
+/// (KYO-385), which this module originated (KYO-324) and which now also
+/// backs the SQL-indexer template and the Connect indexer in `kyomi-agent` —
+/// see that function's doc comment for the full reasoning, including why
+/// conflating the two questions is the exact KYO-324/KYO-364/KYO-385 family
+/// of regressions. This module always passes `empty_scope_is_expected =
+/// false`: an empty `project_ids` returns `CatalogIndexResult::skipped(..)`
+/// before ever reaching this function, so there is no equivalent state here
+/// to the SQL/Connect paths' "user configured/cleared an empty scope".
 ///
-/// - **Archiving** only ever needs the first question. If nothing was ever
-///   listed (regardless of whether any project query succeeded), the
-///   existing catalog must be preserved — a successful listing that
-///   enumerates 0 tables is just as unsafe to archive on as a failed one.
-///   A table whose schema fetch failed still counts as "listed", so a
-///   blanket `bigquery.tables.get` denial does not evict tables that
-///   demonstrably still exist (KYO-324).
-/// - **Status** needs the second question. `resolve_final_status` (shared
-///   with the SQL path, KYO-126) draws the idle/failed line using `errors`,
-///   which include per-dataset failures via `fold_dataset_outcomes` AND
-///   per-table schema-fetch failures AND per-table catalog write failures
-///   via `fold_table_outcomes` (KYO-324, extended by KYO-364).
-/// - **The returned error message** must not claim more than what actually
-///   happened: when nothing was ever listed, no archiving ran; when tables
-///   WERE listed but none of them ended up indexed, archiving already ran and
-///   preserved exactly those listed tables. Note the second message says
-///   "indexed", not "read": a listed table also fails to be indexed when its
-///   schema read succeeded but the `cache_table` write itself failed
-///   (`TableOutcome::WriteFailed`, KYO-364), so naming the read specifically
-///   would overclaim on that path.
+/// What stays local to this wrapper is the **returned error message**,
+/// which must not claim more than what actually happened: when nothing was
+/// ever listed, no archiving ran; when tables WERE listed but none of them
+/// ended up indexed, archiving already ran and preserved exactly those
+/// listed tables. Note the second message says "indexed", not "read": a
+/// listed table also fails to be indexed when its schema read succeeded but
+/// the `cache_table` write itself failed (`TableOutcome::WriteFailed`,
+/// KYO-364), so naming the read specifically would overclaim on that path.
 ///
 /// Pure and I/O-free (mirrors `fold_dataset_outcomes` above and
 /// `fold_table_outcomes` in `catalog::helpers`) so this exact decision — not
@@ -308,10 +292,30 @@ fn resolve_run_outcome(
     tables_indexed: usize,
     errors: &[String],
 ) -> RunOutcome {
-    let nothing_listed = !seen_any_table;
-    let nothing_usable = tables_indexed == 0;
+    let shared = crate::catalog::helpers::resolve_run_outcome(
+        seen_any_table,
+        tables_indexed,
+        errors,
+        false,
+    );
 
-    let (status, failure_reason) = resolve_final_status(nothing_usable, errors);
+    // Derived from `shared`, not recomputed: this wrapper always passes
+    // `empty_scope_is_expected = false`, so `shared.archive` is exactly
+    // `!nothing_listed` by construction (see `resolve_run_outcome`'s doc
+    // comment) — reusing it here means a future change to that predicate
+    // can't silently desync the message text from the archive decision it
+    // describes.
+    let nothing_listed = !shared.archive;
+
+    // NOT derived from `shared`: `resolve_final_status` folds
+    // `nothing_usable` together with `errors.is_empty()` into `status`/
+    // `failure_reason`, and `"idle"` is genuinely ambiguous between
+    // `nothing_usable == false` and `nothing_usable == true` with no
+    // errors — so unlike `nothing_listed` above, there is no lossless way
+    // to recover this boolean from `shared`'s output fields. `tables_indexed`
+    // is a plain input already in scope, not a re-derivation of any
+    // decision `resolve_run_outcome` makes internally.
+    let nothing_usable = tables_indexed == 0;
 
     let message = if nothing_listed {
         "No tables discovered — existing catalog preserved"
@@ -321,9 +325,9 @@ fn resolve_run_outcome(
     let error_message = nothing_usable.then_some(message);
 
     RunOutcome {
-        archive: !nothing_listed,
-        status,
-        failure_reason,
+        archive: shared.archive,
+        status: shared.status,
+        failure_reason: shared.failure_reason,
         error_message,
     }
 }

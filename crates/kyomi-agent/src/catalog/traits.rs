@@ -21,7 +21,7 @@ use serde_json::Value;
 use tracing::{info, warn};
 
 use kyomi_auth::catalog::helpers::{
-    archive_missing_tables, cache_table, resolve_final_status, update_datasource_last_refresh,
+    archive_missing_tables, cache_table, resolve_run_outcome, update_datasource_last_refresh,
     update_datasource_status, CacheTableParams, IndexerContext,
 };
 use kyomi_auth::catalog::types::{CatalogIndexResult, ColumnEntry, TableEntry};
@@ -121,11 +121,11 @@ pub trait SQLCatalogIndexer: Send + Sync {
     /// without aborting the whole container. Swallowing such a failure with
     /// only a log and no return path makes a fully permission-denied
     /// container indistinguishable from a genuinely empty one to the
-    /// `nothing_found` check below — the exact silent-success bug KYO-126
-    /// exists to fix, reappearing one level down (KYO-126, second pass).
-    /// Returning the messages here lets [`index_catalog_sql`] fold them into
-    /// the same `errors` accumulator every other indexer's `Err` path
-    /// already feeds, so [`resolve_final_status`] can see them.
+    /// status decision below — the exact silent-success bug KYO-126 exists
+    /// to fix, reappearing one level down (KYO-126, second pass). Returning
+    /// the messages here lets [`index_catalog_sql`] fold them into the same
+    /// `errors` accumulator every other indexer's `Err` path already feeds,
+    /// so `resolve_run_outcome` can see them.
     ///
     /// [`get_tables_in_container`]: SQLCatalogIndexer::get_tables_in_container
     async fn get_tables_in_container_with_partial_failures(
@@ -681,25 +681,36 @@ pub async fn index_catalog_sql(
         }
     }
 
-    // Archive missing tables — only when we have positive evidence of tables.
-    // Guard condition: if no tables were found (regardless of whether any container
-    // query succeeded), preserve the existing catalog. A successful query returning
-    // 0 rows is just as unsafe to archive on as a failed query.
-    // Exception: containers.is_empty() means the user explicitly configured no
-    // containers — archiving is correct there (removes stale tables from a datasource
-    // the user intentionally emptied).
-    let nothing_found =
-        seen_table_ids.is_empty() && tables_indexed == 0 && !containers.is_empty();
+    // Resolve the archive/status decision (KYO-385). These are two
+    // different questions and must not be answered by one predicate:
+    //
+    // - Archiving keys off "was anything *listed*" (`seen_table_ids`) — a
+    //   listed-but-unwritable table (schema read OK, `cache_table` write
+    //   failed) demonstrably exists and must not be evicted. A successful
+    //   container query returning 0 rows is just as unsafe to archive on as
+    //   a failed one.
+    // - Status keys off "was anything *usable*" (`tables_indexed`).
+    //   Conflating the two — as the single `nothing_found` predicate this
+    //   replaces did — is the KYO-385 bug: `seen_table_ids` is populated
+    //   before `cache_table` runs, so a run where every table listed and
+    //   read fine but every write failed always looked like `nothing_found
+    //   == false` and silently reported `"idle"`, no matter how many
+    //   `errors` accumulated.
+    //
+    // `containers.is_empty()` is the one exception: the user explicitly
+    // configured no containers, so an empty result is expected — archive
+    // the existing catalog (removes stale tables from a datasource the user
+    // intentionally emptied) and never report a failure for a run that
+    // found nothing because there was nothing configured to look at. See
+    // `resolve_run_outcome`'s doc comment for the full reasoning.
+    let outcome = resolve_run_outcome(
+        !seen_table_ids.is_empty(),
+        tables_indexed,
+        &errors,
+        containers.is_empty(),
+    );
 
-    let tables_archived = if nothing_found {
-        warn!(
-            workspace_id = ctx.workspace_id,
-            datasource_config_id = ctx.datasource_config_id,
-            any_container_succeeded,
-            "No tables found — preserving existing catalog (archiving skipped)"
-        );
-        0
-    } else {
+    let tables_archived = if outcome.archive {
         let archived_names = archive_missing_tables(
             db,
             &ctx.workspace_id,
@@ -709,23 +720,26 @@ pub async fn index_catalog_sql(
         .await
         .unwrap_or_default();
         archived_names.len()
+    } else {
+        warn!(
+            workspace_id = ctx.workspace_id,
+            datasource_config_id = ctx.datasource_config_id,
+            any_container_succeeded,
+            "No tables found — preserving existing catalog (archiving skipped)"
+        );
+        0
     };
 
     // Update datasource last refresh time
     let _ = update_datasource_last_refresh(db, &ctx.datasource_config_id).await;
 
-    // Record this datasource's status. A container set that yields zero tables is
-    // only a failure if at least one discovery error occurred along the
-    // way (KYO-126) — a container that is accessible but genuinely empty
-    // must still report `idle`. See `resolve_final_status`.
-    let (final_status, failure_reason) = resolve_final_status(nothing_found, &errors);
     let _ = update_datasource_status(
         db,
         &ctx.workspace_id,
         &ctx.datasource_config_id,
-        final_status,
+        outcome.status,
         None,
-        failure_reason.as_deref(),
+        outcome.failure_reason.as_deref(),
         &errors,
     )
     .await;
@@ -745,9 +759,16 @@ pub async fn index_catalog_sql(
         "catalog indexing complete"
     );
 
-    // If nothing was found, return an error result so callers can surface
-    // the failure rather than silently reporting zero tables indexed.
-    if nothing_found {
+    // If nothing was ever listed, return an error result so callers can
+    // surface the failure rather than silently reporting zero tables
+    // indexed. This is `!outcome.archive` rather than a write-failure
+    // check: it fires only when discovery itself found nothing (or
+    // `containers` was configured empty) — the same condition `nothing_found`
+    // captured before the archive/status split, unaffected by KYO-385 (an
+    // all-write-failed run still has `outcome.archive == true`, and falls
+    // through to the `completed(..)` result below with its errors attached,
+    // exactly as before).
+    if !outcome.archive {
         let mut result =
             CatalogIndexResult::error("No tables discovered — existing catalog preserved")
                 .with_times(&start_time.to_rfc3339(), &end_time.to_rfc3339())
@@ -1266,6 +1287,210 @@ mod tests {
         );
     }
 
+
+    /// AC3 (KYO-385): a genuine mixed run — one table's `cache_table` call
+    /// takes the "schema unchanged AND embeddings exist" skip branch
+    /// (`crates/kyomi-auth/src/catalog/helpers.rs`, the `Ok(())` path that
+    /// never calls `generate_and_store_embeddings`, so it never touches
+    /// pgvector) and genuinely counts toward `tables_indexed`, while a
+    /// second, newly-discovered table still fails on this SQLite pool
+    /// exactly as in the all-failed tests above. This is the one scenario
+    /// none of those tests can exercise, because they never seed a
+    /// matching pre-existing cache + embeddings row: on this pool
+    /// `store_search_embeddings` unconditionally errors, so without the
+    /// skip branch `tables_indexed` can only ever be `0`.
+    ///
+    /// Also seeds a third, unrelated stale table that this run's discovery
+    /// never lists, to confirm archiving runs *normally* here — not the
+    /// "preserve everything" branch that a `nothing_listed` run takes.
+    #[tokio::test]
+    async fn partial_write_failure_one_cached_one_failed_resolves_to_idle() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+
+        // Seed FK parents: users -> workspaces -> datasource_configs.
+        sqlx::query("INSERT INTO users (user_id, email) VALUES ('u1', 'u1@test.local')")
+            .execute(sq)
+            .await
+            .expect("insert user");
+        sqlx::query(
+            "INSERT INTO workspaces (workspace_id, name, owner_user_id) VALUES ('ws1', 'WS', 'u1')",
+        )
+        .execute(sq)
+        .await
+        .expect("insert workspace");
+        sqlx::query(
+            "INSERT INTO datasource_configs (id, workspace_id, name, datasource_type, slug) \
+             VALUES ('ds1', 'ws1', 'RS', 'redshift', 'rs')",
+        )
+        .execute(sq)
+        .await
+        .expect("insert datasource_config");
+
+        // Stale table this run's discovery will never list — proves
+        // archiving ran normally (not skipped) when the run finds *some*
+        // real evidence of tables.
+        sqlx::query(
+            r#"
+            INSERT INTO datasource_table_cache
+                (workspace_id, datasource_config_id, project_id, dataset_id, table_id, table_metadata, is_archived)
+            VALUES ('ws1', 'ds1', 'analytics', 'public', 'stale_table', '{}', 0)
+            "#,
+        )
+        .execute(sq)
+        .await
+        .expect("seed stale cache row");
+
+        // `users` — pre-seeded with a `table_metadata` whose schema
+        // signature matches exactly what `MockRedshiftIndexer::
+        // get_table_columns` returns (`id`/`number`/no description, same
+        // for every table name it's asked about), plus a search-embeddings
+        // row so `cache_table`'s "schema unchanged AND embeddings exist"
+        // branch is taken: `compute_schema_signature` reads `col_type` off
+        // the freshly-discovered `ColumnEntry`, `extract_schema_signature`
+        // reads the stored `columns[].type` — both must resolve to
+        // `[("id", "number", "")]`, or the skip branch will be missed and
+        // `users` will silently fail its write too, defeating the point of
+        // this fixture.
+        let insert_result = sqlx::query(
+            r#"
+            INSERT INTO datasource_table_cache
+                (workspace_id, datasource_config_id, project_id, dataset_id, table_id, table_metadata, is_archived)
+            VALUES ('ws1', 'ds1', 'analytics', 'public', 'users', ?, 0)
+            "#,
+        )
+        .bind(
+            json!({
+                "table_name": "users",
+                "dataset_id": "public",
+                "project_id": "analytics",
+                "table_type": "BASE TABLE",
+                "columns": [
+                    {"name": "id", "type": "number", "native_type": "INTEGER", "description": ""}
+                ],
+            })
+            .to_string(),
+        )
+        .execute(sq)
+        .await
+        .expect("seed users cache row");
+        let users_cache_id = insert_result.last_insert_rowid();
+
+        sqlx::query(
+            r#"
+            INSERT INTO datasource_search_embeddings
+                (table_cache_id, workspace_id, project_id, dataset_id, table_id, entry_type, text, weight, embedding, datasource_config_id)
+            VALUES (?, 'ws1', 'analytics', 'public', 'users', 'schema_table', 'public.users', 1.0, ?, 'ds1')
+            "#,
+        )
+        .bind(users_cache_id)
+        .bind(vec![0u8; 4])
+        .execute(sq)
+        .await
+        .expect("seed users embedding row");
+
+        let embedding = EmbeddingService::new().expect("load embedding model");
+        let ctx = IndexerContext {
+            workspace_id: "ws1".to_string(),
+            datasource_config_id: "ds1".to_string(),
+            connection_config: json!({ "database": "analytics" }),
+            encryption_key: std::sync::Arc::new([0u8; 32]),
+        };
+        let credentials = json!({ "user": "x", "password": "y" });
+
+        let result = index_catalog_sql(
+            &MockRedshiftIndexer,
+            &ctx,
+            &db,
+            &embedding,
+            None,
+            Some(&credentials),
+            None,
+        )
+        .await;
+
+        // Loud failure mode if the skip branch was missed: this would read
+        // `0`, not `1`, and every other assertion below would be testing
+        // the wrong scenario (another all-failed run) for the wrong reason.
+        assert_eq!(
+            result.tables_indexed, 1,
+            "users must take the schema-unchanged/embeddings-exist skip branch and genuinely count \
+             as indexed — if this is 0, the seeded schema signature didn't match and users failed too"
+        );
+
+        let errors = result
+            .errors
+            .as_deref()
+            .expect("the events write failure must still reach the caller-visible result");
+        assert_eq!(errors.len(), 1, "got: {errors:?}");
+        assert!(
+            errors[0].contains("events"),
+            "the one real failure must be for events, got: {errors:?}"
+        );
+
+        assert_eq!(
+            result.tables_archived, 1,
+            "the stale table must be archived — this run found real evidence of tables, so archiving \
+             must run normally, not take the nothing-listed preserve-everything branch"
+        );
+
+        let status: String = sqlx::query_scalar(
+            "SELECT catalog_refresh_status FROM datasource_configs WHERE id = ?",
+        )
+        .bind(&ctx.datasource_config_id)
+        .fetch_one(sq)
+        .await
+        .expect("read datasource status");
+        assert_eq!(
+            status, "idle",
+            "AC3: a partial write failure (one cached, one failed) must still resolve to idle"
+        );
+
+        // Parsed inline rather than via connect.rs's `datasource_progress_envelope`
+        // helper (that module's test-only fixture, not shared).
+        let progress_raw: String = sqlx::query_scalar(
+            "SELECT catalog_refresh_progress FROM datasource_configs WHERE id = ?",
+        )
+        .bind(&ctx.datasource_config_id)
+        .fetch_one(sq)
+        .await
+        .expect("read progress envelope");
+        let envelope: Value =
+            serde_json::from_str(&progress_raw).expect("progress envelope must be valid JSON");
+        let warnings = envelope
+            .get("warnings")
+            .and_then(|w| w.as_array())
+            .expect("warnings must be a present JSON array");
+        assert_eq!(warnings.len(), 1, "got: {warnings:?}");
+        assert!(
+            warnings[0]
+                .as_str()
+                .is_some_and(|w| w.contains("events")),
+            "the events write failure must also be persisted in the warnings array, got: {warnings:?}"
+        );
+
+        let stale_archived: i64 = sqlx::query_scalar(
+            "SELECT is_archived FROM datasource_table_cache WHERE datasource_config_id = 'ds1' AND table_id = 'stale_table'",
+        )
+        .fetch_one(sq)
+        .await
+        .expect("read stale_table archival state");
+        assert_eq!(stale_archived, 1, "stale_table must be archived — it was never re-listed this run");
+
+        let visible: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM datasource_table_cache WHERE datasource_config_id = 'ds1' AND is_archived = 0")
+                .fetch_one(sq)
+                .await
+                .expect("count visible tables");
+        assert_eq!(
+            visible, 2,
+            "users (skip-branch success) and events (write-failed but still cached) must both remain visible"
+        );
+    }
     // ── get_tables_in_container_with_partial_failures wiring (KYO-126, second pass) ──
     //
     // Databricks-shaped mock: overrides `get_tables_in_container_with_partial_failures`
@@ -1435,13 +1660,30 @@ mod tests {
         );
     }
 
-    /// Companion regression guard: a Databricks-shaped catalog where only
-    /// SOME schemas fail (others yield real tables) must still complete
-    /// normally — one bad schema must not turn the whole catalog red. This
-    /// is the "one bad apple" behavior the KYO-126 fix is required to
-    /// preserve, not just the failure case above.
+    /// AC1 headline (KYO-385): a Databricks-shaped catalog where one schema
+    /// is permission-denied (`main.marketing`) while the other schema's one
+    /// table (`orders`, from `main.sales`) lists and reads fine — but its
+    /// `cache_table` write fails too, on this in-memory SQLite pool, since
+    /// `store_search_embeddings` unconditionally errors (pgvector
+    /// unsupported). So `tables_indexed` ends at `0`: nothing from either
+    /// schema was actually usable this run, and with two real errors
+    /// recorded (the schema-list denial and the write failure) the correct
+    /// status is `"failed"`.
+    ///
+    /// This test used to be named `..._still_completes` and asserted
+    /// `"idle"` — the KYO-126 "one bad apple" doctrine it was written to
+    /// pin (one denied schema must not fail tables found in a sibling
+    /// schema) is still true, and still demonstrated below by the cached
+    /// row surviving archival, but the *status* claim was wrong: it relied
+    /// on `seen_table_ids` (populated as soon as `orders` was discovered,
+    /// independent of whether its embeddings could be stored) rather than
+    /// on `tables_indexed`, which is exactly the KYO-385 bug. KYO-364 fixed
+    /// the equivalent case on the BigQuery REST path
+    /// (`kyomi_auth::catalog::indexers::user_dataset::resolve_run_outcome`,
+    /// now shared via `kyomi_auth::catalog::helpers::resolve_run_outcome`);
+    /// this test is the SQL-indexer-template port of that fix.
     #[tokio::test]
-    async fn databricks_shaped_partial_schema_failure_still_completes() {
+    async fn databricks_shaped_partial_schema_failure_all_writes_failed_resolves_to_failed() {
         let db = DbPool::connect("sqlite::memory:")
             .await
             .expect("connect in-memory sqlite");
@@ -1502,23 +1744,12 @@ mod tests {
         // is unsupported on the in-memory SQLite pool this test runs
         // against (see `redshift_refresh_does_not_archive_freshly_cached_tables`
         // above, which has the same property and asserts on the cache row
-        // directly for the same reason). What actually decides
-        // `nothing_found` — and therefore this test's point, that one bad
-        // schema doesn't fail the whole catalog — is `seen_table_ids`, which
-        // is populated as soon as a table is discovered, independent of
-        // whether its embeddings could be stored.
-        //
-        // KYO-385: that last property is also a live bug, not just a
-        // fixture quirk. Because `seen_table_ids` is populated before
-        // `cache_table` runs, a run where every discovered table's write
-        // fails still resolves to `"idle"` here — the `status` assertion at
-        // the bottom of this test is asserting exactly that, on a fixture
-        // where 0 of 1 tables were successfully cached. KYO-364 fixed this
-        // on the BigQuery REST path (`resolve_run_outcome` in
-        // `kyomi_auth::catalog::indexers::user_dataset`, which keys status
-        // off `tables_indexed` and archiving off `seen_table_ids`
-        // separately); porting that split here is KYO-385, which will
-        // rename and re-assert this test.
+        // directly for the same reason). Archiving keys off `seen_table_ids`
+        // (populated as soon as `orders` is discovered, independent of
+        // whether its embeddings could be stored) — not `tables_indexed` —
+        // so the accessible schema's table is still cached/preserved here
+        // (the KYO-324 invariant) even though the run as a whole is
+        // reported failed below.
         let cached_rows: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM datasource_table_cache WHERE datasource_config_id = ? AND is_archived = 0",
         )
@@ -1539,8 +1770,20 @@ mod tests {
         .await
         .expect("read datasource status");
         assert_eq!(
-            status, "idle",
-            "partial success (one bad schema, others fine) must not be reported as failed"
+            status, "failed",
+            "zero usable tables with two real errors recorded must surface as failed, not idle"
+        );
+
+        let progress: String = sqlx::query_scalar(
+            "SELECT catalog_refresh_progress FROM datasource_configs WHERE id = ?",
+        )
+        .bind(&ctx.datasource_config_id)
+        .fetch_one(sq)
+        .await
+        .expect("read progress envelope");
+        assert!(
+            progress.contains("main.marketing"),
+            "failure reason must name a real underlying error, not a generic message, got: {progress}"
         );
     }
 }

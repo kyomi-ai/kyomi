@@ -17,7 +17,7 @@ use tracing::{info, warn};
 
 use crate::catalog::traits::CatalogIndexer;
 use kyomi_auth::catalog::helpers::{
-    archive_missing_tables, cache_table, resolve_final_status, update_datasource_last_refresh,
+    archive_missing_tables, cache_table, resolve_run_outcome, update_datasource_last_refresh,
     update_datasource_status, CacheTableParams, IndexerContext,
 };
 use kyomi_auth::catalog::types::{CatalogIndexResult, ColumnEntry};
@@ -212,8 +212,8 @@ struct ProcessDiscoveredCatalogParams<'a> {
 /// longer present, and decide the run's final datasource status.
 ///
 /// Split out from [`ConnectIndexer::index_catalog`] so this logic — which
-/// includes the KYO-126 `nothing_found` decision below — is unit-testable
-/// against a plain [`CatalogResult`] value and an in-memory DB, without
+/// includes the KYO-126/KYO-385 `resolve_run_outcome` decision below — is
+/// unit-testable against a plain [`CatalogResult`] value and an in-memory DB, without
 /// needing a live Connect WebSocket connection through [`ConnectRegistry`].
 /// `discover_catalog` itself (and its `Err` handling, which already maps a
 /// discovery failure to `"failed"` with the agent's real message) stays in
@@ -284,18 +284,34 @@ async fn process_discovered_catalog(params: ProcessDiscoveredCatalogParams<'_>) 
         }
     }
 
-    // Archive missing tables — guard against empty discovery. As on the
-    // direct path, an *explicit empty selection* is exempt from the guard:
-    // the user intentionally cleared the scope, so stale tables should be
-    // archived rather than preserved.
-    let nothing_found = seen_table_ids.is_empty() && tables_indexed == 0 && !explicit_empty;
-    let tables_archived = if nothing_found {
-        warn!(
-            datasource_config_id = ctx.datasource_config_id,
-            "No tables found via Connect — preserving existing catalog"
-        );
-        0
-    } else {
+    // Resolve the archive/status decision (KYO-385). These are two
+    // different questions and must not be answered by one predicate:
+    //
+    // - Archiving keys off "was anything *listed*" (`seen_table_ids`) — a
+    //   listed-but-unwritable table (schema read OK, `cache_table` write
+    //   failed) demonstrably exists and must not be evicted.
+    // - Status keys off "was anything *usable*" (`tables_indexed`).
+    //   Conflating the two — as the single `nothing_found` predicate this
+    //   replaces did — is the KYO-385 bug: `seen_table_ids` is populated
+    //   before `cache_table` runs, so a run where every table listed fine
+    //   but every write failed always looked like `nothing_found == false`
+    //   and silently reported `"idle"`, no matter how many
+    //   `catalog_result.errors` accumulated.
+    //
+    // As on the direct SQL path, `explicit_empty` is the one exception: the
+    // user intentionally cleared the container selection, so an empty
+    // result is expected — archive the existing catalog (stale tables
+    // should be evicted, not preserved) and never report a failure for a
+    // run that found nothing because nothing was ever selected. See
+    // `resolve_run_outcome`'s doc comment for the full reasoning.
+    let outcome = resolve_run_outcome(
+        !seen_table_ids.is_empty(),
+        tables_indexed,
+        &catalog_result.errors,
+        explicit_empty,
+    );
+
+    let tables_archived = if outcome.archive {
         archive_missing_tables(
             db,
             &ctx.workspace_id,
@@ -305,44 +321,43 @@ async fn process_discovered_catalog(params: ProcessDiscoveredCatalogParams<'_>) 
         .await
         .unwrap_or_default()
         .len()
+    } else {
+        warn!(
+            datasource_config_id = ctx.datasource_config_id,
+            "No tables found via Connect — preserving existing catalog"
+        );
+        0
     };
 
     let _ = update_datasource_last_refresh(db, &ctx.datasource_config_id).await;
 
-    // KYO-268 phase 2: `nothing_found` can no longer be assumed to mean "a
-    // fully successful discovery that simply found no tables" — that
-    // premise (from the KYO-126 fix this comment used to describe) held
-    // only for a *total* denial, which is still unchanged: it surfaces as a
-    // real `Err` from `discover_catalog`, caught above in `index_catalog`'s
-    // discovery match arm, and this function is never reached in that case.
-    // What's new (kyomi-connect-protocol 1.4.1, kyomi-connect PR #17) is a
-    // *partial* denial: one container or table failing no longer aborts the
-    // whole crawl. `discover_catalog` still returns `Ok`, with the failing
-    // container/table simply omitted from `containers` and its failure
-    // recorded in `catalog_result.errors` instead. So `nothing_found` can
-    // now happen with discovery having "succeeded" only in the sense that
-    // it returned `Ok` — every container that *was* reachable turned out
-    // empty, while a sibling container was silently denied and excluded.
+    // KYO-268 phase 2: a discovery denial no longer aborts the whole crawl
+    // (kyomi-connect-protocol 1.4.1, kyomi-connect PR #17) — one container
+    // or table failing is recorded in `catalog_result.errors` and simply
+    // omitted from `containers`, while `discover_catalog` still returns
+    // `Ok` and the rest of the crawl proceeds normally. A *total* denial is
+    // unaffected by this and still unchanged: it surfaces as a real `Err`
+    // from `discover_catalog`, caught above in `index_catalog`'s discovery
+    // match arm, and this function is never reached in that case.
     //
-    // `resolve_final_status` — the same function the direct SQL path uses —
-    // is what tells the two cases apart: `nothing_found` with at least one
-    // recorded error maps to `"failed"` with a reason built from that
-    // error; `nothing_found` with no errors is a genuinely empty,
-    // fully-accessible catalog and still reports `"idle"` (the original
-    // KYO-126 case this path was fixed for). A non-empty result (some
-    // tables were cached) always reports `"idle"` regardless of `errors` —
-    // a 9-of-10-accessible datasource must not carry a permanent red alert
-    // over one denied container. Those errors aren't dropped in that case;
-    // they're carried on `CatalogIndexResult::errors` below instead.
-    let (final_status, failure_reason) =
-        resolve_final_status(nothing_found, &catalog_result.errors);
+    // `outcome.status` (via `resolve_final_status`, shared with the direct
+    // SQL path) is what tells the partial-denial cases apart: zero tables
+    // usable with at least one recorded error maps to `"failed"` with a
+    // reason built from that error; zero tables usable with no errors is a
+    // genuinely empty, fully-accessible catalog and still reports `"idle"`
+    // (the original KYO-126 case this path was fixed for). A non-empty
+    // result (some tables actually indexed) always reports `"idle"`
+    // regardless of `errors` — a 9-of-10-accessible datasource must not
+    // carry a permanent red alert over one denied container. Those errors
+    // aren't dropped in that case; they're carried on
+    // `CatalogIndexResult::errors` below instead.
     let _ = update_datasource_status(
         db,
         &ctx.workspace_id,
         &ctx.datasource_config_id,
-        final_status,
+        outcome.status,
         None,
-        failure_reason.as_deref(),
+        outcome.failure_reason.as_deref(),
         &catalog_result.errors,
     )
     .await;
@@ -353,7 +368,8 @@ async fn process_discovered_catalog(params: ProcessDiscoveredCatalogParams<'_>) 
         datasource_config_id = ctx.datasource_config_id,
         tables_indexed,
         tables_archived,
-        nothing_found,
+        archived = outcome.archive,
+        status = outcome.status,
         discovery_errors = catalog_result.errors.len(),
         elapsed_secs = (end_time - start_time).num_seconds(),
         "Connect catalog indexing complete"
@@ -624,11 +640,24 @@ mod tests {
         );
     }
 
-    /// Companion sanity check: when the catalog actually has tables, they
-    /// get cached and the run still reports `"idle"`/`"completed"` — the
-    /// fix only changes the *empty* case, not the normal path.
+    /// AC2 headline (KYO-385): a table is discovered and its schema read
+    /// fine, but the `cache_table` write itself fails for every table this
+    /// run — on this in-memory SQLite pool, that's *every* table with at
+    /// least one column, since `store_search_embeddings` unconditionally
+    /// errors (pgvector unsupported). Zero discovery errors here, so this
+    /// is the cleanest form of the bug: no denied container muddying
+    /// whether the zero-tables outcome came from discovery or from caching.
+    ///
+    /// Before KYO-385 this asserted `"idle"` — the test's original name
+    /// (`tables_found_are_cached_and_reports_idle`) claimed the table "gets
+    /// cached", but `cache_table` returns `Err` here (see the cached-row
+    /// assertion below for what actually happens), so `tables_indexed`
+    /// stays `0` and the run silently reported a healthy datasource with an
+    /// empty catalog. `seen_table_ids` (non-empty — `orders` was listed)
+    /// masked that from the old single `nothing_found` predicate; the
+    /// status decision must follow `tables_indexed`, not `seen_table_ids`.
     #[tokio::test]
-    async fn tables_found_are_cached_and_reports_idle() {
+    async fn all_tables_listed_all_writes_failed_resolves_to_failed() {
         let db = DbPool::connect("sqlite::memory:")
             .await
             .expect("connect in-memory sqlite");
@@ -664,14 +693,25 @@ mod tests {
         })
         .await;
 
+        // `CatalogIndexResult::status` is always `"completed"` on this path
+        // (unlike the SQL path, `process_discovered_catalog` has no
+        // early-return-`error()` branch) — the persisted
+        // `catalog_refresh_status` column below is what the settings page
+        // badge and `get_catalog_stats` actually read, and is what this
+        // test exists to pin.
         assert_eq!(result.status, "completed");
+        assert_eq!(
+            result.errors.as_deref().map(<[String]>::len),
+            Some(1),
+            "the cache_table write failure must reach the caller-visible result"
+        );
 
-        // Not `result.tables_indexed` — `cache_table` only counts a table as
-        // "indexed" once embedding storage also succeeds, and pgvector
-        // storage is unsupported on the in-memory SQLite pool this test runs
-        // against. The cache row itself is written regardless, so assert on
-        // that directly (same reasoning as
-        // `databricks_shaped_partial_schema_failure_still_completes` in
+        // The cache row IS written — `cache_table`'s INSERT commits before
+        // it ever calls `store_search_embeddings` — so `tables_indexed`
+        // (which only increments on a full `cache_table` `Ok`) undercounts
+        // relative to what's physically in the cache table. Assert on the
+        // row directly instead (same reasoning as
+        // `all_tables_listed_all_writes_failed_resolves_to_failed` in
         // `catalog::traits::tests`, which hits the same environment
         // limitation).
         let cached_rows: i64 = sqlx::query_scalar(
@@ -681,23 +721,46 @@ mod tests {
         .fetch_one(sq)
         .await
         .expect("count cached tables");
-        assert_eq!(cached_rows, 1, "the discovered table must be cached");
+        assert_eq!(
+            cached_rows, 1,
+            "the listed table must still be cached/preserved (KYO-324 invariant) even though the run is reported failed"
+        );
 
         assert_eq!(
             datasource_status(sq, &ctx.datasource_config_id).await,
-            "idle"
+            "failed",
+            "zero usable tables with a real write-failure error must surface as failed, not idle"
+        );
+
+        let progress: String = sqlx::query_scalar(
+            "SELECT catalog_refresh_progress FROM datasource_configs WHERE id = ?",
+        )
+        .bind(&ctx.datasource_config_id)
+        .fetch_one(sq)
+        .await
+        .expect("read progress envelope");
+        assert!(
+            progress.contains("orders") && progress.contains("pgvector"),
+            "failure reason must name the real cache_table write error, not a generic message, got: {progress}"
         );
     }
 
-    /// KYO-268 phase 2: the load-bearing case. One container out of several
-    /// is denied (recorded in `errors`, omitted from `containers`) while the
-    /// rest discover tables normally. The datasource must still report
-    /// `"idle"` — a 9-of-10-accessible datasource must not carry a
-    /// permanent red alert over one denial — but the denial itself must not
-    /// be silently dropped: it has to reach the returned
-    /// `CatalogIndexResult::errors` (acceptance criterion 1).
+    /// KYO-268 phase 2 originally introduced this as "the load-bearing
+    /// case": a denied container plus one table found elsewhere, staying
+    /// `"idle"` because *some* container was accessible. KYO-385 corrects
+    /// the premise — the one table this fixture finds also fails its
+    /// `cache_table` write on this SQLite pool (see
+    /// `all_tables_listed_all_writes_failed_resolves_to_failed` above), so
+    /// `tables_indexed` is `0` here too: nothing was actually usable this
+    /// run, and with two real errors recorded (the denial and the write
+    /// failure) the correct status is `"failed"`, not `"idle"`. What this
+    /// test still proves, and the reason it stays distinct from
+    /// `discovery_denial_plus_all_writes_failed_persists_failed_with_warnings`
+    /// below: both failures reach the in-process `CatalogIndexResult::errors`
+    /// return value, not just the persisted envelope that function checks —
+    /// a separate channel (see that function's own doc comment).
     #[tokio::test]
-    async fn partial_failure_with_tables_found_reports_idle_and_preserves_errors() {
+    async fn discovery_denial_plus_all_writes_failed_reports_failed_and_preserves_errors() {
         let db = DbPool::connect("sqlite::memory:")
             .await
             .expect("connect in-memory sqlite");
@@ -736,10 +799,9 @@ mod tests {
         // Two errors, not one: the denied-container error PLUS a
         // `cache_table` write failure for `orders` (KYO-364) — pgvector
         // storage is unsupported on the in-memory SQLite pool this test runs
-        // against (see the "Not `result.tables_indexed`" comment below), so
-        // `cache_table` always returns `Err` here, and that `Err` is now
-        // correctly folded into `catalog_result.errors` instead of being
-        // silently dropped.
+        // against (see the cache-row comment below), so `cache_table`
+        // always returns `Err` here, and that `Err` is now correctly folded
+        // into `catalog_result.errors` instead of being silently dropped.
         let errors = result
             .errors
             .as_deref()
@@ -754,9 +816,9 @@ mod tests {
             "cache_table write failure for orders must be present, got: {errors:?}"
         );
 
-        // See the "Not `result.tables_indexed`" comment on
-        // `tables_found_are_cached_and_reports_idle` above for why the cache
-        // row is asserted directly instead.
+        // See `all_tables_listed_all_writes_failed_resolves_to_failed` above
+        // for why the cache row is asserted directly instead of
+        // `result.tables_indexed`.
         let cached_rows: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM datasource_table_cache WHERE datasource_config_id = ? AND is_archived = 0",
         )
@@ -766,13 +828,13 @@ mod tests {
         .expect("count cached tables");
         assert_eq!(
             cached_rows, 1,
-            "the accessible container's table must still be cached despite the sibling denial"
+            "the listed table must still be cached/preserved (KYO-324 invariant) even though the run is reported failed"
         );
 
         assert_eq!(
             datasource_status(sq, &ctx.datasource_config_id).await,
-            "idle",
-            "a 9-of-10-accessible Connect catalog must not go red over one denied container"
+            "failed",
+            "zero usable tables with two real errors recorded must surface as failed, not idle"
         );
     }
 
@@ -837,23 +899,37 @@ mod tests {
     // ── persisted `warnings` array (KYO-327) ─────────────────────────────
     //
     // KYO-327's premise correction: before this fix, `resolve_final_status`
-    // folding a partial run (tables found elsewhere, some containers
-    // denied) down to `"idle"` also discarded the individual error strings
-    // — they were never written to the persisted envelope at all, so the
-    // settings page had nothing to read for a partial success. These two
-    // tests lock in the terminal write's new `warnings` parameter on both
-    // sides of that behavior: non-empty on a partial run, empty on a clean
-    // one.
+    // folding a non-clean run (tables found elsewhere, or some containers
+    // denied) down to a terminal status also discarded the individual error
+    // strings — they were never written to the persisted envelope at all,
+    // so the settings page had nothing to read to explain the status. These
+    // two tests lock in the terminal write's `warnings` parameter on both
+    // sides of that behavior: non-empty on a failed/partial run, empty on a
+    // clean one.
 
-    /// The load-bearing regression: a partial run (some tables cached, one
-    /// container denied) must persist `catalog_refresh_status = "idle"`
-    /// *and* a non-empty `warnings` array carrying the real denial —  not
-    /// silently dropped the way `resolve_final_status`'s own reason
-    /// (`error`) is for this exact case (see
+    /// The load-bearing regression: a run with one denied container AND a
+    /// `cache_table` write failure for the only table found elsewhere must
+    /// persist a non-empty `warnings` array carrying both real errors — not
+    /// silently dropped the way `resolve_final_status`'s own `error` field
+    /// used to be for a comparable case (see
     /// `not_nothing_found_reports_idle_even_with_partial_errors` in
-    /// `kyomi_auth::catalog::helpers`, which is unaffected by this change).
+    /// `kyomi_auth::catalog::helpers`, which covers the genuinely-partial,
+    /// `tables_indexed > 0` case and is unaffected by this change).
+    ///
+    /// KYO-385: `catalog_refresh_status` itself is `"failed"` here, not
+    /// `"idle"` — this fixture is partial on the *discovery* axis (one
+    /// container denied, one listed fine) but 0-of-N on the *write* axis
+    /// (`cache_table` fails for `public.orders` on this SQLite pool, see
+    /// `all_tables_listed_all_writes_failed_resolves_to_failed` above), so
+    /// zero tables were actually usable this run. Before this fix,
+    /// `seen_table_ids` (populated before the write) masked that from the
+    /// old `nothing_found` predicate and this test asserted `"idle"` — the
+    /// KYO-364 bug surviving on this path, which KYO-364 fixed only for the
+    /// BigQuery REST path. The `warnings` array itself is unaffected: it's
+    /// built from `catalog_result.errors` regardless of which status they
+    /// resolve to.
     #[tokio::test]
-    async fn partial_run_with_tables_and_errors_persists_idle_with_warnings() {
+    async fn discovery_denial_plus_all_writes_failed_persists_failed_with_warnings() {
         let db = DbPool::connect("sqlite::memory:")
             .await
             .expect("connect in-memory sqlite");
@@ -889,18 +965,10 @@ mod tests {
         })
         .await;
 
-        // KYO-385: this fixture is partial on the *discovery* axis (one
-        // container denied, one listed fine) but 0-of-N on the *write* axis
-        // — `cache_table` fails for `public.orders` on this SQLite pool. The
-        // run therefore still reports `"idle"` with zero tables actually
-        // cached, which is the KYO-364 bug surviving on this path:
-        // `nothing_found` below keys off `seen_table_ids`, populated before
-        // the write. KYO-364 fixed it for the BigQuery REST path only;
-        // KYO-385 ports that fix here and will re-assert this test.
         assert_eq!(
             datasource_status(sq, &ctx.datasource_config_id).await,
-            "idle",
-            "tables found elsewhere must still resolve to idle, not failed (KYO-126/KYO-268)"
+            "failed",
+            "zero usable tables with two real errors recorded must surface as failed, not idle"
         );
 
         let envelope = datasource_progress_envelope(sq, &ctx.datasource_config_id).await;
@@ -941,8 +1009,8 @@ mod tests {
     /// correctly surfaced as a warning instead of being swallowed as a bare
     /// `false`, so a one-table fixture no longer *is* a clean run and cannot
     /// test this property. Zero tables keeps the assertion honest: the
-    /// terminal write still runs (`nothing_found` skips archiving but not
-    /// the status write), and it must still persist `warnings: []`.
+    /// terminal write still runs (`resolve_run_outcome` skips archiving but
+    /// not the status write), and it must still persist `warnings: []`.
     #[tokio::test]
     async fn clean_run_persists_empty_warnings_array() {
         let db = DbPool::connect("sqlite::memory:")
