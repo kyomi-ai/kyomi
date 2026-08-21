@@ -441,11 +441,7 @@ async fn search_knowledge_chunks(
         let score = if let Some(s) = row.score {
             s
         } else {
-            let chunk_emb: Vec<f32> = row
-                .embedding
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-                .collect();
+            let chunk_emb = kyomi_core::embedding_compat::bytes_to_embedding(&row.embedding);
             cosine_similarity(query_embedding, &chunk_emb)
         };
         let entry = file_scores

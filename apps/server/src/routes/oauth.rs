@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use kyomi_auth::{jwt, redis_ops, request_meta, token_service, user_service};
 
+use super::route_error::RouteError;
 use crate::state::AppState;
 
 // ===========================================================================
@@ -223,23 +224,20 @@ async fn oauth_authorize(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(params): Query<AuthorizeParams>,
-) -> Result<Response, Response> {
+) -> Result<Response, RouteError> {
     if params.response_type != "code" {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(json!({"error": "Only response_type=code is supported"})),
         )
-            .into_response());
+            .into());
     }
 
     // Validate client
-    let client = lookup_active_client(&state, &params.client_id)
-        .await
-        .map_err(|e| e.into_response())?;
+    let client = lookup_active_client(&state, &params.client_id).await?;
 
     // Validate redirect_uri
-    validate_redirect_uri(&client.redirect_uris, &params.redirect_uri)
-        .map_err(|e| e.into_response())?;
+    validate_redirect_uri(&client.redirect_uris, &params.redirect_uri)?;
 
     // Check if user is logged in (via cookie)
     let cookie_name = &kyomi_core::constants::get().cookies.access_token_name;
@@ -273,7 +271,7 @@ async fn oauth_authorize(
             .await
             .map_err(|e| {
                 tracing::error!(error = %e, "Failed to store OAuth pending state");
-                (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response()
+                RouteError::from((StatusCode::INTERNAL_SERVER_ERROR, "Internal error"))
             })?;
 
         let login_url = format!(
@@ -298,7 +296,7 @@ async fn oauth_authorize(
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "Failed to store OAuth auth code");
-            (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response()
+            RouteError::from((StatusCode::INTERNAL_SERVER_ERROR, "Internal error"))
         })?;
 
     let mut redirect_url = format!("{}?code={}", params.redirect_uri, auth_code);
@@ -325,14 +323,14 @@ async fn oauth_authorize_continue(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(params): Query<AuthorizeContinueParams>,
-) -> Result<Response, Response> {
+) -> Result<Response, RouteError> {
     // Check authentication FIRST, before consuming the state.
     let cookie_name = &kyomi_core::constants::get().cookies.access_token_name;
     let access_token = kyomi_auth::cookies::get_cookie_value(&headers, cookie_name)
-        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Not logged in").into_response())?;
+        .ok_or_else(|| RouteError::from((StatusCode::UNAUTHORIZED, "Not logged in")))?;
 
     let decoded = jwt::validate_token(access_token, &state.config.jwt_secret).map_err(|_| {
-        (StatusCode::UNAUTHORIZED, "Invalid session").into_response()
+        RouteError::from((StatusCode::UNAUTHORIZED, "Invalid session"))
     })?;
 
     let user_id = decoded.claims.sub.clone();
@@ -349,7 +347,7 @@ async fn oauth_authorize_continue(
             .await
             .map_err(|e| {
                 tracing::error!(error = %e, "Failed to verify OAuth pending state");
-                (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response()
+                RouteError::from((StatusCode::INTERNAL_SERVER_ERROR, "Internal error"))
             })?;
 
     let Some(oauth_params) = oauth_params else {
@@ -368,12 +366,9 @@ async fn oauth_authorize_continue(
     let original_state = oauth_params["state"].as_str();
     let scope = oauth_params["scope"].as_str();
 
-    let client = lookup_active_client(&state, client_id)
-        .await
-        .map_err(|e| e.into_response())?;
+    let client = lookup_active_client(&state, client_id).await?;
 
-    validate_redirect_uri(&client.redirect_uris, redirect_uri)
-        .map_err(|e| e.into_response())?;
+    validate_redirect_uri(&client.redirect_uris, redirect_uri)?;
 
     // Generate auth code
     let auth_code = redis_ops::generate_token();
@@ -389,7 +384,7 @@ async fn oauth_authorize_continue(
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "Failed to store OAuth auth code");
-            (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response()
+            RouteError::from((StatusCode::INTERNAL_SERVER_ERROR, "Internal error"))
         })?;
 
     let mut redirect_url = format!("{redirect_uri}?code={auth_code}");
@@ -435,7 +430,7 @@ async fn oauth_token(
     State(state): State<AppState>,
     headers: HeaderMap,
     Form(params): Form<TokenRequest>,
-) -> Result<Json<TokenResponse>, Response> {
+) -> Result<Json<TokenResponse>, RouteError> {
     tracing::info!(
         grant_type = %params.grant_type,
         client_id = %&params.client_id[..std::cmp::min(20, params.client_id.len())],
@@ -443,28 +438,26 @@ async fn oauth_token(
     );
 
     // Validate client
-    let _client = lookup_active_client(&state, &params.client_id)
-        .await
-        .map_err(|e| e.into_response())?;
+    let _client = lookup_active_client(&state, &params.client_id).await?;
 
     match params.grant_type.as_str() {
         "authorization_code" => {
             handle_authorization_code(&state, &headers, &params)
                 .await
                 .map(Json)
-                .map_err(|e| e.into_response())
+                .map_err(RouteError::from)
         }
         "refresh_token" => {
             handle_refresh_token(&state, &headers, &params)
                 .await
                 .map(Json)
-                .map_err(|e| e.into_response())
+                .map_err(RouteError::from)
         }
         other => Err((
             StatusCode::BAD_REQUEST,
             Json(json!({"error": format!("Unsupported grant_type: {other}")})),
         )
-            .into_response()),
+            .into()),
     }
 }
 
@@ -758,13 +751,13 @@ struct ClientRegistrationResponse {
 async fn register_client(
     State(state): State<AppState>,
     Json(registration): Json<ClientRegistrationRequest>,
-) -> Result<Json<ClientRegistrationResponse>, Response> {
+) -> Result<Json<ClientRegistrationResponse>, RouteError> {
     if registration.redirect_uris.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(json!({"error": "redirect_uris is required and must not be empty"})),
         )
-            .into_response());
+            .into());
     }
 
     // Generate unique client_id
@@ -800,7 +793,7 @@ async fn register_client(
     )
     .map_err(|e| {
         tracing::error!(error = %e, "Failed to register OAuth client");
-        (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response()
+        RouteError::from((StatusCode::INTERNAL_SERVER_ERROR, "Internal error"))
     })?;
 
     tracing::info!(client_id = %client_id, name = %client_name, "Registered new OAuth client");

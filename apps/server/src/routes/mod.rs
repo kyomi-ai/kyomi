@@ -23,5 +23,7 @@ pub mod mcp;
 pub mod oauth;
 pub mod push;
 pub mod query_arrow;
+// Shared `RouteError` type used by oauth.rs and mcp.rs — not a route module itself.
+mod route_error;
 // Slack routes moved to enterprise/kyomi-slack crate (Phase 12).
 pub mod websocket;

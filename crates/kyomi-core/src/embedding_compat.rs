@@ -24,8 +24,10 @@ pub fn bytes_to_embedding(bytes: &[u8]) -> Vec<f32> {
         bytes.len()
     );
     bytes
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
         .collect()
 }
 
@@ -76,5 +78,25 @@ mod tests {
         let bytes = embedding_to_bytes(&original);
         let vec: Vec<f32> = bytes_to_pg_vector(&bytes).into();
         assert_eq!(vec, original);
+    }
+
+    /// Byte-exact round-trip for a realistic 384-dim embedding (the
+    /// production dimension per the module doc). Uses varied, non-trivial
+    /// values (not all-zero like `correct_byte_count_384dim`) so the
+    /// assertion actually exercises `bytes_to_embedding`'s decode across
+    /// every chunk — the embedding round-trip behaviour KYO-400's
+    /// `as_chunks` rewrite must leave provably unchanged.
+    #[test]
+    fn roundtrip_384dim_embedding_is_byte_exact() {
+        let original: Vec<f32> = (0..384)
+            .map(|i| (i as f32 - 192.0) * 0.0173)
+            .collect();
+        let bytes = embedding_to_bytes(&original);
+        assert_eq!(bytes.len(), 384 * 4);
+        let restored = bytes_to_embedding(&bytes);
+        assert_eq!(restored.len(), original.len());
+        for (a, b) in original.iter().zip(restored.iter()) {
+            assert_eq!(a.to_bits(), b.to_bits(), "expected bit-exact round-trip");
+        }
     }
 }
