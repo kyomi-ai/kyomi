@@ -8,6 +8,28 @@ All scripts are organized by environment. **Every script is environment-specific
   in `.githooks/`; the setting is shared with every worktree of that clone.
   See root `CLAUDE.md` "Setup".
 
+- **`mine-review-logs.sh`** - Locates recent code-review logs for the
+  coding-standards-mining step (KYO-373 / KYO-386), from any worktree.
+  `docs/review-logs/` is **intentionally untracked and machine-local** —
+  `.gitignore` excludes `docs/*` except `docs/product/`, because review
+  logs are audit findings (some describing still-open issues) that must
+  not be published from this public repo. That means the directory only
+  exists in whichever clone has actually accumulated review runs; it is
+  never present in a fresh clone and is invisible to any linked worktree
+  unless this script is used to find it. Run it as
+  `scripts/mine-review-logs.sh [days]` (default `7`, must be a positive
+  integer) — it walks up to the canonical clone via
+  `git rev-parse --path-format=absolute --git-common-dir`, so it works
+  identically from the main checkout or any worktree. Matching log paths
+  (filtered by the `YYYY-MM-DD.md` filename, not mtime) print one per line
+  on stdout, oldest to newest; human-facing status goes to stderr.
+  **Exit-code contract:** `0` means `docs/review-logs/` was found (the
+  stdout list may legitimately be empty — a quiet review week is not an
+  error); `2` means the directory doesn't exist in the canonical clone at
+  all, which is the loud-failure signal a caller must report as an
+  explicit skip rather than silently continuing past; `1` is a usage error
+  (bad argument, or not run inside a git repository).
+
 ## Directory Structure
 
 ```
