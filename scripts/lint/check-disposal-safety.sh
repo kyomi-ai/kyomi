@@ -6,7 +6,7 @@
 # "KYO-289", an identifier from an earlier issue-numbering scheme that no
 # longer resolves — cite the PR, not that ID. Enforcement status of this and
 # the four sibling patterns it does NOT cover is documented in
-# docs/CODING_STANDARDS.md § "Enforcement status" (KYO-199).
+# docs/standards/leptos-frontend-patterns/enforcement-status.md (KYO-199).
 #
 # Static lint that blocks two patterns known to cause "reactive value already
 # disposed" WASM panics in Leptos:
