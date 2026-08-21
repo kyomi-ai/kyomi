@@ -6,7 +6,7 @@ Kyomi supports three authentication methods for BigQuery. Choose the one that be
 
 | Method | Best For | Setup Complexity |
 |--------|----------|------------------|
-| **Kyomi OAuth** | Individuals, small teams | Easy - just click "Connect BigQuery" |
+| **Kyomi OAuth** | Individuals, small teams | Easy - once authorized by Kyomi |
 | **Service Account** | Shared team access, automation | Medium - create key in GCP Console |
 | **Enterprise OAuth** | Organizations with Google Workspace | Advanced - configure OAuth consent screen |
 
@@ -15,6 +15,12 @@ Kyomi supports three authentication methods for BigQuery. Choose the one that be
 ## Method 1: Kyomi OAuth
 
 The simplest way to connect - sign in with your Google account and authorize Kyomi to access BigQuery.
+
+### Prerequisites
+
+- Your Google account must be on Kyomi's OAuth allowlist. Kyomi's team adds accounts on the Google side — you can't do this yourself in the datasource modal.
+- To request access, open Kyomi's in-app **Send Feedback** form and ask to be authorized for BigQuery.
+- Need access now? Use [Method 2: Service Account](#method-2-service-account) instead — no action from Kyomi required.
 
 ### Setup Steps
 
@@ -120,6 +126,12 @@ Configure your own OAuth client for branded consent screens and per-user audit t
 
 ## Troubleshooting
 
+### "Access blocked" error signing in with Kyomi OAuth
+
+- This means your Google account hasn't been authorized by Kyomi for Kyomi's OAuth app yet. Google shows an error along the lines of "Access blocked: this app hasn't been verified" at its own consent screen, before Kyomi is ever involved — so although it looks like something is broken in Kyomi, the error is coming from Google.
+- See [Method 1: Kyomi OAuth](#method-1-kyomi-oauth) (its Prerequisites section) to request access, or switch to [Method 2: Service Account](#method-2-service-account) for immediate access without waiting on authorization.
+- Using your own Enterprise OAuth client instead of Kyomi's? See "[OAuth consent screen shows 'unverified app' warning](#oauth-consent-screen-shows-unverified-app-warning)" below — that's a different cause.
+
 ### "Access Denied" or "Permission Denied" errors
 
 - Verify your account has the required BigQuery roles in the GCP project
@@ -127,6 +139,8 @@ Configure your own OAuth client for branded consent screens and per-user audit t
 - Check that the BigQuery API is enabled in your GCP project
 
 ### OAuth consent screen shows "unverified app" warning
+
+This applies to [Method 3: Enterprise OAuth](#method-3-enterprise-oauth), where you've configured your own OAuth client. Signing in with Kyomi's built-in OAuth instead? See ["Access blocked" error signing in with Kyomi OAuth](#access-blocked-error-signing-in-with-kyomi-oauth) above.
 
 - For internal apps: Use the "Internal" user type in OAuth consent screen settings
 - For external apps: Submit your app for Google verification, or users can click "Advanced" → "Go to [app]"
