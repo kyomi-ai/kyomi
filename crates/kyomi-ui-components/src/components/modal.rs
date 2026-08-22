@@ -64,6 +64,41 @@ impl ModalSize {
     }
 }
 
+/// Which stacking layer a modal's backdrop paints on.
+///
+/// Every `Modal` used to hardcode `z-[1000]` on its backdrop, so any two
+/// modals open at once fell through to DOM order to decide which painted on
+/// top — the caller had no way to ask for "on top of another modal" (KYO-434:
+/// the feedback modal opened from inside the Add Datasource modal rendered
+/// *behind* it, because `Sidebar`, which owns `FeedbackModal`, renders before
+/// `<main>`, which owns the datasource modal).
+///
+/// See the "Stacking / Z-Index Scale" table in `DESIGN.md` for the full
+/// picture across components (Toast, ConfirmDialog, Tooltip, etc.) — this
+/// enum only covers `Modal`'s own two layers, and [`Self::Elevated`] must
+/// stay below Tooltip's `z-[1100]` so tooltips still render above modals.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ModalLayer {
+    /// `z-[1000]` — the layer every `Modal` used before this enum existed.
+    /// Changing this value restacks every modal in the app; don't.
+    #[default]
+    Base,
+    /// `z-[1050]` — for a modal that must open on top of another `Modal`
+    /// (e.g. `FeedbackModal` opened from inside the Add Datasource modal).
+    /// Stays below Tooltip's `z-[1100]`.
+    Elevated,
+}
+
+impl ModalLayer {
+    /// Returns the Tailwind z-index class for this layer.
+    fn class(self) -> &'static str {
+        match self {
+            Self::Base => "z-[1000]",
+            Self::Elevated => "z-[1050]",
+        }
+    }
+}
+
 /// A center-overlay modal component.
 ///
 /// React reference: `apps/frontend/src/components/Modal.jsx`
@@ -89,6 +124,12 @@ pub fn Modal(
     /// Modal size — controls max-width. Default: Lg (896px).
     #[prop(default = ModalSize::Lg)]
     size: ModalSize,
+    /// Stacking layer — controls the backdrop's z-index. Default: `ModalLayer::Base`
+    /// (`z-[1000]`, today's behavior for every existing caller). Pass
+    /// `ModalLayer::Elevated` only when this modal must be able to open on
+    /// top of another already-open `Modal`.
+    #[prop(default = ModalLayer::Base)]
+    layer: ModalLayer,
     /// Optional minimum height for the scrollable content area (e.g. `"320px"`).
     /// Prevents layout shift when async content transitions from skeleton to real
     /// data — the modal body maintains this minimum size regardless of loading state.
@@ -116,6 +157,14 @@ pub fn Modal(
         .map(|h| format!("min-height: {h}"))
         .unwrap_or_default();
 
+    // Backdrop z-index — Base (z-[1000], today's default) unless the caller
+    // opted into ModalLayer::Elevated (z-[1050]) to open on top of another
+    // Modal. See ModalLayer's doc comment and DESIGN.md's stacking scale.
+    let overlay_class = format!(
+        "fixed inset-0 flex items-center justify-center {} font-sans bg-[var(--color-overlay)] animate-fade-in-fast",
+        layer.class()
+    );
+
     // Escape key handler
     let handle_keydown = move |ev: ev::KeyboardEvent| {
         if ev.key() == "Escape" {
@@ -128,8 +177,9 @@ pub fn Modal(
             // Backdrop overlay
             // React: className="modal-overlay" → `fixed inset-0 flex items-center justify-center z-[1000] font-sans`
             //   + `background-color: var(--color-overlay)` which is `rgba(0,0,0,0.5)` → `bg-[var(--color-overlay)]`
+            // z-index comes from `layer` (ModalLayer::Base → z-[1000] by default; see overlay_class above).
             <div
-                class="fixed inset-0 flex items-center justify-center z-[1000] font-sans bg-[var(--color-overlay)] animate-fade-in-fast"
+                class=overlay_class.clone()
                 on:click=move |ev: web_sys::MouseEvent| {
                     // Only close if click is directly on the backdrop, not bubbled from modal content.
                     // React uses mousedown tracking; here we rely on stopPropagation on the content div.
@@ -183,5 +233,59 @@ pub fn Modal(
                 </div>
             </div>
         </Show>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Extracts the number inside a Tailwind arbitrary z-index class like
+    /// `"z-[1050]"`. Panics with a clear message if the class isn't in that
+    /// shape — that would mean the format itself changed underneath these
+    /// tests, which is worth knowing loudly rather than silently.
+    fn z_index_value(class: &str) -> u32 {
+        let inner = class
+            .strip_prefix("z-[")
+            .and_then(|s| s.strip_suffix(']'))
+            .unwrap_or_else(|| panic!("expected a `z-[N]` class, got {class:?}"));
+        inner
+            .parse()
+            .unwrap_or_else(|_| panic!("expected a numeric z-index, got {inner:?} from {class:?}"))
+    }
+
+    #[test]
+    fn default_layer_is_base() {
+        // KYO-434: a silent change to Modal's default layer would restack
+        // every modal in the app, since every existing caller relies on
+        // getting Base without asking for it.
+        assert_eq!(ModalLayer::default(), ModalLayer::Base);
+    }
+
+    #[test]
+    fn base_layer_preserves_todays_z_1000() {
+        assert_eq!(
+            ModalLayer::Base.class(),
+            "z-[1000]",
+            "Base must keep the exact z-index every Modal caller had before ModalLayer existed"
+        );
+    }
+
+    #[test]
+    fn elevated_layer_paints_above_base_and_below_tooltip() {
+        let base = z_index_value(ModalLayer::Base.class());
+        let elevated = z_index_value(ModalLayer::Elevated.class());
+        // Tooltip's z-index — crates/kyomi-ui-components/src/components/tooltip.rs
+        // `CONTENT_CLASS`. Kept as a literal (not imported) so this test
+        // fails loudly if either component's z-index drifts independently.
+        let tooltip = 1100;
+        assert!(
+            elevated > base,
+            "Elevated ({elevated}) must paint above Base ({base}) or modal-over-modal stacking (KYO-434) regresses"
+        );
+        assert!(
+            elevated < tooltip,
+            "Elevated ({elevated}) must stay below Tooltip's z-[1100] ({tooltip}) so tooltips still render above modals"
+        );
     }
 }

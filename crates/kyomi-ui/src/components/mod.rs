@@ -55,7 +55,7 @@ pub use kyomi_ui_components::components::{
     EmptyState, EmptyStateVariant,
     INPUT_CLASS,
     Label,
-    Modal, ModalSize,
+    Modal, ModalLayer, ModalSize,
     NavigationProgress,
     SearchInput,
     Select, StaticSelect,

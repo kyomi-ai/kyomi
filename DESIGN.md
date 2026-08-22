@@ -805,6 +805,31 @@ Watch cards are NOT clickable surfaces (unlike document cards) because there's n
 - Critical error blocking workflow: **Alert** (inline, persistent)
 - Brief success/info notification: **Toast** (auto-dismiss)
 
+### Stacking / Z-Index Scale
+
+Every overlay-ish component picks its own `z-*` class independently — there
+was no documented scale, so values drifted apart across components (KYO-434:
+`FeedbackModal`, opened from inside the Add Datasource modal, painted
+*behind* it because both used the same `z-[1000]` and paint order fell
+through to DOM order). This table is the scale going forward — **check it
+before adding a new `z-*` value to any component.**
+
+| Layer | z-index | Component | Notes |
+|---|---|---|---|
+| Base overlay | `z-20` | Mobile sidebar overlay (`layout.rs`) | Below the sidebar's own content, above the page. |
+| Standalone dialog | `z-50` | `ConfirmDialog`, `Toast` | Sit *below* Modal today — a `ConfirmDialog` or `Toast` raised while a `Modal` is open can paint underneath it. Not fixed here — tracked as **KYO-441**, which must bring both into this scale rather than inventing new values. |
+| Modal — base | `z-[1000]` | `Modal` (`ModalLayer::Base`, the default) | Every existing `Modal` caller. Changing this value restacks every modal in the app. |
+| Modal — elevated | `z-[1050]` | `Modal` (`ModalLayer::Elevated`) | Opt-in, for a modal that must open on top of another already-open `Modal` (e.g. `FeedbackModal`). Pass `layer=ModalLayer::Elevated` — never a raw `z-*` override at the call site. |
+| Tooltip | `z-[1100]` | `Tooltip` | Always above every modal layer, so hover hints stay legible even inside a modal. |
+
+**Rules:**
+- New overlay components must place themselves in this table, not invent an
+  unlisted value.
+- `Modal` stacking is a `layer` prop (`ModalLayer`), not a `class` override —
+  see `crates/kyomi-ui-components/src/components/modal.rs`. Extend the enum
+  (and this table) if a third layer is ever needed; don't hand-roll a
+  `z-[NNNN]` at the call site.
+
 ## Dashboard Viewer
 
 The primary Kyomi interface. A markdown document rendered with ChartML charts inline.
