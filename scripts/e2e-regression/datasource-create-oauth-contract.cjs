@@ -100,7 +100,13 @@
  */
 const { chromium } = require('playwright');
 
-const BASE = 'http://localhost:3000';
+// Overrides (all optional — defaults target local dev):
+//   E2E_BASE_URL        - app base URL          (default http://localhost:3000)
+//   E2E_ADMIN_EMAIL     - admin login email     (default e2e-admin@kyomi.dev)
+//   E2E_ADMIN_PASSWORD  - admin login password  (default E2eAdminPass123!)
+const BASE = process.env.E2E_BASE_URL || 'http://localhost:3000';
+const ADMIN_EMAIL = process.env.E2E_ADMIN_EMAIL || 'e2e-admin@kyomi.dev';
+const ADMIN_PASSWORD = process.env.E2E_ADMIN_PASSWORD || 'E2eAdminPass123!';
 const SHOT = '/tmp/ds-create-oauth';
 const results = [];
 
@@ -210,8 +216,8 @@ async function pickAuthMode(page, label) {
   try {
     // ── Login ──────────────────────────────────────────────────────────
     await page.goto(`${BASE}/login`, { waitUntil: 'networkidle', timeout: 30000 });
-    await page.fill('input[type="email"]', 'e2e-admin@kyomi.dev', { timeout: 10000 });
-    await page.fill('input[type="password"]', 'E2eAdminPass123!', { timeout: 10000 });
+    await page.fill('input[type="email"]', ADMIN_EMAIL, { timeout: 10000 });
+    await page.fill('input[type="password"]', ADMIN_PASSWORD, { timeout: 10000 });
     await page.click('button[type="submit"]', { timeout: 10000 });
     await page.waitForURL(u => !u.toString().includes('/login'), { timeout: 20000 });
     check('login as admin', true);

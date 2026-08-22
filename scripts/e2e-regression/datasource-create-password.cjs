@@ -25,19 +25,35 @@
  * Assertions use isVisible()/isEnabled(), never count(): count() matches
  * hidden DOM and would pass on a control the user cannot actually see.
  *
- * KNOWN BLOCKED STATE — KYO-428 (confirmed app bug, not a test defect):
- * create-mode Test & Discover silently drops non-default ports for
- * postgres/mysql/redshift/clickhouse (a serde_qs string/number coercion
- * bug). This spec targets the test container on port 5434 — nothing listens
- * on the default 5432, so the bug cannot be sidestepped. Every run currently
- * ends at step 3 with an unmissable "BLOCKED BY KYO-428" banner and a
- * non-zero exit; steps 4-7 (create + queryability + cleanup) are skipped
- * deterministically rather than attempted against a connection that never
- * succeeded. This spec goes green only once KYO-428 is actually fixed.
+ * STATUS: KYO-428 (the previous blocker — create-mode Test & Discover
+ * silently dropping non-default ports) is fixed as of 3ad087bc. Steps 4-7
+ * (create, queryability, cleanup) have not yet been executed against a
+ * build containing that fix, so this spec's first green run is still
+ * outstanding. If Test & Discover does not report Connected, the run still
+ * aborts deterministically before Create rather than attempting it against
+ * an untested connection — see abortBanner() below, the screenshots, and
+ * the printed HTTP >=400 list for the observed cause.
  */
 const { chromium } = require('playwright');
 
-const BASE = 'http://localhost:3000';
+// Overrides (all optional — defaults target local dev and the
+// docker-compose kyomi-postgres-test container):
+//   E2E_BASE_URL        - app base URL            (default http://localhost:3000)
+//   E2E_ADMIN_EMAIL     - admin login email       (default e2e-admin@kyomi.dev)
+//   E2E_ADMIN_PASSWORD  - admin login password    (default E2eAdminPass123!)
+//   E2E_PG_HOST         - Postgres host           (default 127.0.0.1)
+//   E2E_PG_PORT         - Postgres port           (default 5434)
+//   E2E_PG_DATABASE     - Postgres database name  (default test_db)
+//   E2E_PG_USER         - Postgres username       (default test_user)
+//   E2E_PG_PASSWORD     - Postgres password       (default test_password)
+const BASE = process.env.E2E_BASE_URL || 'http://localhost:3000';
+const ADMIN_EMAIL = process.env.E2E_ADMIN_EMAIL || 'e2e-admin@kyomi.dev';
+const ADMIN_PASSWORD = process.env.E2E_ADMIN_PASSWORD || 'E2eAdminPass123!';
+const PG_HOST = process.env.E2E_PG_HOST || '127.0.0.1';
+const PG_PORT = process.env.E2E_PG_PORT || '5434';
+const PG_DATABASE = process.env.E2E_PG_DATABASE || 'test_db';
+const PG_USER = process.env.E2E_PG_USER || 'test_user';
+const PG_PASSWORD = process.env.E2E_PG_PASSWORD || 'test_password';
 const SHOT = '/tmp/ds-create-pw';
 const results = [];
 let cleanupFailed = false;
@@ -48,12 +64,12 @@ function check(name, pass, detail) {
 }
 const vis = async (loc) => loc.isVisible().catch(() => false);
 
-/** Print an unmissable, greppable banner for a confirmed-blocking app bug. */
-function blockedBanner(ticket, reason) {
+/** Print an unmissable, greppable banner reporting why the run aborted early. */
+function abortBanner(title, detail) {
   const line = '='.repeat(78);
   console.log(`\n${line}`);
-  console.log(`BLOCKED BY ${ticket} — known app bug, not a broken test. See ticket.`);
-  console.log(reason);
+  console.log(`ABORTED — ${title}`);
+  console.log(detail);
   console.log(`${line}\n`);
 }
 
@@ -113,8 +129,8 @@ async function selectByLabel(page, labelText, optionText) {
   try {
     // ── Login ──────────────────────────────────────────────────────────
     await page.goto(`${BASE}/login`, { waitUntil: 'networkidle', timeout: 30000 });
-    await page.fill('input[type="email"]', 'e2e-admin@kyomi.dev', { timeout: 10000 });
-    await page.fill('input[type="password"]', 'E2eAdminPass123!', { timeout: 10000 });
+    await page.fill('input[type="email"]', ADMIN_EMAIL, { timeout: 10000 });
+    await page.fill('input[type="password"]', ADMIN_PASSWORD, { timeout: 10000 });
     await page.click('button[type="submit"]', { timeout: 10000 });
     await page.waitForURL(u => !u.toString().includes('/login'), { timeout: 20000 });
     check('login as admin', true);
@@ -144,24 +160,24 @@ async function selectByLabel(page, labelText, optionText) {
 
     // ── Connection config ─────────────────────────────────────────────
     const hostInput = page.locator('input[placeholder="db.example.com"]').first();
-    await hostInput.fill('127.0.0.1', { timeout: 10000 });
+    await hostInput.fill(PG_HOST, { timeout: 10000 });
     const portInput = page.locator('input[type="number"][placeholder="5432"]').first();
-    await portInput.fill('5434', { timeout: 10000 });
+    await portInput.fill(PG_PORT, { timeout: 10000 });
     const dbInput = page.locator('input[placeholder="mydb"]').first();
-    await dbInput.fill('test_db', { timeout: 10000 });
+    await dbInput.fill(PG_DATABASE, { timeout: 10000 });
     check('host/port/database filled',
-      (await hostInput.inputValue()) === '127.0.0.1'
-      && (await portInput.inputValue()) === '5434'
-      && (await dbInput.inputValue()) === 'test_db');
+      (await hostInput.inputValue()) === PG_HOST
+      && (await portInput.inputValue()) === PG_PORT
+      && (await dbInput.inputValue()) === PG_DATABASE);
 
     // ── Credentials ────────────────────────────────────────────────────
     const userInput = page.locator('input[placeholder="Database username"]').first();
-    await userInput.fill('test_user', { timeout: 10000 });
+    await userInput.fill(PG_USER, { timeout: 10000 });
     const passInput = page.locator('input[type="password"]').first();
-    await passInput.fill('test_password', { timeout: 10000 });
+    await passInput.fill(PG_PASSWORD, { timeout: 10000 });
     check('username/password filled',
-      (await userInput.inputValue()) === 'test_user'
-      && (await passInput.inputValue()) === 'test_password');
+      (await userInput.inputValue()) === PG_USER
+      && (await passInput.inputValue()) === PG_PASSWORD);
 
     await page.screenshot({ path: `${SHOT}-1-filled.png`, fullPage: true });
 
@@ -207,14 +223,13 @@ async function selectByLabel(page, labelText, optionText) {
       // connection that never tested successfully (that would risk a
       // false-positive datasource row), and do not throw a generic error
       // that would bury the real cause in a stack-trace-shaped FAIL line.
-      blockedBanner('KYO-428',
-        'create-mode Test & Discover silently drops the non-default port (5434) for ' +
-        'postgres/mysql/redshift/clickhouse — a serde_qs string/number coercion bug. ' +
-        'Nothing listens on the default 5432 in this environment, so it cannot be ' +
-        'sidestepped. Aborting before Create; steps 4-7 (create, queryability, ' +
-        'cleanup) are skipped, not attempted.');
+      abortBanner('Test & Discover did not report Connected',
+        `testSucceeded=${testSucceeded} nextEnabledAfter=${nextEnabledAfter} — see the ` +
+        `${SHOT}-2-tested.png screenshot and the HTTP >=400 list printed at the end of ` +
+        'this run for the observed cause. Aborting before Create; steps 4-7 (create, ' +
+        'queryability, cleanup) are skipped, not attempted.');
       check('create + queryability steps reached', false,
-        'skipped — BLOCKED BY KYO-428, Test & Discover must succeed first');
+        'skipped — Test & Discover did not report Connected, see abort banner above');
     } else {
       // ── Next -> Catalog tab -> Create (leave scope default: index everything) ──
       await nextBtn().click({ timeout: 10000 });
