@@ -178,6 +178,43 @@ pub fn parse_oauth_message(event: &web_sys::MessageEvent) -> Option<OAuthMessage
     }
 }
 
+/// Resolve the window that opened this popup, if there is one.
+///
+/// Returns `None` when the document was not opened by another window (a normal
+/// top-level navigation), and `Some` for a genuine popup.
+///
+/// # Why this must not use `dyn_into` / `instanceof`
+///
+/// `window.opener` is a `WindowProxy` belonging to a **different JavaScript
+/// realm**. `JsCast::dyn_into::<web_sys::Window>()` compiles to an `instanceof`
+/// against *this* realm's `Window` constructor, and every realm has its own —
+/// so the check is `false` for a live, same-origin, fully usable opener. The
+/// object is fine; only the type test is wrong.
+///
+/// Both OAuth callback pages previously used `dyn_into` here, so the opener
+/// always resolved to `None`, the popup never posted its result back, and every
+/// provider's connect button hung on "Connecting..." forever (KYO-436). Measured
+/// in a real browser, `window.opener` reports `[object Window]` with a callable
+/// `postMessage` while `window.opener instanceof Window` is `false`.
+///
+/// A null check plus `unchecked_into` is the correct pattern here: nothing in
+/// this flow ever assigns `window.opener` to anything other than what the
+/// browser set it to when the popup was opened (a `WindowProxy`, or `null`
+/// for a normal top-level navigation), so once null and undefined are
+/// excluded, what's left is a `WindowProxy`. Note this is a property of how
+/// Kyomi uses `opener`, not a platform guarantee — `window.opener` has an
+/// unrestricted setter and can legally be reassigned to anything by page
+/// script, including by the opened page itself.
+#[cfg(target_arch = "wasm32")]
+pub fn opener_window() -> Option<web_sys::Window> {
+    use wasm_bindgen::JsCast;
+
+    web_sys::window()
+        .and_then(|w| w.opener().ok())
+        .filter(|o| !o.is_null() && !o.is_undefined())
+        .map(|o| o.unchecked_into::<web_sys::Window>())
+}
+
 /// Build and send a success OAuth postMessage to the opener window.
 ///
 /// `msg_type` is the full type string (e.g. `"GOOGLE_OAUTH_SUCCESS"`).
@@ -266,5 +303,76 @@ pub fn install_oauth_listener(
             let _ = window.remove_event_listener_with_callback("message", &listener_fn);
         }
         drop(closure);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Source-level guards for KYO-436.
+    //!
+    //! The defect these cover is invisible to a host-target unit test: it is a
+    //! JavaScript realm-boundary behaviour that only manifests in a browser.
+    //! What *can* be enforced here is that neither callback page reintroduces
+    //! the `instanceof`-based cast, and that both keep going through the one
+    //! shared helper. See `scripts/e2e-regression/oauth-opener-realm.cjs` for
+    //! the matching real-browser assertion.
+
+    const GOOGLE_LINK_CALLBACK: &str = include_str!("../pages/auth/google_link_callback.rs");
+    const DATASOURCE_OAUTH_CALLBACK: &str =
+        include_str!("../pages/auth/datasource_oauth_callback.rs");
+
+    /// `dyn_into::<web_sys::Window>()` compiles to an `instanceof` against the
+    /// current realm's `Window`. `window.opener` comes from another realm, so
+    /// the test is always `false` and the opener resolves to `None` — the
+    /// popup then never posts its result back and the parent hangs on
+    /// "Connecting..." forever, for every OAuth provider.
+    #[test]
+    fn callback_pages_never_instanceof_test_the_opener() {
+        for (name, src) in [
+            ("google_link_callback.rs", GOOGLE_LINK_CALLBACK),
+            ("datasource_oauth_callback.rs", DATASOURCE_OAUTH_CALLBACK),
+        ] {
+            assert!(
+                !src.contains("dyn_into::<web_sys::Window>"),
+                "{name} casts the opener with dyn_into, which is a cross-realm `instanceof` \
+                 and always fails — window.opener is a WindowProxy from another realm. Use \
+                 `opener_window()` (null check + unchecked_into) instead (KYO-436)."
+            );
+        }
+    }
+
+    /// Both pages must resolve the opener through the single shared helper.
+    /// Two hand-rolled copies of this logic are exactly how one bug came to
+    /// break all five OAuth providers at once.
+    #[test]
+    fn callback_pages_resolve_the_opener_through_the_shared_helper() {
+        for (name, src) in [
+            ("google_link_callback.rs", GOOGLE_LINK_CALLBACK),
+            ("datasource_oauth_callback.rs", DATASOURCE_OAUTH_CALLBACK),
+        ] {
+            assert!(
+                src.contains("opener_window()"),
+                "{name} must resolve window.opener via oauth_popup::opener_window() rather \
+                 than rolling its own cast (KYO-436)."
+            );
+        }
+    }
+
+    /// The helper itself must keep the null/undefined guard. Dropping it would
+    /// turn "not a popup" into a bogus `Some(window)` whose `postMessage` calls
+    /// throw at runtime — the opposite failure, and a harder one to spot.
+    #[test]
+    fn opener_window_guards_null_before_casting_unchecked() {
+        let src = include_str!("oauth_popup.rs");
+        let helper = src
+            .split_once("pub fn opener_window()")
+            .expect("opener_window must exist")
+            .1;
+        let body = &helper[..helper.find("\n}").expect("helper must terminate")];
+        assert!(
+            body.contains("is_null()") && body.contains("is_undefined()"),
+            "opener_window must reject null/undefined before unchecked_into — otherwise a \
+             non-popup document resolves to a Some(..) that throws on use (KYO-436)."
+        );
     }
 }
