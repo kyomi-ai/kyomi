@@ -592,26 +592,31 @@ pub use kyomi_types::GoogleProject;
 /// a server_fn response — see `kyomi_types::datasource_contracts`.
 pub use kyomi_types::GoogleOAuthProjectsResult;
 
-/// List Google Cloud projects accessible to the authenticated user.
+/// List active GCP projects visible to a resolved Google OAuth access
+/// token, via the Cloud Resource Manager API.
 ///
-/// Resolves the user's Google OAuth token (refreshing if needed), then
-/// calls the Google Cloud Resource Manager API to list active projects.
+/// Split out of `google_oauth_projects_service` (KYO-444) so a caller that
+/// has already resolved an access token through some *other* path can reuse
+/// the Resource Manager call instead of re-implementing it. The BigQuery
+/// catalog indexer is exactly that caller: it resolves its own access token
+/// per `auth_mode` (`kyomi_oauth` / `enterprise_oauth` / `service_account`)
+/// and only one of those three modes goes through
+/// `ensure_valid_google_token` — the token resolution
+/// `google_oauth_projects_service` performs below is `kyomi_oauth`-specific
+/// and would be the wrong call for the other two.
 ///
-/// Mirrors the logic from `apps/server/src/routes/auth_google_oauth.rs::google_oauth_projects`.
-pub async fn google_oauth_projects_service(
-    db: &kyomi_core::DbPool,
-    user_id: &str,
-    encryption_key: &[u8; 32],
-    client_id: &str,
-    client_secret: &str,
-) -> kyomi_core::Result<GoogleOAuthProjectsResult> {
-    let tokens = ensure_valid_google_token(db, user_id, encryption_key, client_id, client_secret)
-        .await?;
-
+/// A `resourcemanager.projects.list` permission denial (common for service
+/// accounts scoped only to e.g. "BigQuery Job User") surfaces as an `Err`
+/// here — callers decide how to degrade (see
+/// `kyomi_agent::catalog::indexers::bigquery`, which turns it into a
+/// recorded `"failed"` status rather than a silent skip).
+pub async fn list_active_google_projects(
+    access_token: &str,
+) -> kyomi_core::Result<Vec<GoogleProject>> {
     let client = crate::http_client()?;
     let resp = client
         .get(GOOGLE_PROJECTS_URI)
-        .bearer_auth(&tokens.access_token)
+        .bearer_auth(access_token)
         .query(&[("filter", "lifecycleState:ACTIVE")])
         .send()
         .await
@@ -654,6 +659,27 @@ pub async fn google_oauth_projects_service(
         .collect();
 
     projects.sort_by_key(|a| a.name.to_lowercase());
+
+    Ok(projects)
+}
+
+/// List Google Cloud projects accessible to the authenticated user.
+///
+/// Resolves the user's Google OAuth token (refreshing if needed), then
+/// calls the Google Cloud Resource Manager API to list active projects.
+///
+/// Mirrors the logic from `apps/server/src/routes/auth_google_oauth.rs::google_oauth_projects`.
+pub async fn google_oauth_projects_service(
+    db: &kyomi_core::DbPool,
+    user_id: &str,
+    encryption_key: &[u8; 32],
+    client_id: &str,
+    client_secret: &str,
+) -> kyomi_core::Result<GoogleOAuthProjectsResult> {
+    let tokens = ensure_valid_google_token(db, user_id, encryption_key, client_id, client_secret)
+        .await?;
+
+    let projects = list_active_google_projects(&tokens.access_token).await?;
 
     Ok(GoogleOAuthProjectsResult {
         projects,
