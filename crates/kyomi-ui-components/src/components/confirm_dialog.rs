@@ -28,6 +28,19 @@
 
 use leptos::prelude::*;
 
+/// Backdrop class for the confirm-dialog overlay.
+///
+/// `z-[1060]` — see the "Stacking / Z-Index Scale" table in `DESIGN.md`
+/// (KYO-441). Must clear `ModalLayer::Elevated`'s `z-[1050]` (a
+/// `ConfirmDialog` can be opened from a modal that is itself stacked on
+/// another modal) and stay below Toast's `z-[1080]` and Tooltip's
+/// `z-[1100]`. A bare literal here — not a shared enum like `ModalLayer` —
+/// because `ConfirmDialog` has exactly one stacking value, not a set of
+/// caller-selectable layers; introducing an enum for a single constant
+/// would be a parallel abstraction with no second variant to justify it.
+const BACKDROP_CLASS: &str =
+    "fixed inset-0 z-[1060] bg-[var(--color-overlay)] flex items-center justify-center animate-fade-in-fast";
+
 /// A confirmation dialog overlay.
 ///
 /// All text props accept `Signal<String>` (or `String` via `MaybeProp`) so they
@@ -68,7 +81,7 @@ pub fn ConfirmDialog(
         <Show when=move || open.get()>
             // Backdrop
             <div
-                class="fixed inset-0 z-50 bg-[var(--color-overlay)] flex items-center justify-center animate-fade-in-fast"
+                class=BACKDROP_CLASS
                 on:click=move |_| on_cancel.run(())
             >
                 // Dialog
@@ -109,5 +122,54 @@ pub fn ConfirmDialog(
                 </div>
             </div>
         </Show>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backdrop_clears_modal_elevated_layer() {
+        // KYO-441: a ConfirmDialog opened from inside a Modal (possibly
+        // already at ModalLayer::Elevated, z-[1050]) must paint above it,
+        // or the dialog is invisible — reproduced via elementFromPoint()
+        // before this fix, returning the modal backdrop instead of the
+        // dialog.
+        assert!(
+            BACKDROP_CLASS.contains("z-[1060]"),
+            "expected backdrop class to carry z-[1060], got {BACKDROP_CLASS:?}"
+        );
+    }
+
+    #[test]
+    fn backdrop_no_longer_uses_pre_kyo_441_z_50() {
+        assert!(
+            !BACKDROP_CLASS.contains("z-50"),
+            "z-50 sat below Modal's z-[1000]; KYO-441 must remove it entirely, got {BACKDROP_CLASS:?}"
+        );
+    }
+
+    #[test]
+    fn backdrop_stays_below_toast_and_tooltip() {
+        // Kept as literals (not imported) so this test fails loudly if any
+        // of the three components' z-index drifts independently. See the
+        // "Stacking / Z-Index Scale" table in DESIGN.md.
+        let confirm_dialog = 1060;
+        let toast = 1080; // toast.rs CONTAINER_CLASS
+        let tooltip = 1100; // tooltip.rs CONTENT_CLASS
+        assert!(
+            confirm_dialog > 1050,
+            "ConfirmDialog ({confirm_dialog}) must clear ModalLayer::Elevated (1050)"
+        );
+        assert!(
+            confirm_dialog < toast,
+            "ConfirmDialog ({confirm_dialog}) must stay below Toast ({toast}) so feedback raised \
+             during a confirmation is still seen"
+        );
+        assert!(
+            confirm_dialog < tooltip,
+            "ConfirmDialog ({confirm_dialog}) must stay below Tooltip ({tooltip})"
+        );
     }
 }
