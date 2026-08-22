@@ -1019,6 +1019,113 @@ where
 }
 
 // ---------------------------------------------------------------------------
+// Discovery / test-connection input resolution (KYO-445)
+// ---------------------------------------------------------------------------
+
+/// Resolved inputs for a discovery/test-connection provider: the decrypted
+/// connection config, the decrypted stored per-user credential blob (not
+/// yet overlaid with caller-provided credentials — that overlay is JSON
+/// merge logic the caller owns, not a service-layer concern), and the
+/// OAuth `UserContext` BigQuery `kyomi_oauth` mode needs.
+pub struct DiscoveryConnectionInputs {
+    pub connection_config: Value,
+    pub stored_creds: Value,
+    pub user_context: Option<kyomi_datasource_server::UserContext>,
+}
+
+/// Which step of [`resolve_discovery_connection_inputs`] failed. Kept
+/// distinct (rather than collapsing to a single `kyomi_core::Error`) so
+/// callers can preserve their own per-step error-message shape — the two
+/// existing callers report a plain decrypt failure differently from a
+/// "Failed to connect" / sanitized OAuth failure.
+pub enum DiscoveryPrepError {
+    Decrypt(kyomi_core::Error),
+    UserContext(kyomi_core::Error),
+}
+
+/// Inputs for [`resolve_discovery_connection_inputs`], bundled into one
+/// struct rather than taken as separate parameters — the function has
+/// several cohesive-but-distinct pieces (who's asking, what datasource,
+/// what secrets) that read better named at the call site than as a long
+/// positional argument list.
+pub struct DiscoveryConnectionRequest<'a> {
+    pub user_id: &'a str,
+    pub ws_id: &'a str,
+    pub datasource_slug: Option<&'a str>,
+    pub connection_config: &'a Value,
+    pub encryption_key: &'a [u8; 32],
+    pub google_client_id: Option<&'a str>,
+    pub google_client_secret: Option<&'a str>,
+    pub user_email: String,
+}
+
+/// Resolve everything a discovery/test-connection caller needs before
+/// calling `create_provider`, **without** requiring an already-persisted
+/// `DatasourceConfig` row.
+///
+/// This is deliberately NOT built on [`build_provider_for_datasource`]:
+/// that helper takes an already-resolved `&DatasourceConfig`, but this path
+/// can run pre-create (the Connection tab's "Validate & Discover Projects"
+/// runs before the datasource is saved, with a slug that may not resolve to
+/// a row). See KYO-445.
+///
+/// Steps, in order — this order matters, see
+/// `docs/standards/code-organization/preserve-side-effect-and-error-ordering.md`:
+/// 1. If `req.datasource_slug` resolves to a persisted row, look up any
+///    stored per-user credential blob (e.g. OAuth) for it. Best-effort: any
+///    lookup failure (no such datasource, no stored credential) silently
+///    yields `None` here, matching pre-KYO-445 behavior — a fresh
+///    pre-create discovery has no stored credential to find anyway.
+/// 2. Decrypt `req.connection_config` and the stored credential blob (if
+///    any). A decrypt failure surfaces as [`DiscoveryPrepError::Decrypt`]
+///    *before* the OAuth call below runs, so a bad connection config isn't
+///    masked by an unrelated OAuth-refresh failure.
+/// 3. Build the OAuth `UserContext` (BigQuery `kyomi_oauth` mode reads its
+///    access token from here — see `resolve_kyomi_oauth_token` in
+///    kyomi-connect; every other provider/auth-mode ignores it).
+pub async fn resolve_discovery_connection_inputs(
+    db: &DbPool,
+    req: DiscoveryConnectionRequest<'_>,
+) -> Result<DiscoveryConnectionInputs, DiscoveryPrepError> {
+    let stored_cred_str: Option<String> = if let Some(slug) = req.datasource_slug {
+        match get_datasource_by_slug(db, slug, req.ws_id).await {
+            Ok(Some(ds)) => match get_user_credential(db, req.user_id, &ds.id).await {
+                Ok(Some(cred)) => Some(cred.credentials),
+                _ => None,
+            },
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    let (connection_config, stored_creds) = credential_service::decrypt_provider_secrets(
+        req.connection_config,
+        stored_cred_str.as_deref(),
+        req.encryption_key,
+    )
+    .map_err(DiscoveryPrepError::Decrypt)?;
+
+    let user_context = crate::google_oauth::build_datasource_user_context(
+        db,
+        req.user_id,
+        Some(req.encryption_key),
+        req.google_client_id,
+        req.google_client_secret,
+        req.user_email,
+        req.ws_id.to_string(),
+    )
+    .await
+    .map_err(DiscoveryPrepError::UserContext)?;
+
+    Ok(DiscoveryConnectionInputs {
+        connection_config,
+        stored_creds,
+        user_context,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Manual catalog refresh orchestration (KYO-143)
 // ---------------------------------------------------------------------------
 
@@ -2215,5 +2322,63 @@ mod tests {
         assert_eq!(counts[0].count, 2, "the archived row must not be counted");
 
         cleanup_pg(pg, &workspace_id, &owner_id).await;
+    }
+
+    // -- resolve_discovery_connection_inputs builds a UserContext (KYO-445) --
+
+    /// `resolve_discovery_connection_inputs` must build a `UserContext` via
+    /// `build_datasource_user_context` and carry the result through to
+    /// `DiscoveryConnectionInputs.user_context` — dropping it, or hardcoding
+    /// `None`, would reproduce the KYO-445 regression one layer down after
+    /// `discover_datasource_resources` (kyomi-ui) was extracted to call
+    /// this function instead of building the `UserContext` inline itself
+    /// (extracted to satisfy `check-server-fns.sh`'s Rule B service-layer
+    /// callout limit — see that function's call site).
+    ///
+    /// Exercising this end-to-end needs a live Google OAuth token this test
+    /// environment doesn't have (see the sibling source-assertion test in
+    /// `kyomi-ui/src/server_fns/datasources.rs`, which pins the other half
+    /// of the chain: that the caller threads this function's `user_context`
+    /// into `create_provider` rather than a literal `None`), so this pins
+    /// the wiring at the source level instead.
+    #[test]
+    fn resolve_discovery_connection_inputs_threads_build_datasource_user_context_through() {
+        const SRC: &str = include_str!("datasource_service.rs");
+        let fn_start = SRC
+            .find("pub async fn resolve_discovery_connection_inputs(")
+            .expect("resolve_discovery_connection_inputs not found in datasource_service.rs");
+        let fn_end = SRC[fn_start..]
+            .find("\n// ---")
+            .map(|i| fn_start + i)
+            .unwrap_or(SRC.len());
+        let body = &SRC[fn_start..fn_end];
+
+        assert!(
+            body.contains("crate::google_oauth::build_datasource_user_context("),
+            "resolve_discovery_connection_inputs must build a UserContext via \
+             build_datasource_user_context — without this call the BigQuery \
+             kyomi_oauth path has no OAuth data to construct a UserContext from"
+        );
+        // Structural, not layout-exact: must find `user_context` (the
+        // built value, not a literal) somewhere after the
+        // build_datasource_user_context call, inside a `DiscoveryConnectionInputs`
+        // construction — without pinning field order or whitespace, which
+        // `cargo fmt` or a field reorder could otherwise break for free.
+        let after_build = {
+            let idx = body
+                .find("crate::google_oauth::build_datasource_user_context(")
+                .expect("build_datasource_user_context call not found");
+            &body[idx..]
+        };
+        assert!(
+            after_build.contains("DiscoveryConnectionInputs {") && after_build.contains("user_context"),
+            "the built user_context must be threaded into the returned \
+             DiscoveryConnectionInputs, not dropped or hardcoded"
+        );
+        assert!(
+            !body.contains("user_context: None"),
+            "regression guard: hardcoding user_context: None here reproduces \
+             the KYO-445 bug one layer down"
+        );
     }
 }

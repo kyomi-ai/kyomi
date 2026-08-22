@@ -23,6 +23,10 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "ssr")]
 use super::{AuthenticatedContext, IntoServerFnError};
 #[cfg(feature = "ssr")]
+use kyomi_auth::datasource_service::{
+    DiscoveryConnectionInputs, DiscoveryConnectionRequest, DiscoveryPrepError,
+};
+#[cfg(feature = "ssr")]
 use kyomi_types::Permission;
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -513,49 +517,49 @@ pub async fn discover_datasource_resources(
 
     let encryption_key = ac.encryption_key()?;
 
-    // If slug provided, look up any stored per-user credential blob (e.g.
-    // OAuth) to overlay caller-provided `credentials` on top of.
-    let stored_cred_str: Option<String> = if let Some(ref slug) = datasource_slug {
-        match kyomi_auth::datasource_service::get_datasource_by_slug(ac.db(), slug, &ac.ws_id)
-            .await
-        {
-            Ok(Some(ds)) => {
-                match kyomi_auth::datasource_service::get_user_credential(
-                    ac.db(),
-                    &ac.auth.user_id,
-                    &ds.id,
-                )
-                .await
-                {
-                    Ok(Some(cred)) => Some(cred.credentials),
-                    _ => None,
-                }
-            }
-            _ => None,
-        }
-    } else {
-        None
-    };
-
-    // `connection_config` may be freshly-typed plaintext (create mode) or an
-    // already-persisted config fetched by the caller (edit mode) — decrypt
-    // defensively; non-ciphertext values pass through unchanged. The stored
-    // per-user credential blob (if any) needs the same treatment before being
-    // overlaid with caller-provided `credentials` (missing/undecryptable
-    // stored credentials yield an empty object, so the overlay falls back to
-    // whatever the caller provided).
-    let (connection_config, stored_creds) = match kyomi_auth::credential_service::decrypt_provider_secrets(
-        &connection_config,
-        stored_cred_str.as_deref(),
-        &encryption_key,
-    ) {
-        Ok(pair) => pair,
-        Err(e) => {
+    // Resolve the stored-credential lookup, connection-config/credential
+    // decrypt, and OAuth `UserContext` build in one service call — this
+    // function can run before the datasource is persisted (the Connection
+    // tab's "Validate & Discover Projects"), so it goes through
+    // `resolve_discovery_connection_inputs` rather than
+    // `build_provider_for_datasource`, which requires an already-resolved
+    // `&DatasourceConfig` (KYO-445). Extracted into kyomi-auth (rather than
+    // inlined here) to keep this fn's service-layer callout count under
+    // `check-server-fns.sh`'s Rule B threshold.
+    let DiscoveryConnectionInputs {
+        connection_config,
+        stored_creds,
+        user_context,
+    } = match kyomi_auth::datasource_service::resolve_discovery_connection_inputs(
+        ac.db(),
+        DiscoveryConnectionRequest {
+            user_id: &ac.auth.user_id,
+            ws_id: &ac.ws_id,
+            datasource_slug: datasource_slug.as_deref(),
+            connection_config: &connection_config,
+            encryption_key: &encryption_key,
+            google_client_id: ac.ctx.config.google_oauth_client_id.as_deref(),
+            google_client_secret: ac.ctx.config.google_oauth_client_secret.as_deref(),
+            user_email: ac.auth.email.clone(),
+        },
+    )
+    .await
+    {
+        Ok(inputs) => inputs,
+        Err(DiscoveryPrepError::Decrypt(e)) => {
             tracing::warn!(error = %e, "credential decrypt failed before resource discovery");
             return Ok(DiscoverResourcesResult {
                 success: false,
                 resources: std::collections::HashMap::new(),
                 message: e.to_string(),
+            });
+        }
+        Err(DiscoveryPrepError::UserContext(e)) => {
+            tracing::warn!(raw_error = %e, "failed to build user context for datasource discovery");
+            return Ok(DiscoverResourcesResult {
+                success: false,
+                resources: std::collections::HashMap::new(),
+                message: format!("Failed to connect: {}", kyomi_core::sanitize_error(&e.to_string())),
             });
         }
     };
@@ -567,7 +571,7 @@ pub async fn discover_datasource_resources(
             &ds_type,
             &connection_config,
             &resolved_creds,
-            None,
+            user_context.as_ref(),
         ),
     )
     .await
@@ -1116,3 +1120,89 @@ mod bigquery_discovery_tests {
     }
 }
 
+// ── discover_datasource_resources builds a UserContext (KYO-445) ──────────
+
+#[cfg(all(test, feature = "ssr"))]
+mod discover_user_context_tests {
+    //! KYO-445: `discover_datasource_resources` used to pass a literal
+    //! `None` for `user_context`, so every BigQuery `kyomi_oauth` "Discover
+    //! Available" call (and, since this function also runs the connection
+    //! test, every "test connection" call on the same datasource) failed
+    //! with "BigQuery kyomi_oauth mode requires user context with OAuth
+    //! data" (`resolve_kyomi_oauth_token`, kyomi-connect) — the
+    //! `UserContext` was never constructed on this path at all, unlike the
+    //! three other callers of a provider-construction function
+    //! (`server_fns/sql_editor.rs`, `apps/server/src/routes/query_arrow.rs`,
+    //! `kyomi_auth::datasource_service`'s manual catalog refresh).
+    //!
+    //! The fix builds the `UserContext` via
+    //! `kyomi_auth::datasource_service::resolve_discovery_connection_inputs`
+    //! rather than inline in this fn — extracted so this server_fn's
+    //! service-layer callout count stays under `check-server-fns.sh`'s Rule
+    //! B threshold (the credential/decrypt lookups already here plus an
+    //! inline `build_datasource_user_context` call tipped it to 4). The
+    //! sibling test in `kyomi-auth/src/datasource_service.rs`'s `mod tests`
+    //! (`resolve_discovery_connection_inputs_threads_build_datasource_user_context_through`)
+    //! pins the other half of the chain: that
+    //! `resolve_discovery_connection_inputs` itself calls
+    //! `build_datasource_user_context` and returns the result rather than
+    //! dropping it. Together the two tests pin the full chain this test
+    //! alone used to pin in one file.
+    //!
+    //! Exercising the real path end-to-end needs a live, refreshable Google
+    //! OAuth token, which this test environment doesn't have. Following the
+    //! source-assertion precedent `pages/settings/datasources.rs`'s
+    //! `mod tests` establishes for exactly this situation, this pins the fix
+    //! at the source level instead.
+    //!
+    //! Not covered by this test: the live Google token refresh, and the
+    //! BigQuery-provider-side branching on `auth_mode` (that lives in
+    //! kyomi-connect, a separate repo/crate, and is exercised by its own
+    //! `resolve_kyomi_oauth_token` unit tests).
+
+    const SRC: &str = include_str!("datasources.rs");
+
+    #[test]
+    fn discover_datasource_resources_threads_a_built_user_context_into_create_provider() {
+        let fn_start = SRC
+            .find("pub async fn discover_datasource_resources(")
+            .expect("discover_datasource_resources not found in datasources.rs");
+        let fn_end = SRC[fn_start..]
+            .find("// Test connection first")
+            .map(|i| fn_start + i)
+            .unwrap_or_else(|| {
+                panic!("\"// Test connection first\" marker not found after discover_datasource_resources")
+            });
+        let connect_phase = &SRC[fn_start..fn_end];
+
+        assert!(
+            connect_phase.contains(
+                "kyomi_auth::datasource_service::resolve_discovery_connection_inputs("
+            ),
+            "discover_datasource_resources must resolve its connection \
+             config, credentials, and UserContext via \
+             resolve_discovery_connection_inputs before creating the \
+             provider — without this call the BigQuery kyomi_oauth path \
+             has no OAuth data to construct a UserContext from"
+        );
+        assert!(
+            connect_phase.contains("} = match kyomi_auth::datasource_service::resolve_discovery_connection_inputs("),
+            "the resolved user_context (destructured from \
+             DiscoveryConnectionInputs) must come from \
+             resolve_discovery_connection_inputs's return value, not be \
+             shadowed or reassigned afterward"
+        );
+        assert!(
+            connect_phase.contains("&resolved_creds,\n            user_context.as_ref(),"),
+            "create_provider must receive the UserContext resolved above \
+             (user_context.as_ref()), not a hardcoded value"
+        );
+        assert!(
+            !connect_phase.contains("&resolved_creds,\n            None,"),
+            "regression guard: this is the exact KYO-445 bug — a literal \
+             None passed as user_context makes every BigQuery kyomi_oauth \
+             \"Discover Available\" and \"test connection\" call fail with \
+             \"BigQuery kyomi_oauth mode requires user context with OAuth data\""
+        );
+    }
+}
