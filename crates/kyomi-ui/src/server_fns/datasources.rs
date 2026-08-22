@@ -282,7 +282,18 @@ pub struct CatalogStatsResult {
 /// Create a new datasource (admin only).
 ///
 /// Mirrors `POST /api/v1/datasources` + optionally `POST /api/v1/datasources/{id}/credentials`.
-#[server(prefix = "/leptos-api")]
+///
+/// `input = server_fn::codec::Json` (KYO-428): `connection_config` and
+/// `credentials` are `serde_json::Value` — a self-describing type. Under the
+/// default `PostUrl` encoding, `serde_qs` deserializes every leaf of a
+/// self-describing target as a JSON string, so a numeric `port` or a boolean
+/// `secure`/`encrypt`/`trust_server_certificate` field arrives as
+/// `Value::String("5434")`/`Value::String("true")` instead of
+/// `Value::Number`/`Value::Bool`. The driver-side `.as_u64()`/`.as_bool()`
+/// then returns `None` and silently falls back to the provider default —
+/// dropping the user's port, or worse, a TLS setting. JSON preserves the
+/// original types on the wire, matching `update_dashboard` (dashboards.rs).
+#[server(prefix = "/leptos-api", input = server_fn::codec::Json)]
 pub async fn create_datasource_modal(
     name: String,
     slug: String,
@@ -360,7 +371,11 @@ pub async fn create_datasource_modal(
 /// Update an existing datasource's connection config and name (admin only).
 ///
 /// Mirrors `PUT /api/v1/datasources/{id}`.
-#[server(prefix = "/leptos-api")]
+///
+/// `input = server_fn::codec::Json` (KYO-428) — see `create_datasource_modal`
+/// for why a `serde_json::Value` argument needs the JSON codec rather than
+/// the default `PostUrl`.
+#[server(prefix = "/leptos-api", input = server_fn::codec::Json)]
 pub async fn update_datasource_settings(
     datasource_id: String,
     name: String,
@@ -400,7 +415,19 @@ pub async fn update_datasource_settings(
 /// Save user credentials for an existing datasource.
 ///
 /// Mirrors `POST /api/v1/datasources/{id}/credentials`.
-#[server(prefix = "/leptos-api")]
+///
+/// `input = server_fn::codec::Json` (KYO-428): today every leaf
+/// `build_credentials()` (pages/settings/datasources.rs) puts in this map is
+/// a string, so decoding it via the default `PostUrl` codec happens to
+/// produce the same `serde_json::Value` a JSON codec would — there is no
+/// live bug here today. But `create_datasource_modal` accepts the *same*
+/// credentials map (built by the same caller, over the same wire type) and
+/// now decodes it as JSON per this ticket's fix. Leaving this function on
+/// `PostUrl` would make the map's decoded shape depend on which of the two
+/// call sites sent it — silently correct only as long as no credential
+/// field is ever a number or boolean. Matching the codec here removes that
+/// path-dependent trap instead of leaving it for the next field to trip over.
+#[server(prefix = "/leptos-api", input = server_fn::codec::Json)]
 pub async fn save_datasource_credentials(
     datasource_id: String,
     credentials: serde_json::Value,
@@ -502,7 +529,11 @@ fn overlay_credentials(stored: serde_json::Value, provided: &serde_json::Value) 
 /// the same mapping the REST route's `discover_all_resources()` used before that
 /// route (`catalog.rs`) was deleted wholesale in the React→Leptos migration
 /// (KYO-73, #182).
-#[server(prefix = "/leptos-api")]
+///
+/// `input = server_fn::codec::Json` (KYO-428) — see `create_datasource_modal`
+/// for why `connection_config` (a `serde_json::Value`) needs the JSON codec
+/// rather than the default `PostUrl`.
+#[server(prefix = "/leptos-api", input = server_fn::codec::Json)]
 pub async fn discover_datasource_resources(
     datasource_type: String,
     connection_config: serde_json::Value,
@@ -1204,5 +1235,121 @@ mod discover_user_context_tests {
              \"Discover Available\" and \"test connection\" call fail with \
              \"BigQuery kyomi_oauth mode requires user context with OAuth data\""
         );
+    }
+}
+
+// ── JSON input codec on serde_json::Value server fns (KYO-428) ────────────
+
+#[cfg(all(test, feature = "ssr"))]
+mod json_input_codec_tests {
+    //! KYO-428: `create_datasource_modal`, `update_datasource_settings`,
+    //! `discover_datasource_resources`, and `save_datasource_credentials`
+    //! all take a `serde_json::Value` argument built from typed
+    //! `connection_config`/`credentials` maps (`build_connection_config`,
+    //! `build_credentials` in `pages/settings/datasources.rs`) that include
+    //! non-string JSON leaves — numbers (`port`) and booleans (`secure`,
+    //! `encrypt`, `trust_server_certificate`).
+    //!
+    //! `serde_json::Value` is self-describing, so its `Deserialize` impl
+    //! defers entirely to the format doing the decoding. Under the `#[server]`
+    //! macro's default input codec (`PostUrl` — `serde_qs` over
+    //! `application/x-www-form-urlencoded`), every leaf decodes as a JSON
+    //! *string*, because `serde_qs` has no type information beyond "this
+    //! looks like text in a query string". A driver reading `port` with
+    //! `.as_u64()` then gets `None` and silently falls back to the
+    //! provider's default port; a driver reading `secure`/`encrypt` with
+    //! `.as_bool()` silently falls back to its default TLS posture.
+    //!
+    //! The fix is `#[server(prefix = "/leptos-api", input =
+    //! server_fn::codec::Json)]` on all four functions (matching the
+    //! existing precedent at `dashboards.rs`'s `update_dashboard`), which
+    //! decodes the body as real JSON and preserves `Value::Number`/
+    //! `Value::Bool` leaves as such.
+    //!
+    //! This test does not build a local struct or assert a decoding truth
+    //! table — either would keep passing if the `input = ...` attribute
+    //! were deleted, since nothing would exercise the macro-generated wire
+    //! type at all. Instead it inspects the `server_fn::ServerFn::Protocol`
+    //! associated type the `#[server]` macro actually generates for each of
+    //! these four functions, and asserts the *input* side of that protocol
+    //! is not `PostUrl` — the one property that flips if the attribute is
+    //! ever removed or edited back to the default.
+    //!
+    //! Verified by mutation: temporarily deleting `input =
+    //! server_fn::codec::Json` from `create_datasource_modal` turns its
+    //! `Protocol`'s input slot back into `server_fn::codec::url::PostUrl`,
+    //! and `create_datasource_modal_uses_the_json_input_codec` fails with
+    //! exactly the message below. The attribute was restored immediately
+    //! after and this test file was confirmed to pass again.
+
+    use super::{
+        CreateDatasourceModal, DiscoverDatasourceResources, SaveDatasourceCredentials,
+        UpdateDatasourceSettings,
+    };
+    use leptos::server_fn::ServerFn;
+
+    /// Extract the type name of the *first* generic argument of
+    /// `server_fn::Http<Input, Output>` from a full `type_name::<Protocol>()`
+    /// string — i.e. the input encoding. Splitting on the first top-level
+    /// comma is sufficient here because neither `PostUrl` nor
+    /// `Post<JsonEncoding>` (what `server_fn::codec::Json` expands to)
+    /// contains a comma of its own.
+    fn input_encoding_of(protocol_type_name: &str) -> &str {
+        protocol_type_name
+            .split_once("Http<")
+            .and_then(|(_, rest)| rest.split_once(','))
+            .map(|(input, _)| input)
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected `{protocol_type_name}` to be a server_fn::Http<Input, Output> \
+                     protocol with a comma-separated generic argument list"
+                )
+            })
+    }
+
+    /// Assert a server_fn's `Protocol::Input` side is the JSON codec, not
+    /// the default `PostUrl` form codec. `T` is one of the PascalCase
+    /// structs the `#[server]` macro generates for each function below
+    /// (`CreateDatasourceModal`, etc.) — asserting against the real
+    /// macro-generated type, not a hand-rolled stand-in, is what makes this
+    /// load-bearing against the attribute actually being removed.
+    fn assert_json_input_codec<T: ServerFn>() {
+        let protocol = std::any::type_name::<T::Protocol>();
+        let input_encoding = input_encoding_of(protocol);
+        assert!(
+            !input_encoding.contains("PostUrl"),
+            "expected a JSON input codec, but {protocol} still uses the \
+             default form-urlencoded PostUrl codec — this is the exact \
+             KYO-428 regression: serde_json::Value leaves that are numbers \
+             or booleans (port, secure, encrypt, trust_server_certificate) \
+             silently decode as strings under PostUrl, and the driver's \
+             .as_u64()/.as_bool() then falls back to its default instead \
+             of erroring"
+        );
+        assert!(
+            input_encoding.contains("JsonEncoding"),
+            "expected the input encoding to be server_fn::codec::Json \
+             (JsonEncoding), got {input_encoding} in protocol {protocol}"
+        );
+    }
+
+    #[test]
+    fn create_datasource_modal_uses_the_json_input_codec() {
+        assert_json_input_codec::<CreateDatasourceModal>();
+    }
+
+    #[test]
+    fn update_datasource_settings_uses_the_json_input_codec() {
+        assert_json_input_codec::<UpdateDatasourceSettings>();
+    }
+
+    #[test]
+    fn discover_datasource_resources_uses_the_json_input_codec() {
+        assert_json_input_codec::<DiscoverDatasourceResources>();
+    }
+
+    #[test]
+    fn save_datasource_credentials_uses_the_json_input_codec() {
+        assert_json_input_codec::<SaveDatasourceCredentials>();
     }
 }
