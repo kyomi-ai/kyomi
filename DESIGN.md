@@ -817,9 +817,10 @@ before adding a new `z-*` value to any component.**
 | Layer | z-index | Component | Notes |
 |---|---|---|---|
 | Base overlay | `z-20` | Mobile sidebar overlay (`layout.rs`) | Below the sidebar's own content, above the page. |
-| Standalone dialog | `z-50` | `ConfirmDialog`, `Toast` | Sit *below* Modal today — a `ConfirmDialog` or `Toast` raised while a `Modal` is open can paint underneath it. Not fixed here — tracked as **KYO-441**, which must bring both into this scale rather than inventing new values. |
 | Modal — base | `z-[1000]` | `Modal` (`ModalLayer::Base`, the default) | Every existing `Modal` caller. Changing this value restacks every modal in the app. |
 | Modal — elevated | `z-[1050]` | `Modal` (`ModalLayer::Elevated`) | Opt-in, for a modal that must open on top of another already-open `Modal` (e.g. `FeedbackModal`). Pass `layer=ModalLayer::Elevated` — never a raw `z-*` override at the call site. |
+| Confirm dialog | `z-[1060]` | `ConfirmDialog` | Must clear `ModalLayer::Elevated` (1050) — a `ConfirmDialog` can be opened from a modal that is itself stacked on another modal (KYO-441: it previously shared Standalone dialog's `z-50`, below Modal's `z-[1000]`, and painted underneath — confirmed via `elementFromPoint()`, which returned the modal backdrop instead of the dialog). |
+| Toast | `z-[1080]` | `Toast` | Above `ConfirmDialog`, so feedback raised during a confirmation is still seen. Also fixed by KYO-441 for the same reason (previously `z-50`, invisible under an open `Modal`). |
 | Tooltip | `z-[1100]` | `Tooltip` | Always above every modal layer, so hover hints stay legible even inside a modal. |
 
 **Rules:**
@@ -829,6 +830,11 @@ before adding a new `z-*` value to any component.**
   see `crates/kyomi-ui-components/src/components/modal.rs`. Extend the enum
   (and this table) if a third layer is ever needed; don't hand-roll a
   `z-[NNNN]` at the call site.
+- `ConfirmDialog` and `Toast` each expose their z-index as a single named
+  `const` (`BACKDROP_CLASS` in `confirm_dialog.rs`, `CONTAINER_CLASS` in
+  `toast.rs`) rather than a `ModalLayer`-style enum — each component has
+  exactly one stacking value, not a set of caller-selectable layers, so an
+  enum would be a parallel abstraction with nothing to select between.
 
 ## Dashboard Viewer
 
