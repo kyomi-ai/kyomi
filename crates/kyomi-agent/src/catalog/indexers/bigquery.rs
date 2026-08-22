@@ -44,6 +44,21 @@
 //!
 //! - **service_account** — GCP service account JSON in `connection_config`.
 //!   Token exchanged via `exchange_service_account_jwt()`.
+//!
+//! ### Token resolution failures (KYO-449)
+//!
+//! Each of the three branches above can fail to produce an access token —
+//! an expired/revoked OAuth grant, a rotated or under-scoped service
+//! account, missing workspace OAuth client credentials. Before KYO-449
+//! these three branches `return`ed a `CatalogIndexResult::error(..)`
+//! straight to the caller without ever calling `update_datasource_status`,
+//! so the failure was silent: the Catalog tab showed zero tables, "Last
+//! indexed: never", no error — the same silence KYO-444 fixed on the
+//! project-scope branches below, just on an earlier early-exit path. All
+//! three now go through [`record_failure`] with a message worded for that
+//! specific auth mode (a rotated service account reads differently from an
+//! expired user OAuth token that needs reconnecting), so the reason is both
+//! visible and actionable in the Catalog tab.
 
 use async_trait::async_trait;
 use kyomi_core::datasource_registry::DatasourceType;
@@ -90,16 +105,33 @@ impl CatalogIndexer for BigQueryIndexer {
             "BigQuery background indexer starting"
         );
 
-        // 1. Resolve access token based on auth_mode
+        // 1. Resolve access token based on auth_mode.
+        //
+        // KYO-449: each failure branch here used to `return
+        // CatalogIndexResult::error(...)` directly — bypassing
+        // `update_datasource_status` entirely, so a token-resolution
+        // failure left `catalog_refresh_status` at whatever it was before
+        // (usually never-set) and the Catalog tab showed zero tables, "Last
+        // indexed: never", no error — the exact silence KYO-444 fixed on
+        // the project-scope branches. Routing through `record_failure`
+        // writes a visible `"failed"` status with a per-auth-mode,
+        // actionable reason, and — matching every other `record_failure`
+        // call site — deliberately does NOT stamp `last_catalog_refresh`,
+        // so a broken datasource doesn't look freshly indexed and isn't
+        // rate-limited out of hourly retries by `can_refresh_now`.
         let access_token = match auth_mode {
             "service_account" => {
                 match resolve_service_account_token(&ctx.connection_config).await {
                     Ok(token) => token,
                     Err(e) => {
-                        return CatalogIndexResult::error(&format!(
-                            "BigQuery service_account token exchange failed: {e}"
-                        ))
-                        .with_ids(&ctx.datasource_config_id, &ctx.workspace_id);
+                        let msg = format!(
+                            "BigQuery service account authentication failed: {e}. The \
+                             service account JSON in datasource settings may have been \
+                             rotated, revoked, or lost a required IAM role — verify it \
+                             in the Google Cloud console and update it in datasource \
+                             settings if needed."
+                        );
+                        return record_failure(db, ctx, &msg).await;
                     }
                 }
             }
@@ -114,10 +146,13 @@ impl CatalogIndexer for BigQueryIndexer {
                 {
                     Ok(token) => token,
                     Err(e) => {
-                        return CatalogIndexResult::error(&format!(
-                            "BigQuery enterprise_oauth token resolution failed: {e}"
-                        ))
-                        .with_ids(&ctx.datasource_config_id, &ctx.workspace_id);
+                        let msg = format!(
+                            "BigQuery enterprise OAuth credentials failed to resolve: {e}. \
+                             The workspace's OAuth client credentials for this datasource \
+                             may be invalid or revoked — reconfigure them in datasource \
+                             settings."
+                        );
+                        return record_failure(db, ctx, &msg).await;
                     }
                 }
             }
@@ -125,10 +160,12 @@ impl CatalogIndexer for BigQueryIndexer {
                 match resolve_kyomi_oauth_token(db, ctx, user_email).await {
                     Ok(token) => token,
                     Err(e) => {
-                        return CatalogIndexResult::error(&format!(
-                            "BigQuery kyomi_oauth token resolution failed: {e}"
-                        ))
-                        .with_ids(&ctx.datasource_config_id, &ctx.workspace_id);
+                        let msg = format!(
+                            "BigQuery's connected Google account needs to be reconnected: \
+                             {e}. Reconnect this datasource's Google account in datasource \
+                             settings to restore catalog indexing."
+                        );
+                        return record_failure(db, ctx, &msg).await;
                     }
                 }
             }
@@ -655,6 +692,24 @@ mod tests {
         }
     }
 
+    /// Connects a fresh in-memory sqlite pool and seeds the FK chain a
+    /// single BigQuery `datasource_configs` row needs. Extracted so the
+    /// tests in this module (three from KYO-444, three more from KYO-449)
+    /// share one setup path instead of a sixth inline copy of the same
+    /// `DbPool::connect` + pattern-match + `seed_bq_datasource` sequence —
+    /// see "the third copy of a test helper is the extraction trigger"
+    /// (`docs/standards/code-organization/`).
+    async fn seeded_bq_db(id: &str, workspace_id: &str) -> kyomi_core::DbPool {
+        let db = kyomi_core::DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let kyomi_core::DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        seed_bq_datasource(sq, id, workspace_id).await;
+        db
+    }
+
     /// The MAJOR from the KYO-444 review: a populated-but-filters-to-empty
     /// `catalog_projects` must skip via `resolve_project_scope`, not
     /// silently proceed to index zero projects. Proven by the reviewer to
@@ -669,13 +724,10 @@ mod tests {
     /// removed.
     #[tokio::test]
     async fn resolve_project_scope_skips_when_explicit_scope_filters_to_empty() {
-        let db = kyomi_core::DbPool::connect("sqlite::memory:")
-            .await
-            .expect("connect in-memory sqlite");
+        let db = seeded_bq_db("ds-filtered", "ws-filtered").await;
         let kyomi_core::DbPool::Sqlite(sq) = &db else {
             unreachable!("expected sqlite pool");
         };
-        seed_bq_datasource(sq, "ds-filtered", "ws-filtered").await;
         let ctx = IndexerContext {
             workspace_id: "ws-filtered".to_string(),
             datasource_config_id: "ds-filtered".to_string(),
@@ -711,13 +763,10 @@ mod tests {
     /// up indistinguishable from a run that never happened.
     #[tokio::test]
     async fn record_skip_writes_idle_status_with_reason_and_stamps_last_refresh() {
-        let db = kyomi_core::DbPool::connect("sqlite::memory:")
-            .await
-            .expect("connect in-memory sqlite");
+        let db = seeded_bq_db("ds-skip", "ws-skip").await;
         let kyomi_core::DbPool::Sqlite(sq) = &db else {
             unreachable!("expected sqlite pool");
         };
-        seed_bq_datasource(sq, "ds-skip", "ws-skip").await;
         let ctx = bq_ctx("ws-skip", "ds-skip");
 
         // Sanity check on the seeded fixture: a fresh datasource starts
@@ -791,13 +840,10 @@ mod tests {
     /// have refreshed the catalog when nothing was discovered.
     #[tokio::test]
     async fn record_failure_writes_failed_status_and_does_not_stamp_last_refresh() {
-        let db = kyomi_core::DbPool::connect("sqlite::memory:")
-            .await
-            .expect("connect in-memory sqlite");
+        let db = seeded_bq_db("ds-fail", "ws-fail").await;
         let kyomi_core::DbPool::Sqlite(sq) = &db else {
             unreachable!("expected sqlite pool");
         };
-        seed_bq_datasource(sq, "ds-fail", "ws-fail").await;
         let ctx = bq_ctx("ws-fail", "ds-fail");
 
         let result = record_failure(&db, &ctx, "resourcemanager.projects.list denied").await;
@@ -841,6 +887,226 @@ mod tests {
             after.is_none(),
             "nothing was refreshed on a discovery failure — last_catalog_refresh must stay \
              untouched, mirroring index_catalog_sql's treatment of a discover-containers failure"
+        );
+    }
+
+    // ── Token-resolution failures write a visible status (KYO-449) ─────
+    //
+    // Before this fix, all three `auth_mode` branches in `index_catalog`
+    // `return`ed `CatalogIndexResult::error(..)` straight to the caller on
+    // a token-resolution failure, bypassing `update_datasource_status`
+    // entirely — the same silent-failure shape KYO-444 fixed on the
+    // project-scope branches, just on this earlier early-exit path. These
+    // three tests run the real `BigQueryIndexer::index_catalog` trait
+    // method end to end (not `record_failure` directly, and not a
+    // reimplementation of the branch) so a regression that reintroduces a
+    // bare early return is caught here.
+    //
+    // Each `connection_config`/`user_email` combination is chosen so the
+    // underlying token resolver fails deterministically without ever
+    // making a network call or reading an environment variable — verified
+    // against each resolver's own logic (see `resolve_service_account_token`,
+    // `resolve_enterprise_oauth_token`, `resolve_kyomi_oauth_token` above,
+    // and the vendored `kyomi-datasource` v1.6.0 source for
+    // `exchange_service_account_jwt`).
+
+    /// Runs `BigQueryIndexer::index_catalog` and reads back the three
+    /// pieces of persisted state every test below needs — extracted so the
+    /// three KYO-449 tests share one readback path instead of a third and
+    /// fourth copy of the same query trio already used inline by the
+    /// `record_skip`/`record_failure` tests above.
+    async fn run_index_catalog_and_read_status(
+        db: &kyomi_core::DbPool,
+        sq: &sqlx::SqlitePool,
+        ctx: &IndexerContext,
+        user_email: Option<&str>,
+    ) -> (CatalogIndexResult, String, Option<String>, Option<String>) {
+        let embedding = EmbeddingService::new().expect("load embedding model");
+        let result = BigQueryIndexer
+            .index_catalog(ctx, db, &embedding, user_email, None, None)
+            .await;
+
+        let status: String = sqlx::query_scalar(
+            "SELECT catalog_refresh_status FROM datasource_configs WHERE id = ?",
+        )
+        .bind(&ctx.datasource_config_id)
+        .fetch_one(sq)
+        .await
+        .expect("read catalog_refresh_status");
+
+        let progress_raw: String = sqlx::query_scalar(
+            "SELECT catalog_refresh_progress FROM datasource_configs WHERE id = ?",
+        )
+        .bind(&ctx.datasource_config_id)
+        .fetch_one(sq)
+        .await
+        .expect("read catalog_refresh_progress");
+        let progress: serde_json::Value =
+            serde_json::from_str(&progress_raw).expect("progress is JSON");
+        let error = progress["error"].as_str().map(str::to_string);
+
+        let last_refresh: Option<String> = sqlx::query_scalar(
+            "SELECT last_catalog_refresh FROM datasource_configs WHERE id = ?",
+        )
+        .bind(&ctx.datasource_config_id)
+        .fetch_one(sq)
+        .await
+        .expect("read last_catalog_refresh");
+
+        (result, status, error, last_refresh)
+    }
+
+    /// `service_account` mode: `connection_config` deliberately omits
+    /// `service_account_json`, so `exchange_service_account_jwt` fails at
+    /// its very first field lookup — before it would ever build a JWT or
+    /// make a network call.
+    #[tokio::test]
+    async fn service_account_token_failure_writes_failed_status_with_actionable_reason() {
+        let db = seeded_bq_db("ds-sa-fail", "ws-sa-fail").await;
+        let kyomi_core::DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        let ctx = IndexerContext {
+            workspace_id: "ws-sa-fail".to_string(),
+            datasource_config_id: "ds-sa-fail".to_string(),
+            connection_config: serde_json::json!({"auth_mode": "service_account"}),
+            encryption_key: std::sync::Arc::new([0u8; 32]),
+        };
+
+        let (result, status, error, last_refresh) =
+            run_index_catalog_and_read_status(&db, sq, &ctx, None).await;
+
+        assert_eq!(result.status, "error");
+        assert_eq!(
+            status, "failed",
+            "a service_account token-exchange failure must write a visible \"failed\" \
+             status (KYO-449) — the pre-fix code returned CatalogIndexResult::error \
+             directly and never called update_datasource_status at all"
+        );
+
+        let error = error.expect("a \"failed\" run must carry an error reason (get_catalog_stats reads it as refresh_failure_reason)");
+        assert!(
+            error.to_lowercase().contains("service account"),
+            "the reason must be actionable for service_account specifically, not a generic \
+             \"credentials failed\" message — got: {error}"
+        );
+        assert!(
+            error.contains("service_account_json"),
+            "must still carry the underlying, offline-deterministic cause — got: {error}"
+        );
+        assert!(
+            !error.to_lowercase().contains("oauth client credentials")
+                && !error.to_lowercase().contains("reconnect"),
+            "the three auth-mode messages must be distinguishable — this one must not reuse \
+             the enterprise_oauth or kyomi_oauth wording, got: {error}"
+        );
+
+        assert!(
+            last_refresh.is_none(),
+            "a failed token resolution must NOT stamp last_catalog_refresh — doing so would \
+             make a broken datasource look freshly indexed, and would rate-limit hourly \
+             retries via can_refresh_now for 24h (helpers.rs:76)"
+        );
+    }
+
+    /// `enterprise_oauth` mode: no `provided_credentials`, no
+    /// `shared_credentials` in `connection_config`, and no `user_email` —
+    /// `resolve_indexing_credentials` returns `None` at its very first
+    /// `user_email?` short-circuit, before any DB query or network call.
+    #[tokio::test]
+    async fn enterprise_oauth_token_failure_writes_failed_status_with_actionable_reason() {
+        let db = seeded_bq_db("ds-eo-fail", "ws-eo-fail").await;
+        let kyomi_core::DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        let ctx = IndexerContext {
+            workspace_id: "ws-eo-fail".to_string(),
+            datasource_config_id: "ds-eo-fail".to_string(),
+            connection_config: serde_json::json!({"auth_mode": "enterprise_oauth"}),
+            encryption_key: std::sync::Arc::new([0u8; 32]),
+        };
+
+        let (result, status, error, last_refresh) =
+            run_index_catalog_and_read_status(&db, sq, &ctx, None).await;
+
+        assert_eq!(result.status, "error");
+        assert_eq!(
+            status, "failed",
+            "an enterprise_oauth credential-resolution failure must write a visible \
+             \"failed\" status (KYO-449)"
+        );
+
+        let error = error.expect("a \"failed\" run must carry an error reason");
+        assert!(
+            error.to_lowercase().contains("oauth client credentials"),
+            "the reason must be actionable for enterprise_oauth specifically — a \
+             workspace-level OAuth client credentials problem reads differently from an \
+             expired end-user OAuth token — got: {error}"
+        );
+        assert!(
+            error.contains("No credentials available for enterprise_oauth BigQuery"),
+            "must still carry the underlying, offline-deterministic cause — got: {error}"
+        );
+        assert!(
+            !error.to_lowercase().contains("service account") && !error.to_lowercase().contains("reconnect"),
+            "the three auth-mode messages must be distinguishable — this one must not reuse \
+             the service_account or kyomi_oauth wording, got: {error}"
+        );
+
+        assert!(
+            last_refresh.is_none(),
+            "a failed token resolution must NOT stamp last_catalog_refresh"
+        );
+    }
+
+    /// `kyomi_oauth` mode (the default, catch-all `_` arm): no
+    /// `user_email` is provided, so `resolve_kyomi_oauth_token` fails at
+    /// its very first check, before any DB query or network call.
+    #[tokio::test]
+    async fn kyomi_oauth_token_failure_writes_failed_status_with_actionable_reason() {
+        let db = seeded_bq_db("ds-ko-fail", "ws-ko-fail").await;
+        let kyomi_core::DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        let ctx = IndexerContext {
+            workspace_id: "ws-ko-fail".to_string(),
+            datasource_config_id: "ds-ko-fail".to_string(),
+            connection_config: serde_json::json!({"auth_mode": "kyomi_oauth"}),
+            encryption_key: std::sync::Arc::new([0u8; 32]),
+        };
+
+        let (result, status, error, last_refresh) =
+            run_index_catalog_and_read_status(&db, sq, &ctx, None).await;
+
+        assert_eq!(result.status, "error");
+        assert_eq!(
+            status, "failed",
+            "a kyomi_oauth token-resolution failure must write a visible \"failed\" status \
+             (KYO-449) — this is the exact scenario from the ticket: an expired user OAuth \
+             token must not leave the Catalog tab silently at zero tables / \"Last indexed: \
+             never\""
+        );
+
+        let error = error.expect("a \"failed\" run must carry an error reason");
+        assert!(
+            error.to_lowercase().contains("reconnect"),
+            "the reason must tell the user to reconnect their Google account — the one \
+             concrete action available for kyomi_oauth specifically — got: {error}"
+        );
+        assert!(
+            error.contains("kyomi_oauth requires a user email for token refresh"),
+            "must still carry the underlying, offline-deterministic cause — got: {error}"
+        );
+        assert!(
+            !error.to_lowercase().contains("service account")
+                && !error.to_lowercase().contains("oauth client credentials"),
+            "the three auth-mode messages must be distinguishable — this one must not reuse \
+             the service_account or enterprise_oauth wording, got: {error}"
+        );
+
+        assert!(
+            last_refresh.is_none(),
+            "a failed token resolution must NOT stamp last_catalog_refresh"
         );
     }
 
