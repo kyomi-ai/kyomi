@@ -38,6 +38,7 @@ use crate::server_fns::datasource_oauth::{
     get_google_oauth_projects,
 };
 use crate::utils::json::config_bool;
+use crate::utils::oauth_popup::{popup_monitor_outcome_message, PopupMonitorOutcome};
 use crate::utils::permissions::{use_analytics_access, use_permissions, AnalyticsAccess};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4226,6 +4227,12 @@ fn ConnectCreateSuccessView(
 // Modal OAuth Status Panel (shared 4-state UI)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// The popup-monitor cleanup slot `ModalOAuthStatusPanel` stashes its
+/// in-flight `monitor_oauth_popup` cleanup in (KYO-437). Named alias for
+/// `clippy::type_complexity`, not a functional requirement.
+#[cfg(target_arch = "wasm32")]
+type PopupMonitorCleanupSlot = StoredValue<Option<send_wrapper::SendWrapper<Box<dyn FnOnce()>>>>;
+
 /// The four OAuth states rendered as a reactive panel inside the edit modal.
 ///
 /// | State          | Condition                                      |
@@ -4261,6 +4268,13 @@ fn ModalOAuthStatusPanel(
     on_disconnect: Callback<()>,
     /// Whether the disconnect action is currently pending.
     disconnect_pending: Signal<bool>,
+    /// Called when the popup-monitor (KYO-437) detects a connect attempt
+    /// resolved without an OAuth `postMessage` ever arriving — the popup
+    /// was closed, or the attempt timed out. Built by
+    /// `build_oauth_recovery_callback` in the owning `*AuthModeSection`,
+    /// which knows which `OAuthStatusSource` and slug to re-check status
+    /// against for this provider/mode before reporting anything as failed.
+    on_recover: Callback<PopupMonitorOutcome>,
 ) -> impl IntoView {
     let provider = provider_name;
 
@@ -4269,6 +4283,72 @@ fn ModalOAuthStatusPanel(
     // unused. Consume it here to suppress the warning without a lint annotation.
     #[cfg(not(target_arch = "wasm32"))]
     let _ = connect_url;
+
+    // `on_recover` is only ever invoked from inside the WASM-only popup
+    // monitor below — same reasoning as `connect_url` above.
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = on_recover;
+
+    // Holds the cleanup returned by `monitor_oauth_popup` for whichever
+    // connect attempt is currently in flight (KYO-437), so this component's
+    // teardown can stop the popup-closed poll and connect timeout
+    // immediately rather than waiting for the next tick — mirrors the
+    // `StoredValue<Option<SendWrapper<_>>>` pattern used for other
+    // `gloo_timers` handles in this codebase (`agent_thinking.rs`,
+    // `search_sort_bar.rs`), except the payload here is the monitor's own
+    // `FnOnce` cleanup rather than a raw timer handle, so it must be
+    // *called*, not merely dropped — see the `on_cleanup` below.
+    #[cfg(target_arch = "wasm32")]
+    let popup_monitor: PopupMonitorCleanupSlot = StoredValue::new(None);
+    #[cfg(target_arch = "wasm32")]
+    on_cleanup(move || {
+        popup_monitor.update_value(|slot| {
+            if let Some(cleanup) = slot.take() {
+                cleanup.take()();
+            }
+        });
+    });
+
+    // Starts (or restarts) a connect attempt: opens the popup and, on
+    // success, arms the popup-closed poll + connect timeout (KYO-437).
+    // Shared by both the "Connect" and "Reconnect" buttons below — they are
+    // otherwise byte-for-byte the same click handler, differing only in
+    // which state they're rendered from.
+    let start_connect = move |_: leptos::ev::MouseEvent| {
+        if oauth_connecting.get_untracked() {
+            return;
+        }
+        set_oauth_connecting.set(true);
+        #[cfg(target_arch = "wasm32")]
+        {
+            let connect_url_val = connect_url.get_untracked();
+            use crate::utils::oauth_popup::{monitor_oauth_popup, open_oauth_popup};
+            match open_oauth_popup(&connect_url_val, provider) {
+                Some(popup) => {
+                    let cleanup = monitor_oauth_popup(
+                        popup,
+                        // `try_get_untracked` — this runs inside a deferred
+                        // `gloo_timers` callback, not a reactive scope; the
+                        // signal may already be disposed if this panel
+                        // unmounted (see the disposal-safety standard).
+                        move || oauth_connecting.try_get_untracked().unwrap_or(false),
+                        move |outcome| {
+                            on_recover.try_run(outcome);
+                        },
+                    );
+                    popup_monitor.update_value(|slot| {
+                        *slot = Some(send_wrapper::SendWrapper::new(
+                            Box::new(cleanup) as Box<dyn FnOnce()>,
+                        ));
+                    });
+                }
+                None => {
+                    set_oauth_connecting.set(false);
+                    toast_error("Popup was blocked. Please allow popups for this site.");
+                }
+            }
+        }
+    };
 
     view! {
         {move || {
@@ -4339,21 +4419,7 @@ fn ModalOAuthStatusPanel(
                         <Button
                             variant=ButtonVariant::Outline
                             size=ButtonSize::Sm
-                            on:click=move |_| {
-                                if oauth_connecting.get_untracked() { return; }
-                                set_oauth_connecting.set(true);
-                                #[cfg(target_arch = "wasm32")]
-                                {
-                                    let connect_url_val = connect_url.get_untracked();
-                                    use crate::utils::oauth_popup::open_oauth_popup;
-                                    if open_oauth_popup(&connect_url_val, provider_name).is_none() {
-                                        set_oauth_connecting.set(false);
-                                        toast_error(
-                                            "Popup was blocked. Please allow popups for this site.",
-                                        );
-                                    }
-                                }
-                            }
+                            on:click=start_connect
                         >
                             {move || if oauth_connecting.get() {
                                 view! {
@@ -4382,21 +4448,7 @@ fn ModalOAuthStatusPanel(
                     <Button
                         variant=ButtonVariant::Outline
                         size=ButtonSize::Sm
-                        on:click=move |_| {
-                            if oauth_connecting.get_untracked() { return; }
-                            set_oauth_connecting.set(true);
-                            #[cfg(target_arch = "wasm32")]
-                            {
-                                let connect_url_val = connect_url.get_untracked();
-                                use crate::utils::oauth_popup::open_oauth_popup;
-                                if open_oauth_popup(&connect_url_val, provider_name).is_none() {
-                                    set_oauth_connecting.set(false);
-                                    toast_error(
-                                        "Popup was blocked. Please allow popups for this site.",
-                                    );
-                                }
-                            }
-                        }
+                        on:click=start_connect
                     >
                         {move || if oauth_connecting.get() {
                             view! {
@@ -4482,6 +4534,56 @@ fn oauth_status_source_to_fetch(
     }
 }
 
+/// Result of a one-shot OAuth status fetch, normalized across the two
+/// underlying endpoints (account-level Google OAuth vs. per-datasource
+/// provider OAuth) so callers don't need to know which one answered.
+struct OAuthStatusFetchResult {
+    connected: bool,
+    email: Option<String>,
+    expired: bool,
+}
+
+/// Fetches OAuth status for `source` — the single place that knows which
+/// server fn backs [`OAuthStatusSource::GoogleAccount`] vs.
+/// [`OAuthStatusSource::Datasource`]. Shared by [`use_oauth_status_refetch`]
+/// (the mode-change refetch) and the popup-recovery callback built by
+/// [`build_oauth_recovery_callback`] (KYO-437) — without this extraction the
+/// recovery path would need its own copy of this match, which is exactly
+/// the kind of duplication that turned one Effect body into three separate
+/// copies before `use_oauth_status_refetch` itself existed (KYO-13 /
+/// KYO-17 / KYO-197, see `docs/CODING_STANDARDS.md`).
+///
+/// Returns `None` on a fetch error — logged via `warn!`, not silently
+/// discarded — so callers know to leave the previous status alone rather
+/// than treat a network error as "disconnected".
+async fn fetch_oauth_status_once(
+    source: OAuthStatusSource,
+    slug_val: String,
+) -> Option<OAuthStatusFetchResult> {
+    match source {
+        OAuthStatusSource::GoogleAccount => get_google_oauth_status()
+            .await
+            .map_err(|e| leptos::logging::warn!("Google OAuth status fetch failed: {e}"))
+            .ok()
+            .map(|s| OAuthStatusFetchResult {
+                connected: s.connected,
+                email: s.google_email,
+                expired: s.token_expired,
+            }),
+        OAuthStatusSource::Datasource(provider_key) => {
+            get_datasource_oauth_status(provider_key.to_string(), slug_val)
+                .await
+                .map_err(|e| leptos::logging::warn!("{provider_key} OAuth status fetch failed: {e}"))
+                .ok()
+                .map(|s| OAuthStatusFetchResult {
+                    connected: s.connected,
+                    email: s.provider_email,
+                    expired: s.token_expired,
+                })
+        }
+    }
+}
+
 fn use_oauth_status_refetch(
     auth_mode: ReadSignal<String>,
     slug: ReadSignal<String>,
@@ -4506,26 +4608,70 @@ fn use_oauth_status_refetch(
         setters.expired.set(false);
 
         leptos::task::spawn_local(async move {
-            match source {
-                OAuthStatusSource::GoogleAccount => {
-                    if let Ok(status) = get_google_oauth_status().await {
-                        setters.connected.try_set(status.connected);
-                        setters.email.try_set(status.google_email);
-                        setters.expired.try_set(status.token_expired);
-                    }
-                }
-                OAuthStatusSource::Datasource(provider_key) => {
-                    if let Ok(status) =
-                        get_datasource_oauth_status(provider_key.to_string(), slug_val).await
-                    {
-                        setters.connected.try_set(status.connected);
-                        setters.email.try_set(status.provider_email);
-                        setters.expired.try_set(status.token_expired);
-                    }
-                }
+            if let Some(status) = fetch_oauth_status_once(source, slug_val).await {
+                setters.connected.try_set(status.connected);
+                setters.email.try_set(status.email);
+                setters.expired.try_set(status.expired);
             }
         });
     });
+}
+
+/// Builds the `on_recover` callback every `ModalOAuthStatusPanel` in a given
+/// `*AuthModeSection` is wired to (KYO-437).
+///
+/// Fired by the shared popup monitor (`oauth_popup::monitor_oauth_popup`)
+/// when a connect attempt resolves *without* an OAuth `postMessage` ever
+/// arriving — the popup was closed, or the attempt timed out. Before
+/// reporting anything as failed, this re-runs the exact status fetch
+/// `use_oauth_status_refetch` uses (via `fetch_oauth_status_once`): the
+/// account may have been linked server-side even though the notification
+/// was lost (KYO-436) — the whole point of this ticket is turning that dead
+/// end into a working recovery instead of a permanent spinner. If the
+/// recheck finds a connection, the recovered state is adopted exactly as
+/// the `postMessage` success handler would have set it and nothing is
+/// shown; otherwise `oauth_connecting` is cleared and a toast explains what
+/// happened, with wording (`popup_monitor_outcome_message`) that
+/// distinguishes an intentional cancel from a timeout.
+///
+/// Built once per section — not once per `ModalOAuthStatusPanel` instance —
+/// because it re-resolves the *current* mode's `OAuthStatusSource`
+/// dynamically via `oauth_status_source_to_fetch` when it fires, the same
+/// way `use_oauth_status_refetch` does on every mode change. That lets one
+/// callback correctly serve both of BigQuery's panels (`kyomi_oauth` and
+/// `enterprise_oauth`) without needing to know at build time which one is
+/// currently visible.
+fn build_oauth_recovery_callback(
+    auth_mode: ReadSignal<String>,
+    slug: ReadSignal<String>,
+    setters: OAuthStatusSetters,
+    set_oauth_connecting: WriteSignal<bool>,
+    source_for_mode: fn(&str) -> Option<OAuthStatusSource>,
+    provider_name: &'static str,
+) -> Callback<PopupMonitorOutcome> {
+    Callback::new(move |outcome: PopupMonitorOutcome| {
+        let current_mode = auth_mode.get_untracked();
+        let slug_val = slug.get_untracked();
+        let source = oauth_status_source_to_fetch(&current_mode, &slug_val, source_for_mode);
+
+        leptos::task::spawn_local(async move {
+            let recovered = match source {
+                Some(source) => fetch_oauth_status_once(source, slug_val).await,
+                None => None,
+            };
+            match recovered {
+                Some(status) if status.connected => {
+                    setters.connected.try_set(true);
+                    setters.email.try_set(status.email);
+                    setters.expired.try_set(status.expired);
+                }
+                _ => {
+                    toast_error(popup_monitor_outcome_message(provider_name, outcome));
+                }
+            }
+            set_oauth_connecting.try_set(false);
+        });
+    })
 }
 
 /// Maps BigQuery's auth mode to its OAuth status source. `service_account`
@@ -4798,6 +4944,25 @@ fn BigQueryAuthModeSection(
         bigquery_oauth_source,
     );
 
+    // Recovers a connect attempt that resolved without an OAuth
+    // postMessage ever arriving — popup closed, or timed out (KYO-437).
+    // Built once for the whole section (not once per panel below) since it
+    // re-resolves the current mode's OAuthStatusSource dynamically, so this
+    // one callback correctly serves both the kyomi_oauth and
+    // enterprise_oauth panels.
+    let on_oauth_recover = build_oauth_recovery_callback(
+        bq_auth_mode,
+        slug,
+        OAuthStatusSetters {
+            connected: set_oauth_connected,
+            email: set_oauth_email,
+            expired: set_oauth_expired,
+        },
+        set_oauth_connecting,
+        bigquery_oauth_source,
+        "BigQuery",
+    );
+
     // Redirect URL shown in the Enterprise OAuth configuration panel so users
     // know what to enter in the Google Cloud OAuth client settings.
     // Only computed on WASM — the component won't render server-side.
@@ -4930,6 +5095,7 @@ fn BigQueryAuthModeSection(
                         cfg_missing=Signal::stored(false)
                         on_disconnect=on_google_disconnect
                         disconnect_pending=google_disconnect_pending
+                        on_recover=on_oauth_recover
                     />
                     <Show when=move || !oauth_connected.get()>
                         <p class="text-xs text-muted-foreground">
@@ -5018,6 +5184,7 @@ fn BigQueryAuthModeSection(
                                 cfg_missing=enterprise_cfg_missing
                                 on_disconnect=on_enterprise_disconnect
                                 disconnect_pending=enterprise_disconnect_pending
+                                on_recover=on_oauth_recover
                             />
                         </div>
                     </Show>
@@ -5286,6 +5453,21 @@ fn SnowflakeAuthModeSection(
         snowflake_oauth_source,
     );
 
+    // Recovers a connect attempt that resolved without an OAuth
+    // postMessage ever arriving — popup closed, or timed out (KYO-437).
+    let on_oauth_recover = build_oauth_recovery_callback(
+        sf_auth_mode,
+        slug,
+        OAuthStatusSetters {
+            connected: set_oauth_connected,
+            email: set_oauth_email,
+            expired: set_oauth_expired,
+        },
+        set_oauth_connecting,
+        snowflake_oauth_source,
+        "Snowflake",
+    );
+
     let slug_for_disconnect = slug;
     let on_sf_disconnect = Callback::new(move |()| {
         if !datasource_disconnect_action.pending().get_untracked() {
@@ -5350,6 +5532,7 @@ fn SnowflakeAuthModeSection(
                         cfg_missing=Signal::stored(false)
                         on_disconnect=on_sf_disconnect
                         disconnect_pending=sf_disconnect_pending
+                        on_recover=on_oauth_recover
                     />
                 </Show>
                 <Show when=move || is_create_mode.get()>
@@ -5452,6 +5635,21 @@ fn DatabricksAuthModeSection(
         databricks_oauth_source,
     );
 
+    // Recovers a connect attempt that resolved without an OAuth
+    // postMessage ever arriving — popup closed, or timed out (KYO-437).
+    let on_oauth_recover = build_oauth_recovery_callback(
+        db_auth_mode,
+        slug,
+        OAuthStatusSetters {
+            connected: set_oauth_connected,
+            email: set_oauth_email,
+            expired: set_oauth_expired,
+        },
+        set_oauth_connecting,
+        databricks_oauth_source,
+        "Databricks",
+    );
+
     // Redirect URL for the Databricks OAuth app registration.
     // Only computed on WASM — the component won't render server-side.
     #[cfg(target_arch = "wasm32")]
@@ -5550,6 +5748,7 @@ fn DatabricksAuthModeSection(
                         cfg_missing=db_cfg_missing
                         on_disconnect=on_db_disconnect
                         disconnect_pending=db_disconnect_pending
+                        on_recover=on_oauth_recover
                     />
                 </Show>
                 <Show when=move || is_create_mode.get()>
@@ -5628,6 +5827,21 @@ fn SynapseAuthModeSection(
             expired: set_oauth_expired,
         },
         synapse_oauth_source,
+    );
+
+    // Recovers a connect attempt that resolved without an OAuth
+    // postMessage ever arriving — popup closed, or timed out (KYO-437).
+    let on_oauth_recover = build_oauth_recovery_callback(
+        synapse_auth_mode,
+        slug,
+        OAuthStatusSetters {
+            connected: set_oauth_connected,
+            email: set_oauth_email,
+            expired: set_oauth_expired,
+        },
+        set_oauth_connecting,
+        synapse_oauth_source,
+        "Microsoft",
     );
 
     // Microsoft Enterprise OAuth connect URL — slug-scoped
@@ -5750,6 +5964,7 @@ fn SynapseAuthModeSection(
                             cfg_missing=enterprise_cfg_missing
                             on_disconnect=on_enterprise_disconnect
                             disconnect_pending=enterprise_disconnect_pending
+                            on_recover=on_oauth_recover
                         />
                     </div>
                 </Show>
@@ -8980,6 +9195,144 @@ mod tests {
              oauth_status_source_to_fetch — inlining the guard again risks reintroducing \
              the KYO-411 bug invisibly to the unit tests above, which only cover the \
              extracted predicate, not the Effect body itself"
+        );
+    }
+
+    // ── KYO-437: OAuth popup recovery ───────────────────────────────────
+    //
+    // The connecting spinner used to be cleared *only* by an OAuth
+    // postMessage — closing the popup, a dropped handshake, or a lost
+    // notification (KYO-436) all left it spinning forever. The fix has two
+    // parts that can't both be exercised as plain unit tests: the
+    // browser-timing half (poll `popup.closed()`, enforce a timeout) lives
+    // in `oauth_popup::monitor_oauth_popup` and is covered there by pure
+    // decision-logic tests (`popup_poll_should_report_closed` /
+    // `popup_timeout_should_report` / the message + timeout-bound tests).
+    // The wiring half — that every provider's panel actually arms the
+    // monitor, re-checks status before reporting failure, and tears the
+    // monitor down on unmount — is what these source-level guards cover.
+
+    /// Every `ModalOAuthStatusPanel` call site must wire `on_recover` — this
+    /// is what the ticket calls out explicitly: fixing recovery only at one
+    /// provider's call site (e.g. BigQuery) would leave Snowflake,
+    /// Databricks, and Microsoft/Synapse still spinning forever, since they
+    /// all share this same component and click handler.
+    #[test]
+    fn every_modal_oauth_status_panel_call_site_wires_on_recover() {
+        // Scoped to production code via MOD_TESTS_MARKER (defined below, but
+        // visible here regardless of textual order — module items aren't
+        // order-dependent) — SRC is include_str!-ed from this very file, so
+        // an unscoped count would also match this test's own source (the
+        // string literals a few lines below), and the assertion could never
+        // fail no matter what the production code does.
+        let production_src = SRC
+            .split(MOD_TESTS_MARKER)
+            .next()
+            .expect("MOD_TESTS_MARKER must appear in datasources.rs");
+
+        let panel_call_sites = production_src.matches("<ModalOAuthStatusPanel").count();
+        let recover_wirings = production_src.matches("on_recover=on_oauth_recover").count();
+        assert_eq!(
+            panel_call_sites, 5,
+            "expected exactly 5 ModalOAuthStatusPanel call sites (BigQuery kyomi_oauth + \
+             enterprise_oauth, Snowflake, Databricks, Synapse/Microsoft) — this test's \
+             markers need updating if that count changed intentionally"
+        );
+        assert_eq!(
+            panel_call_sites, recover_wirings,
+            "every ModalOAuthStatusPanel call site must pass on_recover=on_oauth_recover — \
+             a call site missing it still has KYO-437's spinner-forever bug"
+        );
+    }
+
+    /// `ModalOAuthStatusPanel`'s shared `start_connect` handler must arm the
+    /// popup monitor (not just open the popup) and stash its cleanup for
+    /// teardown — this is the actual fix for the ticket's core complaint
+    /// ("the only thing that can ever clear `oauth_connecting` is a
+    /// `postMessage`"). A regression that reverts to calling only
+    /// `open_oauth_popup` would compile and look identical in a diff of the
+    /// success path alone.
+    #[test]
+    fn start_connect_arms_the_popup_monitor_and_stashes_cleanup() {
+        let body = extract_between(SRC, "let start_connect = move |_: leptos::ev::MouseEvent| {", "view! {\n        {move || {");
+        assert!(
+            body.contains("monitor_oauth_popup("),
+            "start_connect must call monitor_oauth_popup after a successful open_oauth_popup \
+             — without it, a closed/abandoned popup never clears oauth_connecting"
+        );
+        assert!(
+            body.contains("on_recover.try_run(outcome)"),
+            "the monitor's outcome must be forwarded to on_recover via try_run — this runs in \
+             a deferred gloo_timers callback, so a bare .run() would panic if the panel had \
+             already unmounted (disposal-safety standard)"
+        );
+        assert!(
+            body.contains("popup_monitor.update_value"),
+            "the monitor's cleanup must be stashed in popup_monitor so on_cleanup can stop it \
+             on teardown instead of leaking the interval/timeout"
+        );
+    }
+
+    /// `on_cleanup` must actually *call* the stashed popup-monitor cleanup,
+    /// not merely drop it — dropping a `Box<dyn FnOnce()>` without invoking
+    /// it does nothing (unlike a raw `gloo_timers` handle, whose `Drop` impl
+    /// itself clears the timer): the interval/timeout closures are kept
+    /// alive by the running JS timers, not by this Box, so only *calling*
+    /// the cleanup reaches into those and cancels them.
+    #[test]
+    fn popup_monitor_cleanup_is_invoked_not_merely_dropped_on_teardown() {
+        let panel_body = extract_between(
+            SRC,
+            "fn ModalOAuthStatusPanel(",
+            "\n// ─────────────────────────────────────────────────────────────────────────────\n// OAuth Status Re-fetch Hook",
+        );
+        assert!(
+            panel_body.contains("on_cleanup(move || {"),
+            "ModalOAuthStatusPanel must register an on_cleanup for the popup monitor"
+        );
+        // End marker matches the outer `on_cleanup(...)` call's closing
+        // "});" specifically (4-space indent) rather than the first "});"
+        // in the body, which would be the inner `update_value(...)` call's.
+        let cleanup_block = extract_between(panel_body, "on_cleanup(move || {", "\n    });");
+        assert!(
+            cleanup_block.contains("cleanup.take()()"),
+            "on_cleanup must call the stashed cleanup (SendWrapper::take() then invoke it), \
+             not just drop it — a dropped-not-called Box<dyn FnOnce()> leaves the popup's \
+             gloo_timers Interval/Timeout still armed, since they're kept alive by the \
+             running JS timers rather than by this Box"
+        );
+    }
+
+    /// `build_oauth_recovery_callback` must re-check OAuth status
+    /// (`fetch_oauth_status_once`) *before* it can report a failure
+    /// (`popup_monitor_outcome_message`) — this is the KYO-436 half of the
+    /// ticket: a lost postMessage after a real successful link must be
+    /// discovered and adopted, not reported as cancelled/timed out.
+    /// Asserting the textual order (not just that both calls exist)
+    /// specifically guards against a regression that re-checks status
+    /// *after* already deciding to show the error.
+    #[test]
+    fn recovery_callback_rechecks_status_before_reporting_failure() {
+        let body = extract_between(
+            SRC,
+            "fn build_oauth_recovery_callback(",
+            "\n/// Maps BigQuery's auth mode",
+        );
+        let fetch_pos = body
+            .find("fetch_oauth_status_once(")
+            .expect("build_oauth_recovery_callback must call fetch_oauth_status_once");
+        let report_pos = body
+            .find("popup_monitor_outcome_message(")
+            .expect("build_oauth_recovery_callback must call popup_monitor_outcome_message");
+        assert!(
+            fetch_pos < report_pos,
+            "the status recheck (fetch_oauth_status_once) must be positioned — and therefore \
+             run — before the failure message is ever built, so a recovered connection never \
+             gets reported as cancelled/timed out"
+        );
+        assert!(
+            body.contains("Some(status) if status.connected =>"),
+            "a recheck that finds the account connected must be adopted, not just discarded"
         );
     }
 
