@@ -37,7 +37,7 @@ pub use confirm_dialog::ConfirmDialog;
 pub use empty_state::{EmptyState, EmptyStateVariant};
 pub use input::INPUT_CLASS;
 pub use label::Label;
-pub use modal::{Modal, ModalSize};
+pub use modal::{Modal, ModalLayer, ModalSize};
 pub use navigation_progress::NavigationProgress;
 pub use search_input::SearchInput;
 pub use select::{Select, StaticSelect};

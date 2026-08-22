@@ -20,7 +20,7 @@ use phosphor_leptos::{Icon, IconWeight};
 use crate::components::alert::{Alert, AlertDescription, AlertVariant};
 use crate::components::button::{Button, ButtonSize, ButtonVariant};
 use crate::components::checkbox::Checkbox;
-use crate::components::modal::{Modal, ModalSize};
+use crate::components::modal::{Modal, ModalLayer, ModalSize};
 use crate::server_fns::feedback::submit_feedback;
 
 /// Feedback type options shown to every caller of `FeedbackModal`.
@@ -391,6 +391,13 @@ pub fn FeedbackModal(
             on_close=handle_close
             title="Send Feedback"
             size=ModalSize::Md
+            // KYO-434: this modal must be able to open on top of another
+            // already-open Modal (e.g. the Add Datasource modal's "Request
+            // access" notice, which opens this via access_request_context).
+            // Base's z-[1000] falls through to DOM order against another
+            // Modal at the same layer — Elevated (z-[1050]) paints above it
+            // while staying below Tooltip's z-[1100].
+            layer=ModalLayer::Elevated
         >
             <Show
                 when=move || !success.get()
@@ -675,6 +682,46 @@ mod tests {
         assert_eq!(
             ui_values, shared_values,
             "kyomi-ui's feedback types and kyomi_types::FEEDBACK_TYPE_VALUES have drifted apart"
+        );
+    }
+
+    // ── KYO-434: modal-over-modal stacking ──────────────────────────────
+    //
+    // FeedbackModal is opened from inside the Add Datasource modal (via the
+    // BigQuery `kyomi_oauth` "Request access" notice) and previously
+    // rendered *behind* it — both modals used the same `z-[1000]` backdrop,
+    // so paint order fell through to DOM order. Whether the `<Modal>` call
+    // actually passes `layer=ModalLayer::Elevated` can't be observed without
+    // a running DOM/browser, so this asserts against the source text itself,
+    // following the precedent in `pages/settings/datasources.rs`'s test
+    // module.
+
+    /// Returns the source slice from the first occurrence of `start` up to
+    /// (but not including) the first occurrence of `end` that follows it.
+    /// Panics with a clear message if either marker is missing — a missing
+    /// marker means the code it was anchoring has been renamed or removed.
+    fn extract_between<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
+        let start_pos = src
+            .find(start)
+            .unwrap_or_else(|| panic!("marker not found in feedback_modal.rs: {start:?}"));
+        let end_pos = src[start_pos..]
+            .find(end)
+            .map(|i| start_pos + i)
+            .unwrap_or_else(|| {
+                panic!("end marker not found after {start:?} in feedback_modal.rs: {end:?}")
+            });
+        &src[start_pos..end_pos]
+    }
+
+    const SRC: &str = include_str!("feedback_modal.rs");
+
+    #[test]
+    fn feedback_modal_requests_the_elevated_stacking_layer() {
+        let opening_tag = extract_between(SRC, "<Modal\n", "\n        >");
+        assert!(
+            opening_tag.contains("layer=ModalLayer::Elevated"),
+            "FeedbackModal must opt into ModalLayer::Elevated so it can open \
+             on top of an already-open Modal (KYO-434) — got tag: {opening_tag:?}"
         );
     }
 }
