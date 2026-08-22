@@ -10809,4 +10809,325 @@ mod tests {
              bigquery_include_public is what keeps the default from drifting again: {snippet}"
         );
     }
+
+    // ── KYO-407: registry-driven create-mode Next-button route matrix ──
+    //
+    // The create wizard's footer gates "Next" on `connection_step_satisfied`
+    // (see `create_mode_can_next_bigquery_exception_requires_enterprise_oauth_mode`
+    // above), which requires `test_result.get().map(|r|
+    // r.success).unwrap_or(false)` for every (type, auth_mode) pair except
+    // the one documented BigQuery enterprise_oauth exception. But *how* a
+    // given pair ever produces that `test_result.success = true` — or
+    // legitimately bypasses the requirement — is wired independently, once
+    // per provider, by whoever implemented that provider. BigQuery was
+    // uncreatable in all three of its auth modes for months (KYO-404/405)
+    // because nothing enumerated the (type, mode) matrix and checked that
+    // every cell had a route; every *other* provider's route happened to
+    // work, so the test suite stayed green the whole time. A paying
+    // customer found the gap, not CI.
+    //
+    // This test derives its pair set from
+    // `kyomi_core::datasource_registry::all_metadata()` — the same registry
+    // BigQuery's own auth modes live in — rather than a list hand-typed into
+    // the test. That is the property that makes it load-bearing: a provider
+    // or auth mode added to the registry with no wired route fails this
+    // test immediately, instead of shipping silently the way BigQuery did.
+    //
+    // Each named `CreateNextRoute` below is backed by its own assertion
+    // against `SRC` (`assert_route_has_production_evidence`) — a route that
+    // is merely declared in `expected_route_for` but whose production
+    // evidence has been deleted or renamed fails just as loudly as an
+    // unmapped pair.
+
+    /// The independent paths within `DatasourceModal` by which a
+    /// `(datasource_type, auth_mode)` pair reaches (or legitimately
+    /// bypasses) `test_result.success` in create mode, unlocking the "Next"
+    /// button. See the module-level KYO-407 comment above for the failure
+    /// this enumeration exists to catch.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    enum CreateNextRoute {
+        /// The shared "Test & Discover" button rendered inside
+        /// `DatasourceModal`: visible for every type/mode except the ones
+        /// the other four routes below cover, and its `on:click` runs
+        /// `do_test_and_discover()`, whose `test_action` Effect writes
+        /// `test_result.success = true` on a successful probe.
+        GenericTestAndDiscover,
+        /// The modal-level OAuth listener's `GoogleSuccess |
+        /// BigqueryEnterpriseSuccess` arm writes `test_result` directly —
+        /// BigQuery kyomi_oauth has no Test & Discover step of its own; the
+        /// OAuth handshake itself is the verification (KYO-404).
+        OAuthArmWritesTestResult,
+        /// An OAuth success arm that calls `do_test_and_discover()` itself
+        /// once connected: `SnowflakeSuccess | DatabricksSuccess`, and the
+        /// Synapse `MicrosoftEnterpriseSuccess` arm. The generic button
+        /// (above) is hidden for these pairs until connected, but the arm
+        /// runs discovery the instant the connection succeeds, so the pair
+        /// still has a route.
+        OAuthArmRunsTestAndDiscover,
+        /// BigQuery `service_account`'s own "Validate & Discover Projects"
+        /// button, rendered inside `BigQueryAuthModeSection` and wired
+        /// through `on_validate` to the same `do_test_and_discover` every
+        /// other provider's generic button calls.
+        BigQueryServiceAccountValidateButton,
+        /// BigQuery `enterprise_oauth` in create mode cannot produce a
+        /// `test_result` at all pre-save (its connect endpoint needs a
+        /// `datasource_slug` that does not exist yet) — the documented
+        /// exception inside `connection_step_satisfied_from` (KYO-411 moved
+        /// it out of the `connection_step_satisfied` `Signal::derive`,
+        /// which now only delegates to it) bypasses the requirement for
+        /// exactly this one pair instead.
+        ConnectionStepSatisfiedException,
+    }
+
+    /// The answer key. Every `(type_id, mode_id)` pair the registry is
+    /// expected to expose today maps to exactly one `CreateNextRoute`
+    /// above; anything else returns `None`. Deliberately no wildcard arm —
+    /// see the module comment above for why a catch-all here would defeat
+    /// the entire point of this test: a genuinely new pair must fall
+    /// through to `None`, not silently inherit `GenericTestAndDiscover`.
+    fn expected_route_for(type_id: &str, mode_id: &str) -> Option<CreateNextRoute> {
+        use CreateNextRoute::*;
+        match (type_id, mode_id) {
+            ("bigquery", "kyomi_oauth") => Some(OAuthArmWritesTestResult),
+            ("bigquery", "enterprise_oauth") => Some(ConnectionStepSatisfiedException),
+            ("bigquery", "service_account") => Some(BigQueryServiceAccountValidateButton),
+            ("clickhouse", "password") => Some(GenericTestAndDiscover),
+            ("snowflake", "password") => Some(GenericTestAndDiscover),
+            ("snowflake", "oauth") => Some(OAuthArmRunsTestAndDiscover),
+            ("snowflake", "keypair") => Some(GenericTestAndDiscover),
+            ("databricks", "token") => Some(GenericTestAndDiscover),
+            ("databricks", "oauth") => Some(OAuthArmRunsTestAndDiscover),
+            ("redshift", "password") => Some(GenericTestAndDiscover),
+            ("postgres", "password") => Some(GenericTestAndDiscover),
+            ("mysql", "password") => Some(GenericTestAndDiscover),
+            ("sqlserver", "password") => Some(GenericTestAndDiscover),
+            ("synapse", "sql") => Some(GenericTestAndDiscover),
+            ("synapse", "service_principal") => Some(GenericTestAndDiscover),
+            ("synapse", "enterprise_oauth") => Some(OAuthArmRunsTestAndDiscover),
+            ("flaredb", "none") => Some(GenericTestAndDiscover),
+            _ => None,
+        }
+    }
+
+    /// Verifies the production-source evidence for one `CreateNextRoute`.
+    /// Called once per route that actually appears among the registry's
+    /// pairs, from `every_registry_auth_mode_pair_has_a_create_next_route`
+    /// below — this is the half of the test that catches a route whose
+    /// backing code has been deleted or renamed out from under a pair that
+    /// is still mapped to it.
+    fn assert_route_has_production_evidence(route: CreateNextRoute) {
+        match route {
+            CreateNextRoute::GenericTestAndDiscover => {
+                let block = extract_between(
+                    SRC,
+                    "// Test & Discover button — workspace-admin-only (KYO-184): it",
+                    "{move || if test_action.pending().get() { \"Discovering...\" } else { \"Test & Discover\" }}",
+                );
+                assert!(
+                    block.contains("t == \"bigquery\""),
+                    "the generic Test & Discover button must still exclude BigQuery — \
+                     BigQuery has no non-OAuth generic-button route"
+                );
+                assert!(
+                    block.contains(
+                        "t == \"snowflake\" && sf == \"oauth\" && !modal_oauth_connected.get()"
+                    ),
+                    "the generic button must still exclude Snowflake oauth mode while \
+                     unconnected — that pair's route is the OAuth success arm instead"
+                );
+                assert!(
+                    block.contains(
+                        "t == \"databricks\" && db == \"oauth\" && !modal_oauth_connected.get()"
+                    ),
+                    "the generic button must still exclude Databricks oauth mode while \
+                     unconnected — that pair's route is the OAuth success arm instead"
+                );
+                assert!(
+                    block.contains("t == \"synapse\"")
+                        && block.contains("syn == \"enterprise_oauth\"")
+                        && block.contains("!modal_oauth_connected.get()"),
+                    "the generic button must still exclude Synapse enterprise_oauth while \
+                     unconnected — that pair's route is the OAuth success arm instead"
+                );
+                assert!(
+                    block.contains("on:click=move |_| do_test_and_discover()"),
+                    "the generic button must still dispatch do_test_and_discover(), whose \
+                     test_action Effect is what ultimately writes test_result.success"
+                );
+            }
+            CreateNextRoute::OAuthArmWritesTestResult => {
+                let arm = extract_between(
+                    SRC,
+                    "OAuthMessage::GoogleSuccess { email }",
+                    "OAuthMessage::SnowflakeSuccess { email }",
+                );
+                assert!(
+                    arm.contains("set_test_result.try_set(Some(TestConnectionResult {"),
+                    "the GoogleSuccess | BigqueryEnterpriseSuccess arm must still write \
+                     test_result directly — BigQuery kyomi_oauth has no other route to \
+                     test_result.success (KYO-404)"
+                );
+                assert!(
+                    arm.contains("success: true,"),
+                    "the arm must write test_result with success: true on a successful \
+                     OAuth handshake"
+                );
+            }
+            CreateNextRoute::OAuthArmRunsTestAndDiscover => {
+                let sf_db_arm = extract_between(
+                    SRC,
+                    "OAuthMessage::SnowflakeSuccess { email }",
+                    "OAuthMessage::GoogleError { error } => {",
+                );
+                assert!(
+                    sf_db_arm.contains("do_test_and_discover();"),
+                    "the SnowflakeSuccess | DatabricksSuccess arm must still call \
+                     do_test_and_discover() on connect — that is the only route to \
+                     test_result.success for Snowflake/Databricks oauth mode"
+                );
+
+                let synapse_arm = extract_between(
+                    SRC,
+                    "OAuthMessage::MicrosoftEnterpriseSuccess { email } => {",
+                    "let cleanup_cell =",
+                );
+                assert!(
+                    synapse_arm.contains("do_test_and_discover();"),
+                    "the Synapse MicrosoftEnterpriseSuccess arm must still call \
+                     do_test_and_discover() on connect — that is the only route to \
+                     test_result.success for Synapse enterprise_oauth"
+                );
+            }
+            CreateNextRoute::BigQueryServiceAccountValidateButton => {
+                let button = extract_between(
+                    SRC,
+                    "<Show when=move || !service_account_email.get().is_empty()>",
+                    "\"Validate & Discover Projects\"",
+                );
+                assert!(
+                    button.contains("on:click=move |_| on_validate.run(())"),
+                    "the BigQuery service_account \"Validate & Discover Projects\" button \
+                     must still dispatch on_validate — its only route to test_result.success"
+                );
+                assert!(
+                    SRC.contains("on_validate: Callback<()>,"),
+                    "BigQueryAuthModeSection must still accept on_validate as a Callback prop"
+                );
+                assert!(
+                    SRC.contains("on_validate=on_bq_validate"),
+                    "the parent must still wire on_validate=on_bq_validate at the \
+                     BigQueryAuthModeSection call site"
+                );
+                let wiring = extract_between(
+                    SRC,
+                    "let on_bq_validate = Callback::new(move |()| {",
+                    "// ── OAuth disconnect actions",
+                );
+                assert!(
+                    wiring.contains("do_test_and_discover();"),
+                    "on_bq_validate must still call do_test_and_discover() — without this, \
+                     the button dispatches nothing and can never produce a test_result"
+                );
+            }
+            CreateNextRoute::ConnectionStepSatisfiedException => {
+                // KYO-411 (#370) moved this rule out of the
+                // `Signal::derive` closure — which is now only a
+                // delegation, `connection_step_satisfied_from(&ds_type.get(),
+                // ...)` — and into `connection_step_satisfied_from`'s own
+                // body. Retarget the evidence there rather than at the
+                // derive: the pure function is what actually encodes the
+                // rule and, being a plain function rather than a reactive
+                // closure, is far less likely to be reshuffled by an
+                // unrelated future refactor.
+                //
+                // Neither marker below is unique in this file, and no count
+                // is quoted here on purpose: `SRC` is `include_str!` of this
+                // very file, so any comment that spelled out a marker would
+                // change the number it was describing. What makes the
+                // extraction correct is not uniqueness but position —
+                // `extract_between` takes the *leftmost* match of each
+                // marker, and both functions are defined near the top of the
+                // file, ahead of `mod tests` and therefore ahead of every
+                // occurrence inside it.
+                let predicate = extract_between(
+                    SRC,
+                    "fn connection_step_satisfied_from(",
+                    "fn auth_mode_select_options(",
+                );
+                assert!(
+                    predicate.contains(
+                        "ds_type == \"bigquery\" && bq_auth_mode == \"enterprise_oauth\""
+                    ),
+                    "the pre-save exception must still require BOTH ds_type == \"bigquery\" \
+                     AND bq_auth_mode == \"enterprise_oauth\" — this is the ONLY pair with no \
+                     other route to satisfying create-mode Next"
+                );
+                assert!(
+                    predicate.contains("|| test_succeeded"),
+                    "the exception must still be OR'd onto the ordinary test_succeeded \
+                     requirement, not a replacement of it, for every other pair"
+                );
+            }
+        }
+    }
+
+    /// **The point of KYO-407.** Enumerates every `(type_id, mode_id)` pair
+    /// straight from `kyomi_core::datasource_registry::all_metadata()` — not
+    /// from a list hand-typed into this test — and confirms each one maps
+    /// to a `CreateNextRoute` whose production evidence still exists. A
+    /// provider or auth mode added to the registry with no wired path to
+    /// `test_result.success` (or the one documented bypass) fails here
+    /// immediately, instead of shipping silently the way BigQuery did for
+    /// months before a paying customer found it (KYO-404/405).
+    #[test]
+    fn every_registry_auth_mode_pair_has_a_create_next_route() {
+        let pairs: Vec<(String, String)> = kyomi_core::datasource_registry::all_metadata()
+            .into_iter()
+            .flat_map(|(type_id, meta)| {
+                meta.auth_modes
+                    .iter()
+                    .map(move |mode| (type_id.to_string(), mode.mode_id.clone()))
+            })
+            .collect();
+
+        // Guards against a vacuous pass: if all_metadata() ever returned
+        // empty (a broken registry build, a bad refactor of this test's own
+        // enumeration), the "no unmapped pairs" assertion below would hold
+        // trivially over an empty list and this test would report green
+        // while checking nothing at all.
+        assert!(
+            pairs.len() >= 17,
+            "sanity check: expected at least the 17 (type, mode) pairs known at the time \
+             this test was written, found {} — did all_metadata() change shape, or is the \
+             registry failing to enumerate?",
+            pairs.len()
+        );
+
+        let mut unmapped: Vec<String> = Vec::new();
+        let mut routes_used: std::collections::HashSet<CreateNextRoute> =
+            std::collections::HashSet::new();
+        for (type_id, mode_id) in &pairs {
+            match expected_route_for(type_id, mode_id) {
+                Some(route) => {
+                    routes_used.insert(route);
+                }
+                None => unmapped.push(format!("{type_id}/{mode_id}")),
+            }
+        }
+
+        assert!(
+            unmapped.is_empty(),
+            "the following (type_id, mode_id) pairs from \
+             kyomi_core::datasource_registry::all_metadata() have no route recorded in \
+             expected_route_for: {unmapped:?}. This means a provider or auth mode was added \
+             to the registry with no verified path to unlock the create-mode \"Next\" button \
+             — see the CreateNextRoute enum and the route list in KYO-407 for the shape a fix \
+             needs to take: either wire a new route and record it here, or confirm one of the \
+             existing five already covers it and add the match arm."
+        );
+
+        for route in routes_used {
+            assert_route_has_production_evidence(route);
+        }
+    }
 }
