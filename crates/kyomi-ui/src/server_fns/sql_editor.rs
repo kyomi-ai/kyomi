@@ -291,168 +291,235 @@ pub struct CatalogTreeResult {
 }
 
 // ---------------------------------------------------------------------------
-// get_catalog_tree — hierarchical catalog tree from cache
+// Catalog row projections (KYO-447)
+//
+// `datasource_table_cache.table_metadata` is a JSON blob averaging ~1.6 KB
+// and reaching ~45 KB per row — measured against production, a full fetch
+// of the BigQuery public-dataset sentinel (9,783 rows) is 16 MB, of which
+// `table_metadata` alone is 15 MB (94%). The tree only needs
+// `project_id`/`dataset_id`/`table_id` plus a table/view classification
+// for every row, and the full `columns` array only when the caller asked
+// for it (`include_columns`). Catalog search never shows columns, so it
+// never needs the blob either. These narrow row types let the SQL do the
+// projection instead of fetching every column and discarding most of it.
 // ---------------------------------------------------------------------------
 
-/// Fetch the catalog tree for a datasource.
-///
-/// Replicates the tree-building logic from `GET /{identifier}/catalog/tree`
-/// in the REST handler. Builds a hierarchical tree from the
-/// `datasource_table_cache` table: project > dataset/schema > table > column.
-#[server(prefix = "/leptos-api")]
-pub async fn get_catalog_tree(
-    datasource_slug: String,
-    include_columns: bool,
-) -> Result<CatalogTreeResult, ServerFnError> {
-    use std::collections::BTreeMap;
+/// Columns needed to classify a table/view node without the `columns`
+/// array — used for the catalog tree when `include_columns` is false, and
+/// always for catalog search (which never shows column children).
+#[cfg(feature = "ssr")]
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct CatalogTableSummaryRow {
+    project_id: String,
+    dataset_id: String,
+    table_id: String,
+    /// Extracted in SQL from `table_metadata->>'table_type'` — the full
+    /// blob is never selected.
+    table_type: Option<String>,
+}
 
-    let ac = AuthenticatedContext::extract().await?;
+/// Columns needed to build column children — used for the catalog tree
+/// when `include_columns` is true.
+#[cfg(feature = "ssr")]
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct CatalogTableWithColumnsRow {
+    project_id: String,
+    dataset_id: String,
+    table_id: String,
+    table_metadata: serde_json::Value,
+}
 
-    // Resolve datasource.
-    let datasource = kyomi_auth::datasource_service::resolve_datasource(
-        ac.db(),
-        &datasource_slug,
-        &ac.ws_id,
-        false,
-    )
-    .await
-    .into_sfn()?;
+/// A table normalized for catalog-tree building, regardless of whether it
+/// came from a summary row or a with-columns row.
+#[cfg(feature = "ssr")]
+struct TreeTable {
+    project_id: String,
+    dataset_id: String,
+    table_id: String,
+    table_type: Option<String>,
+    columns: Vec<CatalogNode>,
+}
 
-    // Fetch all non-archived cached tables for this datasource.
-    //
-    // Note: sample datasources used to live in a shared sentinel workspace
-    // (`SAMPLE_DATA_WORKSPACE_ID`), so this query had an `is_sample` branch
-    // that read from there. `onboarding::add_sample_datasource` switched to
-    // the generic per-workspace indexer but this read site was missed, so
-    // samples appeared empty in the UI. Query by `datasource_config_id`
-    // uniformly — works for every datasource type including samples.
-    let is_pg = ac.db().is_postgres();
-    let bf = kyomi_core::sql_compat::bool_false(is_pg);
-    let mut cached_tables: Vec<kyomi_core::models::table_cache::DatasourceTableCache> =
-        kyomi_core::db_fetch_all!(
-            ac.db(), kyomi_core::models::table_cache::DatasourceTableCache,
-            &format!(
-                "SELECT id, workspace_id, datasource_config_id, project_id, dataset_id, table_id, \
-                 table_metadata, column_descriptions, created_at, updated_at, \
-                 structure_refreshed_at, descriptions_refreshed_at, is_archived, last_verified \
-                 FROM datasource_table_cache \
-                 WHERE datasource_config_id = $1 AND is_archived = {bf}"
-            ),
-            &datasource.id
-        )
-        .into_sfn()?;
-
-    // BigQuery public datasets: include if enabled (absent key defaults to
-    // disabled — see kyomi_core::json_utils::bigquery_include_public).
-    if datasource.datasource_type == kyomi_core::DatasourceType::Bigquery {
-        let include_public = bigquery_include_public(&datasource.connection_config);
-
-        if include_public {
-            let public_tables: Vec<kyomi_core::models::table_cache::DatasourceTableCache> =
-                kyomi_core::db_fetch_all!(
-                    ac.db(), kyomi_core::models::table_cache::DatasourceTableCache,
-                    &format!(
-                        "SELECT id, workspace_id, datasource_config_id, project_id, dataset_id, table_id, \
-                         table_metadata, column_descriptions, created_at, updated_at, \
-                         structure_refreshed_at, descriptions_refreshed_at, is_archived, last_verified \
-                         FROM datasource_table_cache \
-                         WHERE workspace_id = $1 AND is_archived = {bf}"
-                    ),
-                    kyomi_auth::catalog::indexers::bigquery_public::PUBLIC_DATA_WORKSPACE_ID
-                )
-                .into_sfn()?;
-            cached_tables.extend(public_tables);
+#[cfg(feature = "ssr")]
+impl From<CatalogTableSummaryRow> for TreeTable {
+    fn from(row: CatalogTableSummaryRow) -> Self {
+        Self {
+            project_id: row.project_id,
+            dataset_id: row.dataset_id,
+            table_id: row.table_id,
+            table_type: row.table_type,
+            columns: Vec::new(),
         }
     }
+}
 
-    let table_count = cached_tables.len();
+#[cfg(feature = "ssr")]
+impl From<CatalogTableWithColumnsRow> for TreeTable {
+    fn from(row: CatalogTableWithColumnsRow) -> Self {
+        let table_type = row
+            .table_metadata
+            .get("table_type")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+
+        let columns = row
+            .table_metadata
+            .get("columns")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|col| {
+                        let col_name = col.get("name")?.as_str()?;
+                        let col_type = col
+                            .get("type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        let col_full = if row.project_id.is_empty() {
+                            format!("{}.{}.{}", row.dataset_id, row.table_id, col_name)
+                        } else {
+                            format!(
+                                "{}.{}.{}.{}",
+                                row.project_id, row.dataset_id, row.table_id, col_name
+                            )
+                        };
+                        Some(CatalogNode {
+                            name: col_name.to_string(),
+                            node_type: CatalogNodeType::Column(col_type),
+                            children: Vec::new(),
+                            full_name: Some(col_full),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Self {
+            project_id: row.project_id,
+            dataset_id: row.dataset_id,
+            table_id: row.table_id,
+            table_type,
+            columns,
+        }
+    }
+}
+
+/// Fetch `datasource_table_cache` rows for the catalog tree, projected to
+/// only the columns needed for the requested `include_columns` mode.
+/// `filter_column` is `"datasource_config_id"` for the caller's own
+/// datasource or `"workspace_id"` for the BigQuery public-dataset sentinel
+/// — both share the same shape, just a different scoping column.
+#[cfg(feature = "ssr")]
+async fn fetch_tree_tables(
+    db: &kyomi_core::DbPool,
+    is_pg: bool,
+    filter_column: &str,
+    filter_value: &str,
+    include_columns: bool,
+) -> Result<Vec<TreeTable>, sqlx::Error> {
+    let bf = kyomi_core::sql_compat::bool_false(is_pg);
+
+    if include_columns {
+        let sql = format!(
+            "SELECT project_id, dataset_id, table_id, table_metadata \
+             FROM datasource_table_cache \
+             WHERE {filter_column} = $1 AND is_archived = {bf}"
+        );
+        let rows: Vec<CatalogTableWithColumnsRow> =
+            kyomi_core::db_fetch_all!(db, CatalogTableWithColumnsRow, &sql, filter_value)?;
+        Ok(rows.into_iter().map(TreeTable::from).collect())
+    } else {
+        let table_type_expr =
+            kyomi_core::sql_compat::json_extract_text(is_pg, "table_metadata", "table_type");
+        let sql = format!(
+            "SELECT project_id, dataset_id, table_id, {table_type_expr} AS table_type \
+             FROM datasource_table_cache \
+             WHERE {filter_column} = $1 AND is_archived = {bf}"
+        );
+        let rows: Vec<CatalogTableSummaryRow> =
+            kyomi_core::db_fetch_all!(db, CatalogTableSummaryRow, &sql, filter_value)?;
+        Ok(rows.into_iter().map(TreeTable::from).collect())
+    }
+}
+
+/// Fetch `datasource_table_cache` rows matching a table-name substring
+/// search, projected the same way as `fetch_tree_tables`'s
+/// `include_columns = false` branch — search never shows column children,
+/// so it never needs the `table_metadata` blob.
+#[cfg(feature = "ssr")]
+async fn fetch_search_tables(
+    db: &kyomi_core::DbPool,
+    is_pg: bool,
+    filter_column: &str,
+    filter_value: &str,
+    search_pattern: &str,
+) -> Result<Vec<CatalogTableSummaryRow>, sqlx::Error> {
+    let bf = kyomi_core::sql_compat::bool_false(is_pg);
+    let ilike = kyomi_core::sql_compat::ilike(is_pg, "table_id", "$2");
+    let table_type_expr =
+        kyomi_core::sql_compat::json_extract_text(is_pg, "table_metadata", "table_type");
+
+    let sql = format!(
+        "SELECT project_id, dataset_id, table_id, {table_type_expr} AS table_type \
+         FROM datasource_table_cache \
+         WHERE {filter_column} = $1 AND is_archived = {bf} AND {ilike} \
+         ORDER BY table_id \
+         LIMIT 50"
+    );
+
+    kyomi_core::db_fetch_all!(db, CatalogTableSummaryRow, &sql, filter_value, search_pattern)
+}
+
+/// Build the hierarchical catalog tree from projected table rows.
+///
+/// Pure function (no I/O) — pulled out of `get_catalog_tree` so the
+/// tree-shape logic can be unit tested directly against hand-built rows,
+/// independent of the SQL projection that produced them.
+#[cfg(feature = "ssr")]
+fn build_catalog_tree(
+    cached_tables: Vec<TreeTable>,
+    meta: &kyomi_core::datasource_registry::DatasourceTypeMetadata,
+) -> Vec<CatalogNode> {
+    use std::collections::BTreeMap;
 
     // Build tree: {project_id: {dataset_id: [table_nodes]}}
     let mut tree_dict: BTreeMap<String, BTreeMap<String, Vec<CatalogNode>>> = BTreeMap::new();
 
-    for table in &cached_tables {
-        let project = &table.project_id;
-        let dataset = &table.dataset_id;
-        let table_name = &table.table_id;
-
-        let project_map = tree_dict.entry(project.clone()).or_default();
-        let table_list = project_map.entry(dataset.clone()).or_default();
+    for table in cached_tables {
+        let TreeTable {
+            project_id,
+            dataset_id,
+            table_id,
+            table_type,
+            columns,
+        } = table;
 
         // Build fully-qualified table name.
-        let full_name = if project.is_empty() {
-            format!("{dataset}.{table_name}")
+        let full_name = if project_id.is_empty() {
+            format!("{dataset_id}.{table_id}")
         } else {
-            format!("{project}.{dataset}.{table_name}")
+            format!("{project_id}.{dataset_id}.{table_id}")
         };
 
-        // Build column children if requested.
-        let children = if include_columns {
-            let columns = table
-                .table_metadata
-                .get("columns")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-
-            let col_nodes: Vec<CatalogNode> = columns
-                .iter()
-                .filter_map(|col| {
-                    let col_name = col.get("name")?.as_str()?;
-                    let col_type = col
-                        .get("type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown")
-                        .to_string();
-                    let col_full = if project.is_empty() {
-                        format!("{dataset}.{table_name}.{col_name}")
-                    } else {
-                        format!("{project}.{dataset}.{table_name}.{col_name}")
-                    };
-                    Some(CatalogNode {
-                        name: col_name.to_string(),
-                        node_type: CatalogNodeType::Column(col_type),
-                        children: Vec::new(),
-                        full_name: Some(col_full),
-                    })
-                })
-                .collect();
-
-            col_nodes
-        } else {
-            Vec::new()
-        };
-
-        // Determine table vs view from metadata.
-        let table_type_str = table
-            .table_metadata
-            .get("table_type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("TABLE");
+        // Determine table vs view from the extracted/embedded table_type.
+        let table_type_str = table_type.as_deref().unwrap_or("TABLE");
         let node_type = if table_type_str.to_uppercase().contains("VIEW") {
             CatalogNodeType::View
         } else {
             CatalogNodeType::Table
         };
 
+        let project_map = tree_dict.entry(project_id).or_default();
+        let table_list = project_map.entry(dataset_id).or_default();
         table_list.push(CatalogNode {
-            name: table_name.clone(),
+            name: table_id,
             node_type,
-            children,
+            children: columns,
             full_name: Some(full_name),
         });
     }
 
     // Convert tree_dict to CatalogNode structure using registry metadata.
-    let meta = kyomi_core::datasource_registry::get_metadata_by_str(
-        datasource.datasource_type.as_ref(),
-    )
-    .ok_or_else(|| {
-        ServerFnError::new(format!(
-            "Unknown datasource type: '{}'",
-            datasource.datasource_type.as_ref()
-        ))
-    })?;
-
     let level2_type = match meta.tree_level2_type {
         "dataset" => CatalogNodeType::Dataset,
         "schema" => CatalogNodeType::Schema,
@@ -507,6 +574,89 @@ pub async fn get_catalog_tree(
         }
     }
 
+    tree
+}
+
+// ---------------------------------------------------------------------------
+// get_catalog_tree — hierarchical catalog tree from cache
+// ---------------------------------------------------------------------------
+
+/// Fetch the catalog tree for a datasource.
+///
+/// Replicates the tree-building logic from `GET /{identifier}/catalog/tree`
+/// in the REST handler. Builds a hierarchical tree from the
+/// `datasource_table_cache` table: project > dataset/schema > table > column.
+#[server(prefix = "/leptos-api")]
+pub async fn get_catalog_tree(
+    datasource_slug: String,
+    include_columns: bool,
+) -> Result<CatalogTreeResult, ServerFnError> {
+    let ac = AuthenticatedContext::extract().await?;
+
+    // Resolve datasource.
+    let datasource = kyomi_auth::datasource_service::resolve_datasource(
+        ac.db(),
+        &datasource_slug,
+        &ac.ws_id,
+        false,
+    )
+    .await
+    .into_sfn()?;
+
+    // Fetch all non-archived cached tables for this datasource, projected
+    // to only what the tree needs for this `include_columns` mode (see
+    // "Catalog row projections (KYO-447)" above).
+    //
+    // Note: sample datasources used to live in a shared sentinel workspace
+    // (`SAMPLE_DATA_WORKSPACE_ID`), so this query had an `is_sample` branch
+    // that read from there. `onboarding::add_sample_datasource` switched to
+    // the generic per-workspace indexer but this read site was missed, so
+    // samples appeared empty in the UI. Query by `datasource_config_id`
+    // uniformly — works for every datasource type including samples.
+    let is_pg = ac.db().is_postgres();
+    let mut cached_tables = fetch_tree_tables(
+        ac.db(),
+        is_pg,
+        "datasource_config_id",
+        &datasource.id,
+        include_columns,
+    )
+    .await
+    .into_sfn()?;
+
+    // BigQuery public datasets: include if enabled (absent key defaults to
+    // disabled — see kyomi_core::json_utils::bigquery_include_public).
+    if datasource.datasource_type == kyomi_core::DatasourceType::Bigquery {
+        let include_public = bigquery_include_public(&datasource.connection_config);
+
+        if include_public {
+            let public_tables = fetch_tree_tables(
+                ac.db(),
+                is_pg,
+                "workspace_id",
+                kyomi_auth::catalog::indexers::bigquery_public::PUBLIC_DATA_WORKSPACE_ID,
+                include_columns,
+            )
+            .await
+            .into_sfn()?;
+            cached_tables.extend(public_tables);
+        }
+    }
+
+    let table_count = cached_tables.len();
+
+    let meta = kyomi_core::datasource_registry::get_metadata_by_str(
+        datasource.datasource_type.as_ref(),
+    )
+    .ok_or_else(|| {
+        ServerFnError::new(format!(
+            "Unknown datasource type: '{}'",
+            datasource.datasource_type.as_ref()
+        ))
+    })?;
+
+    let tree = build_catalog_tree(cached_tables, meta);
+
     Ok(CatalogTreeResult {
         tree,
         datasource_type: datasource.datasource_type.as_ref().to_string(),
@@ -542,37 +692,23 @@ pub async fn search_catalog(
     // Samples now index into the user's workspace via the generic indexer
     // (see `onboarding::add_sample_datasource`), so we query by
     // `datasource_config_id` uniformly.
+    //
+    // Search never shows column children, so the query is projected to
+    // avoid `table_metadata` entirely (see "Catalog row projections
+    // (KYO-447)" above) — `table_type` is extracted as a scalar just to
+    // classify table vs view.
     let is_pg = ac.db().is_postgres();
-    let bf = kyomi_core::sql_compat::bool_false(is_pg);
-    let ilike = kyomi_core::sql_compat::ilike(is_pg, "table_id", "$2");
-
     let search_pattern = format!("%{query}%");
 
-    let sql = format!(
-        "SELECT id, workspace_id, datasource_config_id, project_id, dataset_id, table_id, \
-         table_metadata, column_descriptions, created_at, updated_at, \
-         structure_refreshed_at, descriptions_refreshed_at, is_archived, last_verified \
-         FROM datasource_table_cache \
-         WHERE datasource_config_id = $1 AND is_archived = {bf} AND {ilike} \
-         ORDER BY table_id \
-         LIMIT 50"
-    );
-    let mut cached_tables: Vec<kyomi_core::models::table_cache::DatasourceTableCache> = match ac.db() {
-        kyomi_core::db::DbPool::Postgres(pg) =>
-            sqlx::query_as::<_, kyomi_core::models::table_cache::DatasourceTableCache>(&sql)
-                .bind(&datasource.id)
-                .bind(&search_pattern)
-                .fetch_all(pg)
-                .await
-                .into_sfn()?,
-        kyomi_core::db::DbPool::Sqlite(sq) =>
-            sqlx::query_as::<_, kyomi_core::models::table_cache::DatasourceTableCache>(&sql)
-                .bind(&datasource.id)
-                .bind(&search_pattern)
-                .fetch_all(sq)
-                .await
-                .into_sfn()?,
-    };
+    let mut cached_tables = fetch_search_tables(
+        ac.db(),
+        is_pg,
+        "datasource_config_id",
+        &datasource.id,
+        &search_pattern,
+    )
+    .await
+    .into_sfn()?;
 
     // BigQuery public datasets: include matching tables if enabled (absent
     // key defaults to disabled — see
@@ -581,31 +717,15 @@ pub async fn search_catalog(
         let include_public = bigquery_include_public(&datasource.connection_config);
 
         if include_public {
-            let public_sql = format!(
-                "SELECT id, workspace_id, datasource_config_id, project_id, dataset_id, table_id, \
-                 table_metadata, column_descriptions, created_at, updated_at, \
-                 structure_refreshed_at, descriptions_refreshed_at, is_archived, last_verified \
-                 FROM datasource_table_cache \
-                 WHERE workspace_id = $1 AND is_archived = {bf} AND {ilike} \
-                 ORDER BY table_id \
-                 LIMIT 50"
-            );
-            let public_tables: Vec<kyomi_core::models::table_cache::DatasourceTableCache> = match ac.db() {
-                kyomi_core::db::DbPool::Postgres(pg) =>
-                    sqlx::query_as::<_, kyomi_core::models::table_cache::DatasourceTableCache>(&public_sql)
-                        .bind(kyomi_auth::catalog::indexers::bigquery_public::PUBLIC_DATA_WORKSPACE_ID)
-                        .bind(&search_pattern)
-                        .fetch_all(pg)
-                        .await
-                        .into_sfn()?,
-                kyomi_core::db::DbPool::Sqlite(sq) =>
-                    sqlx::query_as::<_, kyomi_core::models::table_cache::DatasourceTableCache>(&public_sql)
-                        .bind(kyomi_auth::catalog::indexers::bigquery_public::PUBLIC_DATA_WORKSPACE_ID)
-                        .bind(&search_pattern)
-                        .fetch_all(sq)
-                        .await
-                        .into_sfn()?,
-            };
+            let public_tables = fetch_search_tables(
+                ac.db(),
+                is_pg,
+                "workspace_id",
+                kyomi_auth::catalog::indexers::bigquery_public::PUBLIC_DATA_WORKSPACE_ID,
+                &search_pattern,
+            )
+            .await
+            .into_sfn()?;
             cached_tables.extend(public_tables);
         }
     }
@@ -622,11 +742,7 @@ pub async fn search_catalog(
                 format!("{}.{}.{}", table.project_id, table.dataset_id, table.table_id)
             };
 
-            let table_type_str = table
-                .table_metadata
-                .get("table_type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("TABLE");
+            let table_type_str = table.table_type.as_deref().unwrap_or("TABLE");
             let node_type = if table_type_str.to_uppercase().contains("VIEW") {
                 CatalogNodeType::View
             } else {
@@ -1272,4 +1388,190 @@ fn generate_chartml_with_rules(
     spec.insert(yaml_str("visualize"), serde_yaml::Value::Mapping(vis));
 
     Ok(serde_yaml::to_string(&spec).unwrap_or_default())
+}
+
+// ---------------------------------------------------------------------------
+// Catalog row projection tests (KYO-447)
+//
+// `build_catalog_tree` is a pure function pulled out of `get_catalog_tree`
+// specifically so the tree-shape logic can be exercised here without a
+// database or a Leptos/Axum request context — see `overlay_credentials`
+// in `server_fns/datasources.rs` for the established precedent of testing
+// a server_fn's extracted helper directly via `use super::*`.
+//
+// These tests prove the KYO-447 projection change (fetching `table_type`
+// as a scalar instead of the full `table_metadata` blob when
+// `include_columns` is false) did not change the tree the user sees.
+// ---------------------------------------------------------------------------
+#[cfg(all(test, feature = "ssr"))]
+mod catalog_tree_projection_tests {
+    use super::{
+        build_catalog_tree, CatalogTableSummaryRow, CatalogTableWithColumnsRow, TreeTable,
+    };
+    use crate::pages::sql_editor::types::{CatalogNode, CatalogNodeType};
+    use serde_json::json;
+
+    /// The registry's BigQuery metadata: `project` > `dataset`, no wrapper
+    /// skipping — a plain two-level tree, exercised via the real registry
+    /// rather than a hand-built fixture.
+    fn bigquery_meta() -> &'static kyomi_core::datasource_registry::DatasourceTypeMetadata {
+        kyomi_core::datasource_registry::get_metadata_by_str("bigquery")
+            .expect("bigquery metadata must be registered")
+    }
+
+    fn find_project<'a>(tree: &'a [CatalogNode], name: &str) -> &'a CatalogNode {
+        tree.iter()
+            .find(|n| n.name == name)
+            .unwrap_or_else(|| panic!("project node '{name}' not found in tree: {tree:?}"))
+    }
+
+    fn find_child<'a>(node: &'a CatalogNode, name: &str) -> &'a CatalogNode {
+        node.children
+            .iter()
+            .find(|n| n.name == name)
+            .unwrap_or_else(|| panic!("child node '{name}' not found under '{}': {node:?}", node.name))
+    }
+
+    /// `include_columns = false` is modeled by rows fetched with
+    /// `CatalogTableSummaryRow` (no `table_metadata`, just an extracted
+    /// `table_type`). The tree must still classify a view as a view — the
+    /// projection must not silently fall back to "TABLE" for every row.
+    #[test]
+    fn summary_row_with_view_type_classifies_as_view_with_no_children() {
+        let rows = vec![TreeTable::from(CatalogTableSummaryRow {
+            project_id: "proj".to_string(),
+            dataset_id: "ds".to_string(),
+            table_id: "my_view".to_string(),
+            table_type: Some("VIEW".to_string()),
+        })];
+
+        let tree = build_catalog_tree(rows, bigquery_meta());
+
+        let project = find_project(&tree, "proj");
+        let dataset = find_child(project, "ds");
+        let table = find_child(dataset, "my_view");
+
+        assert_eq!(table.node_type, CatalogNodeType::View);
+        assert!(
+            table.children.is_empty(),
+            "include_columns = false must never populate column children, got {:?}",
+            table.children
+        );
+        assert_eq!(table.full_name, Some("proj.ds.my_view".to_string()));
+    }
+
+    /// `include_columns = false` for an ordinary table (no `table_type` in
+    /// the projected column, e.g. legacy rows) falls back to "TABLE" —
+    /// unchanged from the pre-projection default.
+    #[test]
+    fn summary_row_with_no_table_type_defaults_to_table() {
+        let rows = vec![TreeTable::from(CatalogTableSummaryRow {
+            project_id: "proj".to_string(),
+            dataset_id: "ds".to_string(),
+            table_id: "legacy_row".to_string(),
+            table_type: None,
+        })];
+
+        let tree = build_catalog_tree(rows, bigquery_meta());
+        let table = find_child(find_child(find_project(&tree, "proj"), "ds"), "legacy_row");
+
+        assert_eq!(table.node_type, CatalogNodeType::Table);
+        assert!(table.children.is_empty());
+    }
+
+    /// `include_columns = true` is modeled by `CatalogTableWithColumnsRow`
+    /// (full `table_metadata`). Column children must be built from the
+    /// `columns` array, with fully-qualified names, and the view
+    /// classification must still be read correctly out of the blob.
+    #[test]
+    fn with_columns_row_yields_column_children_and_view_classification() {
+        let rows = vec![TreeTable::from(CatalogTableWithColumnsRow {
+            project_id: "proj".to_string(),
+            dataset_id: "ds".to_string(),
+            table_id: "my_view".to_string(),
+            table_metadata: json!({
+                "table_type": "VIEW",
+                "columns": [
+                    { "name": "id", "type": "INT64" },
+                    { "name": "name", "type": "STRING" },
+                ],
+            }),
+        })];
+
+        let tree = build_catalog_tree(rows, bigquery_meta());
+        let table = find_child(find_child(find_project(&tree, "proj"), "ds"), "my_view");
+
+        assert_eq!(table.node_type, CatalogNodeType::View);
+        assert_eq!(table.children.len(), 2, "expected both columns as children");
+
+        let id_col = find_child(table, "id");
+        assert_eq!(id_col.node_type, CatalogNodeType::Column("INT64".to_string()));
+        assert_eq!(id_col.full_name, Some("proj.ds.my_view.id".to_string()));
+
+        let name_col = find_child(table, "name");
+        assert_eq!(
+            name_col.node_type,
+            CatalogNodeType::Column("STRING".to_string())
+        );
+    }
+
+    /// The core KYO-447 regression guard: for a row with no columns to
+    /// show, the tree built from the narrow `include_columns = false`
+    /// projection must be byte-for-byte identical to the tree built from
+    /// the full `include_columns = true` projection of the *same*
+    /// underlying row. This is what "projection, not a behavior change"
+    /// means — the two SQL shapes must be interchangeable whenever the
+    /// caller doesn't need column children.
+    #[test]
+    fn same_row_produces_identical_tree_from_either_projection() {
+        let via_summary = vec![TreeTable::from(CatalogTableSummaryRow {
+            project_id: "proj".to_string(),
+            dataset_id: "ds".to_string(),
+            table_id: "orders".to_string(),
+            table_type: Some("TABLE".to_string()),
+        })];
+        let via_full_metadata = vec![TreeTable::from(CatalogTableWithColumnsRow {
+            project_id: "proj".to_string(),
+            dataset_id: "ds".to_string(),
+            table_id: "orders".to_string(),
+            table_metadata: json!({ "table_type": "TABLE", "columns": [] }),
+        })];
+
+        let tree_from_summary = build_catalog_tree(via_summary, bigquery_meta());
+        let tree_from_full = build_catalog_tree(via_full_metadata, bigquery_meta());
+
+        assert_eq!(
+            tree_from_summary, tree_from_full,
+            "narrow (include_columns=false) and full (include_columns=true, no \
+             columns) projections of the same row must produce the same tree"
+        );
+    }
+
+    /// Two tables in the same dataset must stay ordered by name regardless
+    /// of fetch order, and projects/datasets are ordered lexically —
+    /// confirms the `BTreeMap`-keyed ordering in `build_catalog_tree`
+    /// survived the refactor.
+    #[test]
+    fn tables_within_a_dataset_are_sorted_by_name() {
+        let rows = vec![
+            TreeTable::from(CatalogTableSummaryRow {
+                project_id: "proj".to_string(),
+                dataset_id: "ds".to_string(),
+                table_id: "zzz_table".to_string(),
+                table_type: Some("TABLE".to_string()),
+            }),
+            TreeTable::from(CatalogTableSummaryRow {
+                project_id: "proj".to_string(),
+                dataset_id: "ds".to_string(),
+                table_id: "aaa_table".to_string(),
+                table_type: Some("TABLE".to_string()),
+            }),
+        ];
+
+        let tree = build_catalog_tree(rows, bigquery_meta());
+        let dataset = find_child(find_project(&tree, "proj"), "ds");
+        let names: Vec<&str> = dataset.children.iter().map(|n| n.name.as_str()).collect();
+
+        assert_eq!(names, vec!["aaa_table", "zzz_table"]);
+    }
 }
