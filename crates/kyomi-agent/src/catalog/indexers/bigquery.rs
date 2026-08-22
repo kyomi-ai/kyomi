@@ -4,9 +4,33 @@
 //!
 //! BigQuery catalog indexing uses the BigQuery REST API (datasets.list,
 //! tables.list, tables.get), NOT SQL queries. This indexer resolves
-//! credentials based on the configured `auth_mode`, then delegates to
+//! credentials based on the configured `auth_mode`, resolves which
+//! project(s) to index (see "Project Scope" below), then delegates to
 //! `UserDatasetIndexer::index_workspace_catalog()` for the actual REST
 //! API work.
+//!
+//! ## Project Scope (KYO-444)
+//!
+//! `connection_config["catalog_projects"]` has three possible states,
+//! mirroring the three states `get_catalog_containers`
+//! (`kyomi_agent::catalog::traits`) distinguishes for every SQL indexer:
+//!
+//! | State | Meaning |
+//! |---|---|
+//! | absent, or `null` | discover all projects accessible to the resolved access token |
+//! | `[]` | the user explicitly cleared the project list — index nothing |
+//! | `[...]` with entries | index exactly those projects |
+//!
+//! Before KYO-444 this indexer collapsed "absent" into the same "index
+//! nothing" outcome as `[]`, so a brand-new datasource (which never has the
+//! key at all — the create modal only writes it when the optional catalog
+//! picker is filled in) indexed nothing, forever, indistinguishable from a
+//! deliberate empty selection. See [`classify_configured_project_scope`].
+//!
+//! Every terminal path here — skip, failure, or a successful delegation to
+//! `UserDatasetIndexer` — writes a `catalog_refresh_status` the Catalog tab
+//! renders, so a run that gave up looks different from a run that never
+//! started.
 //!
 //! ## Auth Modes
 //!
@@ -25,17 +49,21 @@ use async_trait::async_trait;
 use kyomi_core::datasource_registry::DatasourceType;
 use kyomi_embed::EmbeddingService;
 use serde_json::Value;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::catalog::traits::CatalogIndexer;
-use kyomi_auth::catalog::helpers::IndexerContext;
+use kyomi_auth::catalog::helpers::{
+    update_datasource_last_refresh, update_datasource_status, IndexerContext,
+};
 use kyomi_auth::catalog::indexers::user_dataset::UserDatasetIndexer;
 use kyomi_auth::catalog::types::CatalogIndexResult;
+use kyomi_auth::google_oauth::list_active_google_projects;
 
 /// BigQuery catalog indexer.
 ///
-/// Resolves an access token based on `auth_mode`, extracts `catalog_projects`,
-/// and delegates to `UserDatasetIndexer::index_workspace_catalog()`.
+/// Resolves an access token based on `auth_mode`, resolves the project
+/// scope to index (see the module doc's "Project Scope" table), and
+/// delegates to `UserDatasetIndexer::index_workspace_catalog()`.
 pub struct BigQueryIndexer;
 
 #[async_trait]
@@ -106,25 +134,15 @@ impl CatalogIndexer for BigQueryIndexer {
             }
         };
 
-        // 2. Extract catalog_projects from connection_config
-        let catalog_projects: Vec<String> = ctx
-            .connection_config
-            .get("catalog_projects")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        if catalog_projects.is_empty() {
-            return CatalogIndexResult::skipped(
-                "No BigQuery projects configured for catalog indexing. \
-                 Add projects in datasource settings.",
-            )
-            .with_ids(&ctx.datasource_config_id, &ctx.workspace_id);
-        }
+        // 2. Resolve which project(s) to index (KYO-444 — see the module
+        // doc for the three-state table this mirrors). Extracted into
+        // `resolve_project_scope` so the decision — including the
+        // populated-but-filters-to-empty case — is directly unit-testable
+        // without needing a real access token.
+        let catalog_projects = match resolve_project_scope(db, ctx, &access_token).await {
+            Ok(projects) => projects,
+            Err(result) => return *result,
+        };
 
         info!(
             workspace_id = ctx.workspace_id,
@@ -145,6 +163,197 @@ impl CatalogIndexer for BigQueryIndexer {
         )
         .await
     }
+}
+
+// ─── Project scope resolution (KYO-444) ────────────────────────────────────────
+
+/// The three states BigQuery's `catalog_projects` scope key in
+/// `connection_config` can be in, mirroring the three states
+/// `get_catalog_containers` (`kyomi_agent::catalog::traits`) distinguishes
+/// for every SQL indexer. Before KYO-444, this indexer derived its decision
+/// from `catalog_projects.is_empty()` alone, which cannot tell "the key is
+/// absent" apart from "the key is `[]`" — both produced an empty `Vec` and
+/// both were treated as "index nothing". Representing `DiscoverAll` and
+/// `ExplicitlyEmpty` as distinct enum variants (rather than re-deriving the
+/// distinction from `is_empty()` at each call site) makes *that* collapse a
+/// type error, not just a code-review nit.
+///
+/// `Explicit`'s own empty case is a narrower guarantee: a populated key that
+/// filters down to zero valid project IDs (e.g. `[123, true, null]`) still
+/// produces `Explicit(vec![])`, indistinguishable at the type level from a
+/// real, non-empty `Explicit`. Only the runtime `is_empty()` guard in
+/// `resolve_project_scope` — not this enum — keeps that case from silently
+/// proceeding to index zero projects.
+#[derive(Debug, PartialEq, Eq)]
+enum ConfiguredProjectScope {
+    /// Key absent, or present as JSON `null` — discover all projects
+    /// accessible to the resolved access token.
+    DiscoverAll,
+    /// Key present as `[]` — the user explicitly cleared the project list.
+    /// Index nothing; this is a genuine skip, not a defect.
+    ExplicitlyEmpty,
+    /// Key present with one or more entries — index exactly those projects.
+    /// May still be `Explicit(vec![])` after filtering out non-string
+    /// entries; `resolve_project_scope` is what checks for that and skips
+    /// rather than proceeding to index zero projects.
+    Explicit(Vec<String>),
+}
+
+/// Classify `connection_config["catalog_projects"]` into the three states
+/// above. Pure and synchronous so it's directly unit-testable without a
+/// network call, following the shape of `bq_kyomi_oauth_access_gate_satisfied`
+/// / `connection_step_satisfied_from` (`kyomi-ui/src/pages/settings/datasources.rs`).
+fn classify_configured_project_scope(connection_config: &Value) -> ConfiguredProjectScope {
+    match connection_config.get("catalog_projects") {
+        None | Some(Value::Null) => ConfiguredProjectScope::DiscoverAll,
+        Some(Value::Array(arr)) if arr.is_empty() => ConfiguredProjectScope::ExplicitlyEmpty,
+        Some(Value::Array(arr)) => {
+            let projects: Vec<String> = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
+            ConfiguredProjectScope::Explicit(projects)
+        }
+        // Unexpected type (e.g. a stray string or number) — discover all as
+        // a fallback, mirroring `get_catalog_containers`'s treatment of the
+        // same case.
+        Some(_) => ConfiguredProjectScope::DiscoverAll,
+    }
+}
+
+/// Resolve which BigQuery project(s) `index_catalog` should index, or
+/// short-circuit with a terminal `CatalogIndexResult` (a recorded skip or
+/// failure) for the KYO-444 three-state handling.
+///
+/// Returns `Ok(projects)` — always non-empty — when indexing should
+/// proceed, or `Err(result)` for every early-return case, so the caller can
+/// simply propagate `result`. Splitting this out of `index_catalog` makes
+/// the decision testable on its own: in particular, `Explicit(_)` filtering
+/// down to zero valid project IDs never reaches `list_active_google_projects`
+/// at all, so this is directly exercisable with a throwaway `access_token`
+/// that would fail if the network call were ever made.
+async fn resolve_project_scope(
+    db: &kyomi_core::DbPool,
+    ctx: &IndexerContext,
+    access_token: &str,
+) -> Result<Vec<String>, Box<CatalogIndexResult>> {
+    match classify_configured_project_scope(&ctx.connection_config) {
+        ConfiguredProjectScope::Explicit(projects) if !projects.is_empty() => Ok(projects),
+        ConfiguredProjectScope::Explicit(_) => Err(Box::new(
+            record_skip(
+                db,
+                ctx,
+                "BigQuery catalog_projects contained no valid project IDs — nothing to index.",
+            )
+            .await,
+        )),
+        ConfiguredProjectScope::ExplicitlyEmpty => Err(Box::new(
+            record_skip(
+                db,
+                ctx,
+                "BigQuery catalog indexing configured with zero projects \
+                 (catalog_projects: []) — nothing to index.",
+            )
+            .await,
+        )),
+        ConfiguredProjectScope::DiscoverAll => {
+            info!(
+                workspace_id = ctx.workspace_id,
+                datasource_config_id = ctx.datasource_config_id,
+                "no BigQuery catalog_projects configured, discovering all accessible projects"
+            );
+
+            match list_active_google_projects(access_token).await {
+                Ok(projects) if projects.is_empty() => Err(Box::new(
+                    record_skip(
+                        db,
+                        ctx,
+                        "No BigQuery projects are accessible to this account.",
+                    )
+                    .await,
+                )),
+                Ok(projects) => Ok(projects.into_iter().map(|p| p.project_id).collect()),
+                Err(e) => {
+                    // Commonly `resourcemanager.projects.list` denied — e.g.
+                    // a service account scoped only to "BigQuery Job User".
+                    // Degrade to a recorded, visible failure rather than a
+                    // silent skip or a propagated error, mirroring
+                    // `discover_datasource_resources`'s treatment of the
+                    // same denial (server_fns/datasources.rs).
+                    warn!(
+                        workspace_id = ctx.workspace_id,
+                        datasource_config_id = ctx.datasource_config_id,
+                        error = %e,
+                        "BigQuery project discovery failed"
+                    );
+                    let msg = format!(
+                        "Failed to list accessible BigQuery projects: {e}. If this account's \
+                         IAM role lacks resourcemanager.projects.list (e.g. \"BigQuery Job \
+                         User\"), configure specific projects in datasource settings instead \
+                         of relying on discovery."
+                    );
+                    Err(Box::new(record_failure(db, ctx, &msg).await))
+                }
+            }
+        }
+    }
+}
+
+/// Record a "skip" outcome: `catalog_refresh_status = idle` with `reason`
+/// carried in the progress envelope's `warnings` array (so
+/// `get_catalog_stats`'s `extract_refresh_warnings` surfaces it in the
+/// Catalog tab — `refresh_failure_reason` only reads `"failed"` runs, so a
+/// reason for an `"idle"` run has to travel as a warning instead), then
+/// stamp `last_catalog_refresh`.
+///
+/// Stamping `last_catalog_refresh` here mirrors `index_catalog_sql`'s
+/// treatment of an explicitly-empty container scope: a deliberate,
+/// nothing-to-do run still counts as a completed refresh. Without this, the
+/// Catalog tab cannot distinguish "indexing ran and found nothing to do"
+/// from "indexing never ran" — the exact silence KYO-444 exists to fix.
+async fn record_skip(
+    db: &kyomi_core::DbPool,
+    ctx: &IndexerContext,
+    reason: &str,
+) -> CatalogIndexResult {
+    let _ = update_datasource_status(
+        db,
+        &ctx.workspace_id,
+        &ctx.datasource_config_id,
+        "idle",
+        None,
+        None,
+        &[reason.to_string()],
+    )
+    .await;
+    let _ = update_datasource_last_refresh(db, &ctx.datasource_config_id).await;
+
+    CatalogIndexResult::skipped(reason).with_ids(&ctx.datasource_config_id, &ctx.workspace_id)
+}
+
+/// Record a "failed" outcome: `catalog_refresh_status = failed` with
+/// `message` as the recorded error (read by `get_catalog_stats` as
+/// `refresh_failure_reason`). Does **not** stamp `last_catalog_refresh` —
+/// nothing was refreshed, mirroring `index_catalog_sql`'s treatment of a
+/// discovery failure (e.g. a schema-listing permission error), which also
+/// leaves the timestamp untouched.
+async fn record_failure(
+    db: &kyomi_core::DbPool,
+    ctx: &IndexerContext,
+    message: &str,
+) -> CatalogIndexResult {
+    let _ = update_datasource_status(
+        db,
+        &ctx.workspace_id,
+        &ctx.datasource_config_id,
+        "failed",
+        None,
+        Some(message),
+        &[],
+    )
+    .await;
+
+    CatalogIndexResult::error(message).with_ids(&ctx.datasource_config_id, &ctx.workspace_id)
 }
 
 // ─── Auth mode token resolvers ─────────────────────────────────────────────────
@@ -314,28 +523,325 @@ mod tests {
         let _indexer = BigQueryIndexer;
     }
 
+    // ── classify_configured_project_scope (KYO-444) ─────────────────────
+    //
+    // These call the real function the indexer uses, not a reimplementation
+    // — the pre-fix version of this test module asserted
+    // `catalog_projects_empty_when_missing` produced an *empty Vec*, which
+    // was itself an assertion of the bug: a missing key must never be
+    // treated the same as an explicitly emptied list.
+
     #[test]
-    fn catalog_projects_extraction() {
-        let config = serde_json::json!({
-            "catalog_projects": ["project-a", "project-b"]
-        });
-        let projects: Vec<String> = config
-            .get("catalog_projects")
-            .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-            .unwrap_or_default();
-        assert_eq!(projects, vec!["project-a", "project-b"]);
+    fn scope_absent_key_discovers_all() {
+        let config = serde_json::json!({});
+        assert_eq!(
+            classify_configured_project_scope(&config),
+            ConfiguredProjectScope::DiscoverAll,
+            "a brand-new datasource has no catalog_projects key at all (the create modal \
+             only writes it when the optional catalog picker is filled in) — it must \
+             discover all accessible projects, not be treated as \"index nothing\" (KYO-444)"
+        );
     }
 
     #[test]
-    fn catalog_projects_empty_when_missing() {
-        let config = serde_json::json!({});
-        let projects: Vec<String> = config
-            .get("catalog_projects")
-            .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-            .unwrap_or_default();
-        assert!(projects.is_empty());
+    fn scope_null_key_discovers_all() {
+        let config = serde_json::json!({"catalog_projects": null});
+        assert_eq!(
+            classify_configured_project_scope(&config),
+            ConfiguredProjectScope::DiscoverAll
+        );
+    }
+
+    #[test]
+    fn scope_explicit_empty_array_skips() {
+        let config = serde_json::json!({"catalog_projects": []});
+        assert_eq!(
+            classify_configured_project_scope(&config),
+            ConfiguredProjectScope::ExplicitlyEmpty,
+            "an explicitly cleared project list is a genuine skip and must stay \
+             distinguishable from an absent key (KYO-444)"
+        );
+    }
+
+    #[test]
+    fn scope_populated_array_indexes_those_projects() {
+        let config = serde_json::json!({"catalog_projects": ["project-a", "project-b"]});
+        assert_eq!(
+            classify_configured_project_scope(&config),
+            ConfiguredProjectScope::Explicit(vec![
+                "project-a".to_string(),
+                "project-b".to_string()
+            ])
+        );
+    }
+
+    /// KYO-444 review follow-up: a *populated* `catalog_projects` key that
+    /// filters down to zero valid string project IDs is the original bug
+    /// wearing a new hat — a non-empty key that ends up indexing nothing.
+    /// `classify_configured_project_scope` alone cannot fail this case (an
+    /// enum variant doesn't know it's "empty" the way `is_empty()` does) —
+    /// see `resolve_project_scope_skips_when_explicit_scope_filters_to_empty`
+    /// below for the routing that actually catches it.
+    #[test]
+    fn scope_populated_array_with_no_valid_strings_classifies_as_explicit_empty_vec() {
+        let config = serde_json::json!({"catalog_projects": [123, true, null]});
+        assert_eq!(
+            classify_configured_project_scope(&config),
+            ConfiguredProjectScope::Explicit(vec![]),
+            "a populated catalog_projects key with no valid string entries must still \
+             classify as Explicit(vec![]) — it's resolve_project_scope's job to catch \
+             that and skip rather than silently proceed to index zero projects"
+        );
+    }
+
+    /// The core KYO-444 assertion: absent and `[]` must not collapse into
+    /// the same outcome. This is the exact bug — both previously produced
+    /// an empty `Vec` via `.unwrap_or_default()` and were indistinguishable
+    /// by the time `is_empty()` ran.
+    #[test]
+    fn scope_absent_and_explicitly_empty_remain_distinguishable() {
+        let absent = classify_configured_project_scope(&serde_json::json!({}));
+        let explicit_empty =
+            classify_configured_project_scope(&serde_json::json!({"catalog_projects": []}));
+        assert_ne!(
+            absent, explicit_empty,
+            "absent catalog_projects and an explicit [] must resolve to different scopes"
+        );
+    }
+
+    // ── record_skip / record_failure write a visible status (KYO-444) ──
+    //
+    // Uses the same `DbPool::connect("sqlite::memory:")` + real migrations
+    // pattern as `catalog::traits`'s tests (see `resolve_indexing_credentials`
+    // tests in that module) so these exercise the real
+    // `update_datasource_status` / `update_datasource_last_refresh` SQL,
+    // not a mock.
+
+    /// Seeds the FK chain a `datasource_configs` row requires: a user, a
+    /// workspace they own, then the datasource config itself — same shape
+    /// as `catalog::traits::tests::seed_credential_resolution_rows`.
+    async fn seed_bq_datasource(sq: &sqlx::SqlitePool, id: &str, workspace_id: &str) {
+        let user_id = format!("user-{id}");
+        sqlx::query("INSERT INTO users (user_id, email) VALUES (?, ?)")
+            .bind(&user_id)
+            .bind(format!("{id}@test.local"))
+            .execute(sq)
+            .await
+            .expect("insert user");
+        sqlx::query("INSERT INTO workspaces (workspace_id, name, owner_user_id) VALUES (?, 'WS', ?)")
+            .bind(workspace_id)
+            .bind(&user_id)
+            .execute(sq)
+            .await
+            .expect("insert workspace");
+        sqlx::query(
+            "INSERT INTO datasource_configs (id, workspace_id, name, datasource_type, slug) \
+             VALUES (?, ?, 'BQ', 'bigquery', ?)",
+        )
+        .bind(id)
+        .bind(workspace_id)
+        .bind(id)
+        .execute(sq)
+        .await
+        .expect("insert bigquery datasource_config");
+    }
+
+    fn bq_ctx(workspace_id: &str, datasource_config_id: &str) -> IndexerContext {
+        IndexerContext {
+            workspace_id: workspace_id.to_string(),
+            datasource_config_id: datasource_config_id.to_string(),
+            connection_config: serde_json::json!({}),
+            encryption_key: std::sync::Arc::new([0u8; 32]),
+        }
+    }
+
+    /// The MAJOR from the KYO-444 review: a populated-but-filters-to-empty
+    /// `catalog_projects` must skip via `resolve_project_scope`, not
+    /// silently proceed to index zero projects. Proven by the reviewer to
+    /// be a live gap — replacing the `Explicit(_) if !projects.is_empty()`
+    /// guard with an unconditional `Explicit(projects) => projects` still
+    /// passed every other test in this module.
+    ///
+    /// Uses a garbage `access_token` deliberately: `Explicit(_)` must never
+    /// reach `list_active_google_projects` at all, so if this test ever
+    /// timed out or errored on a network call instead of returning `Err(..)`
+    /// immediately, that failure mode would itself indicate the guard was
+    /// removed.
+    #[tokio::test]
+    async fn resolve_project_scope_skips_when_explicit_scope_filters_to_empty() {
+        let db = kyomi_core::DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let kyomi_core::DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        seed_bq_datasource(sq, "ds-filtered", "ws-filtered").await;
+        let ctx = IndexerContext {
+            workspace_id: "ws-filtered".to_string(),
+            datasource_config_id: "ds-filtered".to_string(),
+            connection_config: serde_json::json!({"catalog_projects": [123, true, null]}),
+            encryption_key: std::sync::Arc::new([0u8; 32]),
+        };
+
+        let outcome = resolve_project_scope(&db, &ctx, "not-a-real-access-token").await;
+
+        let Err(result) = outcome else {
+            panic!(
+                "a catalog_projects key that filters to zero valid project IDs must skip, \
+                 not proceed to index zero projects — got Ok({outcome:?})"
+            );
+        };
+        assert_eq!(result.status, "skipped");
+
+        let status: String =
+            sqlx::query_scalar("SELECT catalog_refresh_status FROM datasource_configs WHERE id = ?")
+                .bind(&ctx.datasource_config_id)
+                .fetch_one(sq)
+                .await
+                .expect("read catalog_refresh_status");
+        assert_eq!(
+            status, "idle",
+            "a populated-but-invalid catalog_projects key must record a visible skip \
+             (KYO-444), not proceed silently"
+        );
+    }
+
+    /// The heart of the KYO-444 fix: a skip must not reach "no status write
+    /// at all" — the exact defect that made a run which deliberately gave
+    /// up indistinguishable from a run that never happened.
+    #[tokio::test]
+    async fn record_skip_writes_idle_status_with_reason_and_stamps_last_refresh() {
+        let db = kyomi_core::DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let kyomi_core::DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        seed_bq_datasource(sq, "ds-skip", "ws-skip").await;
+        let ctx = bq_ctx("ws-skip", "ds-skip");
+
+        // Sanity check on the seeded fixture: a fresh datasource starts
+        // with no refresh timestamp, matching the "Last indexed: never"
+        // production symptom — so the post-call assertion below actually
+        // proves something changed.
+        let before: Option<String> =
+            sqlx::query_scalar("SELECT last_catalog_refresh FROM datasource_configs WHERE id = ?")
+                .bind(&ctx.datasource_config_id)
+                .fetch_one(sq)
+                .await
+                .expect("read last_catalog_refresh before");
+        assert!(
+            before.is_none(),
+            "expected a freshly seeded datasource to start with no refresh timestamp"
+        );
+
+        let result = record_skip(&db, &ctx, "test skip reason").await;
+        assert_eq!(result.status, "skipped");
+
+        let status: String =
+            sqlx::query_scalar("SELECT catalog_refresh_status FROM datasource_configs WHERE id = ?")
+                .bind(&ctx.datasource_config_id)
+                .fetch_one(sq)
+                .await
+                .expect("read catalog_refresh_status");
+        assert_eq!(
+            status, "idle",
+            "a skip must write a status the Catalog tab renders, not leave the column \
+             at its default"
+        );
+
+        let progress_raw: String = sqlx::query_scalar(
+            "SELECT catalog_refresh_progress FROM datasource_configs WHERE id = ?",
+        )
+        .bind(&ctx.datasource_config_id)
+        .fetch_one(sq)
+        .await
+        .expect("read catalog_refresh_progress");
+        let progress: serde_json::Value =
+            serde_json::from_str(&progress_raw).expect("progress is JSON");
+        let warnings: Vec<&str> = progress["warnings"]
+            .as_array()
+            .expect("warnings array present")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(
+            warnings,
+            vec!["test skip reason"],
+            "the skip reason must be readable — get_catalog_stats reads \
+             catalog_refresh_progress.warnings for a non-\"failed\" status \
+             (refresh_failure_reason only reads .error on a \"failed\" run)"
+        );
+
+        let after: Option<String> =
+            sqlx::query_scalar("SELECT last_catalog_refresh FROM datasource_configs WHERE id = ?")
+                .bind(&ctx.datasource_config_id)
+                .fetch_one(sq)
+                .await
+                .expect("read last_catalog_refresh after");
+        assert!(
+            after.is_some(),
+            "a skip must stamp last_catalog_refresh so \"Last indexed\" no longer reads \
+             \"never\" for a run that deliberately gave up (KYO-444)"
+        );
+    }
+
+    /// A `resourcemanager.projects.list` denial must degrade to a recorded,
+    /// visible failure — not a silent skip, and not a run that claims to
+    /// have refreshed the catalog when nothing was discovered.
+    #[tokio::test]
+    async fn record_failure_writes_failed_status_and_does_not_stamp_last_refresh() {
+        let db = kyomi_core::DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let kyomi_core::DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        seed_bq_datasource(sq, "ds-fail", "ws-fail").await;
+        let ctx = bq_ctx("ws-fail", "ds-fail");
+
+        let result = record_failure(&db, &ctx, "resourcemanager.projects.list denied").await;
+        assert_eq!(result.status, "error");
+
+        let status: String =
+            sqlx::query_scalar("SELECT catalog_refresh_status FROM datasource_configs WHERE id = ?")
+                .bind(&ctx.datasource_config_id)
+                .fetch_one(sq)
+                .await
+                .expect("read catalog_refresh_status");
+        assert_eq!(
+            status, "failed",
+            "a resourcemanager.projects.list denial must degrade to a recorded, visible \
+             failure, not a silent skip"
+        );
+
+        let progress_raw: String = sqlx::query_scalar(
+            "SELECT catalog_refresh_progress FROM datasource_configs WHERE id = ?",
+        )
+        .bind(&ctx.datasource_config_id)
+        .fetch_one(sq)
+        .await
+        .expect("read catalog_refresh_progress");
+        let progress: serde_json::Value =
+            serde_json::from_str(&progress_raw).expect("progress is JSON");
+        assert_eq!(
+            progress["error"].as_str(),
+            Some("resourcemanager.projects.list denied"),
+            "get_catalog_stats reads catalog_refresh_progress.error as refresh_failure_reason \
+             for a \"failed\" run"
+        );
+
+        let after: Option<String> =
+            sqlx::query_scalar("SELECT last_catalog_refresh FROM datasource_configs WHERE id = ?")
+                .bind(&ctx.datasource_config_id)
+                .fetch_one(sq)
+                .await
+                .expect("read last_catalog_refresh after");
+        assert!(
+            after.is_none(),
+            "nothing was refreshed on a discovery failure — last_catalog_refresh must stay \
+             untouched, mirroring index_catalog_sql's treatment of a discover-containers failure"
+        );
     }
 
     #[test]
