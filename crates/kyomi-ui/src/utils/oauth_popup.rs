@@ -32,6 +32,93 @@ pub enum OAuthMessage {
     BigqueryEnterpriseError { error: String },
 }
 
+/// Why a popup-monitor "recover" callback fired (KYO-437).
+///
+/// [`monitor_oauth_popup`] reports exactly one of these when a connect
+/// attempt resolves *without* an OAuth `postMessage` ever arriving — the two
+/// ways that can happen. Kept separate (rather than a single "recovery
+/// needed" signal) so the caller's UI copy can honestly distinguish "you
+/// closed the popup" from "this timed out", per the ticket's requirement
+/// that the two not be conflated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PopupMonitorOutcome {
+    /// The popup closed before any recognized OAuth message arrived — most
+    /// likely the user closed it themselves (cancelled), but could also be
+    /// the provider's callback page closing itself after a failure it
+    /// couldn't or didn't report via `postMessage`.
+    ClosedWithoutMessage,
+    /// [`POPUP_CONNECT_TIMEOUT_MS`] elapsed with no message and (as far as
+    /// this window can tell) the popup still open.
+    TimedOut,
+}
+
+/// Human-readable message for a [`PopupMonitorOutcome`], shared across every
+/// provider so the "cancelled" vs. "timed out" wording (and any future copy
+/// change) lives in one place rather than being re-derived per call site —
+/// the same reasoning that motivated extracting `use_oauth_status_refetch`
+/// after its Effect body was copy-pasted three times (KYO-13 / KYO-17 /
+/// KYO-197, see `docs/CODING_STANDARDS.md`).
+///
+/// Callers still own *whether* to show this — e.g. after re-checking status
+/// and finding the connection actually succeeded (KYO-436), nothing here
+/// should be shown at all.
+pub fn popup_monitor_outcome_message(provider_name: &str, outcome: PopupMonitorOutcome) -> String {
+    match outcome {
+        PopupMonitorOutcome::ClosedWithoutMessage => {
+            format!("{provider_name} connection cancelled.")
+        }
+        PopupMonitorOutcome::TimedOut => {
+            format!("{provider_name} connection timed out. Please try again.")
+        }
+    }
+}
+
+/// How often [`monitor_oauth_popup`] polls `popup.closed()` while a connect
+/// attempt is in flight.
+pub const POPUP_POLL_INTERVAL_MS: u32 = 500;
+
+/// Upper bound on how long a connect attempt may stay "connecting" before
+/// [`monitor_oauth_popup`] forces recovery, even if the popup never closes
+/// and never posts a message (KYO-437). The ticket suggests 2-3 minutes;
+/// this is the midpoint.
+pub const POPUP_CONNECT_TIMEOUT_MS: u32 = 150_000; // 2.5 minutes
+
+// Compile-time guard, not a runtime `#[test]`: both bounds are on a `const`,
+// so clippy's `assertions_on_constants` correctly points out that a runtime
+// assertion here can only ever pass or fail at compile time anyway — this
+// makes that explicit instead of fighting the lint.
+const _: () = assert!(
+    POPUP_CONNECT_TIMEOUT_MS >= 120_000 && POPUP_CONNECT_TIMEOUT_MS <= 180_000,
+    "KYO-437 requires POPUP_CONNECT_TIMEOUT_MS to stay within the ticket's 2-3 minute range"
+);
+
+/// Pure decision logic for the popup-closed poll tick, extracted out of
+/// [`monitor_oauth_popup`]'s `Interval` callback so it's directly
+/// unit-testable without a browser (KYO-437 — the rest of the monitor is
+/// browser-timing behavior that in-process tests can't reach).
+///
+/// `still_connecting` is `false` when an OAuth `postMessage` already
+/// resolved this attempt (success or error) since the monitor was armed —
+/// in that case the poll must stand down silently rather than report a
+/// stale close, even though the popup did in fact close (most OAuth
+/// callback pages close themselves right after posting).
+///
+/// Only [`monitor_oauth_popup`] (`wasm32`-only) and this module's own tests
+/// call this — cfg-gated the same way rather than left unconditional, so a
+/// non-wasm, non-test build doesn't carry a helper with no caller.
+#[cfg(any(target_arch = "wasm32", test))]
+fn popup_poll_should_report_closed(still_connecting: bool, popup_closed: bool) -> bool {
+    still_connecting && popup_closed
+}
+
+/// Pure decision logic for the connect-timeout firing, extracted out of
+/// [`monitor_oauth_popup`]'s `Timeout` callback for the same reason as
+/// [`popup_poll_should_report_closed`] above.
+#[cfg(any(target_arch = "wasm32", test))]
+fn popup_timeout_should_report(still_connecting: bool) -> bool {
+    still_connecting
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // WASM-only functions
 // ─────────────────────────────────────────────────────────────────────────────
@@ -88,6 +175,109 @@ pub fn open_oauth_popup(url: &str, provider_name: &str) -> Option<web_sys::Windo
     }
 
     Some(popup)
+}
+
+/// Watch an OAuth popup for closure and enforce a connect timeout (KYO-437).
+///
+/// Call this immediately after `open_oauth_popup` returns `Some`. It polls
+/// `popup.closed()` every [`POPUP_POLL_INTERVAL_MS`] and separately arms a
+/// [`POPUP_CONNECT_TIMEOUT_MS`] timeout. `still_connecting` is consulted
+/// before either fires `on_outcome` — pass a closure that reads the same
+/// "connecting" signal the caller set to `true` when it opened the popup
+/// (via `try_get_untracked()`, since this runs in a deferred timer
+/// callback — see `docs/CODING_STANDARDS.md`'s disposal-safety rule). This
+/// is what makes cancellation-on-success automatic: the instant an OAuth
+/// `postMessage` handler flips that signal back to `false`, the very next
+/// tick (or the timeout, whichever comes first) sees `still_connecting() ==
+/// false`, stops both timers, and reports nothing — no separate "cancel on
+/// success" wiring is needed at the call site. `on_outcome` therefore fires
+/// **at most once**, and never after the connect attempt already resolved
+/// another way.
+///
+/// Returns a `FnOnce()` cleanup. Callers should invoke it when the owning
+/// component unmounts mid-connect, to stop the timers immediately rather
+/// than waiting for the next poll tick or the timeout — mirrors the
+/// retention/cleanup discipline of [`install_oauth_listener`]. Calling it
+/// after `on_outcome` has already fired (or not calling it at all, if the
+/// component simply never unmounts before the attempt resolves) is safe —
+/// both timers are already stopped by that point.
+#[cfg(target_arch = "wasm32")]
+pub fn monitor_oauth_popup(
+    popup: web_sys::Window,
+    still_connecting: impl Fn() -> bool + 'static,
+    on_outcome: impl Fn(PopupMonitorOutcome) + 'static,
+) -> impl FnOnce() {
+    use gloo_timers::callback::{Interval, Timeout};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let still_connecting = Rc::new(still_connecting);
+    let on_outcome = Rc::new(on_outcome);
+
+    let interval_slot: Rc<RefCell<Option<Interval>>> = Rc::new(RefCell::new(None));
+    let timeout_slot: Rc<RefCell<Option<Timeout>>> = Rc::new(RefCell::new(None));
+
+    let interval_slot_poll = interval_slot.clone();
+    let timeout_slot_poll = timeout_slot.clone();
+    let still_connecting_poll = still_connecting.clone();
+    let on_outcome_poll = on_outcome.clone();
+    let interval = Interval::new(POPUP_POLL_INTERVAL_MS, move || {
+        let connecting = still_connecting_poll();
+        let popup_closed = popup.closed().unwrap_or(true);
+        if !popup_poll_should_report_closed(connecting, popup_closed) {
+            // Either the popup is still open, or the attempt already
+            // resolved another way — but if it resolved, stop polling.
+            if !connecting {
+                // `timeout_slot_poll` must be taken *before* the self-drop
+                // below: `interval_slot_poll` owns the `Interval` whose
+                // `Closure` *is* this very closure's boxed environment.
+                // Dropping it frees that box, so any field captured by
+                // this closure (including `timeout_slot_poll`) becomes a
+                // dangling read the instant it happens — the self-drop
+                // must be the last thing that touches a captured field.
+                timeout_slot_poll.borrow_mut().take();
+                interval_slot_poll.borrow_mut().take();
+            }
+            return;
+        }
+        // Clone the callback into a stack local *before* the self-drop
+        // below. `on_outcome_poll` is a field of this closure's own boxed
+        // environment, which the self-drop frees; `report` lives on the
+        // call stack (a separate allocation an `Rc` clone doesn't touch)
+        // and stays valid after that box is gone.
+        let report = on_outcome_poll.clone();
+        // Stop both timers before notifying, so `on_outcome` fires exactly
+        // once. Same ordering constraint as the branch above.
+        timeout_slot_poll.borrow_mut().take();
+        interval_slot_poll.borrow_mut().take(); // self-drop — must stay last
+        report(PopupMonitorOutcome::ClosedWithoutMessage);
+    });
+    *interval_slot.borrow_mut() = Some(interval);
+
+    let interval_slot_timeout = interval_slot.clone();
+    let timeout_slot_timeout = timeout_slot.clone();
+    let timeout = Timeout::new(POPUP_CONNECT_TIMEOUT_MS, move || {
+        let connecting = still_connecting();
+        let should_report = popup_timeout_should_report(connecting);
+        // Clone the callback into a stack local *before* the self-drop
+        // below, same reasoning as the interval closure above:
+        // `timeout_slot_timeout` owns the `Timeout` whose `Closure` is this
+        // very closure's boxed environment, so `on_outcome` (a captured
+        // field) must not be read after that drop — `report` (a stack
+        // local) survives it.
+        let report = on_outcome.clone();
+        interval_slot_timeout.borrow_mut().take();
+        timeout_slot_timeout.borrow_mut().take(); // self-drop — must stay last
+        if should_report {
+            report(PopupMonitorOutcome::TimedOut);
+        }
+    });
+    *timeout_slot.borrow_mut() = Some(timeout);
+
+    move || {
+        interval_slot.borrow_mut().take();
+        timeout_slot.borrow_mut().take();
+    }
 }
 
 /// Parse a `message` event into an [`OAuthMessage`] if it matches a known
@@ -317,6 +507,8 @@ mod tests {
     //! shared helper. See `scripts/e2e-regression/oauth-opener-realm.cjs` for
     //! the matching real-browser assertion.
 
+    use super::*;
+
     const GOOGLE_LINK_CALLBACK: &str = include_str!("../pages/auth/google_link_callback.rs");
     const DATASOURCE_OAUTH_CALLBACK: &str =
         include_str!("../pages/auth/datasource_oauth_callback.rs");
@@ -374,5 +566,63 @@ mod tests {
             "opener_window must reject null/undefined before unchecked_into — otherwise a \
              non-popup document resolves to a Some(..) that throws on use (KYO-436)."
         );
+    }
+
+    // `monitor_oauth_popup` itself is browser-timing behavior (`Interval`,
+    // `Timeout`, `popup.closed()`) that an in-process test can't reach —
+    // per the KYO-437 ticket, its decision logic is pulled out into pure
+    // functions here instead, so the *behavior* (not the JS plumbing) is
+    // directly covered. These run on the host target; nothing here needs
+    // `wasm32` or the `ssr` feature.
+
+    #[test]
+    fn popup_poll_reports_closed_only_while_still_connecting() {
+        assert!(
+            popup_poll_should_report_closed(true, true),
+            "popup closed, no message yet arrived — this is the real cancel/failure case"
+        );
+        assert!(
+            !popup_poll_should_report_closed(false, true),
+            "a postMessage already resolved this attempt before the popup closed — \
+             the poll must not report a stale close on top of it"
+        );
+        assert!(
+            !popup_poll_should_report_closed(true, false),
+            "popup is still open — nothing to report yet"
+        );
+        assert!(!popup_poll_should_report_closed(false, false));
+    }
+
+    #[test]
+    fn popup_timeout_reports_only_while_still_connecting() {
+        assert!(
+            popup_timeout_should_report(true),
+            "still connecting when the timeout fires — this is the real timeout case"
+        );
+        assert!(
+            !popup_timeout_should_report(false),
+            "a postMessage already resolved this attempt before the timeout fired"
+        );
+    }
+
+    #[test]
+    fn recovery_message_distinguishes_cancelled_from_timed_out() {
+        let cancelled =
+            popup_monitor_outcome_message("Snowflake", PopupMonitorOutcome::ClosedWithoutMessage);
+        let timed_out = popup_monitor_outcome_message("Snowflake", PopupMonitorOutcome::TimedOut);
+
+        assert_ne!(
+            cancelled, timed_out,
+            "the two outcomes must not be conflated into the same message"
+        );
+        assert!(
+            cancelled.to_lowercase().contains("cancel"),
+            "ClosedWithoutMessage should read as a cancel, not a generic failure: {cancelled:?}"
+        );
+        assert!(
+            timed_out.to_lowercase().contains("timed out") || timed_out.to_lowercase().contains("timeout"),
+            "TimedOut should say so explicitly: {timed_out:?}"
+        );
+        assert!(cancelled.contains("Snowflake") && timed_out.contains("Snowflake"));
     }
 }
