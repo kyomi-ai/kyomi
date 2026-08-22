@@ -1,10 +1,34 @@
 # =============================================================================
 # Kyomi — Desktop Build
 # =============================================================================
-# Builds Tauri desktop installers for all platforms.
-# Manually dispatched (workflow_dispatch) — not triggered by version tags.
+# Builds Tauri desktop installers for linux, macos and windows.
+#
+# STATUS: active. The desktop app still ships; installers are built on demand
+# when a desktop release is cut, not on every version tag.
+#
+# TRIGGER: workflow_dispatch only, and that is deliberate — not an oversight
+# and not a stale comment. `82c00a03` ("chore: disable desktop builds on tag
+# push (manual dispatch only) (#31)", 2026-05-08) removed the tag trigger the
+# day after the matrix went green. Re-adding it would reverse a recorded
+# decision; do not "fix" this without asking (KYO-320).
 #
 # Artifacts are attached to the same GitHub Release created by release.yml.
+# The upload step is guarded by `if: github.ref_type == 'tag'`, so dispatching
+# this workflow on a branch builds and verifies but publishes nothing — that is
+# the cheap way to check the matrix still compiles.
+#
+# WINDOWS LEG: green, and expected to stay that way. A reading of the run
+# history is misleading here, so it is recorded once: the last 8 runs before
+# 2026-05-08 show windows at 1 success / 7 failures, which looks like a
+# chronically broken leg. It is not. Those seven failures are the consecutive
+# debugging commits that fixed it, one per attempt, ending at `da764cb5`
+# ("fix: disable sccache on Windows desktop build (linker exit code 2)
+# (#30)"). Run 25530975421 was green on all three legs.
+#
+# Re-verified 2026-08-10 on `72343862` via run 31437801869: linux, macos and
+# windows all green, three months and a large amount of workspace churn after
+# that fix. If you are here because the 1-in-8 statistic looked alarming, it
+# was measuring a debugging session (KYO-320).
 # =============================================================================
 
 name: Desktop
