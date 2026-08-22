@@ -115,6 +115,18 @@ pub fn GoogleLinkCallbackPage() -> impl IntoView {
     let navigate = use_navigate();
     let (status, set_status) = signal(LinkStatus::Processing);
     let (message, set_message) = signal(String::from("Linking Google Account"));
+    // Set when `window.close()` was refused by the browser and the popup is
+    // still sitting open after the postMessage to the opener already went
+    // out. Deliberately a separate signal rather than a `LinkStatus` variant:
+    // it doesn't replace the real success/error outcome, it just tells the
+    // user this leftover window is safe to close by hand (KYO-436).
+    let (popup_close_blocked, set_popup_close_blocked) = signal(false);
+    // The setter is only invoked from the wasm32-only popup-close path below;
+    // consume it here so host-target (SSR) builds don't warn it's unused.
+    // `WriteSignal` is `Copy`, so this doesn't affect the later move into
+    // `spawn_local`.
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = set_popup_close_blocked;
 
     // Help text appears after 10s if the redirect hasn't fired. The timer
     // and signal only exist on the wasm target — on SSR there's nothing to
@@ -162,14 +174,14 @@ pub fn GoogleLinkCallbackPage() -> impl IntoView {
         // Otherwise fall through to the normal redirect behavior.
         #[cfg(target_arch = "wasm32")]
         {
-            use crate::utils::oauth_popup::{send_oauth_error_to_opener, send_oauth_success_to_opener};
+            use crate::utils::oauth_popup::{
+                opener_window, send_oauth_error_to_opener, send_oauth_success_to_opener,
+            };
 
-            let opener = web_sys::window()
-                .and_then(|w| w.opener().ok())
-                .and_then(|o| {
-                    use wasm_bindgen::JsCast;
-                    o.dyn_into::<web_sys::Window>().ok()
-                });
+            // KYO-436: must not be an `instanceof` test — `window.opener` is a
+            // cross-realm `WindowProxy` and `dyn_into` always fails on it. See
+            // `opener_window`'s doc comment.
+            let opener = opener_window();
 
             if let Some(opener_win) = opener {
                 if outcome.status == LinkStatus::Success {
@@ -186,9 +198,19 @@ pub fn GoogleLinkCallbackPage() -> impl IntoView {
                     );
                 }
 
-                // Close the popup — parent window handles the next step
+                // Close the popup — parent window handles the next step. The
+                // browser can refuse `close()` (most commonly because the
+                // popup navigated cross-origin through the provider and back,
+                // which some browsers treat as disqualifying it from
+                // script-close). Verify it actually closed and, if not, tell
+                // the user rather than leaving them on a page that looks
+                // stuck (KYO-436).
                 if let Some(w) = web_sys::window() {
                     w.close().ok();
+                    gloo_timers::future::TimeoutFuture::new(300).await;
+                    if !w.closed().unwrap_or(true) {
+                        set_popup_close_blocked.try_set(true);
+                    }
                 }
                 return;
             }
@@ -213,15 +235,32 @@ pub fn GoogleLinkCallbackPage() -> impl IntoView {
     });
 
     // ── Reactive title & subtitle ────────────────────────────────────────
+    //
+    // The popup's postMessage already reached the opener and the opener has
+    // already acted on the real success/error outcome — but that outcome is
+    // still the truth for *this* window too, so the title and the base
+    // subtitle stay exactly status-driven. `popup_close_blocked` never
+    // overrides them: it only appends an instruction ("you can close this
+    // window") when `window.close()` was refused, because the fallback must
+    // never assert an outcome — restating success on an error path (or vice
+    // versa) would be a false statement shown exactly where honesty matters
+    // most.
     let title = Signal::derive(move || match status.get() {
         LinkStatus::Processing => "Linking Google Account".to_string(),
         LinkStatus::Success => "Google Account Linked".to_string(),
         LinkStatus::Error => "Link Failed".to_string(),
     });
-    let subtitle = Signal::derive(move || match status.get() {
-        LinkStatus::Processing => "Completing your Google account link...".to_string(),
-        LinkStatus::Success => message.get(),
-        LinkStatus::Error => message.get(),
+    let subtitle = Signal::derive(move || {
+        let base = match status.get() {
+            LinkStatus::Processing => "Completing your Google account link...".to_string(),
+            LinkStatus::Success => message.get(),
+            LinkStatus::Error => message.get(),
+        };
+        if popup_close_blocked.get() {
+            format!("{base} You can close this window.")
+        } else {
+            base
+        }
     });
 
     view! {
@@ -230,6 +269,10 @@ pub fn GoogleLinkCallbackPage() -> impl IntoView {
                 // Status icon
                 <div class="flex justify-center">
                     {move || {
+                        // Icon stays status-driven — `popup_close_blocked`
+                        // affects only the appended subtitle sentence, never
+                        // the icon or title (see the title/subtitle comment
+                        // above).
                         if status.get() == LinkStatus::Error {
                             view! {
                                 <Icon
@@ -253,9 +296,14 @@ pub fn GoogleLinkCallbackPage() -> impl IntoView {
                     }}
                 </div>
 
-                // Error state content
+                // Error state content — suppressed once popup_close_blocked
+                // is set. This is a leftover popup at that point (KYO-436);
+                // sending the user to Settings from inside a stray popup is
+                // the very confusion this fix exists to remove. Closing the
+                // window is the correct action, and the appended subtitle
+                // sentence above already tells them that.
                 {move || {
-                    if status.get() == LinkStatus::Error {
+                    if !popup_close_blocked.get() && status.get() == LinkStatus::Error {
                         Some(
                             view! {
                                 <div class="space-y-3">
