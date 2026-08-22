@@ -29,6 +29,48 @@ struct TableFullNameRow {
     full_name: Option<String>,
 }
 
+/// Whether any active BigQuery datasource in `workspace_id` has "Include
+/// public datasets" enabled — gates the second, public-workspace knowledge
+/// search below.
+///
+/// Extracted out of [`SearchKnowledgeTool::execute`] so this predicate can be
+/// exercised directly against a real (in-memory) database, without also
+/// fixturing the embedding pipeline the rest of that method depends on.
+///
+/// The `COALESCE(..., 'false')` here must stay in step with
+/// `kyomi_core::json_utils::bigquery_include_public` — that Rust function is
+/// the single source of truth for what an *absent* key means (disabled);
+/// this SQL predicate can't call it directly, so the `'false'` default is
+/// hand-mirrored (KYO-446). A DB error collapses to "no public datasources
+/// enabled" rather than propagating, matching the pre-KYO-446 behavior at
+/// this call site.
+///
+/// Known gap (pre-existing, not introduced by KYO-446, tracked as KYO-451):
+/// this predicate compares the extracted value against the text literal
+/// `'true'`. That's correct on every backend for the JSON *string* `"true"`
+/// (what the settings UI's save path actually persists — see KYO-21) and
+/// correct on Postgres for a genuine JSON *boolean* `true` too (`->>` always
+/// yields text), but not on SQLite: `json_extract()` there returns SQLite's
+/// native integer `1`/`0` for JSON booleans, which never equals the text
+/// literal `'true'`.
+async fn workspace_wants_bigquery_public_datasets(
+    db: &kyomi_core::DbPool,
+    workspace_id: &str,
+) -> bool {
+    let is_pg = db.is_postgres();
+    let json_field =
+        kyomi_core::sql_compat::json_extract_text(is_pg, "connection_config", "include_public_datasets");
+    let bool_true = kyomi_core::sql_compat::bool_true(is_pg);
+    let sql = format!(
+        "SELECT COUNT(*) FROM datasource_configs \
+         WHERE workspace_id = $1 \
+           AND datasource_type = 'bigquery' \
+           AND active = {bool_true} \
+           AND COALESCE({json_field}, 'false') = 'true'"
+    );
+    kyomi_core::db_fetch_scalar!(db, i64, &sql, workspace_id).unwrap_or(0) > 0
+}
+
 // ---------------------------------------------------------------------------
 // SearchKnowledgeTool
 // ---------------------------------------------------------------------------
@@ -131,22 +173,7 @@ impl AgentTool for SearchKnowledgeTool {
         .await?;
 
         // Also search the public dataset workspace if any BigQuery datasource has include_public_datasets enabled.
-        let is_pg = ctx.db.is_postgres();
-        let json_field = kyomi_core::sql_compat::json_extract_text(is_pg, "connection_config", "include_public_datasets");
-        let bool_true = kyomi_core::sql_compat::bool_true(is_pg);
-        let include_public_sql = format!(
-            "SELECT COUNT(*) FROM datasource_configs \
-             WHERE workspace_id = $1 \
-               AND datasource_type = 'bigquery' \
-               AND active = {bool_true} \
-               AND COALESCE({json_field}, 'true') = 'true'"
-        );
-        let include_public: bool = kyomi_core::db_fetch_scalar!(
-            ctx.db, i64,
-            &include_public_sql,
-            &ctx.workspace_id
-        )
-        .unwrap_or(0) > 0;
+        let include_public = workspace_wants_bigquery_public_datasets(&ctx.db, &ctx.workspace_id).await;
 
         if include_public
             && let Ok(public_result) = kyomi_knowledge::retrieval::retrieve(
@@ -224,6 +251,7 @@ impl AgentTool for SearchKnowledgeTool {
         // Resolve datasource slugs for table entries so the agent knows
         // which datasource each table belongs to.
         let has_tables = results.iter().any(|e| e["type"].as_str() == Some("table"));
+        let is_pg = ctx.db.is_postgres();
         let bool_false = kyomi_core::sql_compat::bool_false(is_pg);
         let tc_full_name = kyomi_core::sql_compat::full_table_name_expr_prefixed(is_pg, "tc");
         if has_tables {
@@ -1049,5 +1077,118 @@ impl AgentTool for EditDocumentTool {
             }
             Err(e) => Err(e),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests — KYO-446: `workspace_wants_bigquery_public_datasets` must honor an
+// absent, `false`, and `true` `include_public_datasets` key identically
+// (absent and `false` both mean "no public search"; only `true` triggers it).
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn test_pool() -> kyomi_core::DbPool {
+        let _ = kyomi_core::constants::load_with_fallback();
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+
+        sqlx::migrate!("../../apps/server/migrations-sqlite")
+            .run(&pool)
+            .await
+            .expect("run sqlite migrations");
+
+        kyomi_core::DbPool::Sqlite(pool)
+    }
+
+    /// Seed workspace "ws-1" with one active BigQuery datasource whose
+    /// `connection_config` is exactly `connection_config_json`.
+    async fn seed_bigquery_datasource(db: &kyomi_core::DbPool, connection_config_json: &str) {
+        let sq = match db {
+            kyomi_core::DbPool::Sqlite(sq) => sq,
+            _ => unreachable!("test pool is always sqlite"),
+        };
+
+        sqlx::query("INSERT INTO users (user_id, email) VALUES ('user-a', 'a@test.local')")
+            .execute(sq)
+            .await
+            .expect("insert user-a");
+        sqlx::query(
+            "INSERT INTO workspaces (workspace_id, name, owner_user_id) \
+             VALUES ('ws-1', 'Workspace', 'user-a')",
+        )
+        .execute(sq)
+        .await
+        .expect("insert workspace");
+
+        sqlx::query(
+            "INSERT INTO datasource_configs \
+             (id, workspace_id, name, datasource_type, connection_config, active, slug) \
+             VALUES ('ds-1', 'ws-1', 'BQ', 'bigquery', ?, 1, 'bq')",
+        )
+        .bind(connection_config_json)
+        .execute(sq)
+        .await
+        .expect("insert datasource");
+    }
+
+    #[tokio::test]
+    async fn absent_key_defaults_to_disabled() {
+        let db = test_pool().await;
+        seed_bigquery_datasource(&db, "{}").await;
+
+        let enabled = workspace_wants_bigquery_public_datasets(&db, "ws-1").await;
+
+        assert!(
+            !enabled,
+            "an absent include_public_datasets key must default to disabled, not enabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn false_stays_disabled() {
+        let db = test_pool().await;
+        seed_bigquery_datasource(&db, r#"{"include_public_datasets": false}"#).await;
+
+        let enabled = workspace_wants_bigquery_public_datasets(&db, "ws-1").await;
+
+        assert!(!enabled);
+    }
+
+    #[tokio::test]
+    async fn true_is_enabled() {
+        let db = test_pool().await;
+        // Seeded as the JSON *string* "true", not a JSON boolean: this is
+        // what the settings UI's Leptos URL-encoded save path actually
+        // persists (see KYO-21's verification notes), and it's also the
+        // shape this SQL predicate's text-literal comparison
+        // (`json_extract_text(...) = 'true'`) is built to match on every
+        // backend. A genuine JSON *boolean* `true` round-trips correctly
+        // through this same comparison on Postgres, but not on SQLite —
+        // `json_extract()` there returns SQLite's native integer 1/0 for
+        // JSON booleans rather than text, so `1 = 'true'` is never true.
+        // That's a pre-existing, backend-specific gap unrelated to the
+        // absent/false/true default this ticket fixes; tracked separately
+        // as KYO-451 rather than papered over in this test.
+        seed_bigquery_datasource(&db, r#"{"include_public_datasets": "true"}"#).await;
+
+        let enabled = workspace_wants_bigquery_public_datasets(&db, "ws-1").await;
+
+        assert!(enabled);
+    }
+
+    #[tokio::test]
+    async fn no_bigquery_datasource_is_disabled() {
+        let db = test_pool().await;
+        // No datasource_configs row at all for this workspace.
+        let enabled = workspace_wants_bigquery_public_datasets(&db, "ws-1").await;
+        assert!(!enabled);
     }
 }

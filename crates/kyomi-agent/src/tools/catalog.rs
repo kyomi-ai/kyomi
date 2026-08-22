@@ -6,7 +6,7 @@ use async_trait::async_trait;
 
 use kyomi_auth::catalog::indexers::bigquery_public::PUBLIC_DATA_WORKSPACE_ID;
 use kyomi_core::enums::DatasourceType;
-use kyomi_core::json_utils::config_bool;
+use kyomi_core::json_utils::bigquery_include_public;
 
 use crate::tools::{AgentTool, ToolContext};
 use crate::types::ToolAnnotations;
@@ -122,11 +122,13 @@ impl AgentTool for GetTableInfoTool {
         let table_metadata = cached.map(|row| row.table_metadata);
 
         // If not found in the user's datasource, try the BigQuery public dataset
-        // workspace when the datasource is BigQuery with include_public_datasets enabled.
+        // workspace when the datasource is BigQuery with include_public_datasets
+        // enabled (absent key defaults to disabled — see
+        // kyomi_core::json_utils::bigquery_include_public).
         let table_metadata = if let Some(metadata) = table_metadata {
             metadata
         } else if ds.datasource_type == DatasourceType::Bigquery
-            && config_bool(ds.connection_config.get("include_public_datasets"), true)
+            && bigquery_include_public(&ds.connection_config)
         {
             let public_sql = format!(
                 "SELECT dtc.table_metadata \
@@ -313,9 +315,10 @@ impl AgentTool for BrowseCatalogTool {
             kyomi_core::db_fetch_all!(ctx.db, CatalogBrowseLiteRow, &sql, &ds.id, &schema_filter)
                 .unwrap_or_default();
 
-        // BigQuery public datasets: include if enabled (defaults to true).
+        // BigQuery public datasets: include if enabled (absent key defaults
+        // to disabled — see kyomi_core::json_utils::bigquery_include_public).
         if ds.datasource_type == DatasourceType::Bigquery
-            && config_bool(ds.connection_config.get("include_public_datasets"), true)
+            && bigquery_include_public(&ds.connection_config)
         {
             let public_sql = format!(
                 "SELECT project_id, dataset_id, table_id, \
@@ -484,4 +487,255 @@ fn format_table_info_response(
     }
 
     result.to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Tests — KYO-446: BrowseCatalogTool / GetTableInfoTool must honor an
+// absent, `false`, and `true` `include_public_datasets` key identically
+// (absent and `false` both exclude public rows; only `true` includes them).
+//
+// Real in-memory SQLite pool with full migrations applied, exercising the
+// actual tool `execute()` path end-to-end — mirrors the pattern in
+// `tools::watch::tests::broadcast_routing`.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn test_pool() -> kyomi_core::DbPool {
+        let _ = kyomi_core::constants::load_with_fallback();
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+
+        sqlx::query("PRAGMA foreign_keys=ON")
+            .execute(&pool)
+            .await
+            .expect("enable foreign keys");
+
+        sqlx::migrate!("../../apps/server/migrations-sqlite")
+            .run(&pool)
+            .await
+            .expect("run sqlite migrations");
+
+        kyomi_core::DbPool::Sqlite(pool)
+    }
+
+    fn build_ctx(db: kyomi_core::DbPool) -> ToolContext {
+        ToolContext {
+            ws_manager: kyomi_auth::websocket::WebSocketManager::new(None, db.clone()),
+            db,
+            kv: kyomi_core::kv_store_memory::InMemoryKVStore::new_pool(),
+            user_id: "user-a".to_string(),
+            workspace_id: "ws-1".to_string(),
+            encryption_key: std::sync::Arc::new([0u8; 32]),
+            embedding: kyomi_embed::LazyEmbedding::new(),
+            config: std::sync::Arc::new(kyomi_core::Config::test_config()),
+            session_id: None,
+            supports_mcp_apps: false,
+            workspace_roles: Vec::new(),
+            connect_registry: None,
+            platforms: std::sync::Arc::new(kyomi_core::platform::PlatformRegistry::new()),
+            user_display_name: "User A".to_string(),
+        }
+    }
+
+    /// Seed workspace "ws-1" with one active BigQuery datasource (slug
+    /// "bq") whose `connection_config` is exactly `connection_config_json`,
+    /// plus:
+    ///  - one cache row under that datasource's own `datasource_config_id`
+    ///    ("acme.sales.orders") — must be visible regardless of the toggle.
+    ///  - one cache row under the shared public-data sentinel workspace
+    ///    ("bigquery-public-data.hacker_news.full") — must be visible only
+    ///    when `include_public_datasets` resolves to `true`.
+    async fn seed_bigquery_datasource(db: &kyomi_core::DbPool, connection_config_json: &str) {
+        let sq = match db {
+            kyomi_core::DbPool::Sqlite(sq) => sq,
+            _ => unreachable!("test pool is always sqlite"),
+        };
+
+        sqlx::query("INSERT INTO users (user_id, email) VALUES ('user-a', 'a@test.local')")
+            .execute(sq)
+            .await
+            .expect("insert user-a");
+        sqlx::query(
+            "INSERT INTO workspaces (workspace_id, name, owner_user_id) \
+             VALUES ('ws-1', 'Workspace', 'user-a')",
+        )
+        .execute(sq)
+        .await
+        .expect("insert workspace");
+
+        sqlx::query(
+            "INSERT INTO datasource_configs \
+             (id, workspace_id, name, datasource_type, connection_config, active, slug) \
+             VALUES ('ds-1', 'ws-1', 'BQ', 'bigquery', ?, 1, 'bq')",
+        )
+        .bind(connection_config_json)
+        .execute(sq)
+        .await
+        .expect("insert datasource");
+
+        sqlx::query(
+            "INSERT INTO datasource_table_cache \
+             (workspace_id, project_id, dataset_id, table_id, table_metadata, datasource_config_id) \
+             VALUES ('ws-1', 'acme', 'sales', 'orders', '{}', 'ds-1')",
+        )
+        .execute(sq)
+        .await
+        .expect("insert own table cache row");
+
+        sqlx::query(
+            "INSERT INTO datasource_table_cache \
+             (workspace_id, project_id, dataset_id, table_id, table_metadata) \
+             VALUES (?, 'bigquery-public-data', 'hacker_news', 'full', '{}')",
+        )
+        .bind(PUBLIC_DATA_WORKSPACE_ID)
+        .execute(sq)
+        .await
+        .expect("insert public table cache row");
+    }
+
+    /// Full table names (`project.dataset.table`) present in a
+    /// `browse_catalog` response for the "bq" datasource.
+    async fn browse_tables(ctx: &ToolContext) -> Vec<String> {
+        let result = BrowseCatalogTool
+            .execute(serde_json::json!({"datasource": "bq"}), ctx)
+            .await
+            .expect("browse_catalog execute");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("browse_catalog result is JSON");
+        parsed["schemas"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|s| s["tables"].as_array().cloned().unwrap_or_default())
+            .filter_map(|t| t["name"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn browse_catalog_excludes_public_datasets_when_key_absent() {
+        let db = test_pool().await;
+        seed_bigquery_datasource(&db, "{}").await;
+        let ctx = build_ctx(db);
+
+        let tables = browse_tables(&ctx).await;
+
+        assert_eq!(
+            tables,
+            vec!["acme.sales.orders".to_string()],
+            "an absent include_public_datasets key must default to disabled, not enabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn browse_catalog_excludes_public_datasets_when_false() {
+        let db = test_pool().await;
+        seed_bigquery_datasource(&db, r#"{"include_public_datasets": false}"#).await;
+        let ctx = build_ctx(db);
+
+        let tables = browse_tables(&ctx).await;
+
+        assert_eq!(tables, vec!["acme.sales.orders".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn browse_catalog_includes_public_datasets_when_true() {
+        let db = test_pool().await;
+        seed_bigquery_datasource(&db, r#"{"include_public_datasets": true}"#).await;
+        let ctx = build_ctx(db);
+
+        let mut tables = browse_tables(&ctx).await;
+        tables.sort();
+
+        assert_eq!(
+            tables,
+            vec![
+                "acme.sales.orders".to_string(),
+                "bigquery-public-data.hacker_news.full".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn get_table_info_cannot_find_public_table_when_key_absent() {
+        let db = test_pool().await;
+        seed_bigquery_datasource(&db, "{}").await;
+        let ctx = build_ctx(db);
+
+        let result = GetTableInfoTool
+            .execute(
+                serde_json::json!({
+                    "table_name": "bigquery-public-data.hacker_news.full",
+                    "datasource": "bq",
+                }),
+                &ctx,
+            )
+            .await
+            .expect("get_table_info execute");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("get_table_info result is JSON");
+
+        assert!(
+            parsed.get("error").is_some(),
+            "a public table must not be found when include_public_datasets is absent: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_table_info_cannot_find_public_table_when_false() {
+        let db = test_pool().await;
+        seed_bigquery_datasource(&db, r#"{"include_public_datasets": false}"#).await;
+        let ctx = build_ctx(db);
+
+        let result = GetTableInfoTool
+            .execute(
+                serde_json::json!({
+                    "table_name": "bigquery-public-data.hacker_news.full",
+                    "datasource": "bq",
+                }),
+                &ctx,
+            )
+            .await
+            .expect("get_table_info execute");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("get_table_info result is JSON");
+
+        assert!(
+            parsed.get("error").is_some(),
+            "a public table must not be found when include_public_datasets is false: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_table_info_finds_public_table_when_true() {
+        let db = test_pool().await;
+        seed_bigquery_datasource(&db, r#"{"include_public_datasets": true}"#).await;
+        let ctx = build_ctx(db);
+
+        let result = GetTableInfoTool
+            .execute(
+                serde_json::json!({
+                    "table_name": "bigquery-public-data.hacker_news.full",
+                    "datasource": "bq",
+                }),
+                &ctx,
+            )
+            .await
+            .expect("get_table_info execute");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("get_table_info result is JSON");
+
+        assert!(
+            parsed.get("error").is_none(),
+            "a public table must be found when include_public_datasets is true: {result}"
+        );
+        assert_eq!(parsed["table"], serde_json::json!("bigquery-public-data.hacker_news.full"));
+    }
 }

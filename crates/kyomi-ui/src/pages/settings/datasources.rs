@@ -37,7 +37,7 @@ use crate::server_fns::datasource_oauth::{
     disconnect_google_oauth, disconnect_datasource_oauth,
     get_google_oauth_projects,
 };
-use crate::utils::json::config_bool;
+use crate::utils::json::bigquery_include_public;
 use crate::utils::oauth_popup::{popup_monitor_outcome_message, PopupMonitorOutcome};
 use crate::utils::permissions::{use_analytics_access, use_permissions, AnalyticsAccess};
 
@@ -1625,10 +1625,7 @@ pub fn DatasourceModal(
                                 })
                                 .unwrap_or_default();
                             set_catalog_selected.try_set(selected_items);
-                            let include_public = config_bool(
-                                cfg.get("include_public_datasets"),
-                                false,
-                            );
+                            let include_public = bigquery_include_public(cfg);
                             set_bq_include_public.try_set(include_public);
 
                             // Load indexing credentials from connection_config.
@@ -2165,10 +2162,10 @@ pub fn DatasourceModal(
                     map.insert(key.to_string(), serde_json::json!(items));
                 }
             }
-            if create_include_public_datasets.get_untracked() {
+            if t == "bigquery" {
                 map.insert(
                     "include_public_datasets".to_string(),
-                    serde_json::json!(true),
+                    serde_json::json!(create_include_public_datasets.get_untracked()),
                 );
             }
         } else {
@@ -2182,10 +2179,10 @@ pub fn DatasourceModal(
                 let key = catalog_config_key_for_type(&t);
                 map.insert(key.to_string(), serde_json::json!(selected));
             }
-            if bq_include_public.get_untracked() {
+            if t == "bigquery" {
                 map.insert(
                     "include_public_datasets".to_string(),
-                    serde_json::json!(true),
+                    serde_json::json!(bq_include_public.get_untracked()),
                 );
             }
         }
@@ -10695,6 +10692,121 @@ mod tests {
              via an untracked read — a tracked .get() there would create a \
              second, redundant subscription to datasources_signal and defeat \
              the point of routing through view_state in the first place"
+        );
+    }
+
+    // ── KYO-446: "Include public datasets" write/read must agree ───────
+    //
+    // Two independent bugs composed to leak BigQuery public datasets past
+    // an unchecked toggle: (1) `build_connection_config` only wrote
+    // `include_public_datasets` when the signal was `true`, so unchecking
+    // the box on save *omitted* the key rather than persisting `false` —
+    // and `datasource_service::update_datasource_settings` replaces
+    // `connection_config` wholesale, so omission is silent deletion of the
+    // prior value; (2) every consumer of that key but this file's own
+    // load-back defaulted an absent key to `true`, so the leftover/omitted
+    // key kept behaving as "enabled" while the UI toggle rendered "off".
+    // These tests pin the write side (both branches must write
+    // unconditionally) and that the read side goes through the one shared
+    // helper the fix introduced, so the two can't drift apart again.
+
+    /// Bounds the extraction to just the catalog-scope block of
+    /// `build_connection_config` (create-mode and edit-mode branches),
+    /// stopping before the unrelated "Indexing credentials" section that
+    /// follows in the same closure.
+    fn catalog_scope_write_block(src: &str) -> &str {
+        extract_between(
+            src,
+            "let in_create_mode = datasource_id.get_untracked().is_none();",
+            "// Indexing credentials",
+        )
+    }
+
+    #[test]
+    fn create_mode_include_public_datasets_write_is_unconditional() {
+        let block = catalog_scope_write_block(SRC);
+
+        assert!(
+            !block.contains("if create_include_public_datasets.get_untracked() {"),
+            "create-mode must not gate the include_public_datasets write behind \
+             `if create_include_public_datasets.get_untracked()` — that shape omits the \
+             key entirely when the toggle is off, and datasource_service replaces \
+             connection_config wholesale, so an omitted key silently drops any prior \
+             value (KYO-446)"
+        );
+        assert!(
+            block.contains(
+                "map.insert(\n                    \"include_public_datasets\".to_string(),\n                    \
+                 serde_json::json!(create_include_public_datasets.get_untracked()),\n                );"
+            ),
+            "create-mode must write include_public_datasets unconditionally with the \
+             signal's actual value (true AND false), not only when it is true: {block}"
+        );
+    }
+
+    #[test]
+    fn edit_mode_include_public_datasets_write_is_unconditional() {
+        let block = catalog_scope_write_block(SRC);
+
+        assert!(
+            !block.contains("if bq_include_public.get_untracked() {"),
+            "edit-mode must not gate the include_public_datasets write behind \
+             `if bq_include_public.get_untracked()` — that shape omits the key entirely \
+             when the toggle is off, and datasource_service replaces connection_config \
+             wholesale, so an omitted key silently drops any prior value (KYO-446)"
+        );
+        assert!(
+            block.contains(
+                "map.insert(\n                    \"include_public_datasets\".to_string(),\n                    \
+                 serde_json::json!(bq_include_public.get_untracked()),\n                );"
+            ),
+            "edit-mode must write include_public_datasets unconditionally with the \
+             signal's actual value (true AND false), not only when it is true: {block}"
+        );
+    }
+
+    #[test]
+    fn create_and_edit_mode_only_write_include_public_datasets_for_bigquery() {
+        let block = catalog_scope_write_block(SRC);
+
+        // `include_public_datasets` is BigQuery-specific (the toggle only
+        // renders under `<Show when=move || datasource_type.get() == "bigquery">`
+        // in both CreateModeCatalogPicker and EditModeCatalogTab) — the
+        // catalog-scope block above it is shared by every provider type via
+        // `catalog_config_key_for_type`, so the include_public_datasets
+        // write must stay scoped to `t == "bigquery"` rather than writing an
+        // irrelevant key into every other provider's connection_config on
+        // every save.
+        let occurrences = block.matches("if t == \"bigquery\" {").count();
+        assert_eq!(
+            occurrences, 2,
+            "expected exactly one `if t == \\\"bigquery\\\"` guard around the \
+             include_public_datasets write in each of create-mode and edit-mode, found \
+             {occurrences}: {block}"
+        );
+    }
+
+    #[test]
+    fn catalog_load_back_reads_include_public_datasets_via_the_shared_helper() {
+        let snippet = extract_between(
+            SRC,
+            "set_catalog_selected.try_set(selected_items);",
+            "set_bq_include_public.try_set(include_public);",
+        );
+
+        assert!(
+            snippet.contains("bigquery_include_public(cfg)"),
+            "the edit-modal load-back must read include_public_datasets through \
+             crate::utils::json::bigquery_include_public — the single place that decides \
+             what an absent key means — rather than reimplementing the default inline: \
+             {snippet}"
+        );
+        assert!(
+            !snippet.contains("config_bool("),
+            "the load-back must not call config_bool directly for include_public_datasets \
+             — that was the KYO-446 bug shape: this file's own default (false) disagreed \
+             with every other reader, which all defaulted absent to true. Routing through \
+             bigquery_include_public is what keeps the default from drifting again: {snippet}"
         );
     }
 }

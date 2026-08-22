@@ -10,7 +10,7 @@ use super::{AuthenticatedContext, IntoServerFnError};
 #[cfg(feature = "ssr")]
 use kyomi_types::Permission;
 #[cfg(feature = "ssr")]
-use kyomi_core::json_utils::config_bool;
+use kyomi_core::json_utils::bigquery_include_public;
 
 use crate::pages::sql_editor::types::{CatalogNode, QueryHistoryEntry};
 #[cfg(feature = "ssr")]
@@ -342,12 +342,10 @@ pub async fn get_catalog_tree(
         )
         .into_sfn()?;
 
-    // BigQuery public datasets: include if enabled (defaults to true).
+    // BigQuery public datasets: include if enabled (absent key defaults to
+    // disabled — see kyomi_core::json_utils::bigquery_include_public).
     if datasource.datasource_type == kyomi_core::DatasourceType::Bigquery {
-        let include_public = config_bool(
-            datasource.connection_config.get("include_public_datasets"),
-            true,
-        );
+        let include_public = bigquery_include_public(&datasource.connection_config);
 
         if include_public {
             let public_tables: Vec<kyomi_core::models::table_cache::DatasourceTableCache> =
@@ -576,12 +574,11 @@ pub async fn search_catalog(
                 .into_sfn()?,
     };
 
-    // BigQuery public datasets: include matching tables if enabled.
+    // BigQuery public datasets: include matching tables if enabled (absent
+    // key defaults to disabled — see
+    // kyomi_core::json_utils::bigquery_include_public).
     if datasource.datasource_type == kyomi_core::DatasourceType::Bigquery {
-        let include_public = config_bool(
-            datasource.connection_config.get("include_public_datasets"),
-            true,
-        );
+        let include_public = bigquery_include_public(&datasource.connection_config);
 
         if include_public {
             let public_sql = format!(
