@@ -4873,19 +4873,32 @@ fn BigQueryAuthModeSection(
                         <Alert variant=AlertVariant::Warning>
                             <AlertTitle>"Google account authorization required"</AlertTitle>
                             <AlertDescription>
-                                <p class="mb-2">
+                                <p class="mb-3">
                                     "Kyomi's shared Google OAuth app only works for Google \
                                      accounts a Kyomi admin has explicitly authorized as \
                                      testers — everyone else is refused by Google itself, \
-                                     not by Kyomi. "
-                                    <button
-                                        type="button"
-                                        class="text-primary hover:underline font-medium"
-                                        on:click=move |_| { feedback_access_request.0.try_run(()); }
-                                    >
-                                        "Request access"
-                                    </button>
-                                    " before connecting, so you're not waiting on a sign-in \
+                                     not by Kyomi."
+                                </p>
+                                // KYO-435 — promoted from an inline text link (spliced mid-
+                                // sentence, effectively invisible against the amber Warning
+                                // background) to a real <Button>, on its own line between the
+                                // explanation above and the attestation checkbox below, so the
+                                // block reads explanation -> action -> attestation. This is the
+                                // only in-product path to ask for allowlisting, so it must read
+                                // as the primary action here — but Secondary (not Default/
+                                // primary) so it doesn't compete with the modal's own amber
+                                // Next/Create button. Copy is unchanged from KYO-408 (both the
+                                // button label and the caption below it, split from what was one
+                                // sentence — see KYO-435 in Trakkt).
+                                <Button
+                                    variant=ButtonVariant::Secondary
+                                    size=ButtonSize::Sm
+                                    on:click=move |_| { feedback_access_request.0.try_run(()); }
+                                >
+                                    "Request access"
+                                </Button>
+                                <p class="text-xs text-muted-foreground mt-1.5 mb-3">
+                                    "before connecting, so you're not waiting on a sign-in \
                                      that's bound to fail."
                                 </p>
                                 <label class="flex items-center gap-2 cursor-pointer">
@@ -9663,11 +9676,11 @@ mod tests {
         );
         assert!(
             kyomi_block.contains("\"Request access\""),
-            "the kyomi_oauth notice must include a \"Request access\" link"
+            "the kyomi_oauth notice must include a \"Request access\" control"
         );
         assert!(
             kyomi_block.contains("feedback_access_request.0.try_run(())"),
-            "the \"Request access\" link must open the feedback modal via the \
+            "the \"Request access\" control must open the feedback modal via the \
              FeedbackAccessRequestHandle context (KYO-417's access_request_context), not \
              navigate anywhere or no-op"
         );
@@ -9708,6 +9721,49 @@ mod tests {
         assert!(
             !service_account_block.contains("I have requested access and had it confirmed"),
             "the KYO-408 confirmation checkbox must not leak into service_account"
+        );
+    }
+
+    // ── KYO-435: "Request access" promoted to a real <Button> ──────────────
+    //
+    // Before this, "Request access" was a hand-rolled `<button class="text-primary
+    // hover:underline ...">` spliced into the middle of the explanatory sentence —
+    // it violated DESIGN.md's "use the component, never raw HTML" rule and had no
+    // button affordance (no fill, no border) against the amber Warning background,
+    // so the only in-product path to ask for allowlisting was easy to miss
+    // entirely. This test pins that the control is now the shared <Button>
+    // component (not a raw <button>) and that promoting it didn't drop the
+    // feedback-modal click wiring.
+
+    /// Scoped to the same kyomi_oauth `<Show>` block as
+    /// `kyomi_oauth_notice_renders_only_for_kyomi_oauth_mode` above, which sits
+    /// entirely above `mod tests` — so this slice never includes this test
+    /// module's own source text (its assertion strings, this doc comment, etc.),
+    /// and a match against `<button` here can only be the production markup.
+    #[test]
+    fn request_access_control_is_a_real_button_component() {
+        let kyomi_block = extract_between(
+            SRC,
+            "<Show when=move || bq_auth_mode.get() == \"kyomi_oauth\">",
+            "<Show when=move || bq_auth_mode.get() == \"enterprise_oauth\">",
+        );
+        assert!(
+            kyomi_block.contains("<Button"),
+            "KYO-435: the \"Request access\" action must render via the shared <Button> \
+             component (DESIGN.md: \"Use the Leptos component, never raw HTML\"), not a \
+             hand-rolled <button> with inline Tailwind classes"
+        );
+        assert!(
+            !kyomi_block.contains("<button"),
+            "KYO-435: no raw <button> should remain in the kyomi_oauth notice — the \
+             \"Request access\" control must have been fully migrated to <Button>, not \
+             left alongside it"
+        );
+        assert!(
+            kyomi_block.contains("feedback_access_request.0.try_run(())"),
+            "KYO-435: promoting \"Request access\" to a real <Button> must not drop its \
+             click handler — it must still invoke the feedback access-request handler \
+             (KYO-417's access_request_context), not navigate anywhere or no-op"
         );
     }
 
