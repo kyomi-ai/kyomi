@@ -4550,42 +4550,66 @@ struct OAuthStatusSetters {
     expired: WriteSignal<bool>,
 }
 
-/// Re-fetches OAuth connection status whenever the auth mode changes in an
-/// open datasource modal.
+/// Resolves which OAuth status source (if any) should be (re)fetched for
+/// the current auth mode, together with the slug it should be fetched
+/// with. This is the single implementation of the KYO-411/KYO-426/KYO-443
+/// guard logic, shared by both callers that need it:
+/// `use_oauth_status_refetch`'s mode-change `Memo` and
+/// `build_oauth_recovery_callback`'s post-popup recheck. Neither inlines
+/// its own copy of these rules — an inlined copy is exactly how KYO-13,
+/// KYO-17 and KYO-197 recurred (see `docs/CODING_STANDARDS.md` §Leptos).
 ///
-/// Without this, the status panel is fetched once when the modal opens
-/// (using whichever auth mode was loaded from the server) and never again —
-/// so switching the mode selector leaves the panel showing the previous
-/// mode's stale connected/email/expired state. This exact defect was
-/// independently flagged in KYO-13 (BigQuery) and KYO-17 (Databricks) and
-/// documented in `docs/CODING_STANDARDS.md` §Leptos as a required
-/// `Effect::new` re-fetch — and it recurred a third time in Synapse anyway,
-/// because each fix copy-pasted the Effect instead of sharing it (KYO-197).
-/// Any new provider's OAuth status panel must call this hook rather than
-/// hand-rolling another copy of the Effect.
-/// Resolves which OAuth status source (if any) [`use_oauth_status_refetch`]
-/// should fetch for the current auth mode — a pure predicate so the KYO-411
-/// slug-guard fix is directly testable, extracted from the `Effect` body
-/// rather than exercised via the view tree (the rest of this hook's
-/// coverage uses the source-text idiom the other tests in this file share,
-/// since it lives inside a reactive closure).
+/// `read_slug` is a lazy accessor rather than an already-read `&str` so
+/// that going through one shared function doesn't cost either caller its
+/// own reactive-tracking property: this predicate only calls `read_slug`
+/// on the edit-mode `Datasource(_)` branch below, so
+/// `use_oauth_status_refetch`'s `Memo` — which passes `move || slug.get()`
+/// — subscribes to `slug` only when that branch is actually taken, which is
+/// what stops it re-running (and flashing the panel to disconnected) on
+/// every keystroke in the Name field while some other source is selected
+/// (KYO-443; see the two `..._never_calls_read_slug` tests below, which
+/// pin this directly against this function using a closure that panics if
+/// called, rather than by scraping source text). `build_oauth_recovery_callback`
+/// passes `move || slug.get_untracked()` — already untracked, so routing
+/// through this function doesn't change when it reads `slug`.
 ///
-/// The empty-slug guard applies ONLY to `Datasource(_)` sources, which need
-/// a real slug (`get_datasource_oauth_status(provider_key, slug)`).
 /// `GoogleAccount` is an account-level fetch (`get_google_oauth_status()`)
-/// that takes no slug at all, so it must run even when `slug` is empty —
-/// notably in create mode, where BigQuery kyomi_oauth otherwise never
-/// learns an already-linked Google account is connected (KYO-411). Before
-/// this fix the guard ran ahead of `source_for_mode` and applied
-/// indiscriminately to both source kinds.
+/// that takes no slug at all and exists independently of any particular
+/// datasource, so it must run even in create mode and even when `slug` is
+/// empty — notably BigQuery kyomi_oauth, where otherwise an already-linked
+/// Google account is never detected while creating a new datasource
+/// (KYO-411). Its arm never calls `read_slug`.
+///
+/// `Datasource(_)` sources need TWO things `GoogleAccount` doesn't:
+///   - `!is_create_mode`: `get_datasource_oauth_status(provider_key, slug)`
+///     looks up a datasource that must already exist server-side. In create
+///     mode it never does yet, so calling this fetch 500s (KYO-426) — the
+///     empty-slug check below does NOT catch this, because `slug`
+///     auto-generates from the Name field the moment the user types
+///     anything, so it stops being empty long before the datasource is
+///     actually created. This is checked in the match guard, before
+///     `read_slug` is called, so create mode never reads the slug either.
+///   - a non-empty resolved slug: a genuine precondition of the fetch call
+///     itself (`get_datasource_oauth_status` needs a real slug to look up),
+///     independent of create/edit mode.
+///
+/// Returns the resolved slug alongside the source so a caller that read it
+/// lazily above doesn't have to read it a second time to perform the fetch.
 fn oauth_status_source_to_fetch(
     current_mode: &str,
-    slug_val: &str,
+    is_create_mode: bool,
+    read_slug: impl FnOnce() -> String,
     source_for_mode: fn(&str) -> Option<OAuthStatusSource>,
-) -> Option<OAuthStatusSource> {
+) -> Option<(OAuthStatusSource, String)> {
     match source_for_mode(current_mode) {
-        Some(OAuthStatusSource::Datasource(_)) if slug_val.is_empty() => None,
-        other => other,
+        Some(OAuthStatusSource::GoogleAccount) => {
+            Some((OAuthStatusSource::GoogleAccount, String::new()))
+        }
+        Some(OAuthStatusSource::Datasource(key)) if !is_create_mode => {
+            let slug_val = read_slug();
+            (!slug_val.is_empty()).then_some((OAuthStatusSource::Datasource(key), slug_val))
+        }
+        _ => None,
     }
 }
 
@@ -4639,22 +4663,57 @@ async fn fetch_oauth_status_once(
     }
 }
 
+/// Re-fetches OAuth connection status whenever the auth mode changes in an
+/// open datasource modal.
+///
+/// Without this, the status panel is fetched once when the modal opens
+/// (using whichever auth mode was loaded from the server) and never again —
+/// so switching the mode selector leaves the panel showing the previous
+/// mode's stale connected/email/expired state. This exact defect was
+/// independently flagged in KYO-13 (BigQuery) and KYO-17 (Databricks) and
+/// documented in `docs/CODING_STANDARDS.md` §Leptos as a required
+/// `Effect::new` re-fetch — and it recurred a third time in Synapse anyway,
+/// because each fix copy-pasted the Effect instead of sharing it (KYO-197).
+/// Any new provider's OAuth status panel must call this hook rather than
+/// hand-rolling another copy of the Effect.
+///
+/// The `fetch_input` `Memo` below resolves its source and slug via the
+/// shared `oauth_status_source_to_fetch` predicate, passing `slug` in as a
+/// lazy `move || slug.get()` accessor rather than reading it upfront — a
+/// reactive closure subscribes only to the signals it actually reads on a
+/// given run, and `oauth_status_source_to_fetch` only calls the accessor on
+/// its edit-mode `Datasource(_)` branch (see that function's doc comment
+/// for the full branch-by-branch account). So a run that resolves
+/// `GoogleAccount`, or a create-mode `Datasource(_)`, never calls the
+/// accessor and this `Memo` is never subscribed to `slug` on that run.
+/// Before this fix, `slug.get()` was read unconditionally at the top of
+/// the `Effect` this `Memo` replaced, so BigQuery kyomi_oauth re-ran, and
+/// therefore reset the panel to disconnected, on every keystroke in the
+/// Name field (KYO-443) — even though that keystroke was driving `slug`'s
+/// auto-generated value, not anything BigQuery kyomi_oauth's own fetch
+/// (`get_google_oauth_status`, which takes no slug) needed. `Memo` also
+/// dedupes by `PartialEq`, so even a run that resolves the same branch
+/// again only notifies the `Effect` below when the resolved `(source,
+/// slug)` pair actually changed — so `setters.connected.set(false)` no
+/// longer fires on every keystroke either.
 fn use_oauth_status_refetch(
     auth_mode: ReadSignal<String>,
     slug: ReadSignal<String>,
+    is_create_mode: Signal<bool>,
     setters: OAuthStatusSetters,
     source_for_mode: fn(&str) -> Option<OAuthStatusSource>,
 ) {
-    Effect::new(move |_| {
+    // See the doc comment above, and oauth_status_source_to_fetch's own
+    // doc comment, for why `slug` is passed in as a lazy accessor rather
+    // than read upfront (KYO-443).
+    let fetch_input = Memo::new(move |_| {
         let current_mode = auth_mode.get(); // subscribe to mode changes
-        let slug_val = slug.get();
-        // Modes with no OAuth status to fetch are skipped by
-        // source_for_mode itself; a Datasource(_) source additionally needs
-        // a non-empty slug (create mode has none yet). GoogleAccount is
-        // account-level and needs no slug — see
-        // oauth_status_source_to_fetch's doc comment (KYO-411).
-        let Some(source) = oauth_status_source_to_fetch(&current_mode, &slug_val, source_for_mode)
-        else {
+        let create_mode = is_create_mode.get();
+        oauth_status_source_to_fetch(&current_mode, create_mode, move || slug.get(), source_for_mode)
+    });
+
+    Effect::new(move |_| {
+        let Some((source, slug_val)) = fetch_input.get() else {
             return;
         };
         // Reset to disconnected state while the fetch is in flight.
@@ -4696,9 +4755,25 @@ fn use_oauth_status_refetch(
 /// callback correctly serve both of BigQuery's panels (`kyomi_oauth` and
 /// `enterprise_oauth`) without needing to know at build time which one is
 /// currently visible.
+///
+/// Takes `is_create_mode` for the same reason `use_oauth_status_refetch`
+/// does (KYO-426): a `Datasource(_)` source's recheck calls
+/// `get_datasource_oauth_status(provider_key, slug)`, which 500s against a
+/// datasource that doesn't exist yet. This callback fires after a connect
+/// attempt, and a connect attempt is reachable in create mode (e.g.
+/// BigQuery `enterprise_oauth`), so without this guard a popup that closed
+/// early in create mode would trigger the exact same fetch-against-a
+/// -nonexistent-datasource error `oauth_status_source_to_fetch` guards
+/// against in the mode-change path too. `auth_mode`/`is_create_mode`/`slug`
+/// are all read with `get_untracked()` here — this callback runs once, on a
+/// discrete event, not inside a reactive scope — including inside the
+/// `move || slug.get_untracked()` accessor passed to
+/// `oauth_status_source_to_fetch`, so routing the slug read through that
+/// shared function changes nothing about when this callback reads `slug`.
 fn build_oauth_recovery_callback(
     auth_mode: ReadSignal<String>,
     slug: ReadSignal<String>,
+    is_create_mode: Signal<bool>,
     setters: OAuthStatusSetters,
     set_oauth_connecting: WriteSignal<bool>,
     source_for_mode: fn(&str) -> Option<OAuthStatusSource>,
@@ -4706,12 +4781,17 @@ fn build_oauth_recovery_callback(
 ) -> Callback<PopupMonitorOutcome> {
     Callback::new(move |outcome: PopupMonitorOutcome| {
         let current_mode = auth_mode.get_untracked();
-        let slug_val = slug.get_untracked();
-        let source = oauth_status_source_to_fetch(&current_mode, &slug_val, source_for_mode);
+        let create_mode = is_create_mode.get_untracked();
+        let resolved = oauth_status_source_to_fetch(
+            &current_mode,
+            create_mode,
+            move || slug.get_untracked(),
+            source_for_mode,
+        );
 
         leptos::task::spawn_local(async move {
-            let recovered = match source {
-                Some(source) => fetch_oauth_status_once(source, slug_val).await,
+            let recovered = match resolved {
+                Some((source, slug_val)) => fetch_oauth_status_once(source, slug_val).await,
                 None => None,
             };
             match recovered {
@@ -4991,6 +5071,7 @@ fn BigQueryAuthModeSection(
     use_oauth_status_refetch(
         bq_auth_mode,
         slug,
+        is_create_mode,
         OAuthStatusSetters {
             connected: set_oauth_connected,
             email: set_oauth_email,
@@ -5008,6 +5089,7 @@ fn BigQueryAuthModeSection(
     let on_oauth_recover = build_oauth_recovery_callback(
         bq_auth_mode,
         slug,
+        is_create_mode,
         OAuthStatusSetters {
             connected: set_oauth_connected,
             email: set_oauth_email,
@@ -5500,6 +5582,7 @@ fn SnowflakeAuthModeSection(
     use_oauth_status_refetch(
         sf_auth_mode,
         slug,
+        is_create_mode,
         OAuthStatusSetters {
             connected: set_oauth_connected,
             email: set_oauth_email,
@@ -5513,6 +5596,7 @@ fn SnowflakeAuthModeSection(
     let on_oauth_recover = build_oauth_recovery_callback(
         sf_auth_mode,
         slug,
+        is_create_mode,
         OAuthStatusSetters {
             connected: set_oauth_connected,
             email: set_oauth_email,
@@ -5682,6 +5766,7 @@ fn DatabricksAuthModeSection(
     use_oauth_status_refetch(
         db_auth_mode,
         slug,
+        is_create_mode,
         OAuthStatusSetters {
             connected: set_oauth_connected,
             email: set_oauth_email,
@@ -5695,6 +5780,7 @@ fn DatabricksAuthModeSection(
     let on_oauth_recover = build_oauth_recovery_callback(
         db_auth_mode,
         slug,
+        is_create_mode,
         OAuthStatusSetters {
             connected: set_oauth_connected,
             email: set_oauth_email,
@@ -5876,6 +5962,7 @@ fn SynapseAuthModeSection(
     use_oauth_status_refetch(
         synapse_auth_mode,
         slug,
+        is_create_mode,
         OAuthStatusSetters {
             connected: set_oauth_connected,
             email: set_oauth_email,
@@ -5889,6 +5976,7 @@ fn SynapseAuthModeSection(
     let on_oauth_recover = build_oauth_recovery_callback(
         synapse_auth_mode,
         slug,
+        is_create_mode,
         OAuthStatusSetters {
             connected: set_oauth_connected,
             email: set_oauth_email,
@@ -9168,15 +9256,23 @@ mod tests {
     use super::{connection_step_satisfied_from, oauth_status_source_to_fetch};
 
     /// `oauth_status_source_to_fetch` — the pure predicate behind the
-    /// KYO-411 guard fix — exercised directly for all four providers'
-    /// mapping functions. Covers the actual bug (GoogleAccount must run on
-    /// an empty slug) and the regression risk the ticket calls out by name
-    /// (the other three providers, all `Datasource(_)`, must stay blocked).
+    /// KYO-411/KYO-426/KYO-443 guard logic — exercised directly for all
+    /// four providers' mapping functions. Covers the actual bug
+    /// (GoogleAccount must run on an empty slug) and the regression risk
+    /// the ticket calls out by name (the other three providers, all
+    /// `Datasource(_)`, must stay blocked). `read_slug` is passed as
+    /// `move || "...".to_string()` here since the function only ever calls
+    /// it 0 or 1 times per call in these cases.
     #[test]
     fn oauth_status_source_to_fetch_lets_google_account_through_empty_slug() {
         assert_eq!(
-            oauth_status_source_to_fetch("kyomi_oauth", "", bigquery_oauth_source),
-            Some(OAuthStatusSource::GoogleAccount),
+            oauth_status_source_to_fetch(
+                "kyomi_oauth",
+                true,
+                String::new,
+                bigquery_oauth_source
+            ),
+            Some((OAuthStatusSource::GoogleAccount, String::new())),
             "GoogleAccount is an account-level fetch with no slug parameter — it must run \
              in create mode (empty slug) so an already-linked user's status is fetched at \
              all (KYO-411)"
@@ -9186,70 +9282,221 @@ mod tests {
     #[test]
     fn oauth_status_source_to_fetch_blocks_datasource_source_on_empty_slug() {
         assert_eq!(
-            oauth_status_source_to_fetch("enterprise_oauth", "", bigquery_oauth_source),
+            oauth_status_source_to_fetch(
+                "enterprise_oauth",
+                false,
+                String::new,
+                bigquery_oauth_source
+            ),
             None,
             "Datasource(_) sources need a real slug (get_datasource_oauth_status(key, \
-             slug)) — create mode must not fire this fetch, even for BigQuery"
+             slug)) — an empty slug must not fire this fetch, even for BigQuery, even in \
+             edit mode"
         );
         assert_eq!(
-            oauth_status_source_to_fetch("oauth", "", snowflake_oauth_source),
+            oauth_status_source_to_fetch("oauth", false, String::new, snowflake_oauth_source),
             None,
             "Snowflake's oauth mode maps to Datasource(_) — must stay blocked on an empty \
              slug (regression guard: the other three providers must not change behavior)"
         );
         assert_eq!(
-            oauth_status_source_to_fetch("oauth", "", databricks_oauth_source),
+            oauth_status_source_to_fetch("oauth", false, String::new, databricks_oauth_source),
             None,
             "Databricks's oauth mode maps to Datasource(_) — must stay blocked on an empty \
              slug"
         );
         assert_eq!(
-            oauth_status_source_to_fetch("enterprise_oauth", "", synapse_oauth_source),
+            oauth_status_source_to_fetch(
+                "enterprise_oauth",
+                false,
+                String::new,
+                synapse_oauth_source
+            ),
             None,
             "Synapse's enterprise_oauth mode maps to Datasource(_) — must stay blocked on \
              an empty slug"
         );
     }
 
+    /// KYO-426's missing case, and the exact reason it shipped: the old
+    /// guard was "slug is empty", but `slug` auto-generates from the Name
+    /// field the instant the user types anything — so by the time a create
+    /// -mode user has typed a name, `slug` is non-empty and the old guard
+    /// no longer applied. This asserts the *new* guard (`is_create_mode`)
+    /// blocks the fetch even though the resolved slug here is non-empty,
+    /// which is precisely the state a real create-mode user is in.
     #[test]
-    fn oauth_status_source_to_fetch_runs_datasource_source_with_a_slug() {
+    fn oauth_status_source_to_fetch_blocks_datasource_source_in_create_mode_with_a_slug() {
         assert_eq!(
-            oauth_status_source_to_fetch("oauth", "my-slug", snowflake_oauth_source),
-            Some(OAuthStatusSource::Datasource("snowflake")),
-            "a non-empty slug must let the Datasource(_) source through unchanged — edit \
-             mode is unaffected by KYO-411"
+            oauth_status_source_to_fetch(
+                "enterprise_oauth",
+                true,
+                || "e2e-bigquery".to_string(),
+                bigquery_oauth_source
+            ),
+            None,
+            "a Datasource(_) source must stay blocked in create mode even with a non-empty \
+             slug — get_datasource_oauth_status would 500 against a datasource that hasn't \
+             been created yet (KYO-426); the empty-slug check alone doesn't catch this \
+             because slug auto-generates from Name as soon as the user types"
+        );
+        assert_eq!(
+            oauth_status_source_to_fetch(
+                "oauth",
+                true,
+                || "my-warehouse".to_string(),
+                snowflake_oauth_source
+            ),
+            None,
+            "Snowflake's oauth mode maps to Datasource(_) too — must stay blocked in create \
+             mode with a non-empty slug, same as BigQuery enterprise_oauth"
+        );
+        assert_eq!(
+            oauth_status_source_to_fetch(
+                "oauth",
+                true,
+                || "my-catalog".to_string(),
+                databricks_oauth_source
+            ),
+            None,
+            "Databricks's oauth mode maps to Datasource(_) too — must stay blocked in \
+             create mode with a non-empty slug"
+        );
+        assert_eq!(
+            oauth_status_source_to_fetch(
+                "enterprise_oauth",
+                true,
+                || "my-synapse".to_string(),
+                synapse_oauth_source
+            ),
+            None,
+            "Synapse's enterprise_oauth mode maps to Datasource(_) too — must stay blocked \
+             in create mode with a non-empty slug"
+        );
+    }
+
+    /// Edit mode is unaffected by the KYO-426 fix: once a datasource
+    /// actually exists (`is_create_mode == false`) and has a real slug, the
+    /// `Datasource(_)` source must resolve exactly as before — and the
+    /// returned slug must be the one `read_slug` produced, since callers
+    /// rely on that to avoid reading it twice.
+    #[test]
+    fn oauth_status_source_to_fetch_runs_datasource_source_in_edit_mode_with_a_slug() {
+        assert_eq!(
+            oauth_status_source_to_fetch(
+                "oauth",
+                false,
+                || "my-slug".to_string(),
+                snowflake_oauth_source
+            ),
+            Some((OAuthStatusSource::Datasource("snowflake"), "my-slug".to_string())),
+            "edit mode (is_create_mode == false) plus a non-empty slug must let the \
+             Datasource(_) source through unchanged, carrying the resolved slug — edit mode \
+             is unaffected by KYO-411/KYO-426"
         );
     }
 
     #[test]
     fn oauth_status_source_to_fetch_passes_through_none_regardless_of_slug() {
         assert_eq!(
-            oauth_status_source_to_fetch("service_account", "", bigquery_oauth_source),
+            oauth_status_source_to_fetch(
+                "service_account",
+                false,
+                String::new,
+                bigquery_oauth_source
+            ),
             None,
             "a mode with no OAuth status source at all must stay None on an empty slug"
         );
         assert_eq!(
-            oauth_status_source_to_fetch("service_account", "my-slug", bigquery_oauth_source),
+            oauth_status_source_to_fetch(
+                "service_account",
+                false,
+                || "my-slug".to_string(),
+                bigquery_oauth_source
+            ),
             None,
             "a mode with no OAuth status source at all must stay None on a non-empty slug too"
         );
     }
 
-    /// Wiring guard: `use_oauth_status_refetch`'s `Effect` must resolve its
-    /// source via the shared `oauth_status_source_to_fetch` predicate rather
-    /// than reimplementing (or re-inlining) the guard — an inlined copy
-    /// could silently diverge from the coverage above.
+    /// KYO-443's core claim: the account-level (`GoogleAccount`) path
+    /// resolves identically no matter what `is_create_mode` is, and does so
+    /// WITHOUT EVER CALLING `read_slug` — proven directly here, not by
+    /// grepping source text, by handing it a closure that panics if
+    /// invoked. If this predicate's `GoogleAccount` arm ever grew a slug or
+    /// create-mode check, this test would fail with that panic rather than
+    /// a silently-wrong return value, which is what makes it a genuine
+    /// regression guard for the property `use_oauth_status_refetch`'s
+    /// `Memo` depends on to avoid resubscribing to `slug` on every
+    /// keystroke (KYO-443).
+    #[test]
+    fn oauth_status_source_to_fetch_google_account_arm_never_calls_read_slug() {
+        for is_create_mode in [true, false] {
+            let panics_if_called =
+                || -> String { panic!("read_slug must not be called for GoogleAccount") };
+            assert_eq!(
+                oauth_status_source_to_fetch(
+                    "kyomi_oauth",
+                    is_create_mode,
+                    panics_if_called,
+                    bigquery_oauth_source
+                ),
+                Some((OAuthStatusSource::GoogleAccount, String::new())),
+                "GoogleAccount must resolve the same way regardless of is_create_mode \
+                 ({is_create_mode}) and must not call read_slug to do it — it is an \
+                 account-level fetch that takes no slug parameter at all (KYO-443)"
+            );
+        }
+    }
+
+    /// The `Datasource(_)` arm's create-mode half of the same property:
+    /// `is_create_mode` must be checked BEFORE `read_slug` is called, not
+    /// after. Proven the same way as the test above — a closure that
+    /// panics if invoked — rather than by checking source-text ordering,
+    /// so a future change to the match arm's internal structure (e.g.
+    /// hoisting the slug read above the guard) fails this test with the
+    /// panic itself instead of silently compiling and passing. Without
+    /// this ordering, a create-mode `Datasource(_)` branch would still
+    /// correctly return `None` (covered by the create-mode test above) but
+    /// would have already subscribed `use_oauth_status_refetch`'s `Memo`
+    /// to `slug`, reintroducing the keystroke-flicker half of KYO-443 for
+    /// e.g. BigQuery `enterprise_oauth` even though KYO-426's
+    /// fetch-blocking itself stayed correct.
+    #[test]
+    fn oauth_status_source_to_fetch_create_mode_datasource_arm_never_calls_read_slug() {
+        let panics_if_called =
+            || -> String { panic!("read_slug must not be called in create mode") };
+        assert_eq!(
+            oauth_status_source_to_fetch(
+                "enterprise_oauth",
+                true,
+                panics_if_called,
+                bigquery_oauth_source
+            ),
+            None,
+            "a create-mode Datasource(_) source must resolve to None without ever calling \
+             read_slug — is_create_mode must be checked before the slug read (KYO-426, \
+             KYO-443)"
+        );
+    }
+
+    /// Wiring guard: `use_oauth_status_refetch`'s `fetch_input` `Memo` must
+    /// resolve its source and slug via the shared `oauth_status_source_to_fetch`
+    /// predicate rather than reimplementing (or re-inlining) the guard —
+    /// the unit tests above only cover the extracted predicate itself, and
+    /// an inlined copy in the Memo could silently diverge from it, which is
+    /// the exact duplication this file's own KYO-13/KYO-17/KYO-197 history
+    /// (see `docs/CODING_STANDARDS.md` §Leptos) warns is likely to recur.
     #[test]
     fn use_oauth_status_refetch_calls_the_shared_guard_predicate() {
-        let body = extract_between(SRC, "fn use_oauth_status_refetch(", "fn bigquery_oauth_source(");
+        let body = extract_between(SRC, "fn use_oauth_status_refetch(", "fn build_oauth_recovery_callback(");
         assert!(
-            body.contains(
-                "oauth_status_source_to_fetch(&current_mode, &slug_val, source_for_mode)"
-            ),
-            "use_oauth_status_refetch's Effect must resolve its source via \
-             oauth_status_source_to_fetch — inlining the guard again risks reintroducing \
-             the KYO-411 bug invisibly to the unit tests above, which only cover the \
-             extracted predicate, not the Effect body itself"
+            body.contains("oauth_status_source_to_fetch(&current_mode, create_mode, move || slug.get(), source_for_mode)"),
+            "use_oauth_status_refetch's Memo must resolve its source via \
+             oauth_status_source_to_fetch, passing slug lazily via move || slug.get() — \
+             inlining the guard again risks reintroducing the KYO-411/KYO-426/KYO-443 bugs \
+             invisibly to the unit tests above, which only cover the extracted predicate"
         );
     }
 
@@ -9388,6 +9635,44 @@ mod tests {
         assert!(
             body.contains("Some(status) if status.connected =>"),
             "a recheck that finds the account connected must be adopted, not just discarded"
+        );
+    }
+
+    /// KYO-426 for the recovery path specifically: `build_oauth_recovery_callback`
+    /// fires after a connect attempt resolves without a postMessage, which is
+    /// reachable in create mode too (e.g. a user opens BigQuery
+    /// enterprise_oauth's popup, closes it, all before the datasource is
+    /// created). Without threading `is_create_mode` into the same
+    /// `oauth_status_source_to_fetch` guard `use_oauth_status_refetch` uses,
+    /// this recheck would fire `get_datasource_oauth_status` against a
+    /// datasource that doesn't exist yet and hit the identical 500 the
+    /// mode-change path was fixed for.
+    #[test]
+    fn build_oauth_recovery_callback_threads_is_create_mode_into_the_shared_guard() {
+        let body = extract_between(
+            SRC,
+            "fn build_oauth_recovery_callback(",
+            "\n/// Maps BigQuery's auth mode",
+        );
+        assert!(
+            body.contains("is_create_mode: Signal<bool>"),
+            "build_oauth_recovery_callback must accept is_create_mode so its recheck can \
+             apply the same create-mode guard use_oauth_status_refetch does (KYO-426)"
+        );
+        assert!(
+            body.contains("oauth_status_source_to_fetch(") && body.contains("create_mode,"),
+            "build_oauth_recovery_callback must pass its resolved create_mode value into \
+             oauth_status_source_to_fetch — passing a hardcoded false or omitting the value \
+             entirely would silently reintroduce KYO-426 for the recovery path alone, since \
+             the mode-change path's own guard is a separate Memo and wouldn't catch it"
+        );
+        assert!(
+            body.contains("move || slug.get_untracked()"),
+            "build_oauth_recovery_callback must pass slug into oauth_status_source_to_fetch \
+             lazily via move || slug.get_untracked() — this callback already runs outside \
+             any reactive scope, so this doesn't change tracking behavior, but the accessor \
+             shape must match oauth_status_source_to_fetch's lazy-accessor signature \
+             (KYO-443)"
         );
     }
 
