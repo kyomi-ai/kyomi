@@ -123,16 +123,41 @@ pub async fn init_cache_db(_workspace_id: &str) -> Result<CacheDb, CacheDbError>
 
     let cache_db = CacheDb { inner: db };
 
-    // Check schema hash — mismatch means cached data was written by a
-    // different code version and may not deserialize. Wipe everything.
-    let needs_wipe = match get_meta_raw(&cache_db.inner, "schemaHash").await {
-        Some(stored) => stored != SCHEMA_HASH,
-        None => false,
-    };
+    // Check schema hash — mismatch, OR absence (KYO-479), means the cached
+    // data cannot be trusted: either it was written by a different code
+    // version and may not deserialize, or it was written by a profile whose
+    // last successful sync predates schemaHash tracking entirely, which is
+    // indistinguishable from staleness (see `schema_hash::cache_needs_wipe`
+    // doc comment — a `None` profile with real entity data and a nonzero
+    // cursor cannot be reconciled by delta sync alone, since bootstrap is
+    // one-shot on `idb_cursor == 0`). Wipe everything in both cases.
+    //
+    // A genuinely fresh profile also reads `None` here, but `wipe_all_data`
+    // on empty object stores is a no-op — `clear()` on an empty store simply
+    // returns — and the cursor stays absent regardless, so the client
+    // bootstraps exactly as a first visit should either way.
+    let stored_hash = get_meta_raw(&cache_db.inner, "schemaHash").await;
+    let needs_wipe = crate::cache::schema_hash::cache_needs_wipe(stored_hash.as_deref(), SCHEMA_HASH);
 
     if needs_wipe {
-        tracing::info!("schema hash mismatch — wiping cache for re-bootstrap");
+        tracing::info!("schema hash missing or mismatched — wiping cache for re-bootstrap");
         wipe_all_data(&cache_db.inner).await;
+    }
+
+    // Record the current schema hash at cache-open time (KYO-479), not only
+    // on sync_complete. This must run *after* the wipe decision/wipe above:
+    // writing it first would make the comparison on the *next* open compare
+    // the current hash against itself, so a real mismatch could never be
+    // detected again — a worse bug than the one this closes.
+    //
+    // Writing here (rather than only after a full sync completes) closes the
+    // window that caused the regression: a profile can no longer end up
+    // holding entity data and a nonzero cursor with zero schemaHash record,
+    // even if the tab closes before this session's sync_complete ever
+    // arrives — the *next* open will see the hash this open wrote and make
+    // a correct decision.
+    if let Err(e) = set_meta(&cache_db, "schemaHash", SCHEMA_HASH).await {
+        tracing::warn!("init_cache_db: failed to persist schema hash: {e}");
     }
 
     Ok(cache_db)
