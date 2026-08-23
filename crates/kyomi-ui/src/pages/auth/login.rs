@@ -13,8 +13,8 @@ use phosphor_leptos::Icon;
 use leptos_router::hooks::{use_navigate, use_query_map};
 
 use crate::components::{
-    Alert, AlertDescription, AlertTitle, AlertVariant, Button, ButtonSize, ButtonVariant, Label,
-    Spinner, INPUT_CLASS,
+    Alert, AlertDescription, AlertTitle, AlertVariant, Button, ButtonLink, ButtonSize,
+    ButtonVariant, Checkbox, Label, Spinner, INPUT_CLASS,
 };
 use crate::pages::auth::auth_layout::AuthLayout;
 use crate::pages::auth::components::{AuthDivider, GoogleSignInButton, PasskeySignInButton};
@@ -53,6 +53,24 @@ enum LoginView {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Google sign-in allowlist gate (KYO-478)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Whether the "Continue with Google" button should be disabled — a pure
+/// predicate so the truth table is directly unit-testable rather than only
+/// reachable via a source-text check on the view tree, mirroring
+/// `bq_kyomi_oauth_connect_allowed` in `pages/settings/datasources.rs`
+/// (KYO-477's fix for the sibling BigQuery-linkage gate).
+///
+/// Returns `true` (disabled) when either passkey sign-in is already in
+/// flight (unchanged pre-existing behavior — the two providers are
+/// mutually exclusive while one is loading) or the allowlist checkbox
+/// hasn't been ticked (KYO-478).
+fn google_sign_in_disabled(passkey_loading: bool, access_confirmed: bool) -> bool {
+    passkey_loading || !access_confirmed
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main component
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -82,6 +100,28 @@ pub fn LoginPage(
     // ── Passkey / Google loading ────────────────────────────────────────
     let (passkey_loading, set_passkey_loading) = signal(false);
     let (google_loading, set_google_loading) = signal(false);
+
+    // ── Google OAuth allowlist attestation (KYO-478) ─────────────────────
+    // Kyomi's Google OAuth app is in Testing mode: Google refuses any
+    // account a Kyomi admin hasn't explicitly added as a tester in the
+    // Cloud Console, both for sign-in here and for BigQuery linkage later
+    // (KYO-408 gates the latter in `pages/settings/datasources.rs`). This
+    // is the same UX nudge, not a security control — there is nothing here
+    // for Kyomi to protect, and no dishonest tick bypasses anything Google
+    // wouldn't already stop.
+    //
+    // Deliberately shown for every visitor, including ones who have
+    // signed in with Google here before — unlike the datasource modal's
+    // notice, there is no "already connected" account-level signal
+    // available pre-auth to hide this behind, and it must NOT be
+    // remembered in localStorage either (that would be a gate that looks
+    // real but is invisibly pre-satisfied on return visits — the exact
+    // shape of the KYO-477 defect this ticket was filed alongside). Remove
+    // this whole gate once Kyomi's OAuth app leaves Testing publishing
+    // status in the Google Cloud Console — at that point Google stops
+    // refusing un-allowlisted accounts and there is nothing left to
+    // attest to.
+    let (google_access_confirmed, set_google_access_confirmed) = signal(false);
 
     // ── Signup signals ──────────────────────────────────────────────────
     let (signup_email, set_signup_email) = signal(String::new());
@@ -396,6 +436,15 @@ pub fn LoginPage(
     // window.location().set_href() which are !Send browser APIs. Signal writes
     // inside the async block use try_set for deferred-write safety.
     let on_google_click = Callback::new(move |()| {
+        // KYO-478 — belt-and-suspenders alongside the button's `disabled`
+        // prop: `disabled` doesn't stop a synthetic/programmatic click, so
+        // the handler itself must also refuse to start the flow when the
+        // allowlist checkbox hasn't been ticked. Mirrors `start_connect`'s
+        // `connect_blocked.get_untracked()` guard in
+        // `pages/settings/datasources.rs` (KYO-427/KYO-477).
+        if !google_access_confirmed.get_untracked() {
+            return;
+        }
         set_google_loading.set(true);
         set_error.set(None);
 
@@ -669,6 +718,8 @@ pub fn LoginPage(
                                     show_google_section=show_google_section
                                     passkey_loading=passkey_loading
                                     google_loading=google_loading
+                                    google_access_confirmed=google_access_confirmed
+                                    set_google_access_confirmed=set_google_access_confirmed
                                     on_passkey_click=on_passkey_click
                                     on_google_click=on_google_click
                                     on_login_submit=on_login_submit
@@ -756,6 +807,13 @@ fn CredentialsView(
     show_google_section: impl Fn() -> bool + Copy + Send + Sync + 'static,
     passkey_loading: ReadSignal<bool>,
     google_loading: ReadSignal<bool>,
+    /// KYO-478 — whether the user has ticked "I have requested access and
+    /// had it confirmed" for Kyomi's Google OAuth app allowlist. Owned by
+    /// the parent `LoginPage` (not local state) because `on_google_click`
+    /// there also reads it for its own early-return guard.
+    google_access_confirmed: ReadSignal<bool>,
+    /// Setter for the checkbox above.
+    set_google_access_confirmed: WriteSignal<bool>,
     on_passkey_click: Callback<()>,
     on_google_click: Callback<()>,
     on_login_submit: impl Fn(leptos::ev::SubmitEvent) + Copy + Send + Sync + 'static,
@@ -791,9 +849,70 @@ fn CredentialsView(
             // Google Sign In
             <Show when=show_google_section>
                 <div class="space-y-3">
+                    // KYO-478 — same allowlist notice/checkbox as the
+                    // BigQuery kyomi_oauth Connect gate in
+                    // `pages/settings/datasources.rs` (KYO-408/KYO-477):
+                    // Kyomi's shared Google OAuth app is in Testing mode,
+                    // so an un-allowlisted account is refused by Google
+                    // itself, not by Kyomi. Shown for every visitor —
+                    // see `google_access_confirmed`'s own doc comment
+                    // above (in `LoginPage`) for why it is never hidden
+                    // or persisted across visits.
+                    <Alert variant=AlertVariant::Warning>
+                        <AlertTitle>"Google account authorization required"</AlertTitle>
+                        <AlertDescription>
+                            <p class="mb-3">
+                                "Kyomi's shared Google OAuth app only works for Google \
+                                 accounts a Kyomi admin has explicitly authorized as \
+                                 testers — everyone else is refused by Google itself, \
+                                 not by Kyomi."
+                            </p>
+                            // No `FeedbackAccessRequestHandle` is available pre-auth
+                            // (that context is only provided by `Layout`, which wraps
+                            // authenticated pages), so this links out to support email
+                            // instead of opening the in-app feedback modal the
+                            // datasource modal's equivalent button uses — same
+                            // request, different channel, since there's no signed-in
+                            // session yet to attach an in-app feedback submission to.
+                            //
+                            // Hardcoded rather than read from `kyomi_core::Config::support_email`
+                            // (which defaults to this same address — see `config.rs`):
+                            // `Config` lives on `ServerContext`, which is
+                            // `#[cfg(feature = "ssr")]`-only (`server_fns/mod.rs`) and does
+                            // not exist on this component's `hydrate`/wasm32 build. If a
+                            // configurable support address is ever needed pre-auth, thread
+                            // it through a dedicated server fn rather than reintroducing
+                            // `ServerContext` on the client — but keep this literal in sync
+                            // with `config.rs`'s default until then.
+                            <ButtonLink
+                                href="mailto:support@kyomi.ai?subject=Request%20BigQuery%20Access"
+                                variant=ButtonVariant::Secondary
+                                size=ButtonSize::Sm
+                            >
+                                "Request access"
+                            </ButtonLink>
+                            <p class="text-xs text-muted-foreground mt-1.5 mb-3">
+                                "before connecting, so you're not waiting on a sign-in \
+                                 that's bound to fail."
+                            </p>
+                            <label class="flex items-center gap-2 cursor-pointer">
+                                <Checkbox
+                                    checked=Signal::derive(move || google_access_confirmed.get())
+                                    on_change=Callback::new(move |v: bool| {
+                                        set_google_access_confirmed.set(v)
+                                    })
+                                />
+                                <span class="text-sm">
+                                    "I have requested access and had it confirmed"
+                                </span>
+                            </label>
+                        </AlertDescription>
+                    </Alert>
                     <GoogleSignInButton
                         loading=Signal::derive(move || google_loading.get())
-                        disabled=Signal::derive(move || passkey_loading.get())
+                        disabled=Signal::derive(move || {
+                            google_sign_in_disabled(passkey_loading.get(), google_access_confirmed.get())
+                        })
                         on_click=on_google_click
                     />
                 </div>
@@ -1257,5 +1376,233 @@ fn CheckEmailView(
                 </Button>
             </div>
         </div>
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests (KYO-478)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// This file's own source, for source-text wiring assertions below —
+    /// mirrors the `SRC`/`extract_between` pattern in
+    /// `pages/settings/datasources/tests/mod.rs`, kept local here since
+    /// this file is far below that module's collision-risk size (see
+    /// `docs/standards/testing/one-test-topic-per-file-not-one-big-mod-tests.md`).
+    const SRC: &str = include_str!("login.rs");
+
+    /// `SRC` sliced to production code only, cutting off at this test
+    /// module's own opening marker. Needed for any assertion that scans
+    /// the *whole* file for a literal (e.g. counting call sites) — this
+    /// test module's own source repeats several of those literals verbatim
+    /// in comments/assertion messages, which would otherwise inflate the
+    /// count and either miscount or (worse) pass vacuously regardless of
+    /// production code. See
+    /// `docs/standards/testing/one-test-topic-per-file-not-one-big-mod-tests.md`
+    /// for the general shape of this failure mode.
+    const TEST_MOD_MARKER: &str = "#[cfg(test)]\nmod tests {";
+    fn production_src() -> &'static str {
+        SRC.split(TEST_MOD_MARKER)
+            .next()
+            .expect("TEST_MOD_MARKER must be found in SRC")
+    }
+
+    /// Returns the substring of `src` starting just after the first
+    /// occurrence of `start` and ending just before the first occurrence
+    /// of `end` that follows it. Panics with a descriptive message if
+    /// either marker isn't found, so a typo'd marker fails loudly instead
+    /// of silently matching an empty/wrong range.
+    fn extract_between<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
+        let start_idx = src
+            .find(start)
+            .unwrap_or_else(|| panic!("start marker not found: {start:?}"));
+        let after_start = start_idx + start.len();
+        let end_idx = src[after_start..]
+            .find(end)
+            .unwrap_or_else(|| panic!("end marker not found after start: {end:?}"));
+        &src[after_start..after_start + end_idx]
+    }
+
+    // ── `google_sign_in_disabled` — pure predicate truth table ──────────
+
+    /// The KYO-478 gate exercised directly rather than via the view tree.
+    /// Covers: blocked when unconfirmed regardless of passkey state;
+    /// released only once confirmed AND passkey isn't loading; and the
+    /// pre-existing passkey-loading exclusion is preserved.
+    #[test]
+    fn google_sign_in_disabled_blocks_until_confirmed() {
+        assert!(
+            google_sign_in_disabled(false, false),
+            "must stay disabled while the allowlist checkbox is unticked, even with \
+             passkey sign-in idle"
+        );
+        assert!(
+            google_sign_in_disabled(true, false),
+            "must stay disabled when both unconfirmed AND passkey is loading"
+        );
+        assert!(
+            !google_sign_in_disabled(false, true),
+            "must enable once confirmed, with passkey sign-in idle"
+        );
+        assert!(
+            google_sign_in_disabled(true, true),
+            "must stay disabled while passkey sign-in is in flight, even once confirmed \
+             — this is the pre-existing mutual-exclusion behavior KYO-478 must not \
+             regress"
+        );
+    }
+
+    // ── Wiring: notice + checkbox render inside show_google_section ─────
+
+    /// The KYO-478 notice (Alert + "Request access" link + confirmation
+    /// checkbox) must render inside the `<Show when=show_google_section>`
+    /// block in `CredentialsView` — the same block that renders
+    /// `GoogleSignInButton` — so it can never appear when Google sign-in
+    /// itself isn't offered.
+    #[test]
+    fn google_sign_in_checkbox_renders_inside_show_google_section_block() {
+        let google_block = extract_between(
+            SRC,
+            "<Show when=show_google_section>",
+            "</Show>",
+        );
+        assert!(
+            google_block.contains("Google account authorization required"),
+            "the show_google_section block must render the KYO-478 access-authorization \
+             notice"
+        );
+        assert!(
+            google_block.contains("\"Request access\""),
+            "the notice must include a \"Request access\" control"
+        );
+        assert!(
+            google_block.contains("I have requested access and had it confirmed"),
+            "the notice must render the KYO-478 confirmation checkbox, with copy \
+             matching the datasource modal's equivalent (KYO-408) so both surfaces say \
+             the same thing"
+        );
+        assert!(
+            google_block.contains("<GoogleSignInButton"),
+            "sanity check on the extract_between bounds: the block must still contain \
+             the Google sign-in button itself"
+        );
+        // Pins the real support domain (kyomi.ai, not kyomi.dev — confirmed against
+        // kyomi_core::Config::support_email's default in config.rs). A prior draft of
+        // this link pointed at a domain Kyomi doesn't own, which is the exact dead end
+        // KYO-478 exists to prevent: a user who can't sign in clicks "Request access"
+        // and mails an address that bounces or goes nowhere.
+        assert!(
+            google_block.contains("mailto:support@kyomi.ai"),
+            "the \"Request access\" link must point at support@kyomi.ai — the address \
+             kyomi_core::Config::support_email defaults to — not any other domain"
+        );
+        assert!(
+            !google_block.contains("kyomi.dev"),
+            "the \"Request access\" link must not use the kyomi.dev domain — Kyomi's \
+             support address is on kyomi.ai (see config.rs)"
+        );
+    }
+
+    /// Negative-space companion: the passkey-only `<Show when=show_passkey_section>`
+    /// block, immediately above the Google block in `CredentialsView`, must
+    /// NOT gain this notice — passkey sign-in has no Google OAuth allowlist
+    /// to attest to.
+    #[test]
+    fn google_sign_in_checkbox_does_not_leak_into_passkey_block() {
+        let passkey_block = extract_between(
+            SRC,
+            "<Show when=show_passkey_section>",
+            "<Show when=move || show_passkey_section() && show_google_section()>",
+        );
+        assert!(
+            !passkey_block.contains("Google account authorization required"),
+            "the KYO-478 notice must not leak into the passkey-only block"
+        );
+        assert!(
+            !passkey_block.contains("I have requested access and had it confirmed"),
+            "the KYO-478 checkbox must not leak into the passkey-only block"
+        );
+    }
+
+    // ── Wiring: GoogleSignInButton reads the predicate ───────────────────
+
+    /// The button's `disabled` prop must be derived from
+    /// `google_sign_in_disabled`, not a hand-rolled boolean expression that
+    /// could silently diverge from the tested truth table above.
+    #[test]
+    fn google_sign_in_button_disabled_reads_the_predicate() {
+        let button_block = extract_between(
+            SRC,
+            "<GoogleSignInButton",
+            "on_click=on_google_click",
+        );
+        assert!(
+            button_block.contains("google_sign_in_disabled(passkey_loading.get(), google_access_confirmed.get())"),
+            "GoogleSignInButton's disabled prop must call google_sign_in_disabled with \
+             the live passkey_loading/google_access_confirmed signals — found:\n{button_block}"
+        );
+    }
+
+    // ── Wiring: on_google_click early-returns when unconfirmed ───────────
+
+    /// `disabled` alone does not stop a synthetic/programmatic click, so
+    /// `on_google_click` must also refuse to start the OAuth flow when the
+    /// checkbox is unticked — mirroring `start_connect`'s
+    /// `connect_blocked.get_untracked()` guard in
+    /// `pages/settings/datasources.rs` (KYO-427/KYO-477).
+    #[test]
+    fn on_google_click_early_returns_when_not_confirmed() {
+        let handler_body = extract_between(
+            SRC,
+            "let on_google_click = Callback::new(move |()| {",
+            "leptos::task::spawn_local(async move {",
+        );
+        assert!(
+            handler_body.contains("google_access_confirmed.get_untracked()"),
+            "on_google_click must read google_access_confirmed.get_untracked() before \
+             starting the OAuth flow — found:\n{handler_body}"
+        );
+        assert!(
+            handler_body.contains("return;"),
+            "on_google_click must early-return when unconfirmed, not merely check the \
+             value — found:\n{handler_body}"
+        );
+        // The guard must gate entry — i.e. sit before set_google_loading.set(true)
+        // — not merely be present somewhere in the closure.
+        let guard_idx = handler_body
+            .find("google_access_confirmed.get_untracked()")
+            .expect("checked above");
+        let loading_idx = handler_body
+            .find("set_google_loading.set(true)")
+            .expect("set_google_loading.set(true) must appear in on_google_click");
+        assert!(
+            guard_idx < loading_idx,
+            "the google_access_confirmed.get_untracked() guard must appear BEFORE \
+             set_google_loading.set(true), so the flow never starts loading when \
+             unconfirmed"
+        );
+    }
+
+    // ── Negative space: SignupView has no Google button to gate ──────────
+
+    /// `LoginView::Signup` renders `SignupView`, a completely separate
+    /// component from `CredentialsView` — it offers passkey signup only,
+    /// no Google button (confirmed by inspection: `GoogleSignInButton` has
+    /// exactly one call site in this file, inside `CredentialsView`). This
+    /// test pins that count so a future addition of Google sign-up is
+    /// forced to either reuse `CredentialsView`'s gate or add an
+    /// equivalent one, rather than silently shipping ungated.
+    #[test]
+    fn google_sign_in_button_has_exactly_one_call_site() {
+        let count = production_src().matches("<GoogleSignInButton").count();
+        assert_eq!(
+            count, 1,
+            "expected exactly one <GoogleSignInButton call site (inside \
+             CredentialsView) — found {count}. If a second one was added (e.g. to \
+             SignupView), it must also be gated by the KYO-478 allowlist checkbox."
+        );
     }
 }
