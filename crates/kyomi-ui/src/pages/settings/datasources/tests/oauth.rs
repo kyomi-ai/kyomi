@@ -723,7 +723,7 @@ fn google_oauth_success_arm_sets_test_result_and_discovery_status() {
 // the shared copy/persistence/link-target module both this notice and
 // the login page's equivalent (`pages/auth/login.rs`) now read through.
 
-use super::super::{bq_kyomi_oauth_access_gate_satisfied, translate_google_oauth_error};
+use super::super::bq_kyomi_oauth_access_gate_satisfied;
 
 /// The KYO-408/KYO-499 notice (Alert + inline "Request beta access" link +
 /// confirmation checkbox) must render inside the kyomi_oauth `<Show>` block
@@ -1067,30 +1067,15 @@ fn bq_kyomi_oauth_access_gate_wired_into_save_and_create_not_next() {
 }
 
 // ── KYO-408: Google OAuth denial error translation ──────────────────
-
-#[test]
-fn translate_google_oauth_error_rewrites_access_denied() {
-    let translated = translate_google_oauth_error(
-        "Google OAuth error: access_denied".to_string(),
-    );
-    assert_eq!(
-        translated,
-        "This Google account isn't authorized for Kyomi's OAuth app yet — \
-         request access before connecting."
-    );
-}
-
-#[test]
-fn translate_google_oauth_error_passes_other_errors_through_unchanged() {
-    let raw = "Google OAuth error: invalid_client".to_string();
-    assert_eq!(
-        translate_google_oauth_error(raw.clone()),
-        raw,
-        "any error code other than access_denied must be passed through verbatim — \
-         translating it to the allowlist message would misdescribe an unrelated failure \
-         (e.g. network error, invalid_client, server misconfiguration)"
-    );
-}
+//
+// `translate_google_oauth_error` itself moved to `utils::oauth_popup`
+// (KYO-421), once a third call site (onboarding) needed it — its two
+// direct unit tests (`translate_google_oauth_error_rewrites_access_denied`,
+// `translate_google_oauth_error_passes_other_errors_through_unchanged`)
+// moved with it into that module's own `mod tests`, alongside its other
+// wasm32-or-test pure-predicate helpers. The wiring guard below stays
+// here: it is a source-text assertion over `datasources.rs`, not a test
+// of the function itself.
 
 /// Both OAuth `postMessage` listeners (list-level in `DatasourcesContent`
 /// and modal-level in `DatasourceModal`) must translate `GoogleError`
@@ -1098,7 +1083,9 @@ fn translate_google_oauth_error_passes_other_errors_through_unchanged() {
 /// providers' error arms — `translate_google_oauth_error` assumes an
 /// OAuth2 `access_denied` code from Google's shared-app allowlist
 /// rejection specifically; applying it to a Snowflake/Databricks/
-/// Microsoft/BigQuery-enterprise error would misdescribe those.
+/// Microsoft/BigQuery-enterprise error would misdescribe those. The
+/// sibling guard for the onboarding page's own listener lives in
+/// `pages/onboarding/datasource_onboarding.rs`'s own test module.
 #[test]
 fn google_error_translation_is_not_applied_to_other_providers_error_arms() {
     let list_level = extract_between(

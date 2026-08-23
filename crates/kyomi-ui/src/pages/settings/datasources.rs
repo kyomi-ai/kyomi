@@ -154,44 +154,6 @@ fn oauth_url_for_datasource(ds_type: &str, slug: &str, auth_mode: Option<&str>) 
     }
 }
 
-/// Rewrites Google's raw OAuth denial error into a message naming the real
-/// cause, for the BigQuery Kyomi-OAuth connect flow (KYO-408).
-///
-/// Google's authorization server returns the standard OAuth2 `access_denied`
-/// error code (RFC 6749 §4.1.2.1) both when a user deliberately cancels
-/// consent and when Kyomi's shared OAuth app — permanently in "Testing"
-/// publishing status — rejects a Google account that has not been added to
-/// the test-user allowlist. Google collapses both cases to the same code
-/// and gives Kyomi no server-side way to tell them apart. Because Kyomi's
-/// app never leaves Testing status, an `access_denied` reaching this
-/// function is overwhelmingly the allowlist rejection in practice rather
-/// than a deliberate cancel, so that is the message shown. Every other
-/// error code (network failure, `invalid_client`, etc.) is passed through
-/// unchanged — this message would misdescribe those.
-///
-/// Only applies to `OAuthMessage::GoogleError` (the shared kyomi_oauth
-/// flow). `BigqueryEnterpriseError` is deliberately excluded — enterprise
-/// OAuth uses the customer's own Google Cloud OAuth app, so there is no
-/// Kyomi allowlist to be rejected from.
-///
-/// `cfg`-gated to `wasm32`-or-`test`: its only production callers live
-/// inside `#[cfg(target_arch = "wasm32")]` OAuth `postMessage` listener
-/// blocks below (the popup-listener setup is browser-only), so a native,
-/// non-test `--features ssr` build has no reachable caller at all — this
-/// mirrors the established pattern elsewhere in this crate (e.g.
-/// `dashboard_editor.rs`, `chartml_extension.rs`) for a wasm32-only helper
-/// that still needs direct, host-side unit test coverage.
-#[cfg(any(target_arch = "wasm32", test))]
-fn translate_google_oauth_error(raw: String) -> String {
-    if raw.contains("access_denied") {
-        "This Google account isn't authorized for Kyomi's OAuth app yet — \
-         request access before connecting."
-            .to_string()
-    } else {
-        raw
-    }
-}
-
 /// The BigQuery kyomi_oauth **Save/Create** gate (KYO-408) — a pure
 /// predicate so it's directly unit-testable, unlike the `Signal::derive`
 /// closure in `DatasourceModal` that calls it. See `bq_kyomi_oauth_access_ok`'s
@@ -607,7 +569,9 @@ fn DatasourcesContent(
     // a box that stores the cleanup FnOnce so drop() can call it.
     #[cfg(target_arch = "wasm32")]
     {
-        use crate::utils::oauth_popup::{install_oauth_listener, OAuthMessage};
+        use crate::utils::oauth_popup::{
+            install_oauth_listener, translate_google_oauth_error, OAuthMessage,
+        };
         let query_cache_for_oauth = query_cache;
         let cleanup = install_oauth_listener(move |msg| {
             match msg {
@@ -2964,7 +2928,9 @@ pub fn DatasourceModal(
     // successful connection so the warehouse/catalog dropdowns populate.
     #[cfg(target_arch = "wasm32")]
     {
-        use crate::utils::oauth_popup::{install_oauth_listener, OAuthMessage};
+        use crate::utils::oauth_popup::{
+            install_oauth_listener, translate_google_oauth_error, OAuthMessage,
+        };
         let cleanup = install_oauth_listener(move |msg| {
             match msg {
                 OAuthMessage::GoogleSuccess { email }
