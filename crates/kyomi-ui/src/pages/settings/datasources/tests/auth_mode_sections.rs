@@ -274,3 +274,212 @@ fn connection_auth_modes_unavailable_alert_wraps_the_four_selectors() {
          while the fetch has failed"
     );
 }
+
+// ── KYO-406: BqProjectField custom-entry escape hatch ──────────────
+//
+// `BqProjectField` used to degrade to a free-text input only when the
+// discovered project list was empty — once *any* project was discovered
+// the user was locked into the dropdown, with no way to enter a project
+// the discovery API didn't return (cross-project billing, a project the
+// token lacks resourcemanager.projects.list on, a freshly created one).
+// React's ProjectDropdowns.jsx offered a `__custom__` sentinel option
+// (per field, independent state) plus a warning Alert when discovery
+// failed but manual entry still worked; the Leptos port dropped both.
+//
+// `f` below spans from the doc comment preceding `BQ_CUSTOM_PROJECT_OPTION`
+// through the end of `BqProjectField` — i.e. everything KYO-406 touched,
+// including the doc comments (unlike `extract_between(SRC, "fn
+// BqProjectField(", ...)`, which would start at the fn keyword and miss
+// the disposal-panic comment above it).
+fn bq_project_field_src(src: &str) -> &str {
+    extract_between(
+        src,
+        "/// Sentinel option value that swaps a [`BqProjectField`] into custom-entry",
+        "fn BigQueryAuthModeSection(",
+    )
+}
+
+use super::super::{bq_project_select_options, BQ_CUSTOM_PROJECT_OPTION};
+
+/// The actual bug, asserted by value rather than by the sentinel constant
+/// merely appearing somewhere in the source (the KYO-427 → KYO-477 lesson):
+/// once projects are discovered, the option list `Select` actually receives
+/// must still contain a way to enter a project the API didn't return.
+#[test]
+fn bq_project_select_options_offers_custom_entry_when_projects_are_discovered() {
+    let projects = vec![
+        ("proj-a".to_string(), "Project A".to_string()),
+        ("proj-b".to_string(), "Project B".to_string()),
+    ];
+    let options = bq_project_select_options(projects.clone());
+
+    assert_eq!(
+        &options[..projects.len()],
+        &projects[..],
+        "the discovered projects themselves must still be present, ahead of the sentinel"
+    );
+    assert_eq!(
+        options.last(),
+        Some(&(
+            BQ_CUSTOM_PROJECT_OPTION.to_string(),
+            "Enter custom project ID...".to_string(),
+        )),
+        "once any project is discovered, the option list must still offer a \
+         custom-entry escape hatch — this is the KYO-406 bug: the dropdown \
+         used to lock the user out of manual entry the moment the list was \
+         non-empty"
+    );
+}
+
+/// Confirms `BqProjectField`'s actual `Select` renders the tested pure
+/// function's output, not the raw discovered list — otherwise the sentinel
+/// proven present above never reaches the real dropdown.
+#[test]
+fn bq_project_field_select_uses_the_custom_sentinel_options() {
+    let f = bq_project_field_src(SRC);
+    assert!(
+        f.contains("Signal::derive(move || bq_project_select_options(bq_projects.get()))"),
+        "BqProjectField's dropdown Select must render \
+         bq_project_select_options(bq_projects.get()), not the raw discovered list"
+    );
+    assert!(
+        f.contains("options=select_options"),
+        "the Select in BqProjectField's dropdown branch must consume select_options"
+    );
+}
+
+/// AC: "Custom/dropdown state is per field — toggling Billing does not
+/// affect Default." `BqProjectField` is one component instantiated twice
+/// per auth mode (Billing, Default); this fails if the toggle is ever
+/// hoisted into a prop threaded from a shared parent-level signal, which is
+/// the exact mistake that would make toggling one field flip the other.
+#[test]
+fn bq_project_field_custom_dropdown_toggle_state_is_local_per_instance() {
+    let f = bq_project_field_src(SRC);
+    let props = extract_between(f, "fn BqProjectField(", ") -> impl IntoView {");
+    assert!(
+        !props.contains("is_custom"),
+        "BqProjectField must not accept an is_custom prop from its caller — \
+         that would let BigQueryAuthModeSection thread one shared signal into \
+         both the Billing and Default instances"
+    );
+    assert!(
+        f.contains("let (is_custom, set_is_custom) = signal(false);"),
+        "BqProjectField must own its custom/dropdown toggle as a signal local \
+         to the component body — each <BqProjectField/> call creates its own \
+         instance, so a locally-owned signal is independent per field"
+    );
+
+    // Belt-and-suspenders: no call site (Billing or Default, across all
+    // three auth modes) may pass a custom-mode prop down.
+    assert_eq!(
+        SRC.matches("<BqProjectField").count(),
+        6,
+        "expected 6 BqProjectField call sites (Billing + Default across \
+         kyomi_oauth, enterprise_oauth, and service_account) — update this \
+         test if that count legitimately changed"
+    );
+    assert!(
+        !SRC.contains("is_custom=") && !SRC.contains("set_is_custom="),
+        "no BqProjectField call site may pass is_custom/set_is_custom as a \
+         prop — the toggle must stay local to each component instance"
+    );
+}
+
+/// The other half of the custom-entry escape hatch: picking the sentinel
+/// must not leak "__custom__" into the field's real value, and there must
+/// be a way back.
+#[test]
+fn bq_project_field_custom_mode_intercepts_sentinel_and_offers_back_to_dropdown() {
+    let f = bq_project_field_src(SRC);
+    assert!(
+        f.contains("if val == BQ_CUSTOM_PROJECT_OPTION") && f.contains("set_is_custom.set(true);"),
+        "selecting the sentinel must flip is_custom, not write \"__custom__\" \
+         into the field's value signal via set_value"
+    );
+    assert!(
+        f.contains("\"Back to dropdown\"") && f.contains("set_is_custom.set(false)"),
+        "custom-entry mode must offer a way back to the dropdown, matching \
+         React's \"Back to dropdown\" affordance"
+    );
+}
+
+/// AC: helper text matches React's two variants exactly.
+#[test]
+fn bq_project_field_helper_text_matches_react_variants() {
+    let f = bq_project_field_src(SRC);
+    assert!(
+        f.contains("Select from discovered projects or enter a custom ID"),
+        "the dropdown-branch helper text must match React's copy"
+    );
+    assert!(
+        f.contains("Connect to discover projects, or enter project ID manually"),
+        "the no-projects-branch helper text must match React's copy"
+    );
+}
+
+/// AC: preserve the `<Show>`-not-`{move || ...}` structure and the
+/// disposal-panic comment while going from two branches to three. Going to
+/// three states via nested `<Show>` (not a `{move || match ...}`) is the
+/// only way to add the custom-entry branch without reintroducing the
+/// disposal panic the doc comment documents.
+#[test]
+fn bq_project_field_uses_nested_show_not_reactive_closure_branching() {
+    let f = bq_project_field_src(SRC);
+    assert!(
+        f.contains("avoids the disposal panic"),
+        "the disposal-panic doc comment must survive KYO-406's move to three \
+         branches — it documents a real Leptos crash someone already paid for"
+    );
+
+    // Count only the actual view! body — `f` also includes the doc comments
+    // above `BqProjectField`, which themselves prose-reference "<Show>" twice.
+    let body = &f[f.find("view! {").expect("BqProjectField must have a view! body")..];
+    assert_eq!(
+        body.matches("<Show").count(),
+        2,
+        "BqProjectField's three render states (no-projects / dropdown / \
+         custom-entry) must come from exactly two nested <Show> components \
+         (outer: has-projects vs not; inner: dropdown vs custom-entry)"
+    );
+    assert!(
+        !body.contains("move || match") && !body.contains("move || if"),
+        "BqProjectField must not branch its three states with a reactive \
+         closure — that would recreate Select's internal Effect on every \
+         switch and reintroduce the disposal panic"
+    );
+}
+
+/// AC: discovery-failure messaging uses a Warning Alert stating manual
+/// entry still works, matching ProjectDropdowns.jsx:47-56 — replacing the
+/// bare red text that used to read as fatal. Checked across all three
+/// BigQuery auth mode sections (AC: "Applies to all three auth modes").
+#[test]
+fn bq_projects_discovery_failure_renders_warning_alert_not_bare_text() {
+    let f = extract_between(SRC, "fn BigQueryAuthModeSection(", "fn SnowflakeAuthModeSection(");
+    assert!(
+        !f.contains("text-error-foreground mt-2\">{err}"),
+        "BigQuery project discovery failures must no longer render as bare \
+         red text — that read as fatal even though manual entry still works"
+    );
+    assert_eq!(
+        f.matches(
+            "bq_projects_error.get().filter(|_| bq_projects.get().is_empty()).map(|err| view! {"
+        )
+        .count(),
+        3,
+        "expected one discovery-failure-gated Alert per BigQuery auth mode \
+         section (kyomi_oauth, enterprise_oauth, service_account)"
+    );
+    assert_eq!(
+        f.matches("<Alert variant=AlertVariant::Warning class=\"mt-2\">").count(),
+        3,
+        "each discovery-failure message must render as a Warning Alert, not bare text"
+    );
+    assert_eq!(
+        f.matches("You can still enter project IDs manually below.").count(),
+        3,
+        "the warning must state that manual entry still works, matching \
+         ProjectDropdowns.jsx:47-56"
+    );
+}
