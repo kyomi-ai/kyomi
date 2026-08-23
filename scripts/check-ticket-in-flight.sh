@@ -1,0 +1,376 @@
+#!/usr/bin/env bash
+# ------------------------------------------------------------------------------
+# scripts/check-ticket-in-flight.sh — is anyone else already working on this
+# ticket? (KYO-422)
+#
+# WHY THIS EXISTS
+#
+# On 2026-08-21 two agent workers implemented KYO-416 concurrently, producing
+# PRs #367 and #368. #368 merged; #367 went CONFLICTING and had to be closed
+# and cleaned up by hand. Prose guidance to check for in-flight work already
+# existed in the /backlog-fast skill file before this script, but prose (a)
+# can drift between the several places that need to agree with it, (b) had
+# never been demonstrated to work — nobody had proven it catches a real
+# double-pickup — and (c) didn't exist at all in the sibling /backlog skill.
+# This script is the single, tested, executable answer both skills (and any
+# future caller) invoke instead of restating the check in prose. Self-test:
+# scripts/check-ticket-in-flight-test.sh.
+#
+# WHAT IT CHECKS (KYO-422, extended by KYO-471 — see below)
+#
+#   1. Remote branches   — `git ls-remote --heads <remote>`
+#   2. Pull requests     — `gh pr list`, matched on `headRefName` ONLY
+#   3. Local worktrees   — `git worktree list --porcelain`
+#   4. Local branches    — `git branch --list`
+#
+# Checks 3 and 4 close a hole found in the first design (KYO-471): a worker
+# whose run dies between `git commit` and `git push` leaves a complete
+# implementation that is invisible to checks 1 and 2 — visible only in its
+# own worktree and local branch list.
+#
+# DO NOT MATCH ON PR BODY OR TITLE — READ THIS BEFORE "FIXING" IT BACK (KYO-471)
+#
+# The KYO-422 ticket text, as originally written, recommended finding
+# duplicates by searching PR *bodies* for "Closes KYO-NN". That is wrong and
+# was reverted: this repo's own PR convention requires a PR body to link
+# every ticket it *considered and deferred*, not just the one it implemented
+# (see CLAUDE.md's "When You Discover Something Mid-Task"). A well-behaved,
+# already-merged PR for ticket A routinely says "Closes KYO-A" and links
+# "KYO-B" and "KYO-C" as deferred follow-ups in the same body. Searching
+# bodies for "Closes KYO-<N>" produced false "in flight" hits for KYO-411,
+# KYO-413, and KYO-406 — every one of them a merged PR that merely *listed*
+# that ticket as a deferral, never touched it. Branch name
+# (`headRefName`) is the reliable signal instead: a worker pushes
+# `jason/kyo-<NN>-<slug>` before it opens anything, and a branch name is not
+# reused across unrelated tickets the way a body's prose references are.
+#
+# MATCHING RULE — the trailing hyphen is load-bearing
+#
+# The slug is `kyo-<NN>-`, matched case-insensitively, WITH the trailing
+# hyphen. Without it, ticket 42 would match branch `jason/kyo-422-foo` as a
+# substring. The one exception: a branch that is *exactly* `...kyo-<NN>` with
+# no slug after it (checked via a same-string suffix match, which is exact
+# down to the character — `kyo-4220` cannot suffix-match `kyo-422`, nor can
+# `kyo-14220`, because the trailing digits differ). Do not "simplify" this to
+# a bare substring match.
+#
+# FAIL CLOSED — READ THIS BEFORE "FIXING" IT BACK (KYO-511)
+#
+# A false "clear" (exit 0 when work actually exists) costs a full duplicate
+# implementation of a ticket. A false "in flight" (exit 3 or 1 when nothing
+# exists) costs one skipped work cycle. Those are wildly asymmetric, so any
+# check we cannot complete must be treated as "in flight", never as "clear".
+#
+# KYO-511, in this very workflow, was two bugs that failed OPEN by piping a
+# command's output into `wc -l` or `head` and discarding its exit status —
+# `git ls-remote ... | wc -l` returns "0" (looks like "nothing found") on a
+# network failure exactly as it does on a genuinely empty result, because
+# the exit status that would have told them apart was thrown away by the
+# pipe. This script never pipes a status-bearing command into anything;
+# every external command whose success gates a decision is captured via
+# `if var="$(cmd 2>stderr_file)"; then ... else ... fi` — the `if` inspects
+# that command's own exit status directly, with nothing downstream of it to
+# swallow it. Do not introduce a pipe into `wc -l`/`grep -c`/`head` on the
+# output of `git ls-remote` or `gh pr list` — that reintroduces KYO-511.
+#
+# A TRUNCATED LISTING IS ALSO A CHECK WE DID NOT COMPLETE (same rule)
+#
+# `gh pr list --limit N` silently returns at most N rows. This script shipped
+# with `--limit 200` while the repo already had 411 PRs, so it saw back only
+# as far as PR #212 and reported CLEAR for every duplicate older than that —
+# the identical fail-open species as KYO-511, reached by a different route.
+# The suite passed only by luck, because the PRs it asserts on (#367/#368)
+# happen to be recent.
+#
+# Raising the number on its own does not fix this; it moves the cliff to the
+# next round number and hides it again. So both halves are required, and both
+# are load-bearing:
+#
+#   1. the limit is a named, env-overridable constant, PR_LIST_LIMIT below;
+#   2. the number of rows actually returned is compared against it, and a
+#      listing that comes back with >= PR_LIST_LIMIT rows is treated as
+#      possibly truncated — i.e. the PR check could not be completed — and
+#      exits 3, the same as a `gh` that failed outright.
+#
+# Do not "fix" that back to a plain exit 0 on the theory that a full page is
+# a complete answer; it is exactly the case where it may not be. Raise
+# PR_LIST_LIMIT instead. The row count is accumulated inside the same loop
+# that already walks the one captured fetch — one `gh` call, and no pipe into
+# `wc -l`, per the rule above.
+#
+# SELF-EXCLUSION
+#
+# The script is meant to be called twice per ticket lifecycle (see
+# scripts/README.md) — once at pickup, once again right before dispatching
+# code review. On both calls the caller's own branch legitimately exists, so
+# it must not count as "someone else". Excluded, by exact short-name match:
+#   - the branch checked out in the invoking worktree right now (unless
+#     detached HEAD, or `main` — nobody's ticket branch is ever `main`)
+#   - every `--ignore-branch <name>` passed on the command line
+#
+# USAGE
+#
+#   check-ticket-in-flight.sh <TICKET> [--remote <name>] [--ignore-branch <name>]...
+#
+#   TICKET is KYO-422, kyo-422, or 422 — all equivalent.
+#   --remote defaults to origin. --ignore-branch is repeatable.
+#
+# EXIT CODES
+#
+#   0 — clear. THE ONLY CODE THAT PERMITS CLAIMING THE TICKET.
+#   1 — work in flight found (remote branch, PR, local worktree, or local
+#       branch, matched and not excluded). Do not claim.
+#   2 — usage error (missing/unparseable ticket argument, unknown flag).
+#   3 — a check could not be completed (remote unreachable, `gh` missing or
+#       failing, or the PR listing came back at PR_LIST_LIMIT rows and may
+#       therefore be truncated). Treat exactly like exit 1: do not claim.
+#
+# Pure bash + git + gh. No Rust toolchain, no jq binary — the one JSON
+# extraction needed (from `gh pr list`) uses gh's own built-in `--jq`, since
+# gh bundles its own jq evaluator and this script should not gain a
+# dependency the box might not have.
+# ------------------------------------------------------------------------------
+
+set -euo pipefail
+
+SCRIPT_NAME="$(basename "$0")"
+
+# How many PRs to ask `gh pr list` for. This MUST exceed the repo's total PR
+# count: `gh pr list` caps the listing at `--limit` (and defaults to 30), so
+# anything older than the newest N PRs is simply not looked at. Measured
+# 2026-08-24: `gh pr list --state all --limit 1000 --json number --jq 'length'`
+# returned 411, while the then-current `--limit 200` reached back only to PR
+# #212. The same trap is written up in `.claude/build-test.md` under "Before
+# Claiming a Ticket — check the remote, not just Trakkt".
+#
+# A big number alone is not the fix — see the truncation section of the header
+# above. It is env-overridable for two reasons: an operator hitting the guard
+# can raise it without editing this file, and the self-test drives it down to
+# a handful of rows so it can exercise the truncation path cheaply against a
+# stub `gh`.
+PR_LIST_LIMIT="${PR_LIST_LIMIT:-500}"
+
+usage() {
+    cat >&2 <<EOF
+Usage: $SCRIPT_NAME <TICKET> [--remote <name>] [--ignore-branch <name>]...
+
+  TICKET                   KYO-422, kyo-422, or 422 (all equivalent)
+  --remote <name>          remote to check (default: origin)
+  --ignore-branch <name>   branch to exclude from matching (repeatable)
+
+Environment:
+  PR_LIST_LIMIT            how many PRs to fetch (default: 500). Must exceed
+                           the repo's total PR count; a listing that comes
+                           back at this many rows may be truncated and exits 3.
+
+Exit codes:
+  0  clear — nothing in flight (the only code that permits claiming)
+  1  work in flight found — do not claim
+  2  usage error
+  3  a check could not be completed (including a possibly-truncated PR
+     listing) — treat like exit 1, do not claim
+EOF
+}
+
+case "$PR_LIST_LIMIT" in
+    '' | *[!0-9]* | 0)
+        echo "ERROR: PR_LIST_LIMIT must be a positive integer, got '$PR_LIST_LIMIT'" >&2
+        exit 2
+        ;;
+esac
+
+if [ "$#" -eq 0 ]; then
+    usage
+    exit 2
+fi
+
+TICKET_ARG="$1"
+shift
+
+REMOTE="origin"
+declare -a IGNORE_BRANCHES=()
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --remote)
+            if [ "$#" -lt 2 ]; then
+                echo "ERROR: --remote requires a value" >&2
+                exit 2
+            fi
+            REMOTE="$2"
+            shift 2
+            ;;
+        --ignore-branch)
+            if [ "$#" -lt 2 ]; then
+                echo "ERROR: --ignore-branch requires a value" >&2
+                exit 2
+            fi
+            IGNORE_BRANCHES+=("$2")
+            shift 2
+            ;;
+        *)
+            echo "ERROR: unknown argument: $1" >&2
+            usage
+            exit 2
+            ;;
+    esac
+done
+
+# ---- normalize the ticket argument to a bare digit string ------------------
+ticket_lower="$(printf '%s' "$TICKET_ARG" | tr '[:upper:]' '[:lower:]')"
+case "$ticket_lower" in
+    kyo-*) ticket_num="${ticket_lower#kyo-}" ;;
+    *) ticket_num="$ticket_lower" ;;
+esac
+
+case "$ticket_num" in
+    '' | *[!0-9]*)
+        echo "ERROR: could not parse a ticket number out of '$TICKET_ARG' (expected KYO-422, kyo-422, or 422)" >&2
+        usage
+        exit 2
+        ;;
+esac
+
+SLUG_HYPHEN="kyo-${ticket_num}-"
+SLUG_BARE="kyo-${ticket_num}"
+
+# ---- matching: case-insensitive, trailing-hyphen slug or exact-suffix bare -
+matches_ticket() {
+    local name="$1" lower
+    lower="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
+    case "$lower" in
+        *"$SLUG_HYPHEN"*) return 0 ;;
+        *"$SLUG_BARE") return 0 ;;
+    esac
+    return 1
+}
+
+# ---- self-exclusion set -----------------------------------------------------
+CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)"
+
+declare -a EXCLUDE=()
+if [ "$CURRENT_BRANCH" != "HEAD" ] && [ "$CURRENT_BRANCH" != "main" ]; then
+    EXCLUDE+=("$CURRENT_BRANCH")
+fi
+if [ "${#IGNORE_BRANCHES[@]}" -gt 0 ]; then
+    EXCLUDE+=("${IGNORE_BRANCHES[@]}")
+fi
+
+is_excluded() {
+    local name="$1" e
+    if [ "${#EXCLUDE[@]}" -eq 0 ]; then
+        return 1
+    fi
+    for e in "${EXCLUDE[@]}"; do
+        if [ "$name" = "$e" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+echo "Checking ticket KYO-${ticket_num} for in-flight work (remote: $REMOTE)"
+if [ "${#EXCLUDE[@]}" -gt 0 ]; then
+    echo "Excluding branches: ${EXCLUDE[*]}"
+else
+    echo "Excluding branches: (none)"
+fi
+echo
+
+declare -a HITS=()
+declare -a FAILURES=()
+
+# ---- Check 1: remote branches ----------------------------------------------
+remote_stderr_file="$(mktemp)"
+if remote_refs="$(git ls-remote --heads "$REMOTE" 2>"$remote_stderr_file")"; then
+    while IFS=$'\t' read -r _sha ref; do
+        [ -n "$ref" ] || continue
+        branch="${ref#refs/heads/}"
+        is_excluded "$branch" && continue
+        if matches_ticket "$branch"; then
+            HITS+=("remote branch: $REMOTE/$branch")
+        fi
+    done <<<"$remote_refs"
+else
+    FAILURES+=("remote branches ($REMOTE): $(cat "$remote_stderr_file")")
+fi
+rm -f "$remote_stderr_file"
+
+# ---- Check 2: pull requests (headRefName only — see KYO-471 note above) ---
+# Rows are counted in this same loop, over the SAME single captured fetch, so
+# the truncation guard below costs no second `gh` call and nothing is piped
+# into `wc -l` (see the KYO-511 note in the header).
+gh_stderr_file="$(mktemp)"
+if pr_lines="$(gh pr list --state all --limit "$PR_LIST_LIMIT" --json number,state,headRefName \
+    --jq '.[] | [.number, .state, .headRefName] | @tsv' 2>"$gh_stderr_file")"; then
+    pr_row_count=0
+    while IFS=$'\t' read -r pr_number pr_state pr_branch; do
+        # A zero-PR listing is the empty string, which a herestring still
+        # feeds through as one empty line. That is not a row.
+        [ -n "$pr_number" ] || continue
+        pr_row_count=$((pr_row_count + 1))
+        [ -n "$pr_branch" ] || continue
+        is_excluded "$pr_branch" && continue
+        if matches_ticket "$pr_branch"; then
+            HITS+=("PR #${pr_number} (${pr_state}) branch ${pr_branch}")
+        fi
+    done <<<"$pr_lines"
+    if [ "$pr_row_count" -ge "$PR_LIST_LIMIT" ]; then
+        FAILURES+=("gh pr list: returned $pr_row_count rows, at the PR_LIST_LIMIT of $PR_LIST_LIMIT — the listing may be truncated, so any older PR went unchecked; re-run with a higher PR_LIST_LIMIT (e.g. PR_LIST_LIMIT=$((PR_LIST_LIMIT * 2)))")
+    fi
+else
+    FAILURES+=("gh pr list: $(cat "$gh_stderr_file")")
+fi
+rm -f "$gh_stderr_file"
+
+# ---- Check 3: local worktrees ----------------------------------------------
+wt_path=""
+wt_branch=""
+flush_worktree_entry() {
+    if [ -n "$wt_branch" ]; then
+        if ! is_excluded "$wt_branch" && matches_ticket "$wt_branch"; then
+            HITS+=("local worktree at ${wt_path} (branch ${wt_branch})")
+        fi
+    fi
+    wt_path=""
+    wt_branch=""
+}
+while IFS= read -r line; do
+    case "$line" in
+        "worktree "*) wt_path="${line#worktree }" ;;
+        "branch refs/heads/"*) wt_branch="${line#branch refs/heads/}" ;;
+        "") flush_worktree_entry ;;
+        *) ;;
+    esac
+done < <(git worktree list --porcelain)
+flush_worktree_entry # in case the porcelain output has no trailing blank line
+
+# ---- Check 4: local branches ------------------------------------------------
+while IFS= read -r branch; do
+    [ -n "$branch" ] || continue
+    is_excluded "$branch" && continue
+    if matches_ticket "$branch"; then
+        HITS+=("local branch: $branch")
+    fi
+done < <(git branch --list --format='%(refname:short)')
+
+# ---- verdict -----------------------------------------------------------------
+echo
+if [ "${#FAILURES[@]}" -gt 0 ]; then
+    echo "RESULT: COULD NOT COMPLETE ALL CHECKS — failing closed, do not claim KYO-${ticket_num}"
+    for f in "${FAILURES[@]}"; do
+        echo "  ✗ $f"
+    done
+    exit 3
+fi
+
+if [ "${#HITS[@]}" -gt 0 ]; then
+    echo "RESULT: IN FLIGHT — do not claim KYO-${ticket_num}"
+    for h in "${HITS[@]}"; do
+        echo "  - $h"
+    done
+    exit 1
+fi
+
+echo "RESULT: CLEAR — nothing in flight for KYO-${ticket_num}"
+exit 0

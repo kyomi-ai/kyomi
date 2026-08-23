@@ -1,0 +1,419 @@
+#!/usr/bin/env bash
+# ------------------------------------------------------------------------------
+# scripts/check-ticket-in-flight-test.sh — self-test for
+# check-ticket-in-flight.sh (KYO-422)
+#
+# Exercises the script against a REAL throwaway git repo with a REAL bare
+# remote (`git init`, `git init --bare`, `git push`) plus a stub `gh` placed
+# first on PATH, whose canned output each test controls. Never touches the
+# real kyomi repo, the real origin, or the real `gh` — everything happens
+# under a fresh mktemp -d that is removed on exit.
+#
+# Test 2 is the KYO-422 acceptance criterion itself: an actual simulated
+# double-pickup (worker A pushes, worker B — a separate, untouched clone —
+# checks before starting and is told no).
+#
+# Exit 0 = all pass, exit 1 = any failure.
+# ------------------------------------------------------------------------------
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT="$SCRIPT_DIR/check-ticket-in-flight.sh"
+PASS=0
+FAIL=0
+
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+
+# Give every throwaway commit a fixed identity so tests don't depend on (or
+# pollute) the real machine's git config.
+export GIT_AUTHOR_NAME="KYO-422 Test" GIT_AUTHOR_EMAIL="kyo422-test@kyomi.invalid"
+export GIT_COMMITTER_NAME="KYO-422 Test" GIT_COMMITTER_EMAIL="kyo422-test@kyomi.invalid"
+
+# ─── stub `gh`, controlled by files the harness writes before each call ─────
+STUB_BIN="$tmpdir/bin"
+mkdir -p "$STUB_BIN"
+export GH_STDOUT_FILE="$tmpdir/gh_stdout"
+export GH_STDERR_FILE="$tmpdir/gh_stderr"
+export GH_EXIT_FILE="$tmpdir/gh_exit"
+
+cat >"$STUB_BIN/gh" <<'STUB'
+#!/usr/bin/env bash
+# Test-only stand-in for `gh`. Ignores its arguments entirely and replays
+# whatever the test harness staged in GH_STDOUT_FILE / GH_STDERR_FILE /
+# GH_EXIT_FILE. Ships only inside this test's own $tmpdir/bin, first on
+# PATH for the duration of the run — never touches the real `gh` or network.
+cat "$GH_STDOUT_FILE"
+cat "$GH_STDERR_FILE" >&2
+exit "$(cat "$GH_EXIT_FILE")"
+STUB
+chmod +x "$STUB_BIN/gh"
+export PATH="$STUB_BIN:$PATH"
+
+gh_ok_empty() { : >"$GH_STDOUT_FILE"; : >"$GH_STDERR_FILE"; echo 0 >"$GH_EXIT_FILE"; }
+gh_ok_prs() {
+    # gh_ok_prs '<number>\t<state>\t<headRefName>' [...]  — one arg per PR row,
+    # matching the exact TSV shape check-ticket-in-flight.sh asks `gh` to
+    # produce via `--jq '.[] | [.number, .state, .headRefName] | @tsv'`.
+    printf '%s\n' "$@" >"$GH_STDOUT_FILE"
+    : >"$GH_STDERR_FILE"
+    echo 0 >"$GH_EXIT_FILE"
+}
+gh_ok_prs_n() {
+    # gh_ok_prs_n <count> [<extra row>...] — stage <count> filler PR rows, then
+    # any extra rows given verbatim. Filler branches are jason/kyo-90<i>-filler,
+    # which no ticket number any test asks about can match, so a row's only
+    # contribution is to the row COUNT — which is what the PR_LIST_LIMIT
+    # truncation guard keys off. Lets a test reach the limit in three rows
+    # instead of five hundred.
+    local count="$1" i
+    shift
+    : >"$GH_STDOUT_FILE"
+    for ((i = 1; i <= count; i++)); do
+        printf '%d\tMERGED\tjason/kyo-90%d-filler\n' "$((9000 + i))" "$i" >>"$GH_STDOUT_FILE"
+    done
+    if [ "$#" -gt 0 ]; then
+        printf '%s\n' "$@" >>"$GH_STDOUT_FILE"
+    fi
+    : >"$GH_STDERR_FILE"
+    echo 0 >"$GH_EXIT_FILE"
+}
+gh_fail() {
+    : >"$GH_STDOUT_FILE"
+    printf '%s\n' "$1" >"$GH_STDERR_FILE"
+    echo 1 >"$GH_EXIT_FILE"
+}
+gh_ok_empty # default: no PRs, until a test says otherwise
+
+# ─── real git repo helpers ───────────────────────────────────────────────────
+new_bare_remote() {
+    # new_bare_remote <dir> -> echoes <dir>. Pre-points HEAD at refs/heads/main
+    # so a later `git clone` checks out "main" the moment it exists, without
+    # depending on this machine's init.defaultBranch.
+    local dir="$1"
+    git init --bare -q "$dir"
+    git -C "$dir" symbolic-ref HEAD refs/heads/main
+    echo "$dir"
+}
+
+seed_main() {
+    # seed_main <bare_remote_dir> — pushes an initial commit on main so
+    # clones aren't empty.
+    local bare="$1" seed
+    seed="$(mktemp -d)"
+    git init -q "$seed"
+    git -C "$seed" checkout -q -b main
+    echo "seed" >"$seed/README.md"
+    git -C "$seed" add README.md
+    git -C "$seed" commit -q -m init
+    git -C "$seed" remote add origin "$bare"
+    git -C "$seed" push -q origin main
+    rm -rf "$seed"
+}
+
+clone_repo() { git clone -q "$1" "$2"; } # clone_repo <bare> <dest>
+
+# ─── invoke the script under test, capturing exit code + combined output ────
+CHECK_STATUS=""
+CHECK_OUTPUT=""
+run_check() {
+    # run_check <dir> <ticket> [extra args to check-ticket-in-flight.sh...]
+    local dir="$1" ticket="$2" out
+    shift 2
+    if out="$(cd "$dir" && "$SCRIPT" "$ticket" "$@" 2>&1)"; then
+        CHECK_STATUS=0
+    else
+        CHECK_STATUS=$?
+    fi
+    CHECK_OUTPUT="$out"
+}
+
+assert_exit() {
+    local name="$1" expected="$2"
+    if [ "$CHECK_STATUS" -eq "$expected" ]; then
+        printf "  \xe2\x9c\x93 %s (exit %d)\n" "$name" "$CHECK_STATUS"
+        PASS=$((PASS + 1))
+    else
+        printf "  \xe2\x9c\x97 %s \xe2\x80\x94 expected exit %d, got %d\n" "$name" "$expected" "$CHECK_STATUS"
+        echo "    output:"
+        echo "$CHECK_OUTPUT" | sed 's/^/    | /'
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+assert_contains() {
+    local name="$1" needle="$2"
+    if printf '%s' "$CHECK_OUTPUT" | grep -qF -- "$needle"; then
+        printf "  \xe2\x9c\x93 %s\n" "$name"
+        PASS=$((PASS + 1))
+    else
+        printf "  \xe2\x9c\x97 %s \xe2\x80\x94 expected output to contain: %s\n" "$name" "$needle"
+        echo "    output:"
+        echo "$CHECK_OUTPUT" | sed 's/^/    | /'
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+assert_not_contains() {
+    local name="$1" needle="$2"
+    if printf '%s' "$CHECK_OUTPUT" | grep -qF -- "$needle"; then
+        printf "  \xe2\x9c\x97 %s \xe2\x80\x94 expected output NOT to contain: %s\n" "$name" "$needle"
+        echo "    output:"
+        echo "$CHECK_OUTPUT" | sed 's/^/    | /'
+        FAIL=$((FAIL + 1))
+    else
+        printf "  \xe2\x9c\x93 %s\n" "$name"
+        PASS=$((PASS + 1))
+    fi
+}
+
+echo "Running check-ticket-in-flight self-tests..."
+echo
+
+# ─── Test 1: clean — no branches, gh returns nothing ────────────────────────
+echo "-- Test 1: clean"
+t1="$tmpdir/t1"
+mkdir -p "$t1"
+bare1="$(new_bare_remote "$t1/remote.git")"
+seed_main "$bare1"
+clone_repo "$bare1" "$t1/workerB"
+gh_ok_empty
+run_check "$t1/workerB" 422
+assert_exit "clean repo, no PRs" 0
+echo
+
+# ─── Test 2: THE KYO-422 acceptance criterion — an actual simulated ─────────
+# double pickup. Worker A pushes jason/kyo-422-guard to the shared remote.
+# Worker B is a SEPARATE clone, still on main, has done zero work, and checks
+# before starting — reproducing the exact KYO-416 failure mode (PRs #367/#368).
+echo "-- Test 2: double pickup (KYO-422 acceptance criterion)"
+t2="$tmpdir/t2"
+mkdir -p "$t2"
+bare2="$(new_bare_remote "$t2/remote.git")"
+seed_main "$bare2"
+clone_repo "$bare2" "$t2/workerA"
+git -C "$t2/workerA" checkout -q -b jason/kyo-422-guard
+echo "workerA change" >>"$t2/workerA/README.md"
+git -C "$t2/workerA" commit -q -am "workerA: start KYO-422"
+git -C "$t2/workerA" push -q origin jason/kyo-422-guard
+clone_repo "$bare2" "$t2/workerB"
+gh_ok_empty
+run_check "$t2/workerB" 422
+assert_exit "worker B sees worker A's pushed branch before starting" 1
+assert_contains "names the remote branch" "remote branch: origin/jason/kyo-422-guard"
+echo
+
+# ─── Test 3: open PR ─────────────────────────────────────────────────────────
+echo "-- Test 3: open PR"
+t3="$tmpdir/t3"
+mkdir -p "$t3"
+bare3="$(new_bare_remote "$t3/remote.git")"
+seed_main "$bare3"
+clone_repo "$bare3" "$t3/workerB"
+gh_ok_prs $'501\tOPEN\tjason/kyo-422-guard'
+run_check "$t3/workerB" 422
+assert_exit "remote clean but an open PR matches" 1
+assert_contains "names the PR number and state" "PR #501 (OPEN) branch jason/kyo-422-guard"
+echo
+
+# ─── Test 4: closed/merged PR — still counts, ticket isn't done ─────────────
+echo "-- Test 4: merged PR"
+t4="$tmpdir/t4"
+mkdir -p "$t4"
+bare4="$(new_bare_remote "$t4/remote.git")"
+seed_main "$bare4"
+clone_repo "$bare4" "$t4/workerB"
+gh_ok_prs $'502\tMERGED\tjason/kyo-422-guard'
+run_check "$t4/workerB" 422
+assert_exit "a merged PR means look before reimplementing" 1
+assert_contains "names the PR number and state" "PR #502 (MERGED) branch jason/kyo-422-guard"
+echo
+
+# ─── Test 5: self-exclusion ──────────────────────────────────────────────────
+echo "-- Test 5: self-exclusion"
+t5="$tmpdir/t5"
+mkdir -p "$t5"
+bare5="$(new_bare_remote "$t5/remote.git")"
+seed_main "$bare5"
+clone_repo "$bare5" "$t5/workerA"
+git -C "$t5/workerA" checkout -q -b jason/kyo-422-guard
+echo "workerA change" >>"$t5/workerA/README.md"
+git -C "$t5/workerA" commit -q -am "workerA: start KYO-422"
+git -C "$t5/workerA" push -q origin jason/kyo-422-guard
+gh_ok_empty
+run_check "$t5/workerA" 422
+assert_exit "worker A re-checking its own checked-out, already-pushed branch" 0
+
+# A second, genuinely different worker's branch lands on the remote.
+git -C "$t5/workerA" push -q origin jason/kyo-422-guard:refs/heads/jason/kyo-422-other
+run_check "$t5/workerA" 422
+assert_exit "self-exclusion must not blind it to a different branch" 1
+assert_contains "names the other worker's branch" "remote branch: origin/jason/kyo-422-other"
+assert_not_contains "does not re-flag its own excluded branch" "remote branch: origin/jason/kyo-422-guard"
+echo
+
+# ─── Test 6: --ignore-branch ─────────────────────────────────────────────────
+echo "-- Test 6: --ignore-branch"
+t6="$tmpdir/t6"
+mkdir -p "$t6"
+bare6="$(new_bare_remote "$t6/remote.git")"
+seed_main "$bare6"
+clone_repo "$bare6" "$t6/helper"
+git -C "$t6/helper" push -q origin main:refs/heads/jason/kyo-422-explicit
+clone_repo "$bare6" "$t6/workerB"
+gh_ok_empty
+run_check "$t6/workerB" 422
+assert_exit "without --ignore-branch it is a real hit" 1
+run_check "$t6/workerB" 422 --ignore-branch jason/kyo-422-explicit
+assert_exit "--ignore-branch suppresses the named branch" 0
+echo
+
+# ─── Test 7: substring safety — the trailing-hyphen rule ────────────────────
+echo "-- Test 7: substring safety"
+t7="$tmpdir/t7"
+mkdir -p "$t7"
+bare7="$(new_bare_remote "$t7/remote.git")"
+seed_main "$bare7"
+clone_repo "$bare7" "$t7/helper"
+git -C "$t7/helper" push -q origin main:refs/heads/jason/kyo-422-guard
+clone_repo "$bare7" "$t7/workerB"
+gh_ok_empty
+run_check "$t7/workerB" 42
+assert_exit "ticket 42 must NOT match branch kyo-422-guard" 0
+run_check "$t7/workerB" 422
+assert_exit "ticket 422 must match branch kyo-422-guard" 1
+echo
+
+# ─── Test 8: local-only work, never pushed (KYO-471 hole) ───────────────────
+echo "-- Test 8: local-only work"
+t8="$tmpdir/t8"
+mkdir -p "$t8"
+bare8="$(new_bare_remote "$t8/remote.git")"
+seed_main "$bare8"
+clone_repo "$bare8" "$t8/worker"
+git -C "$t8/worker" checkout -q -b jason/kyo-422-guard
+echo "local only, never pushed" >>"$t8/worker/README.md"
+git -C "$t8/worker" commit -q -am "local work, never pushed"
+git -C "$t8/worker" checkout -q main
+gh_ok_empty
+run_check "$t8/worker" 422
+assert_exit "unpushed local branch is still in-flight work" 1
+assert_contains "names the local branch" "local branch: jason/kyo-422-guard"
+echo
+
+# ─── Test 9: fail closed — gh broken ─────────────────────────────────────────
+echo "-- Test 9: fail closed, gh broken"
+t9="$tmpdir/t9"
+mkdir -p "$t9"
+bare9="$(new_bare_remote "$t9/remote.git")"
+seed_main "$bare9"
+clone_repo "$bare9" "$t9/workerB"
+gh_fail "gh: authentication required (stub failure)"
+run_check "$t9/workerB" 422
+assert_exit "a failing gh must exit 3, never 0" 3
+assert_contains "names the failing check" "gh pr list"
+gh_ok_empty
+echo
+
+# ─── Test 10: fail closed — remote unreachable ───────────────────────────────
+echo "-- Test 10: fail closed, remote unreachable"
+t10="$tmpdir/t10"
+mkdir -p "$t10"
+bare10="$(new_bare_remote "$t10/remote.git")"
+seed_main "$bare10"
+clone_repo "$bare10" "$t10/workerB"
+gh_ok_empty
+run_check "$t10/workerB" 422 --remote "$t10/does-not-exist.git"
+assert_exit "an unreachable remote must exit 3, never 0" 3
+assert_contains "names the failing check" "remote branches"
+echo
+
+# ─── Test 11: usage errors ───────────────────────────────────────────────────
+echo "-- Test 11: usage"
+if out="$(cd "$tmpdir" && "$SCRIPT" 2>&1)"; then
+    CHECK_STATUS=0
+else
+    CHECK_STATUS=$?
+fi
+CHECK_OUTPUT="$out"
+assert_exit "no argument" 2
+run_check "$tmpdir" "not-a-ticket"
+assert_exit "unparseable ticket" 2
+PR_LIST_LIMIT="not-a-number" run_check "$tmpdir" 422
+assert_exit "non-numeric PR_LIST_LIMIT override" 2
+PR_LIST_LIMIT=0 run_check "$tmpdir" 422
+assert_exit "zero PR_LIST_LIMIT override" 2
+echo
+
+# ─── Test 12: input forms — KYO-422 / kyo-422 / 422 all identical ───────────
+echo "-- Test 12: input forms"
+t12="$tmpdir/t12"
+mkdir -p "$t12"
+bare12="$(new_bare_remote "$t12/remote.git")"
+seed_main "$bare12"
+clone_repo "$bare12" "$t12/workerA"
+git -C "$t12/workerA" checkout -q -b jason/kyo-422-guard
+echo "x" >>"$t12/workerA/README.md"
+git -C "$t12/workerA" commit -q -am "start"
+git -C "$t12/workerA" push -q origin jason/kyo-422-guard
+clone_repo "$bare12" "$t12/workerB"
+gh_ok_empty
+for form in KYO-422 kyo-422 422; do
+    run_check "$t12/workerB" "$form"
+    assert_exit "input form '$form' behaves identically" 1
+done
+echo
+
+# ─── Test 13: fail closed — a PR listing that may be truncated ──────────────
+# THE FAIL-CLOSED PROOF for `gh pr list --limit`. The script shipped with a
+# hardcoded --limit 200 against a repo that already had 411 PRs, so every
+# duplicate older than PR #212 was invisible and reported CLEAR — the KYO-511
+# fail-open species by another route. A bigger number alone would not have
+# caught it, so the guard is what is under test here: exactly PR_LIST_LIMIT
+# rows come back, NONE of them matching the ticket, so an implementation that
+# ignored the row count would confidently say "clear" (exit 0). It must say
+# "could not complete this check" (exit 3) instead.
+echo "-- Test 13: fail closed, PR listing at PR_LIST_LIMIT"
+t13="$tmpdir/t13"
+mkdir -p "$t13"
+bare13="$(new_bare_remote "$t13/remote.git")"
+seed_main "$bare13"
+clone_repo "$bare13" "$t13/workerB"
+gh_ok_prs_n 3
+PR_LIST_LIMIT=3 run_check "$t13/workerB" 422
+assert_exit "a listing at the limit must exit 3, never 0" 3
+assert_contains "names the limit it hit" "PR_LIST_LIMIT of 3"
+assert_contains "tells the operator to raise it" "re-run with a higher PR_LIST_LIMIT"
+echo
+
+# ─── Test 14: just under the limit, no match — the guard must not fire ──────
+echo "-- Test 14: just under PR_LIST_LIMIT, no match"
+t14="$tmpdir/t14"
+mkdir -p "$t14"
+bare14="$(new_bare_remote "$t14/remote.git")"
+seed_main "$bare14"
+clone_repo "$bare14" "$t14/workerB"
+gh_ok_prs_n 2
+PR_LIST_LIMIT=3 run_check "$t14/workerB" 422
+assert_exit "a complete listing with no match is still CLEAR" 0
+assert_not_contains "does not claim truncation" "PR_LIST_LIMIT of 3"
+echo
+
+# ─── Test 15: just under the limit, with a match — real verdict survives ────
+echo "-- Test 15: just under PR_LIST_LIMIT, with a match"
+t15="$tmpdir/t15"
+mkdir -p "$t15"
+bare15="$(new_bare_remote "$t15/remote.git")"
+seed_main "$bare15"
+clone_repo "$bare15" "$t15/workerB"
+gh_ok_prs_n 1 $'503\tOPEN\tjason/kyo-422-guard'
+PR_LIST_LIMIT=3 run_check "$t15/workerB" 422
+assert_exit "a complete listing with a match is IN FLIGHT" 1
+assert_contains "names the matching PR" "PR #503 (OPEN) branch jason/kyo-422-guard"
+echo
+
+gh_ok_empty
+
+echo "Results: $PASS passed, $FAIL failed"
+[ "$FAIL" -eq 0 ]
