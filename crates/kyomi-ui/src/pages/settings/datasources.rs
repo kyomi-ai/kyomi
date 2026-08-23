@@ -2941,9 +2941,16 @@ pub fn DatasourceModal(
     // that signal answers "is the Connection tab done" and gates
     // Next/the Catalog tab, matching the KYO-404 create-mode flow. This
     // gate answers a narrower question — "has the user acknowledged the
-    // OAuth allowlist" — and, matching the React reference
-    // (`AuthModeSelector.jsx` / `DatasourceModal.jsx`), only ever gates
-    // the Save/Create action itself, never tab navigation.
+    // OAuth allowlist" — and gates the Save/Create action and the
+    // kyomi_oauth Connect/Reconnect button (`connect_blocked` on
+    // `ModalOAuthStatusPanel`, KYO-427) — never tab navigation. Save/
+    // Create was the original (and, per the React reference —
+    // `AuthModeSelector.jsx` / `DatasourceModal.jsx` — the only) gate;
+    // KYO-427 added Connect/Reconnect after production use showed the
+    // Save/Create gate alone was unreachable in create mode until OAuth
+    // had already succeeded, so it gated nothing where it mattered. Both
+    // readers share this one signal rather than each deriving their own
+    // copy of `bq_kyomi_oauth_access_gate_satisfied` (KYO-423).
     //
     // Auto-satisfied once `modal_oauth_connected` is true: a successful
     // OAuth handshake IS proof the account was already allowlisted (Google
@@ -3707,6 +3714,7 @@ pub fn DatasourceModal(
                                             on_validate=on_bq_validate
                                             bq_access_confirmed=bq_access_confirmed
                                             set_bq_access_confirmed=set_bq_access_confirmed
+                                            bq_kyomi_oauth_access_ok=bq_kyomi_oauth_access_ok
                                         />
                                     </Show>
 
@@ -4290,6 +4298,18 @@ fn ModalOAuthStatusPanel(
     /// connect button. Always false for `kyomi_oauth` (global OAuth,
     /// not per-datasource).
     cfg_missing: Signal<bool>,
+    /// Whether the Connect/Reconnect action is blocked by an unmet
+    /// precondition (KYO-427). Defaults to `false` — never blocked — so
+    /// Snowflake, Databricks, Microsoft, and BigQuery enterprise_oauth
+    /// (the other four callers of this shared panel) are unaffected. The
+    /// one real caller, BigQuery kyomi_oauth, passes the *same*
+    /// `bq_kyomi_oauth_access_ok` signal the footer's Save/Create gate
+    /// reads (see that signal's doc comment in `DatasourceModal`) —
+    /// never a separately-derived copy of the underlying predicate
+    /// (KYO-423 is exactly that anti-pattern, twice already: KYO-404,
+    /// KYO-413).
+    #[prop(default = false.into())]
+    connect_blocked: Signal<bool>,
     /// Called when the user clicks "Disconnect".  Callers use an
     /// `Action` and pass a typed callback — this is a simple `Fn`
     /// because `Action` dispatch is synchronous and non-blocking.
@@ -4343,7 +4363,7 @@ fn ModalOAuthStatusPanel(
     // otherwise byte-for-byte the same click handler, differing only in
     // which state they're rendered from.
     let start_connect = move |_: leptos::ev::MouseEvent| {
-        if oauth_connecting.get_untracked() {
+        if oauth_connecting.get_untracked() || connect_blocked.get_untracked() {
             return;
         }
         set_oauth_connecting.set(true);
@@ -4447,6 +4467,7 @@ fn ModalOAuthStatusPanel(
                         <Button
                             variant=ButtonVariant::Outline
                             size=ButtonSize::Sm
+                            disabled=connect_blocked
                             on:click=start_connect
                         >
                             {move || if oauth_connecting.get() {
@@ -4476,6 +4497,7 @@ fn ModalOAuthStatusPanel(
                     <Button
                         variant=ButtonVariant::Outline
                         size=ButtonSize::Sm
+                        disabled=connect_blocked
                         on:click=start_connect
                     >
                         {move || if oauth_connecting.get() {
@@ -5024,6 +5046,12 @@ fn BigQueryAuthModeSection(
     bq_access_confirmed: ReadSignal<bool>,
     /// Setter for the checkbox above.
     set_bq_access_confirmed: WriteSignal<bool>,
+    /// KYO-427 — the same `bq_kyomi_oauth_access_ok` signal the footer's
+    /// Save/Create gate reads (see that signal's doc comment in
+    /// `DatasourceModal`), threaded down so the kyomi_oauth `Connect
+    /// BigQuery` button can be gated by the identical predicate rather
+    /// than a second, independently-derived copy of it (KYO-423).
+    bq_kyomi_oauth_access_ok: Signal<bool>,
 ) -> impl IntoView {
     // Parse service account email from JSON
     let handle_service_account_json = move |json_text: String| {
@@ -5254,6 +5282,9 @@ fn BigQueryAuthModeSection(
                         provider_name="BigQuery"
                         connect_url=kyomi_oauth_url
                         cfg_missing=Signal::stored(false)
+                        connect_blocked=Signal::derive(move || {
+                            !bq_kyomi_oauth_access_ok.get()
+                        })
                         on_disconnect=on_google_disconnect
                         disconnect_pending=google_disconnect_pending
                         on_recover=on_oauth_recover
@@ -11485,6 +11516,200 @@ mod tests {
             "the BigQuery service_account Validate & Discover Projects site must render its \
              result through ConnectionTestResultBadge (KYO-469), not an inline duplicate of \
              the success/failure arms"
+        );
+    }
+
+    // ── KYO-427: gate "Connect BigQuery" on the same attestation checkbox ──
+
+    /// The KYO-408 checkbox previously gated only Save/Create, which in
+    /// create mode is unreachable until OAuth has already succeeded — so it
+    /// gated nothing where it mattered. KYO-427 requires the kyomi_oauth
+    /// `ModalOAuthStatusPanel`'s "Connect BigQuery" button itself to read
+    /// the *same* `bq_kyomi_oauth_access_ok` signal the footer reads (KYO-423
+    /// forbids a second, independently-derived copy of the predicate) — not
+    /// merely that some predicate with a similar name exists nearby.
+    ///
+    /// Scoped to `kyomi_block`, the `<Show when=bq_auth_mode == "kyomi_oauth">`
+    /// body used by the sibling KYO-404 tests above — this is the same
+    /// isolation those tests rely on to keep the textually-similar
+    /// enterprise_oauth block (which must NOT gain this gate, see the next
+    /// test) from making either assertion pass vacuously.
+    #[test]
+    fn bigquery_kyomi_oauth_connect_button_reads_the_shared_access_ok_signal() {
+        let kyomi_block = extract_between(
+            SRC,
+            "<Show when=move || bq_auth_mode.get() == \"kyomi_oauth\">",
+            "<Show when=move || bq_auth_mode.get() == \"enterprise_oauth\">",
+        );
+        assert!(
+            kyomi_block.contains("connect_blocked=Signal::derive(move || {"),
+            "the kyomi_oauth ModalOAuthStatusPanel must pass a connect_blocked prop \
+             derived fresh from a signal, not a plain bool literal"
+        );
+        assert!(
+            appears_shortly_before(
+                kyomi_block,
+                "!bq_kyomi_oauth_access_ok.get()",
+                "on_disconnect=on_google_disconnect",
+                200,
+            ),
+            "the kyomi_oauth ModalOAuthStatusPanel's connect_blocked derive must read \
+             bq_kyomi_oauth_access_ok — the exact signal the footer's Save/Create gate \
+             reads (see that signal's doc comment in DatasourceModal) — and not a second, \
+             independently-derived copy of bq_kyomi_oauth_access_gate_satisfied (KYO-423)"
+        );
+    }
+
+    /// Negative-space companion to the test above: none of the other four
+    /// `ModalOAuthStatusPanel` call sites — BigQuery enterprise_oauth,
+    /// Snowflake, Databricks, and Microsoft — may gain a `connect_blocked`
+    /// prop as a side effect of this change. The default
+    /// (`#[prop(default = false.into())]`) already makes an omitted prop
+    /// behavior-preserving, but this test would still catch a stray
+    /// find-and-replace that wired the KYO-408 checkbox into an unrelated
+    /// provider's Connect button.
+    #[test]
+    fn connect_blocked_prop_is_bigquery_kyomi_oauth_only() {
+        // Scoped to production code only (see `MOD_TESTS_MARKER`'s doc
+        // comment above) — this test's own marker/assertion-message
+        // literals below repeat "connect_url=enterprise_oauth_url" and
+        // "connect_blocked" verbatim, which would make a whole-`SRC` scan
+        // match this test's own text and either miscount the call sites or
+        // make the assertion pass vacuously regardless of production code.
+        let production_src = SRC
+            .split(MOD_TESTS_MARKER)
+            .next()
+            .expect("MOD_TESTS_MARKER must appear in datasources.rs");
+
+        let other_call_sites: &[(&str, &str)] = &[
+            ("Snowflake", "connect_url=sf_connect_url"),
+            ("Databricks", "connect_url=db_connect_url"),
+        ];
+        for (name, marker) in other_call_sites {
+            let call = extract_between(production_src, marker, "/>");
+            assert!(
+                !call.contains("connect_blocked"),
+                "{name}'s ModalOAuthStatusPanel call must not pass connect_blocked — \
+                 only BigQuery kyomi_oauth has a KYO-408 attestation gate"
+            );
+        }
+
+        // "connect_url=enterprise_oauth_url" is shared verbatim by BigQuery
+        // enterprise_oauth and Microsoft, so both occurrences must be
+        // checked explicitly rather than relying on extract_between's
+        // first-match behavior, which would silently skip the second call.
+        let enterprise_offsets: Vec<usize> = production_src
+            .match_indices("connect_url=enterprise_oauth_url")
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            enterprise_offsets.len(),
+            2,
+            "expected exactly two connect_url=enterprise_oauth_url call sites in \
+             production code (BigQuery enterprise_oauth and Microsoft) — this test's \
+             bounds assume that shape and must be revisited if it changes"
+        );
+        for offset in enterprise_offsets {
+            let tail = &production_src[offset..];
+            let end = tail
+                .find("/>")
+                .unwrap_or_else(|| panic!("no closing /> found after offset {offset}"));
+            let call = &tail[..end];
+            assert!(
+                !call.contains("connect_blocked"),
+                "an enterprise_oauth ModalOAuthStatusPanel call site (BigQuery or \
+                 Microsoft) must not pass connect_blocked — only BigQuery kyomi_oauth \
+                 has a KYO-408 attestation gate"
+            );
+        }
+    }
+
+    /// Reachability guard, not a truth-table test: this proves the wiring
+    /// between the KYO-408 predicate and the Connect/Reconnect buttons
+    /// cannot be silently deleted from ModalOAuthStatusPanel without a test
+    /// failing — the acceptance-criteria bar KYO-427 sets, over and above
+    /// the existing truth-table coverage of
+    /// `bq_kyomi_oauth_access_gate_satisfied` above.
+    ///
+    /// Both the "Not connected" (Connect) and "Expired" (Reconnect) branches
+    /// must each carry `disabled=connect_blocked` — matching how
+    /// `disconnect_pending` is guarded in the "Connected" branch just above
+    /// them. `start_connect` (the shared click handler both branches wire
+    /// via `on:click=start_connect`, KYO-437) must additionally early-return
+    /// on `connect_blocked.get_untracked()` — a `disabled` attribute alone
+    /// does not stop a synthetic/programmatic click — and that guard must
+    /// live in `start_connect` itself, not be duplicated per branch: KYO-437
+    /// already pins that both buttons share one handler so the popup-monitor
+    /// arming can't drift between them, and a per-branch copy of the guard
+    /// would reintroduce exactly that drift risk for this new condition.
+    /// If a future change removes the guard from either half, the
+    /// exact-count assertions below fail.
+    #[test]
+    fn modal_oauth_status_panel_gates_both_connect_and_reconnect_branches() {
+        let panel_fn = extract_between(
+            SRC,
+            "fn ModalOAuthStatusPanel(",
+            "// OAuth Status Re-fetch Hook",
+        );
+
+        let disabled_count = panel_fn.matches("disabled=connect_blocked").count();
+        assert_eq!(
+            disabled_count, 2,
+            "expected disabled=connect_blocked on exactly two buttons (Connect and \
+             Reconnect) inside ModalOAuthStatusPanel — found {disabled_count}. A count \
+             of 1 means one branch lost its gate (the KYO-427 half-propagation defect); \
+             a count of 0 means the gate was deleted entirely"
+        );
+
+        let click_wiring_count = panel_fn.matches("on:click=start_connect").count();
+        assert_eq!(
+            click_wiring_count, 2,
+            "expected on:click=start_connect on exactly two buttons (Connect and \
+             Reconnect) — found {click_wiring_count}. Both branches must keep sharing \
+             the one handler (KYO-437) rather than each getting its own inline \
+             on:click body, which is exactly the regression this change must avoid"
+        );
+
+        let start_connect_body = extract_between(
+            panel_fn,
+            "let start_connect = move |_: leptos::ev::MouseEvent| {",
+            "view! {\n        {move || {",
+        );
+        let guard_count = start_connect_body
+            .matches("connect_blocked.get_untracked()")
+            .count();
+        assert_eq!(
+            guard_count, 1,
+            "expected exactly one connect_blocked.get_untracked() early-return guard, \
+             inside the shared start_connect closure itself — found {guard_count}. Since \
+             both Connect and Reconnect wire the same start_connect (KYO-437), one guard \
+             there covers both buttons; 0 means the guard was deleted, and >1 suggests it \
+             was duplicated instead of shared"
+        );
+        assert!(
+            appears_shortly_before(
+                start_connect_body,
+                "connect_blocked.get_untracked()",
+                "set_oauth_connecting.set(true);",
+                80,
+            ),
+            "the connect_blocked early-return must gate entry to start_connect — i.e. sit \
+             before set_oauth_connecting.set(true) — not merely be present somewhere in the \
+             closure"
+        );
+
+        // The "Connected" branch's Disconnect button must remain ungated by
+        // connect_blocked — this predicate answers "can the user start a
+        // NEW connection", which is meaningless once already connected.
+        let connected_branch = extract_between(
+            panel_fn,
+            "// Connected state.",
+            "// Expired state.",
+        );
+        assert!(
+            !connected_branch.contains("connect_blocked"),
+            "the Disconnect button (Connected branch) must not read connect_blocked — \
+             that gate governs starting a new connection, not ending an existing one"
         );
     }
 }
