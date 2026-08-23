@@ -5159,13 +5159,56 @@ fn ConnectionTestResultBadge(
 // BigQuery Auth Mode Section
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// A single BigQuery project field that renders a [`Select`] when projects
-/// are loading or available, and falls back to a plain text input otherwise.
+/// Sentinel option value that swaps a [`BqProjectField`] into custom-entry
+/// mode. Never written into the field's `value` signal — the `on_change`
+/// handler below intercepts it before that can happen.
+const BQ_CUSTOM_PROJECT_OPTION: &str = "__custom__";
+
+/// Appends the "Enter custom project ID..." sentinel option
+/// (`BQ_CUSTOM_PROJECT_OPTION`) to a discovered project list, producing the
+/// options `[Select]` renders in [`BqProjectField`]'s dropdown branch.
+///
+/// Pure and free of the view tree so KYO-406's actual bug — the dropdown
+/// offering no way to enter a project the discovery API didn't return, once
+/// *any* project was discovered — can be asserted by value (the sentinel is
+/// really present in the option list `Select` receives) rather than merely
+/// asserting that `BQ_CUSTOM_PROJECT_OPTION` appears somewhere in the
+/// source.
+fn bq_project_select_options(projects: Vec<(String, String)>) -> Vec<(String, String)> {
+    let mut opts = projects;
+    opts.push((
+        BQ_CUSTOM_PROJECT_OPTION.to_string(),
+        "Enter custom project ID...".to_string(),
+    ));
+    opts
+}
+
+/// A single BigQuery project field with three mutually exclusive render
+/// states:
+///
+/// 1. **No projects discovered** (and not loading): a plain text input —
+///    there is nothing to pick from, so there is no dropdown to offer.
+/// 2. **Projects discovered, dropdown mode**: a [`Select`] whose option list
+///    carries a trailing "Enter custom project ID..." sentinel
+///    (`BQ_CUSTOM_PROJECT_OPTION`). `Select` has no separator/heterogeneous-
+///    item support, so the sentinel renders as an ordinary trailing option
+///    rather than forking a new shared primitive for one caller.
+/// 3. **Projects discovered, custom-entry mode**: a text input plus a "Back
+///    to dropdown" affordance. Reached by picking the sentinel; left by the
+///    button. `is_custom` is a signal local to this component instance, so
+///    each `BqProjectField` (Billing vs Default) toggles independently
+///    (KYO-406 AC: toggling one must not affect the other).
+///
+/// Across both dropdown and custom-entry states the field shares the same
+/// `value`/`set_value` signal, so switching modes never loses or resets
+/// whatever project id was already entered.
 ///
 /// Using `<Show>` here (instead of `{move || ...}` branching) keeps a stable
 /// component tree and avoids the disposal panic that occurs when an `Effect`
 /// inside `Select` fires after the surrounding closure's reactive scope is
-/// torn down during a branch swap.
+/// torn down during a branch swap. The three states above are still only two
+/// levels of `<Show>` nesting — outer (has-projects vs not), inner
+/// (dropdown vs custom-entry) — never a `{move || match ... }` branch.
 #[component]
 fn BqProjectField(
     label: &'static str,
@@ -5174,6 +5217,10 @@ fn BqProjectField(
     bq_projects: ReadSignal<Vec<(String, String)>>,
     bq_projects_loading: ReadSignal<bool>,
 ) -> impl IntoView {
+    let (is_custom, set_is_custom) = signal(false);
+
+    let select_options = Signal::derive(move || bq_project_select_options(bq_projects.get()));
+
     view! {
         <div>
             <label class="block text-sm font-medium mb-1">{label}</label>
@@ -5187,15 +5234,47 @@ fn BqProjectField(
                         prop:value=move || value.get()
                         on:input=move |ev| set_value.set(event_target_value(&ev))
                     />
+                    <p class="text-xs text-muted-foreground mt-1">
+                        "Connect to discover projects, or enter project ID manually"
+                    </p>
                 }
             >
-                <Select
-                    value=Signal::derive(move || value.get())
-                    options=Signal::derive(move || bq_projects.get())
-                    on_change=move |val| set_value.set(val)
-                    placeholder="Select a project".to_string()
-                    disabled=Signal::derive(move || bq_projects_loading.get())
-                />
+                <p class="text-xs text-muted-foreground mb-1">
+                    "Select from discovered projects or enter a custom ID"
+                </p>
+                <Show
+                    when=move || is_custom.get()
+                    fallback=move || view! {
+                        <Select
+                            value=Signal::derive(move || value.get())
+                            options=select_options
+                            on_change=move |val| {
+                                if val == BQ_CUSTOM_PROJECT_OPTION {
+                                    set_is_custom.set(true);
+                                } else {
+                                    set_value.set(val);
+                                }
+                            }
+                            placeholder="Select a project".to_string()
+                            disabled=Signal::derive(move || bq_projects_loading.get())
+                        />
+                    }
+                >
+                    <input
+                        type="text"
+                        class=MODAL_INPUT_CLASS
+                        placeholder="my-gcp-project"
+                        prop:value=move || value.get()
+                        on:input=move |ev| set_value.set(event_target_value(&ev))
+                    />
+                    <button
+                        type="button"
+                        class="text-xs text-primary hover:underline mt-1"
+                        on:click=move |_| set_is_custom.set(false)
+                    >
+                        "Back to dropdown"
+                    </button>
+                </Show>
             </Show>
         </div>
     }
@@ -5579,8 +5658,12 @@ fn BigQueryAuthModeSection(
                             bq_projects_loading=bq_projects_loading
                         />
                     </div>
-                    {move || bq_projects_error.get().map(|err| view! {
-                        <p class="text-xs text-error-foreground mt-2">{err}</p>
+                    {move || bq_projects_error.get().filter(|_| bq_projects.get().is_empty()).map(|err| view! {
+                        <Alert variant=AlertVariant::Warning class="mt-2">
+                            <AlertDescription>
+                                {err} " You can still enter project IDs manually below."
+                            </AlertDescription>
+                        </Alert>
                     })}
                 </div>
             </Show>
@@ -5677,8 +5760,12 @@ fn BigQueryAuthModeSection(
                             bq_projects_loading=bq_projects_loading
                         />
                     </div>
-                    {move || bq_projects_error.get().map(|err| view! {
-                        <p class="text-xs text-error-foreground mt-2">{err}</p>
+                    {move || bq_projects_error.get().filter(|_| bq_projects.get().is_empty()).map(|err| view! {
+                        <Alert variant=AlertVariant::Warning class="mt-2">
+                            <AlertDescription>
+                                {err} " You can still enter project IDs manually below."
+                            </AlertDescription>
+                        </Alert>
                     })}
                 </div>
             </Show>
@@ -5804,8 +5891,12 @@ fn BigQueryAuthModeSection(
                                         bq_projects_loading=bq_projects_loading
                                     />
                                 </div>
-                                {move || bq_projects_error.get().map(|err| view! {
-                                    <p class="text-xs text-error-foreground mt-2">{err}</p>
+                                {move || bq_projects_error.get().filter(|_| bq_projects.get().is_empty()).map(|err| view! {
+                                    <Alert variant=AlertVariant::Warning class="mt-2">
+                                        <AlertDescription>
+                                            {err} " You can still enter project IDs manually below."
+                                        </AlertDescription>
+                                    </Alert>
                                 })}
                             </div>
                         </Show>
