@@ -3,6 +3,7 @@
 //! Shared utility modules for the Leptos frontend.
 
 pub mod auth_refresh;
+pub mod beta_access;
 pub mod cron;
 pub mod feedback_context;
 pub mod json;

@@ -714,12 +714,20 @@ fn google_oauth_success_arm_sets_test_result_and_discovery_status() {
 // predicate, `bq_kyomi_oauth_access_gate_satisfied`) is exercised
 // directly, and its wiring into the Save/Create buttons (but
 // deliberately NOT the Next button) is pinned by source-text checks.
+//
+// Copy and link target were rewritten in KYO-499 to restore parity with
+// the React original (`AuthModeSelector.jsx` at `ee16f48a^`) — the
+// version that shipped in KYO-408/435/477 diverged into a heading + two
+// explanatory paragraphs + a standalone <Button> opening the in-app
+// FeedbackModal, none of which React did. See `utils::beta_access` for
+// the shared copy/persistence/link-target module both this notice and
+// the login page's equivalent (`pages/auth/login.rs`) now read through.
 
 use super::super::{bq_kyomi_oauth_access_gate_satisfied, translate_google_oauth_error};
 
-/// The KYO-408 notice (Alert + "Request access" link + confirmation
-/// checkbox) must render inside the kyomi_oauth `<Show>` block and must
-/// not leak into enterprise_oauth or service_account — neither of
+/// The KYO-408/KYO-499 notice (Alert + inline "Request beta access" link +
+/// confirmation checkbox) must render inside the kyomi_oauth `<Show>` block
+/// and must not leak into enterprise_oauth or service_account — neither of
 /// those modes has a Kyomi-side Google-account allowlist to request
 /// access to (enterprise_oauth uses the customer's own OAuth app;
 /// service_account has no OAuth at all).
@@ -731,25 +739,27 @@ fn kyomi_oauth_notice_renders_only_for_kyomi_oauth_mode() {
         "<Show when=move || bq_auth_mode.get() == \"enterprise_oauth\">",
     );
     assert!(
-        kyomi_block.contains("Google account authorization required"),
-        "the kyomi_oauth block must render the KYO-408 access-authorization notice"
+        kyomi_block.contains("This authentication method requires beta access."),
+        "the kyomi_oauth block must render the KYO-499 access notice sentence"
     );
     assert!(
-        kyomi_block.contains("\"Request access\""),
-        "the kyomi_oauth notice must include a \"Request access\" control"
+        kyomi_block.contains("\"Request beta access\""),
+        "the kyomi_oauth notice must include a \"Request beta access\" link (KYO-499 \
+         copy, restoring the React original)"
     );
     assert!(
-        kyomi_block.contains("feedback_access_request.0.try_run(())"),
-        "the \"Request access\" control must open the feedback modal via the \
-         FeedbackAccessRequestHandle context (KYO-417's access_request_context), not \
-         navigate anywhere or no-op"
+        kyomi_block.contains("beta_access::BETA_ACCESS_REQUEST_HREF"),
+        "the \"Request beta access\" link must point at the shared \
+         utils::beta_access::BETA_ACCESS_REQUEST_HREF target (KYO-499) — not a \
+         hardcoded href or the removed FeedbackAccessRequestHandle context, which \
+         login.rs can never reach pre-auth"
     );
     assert!(
-        kyomi_block.contains("I have requested access and had it confirmed"),
-        "the kyomi_oauth block must render the KYO-408 confirmation checkbox, with copy \
-         conveying access was already requested AND confirmed — not merely \"I have \
-         access\", which is what the React reference used and which Jason explicitly \
-         asked to be clearer than"
+        kyomi_block.contains("\"I have beta access\""),
+        "the kyomi_oauth block must render the KYO-499 confirmation checkbox with the \
+         exact copy \"I have beta access\", restoring the React original's wording \
+         (KYO-408's \"I have requested access and had it confirmed\" was rejected as a \
+         divergence from React — see KYO-499)"
     );
 
     let enterprise_block = extract_between(
@@ -758,14 +768,14 @@ fn kyomi_oauth_notice_renders_only_for_kyomi_oauth_mode() {
         "<Show when=move || bq_auth_mode.get() == \"service_account\">",
     );
     assert!(
-        !enterprise_block.contains("Google account authorization required"),
-        "the KYO-408 notice must not leak into enterprise_oauth — that mode uses the \
-         customer's own Google Cloud OAuth app, which has no Kyomi allowlist to request \
-         access to"
+        !enterprise_block.contains("requires beta access"),
+        "the KYO-408/499 notice must not leak into enterprise_oauth — that mode uses \
+         the customer's own Google Cloud OAuth app, which has no Kyomi allowlist to \
+         request access to"
     );
     assert!(
-        !enterprise_block.contains("I have requested access and had it confirmed"),
-        "the KYO-408 confirmation checkbox must not leak into enterprise_oauth"
+        !enterprise_block.contains("\"I have beta access\""),
+        "the KYO-499 confirmation checkbox must not leak into enterprise_oauth"
     );
 
     let service_account_block = extract_between(
@@ -774,56 +784,58 @@ fn kyomi_oauth_notice_renders_only_for_kyomi_oauth_mode() {
         "fn SnowflakeAuthModeSection(",
     );
     assert!(
-        !service_account_block.contains("Google account authorization required"),
-        "the KYO-408 notice must not leak into service_account — that mode has no OAuth \
-         flow at all, so an OAuth-allowlist notice would be nonsensical there"
+        !service_account_block.contains("requires beta access"),
+        "the KYO-408/499 notice must not leak into service_account — that mode has no \
+         OAuth flow at all, so an OAuth-allowlist notice would be nonsensical there"
     );
     assert!(
-        !service_account_block.contains("I have requested access and had it confirmed"),
-        "the KYO-408 confirmation checkbox must not leak into service_account"
+        !service_account_block.contains("\"I have beta access\""),
+        "the KYO-499 confirmation checkbox must not leak into service_account"
     );
 }
 
-// ── KYO-435: "Request access" promoted to a real <Button> ──────────────
+// ── KYO-499: "Request beta access" is an inline link, not a <Button> ───
 //
-// Before this, "Request access" was a hand-rolled `<button class="text-primary
-// hover:underline ...">` spliced into the middle of the explanatory sentence —
-// it violated DESIGN.md's "use the component, never raw HTML" rule and had no
-// button affordance (no fill, no border) against the amber Warning background,
-// so the only in-product path to ask for allowlisting was easy to miss
-// entirely. This test pins that the control is now the shared <Button>
-// component (not a raw <button>) and that promoting it didn't drop the
-// feedback-modal click wiring.
+// KYO-435 had promoted this control from an inline text link to a
+// standalone <Button> on its own line, reasoning the inline link was
+// "effectively invisible" against the amber Warning background. KYO-499
+// reverts that: React's original rendered it as a plain inline link
+// spliced mid-sentence (`text-primary hover:underline font-medium`), and
+// restoring exact parity with React was this ticket's explicit goal —
+// see the KYO-499 ticket for the full "how we diverged" writeup. This
+// test pins the reverted shape so a future edit can't silently
+// reintroduce the standalone-<Button> layout without a deliberate
+// decision to do so.
 
 /// Scoped to the same kyomi_oauth `<Show>` block as
 /// `kyomi_oauth_notice_renders_only_for_kyomi_oauth_mode` above — bounded
-/// by the next mode's `<Show>` opening tag — so a match against `<button`
-/// here can only be the production markup for this one panel, not a
-/// sibling panel's textually similar markup.
+/// by the next mode's `<Show>` opening tag — so a match here can only be
+/// the production markup for this one panel, not a sibling panel's
+/// textually similar markup.
 #[test]
-fn request_access_control_is_a_real_button_component() {
+fn request_beta_access_control_is_an_inline_link_not_a_button() {
     let kyomi_block = extract_between(
         SRC,
         "<Show when=move || bq_auth_mode.get() == \"kyomi_oauth\">",
         "<Show when=move || bq_auth_mode.get() == \"enterprise_oauth\">",
     );
     assert!(
-        kyomi_block.contains("<Button"),
-        "KYO-435: the \"Request access\" action must render via the shared <Button> \
-         component (DESIGN.md: \"Use the Leptos component, never raw HTML\"), not a \
-         hand-rolled <button> with inline Tailwind classes"
+        kyomi_block.contains("<a\n") || kyomi_block.contains("<a "),
+        "KYO-499: \"Request beta access\" must render as a plain inline <a> link \
+         (React's own shape — text-primary hover:underline font-medium, spliced \
+         mid-sentence), not a <Button>/<ButtonLink> — found no <a> tag in the \
+         kyomi_oauth block"
     );
     assert!(
-        !kyomi_block.contains("<button"),
-        "KYO-435: no raw <button> should remain in the kyomi_oauth notice — the \
-         \"Request access\" control must have been fully migrated to <Button>, not \
-         left alongside it"
+        !kyomi_block.contains("<Button") && !kyomi_block.contains("<ButtonLink"),
+        "KYO-499: the standalone <Button>/<ButtonLink> control KYO-435 introduced must \
+         be gone — the request-access control reverted to an inline link matching React"
     );
     assert!(
-        kyomi_block.contains("feedback_access_request.0.try_run(())"),
-        "KYO-435: promoting \"Request access\" to a real <Button> must not drop its \
-         click handler — it must still invoke the feedback access-request handler \
-         (KYO-417's access_request_context), not navigate anywhere or no-op"
+        kyomi_block.contains("beta_access::write_beta_access(v)"),
+        "KYO-499: ticking the checkbox must persist to localStorage via \
+         beta_access::write_beta_access, not merely update the in-memory signal — found \
+         no call in the kyomi_oauth block"
     );
 }
 

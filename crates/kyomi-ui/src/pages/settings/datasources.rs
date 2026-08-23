@@ -10,7 +10,7 @@ use leptos::prelude::*;
 use phosphor_leptos::{Icon, IconWeight};
 use crate::components::{
     Alert, AlertDescription, AlertTitle, AlertVariant, Badge, BadgeVariant, Button, ButtonLink,
-    ButtonSize, ButtonVariant, Card, Checkbox, ConfirmDialog, EmptyState, FeedbackAccessRequestHandle,
+    ButtonSize, ButtonVariant, Card, Checkbox, ConfirmDialog, EmptyState,
     Modal, ModalSize, Skeleton, Spinner, Switch, ToggleButton,
 };
 use crate::components::toast::toast_error;
@@ -37,6 +37,7 @@ use crate::server_fns::datasource_oauth::{
     disconnect_google_oauth, disconnect_datasource_oauth,
     get_google_oauth_projects,
 };
+use crate::utils::beta_access;
 use crate::utils::json::bigquery_include_public;
 use crate::utils::oauth_popup::{popup_monitor_outcome_message, PopupMonitorOutcome};
 use crate::utils::permissions::{use_analytics_access, use_permissions, AnalyticsAccess};
@@ -1398,15 +1399,26 @@ pub fn DatasourceModal(
     let (cfg_oauth_client_secret, set_cfg_oauth_client_secret) = signal(String::new());
     let (cfg_service_account_json, set_cfg_service_account_json) = signal(String::new());
     let (service_account_email, set_service_account_email) = signal(String::new());
-    // KYO-408 — user has ticked "I have requested access and had it
-    // confirmed" for the kyomi_oauth mode's Google-account allowlist. Not
-    // persisted (see `BigQueryAuthModeSection`'s kyomi_oauth `<Show>` block
-    // for the reasoning): resets to `false` every time the modal opens,
-    // whether that's `reset_form` in create mode or the edit-mode settings
-    // load below. Deliberately separate from `bq_auth_mode` /
+    // KYO-408 — user has ticked the beta-access confirmation checkbox for
+    // the kyomi_oauth mode's Google-account allowlist (see the checkbox's
+    // own copy in the view tree below — deliberately not quoted here; this
+    // doc comment is scanned as part of the file by
+    // `utils::beta_access`'s whole-file structural tests, and an echoed
+    // copy string here would let a regression in the real markup pass
+    // unnoticed). Persisted to
+    // `localStorage["hasBetaAccess"]` via `utils::beta_access` (KYO-499),
+    // matching the React original — an earlier attempt (KYO-478) shipped
+    // this deliberately NOT persisted, on the reasoning that persistence
+    // would make the attestation "look real but be pre-satisfied"; that
+    // reasoning was wrong (this was never a security control — Google's
+    // allowlist is the actual enforcement) and React always persisted it.
+    // Re-read from storage every time the modal opens (`reset_form` in
+    // create mode, the edit-mode settings load below) rather than left
+    // untouched, so a value ticked on another tab/surface since this modal
+    // last opened is picked up. Deliberately separate from `bq_auth_mode` /
     // `modal_oauth_connected` rather than folded into either — this is
     // purely the user's self-report, not derived connection state.
-    let (bq_access_confirmed, set_bq_access_confirmed) = signal(false);
+    let (bq_access_confirmed, set_bq_access_confirmed) = signal(beta_access::read_beta_access());
 
     // Snowflake-specific
     let (sf_auth_mode, set_sf_auth_mode) = signal("password".to_string());
@@ -1564,7 +1576,10 @@ pub fn DatasourceModal(
         set_cfg_oauth_client_secret.set(String::new());
         set_cfg_service_account_json.set(String::new());
         set_service_account_email.set(String::new());
-        set_bq_access_confirmed.set(false);
+        // KYO-499 — re-read from localStorage rather than hardcoding false,
+        // so a value ticked on another tab/surface since this modal was
+        // last open is honored; see `bq_access_confirmed`'s own doc comment.
+        set_bq_access_confirmed.set(beta_access::read_beta_access());
         set_sf_auth_mode.set("password".to_string());
         set_db_auth_mode.set("token".to_string());
         set_synapse_auth_mode.set("sql".to_string());
@@ -1648,9 +1663,11 @@ pub fn DatasourceModal(
                 set_error_msg.set(None);
                 set_discovery_status.set("idle".to_string());
                 set_catalog_scope_touched.set(false);
-                // KYO-408 — fresh per modal-open, same as create mode's
-                // reset_form(); see bq_access_confirmed's own doc comment.
-                set_bq_access_confirmed.set(false);
+                // KYO-408/KYO-499 — re-read per modal-open, same as create
+                // mode's reset_form(); see bq_access_confirmed's own doc
+                // comment for why this reads localStorage rather than
+                // hardcoding false.
+                set_bq_access_confirmed.set(beta_access::read_beta_access());
 
                 leptos::task::spawn_local(async move {
                     match get_datasource_settings(ds_id).await {
@@ -3147,9 +3164,12 @@ pub fn DatasourceModal(
     // refused it otherwise), so there is nothing left to confirm before
     // saving a datasource that already has a working connection — this is
     // also what keeps a returning, already-connected user from being
-    // nagged by the checkbox on every visit, without resorting to a
-    // client-side "remember forever" flag (see `bq_access_confirmed`'s own
-    // doc comment for why no localStorage).
+    // nagged by the checkbox on every visit. (`bq_access_confirmed` is
+    // separately persisted to localStorage — see its own doc comment —
+    // but that persistence is orthogonal to this auto-satisfaction path:
+    // a user can reach "not nagged" either by a proven OAuth connection or
+    // by a remembered checkbox tick, and this predicate only needs the
+    // former.)
     let bq_kyomi_oauth_access_ok: Signal<bool> = Signal::derive(move || {
         bq_kyomi_oauth_access_gate_satisfied(
             &ds_type.get(),
@@ -3172,6 +3192,35 @@ pub fn DatasourceModal(
             bq_access_confirmed.get(),
         )
     });
+
+    // KYO-499 — keep `bq_access_confirmed` in sync with
+    // `localStorage["hasBetaAccess"]` across tabs/surfaces: this modal's
+    // kyomi_oauth notice and the pre-auth Google sign-in notice in
+    // `pages/auth/login.rs` read/write the same key via `utils::beta_access`.
+    // Installed once here — `DatasourceModal` mounts once for the settings
+    // page's lifetime (visibility toggles via the `open` prop; it is never
+    // conditionally mounted/unmounted, see `reset_form`'s own doc context
+    // above) — mirroring the OAuth postMessage listener pattern earlier in
+    // this file (`install_oauth_listener`, `DatasourcesList`).
+    #[cfg(target_arch = "wasm32")]
+    {
+        use crate::utils::beta_access::install_beta_access_listener;
+        let cleanup = install_beta_access_listener(move |value| {
+            set_bq_access_confirmed.try_set(value);
+        });
+        // Box<dyn FnOnce()> is used so the inner cleanup can be called
+        // through Drop without requiring Send. SendWrapper makes the box
+        // Send+Sync for on_cleanup's bound while guaranteeing
+        // single-threaded access on WASM — same pattern as the OAuth
+        // postMessage listener's cleanup above.
+        let cleanup_cell = std::cell::Cell::new(Some(Box::new(cleanup) as Box<dyn FnOnce()>));
+        let cleanup_wrapper = send_wrapper::SendWrapper::new(cleanup_cell);
+        on_cleanup(move || {
+            if let Some(f) = cleanup_wrapper.take().take() {
+                f();
+            }
+        });
+    }
 
     // ── Datasource-type registry data (KYO-274) ─────────────────────────────
     // Which auth modes the four Authentication Mode selectors below offer —
@@ -5288,15 +5337,6 @@ fn BigQueryAuthModeSection(
     // ── Kyomi OAuth: connect URL is fixed (no slug).
     let kyomi_oauth_url = Signal::stored("/api/v1/auth/google-oauth/connect".to_string());
 
-    // KYO-408 — opens the Layout's FeedbackModal, preselected on "Request
-    // BigQuery Access" (KYO-417), from the "Request access" link in the
-    // kyomi_oauth notice below. Provided by `Layout`, which every authed
-    // page (including this settings page) is guaranteed to mount under —
-    // the same guarantee `expect_context::<QueryCache>()` already relies
-    // on elsewhere in this file — so `expect_context` here is consistent
-    // with that established convention rather than an unchecked new one.
-    let feedback_access_request = expect_context::<FeedbackAccessRequestHandle>();
-
     // ── Enterprise OAuth: connect URL is slug-scoped.
     let enterprise_oauth_url = Signal::derive(move || {
         let s = slug.get();
@@ -5441,47 +5481,58 @@ fn BigQueryAuthModeSection(
                     // from `oauth_connected` — see its own doc comment for
                     // why — but that is moot here specifically because the
                     // Connect button isn't reachable while connected either.
+                    // KYO-499 — restores parity with the React original
+                    // (`AuthModeSelector.jsx` at `ee16f48a^`): one sentence
+                    // plus an inline beta-access request link, not a
+                    // heading + two explanatory paragraphs + a standalone
+                    // Button component (that shape shipped in KYO-435/
+                    // KYO-477/KYO-478 without verifying against React and
+                    // was rejected as "a monstrosity" — see KYO-499). The link
+                    // goes to the shared mailto constant in `utils::beta_access`
+                    // (see that module for the exact target) — the same one
+                    // `pages/auth/login.rs`'s Google sign-in notice uses —
+                    // rather than the `FeedbackAccessRequestHandle`/
+                    // FeedbackModal path this used before, because the
+                    // login page has no `Layout` context to reach that
+                    // modal and the two surfaces must use one identical
+                    // target (KYO-499's decision; React's own target,
+                    // `/beta-signup`, was never ported and stays out of
+                    // scope — see the ticket).
+                    //
+                    // This comment deliberately does not quote the exact
+                    // copy strings below — `tests/oauth.rs`'s source-text
+                    // assertions for this block scan for those literals,
+                    // and an echo here would let a regression in the real
+                    // markup pass unnoticed (verified by mutation during
+                    // KYO-499 implementation).
                     <Show when=move || !oauth_connected.get()>
                         <Alert variant=AlertVariant::Warning>
-                            <AlertTitle>"Google account authorization required"</AlertTitle>
+                            <Icon icon=phosphor_leptos::WARNING_CIRCLE attr:class="h-4 w-4" />
                             <AlertDescription>
                                 <p class="mb-3">
-                                    "Kyomi's shared Google OAuth app only works for Google \
-                                     accounts a Kyomi admin has explicitly authorized as \
-                                     testers — everyone else is refused by Google itself, \
-                                     not by Kyomi."
-                                </p>
-                                // KYO-435 — promoted from an inline text link (spliced mid-
-                                // sentence, effectively invisible against the amber Warning
-                                // background) to a real <Button>, on its own line between the
-                                // explanation above and the attestation checkbox below, so the
-                                // block reads explanation -> action -> attestation. This is the
-                                // only in-product path to ask for allowlisting, so it must read
-                                // as the primary action here — but Secondary (not Default/
-                                // primary) so it doesn't compete with the modal's own amber
-                                // Next/Create button. Copy is unchanged from KYO-408 (both the
-                                // button label and the caption below it, split from what was one
-                                // sentence — see KYO-435 in Trakkt).
-                                <Button
-                                    variant=ButtonVariant::Secondary
-                                    size=ButtonSize::Sm
-                                    on:click=move |_| { feedback_access_request.0.try_run(()); }
-                                >
-                                    "Request access"
-                                </Button>
-                                <p class="text-xs text-muted-foreground mt-1.5 mb-3">
-                                    "before connecting, so you're not waiting on a sign-in \
-                                     that's bound to fail."
+                                    "This authentication method requires beta access. "
+                                    <a
+                                        href=beta_access::BETA_ACCESS_REQUEST_HREF
+                                        class="text-primary hover:underline font-medium"
+                                    >
+                                        "Request beta access"
+                                    </a>
                                 </p>
                                 <label class="flex items-center gap-2 cursor-pointer">
                                     <Checkbox
                                         checked=Signal::derive(move || bq_access_confirmed.get())
                                         on_change=Callback::new(move |v: bool| {
+                                            // KYO-499 — persist to
+                                            // localStorage["hasBetaAccess"]
+                                            // alongside the in-memory signal;
+                                            // see `bq_access_confirmed`'s doc
+                                            // comment.
+                                            beta_access::write_beta_access(v);
                                             set_bq_access_confirmed.set(v)
                                         })
                                     />
                                     <span class="text-sm">
-                                        "I have requested access and had it confirmed"
+                                        "I have beta access"
                                     </span>
                                 </label>
                             </AlertDescription>
