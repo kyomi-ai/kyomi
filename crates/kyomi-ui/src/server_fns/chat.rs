@@ -616,7 +616,9 @@ pub async fn send_chat_message(
         max_duration: Some(std::time::Duration::from_secs(15 * 60)),
         max_total_tokens: Some(1_500_000),
         component: "custom_agent".to_string(),
-        user_message_id: Some(user_message_id.clone()),
+        user_message_persistence: kyomi_agent::UserMessagePersistence::CallerPersisted(
+            user_message_id.clone(),
+        ),
         assistant_message_id: Some(assistant_message_id.clone()),
         conversation_history: None,
         user_display_name: ac.auth.name.clone().unwrap_or_else(|| ac.auth.email.clone()),

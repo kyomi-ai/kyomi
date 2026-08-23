@@ -49,6 +49,75 @@ pub struct ChatAgentAdapter {
     /// Number of messages loaded from the DB during context loading.
     /// Used to determine which new messages need to be persisted.
     messages_loaded_count: usize,
+    /// Set from [`ChatParams::user_message_persistence`] at the top of
+    /// [`ChatAgentAdapter::chat`], before `load_context()` runs. See that
+    /// field's doc for the contract this enforces.
+    user_message_persistence: UserMessagePersistence,
+}
+
+/// How the user's message for a given turn reaches the database.
+///
+/// This used to be a single `Option<String>` (`user_message_id`) doing two
+/// unrelated jobs at once: stamping the id used for WebSocket streaming,
+/// *and* signalling "already durably written — do not persist again".
+/// Slack only ever wanted the first: it mints its own id but still relies
+/// on [`ChatAgentAdapter::persist_after_chat`] to do the actual write.
+/// Collapsing both back into one `Option` makes that distinction impossible
+/// to see at the call site — splitting them into variants makes the
+/// mistake unrepresentable.
+#[derive(Debug, Clone)]
+pub enum UserMessagePersistence {
+    /// The adapter persists the user message itself, at the end of the run,
+    /// in [`ChatAgentAdapter::persist_after_chat`]. `Some(id)` stamps that
+    /// row with a caller-chosen id (matching the id already streamed to the
+    /// client over WebSocket); `None` lets the database layer generate one.
+    /// Historical behaviour — Slack, copilot, and watch execution all use
+    /// this.
+    AdapterPersists(Option<String>),
+    /// The caller already wrote the user-message row to the DB *before*
+    /// the agent was spawned (KYO-492 —
+    /// `kyomi_auth::chat_service::prepare_chat_dispatch`). The adapter must
+    /// neither re-load that row into context (`load_context` filters it out
+    /// via [`drop_pre_persisted_message`]) nor write it a second time
+    /// (`persist_after_chat` skips it via [`should_persist_new_message`]).
+    CallerPersisted(String),
+}
+
+impl Default for UserMessagePersistence {
+    /// `AdapterPersists(None)` — no pre-persisted row, no caller-chosen id.
+    /// This is pre-KYO-492 behaviour: the adapter both generates and
+    /// persists the message id itself.
+    fn default() -> Self {
+        Self::AdapterPersists(None)
+    }
+}
+
+impl UserMessagePersistence {
+    /// The id to stamp on the newly-appended user message, if any.
+    ///
+    /// Fires for *either* variant whenever a concrete id is available —
+    /// this is what keeps the id used for WebSocket streaming in sync with
+    /// the id ultimately written to the DB (whichever side writes it), and
+    /// for `CallerPersisted` is also the id `should_persist_new_message`
+    /// and `drop_pre_persisted_message` match against.
+    fn tag_id(&self) -> Option<&str> {
+        match self {
+            Self::AdapterPersists(id) => id.as_deref(),
+            Self::CallerPersisted(id) => Some(id.as_str()),
+        }
+    }
+
+    /// The id of a row the caller already wrote to the DB — `Some` only
+    /// for `CallerPersisted`. Drives both the skip-persist
+    /// (`should_persist_new_message`) and drop-from-loaded-context
+    /// (`drop_pre_persisted_message`) behaviour; `AdapterPersists` never
+    /// triggers either, even when it carries an id.
+    fn caller_persisted_id(&self) -> Option<&str> {
+        match self {
+            Self::CallerPersisted(id) => Some(id.as_str()),
+            Self::AdapterPersists(_) => None,
+        }
+    }
 }
 
 /// Arguments for [`ChatAgentAdapter::chat`] — one agent turn.
@@ -62,7 +131,10 @@ pub struct ChatParams<'a> {
     pub current_time_user_tz: Option<&'a str>,
     pub message_source: Option<&'a str>,
     pub user_id: Option<&'a str>,
-    pub user_message_id: Option<&'a str>,
+    /// How the user's message for this turn reaches the database — see
+    /// [`UserMessagePersistence`] for the two arms and the contract each
+    /// enforces.
+    pub user_message_persistence: &'a UserMessagePersistence,
     pub assistant_message_id: Option<&'a str>,
 }
 
@@ -88,6 +160,7 @@ impl ChatAgentAdapter {
             db,
             encryption_key,
             messages_loaded_count: 0,
+            user_message_persistence: UserMessagePersistence::default(),
         }
     }
 
@@ -227,6 +300,16 @@ impl ChatAgentAdapter {
         )
         .await?;
 
+        // Drop the row the caller already persisted before calling chat()
+        // (KYO-492) — otherwise it would both be loaded into context here
+        // AND re-appended by CustomAgent::chat(), so the LLM sees the same
+        // user turn twice and persist_after_chat would try to insert it a
+        // second time.
+        let db_messages = drop_pre_persisted_message(
+            db_messages,
+            self.user_message_persistence.caller_persisted_id(),
+        );
+
         if db_messages.is_empty() {
             self.context_loaded = true;
             return Ok(false);
@@ -275,6 +358,20 @@ impl ChatAgentAdapter {
             for msg in new_messages {
                 // Skip system messages (they're part of the prompt, not stored).
                 if msg.role == MessageRole::System {
+                    continue;
+                }
+
+                // Skip the one message the caller already persisted before
+                // calling chat() (KYO-492) — see
+                // UserMessagePersistence::CallerPersisted. Every other new
+                // message (a second user turn within the same run, every
+                // assistant/tool message, and — critically — any
+                // AdapterPersists row, e.g. Slack's caller-chosen id) is
+                // still persisted here.
+                if !should_persist_new_message(
+                    msg,
+                    self.user_message_persistence.caller_persisted_id(),
+                ) {
                     continue;
                 }
 
@@ -343,6 +440,11 @@ impl ChatAgentAdapter {
     /// assistant response message before persistence, ensuring the DB record
     /// matches the ID used for WebSocket streaming and UI display.
     pub async fn chat(&mut self, params: ChatParams<'_>) -> kyomi_core::Result<String> {
+        // Record how this turn's user message is persisted before
+        // load_context() runs, so the filter it applies (and the
+        // persist-skip below) see it.
+        self.user_message_persistence = params.user_message_persistence.clone();
+
         // Lazy context loading on first call.
         if !self.context_loaded {
             self.load_context().await?;
@@ -360,9 +462,15 @@ impl ChatAgentAdapter {
             )
             .await;
 
-        // Tag the user message with the known ID so the DB record matches
-        // the ID returned to the frontend in the HTTP response.
-        if let Some(umid) = params.user_message_id {
+        // Tag the agent-appended user message with the known ID so the DB
+        // record — whichever side ends up writing it — matches the ID
+        // returned to the frontend. For `CallerPersisted`, this is also
+        // what makes the persist-skip above fire: should_persist_new_message
+        // matches on this exact message_id, so tagging it is what lets
+        // persist_after_chat recognise "this is the row already written by
+        // prepare_chat_dispatch" and skip it, rather than by slice
+        // arithmetic or role.
+        if let Some(umid) = params.user_message_persistence.tag_id() {
             self.tag_first_new_user_message_id(umid);
         }
 
@@ -396,7 +504,14 @@ impl ChatAgentAdapter {
         }
     }
 
-    /// Set the `message_id` on the first new user message (after loaded messages).
+    /// Set the `message_id` on the first new user message (after loaded
+    /// messages) to `message_id` — see [`UserMessagePersistence::tag_id`].
+    /// For `CallerPersisted`, this both preserves the "persisted id ==
+    /// streamed id" guarantee and is what lets `persist_after_chat` (via
+    /// [`should_persist_new_message`]) recognise that message as already
+    /// stored and skip it. For `AdapterPersists(Some(id))`, it simply
+    /// ensures the row `persist_after_chat` is about to write uses the
+    /// caller-chosen id.
     fn tag_first_new_user_message_id(&mut self, message_id: &str) {
         let state = self.agent.state_mut();
         for msg in state.messages[self.messages_loaded_count..].iter_mut() {
@@ -423,6 +538,52 @@ impl ChatAgentAdapter {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Whether a newly-produced agent message still needs to be written to the
+/// DB by `persist_after_chat`.
+///
+/// `caller_persisted_id` is [`UserMessagePersistence::caller_persisted_id`]
+/// — `Some` exactly when the caller (e.g.
+/// `kyomi_auth::chat_service::prepare_chat_dispatch`, KYO-492) already
+/// wrote a user message row before the agent loop started
+/// (`CallerPersisted`). The one new message whose `message_id` matches it
+/// (tagged by `tag_first_new_user_message_id`) must not be written again.
+/// Every other new message — a second user turn within the same run, every
+/// assistant/tool message, and *every* `AdapterPersists` row regardless of
+/// whether it carries a caller-chosen id (e.g. Slack) — still needs
+/// persisting. When `caller_persisted_id` is `None`, every new message is
+/// persisted, matching pre-KYO-492 behaviour exactly.
+fn should_persist_new_message(msg: &Message, caller_persisted_id: Option<&str>) -> bool {
+    match caller_persisted_id {
+        // Only a User-role message can be the pre-persisted row — an
+        // assistant or tool message must never be skipped, even if it
+        // happened to carry the same id (message ids are UUIDs, so this is
+        // theoretical, but the predicate should not rely on that).
+        Some(id) => !(msg.role == MessageRole::User && msg.message_id.as_deref() == Some(id)),
+        None => true,
+    }
+}
+
+/// Drop the DB row already covered by `caller_persisted_id`
+/// ([`UserMessagePersistence::caller_persisted_id`]) from a freshly-loaded
+/// message history, before it is converted into agent `Message`s and
+/// pushed onto `state.messages`.
+///
+/// Without this, the row `prepare_chat_dispatch` (KYO-492) already wrote
+/// would be loaded back into context here AND re-appended by
+/// `CustomAgent::chat()`, so the LLM would see the same user turn twice.
+/// Preserves the order and content of every other row. When
+/// `caller_persisted_id` is `None` (including every `AdapterPersists` row),
+/// the list is returned unchanged.
+fn drop_pre_persisted_message(
+    db_messages: Vec<chat_service::AgentMessage>,
+    caller_persisted_id: Option<&str>,
+) -> Vec<chat_service::AgentMessage> {
+    match caller_persisted_id {
+        Some(id) => db_messages.into_iter().filter(|m| m.message_id != id).collect(),
+        None => db_messages,
+    }
+}
 
 /// Convert a database `AgentMessage` to an agent `Message`.
 fn db_message_to_agent_message(msg: &chat_service::AgentMessage) -> Message {
@@ -827,6 +988,174 @@ mod tests {
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::User);
+    }
+
+    // -- Contract: should_persist_new_message (KYO-492) ----------------------
+
+    #[test]
+    fn should_persist_new_message_skips_the_message_tagged_with_the_pre_persisted_id() {
+        let mut msg = Message::user("hello");
+        msg.message_id = Some("pre-persisted-id".into());
+        assert!(
+            !should_persist_new_message(&msg, Some("pre-persisted-id")),
+            "the exact row prepare_chat_dispatch already wrote must not be re-persisted"
+        );
+    }
+
+    #[test]
+    fn should_persist_new_message_persists_a_different_user_message() {
+        // A second user turn within the same run (message_id unset, or set
+        // to something other than the pre-persisted id) must still be
+        // persisted — this is not "skip all user messages", only the one.
+        let unset = Message::user("a later turn in the same run");
+        assert!(
+            should_persist_new_message(&unset, Some("pre-persisted-id")),
+            "a user message that isn't the pre-persisted row must still be persisted"
+        );
+
+        let mut different_id = Message::user("another later turn");
+        different_id.message_id = Some("some-other-id".into());
+        assert!(should_persist_new_message(&different_id, Some("pre-persisted-id")));
+    }
+
+    #[test]
+    fn should_persist_new_message_always_persists_assistant_and_tool_messages() {
+        let mut assistant = Message::assistant("here's the answer");
+        assistant.message_id = Some("pre-persisted-id".into());
+        assert!(
+            should_persist_new_message(&assistant, Some("pre-persisted-id")),
+            "only a User-role message can be the pre-persisted row; an assistant \
+             message must never be skipped even if it happened to carry the same id"
+        );
+
+        let tool = Message::tool_result("tc_1", "search_catalog", "{}");
+        assert!(should_persist_new_message(&tool, Some("pre-persisted-id")));
+    }
+
+    #[test]
+    fn should_persist_new_message_persists_everything_when_none() {
+        // None means no row was pre-persisted (copilot/watch paths) —
+        // behaviour must be unchanged from before KYO-492: every new
+        // message gets persisted.
+        let user = Message::user("hello");
+        let assistant = Message::assistant("hi there");
+        let tool = Message::tool_result("tc_1", "search_catalog", "{}");
+
+        assert!(should_persist_new_message(&user, None));
+        assert!(should_persist_new_message(&assistant, None));
+        assert!(should_persist_new_message(&tool, None));
+    }
+
+    // -- Contract: UserMessagePersistence::caller_persisted_id (KYO-492 review) --
+    //
+    // The two arms of UserMessagePersistence exist specifically so that
+    // Slack's `AdapterPersists(Some(id))` — a caller-chosen id with no
+    // pre-persisted row — can never be mistaken for `CallerPersisted(id)`.
+    // A naive rename back to a single `Option<String>` (treating "carries
+    // an id" as "already persisted") would make this test fail: Slack
+    // would silently stop having its user messages persisted at all.
+
+    #[test]
+    fn adapter_persists_with_id_does_not_report_a_caller_persisted_row() {
+        let persistence = UserMessagePersistence::AdapterPersists(Some("slack-minted-id".into()));
+        assert_eq!(
+            persistence.caller_persisted_id(),
+            None,
+            "AdapterPersists must never be read as a caller-persisted row, even when \
+             it carries an id — Slack mints its own id (routes.rs) but still relies \
+             on persist_after_chat to do the actual write"
+        );
+        // tag_id still fires — the id is used for WS-streaming / DB-row
+        // matching, just not for skip-persist.
+        assert_eq!(persistence.tag_id(), Some("slack-minted-id"));
+    }
+
+    #[test]
+    fn should_persist_new_message_persists_the_row_for_adapter_persists_with_id() {
+        // End-to-end through should_persist_new_message (not just the enum
+        // accessor): a message tagged with the AdapterPersists id must
+        // still be persisted — this is the exact case that broke when the
+        // field was a bare Option<String> and the fix incorrectly proposed
+        // renaming it in place. See KYO-492 review finding 2.
+        let mut msg = Message::user("hello from slack");
+        msg.message_id = Some("slack-minted-id".into());
+
+        let persistence = UserMessagePersistence::AdapterPersists(Some("slack-minted-id".into()));
+        assert!(
+            should_persist_new_message(&msg, persistence.caller_persisted_id()),
+            "AdapterPersists(Some(id)) must still be persisted by persist_after_chat — \
+             only CallerPersisted skips"
+        );
+    }
+
+    #[test]
+    fn should_persist_new_message_skips_the_row_for_caller_persisted() {
+        let mut msg = Message::user("hello from web chat");
+        msg.message_id = Some("caller-written-id".into());
+
+        let persistence = UserMessagePersistence::CallerPersisted("caller-written-id".into());
+        assert!(
+            !should_persist_new_message(&msg, persistence.caller_persisted_id()),
+            "CallerPersisted must still be skipped — prepare_chat_dispatch already \
+             wrote this row (KYO-492)"
+        );
+    }
+
+    // -- Contract: drop_pre_persisted_message (KYO-492) -----------------------
+
+    fn agent_message(message_id: &str, role: &str, content: &str) -> chat_service::AgentMessage {
+        chat_service::AgentMessage {
+            message_id: message_id.into(),
+            role: role.into(),
+            content: content.into(),
+            tool_calls: None,
+            tool_call_id: None,
+            tool_name: None,
+            sent_by_user_id: None,
+        }
+    }
+
+    #[test]
+    fn drop_pre_persisted_message_removes_exactly_the_one_row() {
+        let db_messages = vec![
+            agent_message("m1", "system", "you are helpful"),
+            agent_message("m2", "user", "first turn"),
+            agent_message("m3", "assistant", "first reply"),
+            agent_message("m4", "user", "second turn — the pre-persisted row"),
+        ];
+
+        let filtered = drop_pre_persisted_message(db_messages, Some("m4"));
+
+        assert_eq!(
+            filtered.len(),
+            3,
+            "exactly one row (m4) must be dropped, none of the others"
+        );
+        // Order and content of the surviving rows must be preserved.
+        assert_eq!(filtered[0].message_id, "m1");
+        assert_eq!(filtered[0].content, "you are helpful");
+        assert_eq!(filtered[1].message_id, "m2");
+        assert_eq!(filtered[1].content, "first turn");
+        assert_eq!(filtered[2].message_id, "m3");
+        assert_eq!(filtered[2].content, "first reply");
+        assert!(
+            filtered.iter().all(|m| m.message_id != "m4"),
+            "the pre-persisted row must not survive the filter"
+        );
+    }
+
+    #[test]
+    fn drop_pre_persisted_message_is_a_no_op_when_none() {
+        let db_messages = vec![
+            agent_message("m1", "user", "hello"),
+            agent_message("m2", "assistant", "hi"),
+        ];
+
+        let filtered = drop_pre_persisted_message(db_messages.clone(), None);
+
+        assert_eq!(filtered.len(), db_messages.len());
+        assert_eq!(filtered[0].message_id, "m1");
+        assert_eq!(filtered[1].message_id, "m2");
     }
 
     // -- Note: Adapter integration contracts --------------------------------
