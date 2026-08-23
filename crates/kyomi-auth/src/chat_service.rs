@@ -1958,9 +1958,12 @@ pub async fn get_agent_messages(
 
 /// Outcome returned by [`prepare_chat_dispatch`].
 ///
-/// `SkippedAi` means the user message was stored and no AI agent should be
-/// spawned. `Ready` means the caller should build an [`AgentExecutionConfig`]
-/// and spawn the agent.
+/// Both variants mean the user message has already been durably stored —
+/// KYO-492: the write happens inside `prepare_chat_dispatch` itself, before
+/// either variant is returned, so the message survives even if the caller
+/// navigates away before the agent loop (for `Ready`) ever completes.
+/// `SkippedAi` means no AI agent should be spawned; `Ready` means the caller
+/// should build an [`AgentExecutionConfig`] and spawn the agent.
 #[derive(Debug)]
 pub enum ChatDispatchOutcome {
     /// AI was skipped (`skip_ai = true`). The user message has been stored.
@@ -1968,9 +1971,11 @@ pub enum ChatDispatchOutcome {
         session_id: String,
         user_message_id: String,
     },
-    /// AI agent spawn is required. User message has NOT been stored yet (the
-    /// agent executor handles storage). Shared-session user message broadcast
-    /// has already been sent.
+    /// AI agent spawn is required. The user message has already been stored
+    /// (see the enum-level doc) — the caller must pass `user_message_id`
+    /// to the agent executor as `UserMessagePersistence::CallerPersisted`
+    /// so it is neither re-loaded into context nor written a second time.
+    /// Shared-session user message broadcast has already been sent.
     Ready {
         session_id: String,
         is_new_session: bool,
@@ -2012,8 +2017,14 @@ pub struct ChatDispatchParams<'a> {
     pub client_msg_id: Option<&'a str>,
 }
 
-/// Find-or-create session, optionally store user message (skip_ai path), and
-/// optionally broadcast the user message to shared-session observers.
+/// Find-or-create session, store the user message, and optionally broadcast
+/// it to shared-session observers.
+///
+/// KYO-492: the user message is written here — before this function
+/// returns, on both the `skip_ai` and AI paths — rather than deferred to
+/// the agent executor's post-loop persistence. Without that, a client that
+/// navigates away while the agent is still working finds its own message
+/// gone on return, because nothing about the turn was durable yet.
 ///
 /// On success returns [`ChatDispatchOutcome`] describing what the caller should
 /// do next.
@@ -2073,25 +2084,40 @@ pub async fn prepare_chat_dispatch(
     // ── Generate message IDs ───────────────────────────────────────────────
     let user_message_id = uuid::Uuid::new_v4().to_string();
 
+    // ── Persist the user message ───────────────────────────────────────────
+    // KYO-492: runs on both the skip_ai and AI paths, before either
+    // ChatDispatchOutcome variant is returned. Previously the AI path left
+    // this to `ChatAgentAdapter::persist_after_chat`, which only ran after
+    // the whole agent loop finished — so a client that navigated away
+    // mid-turn found its own message gone on return. This also changes
+    // what gets stored on the AI path: the DB now holds the raw message
+    // instead of the metadata-prefixed content `agent.chat()` builds for
+    // the LLM (`build_metadata_prefix`) — matching what the skip_ai path
+    // has always stored. Display is unaffected: `get_session_messages`
+    // strips the prefix before the UI ever sees it, and must keep doing so
+    // for pre-existing rows that still carry it (KYO-506 tracks the
+    // consequence that `get_agent_messages`, the LLM-context path, does
+    // not strip it, so past turns now reach the model without their
+    // annotation — not fixed here).
+    let saved_id = add_message(
+        p.db,
+        p.encryption_key,
+        &session_id,
+        "user",
+        p.message,
+        None,
+        Some(&user_message_id),
+        p.current_time_user_tz,
+        Some(p.user_id),
+        None,
+        None,
+        None,
+    )
+    .await
+    .map_err(|e| kyomi_core::Error::Internal(format!("Failed to store message: {e}")))?;
+
     // ── skip_ai fast path ──────────────────────────────────────────────────
     if p.skip_ai {
-        let saved_id = add_message(
-            p.db,
-            p.encryption_key,
-            &session_id,
-            "user",
-            p.message,
-            None,
-            Some(&user_message_id),
-            p.current_time_user_tz,
-            Some(p.user_id),
-            None,
-            None,
-            None,
-        )
-        .await
-        .map_err(|e| kyomi_core::Error::Internal(format!("Failed to store message: {e}")))?;
-
         tracing::info!(
             session_id = %session_id,
             message_id = %saved_id,
@@ -2113,7 +2139,7 @@ pub async fn prepare_chat_dispatch(
             ws_manager,
             p.workspace_id,
             &session_id,
-            &user_message_id,
+            &saved_id,
             "user",
             p.message,
             &chrono::Utc::now().to_rfc3339(),
@@ -2127,7 +2153,7 @@ pub async fn prepare_chat_dispatch(
     Ok(ChatDispatchOutcome::Ready {
         session_id,
         is_new_session,
-        user_message_id,
+        user_message_id: saved_id,
         assistant_message_id,
         is_shared,
     })
@@ -2890,6 +2916,117 @@ mod tests {
             untouched.user_id, "user-a",
             "collision must not overwrite the original owner"
         );
+    }
+
+    #[tokio::test]
+    async fn prepare_chat_dispatch_ready_persists_user_message_before_agent_runs() {
+        // KYO-492: before the fix, the `skip_ai=false` (AI) path returned
+        // `Ready` without writing anything — the write was deferred to
+        // `ChatAgentAdapter::persist_after_chat`, which only ran once the
+        // whole agent loop finished. Because `prepare_chat_dispatch`
+        // returns before the agent is even spawned, this return point IS
+        // the "agent still running" window the bug describes — a faithful
+        // and much cheaper equivalent of stubbing a blocking agent. On
+        // unfixed code the assertions below fail: `get_session_messages`
+        // returns an empty list, because nothing has been written yet.
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        let key = test_key();
+        seed_user(sq, "user-a", "user-a@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+
+        let client_sid = uuid::Uuid::new_v4().to_string();
+        let outcome = prepare_chat_dispatch(ChatDispatchParams {
+            db: &db,
+            encryption_key: &key,
+            ws_manager: None,
+            user_id: "user-a",
+            workspace_id: "ws-1",
+            user_display_name: "User A",
+            session_id: &client_sid,
+            is_new_session: true,
+            message: "what was Q4 revenue",
+            current_time_user_tz: None,
+            skip_ai: false,
+            client_msg_id: None,
+        })
+        .await
+        .expect("prepare_chat_dispatch should succeed for the AI path");
+
+        let ChatDispatchOutcome::Ready { user_message_id, .. } = outcome else {
+            panic!("skip_ai=false must return Ready");
+        };
+
+        let messages = get_session_messages(&db, &key, &client_sid, 100)
+            .await
+            .expect("get_session_messages should succeed");
+
+        assert_eq!(
+            messages.len(),
+            1,
+            "the user's message must be durable the instant prepare_chat_dispatch \
+             returns Ready, before the agent loop is even spawned — not deferred to \
+             ChatAgentAdapter::persist_after_chat, which only runs after the whole \
+             agent loop finishes"
+        );
+        assert_eq!(messages[0].message_type, "user");
+        assert_eq!(
+            messages[0].message_id, user_message_id,
+            "the stored row must carry the same id returned in the Ready outcome, \
+             so the persisted id matches the id streamed to the client"
+        );
+        assert_eq!(
+            messages[0].content, "what was Q4 revenue",
+            "the stored content must be the raw message the user sent, not the \
+             metadata-prefixed form agent.chat() builds for the LLM via \
+             build_metadata_prefix"
+        );
+    }
+
+    #[tokio::test]
+    async fn prepare_chat_dispatch_skip_ai_stores_exactly_one_user_message() {
+        // Regression guard: hoisting the write out of the `skip_ai` branch
+        // (KYO-492) must not change this path's behaviour at all.
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        let key = test_key();
+        seed_user(sq, "user-a", "user-a@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+
+        let client_sid = uuid::Uuid::new_v4().to_string();
+        let outcome = prepare_chat_dispatch(ChatDispatchParams {
+            db: &db,
+            encryption_key: &key,
+            ws_manager: None,
+            user_id: "user-a",
+            workspace_id: "ws-1",
+            user_display_name: "User A",
+            session_id: &client_sid,
+            is_new_session: true,
+            message: "log this only",
+            current_time_user_tz: None,
+            skip_ai: true,
+            client_msg_id: None,
+        })
+        .await
+        .expect("prepare_chat_dispatch should succeed for the skip_ai path");
+
+        let ChatDispatchOutcome::SkippedAi { user_message_id, .. } = outcome else {
+            panic!("skip_ai=true must return SkippedAi");
+        };
+
+        let messages = get_session_messages(&db, &key, &client_sid, 100)
+            .await
+            .expect("get_session_messages should succeed");
+
+        assert_eq!(
+            messages.len(),
+            1,
+            "the skip_ai path must still store exactly one user message, unchanged \
+             by hoisting the write above the skip_ai branch"
+        );
+        assert_eq!(messages[0].message_id, user_message_id);
+        assert_eq!(messages[0].content, "log this only");
     }
 
     #[tokio::test]

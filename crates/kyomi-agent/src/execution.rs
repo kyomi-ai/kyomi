@@ -29,7 +29,7 @@ use kyomi_core::enums::WorkspaceRole;
 use kyomi_core::{DbPool, KVPool};
 use kyomi_embed::LazyEmbedding;
 
-use crate::adapter::ChatAgentAdapter;
+use crate::adapter::{ChatAgentAdapter, UserMessagePersistence};
 
 /// SQL used to persist a row to `api_usage_log` after an agent turn.
 ///
@@ -90,7 +90,11 @@ pub struct AgentExecutionConfig {
     /// field's doc for why.
     pub max_total_tokens: Option<u64>,
     pub component: String,
-    pub user_message_id: Option<String>,
+    /// How the user's message for this execution reaches the database —
+    /// see [`UserMessagePersistence`] for the two arms and the contract
+    /// each enforces. Threaded into
+    /// [`ChatParams::user_message_persistence`](crate::adapter::ChatParams::user_message_persistence).
+    pub user_message_persistence: UserMessagePersistence,
     pub assistant_message_id: Option<String>,
     /// Optional conversation history for multi-turn conversations.
     /// Each entry is a (role, content) pair where role is "user" or "assistant".
@@ -136,7 +140,7 @@ impl Default for AgentExecutionConfig {
             max_duration: Some(Duration::from_secs(15 * 60)),
             max_total_tokens: Some(1_500_000),
             component: "custom_agent".into(),
-            user_message_id: None,
+            user_message_persistence: UserMessagePersistence::AdapterPersists(None),
             assistant_message_id: None,
             conversation_history: None,
             user_display_name: "Unknown".to_string(),
@@ -469,7 +473,7 @@ pub async fn execute_agent_chat(
             current_time_user_tz: config.current_time_user_tz.as_deref(),
             message_source: config.message_source.as_deref(),
             user_id: Some(&config.user_id),
-            user_message_id: config.user_message_id.as_deref(),
+            user_message_persistence: &config.user_message_persistence,
             assistant_message_id: Some(&assistant_message_id),
         })
         .await;
@@ -1293,7 +1297,9 @@ mod tests {
             max_total_tokens: Some(500_000),
             component: "watch_agent".into(),
             assistant_message_id: Some("msg-pre-created".into()),
-            user_message_id: Some("msg-user-123".into()),
+            user_message_persistence: UserMessagePersistence::CallerPersisted(
+                "msg-user-123".into(),
+            ),
             conversation_history: Some(vec![
                 ("user".into(), "What's our MRR?".into()),
                 ("assistant".into(), "Let me look that up.".into()),

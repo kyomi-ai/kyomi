@@ -34,6 +34,7 @@ use kyomi_core::{capability, DbPool, KVPool, WatchMode};
 use kyomi_embed::EmbeddingService;
 use kyomi_types::truncate_preview;
 
+use crate::adapter::UserMessagePersistence;
 use crate::alert::deliver_watch_alert;
 use crate::execution::{execute_agent_chat, AgentExecutionConfig};
 use crate::tools::WATCH_TOOLS;
@@ -1221,7 +1222,7 @@ async fn execute_watch_inner(
         max_duration: Some(MAX_WATCH_DURATION),
         max_total_tokens: Some(MAX_WATCH_TOTAL_TOKENS),
         component: "kyomi_watch".into(),
-        user_message_id: None,
+        user_message_persistence: UserMessagePersistence::AdapterPersists(None),
         assistant_message_id: None,
         conversation_history: None,
         user_display_name: "Kyomi Watch".to_string(),
@@ -1330,7 +1331,7 @@ async fn execute_watch_inner(
                         max_duration: Some(MAX_WATCH_DURATION),
                         max_total_tokens: Some(MAX_WATCH_TOTAL_TOKENS),
                         component: "kyomi_watch".into(),
-                        user_message_id: None,
+                        user_message_persistence: UserMessagePersistence::AdapterPersists(None),
                         assistant_message_id: None,
                         conversation_history: None,
                         user_display_name: "Kyomi Watch".to_string(),

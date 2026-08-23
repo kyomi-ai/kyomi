@@ -1788,9 +1788,13 @@ async fn run_slack_query(
     });
 
     // Generate a stable ID for the user message so the agent's
-    // persist_after_chat() stores it exactly once (matches the web frontend
-    // pattern in server_fns/chat.rs where prepare_chat_dispatch() returns a
-    // UUID and the server_fn passes it via user_message_id).
+    // persist_after_chat() stores it exactly once, under this id — passed
+    // below as `UserMessagePersistence::AdapterPersists(Some(user_message_id))`.
+    // Unlike the web frontend (server_fns/chat.rs), which pre-persists the
+    // user message before the agent is even spawned (KYO-492,
+    // `UserMessagePersistence::CallerPersisted`), Slack still relies on the
+    // adapter's post-loop persistence — it only mints the id up front so
+    // that row's id is known ahead of time.
     let user_message_id = uuid::Uuid::new_v4().to_string();
 
     // Resolve the Slack-linked Kyomi user's current workspace role — and,
@@ -1834,7 +1838,9 @@ async fn run_slack_query(
         max_duration: Some(std::time::Duration::from_secs(10 * 60)),
         max_total_tokens: Some(1_500_000),
         component: "slack_agent".into(),
-        user_message_id: Some(user_message_id),
+        user_message_persistence: kyomi_agent::UserMessagePersistence::AdapterPersists(Some(
+            user_message_id,
+        )),
         assistant_message_id: None,
         conversation_history: None,
         user_display_name: "Kyomi Slack".to_string(),
