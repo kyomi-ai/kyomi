@@ -244,6 +244,22 @@ pub struct TestConnectionResult {
 pub struct DiscoverResourcesResult {
     pub success: bool,
     pub resources: std::collections::HashMap<String, Vec<String>>,
+    /// Per-key discovery failures, keyed the same as `resources` — a key
+    /// present here means that specific `list_*` call failed and is
+    /// therefore absent from `resources` (never both, never silently
+    /// dropped with no trace of either). Distinct from `success: false`:
+    /// this fn already reports `success: false` for connection-level
+    /// failures (bad credentials, timeout, `test_connection()` returning
+    /// `false`) before any discovery call runs, so by the time
+    /// `resource_errors` can be non-empty the connection itself is known
+    /// good — only a specific resource listing failed. Some providers
+    /// return more than one pair (e.g. `databases` + `schemas`), and one
+    /// failing must not blank the ones that succeeded (KYO-466) — that is
+    /// the reason this is a per-key map rather than a single flag.
+    /// Sanitized for client display the same way `message` is
+    /// (`kyomi_core::sanitize_error`); the raw reason is logged
+    /// server-side in `discover_datasource_resources` before sanitizing.
+    pub resource_errors: std::collections::HashMap<String, String>,
     pub message: String,
 }
 
@@ -647,6 +663,7 @@ pub async fn discover_datasource_resources(
             return Ok(DiscoverResourcesResult {
                 success: false,
                 resources: std::collections::HashMap::new(),
+                resource_errors: std::collections::HashMap::new(),
                 message: e.to_string(),
             });
         }
@@ -661,6 +678,7 @@ pub async fn discover_datasource_resources(
             return Ok(DiscoverResourcesResult {
                 success: false,
                 resources: std::collections::HashMap::new(),
+                resource_errors: std::collections::HashMap::new(),
                 message: format!("Failed to connect: {}", kyomi_core::sanitize_error(&e.to_string())),
             });
         }
@@ -690,6 +708,7 @@ pub async fn discover_datasource_resources(
             return Ok(DiscoverResourcesResult {
                 success: false,
                 resources: std::collections::HashMap::new(),
+                resource_errors: std::collections::HashMap::new(),
                 message: format!("Failed to connect: {}", kyomi_core::sanitize_error(&e.to_string())),
             });
         }
@@ -703,6 +722,7 @@ pub async fn discover_datasource_resources(
             return Ok(DiscoverResourcesResult {
                 success: false,
                 resources: std::collections::HashMap::new(),
+                resource_errors: std::collections::HashMap::new(),
                 message: "Connection timed out".to_string(),
             });
         }
@@ -730,6 +750,7 @@ pub async fn discover_datasource_resources(
         return Ok(DiscoverResourcesResult {
             success: false,
             resources: std::collections::HashMap::new(),
+            resource_errors: std::collections::HashMap::new(),
             message: "Connection test failed — check your credentials".to_string(),
         });
     }
@@ -774,23 +795,94 @@ pub async fn discover_datasource_resources(
             // expects. Many service accounts (e.g. anything scoped to
             // "BigQuery Job User") lack `resourcemanager.projects.list` —
             // that must become a captured `DiscoveryResult` error, not a
-            // propagated one, so the loop below drops the "projects" key
-            // instead of failing discovery as a whole.
+            // propagated one, so the loop below reports it as a per-key
+            // discovery failure (KYO-466) instead of failing discovery as a
+            // whole.
             let projects = bigquery_projects_discovery_result(provider.list_projects().await);
             vec![("projects", projects)]
         }
         _ => vec![],
     };
 
-    let resources_map = build_resources_map(discovery_pairs);
+    let (resources_map, resource_errors) = build_resources_map(discovery_pairs);
+
+    // Log every per-key discovery failure before sanitizing — this is the
+    // trace KYO-466 found completely absent from production: the original
+    // report could not be diagnosed because a failing `list_projects()` left
+    // no server-side record at all. Kept inside this fn (rather than inside
+    // `build_resources_map`) so it carries the same three attribution fields
+    // as every other `tracing::warn!` here (KYO-469's shape).
+    for (key, reason) in &resource_errors {
+        tracing::warn!(
+            datasource_type = %datasource_type,
+            auth_mode = %auth_mode,
+            has_slug,
+            resource_key = %key,
+            error = %reason,
+            "discover_datasource_resources: failed to list resources for one discovery key"
+        );
+    }
 
     provider.close().await;
+
+    // Sanitized for the client the same way every other message in this fn
+    // is (KYO-448) — the raw reason was already logged above.
+    let resource_errors: std::collections::HashMap<String, String> = resource_errors
+        .into_iter()
+        .map(|(key, reason)| (key, kyomi_core::sanitize_error(&reason)))
+        .collect();
+
+    let message = discovery_outcome_message(&resources_map, &resource_errors);
 
     Ok(DiscoverResourcesResult {
         success: true,
         resources: resources_map,
-        message: "Connection successful and resources discovered".to_string(),
+        resource_errors,
+        message,
     })
+}
+
+/// Choose the client-facing message for a completed discovery call, given
+/// the final resources/errors split `build_resources_map` produced.
+///
+/// KYO-466: `"Connection successful and resources discovered"` was returned
+/// unconditionally, which is false whenever nothing was actually
+/// discovered. Extracted as a pure function (rather than inlined in
+/// `discover_datasource_resources`, which needs a live provider connection
+/// to exercise at all) specifically so the three outcomes it distinguishes
+/// can be unit tested directly:
+/// - at least one resource came back → resources were genuinely discovered
+/// - nothing came back, but nothing errored either → a real empty result
+///   (e.g. a BigQuery account with zero listable projects)
+/// - nothing came back and at least one key errored → discovery could not
+///   complete, and `resource_errors` carries the per-key reason(s)
+///
+/// Neither current client reads this string on the success path (both
+/// `resources: HashMap<String, Vec<String>>` consumers in
+/// `pages/settings/datasources.rs` derive their own copy instead —
+/// `EditModeCatalogTab`'s Catalog-tab Effect builds a per-provider-noun
+/// message via `catalog_item_label_for_type`, and `test_action`'s
+/// `ConnectionTestResultBadge` never renders `TestConnectionResult.message`
+/// at all when `success` is `true`, only its `success_label` prop). That is
+/// deliberate, not a sign this fn is dead: this is still the field every
+/// non-Leptos caller of `discover_datasource_resources` (a script, a future
+/// API consumer, a log line) sees, and the three-outcome distinction it
+/// computes is exactly what `discovery_outcome_message_tests` below pins.
+/// Wiring it into either client would only *replace* a more specific,
+/// per-provider-noun string with a generic one — not add information.
+#[cfg(feature = "ssr")]
+fn discovery_outcome_message(
+    resources: &std::collections::HashMap<String, Vec<String>>,
+    resource_errors: &std::collections::HashMap<String, String>,
+) -> String {
+    let discovered_any = resources.values().any(|items| !items.is_empty());
+    if discovered_any {
+        "Connection successful and resources discovered".to_string()
+    } else if !resource_errors.is_empty() {
+        "Connected, but some resources could not be listed — see details below".to_string()
+    } else {
+        "Connected, but no resources were found".to_string()
+    }
 }
 
 /// Convert BigQuery's `list_projects()` result into the `DiscoveryResult`
@@ -798,8 +890,8 @@ pub async fn discover_datasource_resources(
 /// (typically a service account missing `resourcemanager.projects.list`)
 /// becomes a `DiscoveryResult` carrying the error message with empty items —
 /// never a propagated `Result::Err` — so it can flow through the same
-/// drop-on-error handling in [`build_resources_map`] as every other
-/// discovery pair.
+/// per-key handling in [`build_resources_map`] as every other discovery
+/// pair.
 #[cfg(feature = "ssr")]
 fn bigquery_projects_discovery_result(
     result: kyomi_connect_protocol::Result<Vec<String>>,
@@ -813,29 +905,45 @@ fn bigquery_projects_discovery_result(
     }
 }
 
-/// Build the discovered-resources map from a set of `(key, DiscoveryResult)`
-/// pairs, dropping any pair whose discovery errored rather than surfacing
-/// that as an overall failure.
+/// Split a set of `(key, DiscoveryResult)` pairs into successfully
+/// discovered items and per-key discovery errors, rather than surfacing one
+/// erroring pair as an overall discovery failure.
 ///
-/// This is the mechanism that keeps `discover_datasource_resources` reporting
-/// `success: true` even when one discovery call (e.g. BigQuery's
-/// `list_projects()` for a service account without Resource Manager access)
-/// fails — the erroring key is simply absent from the returned map, and the
-/// caller falls back to manual entry (`BqProjectField`'s free-text input).
+/// A key that errored (e.g. BigQuery's `list_projects()` for a service
+/// account without Resource Manager access) lands in the *second* returned
+/// map, keyed the same way, and is absent from the first — never both,
+/// never dropped with no trace of either (KYO-466: silently dropping the
+/// key with no error channel is exactly what made "no projects" and
+/// "couldn't list projects" indistinguishable to the client). This is the
+/// mechanism that lets `discover_datasource_resources` keep reporting
+/// `success: true` — the connection itself worked — while still telling the
+/// client which specific resource list it could not enumerate, and why.
+/// Some providers return more than one pair (e.g. `databases` + `schemas`),
+/// and one failing must not blank the pairs that succeeded — the reason
+/// this is a per-key map rather than a single flag.
 #[cfg(feature = "ssr")]
 fn build_resources_map(
     pairs: Vec<(&str, kyomi_datasource_server::DiscoveryResult)>,
-) -> std::collections::HashMap<String, Vec<String>> {
+) -> (
+    std::collections::HashMap<String, Vec<String>>,
+    std::collections::HashMap<String, String>,
+) {
     let mut resources_map = std::collections::HashMap::new();
+    let mut errors_map = std::collections::HashMap::new();
     for (key, result) in pairs {
-        if result.error.is_none() {
-            resources_map.insert(
-                key.to_string(),
-                result.items, // items is already Vec<String>
-            );
+        match result.error {
+            None => {
+                resources_map.insert(
+                    key.to_string(),
+                    result.items, // items is already Vec<String>
+                );
+            }
+            Some(reason) => {
+                errors_map.insert(key.to_string(), reason);
+            }
         }
     }
-    resources_map
+    (resources_map, errors_map)
 }
 
 // ---------------------------------------------------------------------------
@@ -1212,31 +1320,217 @@ mod bigquery_discovery_tests {
     /// The exact regression this ticket fixes: a service account without
     /// Resource Manager access must not turn the whole "Validate & Discover
     /// Projects" call into a failure — `Next` still has to enable. That
-    /// depends on `build_resources_map` dropping the errored "projects" pair
-    /// entirely rather than inserting an empty vec (which would be
-    /// indistinguishable from a real empty project list) or aborting.
+    /// depends on `build_resources_map` omitting the errored "projects" pair
+    /// from `resources` entirely rather than inserting an empty vec (which
+    /// would be indistinguishable from a real empty project list) or
+    /// aborting. KYO-466 adds the second half of this: the reason must not
+    /// simply vanish either — it belongs in the returned error map.
     #[test]
     fn errored_projects_pair_is_dropped_from_resources_map_not_fatal() {
         let projects = bigquery_projects_discovery_result(Err(
             kyomi_connect_protocol::Error::Provider("permission denied".to_string()),
         ));
-        let map = build_resources_map(vec![("projects", projects)]);
+        let (resources, errors) = build_resources_map(vec![("projects", projects)]);
         assert!(
-            !map.contains_key("projects"),
-            "an errored discovery item must be omitted entirely, not surfaced as an empty vec"
+            !resources.contains_key("projects"),
+            "an errored discovery item must be omitted from resources, not surfaced as an \
+             empty vec"
+        );
+        assert_eq!(
+            errors.get("projects").map(String::as_str),
+            Some("permission denied"),
+            "KYO-466: the error must reach the caller via the per-key error channel instead \
+             of vanishing with no trace"
         );
     }
 
     /// A genuinely empty-but-successful project list (e.g. a fresh service
     /// account with no projects yet) is a real result and must still appear
-    /// in the map — distinguishing it from the dropped-on-error case above is
-    /// exactly the property `BqProjectField`'s text-input fallback depends on
-    /// being safe either way.
+    /// in the resources map with no corresponding entry in the error map —
+    /// distinguishing it from the dropped-on-error case above is the whole
+    /// point of KYO-466.
     #[test]
     fn empty_but_successful_projects_list_is_present_in_resources_map() {
         let projects = bigquery_projects_discovery_result(Ok(vec![]));
-        let map = build_resources_map(vec![("projects", projects)]);
-        assert_eq!(map.get("projects"), Some(&Vec::<String>::new()));
+        let (resources, errors) = build_resources_map(vec![("projects", projects)]);
+        assert_eq!(resources.get("projects"), Some(&Vec::<String>::new()));
+        assert!(
+            errors.is_empty(),
+            "a successful (even empty) discovery must not also appear in the error map"
+        );
+    }
+}
+
+// ── build_resources_map: multi-pair error isolation (KYO-466) ─────────────
+
+#[cfg(all(test, feature = "ssr"))]
+mod build_resources_map_multi_pair_tests {
+    //! `bigquery_discovery_tests` above covers the single-pair BigQuery
+    //! case. Several other providers return *two* discovery pairs in one
+    //! call (postgres/redshift/sqlserver/synapse: `databases` + `schemas`;
+    //! snowflake: `warehouses` + `databases`) — this is the property the
+    //! ticket's per-key error channel exists to protect: one pair failing
+    //! must not blank the pair that succeeded.
+
+    use super::build_resources_map;
+    use kyomi_datasource_server::DiscoveryResult;
+
+    /// The core regression this ticket guards against: an erroring
+    /// `schemas` pair must not blank a succeeding `databases` pair.
+    #[test]
+    fn one_erroring_pair_does_not_blank_a_succeeding_pair() {
+        let databases = DiscoveryResult {
+            items: vec!["prod".to_string(), "staging".to_string()],
+            error: None,
+        };
+        let schemas = DiscoveryResult {
+            items: vec![],
+            error: Some("permission denied listing schemas".to_string()),
+        };
+        let (resources, errors) =
+            build_resources_map(vec![("databases", databases), ("schemas", schemas)]);
+
+        assert_eq!(
+            resources.get("databases"),
+            Some(&vec!["prod".to_string(), "staging".to_string()]),
+            "the succeeding pair must render fully even though a sibling pair failed"
+        );
+        assert!(
+            !resources.contains_key("schemas"),
+            "the failing pair's key must not appear in resources — an empty vec there would \
+             be indistinguishable from a real empty schema list"
+        );
+        assert_eq!(
+            errors.get("schemas").map(String::as_str),
+            Some("permission denied listing schemas"),
+            "the failing pair's reason must reach the caller via the error channel"
+        );
+        assert!(
+            !errors.contains_key("databases"),
+            "a succeeding pair must never appear in the error map"
+        );
+    }
+
+    /// The reverse ordering — first pair fails, second succeeds — guards
+    /// against an implementation that only isolates the failure correctly
+    /// when it happens to come last in the `Vec`.
+    #[test]
+    fn failure_in_the_first_pair_still_preserves_the_second() {
+        let warehouses = DiscoveryResult {
+            items: vec![],
+            error: Some("warehouse listing timed out".to_string()),
+        };
+        let databases = DiscoveryResult {
+            items: vec!["analytics".to_string()],
+            error: None,
+        };
+        let (resources, errors) =
+            build_resources_map(vec![("warehouses", warehouses), ("databases", databases)]);
+
+        assert_eq!(
+            resources.get("databases"),
+            Some(&vec!["analytics".to_string()])
+        );
+        assert!(!resources.contains_key("warehouses"));
+        assert_eq!(
+            errors.get("warehouses").map(String::as_str),
+            Some("warehouse listing timed out")
+        );
+    }
+
+    /// Both pairs failing must surface both reasons — neither error may
+    /// overwrite or suppress the other.
+    #[test]
+    fn both_pairs_failing_surfaces_both_errors() {
+        let databases = DiscoveryResult {
+            items: vec![],
+            error: Some("db error".to_string()),
+        };
+        let schemas = DiscoveryResult {
+            items: vec![],
+            error: Some("schema error".to_string()),
+        };
+        let (resources, errors) =
+            build_resources_map(vec![("databases", databases), ("schemas", schemas)]);
+
+        assert!(resources.is_empty());
+        assert_eq!(errors.get("databases").map(String::as_str), Some("db error"));
+        assert_eq!(errors.get("schemas").map(String::as_str), Some("schema error"));
+    }
+}
+
+// ── discovery_outcome_message: three distinguishable outcomes (KYO-466) ───
+
+#[cfg(all(test, feature = "ssr"))]
+mod discovery_outcome_message_tests {
+    //! The whole point of KYO-466: a discovery call that found resources,
+    //! one that legitimately found none, and one that could not list at
+    //! all must each produce a different client-facing message — before
+    //! this fix all three said "Connection successful and resources
+    //! discovered", which is only true of the first.
+
+    use super::discovery_outcome_message;
+    use std::collections::HashMap;
+
+    /// At least one key came back with items → the original unconditional
+    /// message is accurate and stays as-is.
+    #[test]
+    fn non_empty_resources_report_success() {
+        let mut resources = HashMap::new();
+        resources.insert("projects".to_string(), vec!["proj-a".to_string()]);
+        let errors = HashMap::new();
+
+        let message = discovery_outcome_message(&resources, &errors);
+        assert_eq!(message, "Connection successful and resources discovered");
+    }
+
+    /// Nothing came back, and nothing errored either — a real empty
+    /// result (e.g. a BigQuery account with zero listable projects). Must
+    /// read differently from both the success case above and the error
+    /// case below, or the client still cannot distinguish "no projects"
+    /// from "couldn't list projects".
+    #[test]
+    fn empty_success_is_distinguishable_from_non_empty_success() {
+        let resources = HashMap::new();
+        let errors = HashMap::new();
+
+        let message = discovery_outcome_message(&resources, &errors);
+        assert_ne!(message, "Connection successful and resources discovered");
+        assert_eq!(message, "Connected, but no resources were found");
+    }
+
+    /// Nothing came back and a key errored — must read differently from
+    /// the empty-but-successful case above; this is the "couldn't list
+    /// projects" outcome the ticket is about.
+    #[test]
+    fn discovery_error_is_distinguishable_from_empty_success() {
+        let resources = HashMap::new();
+        let mut errors = HashMap::new();
+        errors.insert("projects".to_string(), "permission denied".to_string());
+
+        let message = discovery_outcome_message(&resources, &errors);
+        assert_ne!(message, "Connection successful and resources discovered");
+        assert_ne!(message, "Connected, but no resources were found");
+        assert_eq!(
+            message,
+            "Connected, but some resources could not be listed — see details below"
+        );
+    }
+
+    /// A key with an empty-but-present `Vec` alongside another key that
+    /// errored must still report success — `values().any(...)` looks
+    /// across every key, not just the one that failed, matching
+    /// `build_resources_map`'s guarantee that a succeeding pair is never
+    /// blanked by a sibling failure.
+    #[test]
+    fn one_key_succeeding_reports_success_even_if_another_key_errored() {
+        let mut resources = HashMap::new();
+        resources.insert("databases".to_string(), vec!["prod".to_string()]);
+        let mut errors = HashMap::new();
+        errors.insert("schemas".to_string(), "permission denied".to_string());
+
+        let message = discovery_outcome_message(&resources, &errors);
+        assert_eq!(message, "Connection successful and resources discovered");
     }
 }
 
@@ -1598,14 +1892,36 @@ mod discover_datasource_resources_logging_tests {
         );
     }
 
+    /// KYO-466: a per-key discovery failure (e.g. BigQuery's
+    /// `list_projects()` returning `Err`) must be logged before the reason
+    /// is sanitized and handed to the client — its total absence from
+    /// production logs is why the original report needed a code read
+    /// instead of a log search. Unlike the other warns in this module, this
+    /// one is not a terminal `?`/early-return path — discovery continues
+    /// for any other key in the same request — so it is asserted
+    /// separately here rather than folded into the timeout/auth-failure
+    /// list above.
+    #[test]
+    fn per_key_discovery_failure_is_logged() {
+        assert!(
+            fn_body().contains(
+                "discover_datasource_resources: failed to list resources for one discovery key"
+            ),
+            "a discovery pair whose DiscoveryResult carried an error must be logged with the \
+             failing key and reason before discover_datasource_resources returns — this is the \
+             log KYO-466 added so a failing list_projects() leaves a trace"
+        );
+    }
+
     /// Cross-cutting requirement: every `tracing::warn!` in this function —
-    /// not just the two previously-silent ones above — must carry all
-    /// three attribution fields. A warn without them is exactly as
-    /// unattributable to *this* endpoint as no warn at all once two
-    /// datasources are failing discovery concurrently.
+    /// not just the two previously-silent terminal paths above, and not
+    /// just the KYO-466 per-key warn — must carry all three attribution
+    /// fields. A warn without them is exactly as unattributable to *this*
+    /// endpoint as no warn at all once two datasources are failing
+    /// discovery concurrently.
     ///
     /// Splits on `tracing::warn!(` rather than depending on exact
-    /// indentation (two of the eight call sites sit one nesting level
+    /// indentation (several of the nine call sites sit one nesting level
     /// shallower than the rest), so this stays robust to reformatting.
     #[test]
     fn every_warn_carries_datasource_type_auth_mode_and_has_slug() {
@@ -1625,16 +1941,16 @@ mod discover_datasource_resources_logging_tests {
                     && call.contains("auth_mode = %auth_mode")
                     && call.contains("has_slug"),
                 "tracing::warn!( call #{warn_count} in discover_datasource_resources is \
-                 missing one of datasource_type / auth_mode / has_slug — every terminal \
-                 failure path must be attributable to this endpoint:\n{call}"
+                 missing one of datasource_type / auth_mode / has_slug — every failure path \
+                 must be attributable to this endpoint:\n{call}"
             );
         }
         assert_eq!(
-            warn_count, 8,
-            "expected exactly 8 tracing::warn!( calls in discover_datasource_resources (one \
-             per terminal failure path enumerated in KYO-469) — found {warn_count}. If a new \
-             failure path was added, give it the same three attribution fields and update \
-             this count."
+            warn_count, 9,
+            "expected exactly 9 tracing::warn!( calls in discover_datasource_resources (the \
+             eight terminal failure paths from KYO-469, plus the KYO-466 per-key discovery \
+             failure warn) — found {warn_count}. If a new failure path was added, give it the \
+             same three attribution fields and update this count."
         );
     }
 }

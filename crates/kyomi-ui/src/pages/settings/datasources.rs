@@ -2439,16 +2439,23 @@ pub fn DatasourceModal(
                         // ids (no display name, unlike the richer
                         // `get_google_oauth_projects()` used by kyomi_oauth
                         // mode below), so id and label are the same string.
-                        // Absent entirely (not an empty vec) when the service
-                        // account lacks resourcemanager.projects.list — see
-                        // `build_resources_map` server-side — in which case
-                        // `bq_projects` stays at the empty vec `do_test_and_discover`
-                        // reset it to, and `BqProjectField` falls back to a
-                        // free-text input.
+                        // Absent from `resources` (not an empty vec) when the
+                        // service account lacks resourcemanager.projects.list
+                        // — see `build_resources_map` server-side — in which
+                        // case the reason is carried in `resource_errors`
+                        // instead of vanishing (KYO-466), and surfaced here
+                        // through `bq_projects_error` — the same signal
+                        // `get_google_oauth_projects()`'s failure arm below
+                        // already populates for the kyomi_oauth path.
+                        // `BqProjectField` falls back to a free-text input
+                        // either way.
                         if let Some(projects) = r.resources.get("projects") {
                             let opts: Vec<(String, String)> =
                                 projects.iter().map(|p| (p.clone(), p.clone())).collect();
                             set_bq_projects.set(opts);
+                            set_bq_projects_error.set(None);
+                        } else if let Some(reason) = r.resource_errors.get("projects") {
+                            set_bq_projects_error.set(Some(format!("Couldn't list projects: {reason}")));
                         }
                     } else {
                         set_test_result.set(Some(TestConnectionResult {
@@ -8293,13 +8300,32 @@ fn EditModeCatalogTab(
         if let Some(result) = discover_action.value().get() {
             match result {
                 Ok(r) if r.success => {
-                    set_discover_status.set("success".to_string());
-                    set_discover_error.set(None);
                     // Extract the items relevant to this datasource type.
                     let ds_type_val = datasource_type.get_untracked();
                     let key = discovery_resource_key_for_type(&ds_type_val);
-                    let items = r.resources.get(key).cloned().unwrap_or_default();
-                    set_discovered_items.set(items);
+                    // KYO-466: `r.success` only means the connection itself
+                    // worked — the specific list this scope cares about can
+                    // still have failed independently (e.g. BigQuery's
+                    // `list_projects()` denied). Check `resource_errors`
+                    // for this key before treating an empty `resources`
+                    // entry as "no items" — an empty vec and a listing
+                    // failure must not render identically.
+                    if let Some(reason) = r.resource_errors.get(key) {
+                        set_discover_status.set("error".to_string());
+                        // Human-readable noun (catalog_item_label_for_type),
+                        // not the raw `resources`/`resource_errors` map key
+                        // — a reader of this Alert shouldn't have to know
+                        // the wire-format dictionary key to understand what
+                        // failed to list.
+                        let noun = catalog_item_label_for_type(&ds_type_val);
+                        set_discover_error.set(Some(format!("Couldn't list {noun}: {reason}")));
+                        set_discovered_items.set(vec![]);
+                    } else {
+                        set_discover_status.set("success".to_string());
+                        set_discover_error.set(None);
+                        let items = r.resources.get(key).cloned().unwrap_or_default();
+                        set_discovered_items.set(items);
+                    }
                 }
                 Ok(r) => {
                     set_discover_status.set("error".to_string());
@@ -8650,13 +8676,29 @@ fn EditModeCatalogTab(
                                 "Discover Available"
                             }}
                         </Button>
-                        {move || if discover_status.get() == "success" && !discovered_items.get().is_empty() {
+                        {move || if discover_status.get() == "success" {
                             let count = discovered_items.get().len();
-                            Some(view! {
-                                <span class="text-xs text-muted-foreground">
-                                    {format!("{count} found")}
-                                </span>
-                            })
+                            if count > 0 {
+                                Some(view! {
+                                    <span class="text-xs text-muted-foreground">
+                                        {format!("{count} found")}
+                                    </span>
+                                })
+                            } else {
+                                // KYO-466: a successful discovery that found
+                                // nothing must say so — before this fix an
+                                // empty (but real) result and a listing
+                                // failure both rendered as silence. The
+                                // failure case now renders via the
+                                // "Discovery error" Alert below, driven by
+                                // `discover_error`.
+                                let noun = catalog_item_label_for_type(&datasource_type.get());
+                                Some(view! {
+                                    <span class="text-xs text-muted-foreground">
+                                        {format!("No {noun} found")}
+                                    </span>
+                                })
+                            }
                         } else {
                             None
                         }}
