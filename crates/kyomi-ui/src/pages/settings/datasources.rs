@@ -1312,7 +1312,6 @@ pub fn DatasourceModal(
     // ── Discovery state ──────────────────────────────────────────────────
     // "idle", "loading", "success", "error"
     let (discovery_status, set_discovery_status) = signal("idle".to_string());
-    let (discovery_error, set_discovery_error) = signal::<Option<String>>(None);
     let (discovered_databases, set_discovered_databases) = signal::<Vec<String>>(vec![]);
     let (discovered_schemas, set_discovered_schemas) = signal::<Vec<String>>(vec![]);
     let (discovered_warehouses, set_discovered_warehouses) = signal::<Vec<String>>(vec![]);
@@ -1412,7 +1411,6 @@ pub fn DatasourceModal(
         set_test_result.set(None);
         set_error_msg.set(None);
         set_discovery_status.set("idle".to_string());
-        set_discovery_error.set(None);
         set_discovered_databases.set(vec![]);
         set_discovered_schemas.set(vec![]);
         set_discovered_warehouses.set(vec![]);
@@ -2405,20 +2403,17 @@ pub fn DatasourceModal(
                     } else {
                         set_test_result.set(Some(TestConnectionResult {
                             success: false,
-                            message: r.message.clone(),
+                            message: r.message,
                         }));
                         set_discovery_status.set("error".to_string());
-                        set_discovery_error.set(Some(r.message));
                     }
                 }
                 Err(e) => {
-                    let msg = e.to_string();
                     set_test_result.set(Some(TestConnectionResult {
                         success: false,
-                        message: msg.clone(),
+                        message: e.to_string(),
                     }));
                     set_discovery_status.set("error".to_string());
-                    set_discovery_error.set(Some(msg));
                 }
             }
         }
@@ -2427,7 +2422,6 @@ pub fn DatasourceModal(
     let do_test_and_discover = move || {
         set_test_result.set(None);
         set_discovery_status.set("loading".to_string());
-        set_discovery_error.set(None);
         set_discovered_databases.set(vec![]);
         set_discovered_schemas.set(vec![]);
         set_discovered_warehouses.set(vec![]);
@@ -3926,29 +3920,8 @@ pub fn DatasourceModal(
                                                     </span>
                                                     {move || if test_action.pending().get() { "Discovering..." } else { "Test & Discover" }}
                                                 </button>
-                                                {move || test_result.get().map(|r| {
-                                                    if r.success {
-                                                        view! {
-                                                            <div class="flex items-center gap-2 text-sm text-success-foreground">
-                                                                <Icon icon=phosphor_leptos::CHECK attr:class="h-4 w-4"/>
-                                                                "Connected"
-                                                            </div>
-                                                        }.into_any()
-                                                    } else {
-                                                        view! {
-                                                            <div class="flex items-center gap-2 text-sm text-error-foreground">
-                                                                <Icon icon=phosphor_leptos::X attr:class="h-4 w-4"/>
-                                                                "Failed"
-                                                            </div>
-                                                        }.into_any()
-                                                    }
-                                                })}
+                                                <ConnectionTestResultBadge test_result=test_result success_label="Connected" />
                                             </div>
-                                            {move || discovery_error.get().filter(|_| discovery_status.get() == "error").map(|msg| view! {
-                                                <Alert variant=AlertVariant::Warning class="mt-3">
-                                                    <AlertDescription>{msg}</AlertDescription>
-                                                </Alert>
-                                            })}
                                             <p class="text-xs text-muted-foreground mt-2">
                                                 "Validate connection and discover available resources"
                                             </p>
@@ -4854,6 +4827,57 @@ fn synapse_oauth_source(mode: &str) -> Option<OAuthStatusSource> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Connection Test Result Badge
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Renders the outcome of the last Test & Discover / Validate call.
+///
+/// Success renders a check icon + `success_label` — unchanged from what both
+/// call sites rendered inline before this extraction. Failure renders an X
+/// icon, "Failed", and the server's sanitized failure reason
+/// (`TestConnectionResult::message`) beneath it, so the specific,
+/// user-fixable cause (malformed JSON, wrong project_id, disabled key,
+/// BigQuery API not enabled, missing IAM role, revoked key, ...) is visible
+/// instead of discarded.
+///
+/// Shared by the generic Test & Discover button (`success_label = "Connected"`)
+/// and the BigQuery service_account mode's "Validate & Discover Projects"
+/// button (`success_label = "Valid"`) — before this component existed, both
+/// sites hardcoded an identical "Failed" arm that read only
+/// `TestConnectionResult::success`, never `::message`, which is why a
+/// BigQuery service-account failure rendered the two-syllable word "Failed"
+/// no matter which of six distinct, user-fixable causes produced it
+/// (KYO-469).
+#[component]
+fn ConnectionTestResultBadge(
+    test_result: ReadSignal<Option<TestConnectionResult>>,
+    success_label: &'static str,
+) -> impl IntoView {
+    move || {
+        test_result.get().map(|r| {
+            if r.success {
+                view! {
+                    <div class="flex items-center gap-2 text-sm text-success-foreground">
+                        <Icon icon=phosphor_leptos::CHECK attr:class="h-4 w-4"/>
+                        {success_label}
+                    </div>
+                }.into_any()
+            } else {
+                view! {
+                    <div>
+                        <div class="flex items-center gap-2 text-sm text-error-foreground">
+                            <Icon icon=phosphor_leptos::X attr:class="h-4 w-4"/>
+                            "Failed"
+                        </div>
+                        <p class="text-xs text-error-foreground mt-2">{r.message.clone()}</p>
+                    </div>
+                }.into_any()
+            }
+        })
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // BigQuery Auth Mode Section
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -5462,23 +5486,7 @@ fn BigQueryAuthModeSection(
                                             }.into_any()
                                         }}
                                     </Button>
-                                    {move || test_result.get().map(|r| {
-                                        if r.success {
-                                            view! {
-                                                <div class="flex items-center gap-2 text-sm text-success-foreground">
-                                                    <Icon icon=phosphor_leptos::CHECK attr:class="h-4 w-4"/>
-                                                    "Valid"
-                                                </div>
-                                            }.into_any()
-                                        } else {
-                                            view! {
-                                                <div class="flex items-center gap-2 text-sm text-error-foreground">
-                                                    <Icon icon=phosphor_leptos::X attr:class="h-4 w-4"/>
-                                                    "Failed"
-                                                </div>
-                                            }.into_any()
-                                        }
-                                    })}
+                                    <ConnectionTestResultBadge test_result=test_result success_label="Valid" />
                                 </div>
                                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                     <BqProjectField
@@ -11414,5 +11422,69 @@ mod tests {
         for route in routes_used {
             assert_route_has_production_evidence(route);
         }
+    }
+
+    // ── KYO-469: connection test failures rendered "Failed" with the ──────
+    // ── server's specific reason discarded ─────────────────────────────
+
+    /// **The point of KYO-469, half 1.** `ConnectionTestResultBadge`'s
+    /// failure arm must read `TestConnectionResult::message` — the
+    /// server's sanitized, specific failure reason — not render only a
+    /// hardcoded heading. Before this component existed, a BigQuery
+    /// service_account validation failure (malformed JSON, wrong
+    /// project_id, disabled key, BigQuery API not enabled, missing IAM
+    /// role, revoked key — six distinct, user-fixable causes) rendered the
+    /// same two-syllable word no matter which one occurred, because the
+    /// failure arm read only `TestConnectionResult::success`.
+    #[test]
+    fn connection_test_result_badge_failure_arm_renders_server_message() {
+        let badge_fn = extract_between(
+            SRC,
+            "fn ConnectionTestResultBadge(",
+            "fn BqProjectField(",
+        );
+        assert!(
+            badge_fn.contains("r.message"),
+            "ConnectionTestResultBadge's failure branch must read \
+             TestConnectionResult::message — rendering only a hardcoded heading silently \
+             discards the server's specific, sanitized failure reason (KYO-469)"
+        );
+    }
+
+    /// The generic Test & Discover site (used by every non-BigQuery
+    /// provider, and BigQuery's own OAuth modes) must render its result
+    /// through the shared `ConnectionTestResultBadge`, not an inline copy
+    /// of the success/failure arms.
+    #[test]
+    fn generic_test_and_discover_site_uses_connection_test_result_badge() {
+        let site = extract_between(
+            SRC,
+            "\"Test & Discover\"",
+            "\"Validate connection and discover available resources\"",
+        );
+        assert!(
+            site.contains("<ConnectionTestResultBadge"),
+            "the generic Test & Discover site must render its result through \
+             ConnectionTestResultBadge (KYO-469), not an inline duplicate of the \
+             success/failure arms"
+        );
+    }
+
+    /// The BigQuery service_account "Validate & Discover Projects" site —
+    /// the exact site the KYO-469 bug report was about — must render its
+    /// result through the same shared component.
+    #[test]
+    fn bigquery_validate_and_discover_site_uses_connection_test_result_badge() {
+        let f = extract_between(
+            SRC,
+            "fn BigQueryAuthModeSection(",
+            "fn SnowflakeAuthModeSection(",
+        );
+        assert!(
+            f.contains("<ConnectionTestResultBadge"),
+            "the BigQuery service_account Validate & Discover Projects site must render its \
+             result through ConnectionTestResultBadge (KYO-469), not an inline duplicate of \
+             the success/failure arms"
+        );
     }
 }

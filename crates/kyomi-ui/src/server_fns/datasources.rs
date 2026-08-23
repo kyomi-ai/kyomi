@@ -541,12 +541,71 @@ pub async fn discover_datasource_resources(
     datasource_slug: Option<String>,
 ) -> Result<DiscoverResourcesResult, ServerFnError> {
     use std::str::FromStr as _;
-    let ac = AuthenticatedContext::extract().await?;
 
-    let ds_type = kyomi_core::datasource_registry::DatasourceType::from_str(&datasource_type)
-        .into_sfn()?;
+    // `auth_mode` lives inside `connection_config` for every provider that
+    // has more than one (BigQuery, Snowflake, Databricks, Synapse) — see
+    // `build_connection_config` in `pages/settings/datasources.rs`, which
+    // sets it under the `"auth_mode"` key before calling this fn. Providers
+    // with a single mode (Postgres, MySQL, ClickHouse, Redshift, SQL
+    // Server, FlareDB) never set it, so this stays `"none"` for them rather
+    // than being invented (KYO-469).
+    let auth_mode = connection_config
+        .get("auth_mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("none")
+        .to_string();
+    let has_slug = datasource_slug.is_some();
 
-    let encryption_key = ac.encryption_key()?;
+    tracing::info!(
+        datasource_type = %datasource_type,
+        auth_mode = %auth_mode,
+        has_slug,
+        "discover_datasource_resources: request received"
+    );
+
+    let ac = match AuthenticatedContext::extract().await {
+        Ok(ac) => ac,
+        Err(e) => {
+            tracing::warn!(
+                datasource_type = %datasource_type,
+                auth_mode = %auth_mode,
+                has_slug,
+                error = %e,
+                "discover_datasource_resources: failed to authenticate request"
+            );
+            return Err(e);
+        }
+    };
+
+    let ds_type = match kyomi_core::datasource_registry::DatasourceType::from_str(&datasource_type)
+        .into_sfn()
+    {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(
+                datasource_type = %datasource_type,
+                auth_mode = %auth_mode,
+                has_slug,
+                error = %e,
+                "discover_datasource_resources: unrecognized datasource type"
+            );
+            return Err(e);
+        }
+    };
+
+    let encryption_key = match ac.encryption_key() {
+        Ok(k) => k,
+        Err(e) => {
+            tracing::warn!(
+                datasource_type = %datasource_type,
+                auth_mode = %auth_mode,
+                has_slug,
+                error = %e,
+                "discover_datasource_resources: failed to resolve encryption key"
+            );
+            return Err(e);
+        }
+    };
 
     // Resolve the stored-credential lookup, connection-config/credential
     // decrypt, and OAuth `UserContext` build in one service call — this
@@ -578,7 +637,13 @@ pub async fn discover_datasource_resources(
     {
         Ok(inputs) => inputs,
         Err(DiscoveryPrepError::Decrypt(e)) => {
-            tracing::warn!(error = %e, "credential decrypt failed before resource discovery");
+            tracing::warn!(
+                datasource_type = %datasource_type,
+                auth_mode = %auth_mode,
+                has_slug,
+                error = %e,
+                "discover_datasource_resources: credential decrypt failed before resource discovery"
+            );
             return Ok(DiscoverResourcesResult {
                 success: false,
                 resources: std::collections::HashMap::new(),
@@ -586,7 +651,13 @@ pub async fn discover_datasource_resources(
             });
         }
         Err(DiscoveryPrepError::UserContext(e)) => {
-            tracing::warn!(raw_error = %e, "failed to build user context for datasource discovery");
+            tracing::warn!(
+                datasource_type = %datasource_type,
+                auth_mode = %auth_mode,
+                has_slug,
+                raw_error = %e,
+                "discover_datasource_resources: failed to build user context for datasource discovery"
+            );
             return Ok(DiscoverResourcesResult {
                 success: false,
                 resources: std::collections::HashMap::new(),
@@ -609,7 +680,13 @@ pub async fn discover_datasource_resources(
     {
         Ok(Ok(p)) => p,
         Ok(Err(e)) => {
-            tracing::warn!(raw_error = %e, "datasource connection error (sanitized for client)");
+            tracing::warn!(
+                datasource_type = %datasource_type,
+                auth_mode = %auth_mode,
+                has_slug,
+                raw_error = %e,
+                "discover_datasource_resources: datasource connection error (sanitized for client)"
+            );
             return Ok(DiscoverResourcesResult {
                 success: false,
                 resources: std::collections::HashMap::new(),
@@ -617,6 +694,12 @@ pub async fn discover_datasource_resources(
             });
         }
         Err(_) => {
+            tracing::warn!(
+                datasource_type = %datasource_type,
+                auth_mode = %auth_mode,
+                has_slug,
+                "discover_datasource_resources: create_provider timed out"
+            );
             return Ok(DiscoverResourcesResult {
                 success: false,
                 resources: std::collections::HashMap::new(),
@@ -637,6 +720,12 @@ pub async fn discover_datasource_resources(
     };
 
     if !connected {
+        tracing::warn!(
+            datasource_type = %datasource_type,
+            auth_mode = %auth_mode,
+            has_slug,
+            "discover_datasource_resources: test_connection reported failure"
+        );
         provider.close().await;
         return Ok(DiscoverResourcesResult {
             success: false,
@@ -1351,5 +1440,201 @@ mod json_input_codec_tests {
     #[test]
     fn save_datasource_credentials_uses_the_json_input_codec() {
         assert_json_input_codec::<SaveDatasourceCredentials>();
+    }
+}
+
+// ── discover_datasource_resources observability (KYO-469) ────────────────
+
+#[cfg(all(test, feature = "ssr"))]
+mod discover_datasource_resources_logging_tests {
+    //! KYO-469, half 2: every terminal path in `discover_datasource_resources`
+    //! must leave a trace. Before this fix, three early `?` returns (auth
+    //! context extraction, unknown datasource type, missing encryption key)
+    //! surfaced as bare 500s indistinguishable from any other endpoint's
+    //! failure in `tower_http::trace`'s generic "response failed" log line,
+    //! and two terminal `Ok(DiscoverResourcesResult { success: false, .. })`
+    //! paths — `create_provider` timing out, and `test_connection()`
+    //! returning `false` — returned a client-facing message but logged
+    //! nothing server-side at all. That silence is exactly why the original
+    //! KYO-469 investigation could not tell, from production logs alone,
+    //! whether a BigQuery service-account failure even reached this
+    //! endpoint.
+    //!
+    //! Following the source-assertion precedent `discover_user_context_tests`
+    //! (above, in this same file) already established — exercising this
+    //! function for real needs a live, connectable datasource this test
+    //! environment doesn't have — this pins the fix at the source level:
+    //! every log call the fix added or enriched is asserted present, by
+    //! its exact message text, inside the function body specifically (not
+    //! just anywhere in the file).
+
+    const SRC: &str = include_str!("datasources.rs");
+
+    /// The full source of `discover_datasource_resources`, from its
+    /// signature to the start of the next top-level fn
+    /// (`bigquery_projects_discovery_result`).
+    fn fn_body() -> &'static str {
+        let start = SRC
+            .find("pub async fn discover_datasource_resources(")
+            .expect("discover_datasource_resources not found in datasources.rs");
+        let end = SRC[start..]
+            .find("fn bigquery_projects_discovery_result(")
+            .map(|i| start + i)
+            .unwrap_or_else(|| {
+                panic!(
+                    "fn bigquery_projects_discovery_result( marker not found after \
+                     discover_datasource_resources"
+                )
+            });
+        &SRC[start..end]
+    }
+
+    /// The entry log — its absence today is indistinguishable from "the
+    /// request never arrived", which was a real ambiguity in the original
+    /// KYO-469 investigation. Must carry `datasource_type`, `auth_mode`,
+    /// and `has_slug` so it identifies the request, not just that *a*
+    /// request happened.
+    #[test]
+    fn entry_log_records_datasource_type_auth_mode_and_has_slug() {
+        let body = fn_body();
+        let start = body
+            .find("tracing::info!(")
+            .expect("no tracing::info!( call found in discover_datasource_resources");
+        let end = body[start..]
+            .find(");")
+            .map(|i| start + i)
+            .expect("tracing::info!( call in discover_datasource_resources has no closing );");
+        let call = &body[start..end];
+        assert!(
+            call.contains("discover_datasource_resources: request received"),
+            "expected an entry log recording the request; found: {call}"
+        );
+        assert!(call.contains("datasource_type = %datasource_type"));
+        assert!(call.contains("auth_mode = %auth_mode"));
+        assert!(call.contains("has_slug"));
+    }
+
+    /// `AuthenticatedContext::extract()` failing was a bare `?` return —
+    /// a 500 with nothing tying it to this endpoint.
+    #[test]
+    fn authentication_failure_is_logged() {
+        assert!(
+            fn_body().contains("discover_datasource_resources: failed to authenticate request"),
+            "AuthenticatedContext::extract() failing must log before returning — this was one \
+             of the three bare `?` returns the ticket required converting to an explicit, \
+             logged match"
+        );
+    }
+
+    /// `DatasourceType::from_str` failing was a bare `?` return.
+    #[test]
+    fn unrecognized_datasource_type_is_logged() {
+        assert!(
+            fn_body().contains("discover_datasource_resources: unrecognized datasource type"),
+            "DatasourceType::from_str failing must log before returning — this was one of the \
+             three bare `?` returns the ticket required converting to an explicit, logged match"
+        );
+    }
+
+    /// `ac.encryption_key()` failing was a bare `?` return.
+    #[test]
+    fn missing_encryption_key_is_logged() {
+        assert!(
+            fn_body().contains("discover_datasource_resources: failed to resolve encryption key"),
+            "ac.encryption_key() failing must log before returning — this was one of the three \
+             bare `?` returns the ticket required converting to an explicit, logged match"
+        );
+    }
+
+    /// `DiscoveryPrepError::Decrypt` already warned before this fix — this
+    /// guards its message stays present and endpoint-attributed.
+    #[test]
+    fn credential_decrypt_failure_is_logged() {
+        assert!(fn_body().contains(
+            "discover_datasource_resources: credential decrypt failed before resource discovery"
+        ));
+    }
+
+    /// `DiscoveryPrepError::UserContext` already warned before this fix —
+    /// this guards its message stays present and endpoint-attributed.
+    #[test]
+    fn user_context_build_failure_is_logged() {
+        assert!(fn_body().contains(
+            "discover_datasource_resources: failed to build user context for datasource discovery"
+        ));
+    }
+
+    /// `create_provider` returning `Err` already warned before this fix —
+    /// this guards its message stays present and endpoint-attributed.
+    #[test]
+    fn create_provider_error_is_logged() {
+        assert!(fn_body().contains(
+            "discover_datasource_resources: datasource connection error (sanitized for client)"
+        ));
+    }
+
+    /// **The point of KYO-469, half 2, bolded row 1.** Before this fix,
+    /// `create_provider` timing out returned "Connection timed out" to the
+    /// client and logged nothing server-side.
+    #[test]
+    fn create_provider_timeout_is_logged() {
+        assert!(
+            fn_body().contains("discover_datasource_resources: create_provider timed out"),
+            "create_provider timing out must log — before this fix it returned \"Connection \
+             timed out\" to the client and logged nothing at all"
+        );
+    }
+
+    /// **The point of KYO-469, half 2, bolded row 2.** Before this fix,
+    /// `test_connection()` returning `false` returned "Connection test
+    /// failed — check your credentials" to the client and logged nothing
+    /// server-side.
+    #[test]
+    fn test_connection_failure_is_logged() {
+        assert!(
+            fn_body().contains("discover_datasource_resources: test_connection reported failure"),
+            "test_connection() returning false must log — before this fix it returned a \
+             client-facing message and logged nothing at all"
+        );
+    }
+
+    /// Cross-cutting requirement: every `tracing::warn!` in this function —
+    /// not just the two previously-silent ones above — must carry all
+    /// three attribution fields. A warn without them is exactly as
+    /// unattributable to *this* endpoint as no warn at all once two
+    /// datasources are failing discovery concurrently.
+    ///
+    /// Splits on `tracing::warn!(` rather than depending on exact
+    /// indentation (two of the eight call sites sit one nesting level
+    /// shallower than the rest), so this stays robust to reformatting.
+    #[test]
+    fn every_warn_carries_datasource_type_auth_mode_and_has_slug() {
+        let body = fn_body();
+        let mut warn_count = 0;
+        for chunk in body.split("tracing::warn!(").skip(1) {
+            warn_count += 1;
+            let end = chunk.find(");").unwrap_or_else(|| {
+                panic!(
+                    "tracing::warn!( call #{warn_count} in discover_datasource_resources has \
+                     no closing );"
+                )
+            });
+            let call = &chunk[..end];
+            assert!(
+                call.contains("datasource_type = %datasource_type")
+                    && call.contains("auth_mode = %auth_mode")
+                    && call.contains("has_slug"),
+                "tracing::warn!( call #{warn_count} in discover_datasource_resources is \
+                 missing one of datasource_type / auth_mode / has_slug — every terminal \
+                 failure path must be attributable to this endpoint:\n{call}"
+            );
+        }
+        assert_eq!(
+            warn_count, 8,
+            "expected exactly 8 tracing::warn!( calls in discover_datasource_resources (one \
+             per terminal failure path enumerated in KYO-469) — found {warn_count}. If a new \
+             failure path was added, give it the same three attribution fields and update \
+             this count."
+        );
     }
 }
