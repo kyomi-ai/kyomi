@@ -58,6 +58,37 @@ All scripts are organized by environment. **Every script is environment-specific
   the on-disk review-log path exist in exactly one place. `resolve_review_logs_dir`
   is the single point of change if KYO-394 moves the canonical location.
 
+- **`check-ticket-in-flight.sh`** - Answers one question before an
+  autonomous worker claims a backlog ticket: *is anyone else already
+  working on this?* (KYO-422, fixing the double-pickup of KYO-416 that
+  produced conflicting PRs #367/#368). Checks remote branches
+  (`git ls-remote --heads`), pull requests (`gh pr list`, matched on
+  `headRefName` only — never PR body or title, see the script header for
+  why that was tried and reverted, KYO-471), local worktrees
+  (`git worktree list`), and local branches (`git branch --list`). The
+  last two exist because a worker whose run dies between `git commit` and
+  `git push` leaves a complete implementation visible only locally
+  (KYO-471). Run it **twice** per ticket: once at pickup, and again
+  immediately before dispatching code review — the second call is what
+  catches two workers who were both already past the claim point when
+  they started, which is exactly how KYO-416 happened. Usage:
+  `scripts/check-ticket-in-flight.sh <TICKET> [--remote <name>] [--ignore-branch <name>]...`,
+  where `TICKET` is `KYO-422`, `kyo-422`, or `422` (equivalent). **Exit-code
+  contract:** `0` — clear, **the only code that permits claiming the
+  ticket**; `1` — work in flight found, do not claim; `2` — usage error;
+  `3` — a check could not be completed (remote unreachable, `gh` missing
+  or failing, **or the PR listing came back at `--limit` and may therefore
+  be truncated**) and must be treated exactly like `1`, never like `0` —
+  the script fails closed by design, since a false "clear" costs a full
+  duplicate implementation while a false "in flight" costs one skipped
+  cycle. The PR page size is the env-overridable `PR_LIST_LIMIT` (default
+  `500`, must exceed the repo's total PR count — it was 411 on 2026-08-24);
+  raising it is the fix when the truncation guard trips, and the guard is
+  why raising it is a deliberate act rather than a silently wrong answer.
+  Self-tested by `scripts/check-ticket-in-flight-test.sh`, including a real
+  simulated double-pickup against a throwaway bare git remote (the KYO-422
+  acceptance criterion).
+
 ## Directory Structure
 
 ```
