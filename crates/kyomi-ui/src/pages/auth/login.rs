@@ -13,8 +13,8 @@ use phosphor_leptos::Icon;
 use leptos_router::hooks::{use_navigate, use_query_map};
 
 use crate::components::{
-    Alert, AlertDescription, AlertTitle, AlertVariant, Button, ButtonLink, ButtonSize,
-    ButtonVariant, Checkbox, Label, Spinner, INPUT_CLASS,
+    Alert, AlertDescription, AlertTitle, AlertVariant, Button, ButtonSize, ButtonVariant,
+    Checkbox, Label, Spinner, INPUT_CLASS,
 };
 use crate::pages::auth::auth_layout::AuthLayout;
 use crate::pages::auth::components::{AuthDivider, GoogleSignInButton, PasskeySignInButton};
@@ -23,6 +23,7 @@ use crate::server_fns::auth::{
     passkey_signup_start, resend_verification, signup_start, LoginResult,
     PasskeySignupStartResult, SignupResult,
 };
+use crate::utils::beta_access;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Login subtitle rotation — editorial voice on the sign-in screen.
@@ -101,7 +102,8 @@ pub fn LoginPage(
     let (passkey_loading, set_passkey_loading) = signal(false);
     let (google_loading, set_google_loading) = signal(false);
 
-    // ── Google OAuth allowlist attestation (KYO-478) ─────────────────────
+    // ── Google OAuth allowlist attestation (KYO-478, copy/persistence
+    // restored to parity with React in KYO-499) ──────────────────────────
     // Kyomi's Google OAuth app is in Testing mode: Google refuses any
     // account a Kyomi admin hasn't explicitly added as a tester in the
     // Cloud Console, both for sign-in here and for BigQuery linkage later
@@ -110,18 +112,47 @@ pub fn LoginPage(
     // for Kyomi to protect, and no dishonest tick bypasses anything Google
     // wouldn't already stop.
     //
-    // Deliberately shown for every visitor, including ones who have
-    // signed in with Google here before — unlike the datasource modal's
-    // notice, there is no "already connected" account-level signal
-    // available pre-auth to hide this behind, and it must NOT be
-    // remembered in localStorage either (that would be a gate that looks
-    // real but is invisibly pre-satisfied on return visits — the exact
-    // shape of the KYO-477 defect this ticket was filed alongside). Remove
-    // this whole gate once Kyomi's OAuth app leaves Testing publishing
-    // status in the Google Cloud Console — at that point Google stops
-    // refusing un-allowlisted accounts and there is nothing left to
-    // attest to.
-    let (google_access_confirmed, set_google_access_confirmed) = signal(false);
+    // Deliberately shown for every visitor, including ones who have signed
+    // in with Google here before — unlike the datasource modal's notice,
+    // there is no "already connected" account-level signal available
+    // pre-auth to hide this behind. It IS persisted to
+    // `localStorage["hasBetaAccess"]` via `utils::beta_access`, shared with
+    // the datasource modal's identical checkbox (KYO-499) — an earlier
+    // version of this comment argued persistence would make the
+    // attestation "look real but be invisibly pre-satisfied"; that was
+    // wrong. This was never a security control (see above), so a
+    // remembered tick isn't a bypass of anything, and the React original
+    // (`AuthModeSelector.jsx`) always persisted it. Remove this whole gate
+    // once Kyomi's OAuth app leaves Testing publishing status in the
+    // Google Cloud Console — at that point Google stops refusing
+    // un-allowlisted accounts and there is nothing left to attest to.
+    let (google_access_confirmed, set_google_access_confirmed) =
+        signal(beta_access::read_beta_access());
+
+    // KYO-499 — keep `google_access_confirmed` in sync with
+    // `localStorage["hasBetaAccess"]` across tabs/surfaces: this notice and
+    // the datasource modal's identical kyomi_oauth notice
+    // (`pages/settings/datasources.rs`) read/write the same key via
+    // `utils::beta_access`. Installed once at `LoginPage` mount — mirrors
+    // `install_beta_access_listener`'s use in `DatasourceModal`.
+    #[cfg(target_arch = "wasm32")]
+    {
+        use crate::utils::beta_access::install_beta_access_listener;
+        let cleanup = install_beta_access_listener(move |value| {
+            set_google_access_confirmed.try_set(value);
+        });
+        // Box<dyn FnOnce()> lets the cleanup run through Drop without
+        // requiring Send; SendWrapper makes the box Send+Sync for
+        // on_cleanup's bound while guaranteeing single-threaded access on
+        // WASM — same pattern `DatasourceModal` uses for this listener.
+        let cleanup_cell = std::cell::Cell::new(Some(Box::new(cleanup) as Box<dyn FnOnce()>));
+        let cleanup_wrapper = send_wrapper::SendWrapper::new(cleanup_cell);
+        on_cleanup(move || {
+            if let Some(f) = cleanup_wrapper.take().take() {
+                f();
+            }
+        });
+    }
 
     // ── Signup signals ──────────────────────────────────────────────────
     let (signup_email, set_signup_email) = signal(String::new());
@@ -807,10 +838,10 @@ fn CredentialsView(
     show_google_section: impl Fn() -> bool + Copy + Send + Sync + 'static,
     passkey_loading: ReadSignal<bool>,
     google_loading: ReadSignal<bool>,
-    /// KYO-478 — whether the user has ticked "I have requested access and
-    /// had it confirmed" for Kyomi's Google OAuth app allowlist. Owned by
-    /// the parent `LoginPage` (not local state) because `on_google_click`
-    /// there also reads it for its own early-return guard.
+    /// KYO-478 — whether the user has ticked "I have beta access" (KYO-499
+    /// copy) for Kyomi's Google OAuth app allowlist. Owned by the parent
+    /// `LoginPage` (not local state) because `on_google_click` there also
+    /// reads it for its own early-return guard.
     google_access_confirmed: ReadSignal<bool>,
     /// Setter for the checkbox above.
     set_google_access_confirmed: WriteSignal<bool>,
@@ -849,61 +880,66 @@ fn CredentialsView(
             // Google Sign In
             <Show when=show_google_section>
                 <div class="space-y-3">
-                    // KYO-478 — same allowlist notice/checkbox as the
-                    // BigQuery kyomi_oauth Connect gate in
-                    // `pages/settings/datasources.rs` (KYO-408/KYO-477):
-                    // Kyomi's shared Google OAuth app is in Testing mode,
-                    // so an un-allowlisted account is refused by Google
-                    // itself, not by Kyomi. Shown for every visitor —
-                    // see `google_access_confirmed`'s own doc comment
-                    // above (in `LoginPage`) for why it is never hidden
-                    // or persisted across visits.
+                    // KYO-499 — restores parity with the React original
+                    // (`AuthModeSelector.jsx` at `ee16f48a^`): one sentence
+                    // plus an inline beta-access request link, not a
+                    // heading + two explanatory paragraphs + a standalone
+                    // ButtonLink component (that shape shipped in KYO-478
+                    // without verifying against React and was rejected as
+                    // "a monstrosity" — see KYO-499). Sentence wording is
+                    // adjusted from the datasource modal's copy ("this
+                    // authentication method" doesn't apply pre-auth, where
+                    // there is no auth-mode dropdown — this notice is
+                    // specifically about the Google sign-in button below);
+                    // the checkbox label, link text, and link target are
+                    // byte-identical to the datasource modal's notice
+                    // (KYO-499's requirement that the two surfaces not
+                    // drift again — see `utils::beta_access`'s tests).
+                    //
+                    // The link goes to the shared mailto constant in
+                    // `utils::beta_access` (see that module for the exact
+                    // target) — no `FeedbackAccessRequestHandle` is
+                    // available pre-auth (that context is only provided by
+                    // `Layout`, which wraps authenticated pages), so this
+                    // can't open the in-app feedback modal the datasource
+                    // notice used to use; mailto is the one target
+                    // reachable from both surfaces, which is why the
+                    // datasource modal now uses it too instead of the
+                    // feedback modal (KYO-499).
+                    //
+                    // This comment deliberately does not quote the exact
+                    // copy strings below — this file's own test module
+                    // scans this block for those literals, and an echo
+                    // here would let a regression in the real markup pass
+                    // unnoticed (verified by mutation during KYO-499
+                    // implementation).
                     <Alert variant=AlertVariant::Warning>
-                        <AlertTitle>"Google account authorization required"</AlertTitle>
+                        <Icon icon=phosphor_leptos::WARNING_CIRCLE attr:class="h-4 w-4" />
                         <AlertDescription>
                             <p class="mb-3">
-                                "Kyomi's shared Google OAuth app only works for Google \
-                                 accounts a Kyomi admin has explicitly authorized as \
-                                 testers — everyone else is refused by Google itself, \
-                                 not by Kyomi."
-                            </p>
-                            // No `FeedbackAccessRequestHandle` is available pre-auth
-                            // (that context is only provided by `Layout`, which wraps
-                            // authenticated pages), so this links out to support email
-                            // instead of opening the in-app feedback modal the
-                            // datasource modal's equivalent button uses — same
-                            // request, different channel, since there's no signed-in
-                            // session yet to attach an in-app feedback submission to.
-                            //
-                            // Hardcoded rather than read from `kyomi_core::Config::support_email`
-                            // (which defaults to this same address — see `config.rs`):
-                            // `Config` lives on `ServerContext`, which is
-                            // `#[cfg(feature = "ssr")]`-only (`server_fns/mod.rs`) and does
-                            // not exist on this component's `hydrate`/wasm32 build. If a
-                            // configurable support address is ever needed pre-auth, thread
-                            // it through a dedicated server fn rather than reintroducing
-                            // `ServerContext` on the client — but keep this literal in sync
-                            // with `config.rs`'s default until then.
-                            <ButtonLink
-                                href="mailto:support@kyomi.ai?subject=Request%20BigQuery%20Access"
-                                variant=ButtonVariant::Secondary
-                                size=ButtonSize::Sm
-                            >
-                                "Request access"
-                            </ButtonLink>
-                            <p class="text-xs text-muted-foreground mt-1.5 mb-3">
-                                "before connecting, so you're not waiting on a sign-in \
-                                 that's bound to fail."
+                                "Google sign-in requires beta access. "
+                                <a
+                                    href=beta_access::BETA_ACCESS_REQUEST_HREF
+                                    class="text-primary hover:underline font-medium"
+                                >
+                                    "Request beta access"
+                                </a>
                             </p>
                             <label class="flex items-center gap-2 cursor-pointer">
                                 <Checkbox
                                     checked=Signal::derive(move || google_access_confirmed.get())
                                     on_change=Callback::new(move |v: bool| {
+                                        // KYO-499 — persist to
+                                        // localStorage["hasBetaAccess"]
+                                        // alongside the in-memory signal; see
+                                        // `google_access_confirmed`'s doc
+                                        // comment.
+                                        beta_access::write_beta_access(v);
                                         set_google_access_confirmed.set(v)
                                     })
                                 />
                                 <span class="text-sm">
-                                    "I have requested access and had it confirmed"
+                                    "I have beta access"
                                 </span>
                             </label>
                         </AlertDescription>
@@ -1457,11 +1493,22 @@ mod tests {
 
     // ── Wiring: notice + checkbox render inside show_google_section ─────
 
-    /// The KYO-478 notice (Alert + "Request access" link + confirmation
-    /// checkbox) must render inside the `<Show when=show_google_section>`
-    /// block in `CredentialsView` — the same block that renders
-    /// `GoogleSignInButton` — so it can never appear when Google sign-in
-    /// itself isn't offered.
+    /// The KYO-478/KYO-499 notice (Alert + inline "Request beta access"
+    /// link + confirmation checkbox) must render inside the
+    /// `<Show when=show_google_section>` block in `CredentialsView` — the
+    /// same block that renders `GoogleSignInButton` — so it can never
+    /// appear when Google sign-in itself isn't offered.
+    ///
+    /// Copy was rewritten in KYO-499 to restore parity with the React
+    /// original (`AuthModeSelector.jsx` at `ee16f48a^`) — the heading +
+    /// two explanatory paragraphs KYO-478 shipped diverged from React and
+    /// were rejected as "a monstrosity". The sentence itself is
+    /// deliberately NOT byte-identical to the datasource modal's — "this
+    /// authentication method" doesn't apply pre-auth, where there's no
+    /// auth-mode dropdown (see the sentence's own inline comment in the
+    /// view tree) — but the checkbox label, link text, and link target
+    /// ARE, and are pinned as such by `utils::beta_access`'s
+    /// `both_surfaces_*` tests rather than here.
     #[test]
     fn google_sign_in_checkbox_renders_inside_show_google_section_block() {
         let google_block = extract_between(
@@ -1470,39 +1517,31 @@ mod tests {
             "</Show>",
         );
         assert!(
-            google_block.contains("Google account authorization required"),
-            "the show_google_section block must render the KYO-478 access-authorization \
-             notice"
+            google_block.contains("requires beta access"),
+            "the show_google_section block must render the KYO-499 access notice \
+             sentence"
         );
         assert!(
-            google_block.contains("\"Request access\""),
-            "the notice must include a \"Request access\" control"
+            google_block.contains("\"Request beta access\""),
+            "the notice must include a \"Request beta access\" link (KYO-499 copy)"
         );
         assert!(
-            google_block.contains("I have requested access and had it confirmed"),
-            "the notice must render the KYO-478 confirmation checkbox, with copy \
-             matching the datasource modal's equivalent (KYO-408) so both surfaces say \
-             the same thing"
+            google_block.contains("beta_access::BETA_ACCESS_REQUEST_HREF"),
+            "the \"Request beta access\" link must point at the shared \
+             utils::beta_access::BETA_ACCESS_REQUEST_HREF target (KYO-499), the same \
+             constant the datasource modal's equivalent notice uses — not an \
+             independently hardcoded mailto href that could silently diverge"
+        );
+        assert!(
+            google_block.contains("\"I have beta access\""),
+            "the notice must render the KYO-499 confirmation checkbox with the exact \
+             copy \"I have beta access\", matching the datasource modal's equivalent \
+             notice so both surfaces say the same thing"
         );
         assert!(
             google_block.contains("<GoogleSignInButton"),
             "sanity check on the extract_between bounds: the block must still contain \
              the Google sign-in button itself"
-        );
-        // Pins the real support domain (kyomi.ai, not kyomi.dev — confirmed against
-        // kyomi_core::Config::support_email's default in config.rs). A prior draft of
-        // this link pointed at a domain Kyomi doesn't own, which is the exact dead end
-        // KYO-478 exists to prevent: a user who can't sign in clicks "Request access"
-        // and mails an address that bounces or goes nowhere.
-        assert!(
-            google_block.contains("mailto:support@kyomi.ai"),
-            "the \"Request access\" link must point at support@kyomi.ai — the address \
-             kyomi_core::Config::support_email defaults to — not any other domain"
-        );
-        assert!(
-            !google_block.contains("kyomi.dev"),
-            "the \"Request access\" link must not use the kyomi.dev domain — Kyomi's \
-             support address is on kyomi.ai (see config.rs)"
         );
     }
 
@@ -1518,12 +1557,12 @@ mod tests {
             "<Show when=move || show_passkey_section() && show_google_section()>",
         );
         assert!(
-            !passkey_block.contains("Google account authorization required"),
-            "the KYO-478 notice must not leak into the passkey-only block"
+            !passkey_block.contains("requires beta access"),
+            "the KYO-478/499 notice must not leak into the passkey-only block"
         );
         assert!(
-            !passkey_block.contains("I have requested access and had it confirmed"),
-            "the KYO-478 checkbox must not leak into the passkey-only block"
+            !passkey_block.contains("\"I have beta access\""),
+            "the KYO-499 checkbox must not leak into the passkey-only block"
         );
     }
 
