@@ -353,11 +353,11 @@ pub async fn resolve_credentials(
                     ..Default::default()
                 };
 
-                // Also load per-user credentials so that billing_project,
-                // default_project, and query_size_limit_gb are available to
-                // resolve_billing_project() downstream. Without this, the
-                // per-user billing project stored in user_datasource_credentials
-                // is invisible to the BigQuery factory and the query fails.
+                // Also load per-user credentials so that billing_project is
+                // available to resolve_billing_project() downstream. Without
+                // this, the per-user billing project stored in
+                // user_datasource_credentials is invisible to the BigQuery
+                // factory and the query fails.
                 let mut result = if let Some(cred) =
                     kyomi_auth::datasource_service::get_user_credential(
                         &ctx.db,

@@ -1702,7 +1702,7 @@ pub async fn toggle_datasource_enabled(
 /// client_secret, ssh_private_key, service_account_json, OAuth tokens, and any
 /// future secret) is excluded automatically and never reaches the client.
 const CLIENT_SAFE_USER_SETTINGS_FIELDS: &[&str] =
-    &["username", "billing_project", "default_project", "client_id"];
+    &["username", "billing_project", "client_id"];
 
 /// Project the fully-decrypted per-user credential blob down to only the
 /// client-safe fields (see `CLIENT_SAFE_USER_SETTINGS_FIELDS`). The full blob
@@ -1965,14 +1965,14 @@ mod tests {
         // New credentials try to update billing_project but also include empty OAuth fields
         let new_creds = json!({
             "billing_project": "new-project",
-            "default_project": "my-project"
+            "client_id": "app-456"
         });
 
         let merged = merge_credentials(Some(&encrypted), &new_creds, &key).unwrap();
 
         // Non-OAuth fields should be updated
         assert_eq!(merged["billing_project"], "new-project");
-        assert_eq!(merged["default_project"], "my-project");
+        assert_eq!(merged["client_id"], "app-456");
 
         // OAuth fields should be preserved from existing
         assert_eq!(merged["oauth_access_token"], "tok-abc");
@@ -2027,10 +2027,6 @@ mod tests {
             obj.get("billing_project").and_then(|v| v.as_str()),
             Some("proj-b")
         );
-        assert_eq!(
-            obj.get("default_project").and_then(|v| v.as_str()),
-            Some("proj-d")
-        );
         // excluded secrets
         for k in [
             "password",
@@ -2041,7 +2037,18 @@ mod tests {
         ] {
             assert!(!obj.contains_key(k), "leaked secret field: {k}");
         }
-        assert_eq!(obj.len(), 4);
+        // KYO-415: default_project was removed from
+        // CLIENT_SAFE_USER_SETTINGS_FIELDS along with the rest of the dead
+        // "Default Project" UI. It was never a secret, but the doc comment
+        // on the allowlist says these are the fields "the datasource edit
+        // modal needs" — the modal no longer reads default_project, so it
+        // must no longer be projected. A legacy row may still carry the
+        // key; that's inert as long as it stops here.
+        assert!(
+            !obj.contains_key("default_project"),
+            "default_project must no longer be projected to the client"
+        );
+        assert_eq!(obj.len(), 3);
     }
 
     // -- fetch_catalog_statuses (KYO-201: N+1 -> single grouped query) --
