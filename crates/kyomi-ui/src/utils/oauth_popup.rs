@@ -119,6 +119,60 @@ fn popup_timeout_should_report(still_connecting: bool) -> bool {
     still_connecting
 }
 
+/// Rewrites Google's raw OAuth denial error into a message naming the real
+/// cause, for the BigQuery Kyomi-OAuth connect flow (KYO-408).
+///
+/// Google's authorization server returns the standard OAuth2 `access_denied`
+/// error code (RFC 6749 §4.1.2.1) both when a user deliberately cancels
+/// consent and when Kyomi's shared OAuth app — permanently in "Testing"
+/// publishing status — rejects a Google account that has not been added to
+/// the test-user allowlist. Google collapses both cases to the same code
+/// and gives Kyomi no server-side way to tell them apart. Because Kyomi's
+/// app never leaves Testing status, an `access_denied` reaching this
+/// function is overwhelmingly the allowlist rejection in practice rather
+/// than a deliberate cancel, so that is the message shown. Every other
+/// error code (network failure, `invalid_client`, etc.) is passed through
+/// unchanged — this message would misdescribe those.
+///
+/// Only applies to `OAuthMessage::GoogleError` (the shared kyomi_oauth
+/// flow). `BigqueryEnterpriseError` is deliberately excluded — enterprise
+/// OAuth uses the customer's own Google Cloud OAuth app, so there is no
+/// Kyomi allowlist to be rejected from.
+///
+/// `pub` and shared (KYO-421) — called from all three OAuth `postMessage`
+/// listeners that can receive a `GoogleError`: the list-level and
+/// modal-level listeners in `pages/settings/datasources.rs`, and the
+/// onboarding listener in `pages/onboarding/datasource_onboarding.rs`.
+/// Originally private to `datasources.rs`; moved here (KYO-421) once a
+/// third call site needed it, rather than duplicating the translation
+/// logic a second time — see
+/// `docs/standards/code-organization/third-copy-of-test-helper-is-extraction-trigger.md`
+/// for why a third copy is the extraction trigger even when the first two
+/// were individually justified. Every call site must still combine the
+/// other five `OAuthMessage::*Error` variants into a separate match arm
+/// that does NOT call this function — applying it to a
+/// Snowflake/Databricks/Microsoft/BigQuery-enterprise error would
+/// misdescribe those, since this assumes Google's shared-app allowlist
+/// rejection specifically.
+///
+/// `cfg`-gated to `wasm32`-or-`test`: its only production callers live
+/// inside `#[cfg(target_arch = "wasm32")]` OAuth `postMessage` listener
+/// blocks (the popup-listener setup is browser-only), so a native,
+/// non-test `--features ssr` build has no reachable caller at all — this
+/// mirrors the established pattern elsewhere in this module (e.g.
+/// [`popup_poll_should_report_closed`]) for a wasm32-only helper that
+/// still needs direct, host-side unit test coverage.
+#[cfg(any(target_arch = "wasm32", test))]
+pub fn translate_google_oauth_error(raw: String) -> String {
+    if raw.contains("access_denied") {
+        "This Google account isn't authorized for Kyomi's OAuth app yet — \
+         request access before connecting."
+            .to_string()
+    } else {
+        raw
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // WASM-only functions
 // ─────────────────────────────────────────────────────────────────────────────
@@ -602,6 +656,31 @@ mod tests {
         assert!(
             !popup_timeout_should_report(false),
             "a postMessage already resolved this attempt before the timeout fired"
+        );
+    }
+
+    // ── KYO-408/KYO-421: Google OAuth denial error translation ──────────
+
+    #[test]
+    fn translate_google_oauth_error_rewrites_access_denied() {
+        let translated =
+            translate_google_oauth_error("Google OAuth error: access_denied".to_string());
+        assert_eq!(
+            translated,
+            "This Google account isn't authorized for Kyomi's OAuth app yet — \
+             request access before connecting."
+        );
+    }
+
+    #[test]
+    fn translate_google_oauth_error_passes_other_errors_through_unchanged() {
+        let raw = "Google OAuth error: invalid_client".to_string();
+        assert_eq!(
+            translate_google_oauth_error(raw.clone()),
+            raw,
+            "any error code other than access_denied must be passed through verbatim — \
+             translating it to the allowlist message would misdescribe an unrelated failure \
+             (e.g. network error, invalid_client, server misconfiguration)"
         );
     }
 

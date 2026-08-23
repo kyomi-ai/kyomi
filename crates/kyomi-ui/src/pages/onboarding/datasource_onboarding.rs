@@ -309,7 +309,9 @@ fn CredentialSetup(
     // the state_resource (the Effect above handles the rest).
     #[cfg(target_arch = "wasm32")]
     {
-        use crate::utils::oauth_popup::{install_oauth_listener, OAuthMessage};
+        use crate::utils::oauth_popup::{
+            install_oauth_listener, translate_google_oauth_error, OAuthMessage,
+        };
 
         let cleanup = install_oauth_listener(move |msg| {
             match msg {
@@ -338,8 +340,17 @@ fn CredentialSetup(
                     toast_success("Microsoft connected successfully");
                     state_resource.refetch();
                 }
-                OAuthMessage::GoogleError { error }
-                | OAuthMessage::SnowflakeError { error }
+                // GoogleError is split into its own arm (KYO-421) so the
+                // allowlist-rejection translation below applies ONLY to the
+                // shared kyomi_oauth Google flow — see
+                // translate_google_oauth_error's doc comment in
+                // utils::oauth_popup for why applying it to the other five
+                // providers' errors would misdescribe those.
+                OAuthMessage::GoogleError { error } => {
+                    set_oauth_connecting.try_set(None);
+                    toast_error(translate_google_oauth_error(error));
+                }
+                OAuthMessage::SnowflakeError { error }
                 | OAuthMessage::DatabricksError { error }
                 | OAuthMessage::MicrosoftError { error }
                 | OAuthMessage::MicrosoftEnterpriseError { error }
@@ -716,3 +727,94 @@ fn WaitingForSetup(
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests (KYO-421)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    /// This file's own source, for source-text wiring assertions below —
+    /// mirrors the `SRC`/`extract_between` pattern in
+    /// `pages/settings/datasources/tests/mod.rs`, kept local here since this
+    /// file is far below that module's collision-risk size (see
+    /// `docs/standards/testing/one-test-topic-per-file-not-one-big-mod-tests.md`).
+    const SRC: &str = include_str!("datasource_onboarding.rs");
+
+    /// `SRC` sliced to production code only, cutting off at this test
+    /// module's own opening marker — otherwise a whole-file scan would
+    /// match this module's own literals (e.g. the marker strings the tests
+    /// below search for, which this doc comment and the assertions
+    /// themselves repeat verbatim).
+    const TEST_MOD_MARKER: &str = "#[cfg(test)]\nmod tests {";
+    fn production_src() -> &'static str {
+        SRC.split(TEST_MOD_MARKER)
+            .next()
+            .expect("TEST_MOD_MARKER must be found in SRC")
+    }
+
+    /// Returns the substring of `src` starting just after the first
+    /// occurrence of `start` and ending just before the first occurrence of
+    /// `end` that follows it. Panics with a descriptive message if either
+    /// marker isn't found, so a typo'd marker fails loudly instead of
+    /// silently matching an empty/wrong range.
+    fn extract_between<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
+        let start_idx = src
+            .find(start)
+            .unwrap_or_else(|| panic!("start marker not found: {start:?}"));
+        let after_start = start_idx + start.len();
+        let end_idx = src[after_start..]
+            .find(end)
+            .unwrap_or_else(|| panic!("end marker not found after start: {end:?}"));
+        &src[after_start..after_start + end_idx]
+    }
+
+    // ── KYO-421: GoogleError must translate; the other five providers must not ──
+    //
+    // The onboarding OAuth `postMessage` listener used to fold GoogleError
+    // into the same combined match arm as Snowflake/Databricks/Microsoft/
+    // Microsoft-enterprise/BigQuery-enterprise, so a user rejected by
+    // Google's shared-app allowlist during onboarding saw Google's raw
+    // OAuth string instead of the KYO-408 translated message the
+    // settings-page listeners already show. Mirrors
+    // `google_error_translation_is_not_applied_to_other_providers_error_arms`
+    // in `pages/settings/datasources/tests/oauth.rs` — the negative half is
+    // load-bearing: it is the regression a careless "just wrap toast_error"
+    // fix could reintroduce by translating the other five providers' errors
+    // too, which would misdescribe them (they have no Kyomi allowlist to be
+    // rejected from).
+
+    #[test]
+    fn onboarding_google_error_arm_calls_the_translation() {
+        let google_arm = extract_between(
+            production_src(),
+            "OAuthMessage::GoogleError { error } => {",
+            "OAuthMessage::SnowflakeError { error }",
+        );
+        assert!(
+            google_arm.contains("translate_google_oauth_error(error)"),
+            "the onboarding listener's GoogleError arm must call \
+             translate_google_oauth_error, the same as the settings-page \
+             list-level and modal-level listeners (KYO-421)"
+        );
+    }
+
+    #[test]
+    fn onboarding_other_providers_error_arm_does_not_call_the_translation() {
+        let others_arm = extract_between(
+            production_src(),
+            "OAuthMessage::SnowflakeError { error }\n                | OAuthMessage::DatabricksError { error }\n                \
+             | OAuthMessage::MicrosoftError { error }\n                | OAuthMessage::MicrosoftEnterpriseError { error }\n                \
+             | OAuthMessage::BigqueryEnterpriseError { error } => {",
+            "toast_error(error);\n                }",
+        );
+        assert!(
+            !others_arm.contains("translate_google_oauth_error"),
+            "the onboarding listener's Snowflake/Databricks/Microsoft/\
+             Microsoft-enterprise/BigQuery-enterprise error arm must pass \
+             `error` straight to toast_error, not through \
+             translate_google_oauth_error — that function assumes a Google \
+             shared-app allowlist rejection specifically and would \
+             misdescribe these providers' errors (KYO-421)"
+        );
+    }
+}
