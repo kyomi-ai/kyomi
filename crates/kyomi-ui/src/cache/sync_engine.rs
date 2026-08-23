@@ -29,10 +29,14 @@
 //! (the unsubscribe functions returned by `ws.subscribe`) are wrapped in
 //! `SendWrapper` so they satisfy `on_cleanup`'s `Send + 'static` bound.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use send_wrapper::SendWrapper;
 
+use crate::cache::reconcile::RepairGuard;
 use crate::cache::store::SyncStore;
 use crate::components::chat::websocket_client::{ConnectionState, WebSocketContext};
 use kyomi_types::sync::entity_types;
@@ -53,6 +57,16 @@ pub fn start_sync_engine(
     store: SyncStore,
     workspace_id: String,
 ) {
+    // Per-connection anti-thrash guard for count reconciliation (KYO-480) —
+    // see `cache::reconcile::RepairGuard`. `StoredValue` so it's `Copy` and
+    // can be captured by both the `sync_complete` subscriber below and the
+    // connection-state `Effect` further down, which resets it on every
+    // transition to `Connected`. `RefCell` because both sites need mutable
+    // access from a plain closure, not a reactive signal — nothing here
+    // needs to be reactive, it's read-and-mutated procedurally in response
+    // to WebSocket events.
+    let repair_guard = StoredValue::new(SendWrapper::new(RefCell::new(RepairGuard::new())));
+
     // ── Subscribe to sync_action ──────────────────────────────────────────────
     let unsub_action = ws.subscribe("sync_action", {
         let workspace_id = workspace_id.clone();
@@ -66,31 +80,164 @@ pub fn start_sync_engine(
     // ── Subscribe to sync_complete ────────────────────────────────────────────
     let unsub_complete = ws.subscribe("sync_complete", {
         let workspace_id = workspace_id.clone();
+        let ws_for_repair = ws.clone();
         move |msg| {
             if let Some(data) = &msg.data
                 && let Some(sync_id) = data.get("last_sync_id").and_then(|v| v.as_i64())
             {
-                    // Persist the cursor to IDB. The schema hash is written
-                    // unconditionally by `init_cache_db` itself at cache-open
-                    // time (KYO-479) — no need to duplicate that write here.
-                    let wid = workspace_id.clone();
-                    spawn_local(async move {
-                        match crate::cache::db::init_cache_db(&wid).await {
-                            Ok(db) => {
+                // KYO-480 count reconciliation: decided synchronously,
+                // right here, before the cursor persist below — by this
+                // point every `sync_action` for this sync cycle has
+                // already been applied to `store` (messages are handled
+                // in order, synchronously, so the last `sync_action`
+                // handler has returned before this `sync_complete`
+                // handler runs), so `store.reconciliation_counts()`
+                // reflects the fully-caught-up local state.
+                let server_counts: HashMap<String, i64> = match data.get("counts") {
+                    Some(v) => serde_json::from_value(v.clone()).unwrap_or_else(|e| {
+                        tracing::warn!("sync_complete: failed to parse counts field: {e}");
+                        HashMap::new()
+                    }),
+                    // Older server mid-rollout, or the field genuinely
+                    // empty — nothing to reconcile against this cycle.
+                    None => HashMap::new(),
+                };
+                let local_counts = store.reconciliation_counts();
+                let diverged = crate::cache::reconcile::diverged_types(&local_counts, &server_counts);
+                let to_repair: Vec<String> =
+                    repair_guard.with_value(|g| g.borrow_mut().admit(diverged));
+
+                // KYO-215/KYO-480: Tier 2 detail caches (`dashboard_detail`,
+                // `chat_messages`) are derived state keyed off individual
+                // Tier 1 entity ids. Every other path that removes a Tier 1
+                // row invalidates its Tier 2 entry (see the `delete` arm of
+                // `apply_sync_action` below) — a bulk repair wipe must do
+                // the same for the stale-extras direction, or an orphaned
+                // Tier 2 entry for an entity that no longer exists locally
+                // (or at all, server-side) would keep rendering as cached
+                // "instant paint" content on next visit. Capture the ids
+                // *before* clearing the store, since after `clear_entity_type`
+                // they're gone.
+                let mut stale_detail_ids: Vec<(&'static str, String)> = Vec::new();
+                for entity_type in &to_repair {
+                    tracing::warn!(
+                        %entity_type,
+                        local_count = local_counts.get(entity_type).copied().unwrap_or(0),
+                        server_count = server_counts.get(entity_type).copied().unwrap_or(0),
+                        "sync: local cache diverged from server counts — repairing"
+                    );
+                    match entity_type.as_str() {
+                        t if t == entity_types::DASHBOARD => {
+                            stale_detail_ids.extend(
+                                store.dashboards().get_untracked().into_iter()
+                                    .map(|d| (entity_types::DASHBOARD_DETAIL, d.dashboard_id)),
+                            );
+                        }
+                        t if t == entity_types::KNOWLEDGE => {
+                            stale_detail_ids.extend(
+                                store.knowledge_docs().get_untracked().into_iter()
+                                    .map(|d| (entity_types::DASHBOARD_DETAIL, d.dashboard_id)),
+                            );
+                        }
+                        t if t == entity_types::CHAT_SESSION => {
+                            stale_detail_ids.extend(
+                                store.chat_sessions().get_untracked().into_iter()
+                                    .map(|s| (entity_types::CHAT_MESSAGES, s.session_id)),
+                            );
+                        }
+                        // `watch` has no Tier 2 detail cache.
+                        _ => {}
+                    }
+                    // Wipe immediately, in this sync cycle — not queued
+                    // behind a user gesture. Clearing the store now (not
+                    // only IDB, below, inside the async block) means a
+                    // page reading `store.watches()` etc. right now sees
+                    // the stale/incomplete list emptied rather than
+                    // stuck showing wrong data until the repair
+                    // bootstrap's `sync_action` stream lands.
+                    store.clear_entity_type(entity_type);
+                }
+
+                // Persist the cursor to IDB. The schema hash is written
+                // unconditionally by `init_cache_db` itself at cache-open
+                // time (KYO-479) — no need to duplicate that write here.
+                let wid = workspace_id.clone();
+                let repair_types = to_repair.clone();
+                let ws_send = ws_for_repair.clone();
+                spawn_local(async move {
+                    match crate::cache::db::init_cache_db(&wid).await {
+                        Ok(db) => {
+                            if let Err(e) =
+                                crate::cache::db::set_last_sync_id(&db, &wid, &sync_id.to_string())
+                                    .await
+                            {
+                                tracing::warn!("sync_complete: failed to persist cursor: {e}");
+                            }
+                            // KYO-480 repair, continued: wipe IDB for
+                            // every diverged type. A failed wipe here is
+                            // not fatal to correctness — the store was
+                            // already cleared above, and the repair
+                            // bootstrap below re-inserts fresh rows into
+                            // IDB regardless (upsert, not append) — but
+                            // it is logged so a persistent IDB failure is
+                            // visible rather than silently swallowed.
+                            for entity_type in &repair_types {
                                 if let Err(e) =
-                                    crate::cache::db::set_last_sync_id(&db, &wid, &sync_id.to_string())
-                                        .await
+                                    crate::cache::db::delete_all_of_type(&db, entity_type, &wid).await
                                 {
-                                    tracing::warn!("sync_complete: failed to persist cursor: {e}");
+                                    tracing::warn!(
+                                        %entity_type,
+                                        "sync: repair wipe of IndexedDB failed: {e}"
+                                    );
                                 }
                             }
-                            Err(e) => {
-                                tracing::warn!("sync_complete: failed to open cache db: {e}");
+                            // Tier 2 detail-cache invalidation for the
+                            // entities that were wiped (see comment at
+                            // the capture site above) — same
+                            // best-effort/logged treatment as the Tier 1
+                            // wipe just above.
+                            for (detail_type, entity_id) in &stale_detail_ids {
+                                let detail_type: &str = detail_type;
+                                let entity_id: &str = entity_id;
+                                if let Err(e) =
+                                    crate::cache::db::delete(&db, detail_type, entity_id, &wid).await
+                                {
+                                    tracing::warn!(
+                                        detail_type,
+                                        entity_id,
+                                        "sync: repair Tier 2 invalidation failed: {e}"
+                                    );
+                                }
                             }
                         }
-                        store.mark_initialized();
-                        tracing::info!(last_sync_id = sync_id, "sync_complete: store initialized");
-                    });
+                        Err(e) => {
+                            tracing::warn!("sync_complete: failed to open cache db: {e}");
+                        }
+                    }
+
+                    if !repair_types.is_empty() {
+                        // Reuses the existing, unmodified bootstrap
+                        // pipeline (KYO-169) to repopulate every wiped
+                        // type — the same request first visit, a
+                        // schema-hash wipe (KYO-479), and `sync_reset`
+                        // already send. No new protocol message, no new
+                        // insertion logic: the resulting `sync_action`
+                        // stream is handled by the same
+                        // `apply_sync_action` as any other bootstrap. If
+                        // this request or its response never completes
+                        // (offline, server error, connection drop), the
+                        // affected types stay wiped and diverged; the
+                        // *next* successful `sync_complete` — on this
+                        // connection if one still arrives, or after a
+                        // reconnect once `repair_guard` resets — detects
+                        // the same mismatch and retries. Nothing marks a
+                        // failed repair as resolved.
+                        ws_send.send(serde_json::json!({"type": "sync_bootstrap"}));
+                    }
+
+                    store.mark_initialized();
+                    tracing::info!(last_sync_id = sync_id, "sync_complete: store initialized");
+                });
             }
         }
     });
@@ -169,6 +316,13 @@ pub fn start_sync_engine(
         if state != ConnectionState::Connected {
             return;
         }
+
+        // KYO-480: a new connection is a fresh chance to repair — reset the
+        // per-connection anti-thrash guard so a mismatch that survived (or
+        // whose repair never completed) on the previous connection gets
+        // retried rather than staying permanently blocked.
+        repair_guard.with_value(|g| g.borrow_mut().reset());
+
         let ws_send = ws_for_state.clone();
         let wid = wid_for_state.clone();
 

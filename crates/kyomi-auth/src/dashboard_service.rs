@@ -1101,6 +1101,12 @@ pub async fn get_dashboard_count(
 /// Never widen this function to drop the visibility filter — see KYO-181
 /// and the "workspace_id is not an authorization boundary for dashboards
 /// reads" rule in `docs/CODING_STANDARDS.md`.
+///
+/// Also reused (unchanged) by the sync protocol's per-entity-type count
+/// reconciliation (KYO-480, `apps/server/src/routes/websocket.rs`) for both
+/// `dashboard` and `knowledge` — it already applies the exact same
+/// visibility scoping as [`list_docs_for_sync`], so there is no separate
+/// count query to keep in sync with that one.
 pub async fn get_document_count(
     db: &DbPool,
     workspace_id: &str,

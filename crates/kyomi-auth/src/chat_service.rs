@@ -2238,7 +2238,7 @@ pub async fn list_sessions_for_sync(
 
     let is_pg = db.is_postgres();
     let bf = kyomi_core::sql_compat::bool_false(is_pg);
-    let bt = kyomi_core::sql_compat::bool_true(is_pg);
+    let where_clause = sessions_for_sync_where(is_pg);
     let sql = format!(
         r#"SELECT cs.session_id, cs.user_id, cs.title,
                   cs.model, cs.session_type,
@@ -2249,8 +2249,7 @@ pub async fn list_sessions_for_sync(
                   COALESCE(u.name, u.email, 'Unknown') AS display_name
            FROM chat_sessions cs
            LEFT JOIN users u ON cs.user_id = u.user_id
-           WHERE cs.workspace_id = $1 AND cs.session_type = 'chat'
-             AND (cs.user_id = $2 OR cs.shared = {bt})
+           {where_clause}
            ORDER BY cs.updated_at DESC"#
     );
 
@@ -2284,6 +2283,53 @@ pub async fn list_sessions_for_sync(
         .collect();
 
     Ok(values)
+}
+
+/// Shared `WHERE` fragment scoping `chat_sessions` rows to what `user_id`
+/// may see via the sync protocol: `session_type = 'chat'`, and either owned
+/// by `user_id` or shared to the whole workspace.
+///
+/// Used by both [`list_sessions_for_sync`] and [`count_sessions_for_sync`]
+/// (KYO-480) so the two queries cannot silently drift apart — if they ever
+/// disagreed, the count-reconciliation check built on `count_sessions_for_sync`
+/// would be comparing against a wrong ground truth (see
+/// `docs/standards/code-organization/propagate-predicate-changes-to-every-copy.md`).
+///
+/// Assumes the caller aliases `chat_sessions` as `cs` and binds
+/// `workspace_id` at `$1`, `user_id` at `$2`.
+fn sessions_for_sync_where(is_pg: bool) -> String {
+    let bt = kyomi_core::sql_compat::bool_true(is_pg);
+    format!(
+        "WHERE cs.workspace_id = $1 AND cs.session_type = 'chat' \
+         AND (cs.user_id = $2 OR cs.shared = {bt})"
+    )
+}
+
+/// Count chat sessions visible to `user_id` within a workspace — the same
+/// scope as [`list_sessions_for_sync`], just `COUNT(*)` instead of the full
+/// rows (both share [`sessions_for_sync_where`], so this can't drift from
+/// the list's visibility rule).
+///
+/// Used by the sync protocol's per-entity-type count reconciliation
+/// (KYO-480) so a client can detect a diverged local cache without a full
+/// re-bootstrap. Index coverage: `idx_chat_sessions_workspace(workspace_id)`
+/// and `idx_chat_sessions_type(session_type)` can be combined via a bitmap
+/// AND scan, and the `shared` branch of the `OR` is additionally covered by
+/// the partial index `idx_chat_sessions_shared(workspace_id, shared) WHERE
+/// shared = true`. There is no single composite index over the exact
+/// predicate `(workspace_id, session_type, user_id)` — worth revisiting if
+/// this ever shows up as a hot query, but not added here.
+pub async fn count_sessions_for_sync(
+    db: &kyomi_core::DbPool,
+    workspace_id: &str,
+    user_id: &str,
+) -> kyomi_core::Result<i64> {
+    let is_pg = db.is_postgres();
+    let where_clause = sessions_for_sync_where(is_pg);
+    let sql = format!("SELECT COUNT(*) FROM chat_sessions cs {where_clause}");
+    kyomi_core::db_fetch_scalar!(db, i64, &sql, workspace_id, user_id).map_err(|e| {
+        kyomi_core::Error::Internal(format!("failed to count sessions for sync: {e}"))
+    })
 }
 
 /// Convert a `SessionWithUserRow` into a `SessionMetadata`.
@@ -2847,6 +2893,51 @@ mod tests {
         assert!(
             !ids.contains(&"sess-other-ws"),
             "sync list scoped to ws-1 must not include a session from ws-2; got {ids:?}"
+        );
+    }
+
+    /// KYO-480: `count_sessions_for_sync` must apply the exact same
+    /// `session_type = 'chat' AND (user_id = $2 OR shared = true)` scoping
+    /// as `list_sessions_for_sync` — a leaked or under-counted total here
+    /// would give the client's sync-reconciliation check a wrong ground
+    /// truth to compare against, defeating the point of KYO-480.
+    #[tokio::test]
+    async fn count_sessions_for_sync_matches_list_scoping() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        seed_user(sq, "user-a", "user-a@test.local").await;
+        seed_user(sq, "user-b", "user-b@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+
+        seed_chat_session(sq, SeedSession::new("sess-a-private", "user-a", "ws-1", "A private")).await;
+        seed_chat_session(
+            sq,
+            SeedSession::new("sess-a-shared", "user-a", "ws-1", "A shared").shared(true),
+        )
+        .await;
+        seed_chat_session(sq, SeedSession::new("sess-b-own", "user-b", "ws-1", "B's own")).await;
+        seed_chat_session(
+            sq,
+            SeedSession::new("sess-watch-exec", "user-b", "ws-1", "Watch run")
+                .session_type("watch_execution"),
+        )
+        .await;
+
+        let bs_count = count_sessions_for_sync(&db, "ws-1", "user-b")
+            .await
+            .expect("count_sessions_for_sync for user-b");
+        let bs_list = list_sessions_for_sync(&db, "ws-1", "user-b")
+            .await
+            .expect("list_sessions_for_sync for user-b");
+
+        // user-b should see: their own session + user-a's shared session.
+        // Excluded: user-a's private session (not shared, not user-b's), and
+        // the non-chat session_type row regardless of owner.
+        assert_eq!(bs_count, 2, "count must include B's own session and A's shared session only");
+        assert_eq!(
+            bs_count as usize,
+            bs_list.len(),
+            "count and list must agree — they are the same visibility scope over the same rows"
         );
     }
 

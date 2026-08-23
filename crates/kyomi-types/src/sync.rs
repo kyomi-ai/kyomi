@@ -34,7 +34,26 @@ pub enum SyncRequest {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SyncResponse {
     SyncAction(SyncAction),
-    SyncComplete { last_sync_id: i64 },
+    SyncComplete {
+        last_sync_id: i64,
+        /// Per-entity-type row counts for the caller, keyed by the
+        /// `entity_types` constants below (KYO-480). Lets the client detect
+        /// a diverged local cache — entities it's missing, or stale extras
+        /// it should no longer have — without a new round trip or protocol
+        /// message; reconciliation rides the sync_complete the protocol
+        /// already sends on every bootstrap and delta.
+        ///
+        /// Only entity types in `entity_types::RECONCILED` are ever present.
+        /// A type can also be *absent* even though it's reconciled, when its
+        /// server-side count query failed this cycle — see
+        /// `compute_sync_counts` in `apps/server/src/routes/websocket.rs`.
+        /// `#[serde(default)]` so an old client mid-rollout that predates
+        /// this field still deserializes a `sync_complete` cleanly (reads an
+        /// empty map, which correctly means "nothing to reconcile this
+        /// cycle" rather than "you now have zero of everything").
+        #[serde(default)]
+        counts: std::collections::HashMap<String, i64>,
+    },
     SyncReset,
 }
 
@@ -56,4 +75,17 @@ pub mod entity_types {
     pub const DASHBOARD_DETAIL: &str = "dashboard_detail";
     /// Ordered messages for a single chat session.
     pub const CHAT_MESSAGES: &str = "chat_messages";
+
+    /// Entity types covered by count-based sync reconciliation (KYO-480).
+    /// Shared by the server (`compute_sync_counts`, which computes one
+    /// count per entry) and the client (`cache::reconcile::diverged_types`,
+    /// which compares against it) so the two sides can't drift apart on
+    /// which types participate.
+    ///
+    /// `workspace_settings` is a workspace-wide singleton fetched by primary
+    /// key, not a set — there's no "count" for it to diverge from, so it's
+    /// deliberately excluded. Tier 2 detail caches (`dashboard_detail`,
+    /// `chat_messages`) are on-demand and invalidated by their Tier 1 parent,
+    /// not part of the bootstrap/delta count surface at all.
+    pub const RECONCILED: &[&str] = &[DASHBOARD, KNOWLEDGE, CHAT_SESSION, WATCH];
 }

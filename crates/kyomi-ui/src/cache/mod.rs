@@ -24,7 +24,16 @@
 //! ungated module — with no `indexed_db_futures`/`web_sys` dependency — so it
 //! can be unit-tested on the host target even though `db` itself cannot
 //! (KYO-479).
+//!
+//! ### `reconcile` — count reconciliation decision (all targets)
+//!
+//! [`reconcile::diverged_types`] and [`reconcile::RepairGuard`] are the pure
+//! divergence-detection and anti-thrash logic `sync_engine` uses to decide
+//! when a local entity type must be wiped and re-fetched (KYO-480). Same
+//! split as `schema_hash`, for the same reason: unit-testable on the host
+//! target even though the wiring that calls it (`sync_engine`) cannot be.
 
+pub mod reconcile;
 pub mod schema_hash;
 pub mod store;
 

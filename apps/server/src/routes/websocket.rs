@@ -343,35 +343,76 @@ async fn handle_sync_bootstrap(
 
     tracing::debug!(user_id, workspace_id, "Handling sync_bootstrap");
 
-    // 1. Fetch all Tier 1 metadata.
-    let dashboards =
-        kyomi_auth::dashboard_service::list_dashboards_for_sync(db, workspace_id, user_id)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!(user_id, workspace_id, error = %e, "list_dashboards_for_sync failed");
-                vec![]
-            });
-    let knowledge =
-        kyomi_auth::dashboard_service::list_knowledge_for_sync(db, workspace_id, user_id)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!(user_id, workspace_id, error = %e, "list_knowledge_for_sync failed");
-                vec![]
-            });
-    let sessions = kyomi_auth::chat_service::list_sessions_for_sync(db, workspace_id, user_id)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!(user_id, workspace_id, error = %e, "list_sessions_for_sync failed");
-            vec![]
-        });
-    let watches = kyomi_auth::watch_service::list_watches_for_sync(db, workspace_id, user_id)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!(user_id, workspace_id, error = %e, "list_watches_for_sync failed");
-            vec![]
-        });
+    // 1. Fetch all Tier 1 metadata. Kept as `Result`s (not yet unwrapped)
+    // so counts (1b, below) can be derived from each fetch's success/failure
+    // independently of the streaming step, which is allowed to degrade to
+    // an empty vec on failure.
+    let dashboards_res =
+        kyomi_auth::dashboard_service::list_dashboards_for_sync(db, workspace_id, user_id).await;
+    let knowledge_res =
+        kyomi_auth::dashboard_service::list_knowledge_for_sync(db, workspace_id, user_id).await;
+    let sessions_res =
+        kyomi_auth::chat_service::list_sessions_for_sync(db, workspace_id, user_id).await;
+    let watches_res =
+        kyomi_auth::watch_service::list_watches_for_sync(db, workspace_id, user_id).await;
     let settings =
         kyomi_auth::workspace_service::get_workspace_settings_for_sync(db, workspace_id).await;
+
+    // 1b. Per-entity-type counts for the sync_complete payload (KYO-480).
+    // Derived from each fetch's `Result` *before* it is unwrapped for
+    // streaming below (free: no additional queries beyond the ones already
+    // run for step 1). Routed through `insert_count_if_present` — the same
+    // function `compute_sync_counts` (the delta path) uses — so a failed
+    // fetch is omitted from `counts` rather than reported as `0` in both
+    // places, structurally, not just here. See `insert_count_if_present`'s
+    // doc comment for why a bootstrap-path `0` is worse than a delta-path
+    // one: every repair goes through this same untargeted bootstrap
+    // (`cache::sync_engine`), so a transient failure here can either mark a
+    // genuinely diverged type as falsely repaired, or fabricate a brand-new
+    // false divergence in an unrelated, correctly-cached type.
+    let mut counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    insert_count_if_present(
+        &mut counts,
+        entity_types::DASHBOARD,
+        dashboards_res.as_ref().ok().map(|v| v.len() as i64),
+    );
+    insert_count_if_present(
+        &mut counts,
+        entity_types::KNOWLEDGE,
+        knowledge_res.as_ref().ok().map(|v| v.len() as i64),
+    );
+    insert_count_if_present(
+        &mut counts,
+        entity_types::CHAT_SESSION,
+        sessions_res.as_ref().ok().map(|v| v.len() as i64),
+    );
+    insert_count_if_present(
+        &mut counts,
+        entity_types::WATCH,
+        watches_res.as_ref().ok().map(|v| v.len() as i64),
+    );
+
+    // Unwrap each `Result` for streaming now — degrading to an empty vec on
+    // failure is fine here (pre-existing behavior, unchanged): a partial or
+    // absent stream this cycle is recoverable the same way it always was.
+    // It is only the *counts* above that must never claim zero on a fetch
+    // failure.
+    let dashboards = dashboards_res.unwrap_or_else(|e| {
+        tracing::warn!(user_id, workspace_id, error = %e, "list_dashboards_for_sync failed");
+        vec![]
+    });
+    let knowledge = knowledge_res.unwrap_or_else(|e| {
+        tracing::warn!(user_id, workspace_id, error = %e, "list_knowledge_for_sync failed");
+        vec![]
+    });
+    let sessions = sessions_res.unwrap_or_else(|e| {
+        tracing::warn!(user_id, workspace_id, error = %e, "list_sessions_for_sync failed");
+        vec![]
+    });
+    let watches = watches_res.unwrap_or_else(|e| {
+        tracing::warn!(user_id, workspace_id, error = %e, "list_watches_for_sync failed");
+        vec![]
+    });
 
     // 2. Get the current sync watermark.
     let latest_sync_id =
@@ -389,12 +430,13 @@ async fn handle_sync_bootstrap(
         stream_entities(manager, user_id, workspace_id, entity_types::WORKSPACE_SETTINGS, "workspace_id", vec![item]).await;
     }
 
-    // 4. Signal completion with the current sync watermark.
+    // 4. Signal completion with the current sync watermark and counts.
     send_sync_response(
         manager,
         user_id,
         SyncResponse::SyncComplete {
             last_sync_id: latest_sync_id,
+            counts,
         },
     )
     .await;
@@ -459,18 +501,121 @@ async fn handle_sync_delta(
         send_sync_response(manager, user_id, SyncResponse::SyncAction(entry.clone())).await;
     }
 
-    // 4. Send SyncComplete with the latest sync_id we streamed.
+    // 4. Send SyncComplete with the latest sync_id we streamed and the
+    // caller's current per-entity-type counts (KYO-480), so the client can
+    // detect a local cache that has diverged from the server's authoritative
+    // set — including entities whose only mutation predates `sync_log`
+    // coverage, which a delta can structurally never carry.
     let latest_id = entries.last().map(|e| e.sync_id).unwrap_or(last_sync_id);
+    let counts = compute_sync_counts(db, workspace_id, user_id).await;
     send_sync_response(
         manager,
         user_id,
         SyncResponse::SyncComplete {
             last_sync_id: latest_id,
+            counts,
         },
     )
     .await;
 
     tracing::debug!(user_id, workspace_id, latest_id, "sync_delta complete");
+}
+
+/// Record `key`'s count in `counts`, but only when `value` is `Some` —
+/// i.e. only when the underlying fetch actually succeeded (KYO-480 review
+/// fix). `None` is silently omitted, never recorded as `0`.
+///
+/// This is the **single** place either counts-producing path is allowed to
+/// write into the map: `handle_sync_bootstrap` and `compute_sync_counts`
+/// both route every entity type through this function rather than each
+/// containing its own "insert on success" logic, specifically so the
+/// omit-on-failure contract cannot drift between the two paths the way it
+/// did before this fix (`compute_sync_counts` omitted correctly;
+/// `handle_sync_bootstrap` derived counts from vecs that had already been
+/// `.unwrap_or_else`'d to `vec![]` on failure, making a fetch error
+/// indistinguishable from a genuinely empty result).
+///
+/// Why a bootstrap-path `0` is worse than it looks: every repair the client
+/// runs (`cache::sync_engine`, `crates/kyomi-ui`) goes through this same
+/// untargeted `sync_bootstrap` — it always re-fetches and re-streams every
+/// `entity_types::RECONCILED` type, not just the one that diverged. A
+/// transient failure on the type actually being repaired makes it converge
+/// on a false `0` that matches the freshly-wiped local store and is
+/// accepted as correct (the entity is gone but believed repaired); the same
+/// failure on any *other*, correctly-cached type fabricates a brand-new
+/// false divergence that `RepairGuard` will admit and wipe, since it has
+/// never seen that type diverge on this connection before.
+fn insert_count_if_present(counts: &mut std::collections::HashMap<String, i64>, key: &str, value: Option<i64>) {
+    if let Some(n) = value {
+        counts.insert(key.to_string(), n);
+    }
+}
+
+/// Compute the caller's current row count for every entity type in
+/// `entity_types::RECONCILED`, scoped identically to that type's
+/// `list_*_for_sync` query (KYO-480).
+///
+/// Cost: up to 4 indexed `COUNT(*)` queries, run once per `sync_delta`
+/// request (i.e. once per reconnect that already has a cursor) — not per
+/// message and not on every bootstrap (`handle_sync_bootstrap` derives its
+/// counts from the vecs it already fetched, at zero extra query cost).
+/// `dashboard`/`knowledge` reuse the existing, already-tested
+/// `dashboard_service::get_document_count`; `chat_session` and `watch` are
+/// new count queries added by this change — see
+/// `chat_service::count_sessions_for_sync` and
+/// `watch_service::count_watches_for_sync` for their index coverage.
+///
+/// A type whose count query fails is omitted from the returned map via
+/// [`insert_count_if_present`] rather than defaulting to `0` — a transient
+/// DB error must not read to the client as "you now have zero of these,
+/// delete them all."
+async fn compute_sync_counts(
+    db: &kyomi_core::DbPool,
+    workspace_id: &str,
+    user_id: &str,
+) -> std::collections::HashMap<String, i64> {
+    use kyomi_core::models::DocType;
+    use kyomi_types::sync::entity_types;
+
+    let mut counts = std::collections::HashMap::with_capacity(entity_types::RECONCILED.len());
+
+    let dashboard_res = kyomi_auth::dashboard_service::get_document_count(
+        db,
+        workspace_id,
+        Some(DocType::Dashboard),
+        user_id,
+    )
+    .await;
+    if let Err(e) = &dashboard_res {
+        tracing::warn!(user_id, workspace_id, error = %e, "sync count: dashboard count failed");
+    }
+    insert_count_if_present(&mut counts, entity_types::DASHBOARD, dashboard_res.ok());
+
+    let knowledge_res = kyomi_auth::dashboard_service::get_document_count(
+        db,
+        workspace_id,
+        Some(DocType::Knowledge),
+        user_id,
+    )
+    .await;
+    if let Err(e) = &knowledge_res {
+        tracing::warn!(user_id, workspace_id, error = %e, "sync count: knowledge count failed");
+    }
+    insert_count_if_present(&mut counts, entity_types::KNOWLEDGE, knowledge_res.ok());
+
+    let sessions_res = kyomi_auth::chat_service::count_sessions_for_sync(db, workspace_id, user_id).await;
+    if let Err(e) = &sessions_res {
+        tracing::warn!(user_id, workspace_id, error = %e, "sync count: chat session count failed");
+    }
+    insert_count_if_present(&mut counts, entity_types::CHAT_SESSION, sessions_res.ok());
+
+    let watches_res = kyomi_auth::watch_service::count_watches_for_sync(db, workspace_id, user_id).await;
+    if let Err(e) = &watches_res {
+        tracing::warn!(user_id, workspace_id, error = %e, "sync count: watch count failed");
+    }
+    insert_count_if_present(&mut counts, entity_types::WATCH, watches_res.ok());
+
+    counts
 }
 
 /// Stream a batch of entities as individual `SyncAction(Insert)` messages.
@@ -525,9 +670,9 @@ async fn send_sync_response(
             MessageType::SyncAction,
             Some(serde_json::to_value(action).unwrap_or_default()),
         ),
-        kyomi_types::sync::SyncResponse::SyncComplete { last_sync_id } => (
+        kyomi_types::sync::SyncResponse::SyncComplete { last_sync_id, counts } => (
             MessageType::SyncComplete,
-            Some(serde_json::json!({ "last_sync_id": last_sync_id })),
+            Some(serde_json::json!({ "last_sync_id": last_sync_id, "counts": counts })),
         ),
         kyomi_types::sync::SyncResponse::SyncReset => (MessageType::SyncReset, None),
     };
@@ -560,6 +705,67 @@ async fn close_with_code(socket: ws::WebSocket, code: u16, reason: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── insert_count_if_present (KYO-480 review fix) ────────────────────────
+    //
+    // `handle_sync_bootstrap` and `compute_sync_counts` are both DB-backed
+    // async fns with no lightweight unit-test seam, so these tests target
+    // `insert_count_if_present` directly instead — the one function both of
+    // those paths are required to route every count through. Proving the
+    // omit-on-failure contract holds here proves it holds in both call
+    // sites structurally: neither path can drift from it without bypassing
+    // this function entirely, which is a visible, reviewable change (unlike
+    // two independent copies of the same "insert on Ok, skip on Err" logic
+    // silently diverging, which is exactly what happened before this fix).
+
+    #[test]
+    fn insert_count_if_present_records_a_present_value() {
+        let mut counts = std::collections::HashMap::new();
+        insert_count_if_present(&mut counts, "dashboard", Some(2));
+        assert_eq!(counts.get("dashboard"), Some(&2));
+    }
+
+    /// The exact bug this fixes: a failed fetch (`None`) must never be
+    /// recorded as a count of `0`. `handle_sync_bootstrap` previously
+    /// derived counts from vecs that had already been degraded to `vec![]`
+    /// on a fetch error, making "zero rows" and "the fetch failed" the same
+    /// observable count — and every repair re-fetches every reconciled
+    /// type via an untargeted bootstrap, so that false `0` could either
+    /// mark a genuinely diverged type as falsely repaired, or fabricate a
+    /// new false divergence in an unrelated, correctly-cached type.
+    #[test]
+    fn insert_count_if_present_omits_a_failed_fetch() {
+        let mut counts = std::collections::HashMap::new();
+        insert_count_if_present(&mut counts, "watch", None);
+        assert!(
+            !counts.contains_key("watch"),
+            "a failed fetch must be omitted entirely, never recorded as a count of 0; got {counts:?}"
+        );
+    }
+
+    /// A mixed batch — the realistic shape both `handle_sync_bootstrap` and
+    /// `compute_sync_counts` produce when only some of the four reconciled
+    /// types' fetches succeed this cycle.
+    #[test]
+    fn insert_count_if_present_handles_a_mixed_batch() {
+        let mut counts = std::collections::HashMap::new();
+        insert_count_if_present(&mut counts, "dashboard", Some(3));
+        insert_count_if_present(&mut counts, "knowledge", None);
+        insert_count_if_present(&mut counts, "chat_session", Some(0));
+        insert_count_if_present(&mut counts, "watch", None);
+
+        assert_eq!(
+            counts,
+            std::collections::HashMap::from([
+                ("dashboard".to_string(), 3),
+                ("chat_session".to_string(), 0),
+            ]),
+            "only the types whose fetch actually succeeded may appear — \
+             note chat_session's genuine 0 (an empty-but-successful fetch) \
+             is recorded, which is exactly what distinguishes it from \
+             knowledge/watch's omitted failures"
+        );
+    }
 
     #[test]
     fn extract_user_id_plain() {
