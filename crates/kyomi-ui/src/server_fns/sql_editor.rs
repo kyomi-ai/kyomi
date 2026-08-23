@@ -1116,7 +1116,22 @@ pub struct GeneratedChart {
 /// Uses rule-based inference (same logic as the REST handler in
 /// `chart_generate.rs`): analyzes column types and cardinality to pick
 /// the best chart type, then builds a ChartML YAML spec.
-#[server(prefix = "/leptos-api")]
+///
+/// `input = server_fn::codec::Json` (KYO-459): `sample_rows` is
+/// `Vec<Vec<serde_json::Value>>` — `results_container.rs` builds each leaf
+/// via `s.parse::<f64>().map(|n| serde_json::json!(n))`, so a numeric
+/// column genuinely arrives here as `Value::Number`. Under the default
+/// `PostUrl` encoding, `serde_qs` deserializes every leaf of a
+/// self-describing type as a JSON string regardless of what was
+/// serialized client-side — the same root cause KYO-428 fixed for
+/// `connection_config`/`credentials` in `datasources.rs`. Here it
+/// silently corrupts `analyze_chart_column`'s `is_numeric` check below
+/// (`values.iter().all(|v| v.is_number())` is always `false` once every
+/// leaf decodes as a string), so every numeric column is misclassified as
+/// categorical and the user gets a worse or empty chart with no error.
+/// JSON preserves the original `Value::Number`/`Value::String` leaves,
+/// matching `create_datasource_modal` (datasources.rs).
+#[server(prefix = "/leptos-api", input = server_fn::codec::Json)]
 pub async fn generate_chart_from_results(
     columns: Vec<String>,
     sample_rows: Vec<Vec<serde_json::Value>>,
@@ -1573,5 +1588,155 @@ mod catalog_tree_projection_tests {
         let names: Vec<&str> = dataset.children.iter().map(|n| n.name.as_str()).collect();
 
         assert_eq!(names, vec!["aaa_table", "zzz_table"]);
+    }
+}
+
+// ── JSON input codec on a self-describing Vec<Vec<Value>> (KYO-459) ───────
+
+#[cfg(all(test, feature = "ssr"))]
+mod chart_json_codec_tests {
+    //! KYO-459: `generate_chart_from_results` takes `sample_rows:
+    //! Vec<Vec<serde_json::Value>>` — the caller
+    //! (`crates/kyomi-ui/src/pages/sql_editor/results_container.rs:321-355`)
+    //! builds each leaf via `s.parse::<f64>().map(|n| serde_json::json!(n))`,
+    //! so a numeric column genuinely arrives here as `Value::Number`, not a
+    //! string dressed up as JSON.
+    //!
+    //! `serde_json::Value` is self-describing, so its `Deserialize` impl
+    //! defers entirely to the format doing the decoding. Under the
+    //! `#[server]` macro's default input codec (`PostUrl` — `serde_qs` over
+    //! `application/x-www-form-urlencoded`), every leaf decodes as a JSON
+    //! *string*, because `serde_qs` has no type information beyond "this
+    //! looks like text in a form field". This is the identical root cause
+    //! KYO-428 fixed for `connection_config`/`credentials` in
+    //! `datasources.rs` — confirmed here empirically (not just assumed from
+    //! the ticket) by round-tripping a `GenerateChartFromResults`-shaped
+    //! payload with numeric `sample_rows` leaves through the real
+    //! `FromReq<PostUrl, ...>` codec `server_fn` uses, and observing that
+    //! `analyze_chart_column`'s `is_numeric` check
+    //! (`values.iter().all(|v| v.is_number())`, above in this file) then
+    //! misclassifies the numeric column as categorical.
+    //!
+    //! The fix is `#[server(prefix = "/leptos-api", input =
+    //! server_fn::codec::Json)]`, matching the existing precedent at
+    //! `datasources.rs`'s `create_datasource_modal` (KYO-428). The second
+    //! test below (`generate_chart_from_results_uses_the_json_input_codec`)
+    //! follows that same file's `json_input_codec_tests` shape and is the
+    //! one that actually guards the fix: it inspects the macro-generated
+    //! `ServerFn::Protocol` for this function and fails if `input = ...` is
+    //! ever removed or edited back to the default. The first test below,
+    //! unlike the second, invokes the `PostUrl` codec directly rather than
+    //! through this function's configured `Protocol`, so on its own it
+    //! cannot detect a codec regression — its purpose is solely to
+    //! establish, empirically, that `PostUrl` really does corrupt this
+    //! data shape (and its downstream `is_numeric` consequence), which is
+    //! why it is kept even though the second test is the actual guard.
+    //!
+    //! Verified by mutation: temporarily deleting `input =
+    //! server_fn::codec::Json` from `generate_chart_from_results` turns its
+    //! `Protocol`'s input slot back into `server_fn::codec::url::PostUrl`,
+    //! and `generate_chart_from_results_uses_the_json_input_codec` fails
+    //! with exactly the message below. The attribute was restored
+    //! immediately after and this test file was confirmed to pass again.
+
+    use super::{analyze_chart_column, GenerateChartFromResults};
+    use axum::body::Body;
+    use axum::http::Request;
+    use leptos::prelude::ServerFnError;
+    use leptos::server_fn::codec::{FromReq, PostUrl};
+    use leptos::server_fn::ServerFn;
+
+    /// A `PostUrl` (`serde_qs`) body a real browser client would have sent
+    /// for `generate_chart_from_results` before this fix, for two rows of
+    /// `(region: string, revenue: number)`. Captured from
+    /// `serde_qs::to_string` against a `GenerateChartFromResults`-shaped
+    /// struct — field order `columns`, `sample_rows`, `sql`,
+    /// `datasource_slug` matches what `#[server]` generates for this
+    /// function's args struct — with `sample_rows` leaves
+    /// `Value::String("us-east")`, `Value::Number(1234.5)`,
+    /// `Value::String("us-west")`, `Value::Number(998)`.
+    const POST_URL_BODY: &str = "columns[0]=region&columns[1]=revenue&\
+         sample_rows[0][0]=us-east&sample_rows[0][1]=1234.5&\
+         sample_rows[1][0]=us-west&sample_rows[1][1]=998&\
+         sql=select+region%2C+revenue+from+sales&datasource_slug=warehouse";
+
+    #[tokio::test]
+    async fn post_url_codec_stringifies_numeric_sample_row_leaves_and_analyze_chart_column_misclassifies_them(
+    ) {
+        let req = Request::post("/leptos-api/generate_chart_from_results")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(POST_URL_BODY))
+            .expect("request must build");
+
+        let decoded =
+            <GenerateChartFromResults as FromReq<PostUrl, Request<Body>, ServerFnError>>::from_req(
+                req,
+            )
+            .await
+            .expect("serde_qs must decode a well-formed PostUrl body");
+
+        assert_eq!(decoded.columns, vec!["region".to_string(), "revenue".to_string()]);
+        assert_eq!(
+            decoded.sample_rows[0][1],
+            serde_json::Value::String("1234.5".to_string()),
+            "PostUrl/serde_qs must have stringified the numeric revenue \
+             leaf 1234.5 — if this now decodes as Value::Number, the \
+             premise this test exists to pin no longer holds and this test \
+             module should be reconsidered"
+        );
+        assert_eq!(
+            decoded.sample_rows[1][1],
+            serde_json::Value::String("998".to_string())
+        );
+
+        let revenue_analysis =
+            analyze_chart_column("revenue", &decoded.sample_rows, &decoded.columns);
+        assert!(
+            !revenue_analysis.is_numeric,
+            "this is the exact KYO-459 consequence: a genuinely numeric \
+             column decodes as strings under PostUrl, so \
+             analyze_chart_column's is_numeric check \
+             (values.iter().all(|v| v.is_number())) is false and the \
+             column is misclassified as categorical"
+        );
+    }
+
+    /// Extract the type name of the *first* generic argument of
+    /// `server_fn::Http<Input, Output>` from a full `type_name::<Protocol>()`
+    /// string — mirrors `datasources.rs`'s `json_input_codec_tests` helper
+    /// of the same name; duplicated here rather than shared because this
+    /// ticket's scope is limited to this file (KYO-459).
+    fn input_encoding_of(protocol_type_name: &str) -> &str {
+        protocol_type_name
+            .split_once("Http<")
+            .and_then(|(_, rest)| rest.split_once(','))
+            .map(|(input, _)| input)
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected `{protocol_type_name}` to be a server_fn::Http<Input, Output> \
+                     protocol with a comma-separated generic argument list"
+                )
+            })
+    }
+
+    #[test]
+    fn generate_chart_from_results_uses_the_json_input_codec() {
+        let protocol =
+            std::any::type_name::<<GenerateChartFromResults as ServerFn>::Protocol>();
+        let input_encoding = input_encoding_of(protocol);
+        assert!(
+            !input_encoding.contains("PostUrl"),
+            "expected a JSON input codec, but {protocol} still uses the \
+             default form-urlencoded PostUrl codec — this is the exact \
+             KYO-459 regression: serde_json::Value leaves in sample_rows \
+             that are numbers silently decode as strings under PostUrl, \
+             misclassifying every numeric column as categorical in \
+             analyze_chart_column"
+        );
+        assert!(
+            input_encoding.contains("JsonEncoding"),
+            "expected the input encoding to be server_fn::codec::Json \
+             (JsonEncoding), got {input_encoding} in protocol {protocol}"
+        );
     }
 }
