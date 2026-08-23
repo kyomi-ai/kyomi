@@ -160,6 +160,85 @@ fn generate_user_message_id() -> String {
     }
 }
 
+/// Format 16 bytes as an RFC 4122 v4 UUID string, after stamping the
+/// version/variant bits.
+///
+/// Split out from [`generate_client_session_id`] so the formatting is
+/// testable on its own, without a WASM `Math.random()` source.
+fn format_uuid_v4(mut bytes: [u8; 16]) -> String {
+    bytes[6] = (bytes[6] & 0x0F) | 0x40; // version 4
+    bytes[8] = (bytes[8] & 0x3F) | 0x80; // variant RFC 4122
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3],
+        bytes[4], bytes[5],
+        bytes[6], bytes[7],
+        bytes[8], bytes[9],
+        bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+    )
+}
+
+/// Generate a client-side session id for a brand-new chat.
+///
+/// KYO-494: the client mints this id itself, before the first message ever
+/// leaves, so it has a real session identity to filter WebSocket events
+/// against from frame one (see `ChatEngine::should_handle`) instead of a
+/// window where "no session yet" used to mean "accept every session's
+/// events." The server validates and adopts this exact id — see
+/// `chat_service::prepare_chat_dispatch`.
+///
+/// Hand-rolled with `js_sys::Math::random()` (the same primitive
+/// `generate_user_message_id` above already uses for client-side ids)
+/// rather than the `uuid` crate: `uuid`'s `v4()` generation needs
+/// `getrandom`'s wasm backend, which this crate's non-`ssr` (client/WASM)
+/// build doesn't wire up, and pulling in a new dependency chain for one
+/// call site isn't worth it.
+///
+/// Only ever actually invoked client-side (message sending is a WASM-only
+/// user action), but — like `generate_user_message_id` above — needs a
+/// non-wasm32 branch too so the component still compiles under SSR.
+fn generate_client_session_id() -> String {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let mut bytes = [0u8; 16];
+        for b in bytes.iter_mut() {
+            *b = (js_sys::Math::random() * 256.0) as u8;
+        }
+        format_uuid_v4(bytes)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // SSR never sends a message, so this value is never observed —
+        // it only needs to exist so the call site compiles. Still shaped
+        // like a real v4 UUID so it would pass server-side validation if
+        // it were ever (incorrectly) used.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let mut bytes = [0u8; 16];
+        bytes.copy_from_slice(&nanos.to_le_bytes()[..16]);
+        format_uuid_v4(bytes)
+    }
+}
+
+/// Resolve the session id the `ChatEngine`'s WS event filter should use.
+///
+/// KYO-494: prefer `current_session_id` (the URL-driven, established
+/// identity) whenever it's set; fall back to `pending_new_session_id` (the
+/// optimistic client-generated id set synchronously by `on_send`, before
+/// this chat's own `chat_stream`/`chat_complete`/`agent_thinking` frames can
+/// possibly arrive) only while `current_session_id` hasn't caught up yet.
+/// This is the actual rule the page's `Signal::derive` uses — see the
+/// `ChatEngineConfig` construction above — pulled out as a plain function so
+/// the resolution rule itself is unit-testable without a reactive owner.
+fn resolve_engine_session_id(
+    current: Option<String>,
+    pending: Option<String>,
+) -> Option<String> {
+    current.or(pending)
+}
+
 /// Format cost for the chat footer — always 2 decimal places.
 fn format_footer_cost(cost: f64) -> String {
     format!("${:.2}", cost)
@@ -257,6 +336,30 @@ pub fn ChatPage() -> impl IntoView {
     // the session loading effect. This signal lets us skip that redundant load.
     let just_created_session: RwSignal<Option<String>> = RwSignal::new(None);
 
+    // KYO-494 — Optimistic session id for a brand-new chat, set synchronously
+    // by on_send (before the network round trip) so the ChatEngine's WS event
+    // filter has a real session identity from the very first frame.
+    //
+    // Cleared on send FAILURE immediately (no handover is coming). On send
+    // SUCCESS it is deliberately NOT cleared right away — `current_session_id`
+    // is still None at that point (it only becomes Some via the URL-driven
+    // effect below, once `navigate_inner` completes) and streaming for this
+    // new session can already be arriving, so clearing early would leave a
+    // None/None gap in which the engine's default-deny `should_handle` would
+    // reject this chat's own first tokens. It is cleared instead where the
+    // handover actually completes: in the "state management effect:
+    // clear/reset on URL change" below, once `current_session_id` becomes
+    // Some (branch 1) or when navigating away to a fresh new chat, to stop a
+    // stale id from leaking into that fresh chat as its filter identity
+    // (branch 2).
+    //
+    // Deliberately a SEPARATE signal from `current_session_id` rather than
+    // setting that one early — the state-management effect below relies on
+    // `current_session_id` only ever changing in response to `url_session_id`,
+    // and setting it directly from on_send would desync that invariant (see
+    // the effect's own comments about the `(None, Some(_))` reset race).
+    let pending_new_session_id: RwSignal<Option<String>> = RwSignal::new(None);
+
     // Phase 9 — dashboard modal state
     let (dashboard_modal_open, set_dashboard_modal_open) = signal(false);
     let (dashboard_modal_content, set_dashboard_modal_content) = signal(String::new());
@@ -285,7 +388,12 @@ pub fn ChatPage() -> impl IntoView {
     // token_usage_update, error, request_cancelled).
     let engine = ChatEngine::new(ChatEngineConfig {
         session_mode: SessionMode::External {
-            session_id: Signal::derive(move || current_session_id.get()),
+            // KYO-494: fall back to the optimistic client-generated id while
+            // `current_session_id` hasn't caught up yet (new-chat send in
+            // flight) — see `pending_new_session_id`'s doc comment above.
+            session_id: Signal::derive(move || {
+                resolve_engine_session_id(current_session_id.get(), pending_new_session_id.get())
+            }),
         },
         context_type: None, // Main chat doesn't filter by context_type
         custom_ws_events: vec![],
@@ -527,6 +635,14 @@ pub fn ChatPage() -> impl IntoView {
                     set_is_loading.set(true);
                 }
                 set_current_session_id.set(Some(sid.clone()));
+                // KYO-494 — Handover from the optimistic new-chat fallback to
+                // the real, URL-driven session id is complete: current_session_id
+                // is now Some and takes priority in the engine's session_id
+                // derive (`.or_else`), so the fallback is shadowed and safe to
+                // drop. Clearing it here (rather than at send-success time)
+                // avoids a None-None gap while streaming is still in flight —
+                // see the async response handler's comment in on_send.
+                pending_new_session_id.set(None);
                 // Only reset streaming state when navigating to a DIFFERENT session
                 // AND we're not actively chatting. The WS `session_created` event often
                 // arrives before the HTTP response, so `just_created_session` might not
@@ -549,6 +665,14 @@ pub fn ChatPage() -> impl IntoView {
                 }
                 just_created_session.set(None);
                 set_current_session_id.set(None);
+                // KYO-494 — A stale `pending_new_session_id` from an earlier
+                // send (this session, or one abandoned by navigating away
+                // before it resolved) must not survive into this fresh new
+                // chat — otherwise the engine's session_id derive would fall
+                // back to that old id and admit its frames into the new,
+                // empty window. Same leak KYO-494 exists to close, via a
+                // different route.
+                pending_new_session_id.set(None);
                 engine_for_load.reset();
                 set_session_title.set(String::new());
                 set_session_metadata.set(SessionDetail::default());
@@ -697,6 +821,44 @@ pub fn ChatPage() -> impl IntoView {
             // ── session_created ─────────────────────────────────────────
             // Matches React: Chat.jsx lines 348-373
             // When a new session is created, navigate to it and update metadata.
+            //
+            // KYO-494 — why this round trip (wait for the server, then
+            // navigate) still exists instead of navigating optimistically
+            // the moment `on_send` mints a client-side id:
+            //
+            // 1. The server can now REJECT the client's id.
+            //    `prepare_chat_dispatch` validates the client-generated id
+            //    and can return `Conflict` (collides with an existing
+            //    session) or `BadRequest` (malformed) instead of creating
+            //    it. Navigating to `/chat/<id>` before the server confirms
+            //    it accepted that exact id would strand the user on a URL
+            //    for a session that was never created. Client-minted ids
+            //    make waiting for the response MORE necessary than before,
+            //    not less — the ticket's original premise (that owning the
+            //    id client-side removes the need to wait) doesn't hold once
+            //    rejection is possible.
+            //
+            // 2. `just_created_session` does a job client-minted ids don't
+            //    replace: once the URL changes to `/chat/<id>`,
+            //    `session_id_to_load` would otherwise re-fetch messages via
+            //    `get_session_messages`, racing the server's own session
+            //    creation (and clobbering the messages already streaming in
+            //    over WebSocket). `just_created_session` is what tells that
+            //    Memo to skip the redundant fetch. Nothing about knowing the
+            //    id in advance eliminates that race — the fetch would race
+            //    the server-side row's creation exactly the same either way.
+            //
+            // `pending_new_session_id` (the optimistic id used only for the
+            // WS event filter, cleared once `current_session_id` catches up
+            // — see its declaration above and the state-management effect
+            // below) and `just_created_session` (used only to skip the
+            // redundant reload once the URL changes) are two DISTINCT
+            // mechanisms solving two different problems. Don't try to
+            // collapse them into one signal — no changes made here reduce
+            // this handler or `just_created_session`; a full audit of every
+            // path that can legitimately reach this handler (shared-session
+            // broadcasts, multi-tab, the MCP chart deep-link flow) would be
+            // needed before removing it, and that audit hasn't been done.
             let unsub_session_created = ws.subscribe("session_created", move |msg| {
                 let current_sid = current_session_id.get_untracked();
                 let state = chat_state_session.state().get_untracked();
@@ -1278,11 +1440,29 @@ pub fn ChatPage() -> impl IntoView {
         // Compute time context
         let time_context = get_time_context();
 
-        // Get the current session ID (may be None for new chats)
-        let session_id = current_session_id.get_untracked();
+        // KYO-494 — Resolve the session this message belongs to. For a
+        // continued conversation this is the already-established id. For a
+        // brand-new chat, mint the id *here* — synchronously, before the
+        // network round trip — and publish it via `pending_new_session_id`
+        // so the ChatEngine's WS event filter (`should_handle`) has a real
+        // identity to match against from the first frame, instead of the
+        // "no session yet" window that used to admit every session's
+        // events. The server is told `is_new_session` and adopts this exact
+        // id (`chat_service::prepare_chat_dispatch`) rather than generating
+        // its own.
+        let existing_session_id = current_session_id.get_untracked();
+        let is_new_session = existing_session_id.is_none();
+        let session_id = match existing_session_id {
+            Some(sid) => sid,
+            None => {
+                let new_id = generate_client_session_id();
+                pending_new_session_id.set(Some(new_id.clone()));
+                new_id
+            }
+        };
 
         // Transition to SENDING state
-        chat_state_send.start_sending(session_id.as_deref().unwrap_or("new"));
+        chat_state_send.start_sending(&session_id);
 
         // Call send_chat_message server function
         let chat_state_inner = chat_state_send.clone();
@@ -1310,6 +1490,7 @@ pub fn ChatPage() -> impl IntoView {
             match send_chat_message(
                 message_to_send,
                 session_id.clone(),
+                is_new_session,
                 time_ctx,
                 skip_ai,
                 dispatch_model,
@@ -1330,6 +1511,18 @@ pub fn ChatPage() -> impl IntoView {
                         }
                     }
 
+                    // KYO-494 — Deliberately NOT clearing `pending_new_session_id`
+                    // here. `current_session_id` is still None at this point
+                    // (see the comments below — it's only set by the URL
+                    // change Effect, after `navigate_inner` below completes)
+                    // and clearing the fallback now would open a window where
+                    // the session-id derive resolves to None right as the
+                    // server starts streaming this chat's own first tokens —
+                    // `should_handle` would then default-deny its own
+                    // content. The fallback is cleared once the handover to
+                    // `current_session_id` actually completes, in the "state
+                    // management effect: clear / reset on URL change" below.
+
                     // Phase 9 — If skip_ai was enabled, reset state and return
                     // (no AI response expected). Matches React: Chat.jsx lines 1147-1151.
                     if response.skip_ai {
@@ -1340,7 +1533,7 @@ pub fn ChatPage() -> impl IntoView {
                         }
                         skip_ai_response.try_set(false);
                         // Still need to update session_id if new
-                        if session_id.is_none() {
+                        if is_new_session {
                             // M8 — Mark as just-created to skip redundant reload.
                             // Do NOT set current_session_id here — setting it before navigate
                             // causes a race: effects flush with url_session_id=None but
@@ -1358,7 +1551,15 @@ pub fn ChatPage() -> impl IntoView {
                     }
 
                     // Update current_session_id from response (for new chats)
-                    if session_id.is_none() {
+                    //
+                    // KYO-494 — this navigate only runs here, after the
+                    // server has confirmed it accepted `session_id` (a
+                    // Conflict/BadRequest response would have gone to the
+                    // Err arm below instead, before this ever runs) — not
+                    // optimistically at send time. See the `session_created`
+                    // WS handler's doc comment further down for why that's
+                    // still required now that the client mints the id.
+                    if is_new_session {
                         // M8 — Mark as just-created to skip redundant reload.
                         // Do NOT set current_session_id here — setting it before navigate
                         // causes a race: effects flush with url_session_id=None but
@@ -1376,6 +1577,13 @@ pub fn ChatPage() -> impl IntoView {
                     }
                 }
                 Err(err) => {
+                    // KYO-494 — The send failed, so the optimistic session id
+                    // (if any) was never adopted server-side, or the session
+                    // may be in an unknown state either way. Drop the
+                    // fallback so the engine doesn't keep filtering on a
+                    // session that doesn't exist; a retry mints a fresh one.
+                    pending_new_session_id.try_set(None);
+
                     // M11 — Display actual error text instead of generic message.
                     // React distinguishes budget-exhausted errors, etc.
                     let error_text = err.to_string();
@@ -1976,5 +2184,94 @@ pub fn ChatPage() -> impl IntoView {
         // renders nothing but must be present for the router to function.
         <Outlet/>
         </>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! KYO-494 regression coverage for the optimistic-session-id handover.
+    //!
+    //! A prior version of this fix cleared `pending_new_session_id` as soon
+    //! as the send's server response arrived — but `current_session_id` is
+    //! still `None` at that point (it only becomes `Some` via the URL-driven
+    //! effect, after `navigate_inner` runs later in the same handler). That
+    //! opened a `None`/`None` window, during which this chat's *own*
+    //! `chat_stream`/`chat_complete`/`agent_thinking` frames — which can
+    //! already be arriving, since the agent is spawned server-side as soon
+    //! as the session is created — were incorrectly default-denied by
+    //! `should_handle`. These tests pin the actual resolution rule
+    //! (`resolve_engine_session_id`, the function the page's `Signal::derive`
+    //! really calls) and its interaction with `should_handle` across the
+    //! three states of a new-chat send: in flight, handed over, and idle.
+
+    use super::*;
+    use crate::components::chat::chat_engine::should_handle;
+
+    #[test]
+    fn resolves_to_pending_id_while_a_new_chat_send_is_in_flight() {
+        // current_session_id == None, pending_new_session_id == Some(id):
+        // the state between on_send's synchronous mint and the URL effect
+        // catching up.
+        let id = "11111111-1111-4111-8111-111111111111".to_string();
+        let resolved = resolve_engine_session_id(None, Some(id.clone()));
+
+        assert_eq!(resolved, Some(id.clone()));
+        assert!(
+            should_handle(resolved.as_deref(), Some(id.as_str())),
+            "the engine must admit this chat's own frames while the send is in flight"
+        );
+    }
+
+    #[test]
+    fn resolves_to_current_id_once_handover_completes() {
+        // current_session_id == Some(id) (URL effect has run and cleared the
+        // pending fallback), pending_new_session_id == None.
+        let id = "11111111-1111-4111-8111-111111111111".to_string();
+        let resolved = resolve_engine_session_id(Some(id.clone()), None);
+
+        assert_eq!(resolved, Some(id.clone()));
+        assert!(should_handle(resolved.as_deref(), Some(id.as_str())));
+    }
+
+    #[test]
+    fn prefers_current_id_over_a_stale_pending_id() {
+        // Defends the ordering itself: if both are somehow set (shouldn't
+        // happen given the call sites, but the rule must still be
+        // unambiguous), the URL-driven id wins, never the optimistic one.
+        let current = "22222222-2222-4222-8222-222222222222".to_string();
+        let stale_pending = "33333333-3333-4333-8333-333333333333".to_string();
+
+        let resolved = resolve_engine_session_id(Some(current.clone()), Some(stale_pending));
+
+        assert_eq!(resolved, Some(current));
+    }
+
+    #[test]
+    fn resolves_to_none_on_a_fresh_new_chat_with_no_send_in_flight() {
+        // Baseline: sitting on an empty /chat page, nothing sent yet.
+        let resolved = resolve_engine_session_id(None, None);
+
+        assert_eq!(resolved, None);
+        assert!(
+            !should_handle(resolved.as_deref(), Some("some-other-session")),
+            "an empty new chat must still default-deny another session's frames"
+        );
+    }
+
+    #[test]
+    fn format_uuid_v4_produces_a_well_formed_uuid_shape() {
+        // Sanity check for the client-generated session id's format, since
+        // the server rejects anything that doesn't parse as a UUID
+        // (`chat_service::validate_client_session_id`).
+        let formatted = format_uuid_v4([0xAB; 16]);
+
+        assert_eq!(formatted.len(), 36);
+        let parts: Vec<&str> = formatted.split('-').collect();
+        assert_eq!(parts.iter().map(|p| p.len()).collect::<Vec<_>>(), vec![8, 4, 4, 4, 12]);
+        assert!(formatted.chars().all(|c| c.is_ascii_hexdigit() || c == '-'));
+        // Version nibble (first char of the third group) must be '4'.
+        assert_eq!(parts[2].chars().next(), Some('4'));
+        // Variant nibble (first char of the fourth group) must be 8/9/a/b.
+        assert!(matches!(parts[3].chars().next(), Some('8' | '9' | 'a' | 'b')));
     }
 }

@@ -476,7 +476,18 @@ pub async fn search_chat_messages(query: String) -> Result<Vec<ChatSessionItem>,
 #[server(prefix = "/leptos-api")]
 pub async fn send_chat_message(
     message: String,
-    session_id: Option<String>,
+    // KYO-494: always the session this message belongs to — never a
+    // placeholder for "no session yet." For a brand-new chat the client
+    // mints this id itself (see `is_new_session`) so the WS event filter
+    // has a real identity to match against from the very first frame,
+    // instead of a "no id yet" window during which every session's stream
+    // used to be admitted.
+    session_id: String,
+    // `true` when `session_id` is a client-generated candidate for a
+    // session that does not exist yet and must be created; `false` for a
+    // continued conversation, where `session_id` must already exist and be
+    // owned by the caller.
+    is_new_session: bool,
     current_time_user_tz: Option<String>,
     skip_ai: bool,
     model: Option<String>,
@@ -522,7 +533,8 @@ pub async fn send_chat_message(
             user_id: &ac.auth.user_id,
             workspace_id: &ac.ws_id,
             user_display_name: &user_display_name,
-            session_id: session_id.as_deref(),
+            session_id: &session_id,
+            is_new_session,
             message: &message,
             current_time_user_tz: current_time_user_tz.as_deref(),
             skip_ai,

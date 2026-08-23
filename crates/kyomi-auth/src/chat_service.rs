@@ -368,71 +368,82 @@ fn resolve_model(model: Option<&str>) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-/// Create a new chat session. Returns the generated session_id.
+/// Write a sync-log INSERT entry for a newly created `chat`-type session.
 ///
-/// Pass `None` for `model` to use the `LLM_MODEL` env var (or the built-in default).
-pub async fn create_session(
+/// As of KYO-494, this has exactly one caller: `prepare_chat_dispatch`'s
+/// client-generated-id path, right after `create_session_with_id` creates
+/// the row. (Before KYO-494, chat sessions were created by a now-deleted
+/// `create_session(db, user_id, workspace_id, model) -> Result<String>`
+/// that generated its own UUID; this helper was factored out of it and
+/// still does the identical INSERT-then-log sequence, just against a
+/// caller-supplied id instead of a freshly minted one.)
+///
+/// This does *not* apply to [`create_session_with_id`]'s other callers
+/// (watch executions, copilot sessions), which have never written a sync
+/// entry and are left as-is here to avoid changing behavior nobody asked
+/// to change.
+///
+/// Best-effort: logs a warning and continues on failure, matching the rest
+/// of this module's sync-log call sites.
+async fn write_new_session_sync_entry(
     db: &DbPool,
+    session_id: &str,
     user_id: &str,
     workspace_id: &str,
-    model: Option<&str>,
-) -> kyomi_core::Result<String> {
-    let session_id = uuid::Uuid::new_v4().to_string();
-    let now = Utc::now();
-    let empty_config = serde_json::json!({});
-    let model = resolve_model(model);
-
-    kyomi_core::db_execute!(
+    now: chrono::DateTime<Utc>,
+) {
+    let snapshot = serde_json::json!({
+        "session_id": session_id,
+        "user_id": user_id,
+        "workspace_id": workspace_id,
+        "title": serde_json::Value::Null,
+        "updated_at": now.to_rfc3339(),
+        "created_at": now.to_rfc3339(),
+    });
+    if let Err(e) = sync_log_service::write_sync_entry(
         db,
-        "INSERT INTO chat_sessions \
-         (session_id, user_id, workspace_id, title, model, session_type, \
-          shared, created_at, updated_at, config) \
-         VALUES ($1, $2, $3, NULL, $4, 'chat', \
-                 false, $5, $6, $7)",
-        &session_id,
-        user_id,
-        workspace_id,
-        &model,
-        now,
-        now,
-        empty_config
+        sync_log_service::SyncEntryParams {
+            entity_type: entity_types::CHAT_SESSION,
+            entity_id: session_id,
+            workspace_id,
+            action: SyncActionType::Insert,
+            data: Some(snapshot),
+            owner_user_id: Some(user_id),
+            is_workspace_visible: false,
+        },
     )
-    .map_err(|e| kyomi_core::Error::Internal(format!("failed to create session: {e}")))?;
-
-    // Sync log — best-effort: log a warning and continue on failure.
+    .await
     {
-        let snapshot = serde_json::json!({
-            "session_id": session_id,
-            "user_id": user_id,
-            "workspace_id": workspace_id,
-            "title": serde_json::Value::Null,
-            "updated_at": now.to_rfc3339(),
-            "created_at": now.to_rfc3339(),
-        });
-        if let Err(e) = sync_log_service::write_sync_entry(
-            db,
-            sync_log_service::SyncEntryParams {
-                entity_type: entity_types::CHAT_SESSION,
-                entity_id: &session_id,
-                workspace_id,
-                action: SyncActionType::Insert,
-                data: Some(snapshot),
-                owner_user_id: Some(user_id),
-                is_workspace_visible: false,
-            },
-        )
-        .await
-        {
-            tracing::warn!(error = %e, session_id = %session_id, "Failed to write sync log entry");
-        }
+        tracing::warn!(error = %e, session_id = %session_id, "Failed to write sync log entry");
     }
+}
 
-    Ok(session_id)
+/// Validate a client-supplied session id.
+///
+/// `chat_sessions.session_id` is a free-text primary key, so an arbitrary
+/// client string would otherwise become a permanent row identity. Requiring
+/// exactly the UUID v4 shape the client is supposed to send (KYO-494) keeps
+/// the id space predictable and rejects garbage outright instead of
+/// accepting it.
+fn validate_client_session_id(id: &str) -> kyomi_core::Result<()> {
+    uuid::Uuid::parse_str(id)
+        .map(|_| ())
+        .map_err(|_| kyomi_core::Error::BadRequest(format!("Invalid session id: {id}")))
 }
 
 /// Create a session with caller-provided ID, title, and session_type.
 ///
 /// Pass `None` for `model` to use the `LLM_MODEL` env var (or the built-in default).
+///
+/// Uses a plain `INSERT` — never `ON CONFLICT` / upsert. If `session_id`
+/// already names a row (whether it belongs to this user, another user, or
+/// came from a genuine UUID collision), the primary-key violation below is
+/// turned into [`kyomi_core::Error::Conflict`] and the caller must treat
+/// that as a hard rejection. Silently overwriting an existing session would
+/// be a cross-user session-hijack vector — see KYO-494's `should_handle`
+/// fix, which this exists to support: the client-generated session id this
+/// function accepts must never be allowed to take over a session it didn't
+/// create.
 pub async fn create_session_with_id(
     db: &DbPool,
     user_id: &str,
@@ -463,7 +474,13 @@ pub async fn create_session_with_id(
         now,
         empty_config
     )
-    .map_err(|e| kyomi_core::Error::Internal(format!("failed to create session: {e}")))?;
+    .map_err(|e| {
+        if e.as_database_error().is_some_and(|de| de.is_unique_violation()) {
+            kyomi_core::Error::Conflict(format!("session id {session_id} already exists"))
+        } else {
+            kyomi_core::Error::Internal(format!("failed to create session: {e}"))
+        }
+    })?;
 
     Ok(())
 }
@@ -1914,6 +1931,7 @@ pub async fn get_agent_messages(
 /// `SkippedAi` means the user message was stored and no AI agent should be
 /// spawned. `Ready` means the caller should build an [`AgentExecutionConfig`]
 /// and spawn the agent.
+#[derive(Debug)]
 pub enum ChatDispatchOutcome {
     /// AI was skipped (`skip_ai = true`). The user message has been stored.
     SkippedAi {
@@ -1942,7 +1960,21 @@ pub struct ChatDispatchParams<'a> {
     pub workspace_id: &'a str,
     /// Display name used for shared-session user broadcast.
     pub user_display_name: &'a str,
-    pub session_id: Option<&'a str>,
+    /// The session this message belongs to. Always a real id, never a
+    /// placeholder — KYO-494: for a brand-new chat this is a client-
+    /// generated candidate id (see `is_new_session`), because the WS event
+    /// filter (`ChatEngine::should_handle`, kyomi-ui) needs a real session
+    /// identity from the client's very first frame. A server-assigned id
+    /// the client only learns about after the round trip leaves a window
+    /// where the client has no identity to filter on — historically papered
+    /// over with a "no id yet, admit everything" wildcard that leaked one
+    /// session's stream into another session's empty chat window.
+    pub session_id: &'a str,
+    /// `true` when `session_id` is a client-generated candidate for a
+    /// session that does not exist yet and must be created. `false` when
+    /// `session_id` names a session that must already exist and be owned by
+    /// `user_id` — the normal continued-conversation case.
+    pub is_new_session: bool,
     pub message: &'a str,
     pub current_time_user_tz: Option<&'a str>,
     pub skip_ai: bool,
@@ -1962,38 +1994,51 @@ pub async fn prepare_chat_dispatch(
     p: ChatDispatchParams<'_>,
 ) -> kyomi_core::Result<ChatDispatchOutcome> {
     // ── Find or create session ─────────────────────────────────────────────
-    let is_new_session = p.session_id.is_none();
-    let (session_id, is_shared) = if let Some(sid) = p.session_id {
-        let session = get_session_info(p.db, p.user_id, sid, Some(p.workspace_id)).await?;
-        match session {
-            Some(s) => (sid.to_string(), s.shared),
-            None => {
-                return Err(kyomi_core::Error::Internal(
-                    "Session not found or access denied".to_string(),
-                ));
-            }
-        }
-    } else {
-        let new_sid = create_session(p.db, p.user_id, p.workspace_id, None).await?;
+    let is_new_session = p.is_new_session;
+    let (session_id, is_shared) = if is_new_session {
+        // KYO-494: `p.session_id` is a client-generated candidate for a
+        // session that must not already exist. Validate its shape, then
+        // create it with a plain INSERT — `create_session_with_id` turns a
+        // primary-key collision into `Error::Conflict` rather than
+        // upserting, so a client that (deliberately or by chance) sends an
+        // id belonging to another user's session is rejected, never allowed
+        // to take it over.
+        validate_client_session_id(p.session_id)?;
+        let now = Utc::now();
+        create_session_with_id(p.db, p.user_id, p.workspace_id, p.session_id, None, "chat", None)
+            .await?;
+        write_new_session_sync_entry(p.db, p.session_id, p.user_id, p.workspace_id, now).await;
 
         // Notify the frontend so the sidebar updates immediately.
         if let Some(ws_manager) = p.ws_manager {
             if let Ok(Some(session_info)) =
-                get_session_info(p.db, p.user_id, &new_sid, Some(p.workspace_id)).await
+                get_session_info(p.db, p.user_id, p.session_id, Some(p.workspace_id)).await
                 && let Ok(data) = serde_json::to_value(&session_info)
             {
-                crate::websocket::helpers::send_session_created(ws_manager, p.user_id, &new_sid, data)
-                    .await;
+                crate::websocket::helpers::send_session_created(
+                    ws_manager, p.user_id, p.session_id, data,
+                )
+                .await;
             }
             crate::websocket::helpers::broadcast_chat_session_sync(
-                p.db, ws_manager, &new_sid, p.workspace_id,
+                p.db, ws_manager, p.session_id, p.workspace_id,
                 kyomi_types::sync::SyncActionType::Insert,
                 p.user_id,
             )
             .await;
         }
 
-        (new_sid, false) // New sessions are always private
+        (p.session_id.to_string(), false) // New sessions are always private
+    } else {
+        let session = get_session_info(p.db, p.user_id, p.session_id, Some(p.workspace_id)).await?;
+        match session {
+            Some(s) => (p.session_id.to_string(), s.shared),
+            None => {
+                return Err(kyomi_core::Error::Internal(
+                    "Session not found or access denied".to_string(),
+                ));
+            }
+        }
     };
 
     // ── Generate message IDs ───────────────────────────────────────────────
@@ -2714,6 +2759,184 @@ mod tests {
             .await
             .expect("get_session_info query should succeed");
         assert!(result.is_some(), "B's own session must be visible to B");
+    }
+
+    // ── KYO-494: client-generated session id ────────────────────────────────
+    //
+    // Chat stream leaked across sessions because `ChatEngine::should_handle`
+    // (kyomi-ui) treated "no session id yet" as "admit everything." The fix
+    // is for the client to mint a session id up front and send it with the
+    // first message, so it never has to filter on `None`. These tests cover
+    // the server half: the id must be validated, and a collision with an
+    // existing session (accidental or an attempted hijack) must be rejected
+    // outright — never upserted.
+
+    #[test]
+    fn validate_client_session_id_accepts_well_formed_uuid() {
+        let id = uuid::Uuid::new_v4().to_string();
+        assert!(validate_client_session_id(&id).is_ok());
+    }
+
+    #[test]
+    fn validate_client_session_id_rejects_malformed_input() {
+        assert!(
+            matches!(
+                validate_client_session_id("not-a-uuid"),
+                Err(kyomi_core::Error::BadRequest(_))
+            ),
+            "a non-UUID string must be rejected as BadRequest"
+        );
+        assert!(validate_client_session_id("").is_err());
+        assert!(validate_client_session_id("'; DROP TABLE chat_sessions; --").is_err());
+    }
+
+    #[tokio::test]
+    async fn create_session_with_id_rejects_collision_instead_of_upserting() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        seed_user(sq, "user-a", "user-a@test.local").await;
+        seed_user(sq, "user-b", "user-b@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+        seed_workspace(sq, "ws-2", "user-b").await;
+        seed_chat_session(sq, SeedSession::new("sess-collide", "user-a", "ws-1", "A's session"))
+            .await;
+
+        // user-b attempts to create a brand-new session reusing user-a's
+        // existing id — this must fail, not silently take the row over.
+        let result =
+            create_session_with_id(&db, "user-b", "ws-2", "sess-collide", None, "chat", None)
+                .await;
+
+        assert!(
+            matches!(result, Err(kyomi_core::Error::Conflict(_))),
+            "a colliding session id must be rejected, not upserted: {result:?}"
+        );
+
+        // The original row must be completely untouched.
+        let untouched = get_session_info(&db, "user-a", "sess-collide", Some("ws-1"))
+            .await
+            .expect("get_session_info should succeed")
+            .expect("user-a's session must still exist");
+        assert_eq!(
+            untouched.user_id, "user-a",
+            "collision must not overwrite the original owner"
+        );
+    }
+
+    #[tokio::test]
+    async fn prepare_chat_dispatch_creates_session_with_client_supplied_id() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        let key = test_key();
+        seed_user(sq, "user-a", "user-a@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+
+        let client_sid = uuid::Uuid::new_v4().to_string();
+        let outcome = prepare_chat_dispatch(ChatDispatchParams {
+            db: &db,
+            encryption_key: &key,
+            ws_manager: None,
+            user_id: "user-a",
+            workspace_id: "ws-1",
+            user_display_name: "User A",
+            session_id: &client_sid,
+            is_new_session: true,
+            message: "hello",
+            current_time_user_tz: None,
+            skip_ai: true,
+            client_msg_id: None,
+        })
+        .await
+        .expect("prepare_chat_dispatch should succeed for a fresh client id");
+
+        let ChatDispatchOutcome::SkippedAi { session_id, .. } = outcome else {
+            panic!("skip_ai=true must return SkippedAi");
+        };
+        assert_eq!(
+            session_id, client_sid,
+            "server must use the client-supplied id verbatim, never generate its own"
+        );
+
+        let stored = get_session_info(&db, "user-a", &client_sid, Some("ws-1"))
+            .await
+            .expect("get_session_info should succeed")
+            .expect("session must have been created under the client's id");
+        assert_eq!(stored.session_id, client_sid);
+    }
+
+    #[tokio::test]
+    async fn prepare_chat_dispatch_rejects_malformed_client_session_id() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        let key = test_key();
+        seed_user(sq, "user-a", "user-a@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+
+        let result = prepare_chat_dispatch(ChatDispatchParams {
+            db: &db,
+            encryption_key: &key,
+            ws_manager: None,
+            user_id: "user-a",
+            workspace_id: "ws-1",
+            user_display_name: "User A",
+            session_id: "not-a-real-uuid",
+            is_new_session: true,
+            message: "hello",
+            current_time_user_tz: None,
+            skip_ai: true,
+            client_msg_id: None,
+        })
+        .await;
+
+        assert!(
+            matches!(result, Err(kyomi_core::Error::BadRequest(_))),
+            "a malformed client session id must be rejected: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn prepare_chat_dispatch_rejects_client_id_colliding_with_another_users_session() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        let key = test_key();
+        seed_user(sq, "user-a", "user-a@test.local").await;
+        seed_user(sq, "user-b", "user-b@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+        seed_workspace(sq, "ws-2", "user-b").await;
+        let victim_sid = uuid::Uuid::new_v4().to_string();
+        seed_chat_session(sq, SeedSession::new(&victim_sid, "user-a", "ws-1", "A's private chat"))
+            .await;
+
+        // user-b's client claims user-a's real (well-formed) session id is a
+        // brand-new session it is creating — whether by accident or as a
+        // deliberate hijack attempt, this must never succeed.
+        let result = prepare_chat_dispatch(ChatDispatchParams {
+            db: &db,
+            encryption_key: &key,
+            ws_manager: None,
+            user_id: "user-b",
+            workspace_id: "ws-2",
+            user_display_name: "User B",
+            session_id: &victim_sid,
+            is_new_session: true,
+            message: "hijack attempt",
+            current_time_user_tz: None,
+            skip_ai: true,
+            client_msg_id: None,
+        })
+        .await;
+
+        assert!(
+            matches!(result, Err(kyomi_core::Error::Conflict(_))),
+            "a client-supplied id colliding with an existing session must be rejected: {result:?}"
+        );
+
+        // user-a's session must be completely unaffected.
+        let untouched = get_session_info(&db, "user-a", &victim_sid, Some("ws-1"))
+            .await
+            .expect("get_session_info should succeed")
+            .expect("user-a's session must still exist, untouched");
+        assert_eq!(untouched.user_id, "user-a");
     }
 
     // ── Part B.2: list_sessions_for_sync (post-KYO-174 sync path) ──────────
