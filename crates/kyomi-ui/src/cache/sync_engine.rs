@@ -70,7 +70,9 @@ pub fn start_sync_engine(
             if let Some(data) = &msg.data
                 && let Some(sync_id) = data.get("last_sync_id").and_then(|v| v.as_i64())
             {
-                    // Persist cursor + schema hash to IDB.
+                    // Persist the cursor to IDB. The schema hash is written
+                    // unconditionally by `init_cache_db` itself at cache-open
+                    // time (KYO-479) — no need to duplicate that write here.
                     let wid = workspace_id.clone();
                     spawn_local(async move {
                         match crate::cache::db::init_cache_db(&wid).await {
@@ -81,9 +83,6 @@ pub fn start_sync_engine(
                                 {
                                     tracing::warn!("sync_complete: failed to persist cursor: {e}");
                                 }
-                                let _ = crate::cache::db::set_meta(
-                                    &db, "schemaHash", crate::cache::db::SCHEMA_HASH
-                                ).await;
                             }
                             Err(e) => {
                                 tracing::warn!("sync_complete: failed to open cache db: {e}");

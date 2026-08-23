@@ -16,7 +16,16 @@
 //! stores (via `indexed_db_futures`) that survive page reloads without
 //! round-tripping to the server on startup.  See [`db`] for the full schema
 //! and API.
+//!
+//! ### `schema_hash` — wipe decision (all targets)
+//!
+//! [`schema_hash::cache_needs_wipe`] is the pure predicate `db::init_cache_db`
+//! uses to decide whether to wipe the cache on open. It lives in its own
+//! ungated module — with no `indexed_db_futures`/`web_sys` dependency — so it
+//! can be unit-tested on the host target even though `db` itself cannot
+//! (KYO-479).
 
+pub mod schema_hash;
 pub mod store;
 
 #[cfg(target_arch = "wasm32")]
