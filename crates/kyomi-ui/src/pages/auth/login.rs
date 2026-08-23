@@ -890,7 +890,8 @@ fn CredentialsView(
                     // adjusted from the datasource modal's copy ("this
                     // authentication method" doesn't apply pre-auth, where
                     // there is no auth-mode dropdown — this notice is
-                    // specifically about the Google sign-in button below);
+                    // specifically about the Google sign-in button it
+                    // accompanies);
                     // the checkbox label, link text, and link target are
                     // byte-identical to the datasource modal's notice
                     // (KYO-499's requirement that the two surfaces not
@@ -913,6 +914,13 @@ fn CredentialsView(
                     // here would let a regression in the real markup pass
                     // unnoticed (verified by mutation during KYO-499
                     // implementation).
+                    <GoogleSignInButton
+                        loading=Signal::derive(move || google_loading.get())
+                        disabled=Signal::derive(move || {
+                            google_sign_in_disabled(passkey_loading.get(), google_access_confirmed.get())
+                        })
+                        on_click=on_google_click
+                    />
                     <Alert variant=AlertVariant::Warning>
                         <Icon icon=phosphor_leptos::WARNING_CIRCLE attr:class="h-4 w-4" />
                         <AlertDescription>
@@ -944,13 +952,6 @@ fn CredentialsView(
                             </label>
                         </AlertDescription>
                     </Alert>
-                    <GoogleSignInButton
-                        loading=Signal::derive(move || google_loading.get())
-                        disabled=Signal::derive(move || {
-                            google_sign_in_disabled(passkey_loading.get(), google_access_confirmed.get())
-                        })
-                        on_click=on_google_click
-                    />
                 </div>
             </Show>
 
