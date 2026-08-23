@@ -1872,10 +1872,10 @@ pub fn DatasourceModal(
                             // (KYO-405). Override the per-user load above when
                             // that's the active mode, so the field the admin
                             // configured is still shown on reopen.
-                            if cfg.get("auth_mode").and_then(|v| v.as_str()) == Some("service_account") {
-                                if let Some(bp) = cfg.get("billing_project").and_then(|v| v.as_str()) {
-                                    set_cred_billing_project.try_set(bp.to_string());
-                                }
+                            if cfg.get("auth_mode").and_then(|v| v.as_str()) == Some("service_account")
+                                && let Some(bp) = cfg.get("billing_project").and_then(|v| v.as_str())
+                            {
+                                set_cred_billing_project.try_set(bp.to_string());
                             }
                             // Restore the stored (non-sensitive) username so the user
                             // doesn't have to re-type it. Reuses `user_str` (empty
@@ -2227,10 +2227,10 @@ pub fn DatasourceModal(
                 // corroborates this: `resolve_billing_project`
                 // (bigquery.rs:61-79) reads `connection_config["billing_project"]`
                 // before ever looking at credentials (KYO-405).
-                if bq_mode == "service_account" {
-                    if !cred_billing_project.get_untracked().is_empty() {
-                        map.insert("billing_project".to_string(), serde_json::json!(cred_billing_project.get_untracked()));
-                    }
+                if bq_mode == "service_account"
+                    && !cred_billing_project.get_untracked().is_empty()
+                {
+                    map.insert("billing_project".to_string(), serde_json::json!(cred_billing_project.get_untracked()));
                 }
             }
             _ => {}
@@ -2449,10 +2449,10 @@ pub fn DatasourceModal(
             "bigquery" => {
                 let bq_mode = bq_auth_mode.get_untracked();
                 match bq_mode.as_str() {
-                    "kyomi_oauth" | "enterprise_oauth" => {
-                        if !cred_billing_project.get_untracked().is_empty() {
-                            map.insert("billing_project".to_string(), serde_json::json!(cred_billing_project.get_untracked()));
-                        }
+                    "kyomi_oauth" | "enterprise_oauth"
+                        if !cred_billing_project.get_untracked().is_empty() =>
+                    {
+                        map.insert("billing_project".to_string(), serde_json::json!(cred_billing_project.get_untracked()));
                     }
                     // service_account: this is shared workspace config, not
                     // a personal credential — written into connection_config
