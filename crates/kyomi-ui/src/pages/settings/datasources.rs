@@ -435,6 +435,19 @@ pub fn DatasourcesPage() -> impl IntoView {
     }
 }
 
+/// Whether `row_id`'s in-progress delete UI should render.
+///
+/// `Action::pending()` is action-wide — `delete_ds_action` is shared by
+/// every row in the list, so reading `pending()` alone would make *every*
+/// row spin during any single delete (KYO-467). This pure, testable
+/// extraction is the actual comparison Signal::derive wraps at the two
+/// call sites (the row's dimmed/spinner state and its click guards) —
+/// mirrors the same "extract the boolean, test it directly" shape as
+/// `connection_auth_modes_unavailable_from` elsewhere in this file.
+fn row_is_deleting(datasource_to_delete_id: Option<&str>, row_id: &str, delete_pending: bool) -> bool {
+    delete_pending && datasource_to_delete_id == Some(row_id)
+}
+
 /// Loading skeleton shown while data is being fetched.
 #[component]
 fn DatasourcesLoadingSkeleton() -> impl IntoView {
@@ -513,6 +526,17 @@ fn DatasourcesContent(
         async move { delete_datasource(ds_id).await }
     });
 
+    // Action-wide pending flag. Two distinct uses, deliberately kept
+    // separate: (1) `DatasourceRow` combines this with `datasource_to_delete`
+    // via `row_is_deleting` to gate the *per-row* dimmed/spinner state — using
+    // this flag alone there would spin every row during any delete (KYO-467);
+    // (2) `on_delete_click` below gates on this flag *alone* (action-wide) as
+    // the double-dispatch guard, since `delete_ds_action` and
+    // `datasource_to_delete` are both singular and shared across every row —
+    // starting a second delete while one is in flight would overwrite
+    // `datasource_to_delete` out from under the first delete's own Effect.
+    let delete_pending = Signal::derive(move || delete_ds_action.pending().get());
+
     Effect::new(move |_| {
         if let Some(result) = delete_ds_action.value().get() {
             match result {
@@ -521,11 +545,24 @@ fn DatasourcesContent(
                         set_datasources.update(|list| {
                             list.retain(|d| d.id != ds.id);
                         });
+                        #[cfg(target_arch = "wasm32")]
+                        toast_success(format!("\"{}\" deleted", ds.name));
                     }
                     set_datasource_to_delete.set(None);
                 }
                 Err(e) => {
                     leptos::logging::error!("Failed to delete datasource: {e}");
+                    // KYO-467 — previously console-only, so a failed delete was
+                    // indistinguishable from a successful one: the confirm
+                    // dialog had already closed, the row never moved, and
+                    // there was no other signal anything went wrong. `e` is
+                    // already sanitized server-side (`into_sfn` runs every
+                    // datasource_service error through `kyomi_core::sanitize_error`
+                    // before it crosses the wire — see `delete_datasource` in
+                    // server_fns/datasources.rs), so it's safe to surface as-is;
+                    // `kyomi_core` itself is an ssr-only dependency and can't be
+                    // called again from this client-side Effect.
+                    toast_error(format!("Failed to delete datasource: {e}"));
                     set_datasource_to_delete.set(None);
                 }
             }
@@ -698,6 +735,8 @@ fn DatasourcesContent(
                                     set_oauth_connecting=set_oauth_connecting
                                     is_admin=is_admin
                                     analytics_access=analytics_access
+                                    datasource_to_delete=datasource_to_delete
+                                    delete_pending=delete_pending
                                 />
                             </For>
                         </div>
@@ -755,7 +794,33 @@ fn DatasourceRow(
     /// Computed once at the list level by the shared analytics-access hook
     /// and passed as a `Signal`, mirroring `is_admin` above.
     analytics_access: Signal<AnalyticsAccess>,
+    /// Which datasource the delete confirmation currently targets, if any —
+    /// the same signal `DatasourcesContent`'s delete Effect reads. Combined
+    /// with `delete_pending` via `row_is_deleting` (KYO-467) so only the
+    /// targeted row renders in-progress state, not every row in the list.
+    datasource_to_delete: ReadSignal<Option<DatasourceInfo>>,
+    /// Whether `delete_ds_action` (defined once, shared by every row, in
+    /// `DatasourcesContent`) is currently in flight.
+    delete_pending: Signal<bool>,
 ) -> impl IntoView {
+    // ── Delete-in-progress state (KYO-467) ─────────────────────────────
+    // Gated on this row's id matching the delete target AND the action
+    // being pending — see `row_is_deleting`. Mirrors the shape of
+    // `is_connecting` below (compare this row's id against a shared
+    // "which id is active" signal), so two concurrent deletes can never
+    // cross-contaminate: `delete_ds_action` only ever has one target at a
+    // time (`on_delete_click` refuses to start a second delete while one
+    // is pending — see below), and this comparison only lights up for the
+    // row whose id currently matches that single target.
+    let ds_id_for_delete_state = ds.id.clone();
+    let is_deleting = Signal::derive(move || {
+        row_is_deleting(
+            datasource_to_delete.get().as_ref().map(|d| d.id.as_str()),
+            &ds_id_for_delete_state,
+            delete_pending.get(),
+        )
+    });
+
     // ── Toggle state ────────────────────────────────────────────────────
     let ds_for_toggle = ds.clone();
     let (local_enabled, set_local_enabled) = signal(ds.user_enabled);
@@ -795,6 +860,15 @@ fn DatasourceRow(
         if toggle_action.pending().get_untracked() {
             return;
         }
+        // KYO-467 — this row is being deleted; toggling it mid-delete makes
+        // no sense (and the row is visually disabled/dimmed for exactly
+        // this reason). Switch's `disabled` prop is a plain bool, not
+        // reactive (see its definition in switch.rs, out of this ticket's
+        // scope), so this guard is the functional backstop that keeps a
+        // stray keyboard toggle from doing anything during the delete.
+        if is_deleting.get_untracked() {
+            return;
+        }
         // Gate: cannot enable a datasource with missing credentials.
         // The switch is already visually disabled (switch_disabled), but we
         // add a toast so the user understands why clicking elsewhere doesn't work.
@@ -810,6 +884,14 @@ fn DatasourceRow(
     // ── Delete handler ──────────────────────────────────────────────────
     let ds_for_delete = ds.clone();
     let on_delete_click = move |_: leptos::ev::MouseEvent| {
+        // Action-wide guard (not per-row `is_deleting`): `delete_ds_action`
+        // and `datasource_to_delete` are both singular, shared by every row.
+        // Starting a second delete while one is in flight would overwrite
+        // `datasource_to_delete` before the first delete's Effect reads it
+        // back — corrupting which row that Effect removes/reports on.
+        if delete_pending.get_untracked() {
+            return;
+        }
         set_datasource_to_delete.set(Some(ds_for_delete.clone()));
         set_delete_dialog_open.set(true);
     };
@@ -817,6 +899,9 @@ fn DatasourceRow(
     // ── Settings handler ─────────────────────────────────────────────────
     let ds_id_for_settings = ds.id.clone();
     let on_settings_click = move |_: leptos::ev::MouseEvent| {
+        if is_deleting.get_untracked() {
+            return;
+        }
         set_modal_datasource_id.set(Some(Some(ds_id_for_settings.clone())));
     };
 
@@ -871,7 +956,11 @@ fn DatasourceRow(
                 <Button
                     variant=ButtonVariant::Outline
                     size=ButtonSize::Sm
+                    disabled=is_deleting
                     on:click=move |_| {
+                        if is_deleting.get_untracked() {
+                            return;
+                        }
                         set_modal_datasource_id
                             .set(Some(Some(ds_id_modal.clone())));
                     }
@@ -910,7 +999,7 @@ fn DatasourceRow(
             // The actual popup open is WASM-only; Action::new body is Send so we
             // do the WASM call outside the Action using a synchronous helper.
             let on_oauth_click = move |_: leptos::ev::MouseEvent| {
-                if is_connecting.get_untracked() {
+                if is_connecting.get_untracked() || is_deleting.get_untracked() {
                     return;
                 }
                 let url = oauth_url_for_datasource(
@@ -944,6 +1033,7 @@ fn DatasourceRow(
                 <Button
                     variant=ButtonVariant::Outline
                     size=ButtonSize::Sm
+                    disabled=Signal::derive(move || is_connecting.get() || is_deleting.get())
                     on:click=on_oauth_click
                 >
                     {move || if is_connecting.get() {
@@ -970,7 +1060,24 @@ fn DatasourceRow(
     });
 
     view! {
-        <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between p-4 gap-3 hover:bg-muted/50 transition-colors">
+        <div class=move || {
+            // KYO-467 — visible in-progress state for the row currently being
+            // deleted: dimmed (matches the Watch Card "disabled" convention
+            // of 70% opacity — see DESIGN.md) and `pointer-events-none` so
+            // mouse interaction with this row's other controls is inert for
+            // the whole 5-10s round trip, not just the delete button itself.
+            // `on_toggle`/`on_settings_click`/`on_oauth_click` each also
+            // guard on `is_deleting` directly (see above) so a keyboard user
+            // tabbing past `pointer-events-none` still can't act on a row
+            // mid-delete.
+            let base = "flex flex-col sm:flex-row sm:items-center sm:justify-between p-4 gap-3 \
+                 hover:bg-muted/50 transition-colors transition-opacity duration-200";
+            if is_deleting.get() {
+                format!("{base} opacity-70 pointer-events-none")
+            } else {
+                base.to_string()
+            }
+        }>
             // Left side: name, type badge, status badges
             <div class="flex items-center gap-3 min-w-0">
                 <span class="h-6 w-6 shrink-0 text-muted-foreground inline-flex items-center justify-center">
@@ -1067,6 +1174,7 @@ fn DatasourceRow(
                         <Button
                             variant=ButtonVariant::Outline
                             size=ButtonSize::Sm
+                            disabled=is_deleting
                             on:click=on_settings_click
                         >
                             <span class="h-4 w-4 sm:mr-1 inline-flex items-center justify-center">
@@ -1082,13 +1190,26 @@ fn DatasourceRow(
                 // `Permission::ManageDatasources`). `<Show>` (not `.then()`) because
                 // `is_admin` is a reactive Signal, unlike the static `is_analytics`
                 // check it's combined with.
+                //
+                // KYO-467 — while `is_deleting` is true, the trash icon swaps for a
+                // `<Spinner>` and the button is disabled. This is per-row (gated on
+                // `is_deleting`, not `delete_pending` action-wide) so a row that
+                // *isn't* being deleted keeps a live, clickable trash button — only
+                // `on_delete_click`'s action-wide guard above stops it from actually
+                // starting a second delete while one is in flight.
                 <Show when=move || is_admin.get() && !ds.is_analytics>
                     <Button
                         variant=ButtonVariant::GhostDestructive
                         size=ButtonSize::Icon
+                        disabled=is_deleting
+                        aria_label="Delete datasource"
                         on:click=on_delete_click.clone()
                     >
-                        <Icon icon=phosphor_leptos::TRASH/>
+                        {move || if is_deleting.get() {
+                            view! { <Spinner size="h-4 w-4"/> }.into_any()
+                        } else {
+                            view! { <Icon icon=phosphor_leptos::TRASH/> }.into_any()
+                        }}
                     </Button>
                 </Show>
             </div>

@@ -1,6 +1,8 @@
-//! The datasource list view: analytics-access prop threading (KYO-260)
-//! and the memoized view-state branch on `DatasourcesContent` (KYO-429).
+//! The datasource list view: analytics-access prop threading (KYO-260),
+//! the memoized view-state branch on `DatasourcesContent` (KYO-429), and
+//! the per-row delete-in-progress state (KYO-467).
 
+use super::super::row_is_deleting;
 use super::{extract_between, SRC};
 
 // ── KYO-260: analytics-link permission gating ──────────────────────
@@ -137,5 +139,172 @@ fn datasources_page_branches_on_a_memoized_view_state_not_a_raw_tracked_get() {
          via an untracked read — a tracked .get() there would create a \
          second, redundant subscription to datasources_signal and defeat \
          the point of routing through view_state in the first place"
+    );
+}
+
+// ── KYO-467: per-row delete-in-progress state ─────────────────────────
+//
+// Deleting a datasource takes 5-10s server-side; the row previously gave
+// no feedback at all for the whole round trip (no spinner, no dimming,
+// no toast on failure). `delete_ds_action` is one Action shared by every
+// row via `<For>`, so `delete_ds_action.pending()` alone is action-wide —
+// gating the visible in-progress state on it directly would spin *every*
+// row during any single delete. `row_is_deleting` is the pure boolean
+// `DatasourceRow`'s `is_deleting` Signal::derive wraps (also reused by
+// `on_toggle`/`on_settings_click`/`on_oauth_click`'s guards), kept as a
+// free function specifically so it can be asserted on directly — per
+// KYO-477, a test that only proves a signal is *read* by the view
+// doesn't prove it *computes the right answer*, and that's exactly what
+// shipped green without changing behaviour earlier today.
+
+#[test]
+fn matching_id_and_pending_is_deleting() {
+    assert!(row_is_deleting(Some("ds-1"), "ds-1", true));
+}
+
+#[test]
+fn matching_id_but_action_not_pending_is_not_deleting() {
+    // A stale `datasource_to_delete` id (left over from a delete that
+    // already resolved, or before dispatch) must not keep the row
+    // spinning once the action itself isn't pending.
+    assert!(!row_is_deleting(Some("ds-1"), "ds-1", false));
+}
+
+#[test]
+fn pending_action_but_different_row_is_not_deleting() {
+    // This is the exact simplification the ticket calls out: dropping the
+    // id comparison and gating on `delete_pending` alone would make this
+    // row report is_deleting == true while a *different* row's delete is
+    // in flight — every row would spin, not just the one being deleted.
+    assert!(!row_is_deleting(Some("ds-1"), "ds-2", true));
+}
+
+#[test]
+fn no_delete_target_is_never_deleting_even_while_pending() {
+    // `datasource_to_delete` is `None` before any delete has ever been
+    // initiated (or after `on_delete_cancel`) — `delete_pending` being
+    // true with no target shouldn't be reachable in practice, but the
+    // comparison must still fail safe rather than matching every row.
+    assert!(!row_is_deleting(None, "ds-1", true));
+}
+
+/// Simulates the actual `<For>` call site: every row in the list computes
+/// `row_is_deleting` independently against the same `datasource_to_delete`
+/// and `delete_pending` values. Only the one row whose id matches the
+/// shared target may come back `true` — this is the "two concurrent
+/// deletes can't cross-contaminate" property from the ticket, expressed
+/// as a single assertion over all three rows sharing one target/pending
+/// pair rather than three isolated calls.
+#[test]
+fn only_the_targeted_row_reports_deleting_the_rest_do_not() {
+    let target = Some("ds-2");
+    let pending = true;
+
+    assert!(
+        !row_is_deleting(target, "ds-1", pending),
+        "ds-1 is not the delete target — must not show in-progress state"
+    );
+    assert!(
+        row_is_deleting(target, "ds-2", pending),
+        "ds-2 is the delete target with the action pending — must show in-progress state"
+    );
+    assert!(
+        !row_is_deleting(target, "ds-3", pending),
+        "ds-3 is not the delete target — must not show in-progress state"
+    );
+}
+
+/// `DatasourceRow`'s `is_deleting` Signal::derive must read *both*
+/// `datasource_to_delete` and `delete_pending` through `row_is_deleting` —
+/// not just the pending flag. Locks in the wiring `row_is_deleting`'s own
+/// unit tests above prove the *values* of.
+#[test]
+fn is_deleting_signal_reads_both_target_id_and_action_pending() {
+    let block = extract_between(
+        SRC,
+        "let is_deleting = Signal::derive(move || {",
+        "let ds_for_toggle = ds.clone();",
+    );
+    assert!(
+        block.contains("row_is_deleting("),
+        "DatasourceRow's is_deleting signal must be computed via the pure, \
+         testable row_is_deleting function, not inlined ad hoc"
+    );
+    assert!(
+        block.contains("datasource_to_delete.get()"),
+        "is_deleting must read datasource_to_delete — without it the row \
+         can't tell whether it, specifically, is the delete target"
+    );
+    assert!(
+        block.contains("delete_pending.get()"),
+        "is_deleting must read delete_pending — without it a stale delete \
+         target would keep showing in-progress state after the action resolved"
+    );
+}
+
+/// A failed delete must surface a visible toast, not just a console log —
+/// the confirm dialog has already closed by the time the Err arm runs, so
+/// `leptos::logging::error!` alone is invisible to the user (KYO-467).
+#[test]
+fn failed_delete_surfaces_a_toast_not_just_a_console_log() {
+    let effect = extract_between(
+        SRC,
+        "Effect::new(move |_| {\n        if let Some(result) = delete_ds_action.value().get() {",
+        "let on_delete_confirm",
+    );
+    let err_arm = extract_between(effect, "Err(e) => {", "            }\n        }\n    });");
+
+    assert!(
+        err_arm.contains("leptos::logging::error!"),
+        "the console log must be kept, not replaced"
+    );
+    assert!(
+        err_arm.contains("toast_error("),
+        "a failed delete must also raise a visible toast_error — otherwise \
+         it is indistinguishable from a successful delete: the dialog closed, \
+         the row didn't move, and nothing else told the user it failed"
+    );
+}
+
+/// A successful delete must still remove the row from the list — the new
+/// in-progress/error handling must not have disturbed the existing
+/// optimistic-list-update-on-success path.
+#[test]
+fn successful_delete_still_removes_the_row_from_the_list() {
+    let effect = extract_between(
+        SRC,
+        "Effect::new(move |_| {\n        if let Some(result) = delete_ds_action.value().get() {",
+        "let on_delete_confirm",
+    );
+    let ok_arm = extract_between(effect, "Ok(()) => {", "Err(e) => {");
+
+    assert!(
+        ok_arm.contains("list.retain(|d| d.id != ds.id)"),
+        "the Ok arm must still filter the deleted datasource out of the \
+         local list by id — this is the actual row-removal behavior, not \
+         just a call to some retain() with an unrelated predicate"
+    );
+}
+
+/// The delete button's own icon must swap to a spinner while `is_deleting`
+/// is true — a dimmed row alone (with no per-control feedback) is exactly
+/// the ambiguity the ticket says a bare spinner-less fix would still leave.
+#[test]
+fn delete_button_shows_a_spinner_while_deleting() {
+    let row = extract_between(SRC, "fn DatasourceRow(", "fn DatasourceModal(");
+    let button = extract_between(
+        row,
+        "variant=ButtonVariant::GhostDestructive",
+        "</Button>",
+    );
+    assert!(
+        button.contains("is_deleting.get()") && button.contains("<Spinner"),
+        "the delete button must branch on is_deleting.get() and render a \
+         <Spinner> while true, replacing the static trash icon"
+    );
+    assert!(
+        button.contains("disabled=is_deleting"),
+        "the delete button must be disabled while its own row is deleting, \
+         so a second click can't re-open the confirm dialog mid-delete"
     );
 }
