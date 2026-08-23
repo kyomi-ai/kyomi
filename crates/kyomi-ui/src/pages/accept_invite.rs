@@ -254,8 +254,18 @@ pub fn AcceptInvitePage() -> impl IntoView {
                 <div class="text-center mt-8">
                     <p class="text-sm text-muted-foreground">
                         "Need help? Contact "
-                        <a href="mailto:support@kyomi.dev" class="text-primary hover:underline">
-                            "support@kyomi.dev"
+                        // Hardcoded rather than read from `Config::support_email`
+                        // (`crates/kyomi-core/src/config.rs`): this page is on a
+                        // failure path where the mailto is the user's only remaining
+                        // option, and `Config` lives on `ServerContext`, which is
+                        // `#[cfg(feature = "ssr")]`-only (`server_fns/mod.rs`) and
+                        // does not exist on this component's `hydrate`/wasm32 build.
+                        // Reading it would require a server-fn round trip for a
+                        // static string. Same shape as the KYO-478 fix on the login
+                        // page (`pages/auth/login.rs`) — keep this literal in sync
+                        // with `config.rs`'s default.
+                        <a href="mailto:support@kyomi.ai" class="text-primary hover:underline">
+                            "support@kyomi.ai"
                         </a>
                     </p>
                 </div>
@@ -624,5 +634,59 @@ fn icon_shield() -> impl IntoView {
         >
             <path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" />
         </svg>
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests (KYO-482)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    /// This file's own source, for a source-text wiring assertion below —
+    /// mirrors the `SRC`/`extract_between` pattern in `pages/auth/login.rs`
+    /// (KYO-478), kept local here since this file is far below the size
+    /// where `docs/standards/code-organization/one-test-topic-per-file-not-one-big-mod-tests.md`
+    /// requires splitting `mod tests` out into its own directory.
+    const SRC: &str = include_str!("accept_invite.rs");
+
+    /// Returns the substring of `src` starting just after the first
+    /// occurrence of `start` and ending just before the first occurrence
+    /// of `end` that follows it. Panics with a descriptive message if
+    /// either marker isn't found, so a typo'd marker fails loudly instead
+    /// of silently matching an empty/wrong range.
+    fn extract_between<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
+        let start_idx = src
+            .find(start)
+            .unwrap_or_else(|| panic!("start marker not found: {start:?}"));
+        let after_start = start_idx + start.len();
+        let end_idx = src[after_start..]
+            .find(end)
+            .unwrap_or_else(|| panic!("end marker not found after start: {end:?}"));
+        &src[after_start..after_start + end_idx]
+    }
+
+    /// Pins the real support domain (kyomi.ai, not kyomi.dev — confirmed
+    /// against `kyomi_core::Config::support_email`'s default in
+    /// `crates/kyomi-core/src/config.rs`). This page is the invite's last
+    /// resort: the invite already failed and the mailto is the user's only
+    /// remaining option, possibly without an account to sign back in with.
+    /// A link to a domain Kyomi doesn't own means the mail goes nowhere
+    /// with no bounce — the user never hears back and we never learn they
+    /// were stuck (KYO-482).
+    #[test]
+    fn footer_support_link_points_at_kyomi_ai() {
+        let footer_block =
+            extract_between(SRC, "\"Need help? Contact \"", "</div>");
+        assert!(
+            footer_block.contains("mailto:support@kyomi.ai"),
+            "the footer support link must point at support@kyomi.ai — the address \
+             kyomi_core::Config::support_email defaults to — not any other domain"
+        );
+        assert!(
+            !footer_block.contains("kyomi.dev"),
+            "the footer support link must not use the kyomi.dev domain — Kyomi's \
+             support address is on kyomi.ai (see config.rs)"
+        );
     }
 }
