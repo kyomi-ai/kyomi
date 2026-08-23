@@ -691,6 +691,26 @@ pub async fn list_watches_for_sync(
     Ok(values)
 }
 
+/// Count a user's own watches within a workspace — the same scope as
+/// [`list_watches_for_sync`], just `COUNT(*)` instead of the full rows.
+///
+/// Used by the sync protocol's per-entity-type count reconciliation
+/// (KYO-480) so a client can detect a diverged local cache without a full
+/// re-bootstrap. Indexed via `idx_watches_workspace` and `idx_watches_creator`
+/// (bitmap AND on Postgres); there is no single composite `(workspace_id,
+/// created_by)` index, but per-workspace watch volumes are small enough that
+/// this has not been worth adding.
+pub async fn count_watches_for_sync(
+    db: &DbPool,
+    workspace_id: &str,
+    user_id: &str,
+) -> Result<i64> {
+    let sql = "SELECT COUNT(*) FROM watches WHERE workspace_id = $1 AND created_by = $2";
+    kyomi_core::db_fetch_scalar!(db, i64, sql, workspace_id, user_id).map_err(|e| {
+        kyomi_core::Error::Internal(format!("failed to count watches for sync: {e}"))
+    })
+}
+
 // ─── List enabled watches ───────────────────────────────────────────────────
 
 /// List all enabled watches across all workspaces (for the scheduler).
@@ -2809,6 +2829,35 @@ mod privacy_tests {
             .expect("watch_id field");
         assert_eq!(seen_id, wb.watch_id, "should be user-b's watch");
         assert_ne!(seen_id, wa.watch_id, "must not leak user-a's watch");
+    }
+
+    /// KYO-480: `count_watches_for_sync` must apply the exact same
+    /// `created_by` scoping as `list_watches_for_sync` — a count that leaked
+    /// user-a's watch into user-b's total would make the client's own
+    /// count-reconciliation check falsely detect (or worse, mask) a
+    /// divergence, since it would be comparing against a wrong ground truth.
+    #[tokio::test]
+    async fn count_watches_for_sync_matches_list_scoping() {
+        let pool = test_pool().await;
+        seed_workspace_with_two_users(&pool).await;
+
+        create_test_watch(&pool, "user-a", "A's Watch").await;
+        create_test_watch(&pool, "user-b", "B's First Watch").await;
+        create_test_watch(&pool, "user-b", "B's Second Watch").await;
+
+        let bs_count = count_watches_for_sync(&pool, "ws-1", "user-b")
+            .await
+            .expect("count_watches_for_sync for user-b");
+        let bs_list = list_watches_for_sync(&pool, "ws-1", "user-b")
+            .await
+            .expect("list_watches_for_sync for user-b");
+
+        assert_eq!(bs_count, 2, "user-b's count must include only their own two watches, not user-a's");
+        assert_eq!(
+            bs_count as usize,
+            bs_list.len(),
+            "count and list must agree — they are the same visibility scope over the same rows"
+        );
     }
 
     // ── list_watches / search_watches (KYO-178) ──────────────────────────
