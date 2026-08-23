@@ -10,43 +10,52 @@
  * `crates/kyomi-ui/src/utils/oauth_popup.rs:140-178`), and assert the
  * create-mode "Next" gate reacts correctly.
  *
- * ARM A DETERMINISM — KYO-429 is a confirmed app bug (via prior instrumented
- * repro, not a test defect), and it is still open in the app today: any
- * recognized `*_OAUTH_SUCCESS` postMessage on /settings/datasources
- * invalidates the `datasources` query cache; when that background
- * `list_datasources` refetch's *response* resolves, the page's top-level
- * view closure re-runs, reconstructing the whole `DatasourcesContent`
- * subtree and remounting `DatasourceModal` with default state — discarding
- * the very "Next" transition Arm A exists to prove, ~20ms after the
- * message. Left alone, whether Arm A observes the transition or the
- * remount is a race between two async events, and it is genuinely flaky:
- * three manual runs produced FAIL / PASS / FAIL.
+ * ARM A DETERMINISM — KYO-429 was a confirmed app bug (via prior
+ * instrumented repro, not a test defect): any recognized `*_OAUTH_SUCCESS`
+ * postMessage on /settings/datasources invalidated the `datasources` query
+ * cache, and when that background `list_datasources` refetch's *response*
+ * resolved, the page's top-level view closure re-ran unconditionally,
+ * reconstructing the whole `DatasourcesContent` subtree and remounting
+ * `DatasourceModal` with default state — discarding the very "Next"
+ * transition Arm A exists to prove, ~20ms after the message. Left alone,
+ * whether Arm A observed the transition or the remount was a race between
+ * two async events, and it was genuinely flaky: three manual runs (pre-fix)
+ * produced FAIL / PASS / FAIL.
  *
- * This spec closes that race instead of living with it or weakening the
- * assertion. The remount can only happen once the `list_datasources`
- * refetch's response reaches the page, so immediately before dispatching
- * the postMessage, Arm A arms a Playwright `page.route()` interception on
- * that server-fn endpoint (`armListDatasourcesDelay()`, matching
- * `/leptos-api/list_datasources*`) that holds the response until the
- * assertion has been made (or a safety-net timeout, so the script can
- * never hang). This is timing control, not mocking: the real request still
- * reaches the real server and gets the real response — only its arrival at
- * the page is deferred, and only for the duration needed to observe a
- * transition that would otherwise happen anyway. The behaviour under test
- * — the modal's synchronous reaction to the postMessage — is completely
- * untouched. With the remount unable to land mid-observation, Arm A's
- * outcome is deterministic and its assertion (`isEnabled()`, a real
- * disabled -> enabled transition, exactly as strict as before) gates the
- * exit code like every other assertion in this file. The modal-died branch
- * is kept as a defensive, distinctly-labelled report in case the delay
- * ever fails to hold — see its comment inline — but is not the expected
- * path. Arm B is independent and unaffected — see below.
+ * KYO-429 is now FIXED, merged as `c2800fca` (PR #374): `DatasourcesPage`'s
+ * view closure (`crates/kyomi-ui/src/pages/settings/datasources.rs`) now
+ * branches on a `Memo<DatasourcesViewState>` that collapses every
+ * `datasources_signal` write into Loading/Ready/Failed, instead of matching
+ * on a raw tracked `datasources_signal.get()` read. A `Memo` only notifies
+ * on a PartialEq-unequal output, so a `Some(Ok(_))` -> `Some(Ok(_))`
+ * refetch — exactly what a cache invalidation with unchanged data
+ * produces — no longer flips the branch, and `DatasourcesContent`/
+ * `DatasourceModal` are never rebuilt out from under an open modal's
+ * unsaved input.
+ *
+ * This spec keeps two layers of protection rather than trusting the fix
+ * blindly. First, it still arms a Playwright `page.route()` interception on
+ * the `list_datasources` server-fn endpoint (`armListDatasourcesDelay()`,
+ * matching `/leptos-api/list_datasources*`) that holds the refetch response
+ * for the duration of Arm A's observation window (or a safety-net timeout,
+ * so the script can never hang) — this is timing control, not mocking: the
+ * real request still reaches the real server and gets the real response,
+ * only its arrival at the page is deferred. Second, and this is the AC2
+ * addition, Arm A now asserts directly on the regression this bug caused,
+ * not just on its downstream symptom: after the postMessage, in addition
+ * to the "Next" transition, it asserts the create modal is still open AND
+ * that the Name field it was seeded with earlier still holds its typed
+ * value — the exact form-state-loss scenario KYO-429 described. If the
+ * modal-died branch below is ever taken again, or the Name field comes
+ * back empty, that is a KYO-429 regression, not an accepted race outcome —
+ * see `regressionBanner()` at that call site. Arm B is independent and
+ * unaffected — see below.
  *
  * Coverage (see the final report for the authoritative list + reasons):
  *
  *   COVERED, including the disabled -> enabled transition itself:
  *     - BigQuery + kyomi_oauth via GOOGLE_OAUTH_SUCCESS. By design,
- *       `datasources.rs:2737-2753` sets `test_result{success:true}` and
+ *       `datasources.rs:2787-2803` sets `test_result{success:true}` and
  *       `discovery_status="success"` directly off the postMessage — no
  *       server round-trip needed, so the "Next disabled -> enabled"
  *       transition is directly assertable here. It previously wasn't,
@@ -61,16 +70,20 @@
  *       immediately after the message is delivered; ruled out real
  *       navigation (`framenavigated` never fires, URL unchanged), full
  *       reload (a `window.__marker` set beforehand survives), and the
- *       top-level WASM panic overlay (never appears). See KYO-429 for full
- *       repro + evidence — the app bug itself is NOT fixed by this spec;
- *       only the test's ability to observe past it is. This spec now
- *       reliably asserts the transition it was written to prove, via the
- *       list_datasources response delay described above.
+ *       top-level WASM panic overlay (never appears). See KYO-429 for the
+ *       original repro + evidence; the app bug itself is now fixed there
+ *       (`DatasourcesPage` branches on a memoized view-state instead of a
+ *       raw tracked `datasources_signal.get()` read — see the ARM A
+ *       DETERMINISM header above). This spec asserts the transition it was
+ *       written to prove, plus the modal-still-open and
+ *       Name-field-retained checks added alongside the fix, and keeps the
+ *       list_datasources response delay as a regression guard rather than
+ *       a required race-avoidance workaround.
  *
  *   COVERED, but as "already enabled by design" (KYO-404) — NOT a
  *   transition, and the spec does not pretend it is one:
  *     - BigQuery + enterprise_oauth: `connection_step_satisfied_from`
- *       (`datasources.rs:239`) special-cases this combination to always
+ *       (`datasources.rs:240`) special-cases this combination to always
  *       satisfy the create-mode gate, because no slug-scoped connect
  *       endpoint exists before the datasource is saved. Next is enabled
  *       from the moment this mode is selected, before any OAuth message.
@@ -128,25 +141,31 @@ function check(name, pass, detail) {
 }
 const vis = async (loc) => loc.isVisible().catch(() => false);
 
-/** Print an unmissable, greppable banner for a confirmed-blocking app bug. */
-function blockedBanner(ticket, reason) {
+/** Print an unmissable, greppable banner for a KYO-429 regression sighting. */
+function regressionBanner(ticket, reason) {
   const line = '='.repeat(78);
   console.log(`\n${line}`);
-  console.log(`BLOCKED BY ${ticket} — known app bug, not a broken test. See ticket.`);
+  console.log(`${ticket} REGRESSION — this was fixed; something reintroduced it. See ticket.`);
   console.log(reason);
   console.log(`${line}\n`);
 }
 
-// KYO-429 fires off the *response* of a `list_datasources` refetch that
-// `datasources.rs`'s GoogleSuccess handler's cache invalidation triggers —
-// not off the postMessage itself. Holding that one response for the
-// duration of Arm A's observation window makes the remount structurally
-// impossible to land mid-observation, without touching anything about the
-// behaviour under test (the modal's synchronous reaction to the
-// postMessage is untouched; only an unrelated background refetch's
-// arrival time is controlled). This is request delay, not response
-// mocking: the real request still goes to the real server and gets the
-// real response — only fulfilment to the page is deferred.
+// Pre-fix, KYO-429 fired off the *response* of a `list_datasources` refetch
+// that `datasources.rs`'s GoogleSuccess handler's cache invalidation
+// triggers — not off the postMessage itself — and that response arriving
+// remounted DatasourcesContent/DatasourceModal out from under the open
+// modal. Holding that one response for the duration of Arm A's observation
+// window made the remount structurally impossible to land mid-observation.
+// With KYO-429's root cause fixed (DatasourcesPage now branches on a
+// Memo<DatasourcesViewState>, so that refetch's arrival no longer changes
+// the branch at all), this delay is no longer required for correctness —
+// it is kept deliberately, as a regression guard: belt-and-braces so the
+// assertion below stays deterministic even if the Memo branch is ever
+// weakened, cheap insurance that costs nothing else in the script (the
+// modal-still-open / Name-field-retained assertions added alongside it are
+// the primary guard). This is request delay, not response mocking: the
+// real request still goes to the real server and gets the real response —
+// only fulfilment to the page is deferred.
 //
 // Deliberately a boolean latch polled from inside the handler, not a
 // per-request Promise resolved from outside: an earlier version resolved a
@@ -240,20 +259,22 @@ async function pickAuthMode(page, label) {
     // Wrapped so that an unexpected exception here does not abort Arm B
     // below, which is independent and unaffected.
     //
-    // KYO-429 fires off the *response* of the list_datasources refetch that
-    // the postMessage's cache invalidation triggers, not off the
-    // postMessage itself — so holding that one response for the
+    // KYO-429 used to fire off the *response* of the list_datasources
+    // refetch that the postMessage's cache invalidation triggers, not off
+    // the postMessage itself — so holding that one response for the
     // observation window (armListDatasourcesDelay(), armed immediately
     // below, released in the finally block once the assertion is made)
-    // makes the remount structurally unable to land mid-observation. See
-    // the ARM A DETERMINISM header comment for the full mechanism.
+    // made the remount structurally unable to land mid-observation. With
+    // KYO-429 fixed, that remount cannot happen at all regardless of this
+    // delay — see the ARM A DETERMINISM header comment for the full
+    // mechanism and why the delay is kept anyway, as a regression guard.
     //
-    // Verdict: with the race closed, this arm expects exactly one outcome —
-    // Next reaches enabled while the modal is still alive. The modal-died
-    // and modal-survived-but-never-enabled branches are kept as defensive
-    // reporting (distinctly labelled, not conflated) in case the delay
-    // ever fails to hold for some unrelated reason; they are not the
-    // expected path.
+    // Verdict: this arm expects exactly one outcome — Next reaches enabled
+    // while the modal is still alive, still showing the Name field's typed
+    // value. The modal-died and modal-survived-but-never-enabled branches
+    // are kept as defensive reporting (distinctly labelled, not conflated)
+    // in case KYO-429 or something with the same signature ever regresses;
+    // they are not the expected path.
     try {
       await pickAuthMode(page, 'Kyomi');
       await page.screenshot({ path: `${SHOT}-A0-kyomi-oauth-before.png`, fullPage: true });
@@ -289,23 +310,41 @@ async function pickAuthMode(page, label) {
       }
       await page.screenshot({ path: `${SHOT}-A1-kyomi-oauth-after.png`, fullPage: true });
 
+      // ── KYO-429 regression guard: modal survives, Name field untouched ──
+      // This is the direct assertion of the bug KYO-429 described — the
+      // create modal (and its in-progress, unsaved Name field) must survive
+      // a *_OAUTH_SUCCESS postMessage unchanged. The "Next" transition
+      // checked below is a secondary signal that also happens to require
+      // the modal to be alive; this pair is the primary one.
+      check('A: create modal remains open after simulated GOOGLE_OAUTH_SUCCESS (KYO-429 regression guard)',
+        !modalDied, `modalDied=${modalDied}`);
+
+      const nameValueAfter = modalDied ? null : await nameInput.inputValue().catch(() => null);
+      check('A: Name field still holds its typed value after simulated GOOGLE_OAUTH_SUCCESS (KYO-429 regression guard)',
+        !modalDied && nameValueAfter === 'E2E OAuth Contract',
+        modalDied ? 'modal closed — cannot read Name field' : `value=${JSON.stringify(nameValueAfter)}`);
+
       if (modalDied) {
-        // Unexpected with the list_datasources delay armed — the refetch
-        // that drives the KYO-429 remount should have been held for the
-        // whole observation window. Still bannered rather than reported as
+        // Unexpected with the list_datasources delay armed AND with the
+        // KYO-429 root cause fixed — DatasourcesPage no longer remounts
+        // DatasourcesContent on a Some(Ok(_)) -> Some(Ok(_)) refetch at
+        // all, so nothing should be able to tear down the modal here
+        // regardless of the delay. Still bannered rather than reported as
         // a generic failure, since a dead modal here is the KYO-429
-        // signature regardless of why the mitigation didn't hold this run.
-        blockedBanner('KYO-429',
+        // signature regardless of what let it back in.
+        regressionBanner('KYO-429',
           'a recognized *_OAUTH_SUCCESS postMessage on /settings/datasources ' +
-          'invalidates the datasources query cache; the resulting refetch ' +
-          'remounts DatasourceModal with default state before the create-mode ' +
-          '"Next" transition can be observed. The create modal closed/reset ' +
-          'during the poll window despite the list_datasources response ' +
-          'delay being armed — this is the confirmed KYO-429 remount, not a ' +
-          'selector or timing issue in this spec; investigate why the delay ' +
-          'did not hold this run.');
+          'closed or reset the create modal during the observation window. ' +
+          'KYO-429 fixed exactly this: DatasourcesPage (crates/kyomi-ui/src/' +
+          'pages/settings/datasources.rs) now branches its view on a ' +
+          'Memo<DatasourcesViewState> so a Some(Ok(_)) -> Some(Ok(_)) ' +
+          'list_datasources refetch no longer changes the branch and ' +
+          'DatasourcesContent/DatasourceModal are never rebuilt. Seeing the ' +
+          'modal die here — with the list_datasources response delay still ' +
+          'armed — means that fix has regressed; investigate ' +
+          'DatasourcesPage before assuming this is a test issue.');
         check('A ★ Next transitions to ENABLED after simulated GOOGLE_OAUTH_SUCCESS (bigquery/kyomi_oauth)',
-          false, 'BLOCKED by KYO-429 — see banner above');
+          false, 'KYO-429 REGRESSION — see banner above');
       } else if (enabledAfter === true) {
         check('A ★ Next transitions to ENABLED after simulated GOOGLE_OAUTH_SUCCESS (bigquery/kyomi_oauth)',
           true, `enabled=${enabledAfter}`);
@@ -323,8 +362,10 @@ async function pickAuthMode(page, label) {
 
     // ══ B — BigQuery enterprise_oauth: covered-by-design (KYO-404), no ═════
     //        postMessage needed — Next is enabled from mode-selection alone.
-    // Reopen the modal fresh — Arm A's postMessage may have closed it
-    // (KYO-429), and Arm B does not depend on Arm A's outcome.
+    // Reopen the modal fresh if it isn't already — defensive: with KYO-429
+    // fixed, Arm A's postMessage should no longer be able to close it, but
+    // Arm B doesn't depend on Arm A's outcome either way, so this keeps
+    // Arm B independent even if Arm A hit its own unrelated failure above.
     if (!(await modalVisible())) {
       await page.locator('button:has-text("Add Datasource")').first().click({ timeout: 10000 });
       await page.waitForTimeout(1500);
