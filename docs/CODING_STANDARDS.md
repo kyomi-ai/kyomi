@@ -34,3 +34,4 @@ To add a rule:
 - [String & Text Processing](standards/string-text-processing/) — *Standards for safe string manipulation in Rust.*
 - [Testing](standards/testing/) — *Standards for test structure, assertions, and what must be tested.*
 - [Version Control & Working Tree](standards/version-control-working-tree/) — *Standards for reasoning about repo state before drawing conclusions from it.*
+- [Build & Toolchain](standards/build-toolchain/) — *Standards for verifying builds and lint results against the toolchain that will actually enforce them, not just the one on your machine.*
