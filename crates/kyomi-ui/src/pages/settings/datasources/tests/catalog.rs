@@ -1,6 +1,7 @@
-//! Catalog tab wiring: registry-driven indexing auth modes (KYO-187)
-//! and the create/edit-mode `include_public_datasets` read/write
-//! agreement (KYO-446).
+//! Catalog tab wiring: registry-driven indexing auth modes (KYO-187),
+//! the create/edit-mode `include_public_datasets` read/write agreement
+//! (KYO-446), the catalog-scope copy audit (KYO-452), and the "Discover
+//! Available" outcome feedback (KYO-466).
 
 use super::{extract_between, MOD_TESTS_MARKER, SRC};
 
@@ -378,4 +379,225 @@ fn no_new_site_introduces_the_kyo_452_unqualified_promise_shape() {
              'this account can list' (or reworded to not promise an outcome at all)"
         );
     }
+}
+
+// ── KYO-466: "Discover Available" announces three distinguishable
+// outcomes — discovered N / discovered none / could-not-discover ─────
+//
+// Before this fix, `discover_datasource_resources` reported
+// `success: true` with an empty `resources` map both when a discovery
+// call returned a genuinely empty list and when it failed outright (the
+// failing key was simply absent, with no error channel to carry a
+// reason). The Catalog tab's `discover_status` / `discover_error` /
+// `discovered_items` signals — and the "Discovery error" Alert already
+// built around them — had nothing to distinguish the two with: both
+// outcomes left the screen unchanged. The server-side fix
+// (server_fns/datasources.rs) adds a per-key `resource_errors` map to
+// `DiscoverResourcesResult`; these tests pin the client-side half that
+// consumes it.
+
+/// Bounds the extraction to the `discover_action` Effect that turns a
+/// `DiscoverResourcesResult` into the `discover_status` / `discover_error`
+/// / `discovered_items` signals — stopping before the Connect-path
+/// discovery Effect that follows and (per its own comment) reuses the
+/// same three signals, so an unscoped search would not be able to tell
+/// which Effect a match came from.
+fn discover_action_effect(src: &str) -> &str {
+    extract_between(
+        src,
+        "let discover_action = Action::new(",
+        "// ── Discover resources — Connect path",
+    )
+}
+
+/// The defect this ticket exists to fix: `Ok(r) if r.success` used to go
+/// straight to "success" and read `r.resources.get(key)`, defaulting a
+/// missing key to an empty vec via `unwrap_or_default()` — exactly as
+/// indistinguishable from a real empty list as the server-side bug it was
+/// paired with. The fix must consult `r.resource_errors` for this
+/// datasource type's key *before* falling back to "no items".
+#[test]
+fn discover_effect_checks_resource_errors_before_reporting_success() {
+    let f = discover_action_effect(SRC);
+    assert!(
+        f.contains("r.resource_errors.get(key)"),
+        "the Ok(r) if r.success branch must check r.resource_errors for this \
+         datasource type's discovery key before treating a missing/empty resources \
+         entry as \"no items\" — otherwise a failed list_projects() (success: true, \
+         the key absent from resources, the reason present in resource_errors) \
+         renders identically to a genuinely empty result, which is the exact KYO-466 \
+         defect: {f}"
+    );
+}
+
+/// A per-key discovery error must drive the *existing* error-display
+/// machinery (`discover_status == \"error\"` + the Alert reading
+/// `discover_error`) rather than silently falling through to "success"
+/// with an empty list — the correction on this ticket explicitly calls
+/// out that the error UI was already built and only needed the server to
+/// report a failure.
+#[test]
+fn discover_effect_reports_a_resource_error_via_the_existing_error_state() {
+    let f = discover_action_effect(SRC);
+    assert!(
+        f.contains("set_discover_status.set(\"error\".to_string());"),
+        "a per-key discovery error must flip discover_status to \"error\" — the \
+         Discovery-error Alert already renders whenever discover_status == \"error\", \
+         so this is what makes it fire for a failed list_projects() instead of \
+         staying silent: {f}"
+    );
+    assert!(
+        f.contains(
+            "set_discover_error.set(Some(format!(\"Couldn't list {noun}: {reason}\")));"
+        ),
+        "a per-key discovery error must populate discover_error with a human-readable \
+         noun (not the raw resources/resource_errors map key) and the actual reason, \
+         not a generic \"discovery failed\" — the reason is exactly what a production \
+         report of this bug was missing: {f}"
+    );
+    assert!(
+        f.contains("let noun = catalog_item_label_for_type(&ds_type_val);"),
+        "the discovery-error message must derive its noun from \
+         catalog_item_label_for_type — the single source of truth for the \
+         per-provider item noun used throughout this file (KYO-300) — not the raw \
+         `resources`/`resource_errors` dictionary key, which a reader shouldn't need \
+         to know: {f}"
+    );
+}
+
+/// A discovery call that genuinely succeeded (no per-key error) must
+/// still populate `discovered_items` from `r.resources` — guards against
+/// a fix that over-corrects by routing every path through the new error
+/// branch.
+#[test]
+fn discover_effect_success_branch_still_populates_items_when_no_error() {
+    let f = discover_action_effect(SRC);
+    assert!(f.contains("set_discover_status.set(\"success\".to_string());"));
+    assert!(f.contains("let items = r.resources.get(key).cloned().unwrap_or_default();"));
+    assert!(f.contains("set_discovered_items.set(items);"));
+}
+
+/// Bounds the extraction to the "Discover Available" button row, which
+/// renders the found-count / empty-result hint next to the button —
+/// stopping before the "Discovery error" Alert that follows it.
+fn discover_button_row(src: &str) -> &str {
+    extract_between(src, "// Discover Available button", "// Discovery error")
+}
+
+/// The other half of the defect: a successful discovery that returned
+/// nothing rendered as complete silence (the "{count} found" hint only
+/// appeared when `discovered_items` was non-empty, and the manual-entry
+/// fallback gives no indication either way). A genuinely empty result
+/// must say so.
+#[test]
+fn discover_button_row_announces_a_genuinely_empty_success() {
+    let row = discover_button_row(SRC);
+    assert!(
+        row.contains("format!(\"No {noun} found\")"),
+        "a successful discovery that returned zero items must render an explicit \
+         'No {{noun}} found' hint next to the Discover Available button — before this \
+         fix an empty-but-successful result rendered no different from a discovery \
+         that silently failed: {row}"
+    );
+    assert!(
+        row.contains("catalog_item_label_for_type(&datasource_type.get())"),
+        "the empty-result hint must derive its noun from catalog_item_label_for_type \
+         — the single source of truth for the per-provider item noun used throughout \
+         this file (KYO-300) — not a re-typed literal"
+    );
+}
+
+/// The empty-result hint and the found-count hint must be mutually
+/// exclusive — both live inside the same `discover_status.get() ==
+/// \"success\"` branch, gated on whether `count > 0`, so a regression
+/// that renders both (or drops the `count > 0` gate) would show
+/// contradictory text simultaneously.
+#[test]
+fn discover_button_row_found_count_and_empty_hint_are_gated_on_count() {
+    let row = discover_button_row(SRC);
+    assert!(
+        row.contains("let count = discovered_items.get().len();\n                            if count > 0 {"),
+        "the found-count hint (\"{{count}} found\") and the empty-result hint (\"No \
+         {{noun}} found\") must branch on the same `count` value inside the single \
+         discover_status == \"success\" check — not on two independently-evaluated \
+         reads of discovered_items, which could disagree under a race: {row}"
+    );
+}
+
+// ── KYO-466 review follow-up: the Connection tab's "Test & Discover" /
+// "Validate & Discover Projects" path must consume resource_errors too ──
+//
+// The reviewer on the KYO-466 PR found a sibling code path with the exact
+// same defect the ticket fixed: `test_action`'s Effect (the Connection
+// tab's "Test & Discover" button, and BigQuery service-account's
+// "Validate & Discover Projects") populates `bq_projects` from
+// `r.resources.get("projects")` but never read `r.resource_errors` — so a
+// `list_projects()` denial reached through this path still produced an
+// empty, unexplained project dropdown. `discover_action`'s Effect
+// (Catalog tab, tested above) was the only consumer wired up in the
+// original PR.
+
+/// Bounds the extraction to `test_action`'s Effect specifically —
+/// `if let Some(result) = test_action.value().get()` is unique to this
+/// Effect (the sibling Catalog-tab Effect above matches on
+/// `discover_action.value().get()`), and stopping before
+/// `do_test_and_discover` (the function that dispatches `test_action` and
+/// immediately follows its Effect) keeps the slice to just the Effect body.
+fn test_action_effect(src: &str) -> &str {
+    extract_between(
+        src,
+        "Effect::new(move |_| {\n        if let Some(result) = test_action.value().get() {",
+        "let do_test_and_discover = move || {",
+    )
+}
+
+/// The core of the review finding: a per-key `resource_errors["projects"]`
+/// entry must actually reach `bq_projects_error` — not merely that
+/// `resource_errors` is read somewhere, but that the *specific* bound
+/// value (`reason`, from `r.resource_errors.get("projects")`) is what gets
+/// interpolated into the signal, not a hardcoded/generic string or a read
+/// of the wrong key. A test that only checked "resource_errors appears in
+/// this function" would pass for a mutation that reads the right map but
+/// writes a constant string, or reads `resource_errors.get("schemas")` by
+/// mistake — this pins the exact data flow instead (the KYO-427 lesson:
+/// assert the right thing is computed, not merely that the plumbing
+/// exists).
+#[test]
+fn test_action_effect_computes_bq_projects_error_from_the_bound_reason() {
+    let f = test_action_effect(SRC);
+
+    assert!(
+        f.contains("} else if let Some(reason) = r.resource_errors.get(\"projects\") {"),
+        "test_action's Effect must branch on r.resource_errors.get(\"projects\") as the \
+         else-arm of the r.resources.get(\"projects\") check — mutually exclusive with the \
+         success-with-items branch, not a separate unconditional check that could fire \
+         alongside it: {f}"
+    );
+    assert!(
+        f.contains(
+            "set_bq_projects_error.set(Some(format!(\"Couldn't list projects: {reason}\")));"
+        ),
+        "the exact `reason` bound from r.resource_errors.get(\"projects\") above must be \
+         what's interpolated into bq_projects_error — not a hardcoded string, and not a \
+         value read from a different variable — or a wrong-key/dropped-reason mutation \
+         would pass this test: {f}"
+    );
+}
+
+/// A successful project list must clear any stale `bq_projects_error` left
+/// over from a previous failed attempt at the same button — without this,
+/// fixing the underlying IAM permission and clicking "Validate & Discover
+/// Projects" again would show a populated dropdown *and* a leftover error
+/// message simultaneously.
+#[test]
+fn test_action_effect_clears_bq_projects_error_on_a_successful_list() {
+    let f = test_action_effect(SRC);
+    assert!(
+        f.contains(
+            "set_bq_projects.set(opts);\n                            set_bq_projects_error.set(None);"
+        ),
+        "the r.resources.get(\"projects\") success branch must clear bq_projects_error \
+         immediately after populating bq_projects — otherwise a stale error from a prior \
+         failed attempt lingers next to a freshly successful project list: {f}"
+    );
 }
