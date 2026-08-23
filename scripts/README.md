@@ -30,6 +30,34 @@ All scripts are organized by environment. **Every script is environment-specific
   explicit skip rather than silently continuing past; `1` is a usage error
   (bad argument, or not run inside a git repository).
 
+- **`append-review-log.sh`** - The write-side counterpart to
+  `mine-review-logs.sh` (KYO-396): appends a code-review entry (read from
+  stdin) to the canonical daily review log, from any worktree, so the
+  location is a property of the tooling instead of agent compliance with
+  an instruction (KYO-387 fixed the same failure by rewriting an
+  instruction in `~/.claude/agents/code-review-architect.md`; that held
+  only as long as every invocation followed it, and several didn't —
+  KYO-371, KYO-397). Run it as `some-command | scripts/append-review-log.sh`
+  or with a heredoc; it takes no arguments and appends to
+  `<canonical-root>/docs/review-logs/$(date +%F).md`, creating the
+  directory and/or file if absent. Concurrent-ish appends (e.g. two review
+  cycles for the same ticket, running from different worktrees) are
+  serialized with `flock` so entries never interleave and always land in
+  one file in call order. **Exit-code contract:** `0` success; `2` means
+  stdin was empty (or whitespace-only) — refused rather than writing a
+  blank entry; `1` is a usage/environment error (unexpected arguments, not
+  inside a git repository, or git older than 2.31). Self-tested by
+  `scripts/append-review-log-test.sh`, including a worktree-cwd
+  reproduction of the exact gap KYO-396 was filed to close.
+
+- **`lib/canonical-root.sh`** - Shared helper, meant to be `source`d rather
+  than run directly. Provides `resolve_canonical_root` and
+  `resolve_review_logs_dir`, used by both `mine-review-logs.sh` (read side)
+  and `append-review-log.sh` (write side) so the
+  `git rev-parse --path-format=absolute --git-common-dir` resolution and
+  the on-disk review-log path exist in exactly one place. `resolve_review_logs_dir`
+  is the single point of change if KYO-394 moves the canonical location.
+
 ## Directory Structure
 
 ```

@@ -35,19 +35,12 @@
 #
 # HOW THE CANONICAL CLONE IS RESOLVED
 #
-#   common_dir=$(git rev-parse --path-format=absolute --git-common-dir)
-#   canonical_root=$(dirname "$common_dir")
-#
-# `--git-common-dir` returns the shared .git directory for a worktree (the
-# main checkout's .git, not the worktree's own .git-file-pointer stub) —
-# this is what lets us find the canonical clone from ANY linked worktree.
-# The `--path-format=absolute` flag is load-bearing, not decorative: from
-# the MAIN repo, plain `git rev-parse --git-common-dir` returns a relative
-# `.git`, which is useless once you `dirname` it from a different cwd.
-# `--path-format=absolute` was verified (git 2.54.0) to return an absolute
-# path in both cases and requires git >= 2.31. If that flag is unsupported,
-# we fail loudly below rather than silently computing a wrong path from a
-# relative fallback.
+# Delegated to scripts/lib/canonical-root.sh, which this script sources
+# below. That file is also sourced by scripts/append-review-log.sh
+# (KYO-396) — the write-side counterpart to this read-side script — so the
+# resolution exists in exactly one place instead of being hand-copied into
+# each script that needs it. See that file's header for the full
+# `--path-format=absolute` rationale and the git-version guard.
 #
 # EXIT CODES
 #   0 — docs/review-logs/ was found (possibly with zero logs in the window;
@@ -68,6 +61,10 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/canonical-root.sh
+source "${SCRIPT_DIR}/lib/canonical-root.sh"
+
 days="${1:-7}"
 
 if ! [[ "$days" =~ ^[0-9]+$ ]] || [ "$days" -eq 0 ]; then
@@ -76,23 +73,17 @@ if ! [[ "$days" =~ ^[0-9]+$ ]] || [ "$days" -eq 0 ]; then
     exit 1
 fi
 
-if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    echo "ERROR: not inside a git repository — cannot locate the canonical clone." >&2
+# resolve_canonical_root() / resolve_review_logs_dir() already print a
+# diagnostic to stderr on failure (either "not inside a git repository" or
+# "unsupported git version" — see scripts/lib/canonical-root.sh). Both map
+# to usage-error exit 1 here, matching this script's own contract. Called
+# twice (once for the error message below, once for the actual path) rather
+# than derived from one another with `dirname`, so this script never
+# hardcodes how many path segments resolve_review_logs_dir appends.
+if ! canonical_root=$(resolve_canonical_root); then
     exit 1
 fi
-
-# --path-format requires git >= 2.31. Fail loudly rather than silently
-# falling back to a possibly-relative path that would resolve wrong.
-# (`set -e` does not abort on a failing command used as an `if` condition,
-# so capturing the output directly here is safe.)
-if ! common_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
-    echo "ERROR: 'git rev-parse --path-format=absolute' is unsupported by this git version" >&2
-    echo "       (requires git >= 2.31). Refusing to guess the canonical clone path." >&2
-    exit 1
-fi
-
-canonical_root=$(dirname "$common_dir")
-review_logs_dir="${canonical_root}/docs/review-logs"
+review_logs_dir=$(resolve_review_logs_dir)
 
 if [ ! -d "$review_logs_dir" ]; then
     {
