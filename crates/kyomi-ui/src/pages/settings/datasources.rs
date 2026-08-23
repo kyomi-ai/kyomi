@@ -7542,7 +7542,7 @@ fn CreateModeCatalogPicker(
                         <p class="text-sm text-muted-foreground">
                             "Select which "
                             {label}
-                            " to include in the catalog. Leave all unchecked to index everything."
+                            " to include in the catalog."
                         </p>
                     </div>
                 }
@@ -7574,12 +7574,19 @@ fn CreateModeCatalogPicker(
                 if items.is_empty() {
                     // No discovery results — render text input
                     let ds_type = datasource_type.get();
+                    // Placeholder describes the field only — it must never promise
+                    // an outcome discovery cannot guarantee (KYO-452). The
+                    // qualified claim ("...this account can list") lives in the
+                    // helper text below instead, driven by the same
+                    // catalog_item_label_for_type noun used throughout this file.
                     let placeholder = match ds_type.as_str() {
-                        "bigquery" => "Enter project IDs, comma-separated (leave blank to index all)",
-                        "clickhouse" | "mysql" | "snowflake" => "Enter database names, comma-separated (leave blank to index all)",
-                        "databricks" => "Enter catalog names, comma-separated (leave blank to index all)",
-                        _ => "Enter schema names, comma-separated (leave blank to index all)",
+                        "bigquery" => "Enter project IDs, comma-separated",
+                        "clickhouse" | "mysql" | "snowflake" => "Enter database names, comma-separated",
+                        "databricks" => "Enter catalog names, comma-separated",
+                        _ => "Enter schema names, comma-separated",
                     };
+                    let noun = catalog_item_label_for_type(&ds_type);
+                    let helper_text = format!("Leave blank to index all {noun} this account can list.");
                     view! {
                         <div class="space-y-1.5">
                             <input
@@ -7590,7 +7597,7 @@ fn CreateModeCatalogPicker(
                                 on:input=move |ev| set_catalog_text.set(event_target_value(&ev))
                             />
                             <p class="text-xs text-muted-foreground">
-                                "Leave blank to index all available items."
+                                {helper_text}
                             </p>
                         </div>
                     }.into_any()
@@ -8505,9 +8512,9 @@ fn EditModeCatalogTab(
                                 <p class="text-xs text-muted-foreground mb-3">
                                     "Select which "
                                     {item_label}
-                                    " to include in catalog indexing. Leave empty to index all available "
+                                    " to include in catalog indexing. Leave empty to index all "
                                     {item_label}
-                                    "."
+                                    " this account can list."
                                 </p>
                             </div>
                         }
@@ -11624,6 +11631,96 @@ mod tests {
         }
     }
 
+    // ── KYO-452: catalog-scope copy must never promise an unqualified
+    // "index all" outcome ───────────────────────────────────────────────
+    //
+    // The catalog-scope placeholder/helper text used to promise "leave
+    // blank/empty to index all" unconditionally. That promise only holds if
+    // discovery actually succeeds — for a BigQuery account whose IAM lacks
+    // `resourcemanager.projects.list` (a normal, least-privilege
+    // `BigQuery Job User` grant), discovery fails and leaving the field
+    // blank produces an empty catalog, the opposite of what the copy said.
+    // Six sites carried a variant of this claim (per the ticket's own grep);
+    // implementing the fix found a seventh — `CreateModeCatalogPicker`'s
+    // always-rendered header, worded differently ("leave all unchecked to
+    // index everything"), which is why a grep for "index all" / "leave
+    // blank" / "leave empty" missed it. All seven are enumerated
+    // individually below — a single coarse check would not name which site
+    // regressed, and a hand-typed "sites I remembered" list would not catch
+    // an eighth site added later with the same shape (see
+    // docs/standards/testing/enumerate-the-variant-registry.md).
+
+    /// Site 1 — `CreateModeCatalogPicker`'s header, rendered unconditionally
+    /// above both the checkbox-list and text-fallback branches. It used to
+    /// claim "leave all unchecked to index everything" regardless of
+    /// whether discovery had actually returned anything to check. The fix
+    /// drops the outcome clause entirely: the header now only describes the
+    /// field, and the qualified promise lives in the branch-specific copy
+    /// below it instead (covered by sites 2–6).
+    #[test]
+    fn create_mode_picker_header_drops_the_unconditional_index_all_promise() {
+        let f = extract_between(
+            SRC,
+            "fn CreateModeCatalogPicker(",
+            "fn view_service_account_form(",
+        );
+        let header = extract_between(f, "\"Catalog Scope\"</h4>", "</p>");
+        assert!(
+            !header.contains("Leave"),
+            "CreateModeCatalogPicker's header must not append an outcome-promising \
+             'Leave ...' clause — KYO-452 requires it to only describe the field, never \
+             promise an outcome discovery cannot guarantee"
+        );
+        assert!(
+            header.contains("to include in the catalog."),
+            "CreateModeCatalogPicker's header lost its descriptive text entirely"
+        );
+    }
+
+    /// Sites 2–5 — the four per-provider placeholders in
+    /// `CreateModeCatalogPicker`'s text-fallback branch. Each used to end in
+    /// the literal suffix `"(leave blank to index all)"` — an unconditional
+    /// promise baked into the `placeholder` attribute itself. The fix drops
+    /// that suffix from the placeholder (a placeholder is the wrong home for
+    /// a qualified, two-part sentence — DESIGN.md's spacing/density
+    /// conventions favor a concise placeholder plus adjacent helper text
+    /// over an overflowing one) and moves the qualified promise into the
+    /// helper text below (site 6).
+    #[test]
+    fn create_mode_picker_placeholders_no_longer_carry_the_index_all_suffix() {
+        let block = extract_between(
+            SRC,
+            "let placeholder = match ds_type.as_str() {",
+            "let noun = catalog_item_label_for_type(&ds_type);",
+        );
+        assert!(
+            !block.contains("(leave blank to index all)"),
+            "a CreateModeCatalogPicker placeholder still promises an unqualified \
+             'leave blank to index all' outcome — KYO-452 regressed"
+        );
+        for (provider, expected) in [
+            (
+                "bigquery",
+                "\"bigquery\" => \"Enter project IDs, comma-separated\",",
+            ),
+            (
+                "clickhouse/mysql/snowflake",
+                "\"clickhouse\" | \"mysql\" | \"snowflake\" => \"Enter database names, comma-separated\",",
+            ),
+            (
+                "databricks",
+                "\"databricks\" => \"Enter catalog names, comma-separated\",",
+            ),
+            ("fallback", "_ => \"Enter schema names, comma-separated\","),
+        ] {
+            assert!(
+                block.contains(expected),
+                "CreateModeCatalogPicker's {provider} placeholder does not match the \
+                 expected KYO-452 wording {expected:?}"
+            );
+        }
+    }
+
     /// Reachability guard, not a truth-table test: this proves the wiring
     /// between the KYO-408 predicate and the Connect/Reconnect buttons
     /// cannot be silently deleted from ModalOAuthStatusPanel without a test
@@ -11711,5 +11808,95 @@ mod tests {
             "the Disconnect button (Connected branch) must not read connect_blocked — \
              that gate governs starting a new connection, not ending an existing one"
         );
+    }
+
+    /// Site 6 — the helper text under the text-fallback input. Used to be a
+    /// single hardcoded "Leave blank to index all available items." for
+    /// every provider. Now built per-provider from
+    /// `catalog_item_label_for_type` — the same function that already
+    /// supplies every other per-provider noun in this file (KYO-300) — and
+    /// qualified with "this account can list", the load-bearing phrase from
+    /// the ticket's own suggested wording.
+    #[test]
+    fn create_mode_picker_fallback_helper_text_is_qualified_per_provider() {
+        let f = extract_between(
+            SRC,
+            "fn CreateModeCatalogPicker(",
+            "fn view_service_account_form(",
+        );
+        assert!(
+            !f.contains("Leave blank to index all available items."),
+            "CreateModeCatalogPicker's fallback helper text regressed to the old \
+             unqualified 'index all available items' promise — KYO-452 regressed"
+        );
+        assert!(
+            f.contains("let noun = catalog_item_label_for_type(&ds_type);"),
+            "the fallback helper text must derive its noun from \
+             catalog_item_label_for_type — the single source of truth for the \
+             per-provider item noun used throughout this file, not a re-typed match"
+        );
+        assert!(
+            f.contains("format!(\"Leave blank to index all {noun} this account can list.\")"),
+            "the fallback helper text must carry the qualifier 'this account can list' — \
+             the load-bearing part of the KYO-452 fix; without it the promise is \
+             unqualified again"
+        );
+    }
+
+    /// Site 7 — `EditModeCatalogTab`'s always-visible Catalog-tab header
+    /// (the second component with catalog-scope copy — `CreateModeCatalogPicker`
+    /// above is create-mode only). It used to read "...Leave empty to index
+    /// all available {item_label}." — the same unqualified promise as sites
+    /// 2–5, worded with "available" instead of "(leave blank to index
+    /// all)", which is why the ticket's grep for that exact four-variant
+    /// phrase missed it.
+    #[test]
+    fn edit_mode_catalog_tab_header_is_qualified() {
+        let f = extract_between(SRC, "fn EditModeCatalogTab(", MOD_TESTS_MARKER);
+        assert!(
+            !f.contains("Leave empty to index all available"),
+            "EditModeCatalogTab's header still promises an unqualified 'index all \
+             available' outcome — KYO-452 regressed"
+        );
+        assert!(
+            f.contains("Leave empty to index all "),
+            "EditModeCatalogTab's header lost the index-all guidance entirely"
+        );
+        assert!(
+            f.contains("this account can list."),
+            "EditModeCatalogTab's header must carry the qualifier 'this account can \
+             list' — without it the promise is unqualified again"
+        );
+    }
+
+    /// Safety net beyond the seven enumerated sites above: no *new* site
+    /// introduced anywhere else in this file may adopt the same unqualified
+    /// shape either. Checked against the exact fragments that made every
+    /// prior site false — deliberately NOT the bare words "index all" or
+    /// "index everything" on their own, both of which also appear in copy
+    /// that is legitimately unqualified-promise-free: the discovered-items
+    /// branch's own accurate "all (leave unchecked to index everything)"
+    /// (conditioned on real discovery results already on screen, so the
+    /// promise is true there), the BYOK "leave blank to keep the existing
+    /// key" copy, and the Snowflake role field's "leave empty for default".
+    #[test]
+    fn no_new_site_introduces_the_kyo_452_unqualified_promise_shape() {
+        let mod_tests_start = SRC
+            .find(MOD_TESTS_MARKER)
+            .expect("MOD_TESTS_MARKER not found in datasources.rs");
+        let prod = &SRC[..mod_tests_start];
+        for banned in [
+            "(leave blank to index all)",
+            "Leave blank to index all available",
+            "Leave empty to index all available",
+            "Leave all unchecked to index everything.",
+        ] {
+            assert!(
+                !prod.contains(banned),
+                "found the KYO-452 unqualified promise fragment {banned:?} somewhere in \
+                 datasources.rs — every catalog-scope copy site must be qualified with \
+                 'this account can list' (or reworded to not promise an outcome at all)"
+            );
+        }
     }
 }
