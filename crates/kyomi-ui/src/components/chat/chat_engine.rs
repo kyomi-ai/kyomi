@@ -19,6 +19,10 @@
 //! - If `context_type` is Some: filters WS events by context_type AND session_id
 //!   (copilot pattern).
 //! - If `context_type` is None: filters by session_id only (main chat pattern).
+//! - **Default-deny (KYO-494)**: the session_id check never admits an event
+//!   when either side is missing an identity — a `None` engine session_id
+//!   (a brand-new, not-yet-created chat) is not "no filter," it's "nothing
+//!   matches yet." See `should_handle`'s doc comment below.
 
 use leptos::prelude::*;
 
@@ -506,6 +510,63 @@ impl ChatEngine {
     }
 }
 
+// ─── WS event filtering (KYO-494) ──────────────────────────────────────────
+//
+// Pulled out of the WS-subscription closures as plain functions — no
+// signals, no reactivity — so the default-deny invariant below is directly
+// unit-testable without a WASM/reactive-owner harness, and so every
+// subscription handler (there were four independent copies of this logic
+// before KYO-494: `should_handle` itself, plus ad hoc duplicates in the
+// token_usage_update, request_cancelled, and custom-event handlers) goes
+// through one implementation instead of four that could silently drift.
+
+/// Whether an event's `context_type` matches the engine's own filter.
+///
+/// `filter = None` means "no context filtering" — the main chat page's
+/// mode, where every event that reaches the WS layer already belongs to
+/// this user's connection. Copilot sidebars set `filter = Some(ctx)` and
+/// require an exact match.
+///
+/// `cfg(any(test, wasm32))`: the only production caller is
+/// `should_handle_event` inside the wasm32-only `setup_ws_subscriptions`
+/// below. Compiled unconditionally would make this "unused" on a plain
+/// non-wasm32, non-test host build; gating it here keeps that build clean
+/// while still compiling for `cargo test` (host) and the real wasm32
+/// target.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn context_type_matches(filter: Option<&str>, event_context_type: Option<&str>) -> bool {
+    match filter {
+        Some(expected) => event_context_type == Some(expected),
+        None => true,
+    }
+}
+
+/// Whether a WS event's `session_id` matches the engine's current session.
+///
+/// **Default-deny**: `should_handle` must never return `true` when either
+/// side is missing an identity. Before KYO-494, a `None` engine session
+/// (the state of a brand-new, not-yet-persisted chat) was treated as "no
+/// filter" and admitted events for *every* session — on the `/chat` route a
+/// new chat sits in exactly that state, so another in-flight conversation's
+/// `chat_stream`/`chat_complete`/`agent_thinking` frames rendered straight
+/// into the empty new-chat window. The fix on the caller's side is for the
+/// client to mint a session id before the first message ever leaves (see
+/// `chat_page.rs`), so `current_session_id` should already be `Some` by the
+/// time this engine's *own* new session starts producing events. This
+/// function still gets called with `current_session_id = None` routinely
+/// though — e.g. sitting on an empty `/chat` while another of the user's
+/// sessions is still streaming — and must keep refusing to guess there too.
+///
+/// `cfg(any(test, wasm32))`: see `context_type_matches` above — same
+/// reasoning, same set of production callers.
+#[cfg(any(test, target_arch = "wasm32"))]
+pub(crate) fn should_handle(current_session_id: Option<&str>, msg_session_id: Option<&str>) -> bool {
+    match (current_session_id, msg_session_id) {
+        (Some(current), Some(msg)) => current == msg,
+        _ => false,
+    }
+}
+
 // ─── WebSocket subscription setup ──────────────────────────────────────────
 
 /// Reactive signals owned by the engine — passed as a unit to `setup_ws_subscriptions`
@@ -538,32 +599,20 @@ fn setup_ws_subscriptions(
     // panics during the race between cleanup and async WS delivery.
     let disposed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    // Helper: check if an event belongs to this engine instance.
-    // When context_type is Some, filter by both context_type AND session_id.
-    // When context_type is None, filter by session_id only (allowing null
-    // session during new chat creation race condition).
-    let should_handle = move |event_context_type: Option<&str>,
-                              msg_session_id: Option<&str>|
+    // Helper: check if an event belongs to this engine instance. Reads the
+    // engine's reactive state and delegates to the pure, unit-tested
+    // `context_type_matches` / `should_handle` functions above — see their
+    // doc comments for the KYO-494 default-deny invariant this must uphold.
+    let should_handle_event = move |event_context_type: Option<&str>,
+                                    msg_session_id: Option<&str>|
           -> bool {
         let ctx_type = context_type.try_get_value().flatten();
+        if !context_type_matches(ctx_type.as_deref(), event_context_type) {
+            return false;
+        }
 
-        // If we have a context_type filter, the event must match it.
-        if let Some(ref expected_ctx) = ctx_type
-            && event_context_type != Some(expected_ctx.as_str()) {
-                return false;
-            }
-
-        // Session ID check: if we have a current session, the event must match.
-        // If we don't have a session yet (new chat race condition in External mode),
-        // allow the event through.
         let current_sid = session_id.try_get_untracked().flatten();
-        if let Some(sid) = &current_sid
-            && let Some(msg_sid) = msg_session_id
-                && msg_sid != sid.as_str() {
-                    return false;
-                }
-
-        true
+        should_handle(current_sid.as_deref(), msg_session_id)
     };
 
     // ── agent_thinking ─────────────────────────────────────────────
@@ -592,7 +641,7 @@ fn setup_ws_subscriptions(
             .and_then(|v| v.get("context_type"))
             .and_then(|v| v.as_str());
 
-        if !should_handle(event_context_type, msg.session_id.as_deref()) {
+        if !should_handle_event(event_context_type, msg.session_id.as_deref()) {
             return;
         }
 
@@ -647,7 +696,7 @@ fn setup_ws_subscriptions(
             .and_then(|d| d.get("context_type"))
             .and_then(|v| v.as_str());
 
-        if !should_handle(event_context_type, msg.session_id.as_deref()) {
+        if !should_handle_event(event_context_type, msg.session_id.as_deref()) {
             return;
         }
 
@@ -706,7 +755,7 @@ fn setup_ws_subscriptions(
             .and_then(|d| d.get("context_type"))
             .and_then(|v| v.as_str());
 
-        if !should_handle(event_context_type, msg.session_id.as_deref()) {
+        if !should_handle_event(event_context_type, msg.session_id.as_deref()) {
             return;
         }
 
@@ -775,11 +824,11 @@ fn setup_ws_subscriptions(
         };
 
         // Filter by session_id (no context_type filter for token updates).
+        // Default-deny — see `should_handle`'s doc comment (KYO-494).
         let current_sid = session_id.try_get_untracked().flatten();
-        if let Some(sid) = &current_sid
-            && msg.session_id.as_deref() != Some(sid.as_str()) {
-                return;
-            }
+        if !should_handle(current_sid.as_deref(), msg.session_id.as_deref()) {
+            return;
+        }
 
         thinking_for_token.update_token_usage(&msg_message_id, token_update);
     });
@@ -826,11 +875,13 @@ fn setup_ws_subscriptions(
 
         // Confirm cancellation if this event belongs to the active message OR,
         // when cancelling during Sending (no message_id set yet), if the event
-        // session matches the active session.
+        // session matches the active session. Default-deny (KYO-494): two
+        // missing session ids are not a match, so this used `should_handle`
+        // instead of `==` — `None == None` would otherwise have been `true`.
+        let current_sid = session_id.try_get_untracked().flatten();
         let is_ours = chat_state_cancelled.is_active_message(&msg_message_id)
             || (chat_state_cancelled.active_message_id().try_get_untracked().flatten().is_none()
-                && msg.session_id.as_deref()
-                    == session_id.try_get_untracked().flatten().as_deref());
+                && should_handle(current_sid.as_deref(), msg.session_id.as_deref()));
 
         if is_ours {
             chat_state_cancelled.confirm_cancelled();
@@ -859,24 +910,21 @@ fn setup_ws_subscriptions(
             if disposed_custom.load(std::sync::atomic::Ordering::Relaxed) { return; }
             // Apply the same filtering as other events.
             let ctx_type = context_type.try_get_value().flatten();
-            if let Some(ref expected_ctx) = ctx_type {
-                let event_context_type = msg
-                    .data
-                    .as_ref()
-                    .and_then(|d| d.get("context_type"))
-                    .and_then(|v| v.as_str());
-
-                if event_context_type != Some(expected_ctx.as_str()) {
-                    return;
-                }
+            let event_context_type = msg
+                .data
+                .as_ref()
+                .and_then(|d| d.get("context_type"))
+                .and_then(|v| v.as_str());
+            if !context_type_matches(ctx_type.as_deref(), event_context_type) {
+                return;
             }
 
-            // Filter by session_id.
+            // Filter by session_id. Default-deny — see `should_handle`'s doc
+            // comment (KYO-494).
             let current_sid = session_id.try_get_untracked().flatten();
-            if let Some(sid) = &current_sid
-                && msg.session_id.as_deref() != Some(sid.as_str()) {
-                    return;
-                }
+            if !should_handle(current_sid.as_deref(), msg.session_id.as_deref()) {
+                return;
+            }
 
             if let Some(data) = msg.data
                 && let Some(cb) = on_custom_event {
@@ -906,4 +954,97 @@ fn setup_ws_subscriptions(
             unsub.take()();
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    //! KYO-494: chat_stream/chat_complete/agent_thinking events leaked
+    //! across sessions because `should_handle` treated "the engine has no
+    //! session id yet" as "admit everything." These tests cover the
+    //! default-deny invariant directly on the pure filtering functions —
+    //! no WASM/reactive-owner harness needed, since `should_handle` and
+    //! `context_type_matches` take plain values, not signals.
+
+    use super::*;
+
+    // ── should_handle: default-deny on missing identity ─────────────────
+
+    #[test]
+    fn should_handle_denies_when_engine_has_no_session_yet() {
+        // The exact reproduction from the ticket: a brand-new chat (no
+        // session id yet) must not admit another session's event.
+        assert!(!should_handle(None, Some("other-session")));
+    }
+
+    #[test]
+    fn should_handle_denies_when_event_carries_no_session_id() {
+        assert!(!should_handle(Some("sess-1"), None));
+    }
+
+    #[test]
+    fn should_handle_denies_when_both_sides_are_missing() {
+        // Regression guard for the `request_cancelled` handler's old `==`
+        // comparison, where `None == None` evaluated to `true`.
+        assert!(!should_handle(None, None));
+    }
+
+    #[test]
+    fn should_handle_denies_mismatched_sessions() {
+        assert!(!should_handle(Some("sess-1"), Some("sess-2")));
+    }
+
+    #[test]
+    fn should_handle_admits_matching_sessions() {
+        assert!(should_handle(Some("sess-1"), Some("sess-1")));
+    }
+
+    // ── context_type_matches ─────────────────────────────────────────────
+
+    #[test]
+    fn context_type_matches_no_filter_admits_anything() {
+        // Main chat mode: context_type is None, so this check never gates.
+        assert!(context_type_matches(None, None));
+        assert!(context_type_matches(None, Some("dashboard_copilot")));
+    }
+
+    #[test]
+    fn context_type_matches_requires_exact_match_when_filtering() {
+        assert!(context_type_matches(
+            Some("dashboard_copilot"),
+            Some("dashboard_copilot")
+        ));
+        assert!(!context_type_matches(Some("dashboard_copilot"), Some("chart_copilot")));
+        assert!(!context_type_matches(Some("dashboard_copilot"), None));
+    }
+
+    // ── Copilot path: its own None-session window must stay closed ──────
+    //
+    // Ephemeral (copilot) engines set context_type = Some(..) and start
+    // with session_id = None until `create_copilot_session` resolves. That
+    // window must be denied exactly like the main chat's, not treated as
+    // "context matched, so admit it anyway."
+
+    #[test]
+    fn copilot_pending_session_denies_events_even_with_matching_context_type() {
+        let ctx_filter = Some("dashboard_copilot");
+        let event_context_type = Some("dashboard_copilot");
+        assert!(
+            context_type_matches(ctx_filter, event_context_type),
+            "context_type matching is a precondition, not the full story"
+        );
+
+        // The engine's own session_id is still None (session creation
+        // in flight) — an event for some other copilot session must be
+        // denied, not admitted just because the context_type matched.
+        let engine_session_id: Option<&str> = None;
+        assert!(!should_handle(engine_session_id, Some("some-other-copilot-session")));
+    }
+
+    #[test]
+    fn copilot_admits_once_its_own_session_is_established() {
+        let ctx_filter = Some("dashboard_copilot");
+        let event_context_type = Some("dashboard_copilot");
+        assert!(context_type_matches(ctx_filter, event_context_type));
+        assert!(should_handle(Some("copilot-sess-1"), Some("copilot-sess-1")));
+    }
 }
