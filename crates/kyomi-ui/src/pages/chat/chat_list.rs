@@ -74,6 +74,24 @@ fn get_chat_status(session: &ChatSessionItem, current_user_id: &str) -> ChatStat
 /// `user_id` field. The `created_by` check is equivalent because the service
 /// layer always populates `created_by` for sessions the user owns, so the
 /// fallback is unnecessary here.
+///
+/// The `None` branch below is legacy-data handling, not a live server gap —
+/// as of KYO-491 every one of `chat_service`'s three snapshot producers
+/// (`write_new_session_sync_entry`'s `sync_log` write for a brand-new
+/// session, `fetch_session_snapshot`'s live broadcast,
+/// `list_sessions_for_sync`'s bootstrap) routes through
+/// `session_snapshot_json`, which always populates `created_by`. It stays
+/// because IndexedDB is a *cache*, not a re-derived view: a row a client
+/// already has on disk from before this fix — written by the old
+/// `create_session` (removed by KYO-494/#402; its replacement,
+/// `write_new_session_sync_entry`, carried the identical minimal shape
+/// until this fix), which only ever wrote `session_id`/`title`/timestamps
+/// to `sync_log` — keeps `created_by: None` until that specific session is
+/// re-bootstrapped (full IDB wipe, or the entity ages out), which is not
+/// guaranteed to happen on upgrade. Removing this branch would silently
+/// misclassify every such cached row the moment a user upgrades without a
+/// full re-sync — see PR #400's identical reasoning for keeping the
+/// mixed-timestamp tolerance in `sort_sessions_by_recency` above.
 fn is_session_owned(session: &ChatSessionItem, current_user_id: &str) -> bool {
     if let Some(ref created_by) = session.created_by {
         created_by.user_id == current_user_id

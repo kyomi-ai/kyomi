@@ -156,11 +156,36 @@ impl SyncStore {
     }
 
     /// Insert or update a chat session by `session_id`.
+    ///
+    /// `unread_count` is preserved from the existing entry rather than
+    /// overwritten by `item`'s value on an update (KYO-491). It is a
+    /// property of a *(session, viewer)* pair, not of the session row
+    /// alone, and every server-side snapshot producer that feeds this
+    /// method — `write_new_session_sync_entry`'s own `sync_log` write (the
+    /// new-session path) and `fetch_session_snapshot`'s live broadcast
+    /// (`kyomi_auth::chat_service::session_snapshot_json`) — always emits
+    /// `unread_count: 0`, because none of them know "the viewer" in the
+    /// general case (a broadcast can reach several workspace members with
+    /// different read positions). The client is the only side tracking it
+    /// correctly between full syncs: the optimistic `+= 1` on
+    /// `shared_conversation_activity` in `chat_list.rs`. Overwriting on
+    /// every update — a title rename, a share toggle, a new message in an
+    /// *unrelated* metadata sense — silently reset that badge to 0 before
+    /// this fix.
+    ///
+    /// On INSERT (a session not already in the list — bootstrap, or a
+    /// session seen live for the first time) there is nothing local to
+    /// preserve, so `item`'s value is taken as-is.
+    ///
+    /// `message_count` / `pinned_count` are real, session-level facts
+    /// computed by every producer (KYO-491) and are always taken from `item`.
     pub fn upsert_chat_session(&self, item: ChatSessionItem) {
         self.inner.with_value(|inner| {
             inner.chat_sessions.update(|list| {
                 if let Some(existing) = list.iter_mut().find(|s| s.session_id == item.session_id) {
+                    let unread_count = existing.unread_count;
                     *existing = item;
+                    existing.unread_count = unread_count;
                 } else {
                     list.push(item);
                 }
@@ -491,5 +516,113 @@ mod reconciliation_tests {
             1,
             "clearing an unrelated entity type must not touch watches"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `ChatSessionItem` with the given title/`unread_count`, otherwise
+    /// matching the shape `kyomi_auth::chat_service::session_snapshot_json`
+    /// emits for a live sync update (real `created_at`/`updated_at`, real
+    /// `message_count`/`pinned_count`, `unread_count: 0`).
+    fn make_session(session_id: &str, title: &str, unread_count: i64) -> ChatSessionItem {
+        ChatSessionItem {
+            session_id: session_id.to_string(),
+            title: Some(title.to_string()),
+            model: Some("test-model".to_string()),
+            session_type: Some("chat".to_string()),
+            shared: false,
+            shared_at: None,
+            created_at: "2026-08-23T10:00:00+00:00".to_string(),
+            updated_at: "2026-08-23T10:00:00+00:00".to_string(),
+            message_count: 1,
+            pinned_count: 0,
+            unread_count,
+            created_by: None,
+            slack_channel_id: None,
+        }
+    }
+
+    /// KYO-491: `unread_count` is a *(session, viewer)* fact none of the
+    /// server-side snapshot producers can supply for an arbitrary recipient
+    /// — every one of them emits `unread_count: 0`
+    /// (`kyomi_auth::chat_service::session_snapshot_json`). `upsert_chat_session`
+    /// must preserve the store's own count across an unrelated metadata
+    /// update (here: a title rename) rather than let it get silently reset
+    /// to that placeholder 0.
+    #[test]
+    fn upsert_preserves_unread_count_across_a_title_update() {
+        let owner = Owner::new();
+        owner.set();
+
+        let store = SyncStore::new();
+        store.upsert_chat_session(make_session("sess-1", "Original title", 3));
+
+        // Simulate the sync engine applying a title-update sync action: a
+        // freshly deserialized snapshot with the server's placeholder 0.
+        store.upsert_chat_session(make_session("sess-1", "Renamed title", 0));
+
+        let sessions = store.chat_sessions().get_untracked();
+        let session = sessions
+            .iter()
+            .find(|s| s.session_id == "sess-1")
+            .expect("session must still be present after the update");
+        assert_eq!(
+            session.title.as_deref(),
+            Some("Renamed title"),
+            "the title update itself must still apply"
+        );
+        assert_eq!(
+            session.unread_count, 3,
+            "unread_count must survive an unrelated metadata update, not be reset to the \
+             snapshot's placeholder 0"
+        );
+    }
+
+    /// A session seen for the first time (bootstrap insert, or a brand-new
+    /// session broadcast to its own creator) has nothing local to preserve —
+    /// the incoming value is taken as-is.
+    #[test]
+    fn upsert_takes_incoming_unread_count_on_first_insert() {
+        let owner = Owner::new();
+        owner.set();
+
+        let store = SyncStore::new();
+        store.upsert_chat_session(make_session("sess-1", "Title", 2));
+
+        let sessions = store.chat_sessions().get_untracked();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].unread_count, 2);
+    }
+
+    /// `message_count` / `pinned_count` are real, session-level facts on
+    /// every producer (KYO-491) and must always take the incoming value —
+    /// unlike `unread_count`, they are never preserved from the existing
+    /// entry.
+    #[test]
+    fn upsert_takes_incoming_message_and_pinned_counts_on_update() {
+        let owner = Owner::new();
+        owner.set();
+
+        let store = SyncStore::new();
+        let mut first = make_session("sess-1", "Title", 0);
+        first.message_count = 1;
+        first.pinned_count = 0;
+        store.upsert_chat_session(first);
+
+        let mut second = make_session("sess-1", "Title", 0);
+        second.message_count = 5;
+        second.pinned_count = 2;
+        store.upsert_chat_session(second);
+
+        let sessions = store.chat_sessions().get_untracked();
+        let session = sessions
+            .iter()
+            .find(|s| s.session_id == "sess-1")
+            .expect("session must still be present after the update");
+        assert_eq!(session.message_count, 5);
+        assert_eq!(session.pinned_count, 2);
     }
 }
