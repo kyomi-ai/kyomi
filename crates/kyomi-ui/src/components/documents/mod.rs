@@ -9,4 +9,5 @@ pub mod document_card_grid;
 pub mod search_sort_bar;
 
 pub use document_card_grid::{format_relative_time, DocumentCardGrid, DocumentCardGridSkeleton};
+pub(crate) use document_card_grid::sort_document_list_items;
 pub use search_sort_bar::SearchSortBar;
