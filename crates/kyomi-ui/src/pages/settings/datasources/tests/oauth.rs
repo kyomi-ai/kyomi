@@ -2,7 +2,8 @@
 //! its per-provider source mapping (KYO-197), the create-mode status
 //! fetch predicate (KYO-411), popup-monitor recovery (KYO-437), the
 //! kyomi_oauth access-request notice/gate and Google-error translation
-//! (KYO-408), and the Connect/Reconnect button wiring (KYO-427).
+//! (KYO-408), and the Connect/Reconnect button wiring (KYO-427, corrected
+//! to use its own separate gate rather than Save/Create's in KYO-477).
 
 use super::{appears_shortly_before, extract_between, SRC};
 
@@ -878,6 +879,121 @@ fn bq_kyomi_oauth_access_gate_blocks_unchecked_and_releases_when_checked() {
     );
 }
 
+// ── KYO-477: Connect/Reconnect gets its OWN predicate ───────────────────
+//
+// KYO-427 pointed the "Connect BigQuery" button at `bq_kyomi_oauth_access_ok`
+// — the Save/Create gate above, which OR's in `oauth_connected`. That
+// shipped in v2.6.5 with a green review and a mutation-proved test
+// (`bigquery_kyomi_oauth_connect_button_reads_the_shared_access_ok_signal`,
+// below) — and did not fix the reported behavior, because `oauth_connected`
+// for kyomi_oauth is account-level: true forever, for every datasource,
+// once a user has linked Google to Kyomi even once. The prior test proved
+// the button *read a signal*; it never proved the signal computed the
+// right answer for a returning, previously-linked user trying a *new*
+// datasource without having confirmed access for it. That is the gap this
+// section closes.
+
+use super::super::bq_kyomi_oauth_connect_allowed;
+
+/// `bq_kyomi_oauth_connect_allowed` — the pure predicate behind the
+/// KYO-477 Connect/Reconnect gate — exercised directly. Unlike
+/// `bq_kyomi_oauth_access_gate_satisfied` above, this predicate does not
+/// even accept an `oauth_connected` argument: Connect must always require
+/// its own explicit, in-the-moment confirmation.
+#[test]
+fn bq_kyomi_oauth_connect_allowed_blocks_unchecked_and_releases_when_checked() {
+    // Blocked: BigQuery kyomi_oauth, checkbox unchecked.
+    assert!(
+        !bq_kyomi_oauth_connect_allowed("bigquery", "kyomi_oauth", false),
+        "the Connect gate must block BigQuery kyomi_oauth when access_confirmed is false"
+    );
+
+    // Released by the checkbox alone.
+    assert!(
+        bq_kyomi_oauth_connect_allowed("bigquery", "kyomi_oauth", true),
+        "ticking the confirmation checkbox must release the Connect gate"
+    );
+
+    // Unaffected: BigQuery service_account and enterprise_oauth.
+    assert!(
+        bq_kyomi_oauth_connect_allowed("bigquery", "service_account", false),
+        "service_account has no Kyomi Google-account allowlist — the Connect gate must \
+         never block it"
+    );
+    assert!(
+        bq_kyomi_oauth_connect_allowed("bigquery", "enterprise_oauth", false),
+        "enterprise_oauth uses the customer's own OAuth app, not Kyomi's — the Connect \
+         gate must never block it"
+    );
+
+    // Unaffected: a non-BigQuery provider, even if (hypothetically) its
+    // auth mode string were literally "kyomi_oauth".
+    assert!(
+        bq_kyomi_oauth_connect_allowed("snowflake", "kyomi_oauth", false),
+        "the Connect gate is BigQuery-specific — ds_type must be checked, not auth_mode \
+         alone"
+    );
+}
+
+/// Wiring companion to the pure-predicate test above: the
+/// `bq_kyomi_oauth_connect_ok` `Signal::derive` definition itself in
+/// `DatasourceModal` (not merely its `connect_blocked` call site, covered
+/// by `bigquery_kyomi_oauth_connect_button_reads_the_connect_only_signal`
+/// below) must never read any spelling of `oauth_connected` — a `||
+/// modal_oauth_connected.get()` folded in at the definition site would
+/// reintroduce KYO-477 without changing anything the connect_blocked
+/// wiring test inspects.
+#[test]
+fn bq_kyomi_oauth_connect_ok_definition_never_reads_oauth_connected() {
+    let definition = extract_between(
+        SRC,
+        "let bq_kyomi_oauth_connect_ok: Signal<bool> = Signal::derive(move || {",
+        "});",
+    );
+    assert!(
+        definition.contains("bq_kyomi_oauth_connect_allowed("),
+        "bq_kyomi_oauth_connect_ok must be defined by calling bq_kyomi_oauth_connect_allowed"
+    );
+    assert!(
+        !definition.to_lowercase().contains("oauth_connected"),
+        "KYO-477: the bq_kyomi_oauth_connect_ok Signal::derive body must not read \
+         oauth_connected (in any spelling — modal_oauth_connected, oauth_connected, \
+         etc.) — folding an account-level connected flag in here is the exact defect \
+         this ticket fixes, found:\n{definition}"
+    );
+}
+
+/// The exact regression KYO-477 was filed against, and the acceptance
+/// criterion the ticket names explicitly: a Kyomi user who has linked
+/// Google to their account before (`oauth_connected == true`,
+/// account-level and permanently true from here on) must still be
+/// blocked from clicking Connect on a datasource they have not
+/// confirmed access for. Save/Create's own gate is contrasted directly
+/// alongside it to make the point unmissable: the same
+/// `oauth_connected = true, access_confirmed = false` inputs must
+/// release ONE gate and hold the OTHER — that is the entire fix.
+#[test]
+fn connect_gate_stays_blocked_when_oauth_connected_but_not_confirmed() {
+    // Save/Create: unaffected by this fix, correctly stays satisfied.
+    assert!(
+        bq_kyomi_oauth_access_gate_satisfied("bigquery", "kyomi_oauth", true, false),
+        "Save/Create must remain satisfied once oauth_connected is true, regardless of \
+         access_confirmed — this is existing, correct, unchanged Save/Create behavior"
+    );
+
+    // Connect: must NOT reuse that same permissive path. This predicate
+    // structurally cannot read `oauth_connected` at all — it only takes
+    // `access_confirmed` — so an account-level "linked somewhere, some
+    // time" can never silently satisfy it.
+    assert!(
+        !bq_kyomi_oauth_connect_allowed("bigquery", "kyomi_oauth", false),
+        "KYO-477: Connect must stay BLOCKED when access_confirmed is false, even though \
+         oauth_connected is (permanently, account-wide) true — this is the exact defect \
+         that let a previously-linked user bypass the checkbox and reach a doomed OAuth \
+         round-trip on every subsequent datasource"
+    );
+}
+
 /// The gate must be wired into the edit-mode Save button and the
 /// create-mode Catalog-tab Create button, but deliberately NOT into
 /// the create-mode Connection-tab Next button — matching the React
@@ -1008,15 +1124,21 @@ fn google_error_translation_is_not_applied_to_other_providers_error_arms() {
     );
 }
 
-// ── KYO-427: gate "Connect BigQuery" on the same attestation checkbox ──
+// ── KYO-427/KYO-477: gate "Connect BigQuery" on its OWN attestation gate ─
 
 /// The KYO-408 checkbox previously gated only Save/Create, which in
 /// create mode is unreachable until OAuth has already succeeded — so it
 /// gated nothing where it mattered. KYO-427 requires the kyomi_oauth
-/// `ModalOAuthStatusPanel`'s "Connect BigQuery" button itself to read
-/// the *same* `bq_kyomi_oauth_access_ok` signal the footer reads (KYO-423
-/// forbids a second, independently-derived copy of the predicate) — not
-/// merely that some predicate with a similar name exists nearby.
+/// `ModalOAuthStatusPanel`'s "Connect BigQuery" button itself to read a
+/// gate driven by the same checkbox — but KYO-477 corrects *which*
+/// signal that must be: `bq_kyomi_oauth_connect_ok`, NOT
+/// `bq_kyomi_oauth_access_ok` (the Save/Create signal, which OR's in the
+/// account-level `oauth_connected` and therefore defeats the checkbox
+/// for any previously-linked user — see `bq_kyomi_oauth_connect_allowed`'s
+/// doc comment). This test also asserts the negative: the connect_blocked
+/// derive must NOT read `bq_kyomi_oauth_access_ok` at all, so a
+/// regression back to the KYO-427 shape fails loudly here rather than
+/// silently passing a "some gate exists" check.
 ///
 /// Scoped to `kyomi_block`, the `<Show when=bq_auth_mode == "kyomi_oauth">`
 /// body used by the sibling KYO-404 tests above — this is the same
@@ -1024,7 +1146,7 @@ fn google_error_translation_is_not_applied_to_other_providers_error_arms() {
 /// enterprise_oauth block (which must NOT gain this gate, see the next
 /// test) from making either assertion pass vacuously.
 #[test]
-fn bigquery_kyomi_oauth_connect_button_reads_the_shared_access_ok_signal() {
+fn bigquery_kyomi_oauth_connect_button_reads_the_connect_only_signal() {
     let kyomi_block = extract_between(
         SRC,
         "<Show when=move || bq_auth_mode.get() == \"kyomi_oauth\">",
@@ -1038,14 +1160,52 @@ fn bigquery_kyomi_oauth_connect_button_reads_the_shared_access_ok_signal() {
     assert!(
         appears_shortly_before(
             kyomi_block,
-            "!bq_kyomi_oauth_access_ok.get()",
+            "!bq_kyomi_oauth_connect_ok.get()",
             "on_disconnect=on_google_disconnect",
             200,
         ),
         "the kyomi_oauth ModalOAuthStatusPanel's connect_blocked derive must read \
-         bq_kyomi_oauth_access_ok — the exact signal the footer's Save/Create gate \
-         reads (see that signal's doc comment in DatasourceModal) — and not a second, \
-         independently-derived copy of bq_kyomi_oauth_access_gate_satisfied (KYO-423)"
+         bq_kyomi_oauth_connect_ok — the Connect-only gate (KYO-477) — not \
+         bq_kyomi_oauth_access_ok, the Save/Create gate"
+    );
+    // Narrowly scoped to the connect_blocked derive itself — NOT the whole
+    // kyomi_block, which legitimately still mentions bq_kyomi_oauth_access_ok
+    // in an explanatory comment a few lines above (contrasting the two
+    // gates). Only the derive's own body must never read it.
+    let connect_blocked_derive = extract_between(
+        kyomi_block,
+        "connect_blocked=Signal::derive(move || {",
+        "on_disconnect=on_google_disconnect",
+    );
+    assert!(
+        !connect_blocked_derive.contains("bq_kyomi_oauth_access_ok"),
+        "KYO-477: the connect_blocked derive must not read bq_kyomi_oauth_access_ok — \
+         that would be the exact defect this ticket fixes"
+    );
+
+    // Exact-body check, not just "contains": a `.contains()` check alone
+    // would still pass if the derive were diluted to e.g.
+    // `!bq_kyomi_oauth_connect_ok.get() && !oauth_connected.get()` — which
+    // reintroduces exactly the KYO-477 defect (an account-level
+    // `oauth_connected` bypassing the Connect gate) without removing the
+    // literal substring the checks above look for. Pin the derive's body
+    // to precisely one expression.
+    // `extract_between` includes the start marker itself in its result
+    // (see its doc comment in `tests/mod.rs`), so strip it back off here
+    // to leave just the derive's inner expression.
+    let derive_body = extract_between(
+        kyomi_block,
+        "connect_blocked=Signal::derive(move || {",
+        "})",
+    )
+    .trim_start_matches("connect_blocked=Signal::derive(move || {")
+    .trim();
+    assert_eq!(
+        derive_body, "!bq_kyomi_oauth_connect_ok.get()",
+        "KYO-477: the connect_blocked derive's body must be exactly \
+         `!bq_kyomi_oauth_connect_ok.get()` — no additional `||`/`&&` clause folding in \
+         oauth_connected or any other signal, which would silently dilute the gate back \
+         toward the KYO-427 defect"
     );
 }
 

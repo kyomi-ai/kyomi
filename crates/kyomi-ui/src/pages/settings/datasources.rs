@@ -191,17 +191,24 @@ fn translate_google_oauth_error(raw: String) -> String {
     }
 }
 
-/// The BigQuery kyomi_oauth Save/Create gate (KYO-408) — a pure predicate
-/// so it's directly unit-testable, unlike the `Signal::derive` closure in
-/// `DatasourceModal` that calls it. See `bq_kyomi_oauth_access_ok`'s doc
-/// comment at its call site for the full design rationale; in short: this
-/// is a UX nudge, not a security control, and is a no-op (always
+/// The BigQuery kyomi_oauth **Save/Create** gate (KYO-408) — a pure
+/// predicate so it's directly unit-testable, unlike the `Signal::derive`
+/// closure in `DatasourceModal` that calls it. See `bq_kyomi_oauth_access_ok`'s
+/// doc comment at its call site for the full design rationale; in short:
+/// this is a UX nudge, not a security control, and is a no-op (always
 /// satisfied) for every provider/mode except BigQuery's kyomi_oauth.
+///
+/// Save/Create **only** — do not reuse this for the Connect/Reconnect
+/// button. See [`bq_kyomi_oauth_connect_allowed`] below for that gate and
+/// why it is a genuinely different predicate, not a copy of this one
+/// (KYO-477).
 ///
 /// Returns `true` (gate satisfied, Save/Create enabled) when any of:
 /// - the datasource/mode isn't BigQuery kyomi_oauth at all
-/// - `oauth_connected` — a successful OAuth handshake is itself proof the
-///   account was already allowlisted, so there's nothing left to confirm
+/// - `oauth_connected` — a successful OAuth handshake for *this* linked
+///   account is itself proof that account was already allowlisted, so
+///   there's nothing left to confirm before saving a datasource that
+///   already has a working connection
 /// - `access_confirmed` — the user ticked the checkbox
 fn bq_kyomi_oauth_access_gate_satisfied(
     ds_type: &str,
@@ -210,6 +217,49 @@ fn bq_kyomi_oauth_access_gate_satisfied(
     access_confirmed: bool,
 ) -> bool {
     !(ds_type == "bigquery" && bq_auth_mode == "kyomi_oauth") || oauth_connected || access_confirmed
+}
+
+/// The BigQuery kyomi_oauth **Connect/Reconnect** gate (KYO-477) — a pure
+/// predicate so it's directly unit-testable, in the same style and
+/// location as [`bq_kyomi_oauth_access_gate_satisfied`] above.
+///
+/// Deliberately a SEPARATE predicate from `bq_kyomi_oauth_access_gate_satisfied`,
+/// not a shared copy — this is not the anti-pattern `docs/CODING_STANDARDS.md`'s
+/// "propagate predicate changes to every copy" standard (KYO-423) warns
+/// about. That standard forbids letting the *same* predicate drift between
+/// call sites; these are two predicates that answer two different
+/// questions and were wrongly collapsed into one signal by KYO-427. Do
+/// not "fix" that back by reintroducing `oauth_connected` here.
+///
+/// The reason they must differ: `oauth_connected` for kyomi_oauth is an
+/// **account-level** signal (`OAuthStatusSource::GoogleAccount` — one
+/// Google link per Kyomi user, shared across every BigQuery kyomi_oauth
+/// datasource that user has, or ever will have). Once a user has linked
+/// Google to Kyomi even once, `oauth_connected` reads `true` forever,
+/// everywhere, regardless of which specific Google account or which
+/// specific datasource is in front of them right now. Folding it into
+/// the Connect gate (as `bq_kyomi_oauth_access_gate_satisfied` correctly
+/// does for Save/Create, where "this account already has a proven
+/// connection" is exactly the right question) turns Connect's gate into
+/// a permanent no-op for any such user — the checkbox stops meaning
+/// anything the moment they've linked Google once. That is the KYO-477
+/// defect: reported three times, "fixed" once already (KYO-427, PR #389,
+/// shipped in v2.6.5) by a green review and a test that only proved the
+/// Connect button *read a signal* — never that the signal computed the
+/// right answer. Connect must always require its own explicit,
+/// in-the-moment `access_confirmed`, independent of any account-level
+/// history.
+///
+/// Returns `true` (gate satisfied, Connect/Reconnect enabled) when
+/// either:
+/// - the datasource/mode isn't BigQuery kyomi_oauth at all
+/// - `access_confirmed` — the user ticked the checkbox
+fn bq_kyomi_oauth_connect_allowed(
+    ds_type: &str,
+    bq_auth_mode: &str,
+    access_confirmed: bool,
+) -> bool {
+    !(ds_type == "bigquery" && bq_auth_mode == "kyomi_oauth") || access_confirmed
 }
 
 /// Whether the create-mode Connection step is satisfied (KYO-404, extended
@@ -2926,44 +2976,71 @@ pub fn DatasourceModal(
         )
     });
 
-    // ── BigQuery kyomi_oauth access-confirmation gate (KYO-408) ─────────────
+    // ── BigQuery kyomi_oauth access-confirmation gates (KYO-408, KYO-477) ───
     // Kyomi's shared Google OAuth app only accepts Google accounts a Kyomi
     // admin has added as test users in the Cloud Console consent screen —
     // Kyomi has no programmatic access to that list, so Google is the only
-    // enforcement layer. This gate is NOT a security control: there is
+    // enforcement layer. Neither gate below is a security control: there is
     // nothing here for Kyomi to protect, and no dishonest tick bypasses
-    // anything Google wouldn't already stop. It exists purely so Save/
-    // Create pauses long enough for the user to request access before
-    // burning a doomed OAuth round-trip — see the notice + checkbox this
-    // reads, in `BigQueryAuthModeSection`'s kyomi_oauth `<Show>` block.
+    // anything Google wouldn't already stop. They exist purely so the user
+    // pauses long enough to request access before burning a doomed OAuth
+    // round-trip — see the notice + checkbox this reads, in
+    // `BigQueryAuthModeSection`'s kyomi_oauth `<Show>` block.
     //
     // Deliberately kept separate from `connection_step_satisfied` above:
     // that signal answers "is the Connection tab done" and gates
-    // Next/the Catalog tab, matching the KYO-404 create-mode flow. This
-    // gate answers a narrower question — "has the user acknowledged the
-    // OAuth allowlist" — and gates the Save/Create action and the
-    // kyomi_oauth Connect/Reconnect button (`connect_blocked` on
-    // `ModalOAuthStatusPanel`, KYO-427) — never tab navigation. Save/
-    // Create was the original (and, per the React reference —
-    // `AuthModeSelector.jsx` / `DatasourceModal.jsx` — the only) gate;
-    // KYO-427 added Connect/Reconnect after production use showed the
-    // Save/Create gate alone was unreachable in create mode until OAuth
-    // had already succeeded, so it gated nothing where it mattered. Both
-    // readers share this one signal rather than each deriving their own
-    // copy of `bq_kyomi_oauth_access_gate_satisfied` (KYO-423).
+    // Next/the Catalog tab, matching the KYO-404 create-mode flow. Both
+    // gates below answer a narrower question — "has the user acknowledged
+    // the OAuth allowlist" — never tab navigation.
     //
-    // Auto-satisfied once `modal_oauth_connected` is true: a successful
-    // OAuth handshake IS proof the account was already allowlisted (Google
-    // would have refused it otherwise), so there is nothing left to
-    // confirm — this is also what keeps a returning, already-connected
-    // user from being nagged by the checkbox on every visit, without
-    // resorting to a client-side "remember forever" flag (see
-    // `bq_access_confirmed`'s own doc comment for why no localStorage).
+    // TWO signals, not one shared between Save/Create and Connect/Reconnect.
+    // KYO-427 originally pointed Connect/Reconnect at the *same* signal
+    // Save/Create reads (reasoning: "Save/Create alone is unreachable in
+    // create mode until OAuth already succeeded, so it gated nothing where
+    // it mattered" — true, but the fix was wrong). KYO-477 is the fix to
+    // that fix: `oauth_connected` is an account-level signal for
+    // kyomi_oauth (one Google link per Kyomi user, shared across every
+    // BigQuery kyomi_oauth datasource forever), so OR-ing it into the
+    // Connect gate — as the shared signal did — makes Connect's gate a
+    // permanent no-op for anyone who has ever linked Google once,
+    // regardless of `access_confirmed`. Reported three times in
+    // production before this fix. Read each signal's own inline comment
+    // below before "simplifying" them back into one — that is exactly the
+    // regression KYO-477 exists to prevent, and this is NOT the KYO-423
+    // "duplicated predicate" anti-pattern: these two answer genuinely
+    // different questions (see `bq_kyomi_oauth_connect_allowed`'s doc
+    // comment for the full explanation).
+    //
+    // `bq_kyomi_oauth_access_ok` — gates Save/Create only (read directly by
+    // the footer buttons below, and NOT threaded into
+    // `BigQueryAuthModeSection`). Auto-satisfied once `modal_oauth_connected`
+    // is true: a successful OAuth handshake for *this* linked account IS
+    // proof that account was already allowlisted (Google would have
+    // refused it otherwise), so there is nothing left to confirm before
+    // saving a datasource that already has a working connection — this is
+    // also what keeps a returning, already-connected user from being
+    // nagged by the checkbox on every visit, without resorting to a
+    // client-side "remember forever" flag (see `bq_access_confirmed`'s own
+    // doc comment for why no localStorage).
     let bq_kyomi_oauth_access_ok: Signal<bool> = Signal::derive(move || {
         bq_kyomi_oauth_access_gate_satisfied(
             &ds_type.get(),
             &bq_auth_mode.get(),
             modal_oauth_connected.get(),
+            bq_access_confirmed.get(),
+        )
+    });
+
+    // `bq_kyomi_oauth_connect_ok` — gates the Connect/Reconnect button
+    // (`connect_blocked` on `ModalOAuthStatusPanel`, threaded into
+    // `BigQueryAuthModeSection` below) only. Deliberately does NOT read
+    // `modal_oauth_connected` — see `bq_kyomi_oauth_connect_allowed`'s doc
+    // comment for why folding that account-level signal in here would
+    // reintroduce KYO-477.
+    let bq_kyomi_oauth_connect_ok: Signal<bool> = Signal::derive(move || {
+        bq_kyomi_oauth_connect_allowed(
+            &ds_type.get(),
+            &bq_auth_mode.get(),
             bq_access_confirmed.get(),
         )
     });
@@ -3714,7 +3791,7 @@ pub fn DatasourceModal(
                                             on_validate=on_bq_validate
                                             bq_access_confirmed=bq_access_confirmed
                                             set_bq_access_confirmed=set_bq_access_confirmed
-                                            bq_kyomi_oauth_access_ok=bq_kyomi_oauth_access_ok
+                                            bq_kyomi_oauth_connect_ok=bq_kyomi_oauth_connect_ok
                                         />
                                     </Show>
 
@@ -4299,15 +4376,17 @@ fn ModalOAuthStatusPanel(
     /// not per-datasource).
     cfg_missing: Signal<bool>,
     /// Whether the Connect/Reconnect action is blocked by an unmet
-    /// precondition (KYO-427). Defaults to `false` — never blocked — so
-    /// Snowflake, Databricks, Microsoft, and BigQuery enterprise_oauth
-    /// (the other four callers of this shared panel) are unaffected. The
-    /// one real caller, BigQuery kyomi_oauth, passes the *same*
-    /// `bq_kyomi_oauth_access_ok` signal the footer's Save/Create gate
-    /// reads (see that signal's doc comment in `DatasourceModal`) —
-    /// never a separately-derived copy of the underlying predicate
-    /// (KYO-423 is exactly that anti-pattern, twice already: KYO-404,
-    /// KYO-413).
+    /// precondition (KYO-427, corrected KYO-477). Defaults to `false` —
+    /// never blocked — so Snowflake, Databricks, Microsoft, and BigQuery
+    /// enterprise_oauth (the other four callers of this shared panel) are
+    /// unaffected. The one real caller, BigQuery kyomi_oauth, passes
+    /// `bq_kyomi_oauth_connect_ok` — the Connect-only gate, deliberately
+    /// NOT the same signal the footer's Save/Create gate reads
+    /// (`bq_kyomi_oauth_access_ok`). Folding Save/Create's account-level
+    /// `oauth_connected` allowance into this prop is the exact KYO-477
+    /// defect: see `bq_kyomi_oauth_connect_allowed`'s doc comment
+    /// (`pages/settings/datasources.rs`) for why the two must stay
+    /// separate predicates rather than a KYO-423-style shared copy.
     #[prop(default = false.into())]
     connect_blocked: Signal<bool>,
     /// Called when the user clicks "Disconnect".  Callers use an
@@ -5046,12 +5125,16 @@ fn BigQueryAuthModeSection(
     bq_access_confirmed: ReadSignal<bool>,
     /// Setter for the checkbox above.
     set_bq_access_confirmed: WriteSignal<bool>,
-    /// KYO-427 — the same `bq_kyomi_oauth_access_ok` signal the footer's
-    /// Save/Create gate reads (see that signal's doc comment in
-    /// `DatasourceModal`), threaded down so the kyomi_oauth `Connect
-    /// BigQuery` button can be gated by the identical predicate rather
-    /// than a second, independently-derived copy of it (KYO-423).
-    bq_kyomi_oauth_access_ok: Signal<bool>,
+    /// KYO-477 — the Connect/Reconnect-only gate, deliberately NOT the
+    /// same signal as the footer's Save/Create gate
+    /// (`bq_kyomi_oauth_access_ok`, read directly by `DatasourceModal`'s
+    /// own footer buttons and never threaded down here). See
+    /// `bq_kyomi_oauth_connect_allowed`'s doc comment in
+    /// `bq_kyomi_oauth_connect_ok`'s definition (`DatasourceModal`) for
+    /// why these two must stay separate predicates rather than one
+    /// shared signal — folding Save/Create's `oauth_connected` allowance
+    /// in here is exactly the KYO-477 defect.
+    bq_kyomi_oauth_connect_ok: Signal<bool>,
 ) -> impl IntoView {
     // Parse service account email from JSON
     let handle_service_account_json = move |json_text: String| {
@@ -5209,20 +5292,27 @@ fn BigQueryAuthModeSection(
                     <p class="text-sm text-muted-foreground">
                         "Connect your Google account to access BigQuery projects."
                     </p>
-                    // KYO-408 — Kyomi has no programmatic access to the Google
-                    // Cloud Console's test-user allowlist for its shared OAuth
-                    // app; Google is the only thing that can let a given
-                    // account through or refuse it. This notice + checkbox is
-                    // NOT a security gate (there's nothing here for Kyomi to
-                    // protect, and no dishonest tick bypasses anything Google
-                    // wouldn't already stop) — it exists purely so the user
-                    // requests access *before* burning a doomed OAuth
-                    // round-trip. Hidden once connected: a successful OAuth
-                    // handshake is itself proof the account was already
-                    // authorized, so there's nothing left to ask for
+                    // KYO-408/KYO-477 — Kyomi has no programmatic access to
+                    // the Google Cloud Console's test-user allowlist for its
+                    // shared OAuth app; Google is the only thing that can let
+                    // a given account through or refuse it. This notice +
+                    // checkbox is NOT a security gate (there's nothing here
+                    // for Kyomi to protect, and no dishonest tick bypasses
+                    // anything Google wouldn't already stop) — it exists
+                    // purely so the user requests access *before* burning a
+                    // doomed OAuth round-trip. Hidden once connected: at that
+                    // point `ModalOAuthStatusPanel` below renders its
+                    // "Connected" branch (Disconnect only, no Connect button
+                    // to gate), and Save/Create's own gate
                     // (`bq_kyomi_oauth_access_ok`'s doc comment above, in
-                    // `DatasourceModal`, has the corresponding Save/Create
-                    // gate logic).
+                    // `DatasourceModal`) auto-satisfies from the same
+                    // connected state — so there is nothing left for this
+                    // notice to ask for. The Connect gate
+                    // (`bq_kyomi_oauth_connect_ok`, read by the
+                    // `connect_blocked` prop below) does NOT auto-satisfy
+                    // from `oauth_connected` — see its own doc comment for
+                    // why — but that is moot here specifically because the
+                    // Connect button isn't reachable while connected either.
                     <Show when=move || !oauth_connected.get()>
                         <Alert variant=AlertVariant::Warning>
                             <AlertTitle>"Google account authorization required"</AlertTitle>
@@ -5283,7 +5373,7 @@ fn BigQueryAuthModeSection(
                         connect_url=kyomi_oauth_url
                         cfg_missing=Signal::stored(false)
                         connect_blocked=Signal::derive(move || {
-                            !bq_kyomi_oauth_access_ok.get()
+                            !bq_kyomi_oauth_connect_ok.get()
                         })
                         on_disconnect=on_google_disconnect
                         disconnect_pending=google_disconnect_pending
