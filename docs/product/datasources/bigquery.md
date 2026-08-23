@@ -29,8 +29,7 @@ The simplest way to connect - sign in with your Google account and authorize Kyo
 3. Click **Connect BigQuery**
 4. Sign in with your Google account and grant the requested permissions
 5. Select your **Billing Project** (the GCP project that will be charged for queries)
-6. Optionally select a **Default Project** for queries
-7. Click **Next**, then **Create**
+6. Click **Next**, then **Create**
 
 ::: info Note
 Your Google account must have the necessary BigQuery permissions (e.g., `bigquery.jobs.create`, `bigquery.tables.getData`) in the projects you want to query.
@@ -77,7 +76,7 @@ Keep this JSON file secure. Anyone with this file has access to your BigQuery da
 2. Choose **Service Account** as the authentication method
 3. Upload the JSON key file or paste its contents
 4. Click **Validate & Discover Projects** to verify credentials and load available projects
-5. Select your **Billing Project** and **Default Project**
+5. Select your **Billing Project**
 6. Click **Save**
 
 ---

@@ -1445,7 +1445,6 @@ pub fn DatasourceModal(
     let (cred_access_token, set_cred_access_token) = signal(String::new());
     let (cred_private_key, set_cred_private_key) = signal(String::new());
     let (cred_billing_project, set_cred_billing_project) = signal(String::new());
-    let (cred_default_project, set_cred_default_project) = signal(String::new());
 
     // ── Tab state ────────────────────────────────────────────────────────
     // "connection" or "catalog"
@@ -1533,8 +1532,8 @@ pub fn DatasourceModal(
 
     // ── BigQuery project list (fetched after OAuth connects) ─────────────
     // Populated when modal_oauth_connected becomes true in kyomi_oauth or
-    // enterprise_oauth mode.  Used to drive Select dropdowns for
-    // billing_project and default_project instead of free-text inputs.
+    // enterprise_oauth mode.  Used to drive a Select dropdown for
+    // billing_project instead of a free-text input.
     let (bq_projects, set_bq_projects) = signal::<Vec<(String, String)>>(vec![]);
     let (bq_projects_loading, set_bq_projects_loading) = signal(false);
     let (bq_projects_error, set_bq_projects_error) = signal::<Option<String>>(None);
@@ -1592,7 +1591,6 @@ pub fn DatasourceModal(
         set_cred_access_token.set(String::new());
         set_cred_private_key.set(String::new());
         set_cred_billing_project.set(String::new());
-        set_cred_default_project.set(String::new());
         set_active_tab.set("connection".to_string());
         set_test_result.set(None);
         set_error_msg.set(None);
@@ -1868,19 +1866,15 @@ pub fn DatasourceModal(
                                     .to_string()
                             };
                             set_cred_billing_project.try_set(user_str("billing_project"));
-                            set_cred_default_project.try_set(user_str("default_project"));
-                            // BigQuery service_account mode stores these two
-                            // fields in connection_config instead (workspace-
-                            // level, not per-user) — see `build_connection_config`
+                            // BigQuery service_account mode stores this field
+                            // in connection_config instead (workspace-level,
+                            // not per-user) — see `build_connection_config`
                             // (KYO-405). Override the per-user load above when
-                            // that's the active mode, so the fields the admin
-                            // configured are still shown on reopen.
+                            // that's the active mode, so the field the admin
+                            // configured is still shown on reopen.
                             if cfg.get("auth_mode").and_then(|v| v.as_str()) == Some("service_account") {
                                 if let Some(bp) = cfg.get("billing_project").and_then(|v| v.as_str()) {
                                     set_cred_billing_project.try_set(bp.to_string());
-                                }
-                                if let Some(dp) = cfg.get("default_project").and_then(|v| v.as_str()) {
-                                    set_cred_default_project.try_set(dp.to_string());
                                 }
                             }
                             // Restore the stored (non-sensitive) username so the user
@@ -2227,7 +2221,7 @@ pub fn DatasourceModal(
                     map.insert("service_account_json".to_string(), serde_json::json!(cfg_service_account_json.get_untracked()));
                 }
                 // A service account is shared by the whole workspace, so its
-                // billing/default project belong in workspace-level
+                // billing project belongs in workspace-level
                 // connection_config — not per-user credentials (the OAuth
                 // modes' storage below in `build_credentials`). The driver
                 // corroborates this: `resolve_billing_project`
@@ -2236,9 +2230,6 @@ pub fn DatasourceModal(
                 if bq_mode == "service_account" {
                     if !cred_billing_project.get_untracked().is_empty() {
                         map.insert("billing_project".to_string(), serde_json::json!(cred_billing_project.get_untracked()));
-                    }
-                    if !cred_default_project.get_untracked().is_empty() {
-                        map.insert("default_project".to_string(), serde_json::json!(cred_default_project.get_untracked()));
                     }
                 }
             }
@@ -2462,11 +2453,8 @@ pub fn DatasourceModal(
                         if !cred_billing_project.get_untracked().is_empty() {
                             map.insert("billing_project".to_string(), serde_json::json!(cred_billing_project.get_untracked()));
                         }
-                        if !cred_default_project.get_untracked().is_empty() {
-                            map.insert("default_project".to_string(), serde_json::json!(cred_default_project.get_untracked()));
-                        }
                     }
-                    // service_account: these are shared workspace config, not
+                    // service_account: this is shared workspace config, not
                     // a personal credential — written into connection_config
                     // by `build_connection_config` above instead (KYO-405).
                     _ => {}
@@ -3942,8 +3930,6 @@ pub fn DatasourceModal(
                                             slug=slug
                                             cred_billing_project=cred_billing_project
                                             set_cred_billing_project=set_cred_billing_project
-                                            cred_default_project=cred_default_project
-                                            set_cred_default_project=set_cred_default_project
                                             oauth_connected=modal_oauth_connected
                                             set_oauth_connected=set_modal_oauth_connected
                                             oauth_email=modal_oauth_email
@@ -5196,8 +5182,8 @@ fn bq_project_select_options(projects: Vec<(String, String)>) -> Vec<(String, St
 /// 3. **Projects discovered, custom-entry mode**: a text input plus a "Back
 ///    to dropdown" affordance. Reached by picking the sentinel; left by the
 ///    button. `is_custom` is a signal local to this component instance, so
-///    each `BqProjectField` (Billing vs Default) toggles independently
-///    (KYO-406 AC: toggling one must not affect the other).
+///    each `BqProjectField` toggles independently of any other rendered
+///    elsewhere (KYO-406 AC).
 ///
 /// Across both dropdown and custom-entry states the field shares the same
 /// `value`/`set_value` signal, so switching modes never loses or resets
@@ -5295,8 +5281,6 @@ fn BigQueryAuthModeSection(
     slug: ReadSignal<String>,
     cred_billing_project: ReadSignal<String>,
     set_cred_billing_project: WriteSignal<String>,
-    cred_default_project: ReadSignal<String>,
-    set_cred_default_project: WriteSignal<String>,
     /// Whether the OAuth account is currently connected.
     oauth_connected: ReadSignal<bool>,
     /// Setter for the connected state (used by re-fetch Effect on mode change).
@@ -5320,7 +5304,7 @@ fn BigQueryAuthModeSection(
     /// True in create mode — OAuth status panel is hidden in create mode.
     is_create_mode: Signal<bool>,
     /// GCP project list fetched after OAuth connects.  Empty until OAuth is
-    /// connected; drives Select dropdowns for billing/default project.
+    /// connected; drives the billing project Select dropdown.
     bq_projects: ReadSignal<Vec<(String, String)>>,
     /// Setter for `bq_projects`. The service-account "Remove" chip is a
     /// teardown route that isn't an `Action` (see `set_test_result` above),
@@ -5340,7 +5324,7 @@ fn BigQueryAuthModeSection(
     /// fields, and the Service Account JSON textarea. All three persist
     /// through `update_datasource_settings`, which non-admins cannot call
     /// (KYO-184). Does NOT gate the personal OAuth connect/disconnect panel
-    /// or billing/default project fields — those are per-user and must stay
+    /// or the billing project field — those are per-user and must stay
     /// visible to every member (`docs/DATASOURCE_ARCHITECTURE.md` §1/§5.2).
     is_admin: Signal<bool>,
     /// Registry-provided auth modes for BigQuery (KYO-274) — ids, labels,
@@ -5639,25 +5623,16 @@ fn BigQueryAuthModeSection(
                     />
                     <Show when=move || !oauth_connected.get()>
                         <p class="text-xs text-muted-foreground">
-                            "After connecting, you can set the billing and default project."
+                            "After connecting, you can set the billing project."
                         </p>
                     </Show>
-                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                        <BqProjectField
-                            label="Billing Project"
-                            value=cred_billing_project
-                            set_value=set_cred_billing_project
-                            bq_projects=bq_projects
-                            bq_projects_loading=bq_projects_loading
-                        />
-                        <BqProjectField
-                            label="Default Project"
-                            value=cred_default_project
-                            set_value=set_cred_default_project
-                            bq_projects=bq_projects
-                            bq_projects_loading=bq_projects_loading
-                        />
-                    </div>
+                    <BqProjectField
+                        label="Billing Project"
+                        value=cred_billing_project
+                        set_value=set_cred_billing_project
+                        bq_projects=bq_projects
+                        bq_projects_loading=bq_projects_loading
+                    />
                     {move || bq_projects_error.get().filter(|_| bq_projects.get().is_empty()).map(|err| view! {
                         <Alert variant=AlertVariant::Warning class="mt-2">
                             <AlertDescription>
@@ -5737,29 +5712,20 @@ fn BigQueryAuthModeSection(
                             "After saving, connect your BigQuery account from this settings panel."
                         </p>
                     </Show>
-                    // Billing / default project fields — same conditional
-                    // Select pattern as kyomi_oauth mode.
+                    // Billing project field — same conditional Select pattern
+                    // as kyomi_oauth mode.
                     <Show when=move || !oauth_connected.get()>
                         <p class="text-xs text-muted-foreground">
-                            "After connecting, you can set the billing and default project."
+                            "After connecting, you can set the billing project."
                         </p>
                     </Show>
-                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                        <BqProjectField
-                            label="Billing Project"
-                            value=cred_billing_project
-                            set_value=set_cred_billing_project
-                            bq_projects=bq_projects
-                            bq_projects_loading=bq_projects_loading
-                        />
-                        <BqProjectField
-                            label="Default Project"
-                            value=cred_default_project
-                            set_value=set_cred_default_project
-                            bq_projects=bq_projects
-                            bq_projects_loading=bq_projects_loading
-                        />
-                    </div>
+                    <BqProjectField
+                        label="Billing Project"
+                        value=cred_billing_project
+                        set_value=set_cred_billing_project
+                        bq_projects=bq_projects
+                        bq_projects_loading=bq_projects_loading
+                    />
                     {move || bq_projects_error.get().filter(|_| bq_projects.get().is_empty()).map(|err| view! {
                         <Alert variant=AlertVariant::Warning class="mt-2">
                             <AlertDescription>
@@ -5875,22 +5841,13 @@ fn BigQueryAuthModeSection(
                                     </Button>
                                     <ConnectionTestResultBadge test_result=test_result success_label="Valid" />
                                 </div>
-                                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                                    <BqProjectField
-                                        label="Billing Project"
-                                        value=cred_billing_project
-                                        set_value=set_cred_billing_project
-                                        bq_projects=bq_projects
-                                        bq_projects_loading=bq_projects_loading
-                                    />
-                                    <BqProjectField
-                                        label="Default Project"
-                                        value=cred_default_project
-                                        set_value=set_cred_default_project
-                                        bq_projects=bq_projects
-                                        bq_projects_loading=bq_projects_loading
-                                    />
-                                </div>
+                                <BqProjectField
+                                    label="Billing Project"
+                                    value=cred_billing_project
+                                    set_value=set_cred_billing_project
+                                    bq_projects=bq_projects
+                                    bq_projects_loading=bq_projects_loading
+                                />
                                 {move || bq_projects_error.get().filter(|_| bq_projects.get().is_empty()).map(|err| view! {
                                     <Alert variant=AlertVariant::Warning class="mt-2">
                                         <AlertDescription>

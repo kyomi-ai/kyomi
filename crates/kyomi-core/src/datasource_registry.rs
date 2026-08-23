@@ -507,7 +507,7 @@ static BIGQUERY_META: LazyLock<DatasourceTypeMetadata> = LazyLock::new(|| Dataso
     display_name: "BigQuery",
     description: "Google Cloud BigQuery",
     default_port: None,
-    credential_fields: &["billing_project", "default_project", "query_size_limit_gb"],
+    credential_fields: &["billing_project", "query_size_limit_gb"],
     sensitive_credential_fields: &[],
     sensitive_connection_config_fields: &["oauth_client_secret", "service_account_json"],
     requires_user_credentials: false,

@@ -485,12 +485,12 @@ mod tests {
 
     #[test]
     fn mask_credentials_preserves_non_sensitive_for_bigquery() {
-        let creds = json!({"billing_project": "my-project", "default_project": "my-project"});
+        let creds = json!({"billing_project": "my-project", "oauth_access_token": "tok-123"});
         let masked = mask_credentials(&creds, "bigquery");
 
         // BigQuery has no sensitive credential fields
         assert_eq!(masked["billing_project"], "my-project");
-        assert_eq!(masked["default_project"], "my-project");
+        assert_eq!(masked["oauth_access_token"], "tok-123");
     }
 
     #[test]

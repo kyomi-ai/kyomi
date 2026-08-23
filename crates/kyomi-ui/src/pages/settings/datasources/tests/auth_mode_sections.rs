@@ -348,11 +348,11 @@ fn bq_project_field_select_uses_the_custom_sentinel_options() {
     );
 }
 
-/// AC: "Custom/dropdown state is per field — toggling Billing does not
-/// affect Default." `BqProjectField` is one component instantiated twice
-/// per auth mode (Billing, Default); this fails if the toggle is ever
-/// hoisted into a prop threaded from a shared parent-level signal, which is
-/// the exact mistake that would make toggling one field flip the other.
+/// AC: the custom/dropdown toggle is owned per `BqProjectField` instance,
+/// not threaded from a shared parent-level signal — this fails if the
+/// toggle is ever hoisted into a prop, which would let two instances of
+/// the field (were there ever more than one rendered at once) flip
+/// together instead of independently.
 #[test]
 fn bq_project_field_custom_dropdown_toggle_state_is_local_per_instance() {
     let f = bq_project_field_src(SRC);
@@ -361,7 +361,7 @@ fn bq_project_field_custom_dropdown_toggle_state_is_local_per_instance() {
         !props.contains("is_custom"),
         "BqProjectField must not accept an is_custom prop from its caller — \
          that would let BigQueryAuthModeSection thread one shared signal into \
-         both the Billing and Default instances"
+         multiple instances"
     );
     assert!(
         f.contains("let (is_custom, set_is_custom) = signal(false);"),
@@ -370,12 +370,14 @@ fn bq_project_field_custom_dropdown_toggle_state_is_local_per_instance() {
          instance, so a locally-owned signal is independent per field"
     );
 
-    // Belt-and-suspenders: no call site (Billing or Default, across all
-    // three auth modes) may pass a custom-mode prop down.
+    // Belt-and-suspenders: no call site (Billing Project, across all three
+    // auth modes) may pass a custom-mode prop down. KYO-415 removed the
+    // Default Project field (it was never read by any query path), leaving
+    // one BqProjectField call site per auth mode.
     assert_eq!(
         SRC.matches("<BqProjectField").count(),
-        6,
-        "expected 6 BqProjectField call sites (Billing + Default across \
+        3,
+        "expected 3 BqProjectField call sites (Billing Project across \
          kyomi_oauth, enterprise_oauth, and service_account) — update this \
          test if that count legitimately changed"
     );
@@ -481,5 +483,51 @@ fn bq_projects_discovery_failure_renders_warning_alert_not_bare_text() {
         3,
         "the warning must state that manual entry still works, matching \
          ProjectDropdowns.jsx:47-56"
+    );
+}
+
+// ── KYO-415: dead "Default Project" field removed ───────────────────
+//
+// All three BigQuery auth modes (kyomi_oauth, enterprise_oauth,
+// service_account) rendered a "Default Project" BqProjectField
+// alongside "Billing Project". Nothing ever read the saved value: the
+// only project consumer on the driver side, `resolve_billing_project`
+// (kyomi-connect's crates/kyomi-datasource/src/providers/bigquery.rs),
+// reads connection_config["billing_project"] /
+// connection_config["default_billing_project"] /
+// credentials["billing_project"] — never `default_project` — and the
+// BigQuery job URL (`/projects/{billing_project}/queries`) has no
+// separate project-only default to apply one to (defaultDataset
+// requires a datasetId, which a bare project ID can't supply). The
+// field, its signals, and its save/load wiring were removed; Billing
+// Project must survive untouched.
+
+/// The failure mode this guards: deleting too much (Billing Project
+/// disappears too) or too little (Default Project survives in one of
+/// the three auth modes, or its signals/wiring linger unused).
+#[test]
+fn bigquery_default_project_field_is_gone_billing_project_survives() {
+    let f = extract_between(SRC, "fn BigQueryAuthModeSection(", "fn SnowflakeAuthModeSection(");
+
+    assert!(
+        !f.contains("Default Project"),
+        "the dead \"Default Project\" field (KYO-415) must not render in any \
+         BigQuery auth mode section"
+    );
+    assert_eq!(
+        f.matches("\"Billing Project\"").count(),
+        3,
+        "expected one \"Billing Project\" BqProjectField per BigQuery auth \
+         mode section (kyomi_oauth, enterprise_oauth, service_account) — \
+         Billing Project must survive the Default Project removal"
+    );
+
+    // Belt-and-suspenders across the whole file: no leftover signal,
+    // prop, or save/load wiring for the removed field.
+    assert!(
+        !SRC.contains("default_project") && !SRC.contains("cred_default_project"),
+        "no default_project / cred_default_project signal, prop, or JSON key \
+         may remain anywhere in datasources.rs after KYO-415 — the field is \
+         fully removed, not just hidden"
     );
 }
