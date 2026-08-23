@@ -218,6 +218,155 @@ fn my_component() {
 }
 RUST
 
+# ─── KYO-414 regression tests ────────────────────────────────────────────
+#
+# These pin the false-positive/false-negative bugs KYO-414 fixed. Each one
+# is a real pattern this repo has actually hit — see the ticket and the
+# script header for where.
+
+# ─── Test 17: this is the ticket's own reproduction — a source-text
+# assertion (the `SRC.find("...")` self-inspection pattern this codebase
+# uses, see datasources/tests/) quoting the EXACT trigger + bare .get() text
+# as a string literal. Must not fire itself, AND — since an unstripped
+# string containing "Signal::derive(" with no `{` on the same line is
+# exactly what used to arm the KYO-414 flag-leak (Test 19) — must not leak
+# into the unrelated closure that follows either. Both assertions only mean
+# something together: a string-unaware matcher that merely failed to find
+# the pattern for some other coincidental reason would still show 0 here.
+run_test "literal_get_in_string_no_fire" 0 0 <<'RUST'
+fn checks_source_for_marker() {
+    let found = SRC
+        .find("let x = Signal::derive(move || connection_auth_modes_unavailable.get());")
+        .is_some();
+    assert!(found);
+
+    if some_condition {
+        is_admin.get();
+    }
+}
+RUST
+
+# ─── Test 18: same as above but via a raw string, the other literal form
+# this codebase uses (e.g. JSON placeholder text) — should also not fire,
+# and must not leak into the (multi-line, so it stays open long enough for
+# a leaked flag to attach to it) block that follows either.
+run_test "literal_get_in_raw_string_no_fire" 0 0 <<'RUST'
+fn checks_source_for_marker() {
+    let found = SRC.find(r#"Signal::derive(move || flag.get())"#).is_some();
+
+    if some_condition {
+        is_admin.get();
+    }
+}
+RUST
+
+# ─── Test 19: THE core KYO-414 regression. A single-line Signal::derive
+# with no block body of its own (`Signal::derive(move || x.get()...)`,
+# closing on the same line) must still fire Rule B for itself — but must
+# NOT leak into the ordinary <Show>/interpolation closures that follow,
+# which is exactly the false-positive pattern reported against
+# datasources.rs (KYO-414 comment: <Show when=move || is_admin.get()> and
+# {move || auth_mode_description(...)} both flagged, neither anywhere near
+# a derive). Expect exactly one B — for the derive line only.
+run_test "single_line_derive_does_not_leak_into_show" 0 1 <<'RUST'
+fn my_component() {
+    let is_edit_mode = Signal::derive(move || datasource_id.get().is_some());
+
+    view! {
+        <Show when=move || is_admin.get()>
+            <AdminPanel/>
+        </Show>
+        {move || format_description(&auth_modes.get())}
+    }
+}
+RUST
+
+# ─── Test 20: mutation-proof companion to Test 19 — a <Show> closure with
+# no preceding single-line derive at all must also not fire on its own.
+run_test "show_closure_alone_no_fire" 0 0 <<'RUST'
+fn my_component() {
+    view! {
+        <Show when=move || is_admin.get()>
+            <AdminPanel/>
+        </Show>
+    }
+}
+RUST
+
+# ─── Test 21: a `//` inside a string (a URL) must not be treated as a line
+# comment and truncate the rest of the line — that would silently hide a
+# real violation appearing after it on the same line.
+run_test "url_slash_slash_does_not_hide_later_violation" 1 0 <<'RUST'
+fn my_component() {
+    spawn_local(async move {
+        let url = "https://kyomi.ai"; set_value.set(result);
+    });
+}
+RUST
+
+# ─── Test 22: `mod tests;` (an external submodule declaration, KYO-455
+# split-test-module style — no block body, ever) must not arm the test-
+# module skip and swallow every line after it waiting for a `{` that will
+# never belong to it. A real violation appearing later in the same file
+# must still be caught.
+run_test "mod_tests_semicolon_does_not_swallow_rest_of_file" 1 0 <<'RUST'
+fn production_code_before() {}
+
+#[cfg(test)]
+mod tests;
+
+fn production_code_after() {
+    spawn_local(async move {
+        set_value.set(42);
+    });
+}
+RUST
+
+# ─── Test 23: a Signal::derive whose own block is on a LATER line than the
+# call (`Signal::derive(\n  move || {\n ...`) must still be recognized as
+# block-form and fire Rule B for a bare .get() inside it — proves multi-
+# line trigger-to-block detection isn't limited to spawn/Timeout/set_timeout
+# (Test 16); it works the same way for derives.
+run_test "multiline_open_derive_still_detected" 0 1 <<'RUST'
+fn my_component() {
+    let filtered = Signal::derive(
+        move || {
+            store_signal.get()
+        }
+    );
+}
+RUST
+
+# ─── Test 24: KYO-414 follow-up regression. A Leptos signal read is ALWAYS
+# `.get()` with no argument. `.get(key)` inside a Signal::derive/Memo block
+# is some other type's accessor entirely -- serde_json::Value::get(key),
+# HashMap::get(&k), a slice/Vec .get(idx) -- and can never be the disposal
+# hazard Rule B exists to catch, even though it sits lexically inside a
+# derive. Real reproduction: datasources.rs:7976 is
+# `v.get("client_email")?.as_str()...` on a serde_json::Value. Must not
+# fire on its own.
+run_test "get_with_arg_inside_derive_is_not_a_signal_read" 0 0 <<'RUST'
+fn my_component() {
+    let email = Signal::derive(move || {
+        config.get("client_email").cloned().unwrap_or_default()
+    });
+}
+RUST
+
+# ─── Test 25: mutation-proof companion to Test 24 -- a genuine bare .get()
+# sitting in the SAME derive block as a .get(key) call must still fire
+# exactly once; the arg-taking accessor must neither be miscounted as a
+# violation nor suppress detection of the real one next to it.
+run_test "bare_get_still_fires_next_to_get_with_arg" 0 1 <<'RUST'
+fn my_component() {
+    let combined = Signal::derive(move || {
+        let email = config.get("client_email").cloned().unwrap_or_default();
+        let flag = enabled_signal.get();
+        format!("{email}-{flag}")
+    });
+}
+RUST
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

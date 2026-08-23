@@ -338,6 +338,58 @@ EOF
 assert_linter "comment_content.rs"                0 "$SERVER_FN_LINT_DIR/comment_content.rs"
 
 # ------------------------------------------------------------------------------
+# KYO-414: the literal-matching flaw check-disposal-safety.sh had also
+# structurally affects this script's Rule A/B matching and its
+# update_depth() brace counting, via the same naive strip_comment(). Not
+# observed as a real false positive in server_fns today (both rules only
+# activate inside a genuine #[server] fn body, a narrower gate than
+# disposal-safety.sh's), but fixed the same way as a precaution and pinned
+# here so a future string literal in a #[server] fn body cannot silently
+# inflate a callout count or hide a URL-adjacent violation.
+# ------------------------------------------------------------------------------
+
+# ------------------------------------------------------------------------------
+# Fixture: string_literal_callout_text.rs — a string literal quoting a
+# kyomi_auth::...( callout pattern verbatim (the exact KYO-455
+# source-text-assertion shape) must not count toward Rule B's callout
+# total. Three REAL callouts here sit exactly at the default max (3, not
+# > 3) so the fixture is clean on its own merits; if the literal were
+# miscounted as a fourth, the total would exceed max and wrongly fail.
+# ------------------------------------------------------------------------------
+cat > "$SERVER_FN_LINT_DIR/string_literal_callout_text.rs" <<'EOF'
+use leptos::prelude::*;
+
+#[server(prefix = "/leptos-api")]
+pub async fn quotes_pattern_fn() -> Result<(), ServerFnError> {
+    let a = kyomi_auth::user_service::get_user(&pool).await?;
+    let b = kyomi_auth::user_service::list_users(&pool).await?;
+    let c = kyomi_knowledge::docs::find(&pool).await?;
+    let note = "see kyomi_auth::user_service::get_user(&pool) for reference";
+    let _ = (a, b, c, note);
+    Ok(())
+}
+EOF
+assert_linter "string_literal_callout_text.rs"    0 "$SERVER_FN_LINT_DIR/string_literal_callout_text.rs"
+
+# ------------------------------------------------------------------------------
+# Fixture: url_does_not_hide_context_lookup.rs — a `//` inside a URL string
+# on the same line as a real non-allowlisted use_context::<T>() call must
+# not truncate the line and hide that call from Rule A.
+# ------------------------------------------------------------------------------
+cat > "$SERVER_FN_LINT_DIR/url_does_not_hide_context_lookup.rs" <<'EOF'
+use leptos::prelude::*;
+
+#[server(prefix = "/leptos-api")]
+pub async fn url_then_context_fn() -> Result<(), ServerFnError> {
+    let docs = "https://kyomi.ai/docs"; let svc = use_context::<std::sync::Arc<ConnectTokenService>>().ok_or_else(|| ServerFnError::new("missing"))?;
+    let _ = (docs, svc);
+    Ok(())
+}
+EOF
+assert_linter "url_does_not_hide_context_lookup.rs" 1 "$SERVER_FN_LINT_DIR/url_does_not_hide_context_lookup.rs"
+assert_contains "url fixture reports Rule A"      "ConnectTokenService" "$SERVER_FN_LINT_DIR/url_does_not_hide_context_lookup.rs"
+
+# ------------------------------------------------------------------------------
 # Summary.
 # ------------------------------------------------------------------------------
 printf '\n%d checks, %d failed\n' "$checks" "$fails"

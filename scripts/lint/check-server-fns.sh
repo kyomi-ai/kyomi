@@ -150,12 +150,116 @@ function trim(s,  t) {
     return t
 }
 
-# Strip // line comments from a Rust line so matches in comment text do not
-# count. We preserve the original $0 for escape-hatch detection.
-function strip_comment(s,  idx) {
-    idx = index(s, "//")
-    if (idx > 0) return substr(s, 1, idx - 1)
-    return s
+# Strips `//` line comments AND the contents of string/raw-string/char
+# literals from a line, in one string-aware pass. We preserve the original
+# $0 for escape-hatch detection.
+#
+# KYO-414: this used to be a naive `index(s, "//")` line-comment cut with no
+# concept of a string literal at all — which meant two real bugs shared with
+# scripts/lint/check-disposal-safety.sh (see that scripts header for the
+# full writeup): a `//` inside a string (e.g. a URL) truncated the line and
+# silently hid anything after it from Rule A and Rule B, and their own
+# pattern matching (`use_context::<...>()`, `kyomi_auth::...(`, etc.) could
+# in principle match that exact text sitting inside a string literal rather
+# than real code — the same KYO-455 source-text-assertion pattern
+# (`SRC.find("...")`) that motivated this ticket in the first place, should
+# a `#[server]` fn body ever need one. Fixed the same way: literal contents
+# are blanked (replaced with a single space) before anything scans `code`,
+# including update_depth()s own brace counting below — a JSON-shaped
+# string with a stray unbalanced brace could otherwise misalign a fn body
+# open/close boundary the exact same way it did in the disposal-safety
+# script. As of this fix, no `#[server]` fn body in this crate contains a
+# string literal matching a Rule A or Rule B pattern, and no fn-body brace
+# count is thrown off by a literal — verified by re-running this script
+# against the full server_fns tree with zero findings before and after.
+# This is therefore hardening a shared, structurally latent flaw rather
+# than fixing an observed false positive.
+#
+# Limitation carried over verbatim from check-disposal-safety.sh: this is
+# line-by-line, so a literal spanning multiple physical lines is not
+# tracked across the line boundary.
+function strip_comment(s,    result, i, n, c, c2, c3, j, hashes, k,
+                        close_delim, start_content, rest, end_pos, cj,
+                        close_b, consumed, sq) {
+    sq = sprintf("%c", 39)
+    result = ""
+    n = length(s)
+    i = 1
+    while (i <= n) {
+        c = substr(s, i, 1)
+
+        if (c == "/" && substr(s, i + 1, 1) == "/") {
+            break
+        }
+
+        if (c == "r") {
+            j = i + 1
+            hashes = 0
+            while (substr(s, j, 1) == "#") { hashes++; j++ }
+            if (substr(s, j, 1) == "\"") {
+                close_delim = "\""
+                for (k = 0; k < hashes; k++) close_delim = close_delim "#"
+                start_content = j + 1
+                rest = substr(s, start_content)
+                end_pos = index(rest, close_delim)
+                if (end_pos > 0) {
+                    i = start_content + end_pos - 1 + length(close_delim)
+                } else {
+                    i = n + 1
+                }
+                result = result " "
+                continue
+            }
+        }
+
+        if (c == "\"") {
+            j = i + 1
+            while (j <= n) {
+                cj = substr(s, j, 1)
+                if (cj == "\\") { j += 2; continue }
+                if (cj == "\"") { j++; break }
+                j++
+            }
+            i = j
+            result = result " "
+            continue
+        }
+
+        if (c == sq) {
+            c2 = substr(s, i + 1, 1)
+            consumed = 0
+            if (c2 == "\\") {
+                c3 = substr(s, i + 2, 1)
+                if (c3 == "u" && substr(s, i + 3, 1) == "{") {
+                    close_b = index(substr(s, i + 4), "}")
+                    if (close_b > 0 && substr(s, i + 4 + close_b, 1) == sq) {
+                        i = i + 4 + close_b + 1
+                        consumed = 1
+                    }
+                } else if (c3 == "x" && substr(s, i + 5, 1) == sq) {
+                    i = i + 6
+                    consumed = 1
+                } else if (c3 != "" && substr(s, i + 3, 1) == sq) {
+                    i = i + 4
+                    consumed = 1
+                }
+            } else if (c2 != "" && substr(s, i + 2, 1) == sq) {
+                i = i + 3
+                consumed = 1
+            }
+            if (consumed) {
+                result = result " "
+                continue
+            }
+            result = result c
+            i++
+            continue
+        }
+
+        result = result c
+        i++
+    }
+    return result
 }
 
 # Count `{` and `}` in a code slice and update fn_depth. Returns 1 if the
