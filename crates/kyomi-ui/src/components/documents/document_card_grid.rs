@@ -69,6 +69,144 @@ pub fn format_relative_time(timestamp: &str) -> String {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// List sorting
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Sort document list items (dashboards or knowledge docs) per the
+/// `SearchSortBar` sort key. Shared by `dashboards_list.rs` and
+/// `knowledge_page.rs`, which previously carried byte-identical copies of
+/// this match — extracted here so a fix (or a future sort option) lands
+/// once for both pages instead of drifting between two copies.
+///
+/// `updated_at`/`created_at` sort on the *parsed* timestamp, not the raw
+/// string (KYO-490). `DashboardListItem` timestamps currently reach the
+/// client through a single query shape — `fetch_dashboard_snapshot`'s
+/// `CAST(... AS TEXT)` (`kyomi-auth/src/dashboard_service.rs`) backs
+/// bootstrap, live broadcast, *and* the `sync_log` insert/update payload —
+/// so, unlike chat sessions, there is no currently-live path that emits a
+/// second, incompatible timestamp format. A byte-wise string comparison is
+/// still the wrong tool for a timestamp: it has no format guarantee to rely
+/// on and would silently misorder the list the moment any write site
+/// diverges (as chat's `sync_log`-authored `to_rfc3339()` path did — see
+/// `sort_sessions_by_recency` in `pages/chat/chat_list.rs`). `title` is a
+/// genuine string field and is left as a byte-wise compare.
+pub(crate) fn sort_document_list_items(items: &mut [DashboardListItem], sort: &str) {
+    match sort {
+        "updated_at" | "recent" | "" => items.sort_by_key(|d| {
+            std::cmp::Reverse(crate::utils::time::parse_timestamp(&d.updated_at))
+        }),
+        "popularity" => items.sort_by(|a, b| {
+            b.popularity_score
+                .partial_cmp(&a.popularity_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.view_count.cmp(&a.view_count))
+        }),
+        "created_at" | "created" => items.sort_by_key(|d| {
+            std::cmp::Reverse(crate::utils::time::parse_timestamp(&d.created_at))
+        }),
+        "title" => items.sort_by(|a, b| a.title.cmp(&b.title)),
+        _ => items.sort_by_key(|d| {
+            std::cmp::Reverse(crate::utils::time::parse_timestamp(&d.updated_at))
+        }),
+    }
+}
+
+#[cfg(test)]
+mod sort_document_list_items_tests {
+    use super::*;
+
+    /// A minimal `DashboardListItem` with only the fields a given test
+    /// varies set to something non-empty — the rest are zero values.
+    fn make_item(id: &str, updated_at: &str, created_at: &str, title: &str) -> DashboardListItem {
+        DashboardListItem {
+            dashboard_id: id.to_string(),
+            user_id: String::new(),
+            workspace_id: String::new(),
+            title: title.to_string(),
+            content: String::new(),
+            content_preview: None,
+            summary: None,
+            last_change_summary: None,
+            popularity_score: 0.0,
+            view_count: 0,
+            recent_views: 0,
+            updated_at: updated_at.to_string(),
+            created_at: created_at.to_string(),
+            is_publicly_shared: false,
+        }
+    }
+
+    fn ids(items: &[DashboardListItem]) -> Vec<&str> {
+        items.iter().map(|d| d.dashboard_id.as_str()).collect()
+    }
+
+    /// KYO-490 audit case: even though no live write path currently emits a
+    /// second timestamp format for `DashboardListItem` (see the doc comment
+    /// on `sort_document_list_items`), the sort must still order by parsed
+    /// instant rather than by byte value — this pins that a mixed-format
+    /// input (defense-in-depth against a future divergent write path, and
+    /// the same input the chat list test uses) sorts correctly.
+    #[test]
+    fn updated_at_sorts_mixed_formats_by_parsed_instant() {
+        let mut items = vec![
+            make_item("rfc3339-10-15", "2026-08-23T10:15:00+00:00", "", ""),
+            make_item("postgres-10-20", "2026-08-23 10:20:00+00", "", ""),
+            make_item("postgres-09-00", "2026-08-23 09:00:00+00", "", ""),
+        ];
+
+        sort_document_list_items(&mut items, "updated_at");
+
+        assert_eq!(
+            ids(&items),
+            vec!["postgres-10-20", "rfc3339-10-15", "postgres-09-00"],
+        );
+    }
+
+    #[test]
+    fn updated_at_unparseable_timestamp_sorts_last() {
+        let mut items = vec![
+            make_item("valid-newer", "2026-08-23T10:15:00+00:00", "", ""),
+            make_item("garbage", "not-a-timestamp", "", ""),
+            make_item("valid-older", "2026-08-23T09:00:00+00:00", "", ""),
+        ];
+
+        sort_document_list_items(&mut items, "updated_at");
+
+        assert_eq!(ids(&items), vec!["valid-newer", "valid-older", "garbage"]);
+    }
+
+    #[test]
+    fn created_at_sorts_mixed_formats_by_parsed_instant() {
+        let mut items = vec![
+            make_item("rfc3339-10-15", "", "2026-08-23T10:15:00+00:00", ""),
+            make_item("postgres-10-20", "", "2026-08-23 10:20:00+00", ""),
+            make_item("postgres-09-00", "", "2026-08-23 09:00:00+00", ""),
+        ];
+
+        sort_document_list_items(&mut items, "created_at");
+
+        assert_eq!(
+            ids(&items),
+            vec!["postgres-10-20", "rfc3339-10-15", "postgres-09-00"],
+        );
+    }
+
+    /// Sanity check that the unrecognized-sort-key fallback (`_` arm) still
+    /// behaves like `"updated_at"`.
+    #[test]
+    fn unrecognized_sort_key_falls_back_to_updated_at_recency() {
+        let mut items = vec![
+            make_item("older", "2026-08-23T09:00:00+00:00", "", ""),
+            make_item("newer", "2026-08-23T10:00:00+00:00", "", ""),
+        ];
+
+        sort_document_list_items(&mut items, "not-a-real-sort-key");
+
+        assert_eq!(ids(&items), vec!["newer", "older"]);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Loading skeleton
 // ─────────────────────────────────────────────────────────────────────────────
 

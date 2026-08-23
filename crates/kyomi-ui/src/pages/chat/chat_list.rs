@@ -83,6 +83,93 @@ fn is_session_owned(session: &ChatSessionItem, current_user_id: &str) -> bool {
     }
 }
 
+/// Sort sessions most-recently-updated first.
+///
+/// `updated_at` reaches the client in two incompatible textual formats — RFC
+/// 3339 (`sync_log` delta replay, `T` separator) and Postgres's
+/// `CAST(... AS TEXT)` rendering (bootstrap and live-broadcast paths, space
+/// separator) — so a byte-wise string comparison orders them inconsistently
+/// (space `0x20` sorts below `T` `0x54`, see KYO-490). Sort on the value
+/// [`parse_timestamp`](crate::utils::time::parse_timestamp) parses instead,
+/// which accepts both forms. `Option<DateTime<FixedOffset>>` orders `None`
+/// before `Some`, so under `Reverse` a session whose timestamp fails to parse
+/// sinks to the bottom rather than floating to the top — the correct failure
+/// mode for a list ordered by recency.
+fn sort_sessions_by_recency(sessions: &mut [ChatSessionItem]) {
+    sessions.sort_by_key(|s| std::cmp::Reverse(crate::utils::time::parse_timestamp(&s.updated_at)));
+}
+
+#[cfg(test)]
+mod sort_sessions_by_recency_tests {
+    use super::*;
+
+    /// A minimal `ChatSessionItem` with only `session_id` and `updated_at`
+    /// set — the two fields the sort under test reads.
+    fn make_session(id: &str, updated_at: &str) -> ChatSessionItem {
+        ChatSessionItem {
+            session_id: id.to_string(),
+            title: None,
+            model: None,
+            session_type: None,
+            shared: false,
+            shared_at: None,
+            created_at: updated_at.to_string(),
+            updated_at: updated_at.to_string(),
+            message_count: 0,
+            pinned_count: 0,
+            unread_count: 0,
+            created_by: None,
+            slack_channel_id: None,
+        }
+    }
+
+    fn session_ids(sessions: &[ChatSessionItem]) -> Vec<&str> {
+        sessions.iter().map(|s| s.session_id.as_str()).collect()
+    }
+
+    /// KYO-490: RFC3339 (`T` separator, delta-replay path) and Postgres
+    /// `CAST(... AS TEXT)` (space separator, bootstrap/broadcast paths) must
+    /// sort by parsed instant, not by byte value. Space (0x20) sorts below
+    /// `T` (0x54), so a raw string compare would place "10:15" (T-format)
+    /// above "10:20" (space-format) despite being five minutes older — this
+    /// is the exact mixed-format case from the ticket.
+    #[test]
+    fn sorts_mixed_rfc3339_and_postgres_formats_by_parsed_instant() {
+        let mut sessions = vec![
+            make_session("rfc3339-10-15", "2026-08-23T10:15:00+00:00"),
+            make_session("postgres-10-20", "2026-08-23 10:20:00+00"),
+            make_session("postgres-09-00", "2026-08-23 09:00:00+00"),
+        ];
+
+        sort_sessions_by_recency(&mut sessions);
+
+        assert_eq!(
+            session_ids(&sessions),
+            vec!["postgres-10-20", "rfc3339-10-15", "postgres-09-00"],
+        );
+    }
+
+    /// A session with an unparseable `updated_at` must sink to the bottom of
+    /// the list, not float to the top — floating to the top is what the
+    /// pre-fix byte-wise compare produced for any string that happened to
+    /// start with a byte greater than a real timestamp's leading digit.
+    #[test]
+    fn unparseable_timestamp_sorts_last() {
+        let mut sessions = vec![
+            make_session("valid-newer", "2026-08-23T10:15:00+00:00"),
+            make_session("garbage", "not-a-timestamp"),
+            make_session("valid-older", "2026-08-23T09:00:00+00:00"),
+        ];
+
+        sort_sessions_by_recency(&mut sessions);
+
+        assert_eq!(
+            session_ids(&sessions),
+            vec!["valid-newer", "valid-older", "garbage"],
+        );
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Chat filter enum
 // ─────────────────────────────────────────────────────────────────────────────
@@ -429,7 +516,7 @@ pub fn ChatsListPage() -> impl IntoView {
                 .collect(),
         };
 
-        filtered.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        sort_sessions_by_recency(&mut filtered);
         filtered
     });
 

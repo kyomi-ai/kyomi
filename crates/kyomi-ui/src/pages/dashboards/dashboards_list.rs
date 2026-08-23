@@ -31,7 +31,9 @@
 use std::sync::Arc;
 
 use super::collections_sidebar::CollectionsSidebar;
-use crate::components::documents::{DocumentCardGrid, DocumentCardGridSkeleton, SearchSortBar};
+use crate::components::documents::{
+    sort_document_list_items, DocumentCardGrid, DocumentCardGridSkeleton, SearchSortBar,
+};
 use crate::components::toast::{toast_error, toast_success};
 use crate::components::{
     Button, ButtonSize, ButtonVariant, ConfirmDialog, EmptyState, Spinner, ToggleButton,
@@ -124,18 +126,7 @@ pub fn DashboardsListPage() -> impl IntoView {
         }
         // Sort
         let sort = sort_signal.try_get().unwrap_or_default();
-        match sort.as_str() {
-            "updated_at" | "recent" | "" => items.sort_by(|a, b| b.updated_at.cmp(&a.updated_at)),
-            "popularity" => items.sort_by(|a, b| {
-                b.popularity_score
-                    .partial_cmp(&a.popularity_score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| b.view_count.cmp(&a.view_count))
-            }),
-            "created_at" | "created" => items.sort_by(|a, b| b.created_at.cmp(&a.created_at)),
-            "title" => items.sort_by(|a, b| a.title.cmp(&b.title)),
-            _ => items.sort_by(|a, b| b.updated_at.cmp(&a.updated_at)),
-        }
+        sort_document_list_items(&mut items, sort.as_str());
         items
     });
 
