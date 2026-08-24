@@ -1,7 +1,28 @@
 //! Create-mode "Next" button gating: which (type, mode) pairs may
 //! bypass a live connection test, and the registry-driven route
 //! matrix that enumerates every pair against its production evidence
-//! (KYO-404, KYO-407).
+//! (KYO-404, KYO-407, KYO-517).
+//!
+//! `CreateNextRoute` enumerates routes that are reachable in create
+//! mode specifically — not everywhere the underlying arm's source code
+//! happens to run. KYO-517 is the cautionary tale: the
+//! `OAuthMessage::SnowflakeSuccess | DatabricksSuccess` and
+//! `MicrosoftEnterpriseSuccess` arms that call `do_test_and_discover()`
+//! genuinely exist in `datasources.rs`, and genuinely run in edit mode
+//! (their `ModalOAuthStatusPanel` Connect button is only hidden in
+//! create mode) — but in create mode nothing can ever trigger them,
+//! since the button that would fire them is the very thing hidden.
+//! `every_registry_auth_mode_pair_has_a_create_next_route` previously
+//! mapped all three of those pairs to a route
+//! (`OAuthArmRunsTestAndDiscover`) claiming otherwise, so the test
+//! reported coverage for a create-mode path that did not exist — it
+//! asserted the arm's source text, never that create mode could reach
+//! it. There is now no `CreateNextRoute` variant for "the arm exists
+//! in source"; a variant exists here only if `expected_route_for` maps
+//! at least one create-mode-reachable pair to it, and that pair's own
+//! `assert_route_has_production_evidence` case checks the create-mode
+//! reachability, not merely that the arm's code is present somewhere
+//! in the file.
 
 use super::super::connection_step_satisfied_from;
 use super::{appears_shortly_before, extract_between, SRC};
@@ -97,31 +118,33 @@ fn bigquery_enterprise_oauth_panel_keeps_create_mode_gate() {
 
 /// The create-mode footer's `can_next` must keep requiring
 /// `!name.get().is_empty()` unconditionally, and the shared
-/// `connection_step_satisfied` predicate it reads must relax the
-/// `test_result.success` requirement only when BOTH the datasource type
-/// is "bigquery" AND the BigQuery auth mode is "enterprise_oauth" — not
-/// on datasource type alone. A bigquery-only relaxation would re-enable
-/// "Next" for kyomi_oauth with no connection at all, reintroducing a
-/// create path that produces a datasource with no verified credentials.
+/// `connection_step_satisfied` `Signal::derive` must delegate to the
+/// pure `connection_step_satisfied_from` predicate — passing the
+/// currently-selected provider's own auth mode, not always
+/// `bq_auth_mode` (KYO-517: the derive now needs Snowflake/Databricks/
+/// Synapse's auth-mode signals too, so a careless generalization could
+/// silently keep reading only BigQuery's).
 ///
-/// The exception now lives in `connection_step_satisfied_from`'s own
+/// The exception lives in `connection_step_satisfied_from`'s own
 /// definition rather than inline in the footer (KYO-404 follow-up: the
 /// footer, and the Catalog tab pill's class/disabled/on:click closures,
 /// all read the same `connection_step_satisfied` signal instead of each
 /// carrying their own copy of the predicate). KYO-411 moved the
 /// predicate's body out of the `Signal::derive` closure and into a pure,
-/// directly-testable function (`connection_step_satisfied_from`, next to
-/// `bq_kyomi_oauth_access_gate_satisfied`) so it could add the
-/// already-connected-account exception without a fourth inline special
-/// case at the `can_next` call site. This test checks three things: the
-/// derive delegates to the pure function with the right arguments, the
-/// AND'd exception behavior itself (exercised directly, not via string
-/// matching), and that the footer still ANDs the name check onto the
-/// shared signal rather than folding name emptiness into the shared
-/// predicate itself (which would wrongly make the Catalog tab pill
-/// require a name too).
+/// directly-testable function so it could add the already-connected-
+/// account exception without a fourth inline special case at the
+/// `can_next` call site. The exception *values themselves* (which pairs
+/// get it, and under what conditions) are exercised directly against
+/// `connection_step_satisfied_from` in
+/// `connection_step_satisfied_precreate_exception_covers_every_datasource_oauth_pair`
+/// below, not here — this test checks only the wiring: the derive
+/// delegates to the pure function with the right arguments and selects
+/// the right auth-mode signal per `ds_type`, and the footer still ANDs
+/// the name check onto the shared signal rather than folding name
+/// emptiness into the shared predicate itself (which would wrongly make
+/// the Catalog tab pill require a name too).
 #[test]
-fn create_mode_can_next_bigquery_exception_requires_enterprise_oauth_mode() {
+fn create_mode_can_next_derive_delegates_to_shared_predicate() {
     let derive_body = extract_between(
         SRC,
         "let connection_step_satisfied: Signal<bool> = Signal::derive(move || {",
@@ -142,28 +165,23 @@ fn create_mode_can_next_bigquery_exception_requires_enterprise_oauth_mode() {
     assert!(
         derive_body.contains("test_result.get().map(|r| r.success).unwrap_or(false)"),
         "the derive must still pass test_result's success as the test_succeeded \
-         argument — the original requirement for every type/mode other than the two \
-         BigQuery exceptions"
+         argument — the requirement for every pair other than the documented \
+         precreate exceptions"
     );
-
-    // The exception logic itself, exercised directly: it must require
-    // BOTH ds_type == "bigquery" AND bq_auth_mode == "enterprise_oauth"
-    // — a bigquery-only relaxation would re-enable Next for kyomi_oauth
-    // with zero connection (KYO-404 regression risk).
-    assert!(
-        connection_step_satisfied_from("bigquery", "enterprise_oauth", false, false),
-        "the enterprise_oauth precreate exception must be satisfied on its own"
-    );
-    assert!(
-        !connection_step_satisfied_from("bigquery", "kyomi_oauth", false, false),
-        "kyomi_oauth with no connection and no test_result must NOT be satisfied — \
-         only enterprise_oauth gets the unconditional precreate exception"
-    );
-    assert!(
-        !connection_step_satisfied_from("snowflake", "enterprise_oauth", false, false),
-        "the enterprise_oauth exception is bigquery-specific — ds_type must be \
-         checked, not auth_mode alone"
-    );
+    for (ds_type, signal_read) in [
+        ("\"bigquery\" => bq_auth_mode.get()", "bq_auth_mode"),
+        ("\"snowflake\" => sf_auth_mode.get()", "sf_auth_mode"),
+        ("\"databricks\" => db_auth_mode.get()", "db_auth_mode"),
+        ("\"synapse\" => synapse_auth_mode.get()", "synapse_auth_mode"),
+    ] {
+        assert!(
+            derive_body.contains(ds_type),
+            "the derive must select {signal_read} when ds_type is the matching \
+             provider (KYO-517) — passing the wrong provider's auth-mode signal into \
+             connection_step_satisfied_from either never fires that provider's \
+             precreate exception or fires it for the wrong pair"
+        );
+    }
 
     let footer = extract_between(
         SRC,
@@ -176,6 +194,78 @@ fn create_mode_can_next_bigquery_exception_requires_enterprise_oauth_mode() {
          connection_step_satisfied signal — this must never become an OR'd-in \
          exception, and the name check must not migrate into the shared predicate \
          itself (the Catalog tab pill must not start requiring a name)"
+    );
+}
+
+/// KYO-517: the create-mode precreate exception in
+/// `connection_step_satisfied_from` must cover every (ds_type,
+/// auth_mode) pair whose OAuth status is slug-scoped
+/// (`OAuthStatusSource::Datasource`, via `oauth_source_for_ds_type`) —
+/// not only BigQuery enterprise_oauth. Before this fix, an admin who
+/// picked Snowflake → OAuth, Databricks → OAuth, or Synapse →
+/// Enterprise OAuth in the create-datasource modal could never enable
+/// "Next": `oauth_status_source_to_fetch` correctly gates
+/// `Datasource(_)` fetches on `!is_create_mode` (KYO-426 — that fetch
+/// needs a `datasource_slug` that does not exist pre-save), so
+/// `modal_oauth_connected` could never become `true` for these pairs in
+/// create mode either, and neither could `test_succeeded` — nothing
+/// could ever satisfy the connection step and the datasource could not
+/// be created at all.
+///
+/// Exercises the pure predicate directly rather than the source text,
+/// so this fails for the right reason against unmodified code: on
+/// `main`, `connection_step_satisfied_from` only recognises the two
+/// BigQuery exceptions, so each of the three new-pair assertions below
+/// fails with the boolean `false` where `true` is expected.
+#[test]
+fn connection_step_satisfied_precreate_exception_covers_every_datasource_oauth_pair() {
+    // The three KYO-517 pairs — unconditionally satisfied pre-save, the
+    // same way BigQuery enterprise_oauth already was.
+    for (ds_type, auth_mode) in [
+        ("snowflake", "oauth"),
+        ("databricks", "oauth"),
+        ("synapse", "enterprise_oauth"),
+    ] {
+        assert!(
+            connection_step_satisfied_from(ds_type, auth_mode, false, false),
+            "{ds_type}/{auth_mode} must satisfy the create-mode connection step \
+             unconditionally, with neither an existing connection nor a completed \
+             test — its connect endpoint is slug-scoped and unreachable pre-save \
+             (KYO-517), so requiring test_succeeded deadlocks \"Next\" forever and \
+             the datasource can never be created"
+        );
+    }
+
+    // The two pre-existing BigQuery exceptions must still hold exactly
+    // as before.
+    assert!(
+        connection_step_satisfied_from("bigquery", "enterprise_oauth", false, false),
+        "the BigQuery enterprise_oauth precreate exception (KYO-404) must still hold"
+    );
+    assert!(
+        connection_step_satisfied_from("bigquery", "kyomi_oauth", true, false),
+        "the BigQuery kyomi_oauth already-connected exception (KYO-411) must still hold"
+    );
+    assert!(
+        !connection_step_satisfied_from("bigquery", "kyomi_oauth", false, false),
+        "kyomi_oauth with neither a live connection nor a test_result must NOT be \
+         satisfied — unlike the four Datasource-sourced pairs above, its exception is \
+         conditional on oauth_connected, not unconditional"
+    );
+
+    // Control: a pair with no OAuth status behind it at all — the
+    // regression to fear is loosening the gate for every pair instead of
+    // only the slug-scoped OAuth ones.
+    assert!(
+        !connection_step_satisfied_from("snowflake", "password", false, false),
+        "snowflake/password has no OAuth status source at all (oauth_source_for_ds_type \
+         returns None) — it must still require an actual successful test, not be swept \
+         up by the OAuth precreate exception"
+    );
+    assert!(
+        connection_step_satisfied_from("snowflake", "password", false, true),
+        "snowflake/password must still be satisfied by an actual successful \
+         Test & Discover"
     );
 }
 
@@ -231,10 +321,11 @@ fn catalog_tab_pill_shares_connection_step_satisfied_with_can_next() {
 // ── KYO-407: registry-driven create-mode Next-button route matrix ──
 //
 // The create wizard's footer gates "Next" on `connection_step_satisfied`
-// (see `create_mode_can_next_bigquery_exception_requires_enterprise_oauth_mode`
+// (see `create_mode_can_next_derive_delegates_to_shared_predicate` and
+// `connection_step_satisfied_precreate_exception_covers_every_datasource_oauth_pair`
 // above), which requires `test_result.get().map(|r|
 // r.success).unwrap_or(false)` for every (type, auth_mode) pair except
-// the one documented BigQuery enterprise_oauth exception. But *how* a
+// the documented precreate exceptions. But *how* a
 // given pair ever produces that `test_result.success = true` — or
 // legitimately bypasses the requirement — is wired independently, once
 // per provider, by whoever implemented that provider. BigQuery was
@@ -266,7 +357,7 @@ fn catalog_tab_pill_shares_connection_step_satisfied_with_can_next() {
 enum CreateNextRoute {
     /// The shared "Test & Discover" button rendered inside
     /// `DatasourceModal`: visible for every type/mode except the ones
-    /// the other four routes below cover, and its `on:click` runs
+    /// the other three routes below cover, and its `on:click` runs
     /// `do_test_and_discover()`, whose `test_action` Effect writes
     /// `test_result.success = true` on a successful probe.
     GenericTestAndDiscover,
@@ -275,25 +366,26 @@ enum CreateNextRoute {
     /// BigQuery kyomi_oauth has no Test & Discover step of its own; the
     /// OAuth handshake itself is the verification (KYO-404).
     OAuthArmWritesTestResult,
-    /// An OAuth success arm that calls `do_test_and_discover()` itself
-    /// once connected: `SnowflakeSuccess | DatabricksSuccess`, and the
-    /// Synapse `MicrosoftEnterpriseSuccess` arm. The generic button
-    /// (above) is hidden for these pairs until connected, but the arm
-    /// runs discovery the instant the connection succeeds, so the pair
-    /// still has a route.
-    OAuthArmRunsTestAndDiscover,
     /// BigQuery `service_account`'s own "Validate & Discover Projects"
     /// button, rendered inside `BigQueryAuthModeSection` and wired
     /// through `on_validate` to the same `do_test_and_discover` every
     /// other provider's generic button calls.
     BigQueryServiceAccountValidateButton,
-    /// BigQuery `enterprise_oauth` in create mode cannot produce a
-    /// `test_result` at all pre-save (its connect endpoint needs a
-    /// `datasource_slug` that does not exist yet) — the documented
-    /// exception inside `connection_step_satisfied_from` (KYO-411 moved
-    /// it out of the `connection_step_satisfied` `Signal::derive`,
-    /// which now only delegates to it) bypasses the requirement for
-    /// exactly this one pair instead.
+    /// A pair whose OAuth status is slug-scoped
+    /// (`OAuthStatusSource::Datasource`, via `oauth_source_for_ds_type`)
+    /// and so cannot produce a `test_result` at all pre-save — its
+    /// connect endpoint needs a `datasource_slug` that does not exist
+    /// yet. The documented exception inside `connection_step_satisfied_from`
+    /// (KYO-411 moved it out of the `connection_step_satisfied`
+    /// `Signal::derive`, which now only delegates to it) bypasses the
+    /// requirement for these pairs instead: BigQuery `enterprise_oauth`
+    /// (KYO-404), and — as of KYO-517 — Snowflake `oauth`, Databricks
+    /// `oauth`, and Synapse `enterprise_oauth`. Each of those three had
+    /// an `OAuthMessage::*Success` arm that calls `do_test_and_discover()`
+    /// once connected, which is a real route in *edit* mode (where the
+    /// Connect button that triggers it isn't hidden) but never in create
+    /// mode — see the module-level KYO-517 comment above for why that
+    /// arm existing in source was mistaken for a create-mode route.
     ConnectionStepSatisfiedException,
 }
 
@@ -311,17 +403,17 @@ fn expected_route_for(type_id: &str, mode_id: &str) -> Option<CreateNextRoute> {
         ("bigquery", "service_account") => Some(BigQueryServiceAccountValidateButton),
         ("clickhouse", "password") => Some(GenericTestAndDiscover),
         ("snowflake", "password") => Some(GenericTestAndDiscover),
-        ("snowflake", "oauth") => Some(OAuthArmRunsTestAndDiscover),
+        ("snowflake", "oauth") => Some(ConnectionStepSatisfiedException),
         ("snowflake", "keypair") => Some(GenericTestAndDiscover),
         ("databricks", "token") => Some(GenericTestAndDiscover),
-        ("databricks", "oauth") => Some(OAuthArmRunsTestAndDiscover),
+        ("databricks", "oauth") => Some(ConnectionStepSatisfiedException),
         ("redshift", "password") => Some(GenericTestAndDiscover),
         ("postgres", "password") => Some(GenericTestAndDiscover),
         ("mysql", "password") => Some(GenericTestAndDiscover),
         ("sqlserver", "password") => Some(GenericTestAndDiscover),
         ("synapse", "sql") => Some(GenericTestAndDiscover),
         ("synapse", "service_principal") => Some(GenericTestAndDiscover),
-        ("synapse", "enterprise_oauth") => Some(OAuthArmRunsTestAndDiscover),
+        ("synapse", "enterprise_oauth") => Some(ConnectionStepSatisfiedException),
         ("flaredb", "none") => Some(GenericTestAndDiscover),
         _ => None,
     }
@@ -391,31 +483,6 @@ fn assert_route_has_production_evidence(route: CreateNextRoute) {
                  OAuth handshake"
             );
         }
-        CreateNextRoute::OAuthArmRunsTestAndDiscover => {
-            let sf_db_arm = extract_between(
-                SRC,
-                "OAuthMessage::SnowflakeSuccess { email }",
-                "OAuthMessage::GoogleError { error } => {",
-            );
-            assert!(
-                sf_db_arm.contains("do_test_and_discover();"),
-                "the SnowflakeSuccess | DatabricksSuccess arm must still call \
-                 do_test_and_discover() on connect — that is the only route to \
-                 test_result.success for Snowflake/Databricks oauth mode"
-            );
-
-            let synapse_arm = extract_between(
-                SRC,
-                "OAuthMessage::MicrosoftEnterpriseSuccess { email } => {",
-                "let cleanup_cell =",
-            );
-            assert!(
-                synapse_arm.contains("do_test_and_discover();"),
-                "the Synapse MicrosoftEnterpriseSuccess arm must still call \
-                 do_test_and_discover() on connect — that is the only route to \
-                 test_result.success for Synapse enterprise_oauth"
-            );
-        }
         CreateNextRoute::BigQueryServiceAccountValidateButton => {
             let button = extract_between(
                 SRC,
@@ -450,13 +517,18 @@ fn assert_route_has_production_evidence(route: CreateNextRoute) {
         CreateNextRoute::ConnectionStepSatisfiedException => {
             // KYO-411 (#370) moved this rule out of the
             // `Signal::derive` closure — which is now only a
-            // delegation, `connection_step_satisfied_from(&ds_type.get(),
-            // ...)` — and into `connection_step_satisfied_from`'s own
-            // body. Retarget the evidence there rather than at the
-            // derive: the pure function is what actually encodes the
-            // rule and, being a plain function rather than a reactive
-            // closure, is far less likely to be reshuffled by an
-            // unrelated future refactor.
+            // delegation, `connection_step_satisfied_from(&t, ...)` —
+            // and into `connection_step_satisfied_from`'s own body.
+            // KYO-517 generalized the rule itself from a single
+            // hand-typed BigQuery-specific condition to a dispatch
+            // through `oauth_source_for_ds_type`, so it covers every
+            // pair whose OAuth status is slug-scoped without a second,
+            // hand-typed (ds_type, auth_mode) list to keep in sync.
+            // Retarget the evidence at the pure function rather than
+            // the derive: it's what actually encodes the rule and,
+            // being a plain function rather than a reactive closure, is
+            // far less likely to be reshuffled by an unrelated future
+            // refactor.
             //
             // Neither marker below is unique in `SRC` (`datasources.rs`),
             // and no count is quoted here on purpose: since `SRC` is
@@ -473,17 +545,34 @@ fn assert_route_has_production_evidence(route: CreateNextRoute) {
                 "fn auth_mode_select_options(",
             );
             assert!(
-                predicate.contains(
-                    "ds_type == \"bigquery\" && bq_auth_mode == \"enterprise_oauth\""
-                ),
-                "the pre-save exception must still require BOTH ds_type == \"bigquery\" \
-                 AND bq_auth_mode == \"enterprise_oauth\" — this is the ONLY pair with no \
-                 other route to satisfying create-mode Next"
+                predicate.contains("match oauth_source_for_ds_type(ds_type, auth_mode)"),
+                "connection_step_satisfied_from must delegate to \
+                 oauth_source_for_ds_type rather than hand-rolling a second \
+                 (ds_type, auth_mode) → OAuthStatusSource mapping (KYO-517) — a second \
+                 mapping is exactly the kind of copy that drifts from the one \
+                 use_oauth_status_refetch already wires per provider"
             );
             assert!(
-                predicate.contains("|| test_succeeded"),
-                "the exception must still be OR'd onto the ordinary test_succeeded \
-                 requirement, not a replacement of it, for every other pair"
+                predicate.contains("Some(OAuthStatusSource::Datasource(_)) => true"),
+                "the pre-save exception must be unconditional for every pair whose \
+                 OAuth status is slug-scoped (Datasource(_)) — those pairs have no \
+                 other route to satisfying create-mode Next: BigQuery enterprise_oauth \
+                 (KYO-404), and Snowflake oauth / Databricks oauth / Synapse \
+                 enterprise_oauth (KYO-517)"
+            );
+            assert!(
+                predicate.contains(
+                    "Some(OAuthStatusSource::GoogleAccount) => oauth_connected || test_succeeded"
+                ),
+                "the account-level kyomi_oauth exception must stay conditional on \
+                 oauth_connected (OR'd with test_succeeded, not a replacement of it) — \
+                 unlike the four unconditional Datasource(_) pairs above (KYO-411)"
+            );
+            assert!(
+                predicate.contains("None => test_succeeded"),
+                "every pair with no OAuth status source at all must still require an \
+                 actual successful test — the regression to fear is loosening this \
+                 gate for every pair instead of only the OAuth-backed ones"
             );
         }
     }
@@ -541,7 +630,7 @@ fn every_registry_auth_mode_pair_has_a_create_next_route() {
          to the registry with no verified path to unlock the create-mode \"Next\" button \
          — see the CreateNextRoute enum and the route list in KYO-407 for the shape a fix \
          needs to take: either wire a new route and record it here, or confirm one of the \
-         existing five already covers it and add the match arm."
+         existing four already covers it and add the match arm."
     );
 
     for route in routes_used {

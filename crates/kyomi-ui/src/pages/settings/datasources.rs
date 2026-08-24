@@ -226,40 +226,62 @@ fn bq_kyomi_oauth_connect_allowed(
 }
 
 /// Whether the create-mode Connection step is satisfied (KYO-404, extended
-/// KYO-411) — a pure predicate so it's directly unit-testable, following
-/// the same shape as [`bq_kyomi_oauth_access_gate_satisfied`] above. Called
-/// from the `connection_step_satisfied` `Signal::derive` in
-/// `DatasourceModal`, which is the single source of truth read by the
-/// create-mode footer's `can_next` and by all three states of the Catalog
-/// tab pill (class, disabled, on:click) — see that call site for why this
-/// must stay one signal rather than independent copies of the same check.
+/// KYO-411, generalized KYO-517) — a pure predicate so it's directly
+/// unit-testable, following the same shape as
+/// [`bq_kyomi_oauth_access_gate_satisfied`] above. Called from the
+/// `connection_step_satisfied` `Signal::derive` in `DatasourceModal`,
+/// which is the single source of truth read by the create-mode footer's
+/// `can_next` and by all three states of the Catalog tab pill (class,
+/// disabled, on:click) — see that call site for why this must stay one
+/// signal rather than independent copies of the same check.
 ///
-/// Returns `true` when any of:
-/// - `ds_type == "bigquery" && bq_auth_mode == "enterprise_oauth"` — no
-///   slug-scoped connect endpoint exists before the datasource is saved
-///   (`enterprise_oauth_url` needs `datasource_slug`), so `test_succeeded`
-///   can never be true for this one type/mode in create mode (KYO-404).
-/// - `ds_type == "bigquery" && bq_auth_mode == "kyomi_oauth" && oauth_connected`
-///   — a proven Google OAuth connection is equally trustworthy whether it
-///   arrived via the popup's `GoogleSuccess` postMessage arm (which itself
-///   sets `test_result`) or via `use_oauth_status_refetch`'s account-level
-///   status fetch on modal open (KYO-411). Without this arm, a returning,
-///   already-linked user's modal renders "Connected" with nothing left to
-///   click, `test_result` never gets set, and Next stays permanently
-///   disabled — the exact KYO-404 deadlock, reintroduced for exactly the
-///   users KYO-411 exists to help.
-/// - `test_succeeded` — every other type/mode requires an actual
-///   successful Test & Discover.
+/// `auth_mode` is the auth mode of whichever provider `ds_type` names —
+/// the caller is responsible for picking the right one of
+/// `bq_auth_mode` / `sf_auth_mode` / `db_auth_mode` / `synapse_auth_mode`
+/// (see the call site). Passing the wrong provider's auth-mode signal
+/// either never fires the exception it should, or fires it for the wrong
+/// pair — there is nothing in this function's types that catches that,
+/// so get it right at the call site.
+///
+/// Dispatches to [`oauth_source_for_ds_type`] — the same
+/// (ds_type, auth_mode) → [`OAuthStatusSource`] mapping every
+/// `*AuthModeSection` already wires into `use_oauth_status_refetch` —
+/// rather than hand-rolling a second, parallel mapping here that could
+/// drift from it. Returns `true` when any of:
+/// - the pair resolves to `OAuthStatusSource::Datasource(_)` — its OAuth
+///   status (and connect endpoint) is slug-scoped
+///   (`get_datasource_oauth_status(key, slug)` / `..._url`) and cannot be
+///   reached before the datasource is saved
+///   (`oauth_status_source_to_fetch` gates `Datasource(_)` fetches on
+///   `!is_create_mode`, KYO-426), so `test_succeeded` can never become
+///   true for this pair in create mode (KYO-404, extended KYO-517 from
+///   BigQuery enterprise_oauth to Snowflake oauth, Databricks oauth, and
+///   Synapse enterprise_oauth — all three deadlocked "Next" identically,
+///   for the identical reason).
+/// - the pair resolves to `OAuthStatusSource::GoogleAccount` (BigQuery
+///   kyomi_oauth, the one account-level source) and `oauth_connected` —
+///   a proven Google OAuth connection is equally trustworthy whether it
+///   arrived via the popup's `GoogleSuccess` postMessage arm (which
+///   itself sets `test_result`) or via `use_oauth_status_refetch`'s
+///   account-level status fetch on modal open (KYO-411). Without this
+///   arm, a returning, already-linked user's modal renders "Connected"
+///   with nothing left to click, `test_result` never gets set, and Next
+///   stays permanently disabled — the exact KYO-404 deadlock,
+///   reintroduced for exactly the users KYO-411 exists to help.
+/// - `test_succeeded` — every other pair (including a `GoogleAccount` or
+///   `Datasource(_)` pair with neither an existing connection nor a
+///   completed test) requires an actual successful Test & Discover.
 fn connection_step_satisfied_from(
     ds_type: &str,
-    bq_auth_mode: &str,
+    auth_mode: &str,
     oauth_connected: bool,
     test_succeeded: bool,
 ) -> bool {
-    let bq_enterprise_oauth_precreate = ds_type == "bigquery" && bq_auth_mode == "enterprise_oauth";
-    let bq_kyomi_oauth_already_connected =
-        ds_type == "bigquery" && bq_auth_mode == "kyomi_oauth" && oauth_connected;
-    bq_enterprise_oauth_precreate || bq_kyomi_oauth_already_connected || test_succeeded
+    match oauth_source_for_ds_type(ds_type, auth_mode) {
+        Some(OAuthStatusSource::Datasource(_)) => true,
+        Some(OAuthStatusSource::GoogleAccount) => oauth_connected || test_succeeded,
+        None => test_succeeded,
+    }
 }
 
 /// Builds `<Select>` options for an Authentication Mode selector from
@@ -3062,19 +3084,23 @@ pub fn DatasourceModal(
         discovery_status.get() == "success"
     });
 
-    // ── Connection-step-satisfied predicate (KYO-404, extended KYO-411) ────
-    // BigQuery enterprise_oauth has no slug-scoped connect endpoint before
-    // the datasource exists (`enterprise_oauth_url` needs `datasource_slug`),
-    // so `test_result` can never become `Some` for that one type/mode in
-    // create mode — the OAuth connect button for it stays gated behind
-    // "save first" (see the `!is_create_mode` Show around the
-    // enterprise_oauth `ModalOAuthStatusPanel`). BigQuery kyomi_oauth is
-    // satisfied by `modal_oauth_connected` alone (KYO-411): that signal is
-    // written both by the popup's `GoogleSuccess` postMessage arm (which
-    // also sets `test_result` itself) and by `use_oauth_status_refetch`'s
-    // account-level status fetch on modal open — an already-linked user has
-    // nothing to click that would ever produce a `test_result`, so without
-    // this arm Next stays permanently disabled for them (see
+    // ── Connection-step-satisfied predicate (KYO-404, extended KYO-411,
+    // generalized KYO-517) ──────────────────────────────────────────────
+    // BigQuery enterprise_oauth, Snowflake oauth, Databricks oauth, and
+    // Synapse enterprise_oauth each have a slug-scoped connect endpoint
+    // that can't be reached before the datasource exists
+    // (`*_url` needs `datasource_slug`), so `test_result` can never
+    // become `Some` for any of those four pairs in create mode — the
+    // OAuth connect button for each stays gated behind "save first" (see
+    // the `!is_create_mode` Show around each pair's
+    // `ModalOAuthStatusPanel`). BigQuery kyomi_oauth is the one
+    // account-level exception, satisfied by `modal_oauth_connected` alone
+    // (KYO-411): that signal is written both by the popup's
+    // `GoogleSuccess` postMessage arm (which also sets `test_result`
+    // itself) and by `use_oauth_status_refetch`'s account-level status
+    // fetch on modal open — an already-linked user has nothing to click
+    // that would ever produce a `test_result`, so without this arm Next
+    // stays permanently disabled for them (see
     // `connection_step_satisfied_from`'s doc comment for the full KYO-404
     // deadlock this reintroduces if omitted). Every other type/mode
     // requires an actual successful test. This is the single source of
@@ -3084,10 +3110,25 @@ pub fn DatasourceModal(
     // same-scope signals with no side effect, so `Signal::derive` applies
     // (docs/CODING_STANDARDS.md: reserve `Signal::derive` for cheap, pure
     // projections; use `Memo` only when the body does more than read).
+    //
+    // `connection_step_satisfied_from` needs the auth mode of whichever
+    // provider is currently selected, not `bq_auth_mode` specifically —
+    // select the matching signal here, following the same
+    // `match ds_type.get().as_str() { "bigquery" => ..., "snowflake" =>
+    // ..., ... }` idiom `build_credentials` above already uses to pick a
+    // provider-specific signal by `ds_type`.
     let connection_step_satisfied: Signal<bool> = Signal::derive(move || {
+        let t = ds_type.get();
+        let auth_mode = match t.as_str() {
+            "bigquery" => bq_auth_mode.get(),
+            "snowflake" => sf_auth_mode.get(),
+            "databricks" => db_auth_mode.get(),
+            "synapse" => synapse_auth_mode.get(),
+            _ => String::new(),
+        };
         connection_step_satisfied_from(
-            &ds_type.get(),
-            &bq_auth_mode.get(),
+            &t,
+            &auth_mode,
             modal_oauth_connected.get(),
             test_result.get().map(|r| r.success).unwrap_or(false),
         )
@@ -5070,6 +5111,24 @@ fn databricks_oauth_source(mode: &str) -> Option<OAuthStatusSource> {
 fn synapse_oauth_source(mode: &str) -> Option<OAuthStatusSource> {
     match mode {
         "enterprise_oauth" => Some(OAuthStatusSource::Datasource("microsoft-enterprise")),
+        _ => None,
+    }
+}
+
+/// Dispatches to the provider-specific `*_oauth_source` function for
+/// `ds_type`, so any caller that needs "does this (ds_type, auth_mode)
+/// pair have an OAuth status behind it, and which kind" reads the same
+/// mapping every `*AuthModeSection` already wires into
+/// `use_oauth_status_refetch`, rather than hand-rolling a second,
+/// independent (ds_type, auth_mode) → [`OAuthStatusSource`] mapping that
+/// could silently drift from it. Added for KYO-517 —
+/// [`connection_step_satisfied_from`] is its only caller today.
+fn oauth_source_for_ds_type(ds_type: &str, auth_mode: &str) -> Option<OAuthStatusSource> {
+    match ds_type {
+        "bigquery" => bigquery_oauth_source(auth_mode),
+        "snowflake" => snowflake_oauth_source(auth_mode),
+        "databricks" => databricks_oauth_source(auth_mode),
+        "synapse" => synapse_oauth_source(auth_mode),
         _ => None,
     }
 }
