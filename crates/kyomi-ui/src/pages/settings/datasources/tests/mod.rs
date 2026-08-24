@@ -69,3 +69,4 @@ mod create_mode;
 mod catalog;
 mod list_view;
 mod connection_test_badge;
+mod synapse_connection_config;
