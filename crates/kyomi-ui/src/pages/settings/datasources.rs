@@ -2488,6 +2488,26 @@ pub fn DatasourceModal(
                 let syn_mode = synapse_auth_mode.get_untracked();
                 match syn_mode.as_str() {
                     "service_principal" => {
+                        // The Synapse driver (kyomi-connect
+                        // providers/synapse.rs) reads tenant_id, client_id
+                        // and client_secret all three from `credentials`
+                        // for this mode. client_id/client_secret already
+                        // landed here; tenant_id was the odd one out — it
+                        // was written only to connection_config below,
+                        // which the driver never consults for
+                        // service_principal — so every Service Principal
+                        // connection failed with "Service Principal
+                        // requires tenant_id" even with the field filled
+                        // in on screen (KYO-522). The connection_config
+                        // copy stays: enterprise_oauth mode still needs it
+                        // there. cfg_tenant_id is the same signal
+                        // build_connection_config reads below, so edit
+                        // mode's load-back (which populates cfg_tenant_id
+                        // from connection_config) keeps both copies in
+                        // sync on re-save.
+                        if !cfg_tenant_id.get_untracked().is_empty() {
+                            map.insert("tenant_id".to_string(), serde_json::json!(cfg_tenant_id.get_untracked()));
+                        }
                         if !cred_sp_client_id.get_untracked().is_empty() {
                             map.insert("client_id".to_string(), serde_json::json!(cred_sp_client_id.get_untracked()));
                         }
