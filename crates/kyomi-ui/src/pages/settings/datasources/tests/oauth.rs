@@ -619,7 +619,15 @@ fn on_oauth_click_guard_and_disabled_prop_are_scoped_to_this_rows_state() {
     let guard = extract_between(
         SRC,
         "let on_oauth_click = move |_: leptos::ev::MouseEvent| {",
-        "let url = oauth_url_for_datasource(",
+        // KYO-442: the end marker is anchored on the `list_connect_action`
+        // call — structure the KYO-442 gate change cannot remove without
+        // also failing `list_connect_gate.rs`'s own dispatch-guard test —
+        // rather than the `oauth_url_for_datasource` call that used to sit
+        // directly in this guard. That call now lives inside
+        // `list_connect_action` itself, so anchoring on it here would make
+        // this test panic on a missing marker instead of asserting anything
+        // (docs/standards/testing/anchor-source-text-markers-on-code-not-copy.md).
+        "let action = list_connect_action(",
     );
     assert!(
         guard.contains("is_connecting.get_untracked()"),

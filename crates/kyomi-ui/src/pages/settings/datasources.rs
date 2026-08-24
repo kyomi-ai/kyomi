@@ -145,6 +145,17 @@ fn provider_label(ds_type: &str) -> &'static str {
     }
 }
 
+/// The `auth_mode` BigQuery is treated as when a caller passes `None` (a row
+/// or form whose `auth_mode` hasn't been set) — extracted into one constant
+/// so [`oauth_url_for_datasource`]'s URL choice and [`list_connect_action`]'s
+/// gate resolve a null `auth_mode` to the exact same effective mode. Before
+/// this existed, the two lived as separate `unwrap_or("kyomi_oauth")`
+/// literals; had `list_connect_action` used a different default, a
+/// `auth_mode: None` row would silently bypass the KYO-442 gate while still
+/// resolving to the gated Google URL underneath it (see `list_connect_action`
+/// for the full failure mode this prevents).
+const BIGQUERY_DEFAULT_AUTH_MODE: &str = "kyomi_oauth";
+
 /// Builds the OAuth connect URL for a given datasource type, slug, and auth mode.
 ///
 /// Returns an empty string for types that do not have a server-side OAuth
@@ -152,10 +163,11 @@ fn provider_label(ds_type: &str) -> &'static str {
 ///
 /// BigQuery has two OAuth flows depending on `auth_mode`:
 /// - `"enterprise_oauth"` → bigquery-enterprise endpoint (slug-scoped)
-/// - anything else (default: `"kyomi_oauth"`) → shared Google OAuth endpoint
+/// - anything else (default: [`BIGQUERY_DEFAULT_AUTH_MODE`]) → shared Google
+///   OAuth endpoint
 fn oauth_url_for_datasource(ds_type: &str, slug: &str, auth_mode: Option<&str>) -> String {
     match ds_type {
-        "bigquery" => match auth_mode.unwrap_or("kyomi_oauth") {
+        "bigquery" => match auth_mode.unwrap_or(BIGQUERY_DEFAULT_AUTH_MODE) {
             "enterprise_oauth" => {
                 format!(
                     "/api/v1/auth/oauth/bigquery-enterprise/connect?datasource_slug={slug}"
@@ -247,6 +259,76 @@ fn bq_kyomi_oauth_connect_allowed(
     access_confirmed: bool,
 ) -> bool {
     !(ds_type == "bigquery" && bq_auth_mode == "kyomi_oauth") || access_confirmed
+}
+
+/// The outcome of a click on the datasource **list**'s own Connect/Reconnect
+/// button (`DatasourceRow::on_oauth_click`) — KYO-442.
+///
+/// KYO-427/KYO-477 gated BigQuery kyomi_oauth's Connect button behind the
+/// KYO-408/KYO-499 beta-access attestation, but only inside
+/// `ModalOAuthStatusPanel` (the settings modal's Connection tab). The list's
+/// own Connect/Reconnect button calls the exact same [`oauth_url_for_datasource`]
+/// and hands the result straight to the OAuth popup with no gate and no
+/// notice anywhere on that surface — a user not on Kyomi's Google OAuth
+/// test-user allowlist gets a doomed round-trip to Google's `access_denied`
+/// with no prior explanation and no "Request beta access" link, because both
+/// live only in the modal.
+///
+/// Rather than duplicating the modal's notice/checkbox UI on the list
+/// surface, `OpenModal` routes the user into the settings modal instead —
+/// which already defaults its `active_tab` to `"connection"` on open
+/// (and resets it there every time it opens), landing the user exactly where
+/// the notice, checkbox, and "Request beta access" link live.
+///
+/// Folds [`bq_kyomi_oauth_connect_allowed`] (the gate) and
+/// [`oauth_url_for_datasource`] (the URL choice) into a single function
+/// precisely so the two cannot disagree — a click handler that calls them
+/// separately can drift if only one side is ever updated. See
+/// `bq_kyomi_oauth_connect_allowed`'s own doc comment for the KYO-477
+/// precedent of exactly that class of bug (a green review and a test that
+/// only proved a signal was *read*, never that it computed the right
+/// answer).
+#[derive(Debug, PartialEq)]
+enum ListConnectAction {
+    /// Launch the OAuth popup at this URL — today's behaviour, unchanged.
+    LaunchPopup(String),
+    /// Open the datasource modal instead of launching a popup, so the user
+    /// meets the allowlist notice, the attestation checkbox, and the
+    /// "Request beta access" link before any doomed round-trip to Google.
+    OpenModal,
+    /// This datasource type has no OAuth connect endpoint at all
+    /// (`oauth_url_for_datasource` returned an empty string).
+    Unsupported,
+}
+
+/// Computes [`ListConnectAction`] for a list-row Connect/Reconnect click.
+///
+/// `auth_mode` is passed through to [`oauth_url_for_datasource`] unchanged
+/// (so the URL half is byte-identical to before this function existed); the
+/// gate check instead reads `auth_mode.unwrap_or(BIGQUERY_DEFAULT_AUTH_MODE)`
+/// — the SAME default `oauth_url_for_datasource` resolves `None` to
+/// internally — so a row with `auth_mode: None` cannot resolve to two
+/// different effective modes on the two sides of this decision. Evaluating
+/// the gate against a different (or missing) default was the exact bypass
+/// KYO-442 exists to close: a null `auth_mode` would silently skip the
+/// attestation gate while still producing the gated Google URL underneath
+/// it.
+fn list_connect_action(
+    ds_type: &str,
+    slug: &str,
+    auth_mode: Option<&str>,
+    access_confirmed: bool,
+) -> ListConnectAction {
+    let effective_auth_mode = auth_mode.unwrap_or(BIGQUERY_DEFAULT_AUTH_MODE);
+    if !bq_kyomi_oauth_connect_allowed(ds_type, effective_auth_mode, access_confirmed) {
+        return ListConnectAction::OpenModal;
+    }
+    let url = oauth_url_for_datasource(ds_type, slug, auth_mode);
+    if url.is_empty() {
+        ListConnectAction::Unsupported
+    } else {
+        ListConnectAction::LaunchPopup(url)
+    }
 }
 
 /// Whether the create-mode Connection step is satisfied (KYO-404, extended
@@ -1145,15 +1227,38 @@ fn DatasourceRow(
                 if is_connecting.get_untracked() || is_deleting.get_untracked() {
                     return;
                 }
-                let url = oauth_url_for_datasource(
+                // KYO-442: the whole gate-vs-URL decision is one pure call
+                // into `list_connect_action` (rather than an `if` sprinkled
+                // here and the predicate tested separately) so the gate and
+                // the URL it launches cannot disagree — see that function's
+                // doc comment. Read at click time, not captured earlier:
+                // `beta_access::read_beta_access()` reflects whatever the
+                // user last ticked in the modal's checkbox, which may have
+                // changed since this row mounted.
+                let access_confirmed = beta_access::read_beta_access();
+                let action = list_connect_action(
                     &ds_type_clone,
                     &ds_slug_clone,
                     ds_auth_mode_clone.as_deref(),
+                    access_confirmed,
                 );
-                if url.is_empty() {
-                    toast_error("OAuth is not supported for this datasource type".to_string());
-                    return;
-                }
+                let url = match action {
+                    ListConnectAction::LaunchPopup(url) => url,
+                    ListConnectAction::OpenModal => {
+                        // Send the user into the settings modal instead of
+                        // launching a popup — no spinner, no popup, no
+                        // `oauth_connecting` write. The modal opens on its
+                        // Connection tab, where the allowlist notice, the
+                        // attestation checkbox, and the "Request beta
+                        // access" link live.
+                        set_modal_datasource_id.set(Some(Some(ds_id_clone.clone())));
+                        return;
+                    }
+                    ListConnectAction::Unsupported => {
+                        toast_error("OAuth is not supported for this datasource type".to_string());
+                        return;
+                    }
+                };
                 set_oauth_connecting.set(Some(ds_id_clone.clone()));
 
                 #[cfg(target_arch = "wasm32")]
