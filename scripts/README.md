@@ -85,9 +85,42 @@ All scripts are organized by environment. **Every script is environment-specific
   `500`, must exceed the repo's total PR count — it was 411 on 2026-08-24);
   raising it is the fix when the truncation guard trips, and the guard is
   why raising it is a deliberate act rather than a silently wrong answer.
-  Self-tested by `scripts/check-ticket-in-flight-test.sh`, including a real
-  simulated double-pickup against a throwaway bare git remote (the KYO-422
-  acceptance criterion).
+  **Honours `STRANDED.md` tombstones (KYO-529):** the local-worktree check
+  and the local-branch check for /backlog-fast Step 0.5's stranded-claim
+  recovery deadlocked each other — Step 0.5 deliberately preserves a dead
+  run's worktree for salvage, and a preserved dead worktree is otherwise
+  indistinguishable from a live worker's, so the ticket went back to
+  Backlog looking available and was never picked up again (KYO-448 twice,
+  KYO-463). A worktree matching the ticket whose root holds a valid
+  tombstone — written by `mark-worktree-stranded.sh`, below — is reported
+  separately as *preserved*, not counted as a hit, and printed under its
+  own heading on every verdict so the unsalvaged work is never silently
+  forgotten. The tombstone only ever suppresses local evidence: a matching
+  remote branch or open PR still forces exit `1` regardless. Self-tested by
+  `scripts/check-ticket-in-flight-test.sh`, including a real simulated
+  double-pickup against a throwaway bare git remote (the KYO-422 acceptance
+  criterion) and real `git worktree add` fixtures for the tombstone cases.
+
+- **`mark-worktree-stranded.sh`** - The writer side of the KYO-529 tombstone
+  above: writes `STRANDED.md` at a preserved worktree's root so
+  `check-ticket-in-flight.sh` stops reading it as a live claim. Keeping the
+  marker's format in one script, rather than restating it in prose across
+  the skill files that call it, follows the same KYO-422 principle the
+  check script itself is built on. Usage:
+  `scripts/mark-worktree-stranded.sh <TICKET> [--worktree <path>] [--note <text>]`
+  — `TICKET` accepts `KYO-529`, `kyo-529`, or `529`; `--worktree` defaults
+  to the current worktree's root; `--note` is optional free text (why the
+  run died, what's left to salvage) appended to the marker body. Refuses to
+  write to the primary worktree (compares `git rev-parse --git-dir` against
+  `--git-common-dir`) and refuses a worktree on branch `main` or in
+  detached HEAD — writing this file at the canonical clone's own root, or
+  tombstoning a state this workflow never produces, would be a bad day.
+  Overwriting an existing marker is allowed and idempotent (a stderr
+  warning says so). **Exit-code contract:** `0` success; `1` error
+  (primary worktree, branch `main`/detached HEAD, git predates 2.31, or the
+  write itself failed); `2` usage error. Self-tested by
+  `scripts/mark-worktree-stranded-test.sh`, including an interop check that
+  `check-ticket-in-flight.sh` actually honours a marker this script wrote.
 
 ## Directory Structure
 

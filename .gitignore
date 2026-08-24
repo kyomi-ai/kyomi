@@ -87,6 +87,12 @@ apps/mcp-chart-app-wasm/dist/
 .gstack/
 .review-approval
 
+# STRANDED.md tombstone marker (KYO-529) — written by
+# scripts/mark-worktree-stranded.sh at the root of a worktree preserved by
+# /backlog-fast Step 0.5's stranded-claim recovery. It's a machine-local
+# artifact of a specific preserved tree, never something to commit.
+STRANDED.md
+
 # Internal docs (public-facing product docs are tracked)
 docs/*
 !docs/product/
