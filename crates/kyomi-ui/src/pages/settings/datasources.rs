@@ -55,6 +55,30 @@ fn credential_badge(ds: &DatasourceInfo) -> Option<(&'static str, BadgeVariant)>
     }
 }
 
+/// Whether a `DatasourceInfo::credential_status` value counts as
+/// "connected" for OAuth popup-monitor recovery purposes (KYO-440).
+///
+/// The list row has no `connected: bool` field like
+/// `DatasourceOAuthStatus` (what `ModalOAuthStatusPanel`'s recovery
+/// re-checks via `fetch_oauth_status_once`) — its only source of truth is
+/// this string. Deliberately the exact inverse of the two states that
+/// `DatasourceRow`'s `cred_action` match keys an OAuth Connect/Reconnect
+/// button on (`"missing"` and `"expired"`, both `"oauth"`), so a
+/// recovered row's status can only ever hide the button it once showed,
+/// never disagree with it.
+///
+/// `cfg`-gated to `wasm32`-or-`test`, mirroring `oauth_popup`'s
+/// `popup_poll_should_report_closed` / `translate_google_oauth_error`: its
+/// only production caller lives inside the `#[cfg(target_arch = "wasm32")]`
+/// popup-monitor recovery closure below, so a native, non-test `--features
+/// ssr` build has no reachable caller at all — this keeps the function
+/// directly unit-testable on the host target without carrying dead code
+/// into that build.
+#[cfg(any(target_arch = "wasm32", test))]
+fn credential_status_indicates_connected(status: &str) -> bool {
+    !matches!(status, "missing" | "expired")
+}
+
 /// Generate a slug from a datasource name — matches React `generateSlug`.
 fn generate_slug(name: &str) -> String {
     name.to_lowercase()
@@ -907,6 +931,121 @@ fn DatasourceRow(
         }
     };
 
+    // ── OAuth recovery state (KYO-440) ───────────────────────────────────
+    // `query_cache` lets the popup-monitor recovery path below adopt a
+    // recovered connection the same way the list-level postMessage success
+    // handler does (`query_cache.invalidate("datasources")` in
+    // `DatasourcesPage`, above) — keeping the cached list (and any later
+    // remount of this row) in sync with the real credential_status.
+    let query_cache = expect_context::<QueryCache>();
+
+    // `cred_action`/`cred_action_view` below are derived once from
+    // `ds.credential_status` at row-mount time, not from a reactive
+    // signal. `<For>`'s keyed diff (`tachys::view::keyed`) never
+    // re-invokes a retained key's view function — only genuinely new keys
+    // get rebuilt — so a `query_cache.invalidate("datasources")` refetch
+    // alone cannot make *this already-mounted* row's Connect/Reconnect
+    // button disappear once popup-monitor recovery finds the connection
+    // actually succeeded. `oauth_recovered` is this row's own optimistic
+    // local override, mirroring `local_enabled` above, except
+    // one-directional: a row can only become recovered, never
+    // un-recovered, within its own mounted lifetime. It gates the
+    // `class:hidden` on the button wrapper below.
+    let (oauth_recovered, set_oauth_recovered) = signal(false);
+
+    // On native (non-WASM) targets, `query_cache` and `set_oauth_recovered`
+    // are only referenced inside the `#[cfg(target_arch = "wasm32")]`
+    // popup-monitor recovery closure below — same reasoning as
+    // `ModalOAuthStatusPanel`'s `connect_url`/`on_recover` suppression.
+    // `oauth_recovered` (the read half) stays live on every target: the
+    // `class:hidden` toggle on the button wrapper reads it unconditionally.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = query_cache;
+        let _ = set_oauth_recovered;
+    }
+
+    // `connect_attempt_live` is this row's own PRIVATE record of "my
+    // current connect attempt is still wanted" (KYO-440 cycle 4, Option
+    // A). `monitor_oauth_popup`'s `still_connecting` closure (below,
+    // inside `on_oauth_click`) reads this instead of comparing the
+    // list-shared `oauth_connecting: Option<String>` against this row's
+    // id.
+    //
+    // Cycle 3 tried the opposite: keep comparing the shared signal by id,
+    // and close every gap by widening the click guard to refuse a second
+    // connect while ANY row was in flight. The review that opened this
+    // cycle traced every writer the signal's *type* actually has, not
+    // just the ones the diff touched
+    // (`docs/standards/code-organization/enumerate-consumers-from-the-type-not-from-the-diff.md`),
+    // and found a third: the settings modal's own `start_connect`
+    // (`ModalOAuthStatusPanel`, below) guards on its own private
+    // `modal_oauth_connecting` bool and never reads or writes this row's
+    // shared signal at all — while the list-level `install_oauth_listener`
+    // (above, in `DatasourcesPage`) clears the shared signal on ANY
+    // recognised OAuth `postMessage`, because `OAuthMessage` itself
+    // carries no datasource id to check. So a user connecting one row,
+    // then opening Settings and completing an unrelated connect there,
+    // silently clears this row's `still_connecting` out from under its
+    // still-open popup — cycle 3's exact bug, still open, just with a new
+    // trigger. Extending the click guard again to also cover the modal
+    // would mean locking the user out of Settings for up to
+    // `POPUP_CONNECT_TIMEOUT_MS` (2.5 minutes) after any abandoned popup —
+    // a worse product than the bug.
+    //
+    // A private token sidesteps the whole class of writer: nothing outside
+    // this row's own click handler, its own drain-before-arm (below), and
+    // its own `on_cleanup` can ever change it, so no external writer —
+    // present or future — can desync it from what this row's own popup is
+    // actually doing. `oauth_connecting` keeps its original, sole
+    // remaining role: driving which row's button shows
+    // "Connecting..."/"Reconnecting..." and the disabled state (see
+    // `is_connecting` and the button's `disabled` prop below) — display
+    // only; nothing correctness-sensitive reads it anymore.
+    //
+    // The trade this makes: `OAuthMessage` carries no datasource id, so
+    // this token cannot observe a genuine success or error `postMessage`
+    // either — only `install_oauth_listener`'s shared listener can. See
+    // the recovery closure below (inside `on_oauth_click`) for what that
+    // costs, traced at the point it happens.
+    #[cfg(target_arch = "wasm32")]
+    let (connect_attempt_live, set_connect_attempt_live) = signal(false);
+
+    // Holds the cleanup returned by `monitor_oauth_popup` for whichever
+    // connect attempt this row currently has in flight (KYO-440), so this
+    // row's teardown can stop the popup-closed poll and connect timeout
+    // immediately rather than waiting for the next tick — mirrors the
+    // `ModalOAuthStatusPanel` `popup_monitor` pattern this parallels
+    // (`PopupMonitorCleanupSlot`, above). A row unmounting mid-connect (the
+    // list refetches and re-renders constantly) must stop the timers right
+    // away.
+    //
+    // Drain-before-arm (in `on_oauth_click`, below) is load-bearing here,
+    // not merely defensive: `on_oauth_click`'s own click guard compares
+    // only *this row's* id against the shared `oauth_connecting` signal
+    // (reverted to its pre-cycle-3 shape — see `connect_attempt_live`
+    // above for why the shared signal is no longer trusted for anything
+    // correctness-sensitive). Because a DIFFERENT row's click can
+    // overwrite that shared signal with its own id at any time — nothing
+    // stops it now, concurrent per-row connects are allowed again — this
+    // row's own guard can read "not connecting" and let a re-click
+    // through even while this row's own earlier popup and monitor are
+    // still live. Draining — invoking, not merely dropping, whatever
+    // cleanup is already stashed here — before installing the new one is
+    // what actually stops the superseded attempt's `Interval`/`Timeout` in
+    // that case.
+    #[cfg(target_arch = "wasm32")]
+    let popup_monitor: PopupMonitorCleanupSlot = StoredValue::new(None);
+    #[cfg(target_arch = "wasm32")]
+    on_cleanup(move || {
+        set_connect_attempt_live.try_set(false);
+        popup_monitor.update_value(|slot| {
+            if let Some(cleanup) = slot.take() {
+                cleanup.take()();
+            }
+        });
+    });
+
     // ── Credential action button ─────────────────────────────────────────
     // Determine whether to show a connect/reconnect button based on the
     // datasource's credential_status and auth_method.
@@ -936,7 +1075,7 @@ fn DatasourceRow(
         let ds_slug = ds_slug_for_cred.clone();
         let ds_auth_mode = ds_auth_mode_for_cred.clone();
 
-        if action_key == "enter_credentials" {
+        let button = if action_key == "enter_credentials" {
             // Password datasource: open the settings modal
             let ds_id_modal = ds_id_for_modal.clone();
             view! {
@@ -969,6 +1108,10 @@ fn DatasourceRow(
             let ds_slug_clone = ds_slug.clone();
             let ds_auth_mode_clone = ds_auth_mode.clone();
 
+            // Per-row: only true while *this* row's own id is the one
+            // recorded in the shared `oauth_connecting` signal — drives the
+            // spinner/"Connecting..." label so only the row that's actually
+            // connecting shows it, not every row (KYO-440).
             let is_connecting = {
                 let ds_id_check = ds_id_for_connecting.clone();
                 Signal::derive(move || {
@@ -986,6 +1129,19 @@ fn DatasourceRow(
             // The actual popup open is WASM-only; Action::new body is Send so we
             // do the WASM call outside the Action using a synchronous helper.
             let on_oauth_click = move |_: leptos::ev::MouseEvent| {
+                // Guards on THIS row's own state again (KYO-440 cycle 4
+                // reverts cycle 3's "any row connecting" widening — see
+                // `connect_attempt_live`'s doc comment above for why that
+                // guard's whole justification collapsed: the settings
+                // modal writes its own private `modal_oauth_connecting`
+                // bool and never touches this shared signal at all, so
+                // widening this guard to cover "any row" never closed the
+                // gap it was meant to close). This is now a plain UX
+                // throttle against a double-click on THIS button, not a
+                // correctness mechanism — the popup monitor's correctness
+                // comes from `connect_attempt_live` (private to this row)
+                // and the drain-before-arm below, neither of which this
+                // guard participates in.
                 if is_connecting.get_untracked() || is_deleting.get_untracked() {
                     return;
                 }
@@ -1002,12 +1158,255 @@ fn DatasourceRow(
 
                 #[cfg(target_arch = "wasm32")]
                 {
-                    use crate::utils::oauth_popup::open_oauth_popup as open_popup;
-                    if open_popup(&url, &ds_id_clone).is_none() {
-                        set_oauth_connecting.set(None);
-                        toast_error(
-                            "Popup was blocked. Please allow popups for this site.",
-                        );
+                    use crate::utils::oauth_popup::{
+                        monitor_oauth_popup, open_oauth_popup as open_popup,
+                    };
+                    match open_popup(&url, &ds_id_clone) {
+                        Some(popup) => {
+                            // `still_connecting` reads this row's own
+                            // private `connect_attempt_live` token, never
+                            // the list-shared `oauth_connecting` signal
+                            // (KYO-440 cycle 4 — see that token's doc
+                            // comment above this function's OAuth-recovery
+                            // section for the full reasoning: comparing
+                            // the shared signal by id, even scoped to this
+                            // row's own id, is still reachable by writers
+                            // outside this row, namely the settings
+                            // modal's independent listener). `try_get_untracked`
+                            // because this runs inside a deferred
+                            // `gloo_timers` callback, not a reactive scope
+                            // — the token may already be disposed if this
+                            // row unmounted (see the disposal-safety
+                            // standard).
+                            let ds_id_for_recover = ds_id_clone.clone();
+                            let cleanup = monitor_oauth_popup(
+                                popup,
+                                move || connect_attempt_live.try_get_untracked().unwrap_or(false),
+                                move |outcome| {
+                                    // KYO-524: did an OAuth `postMessage`
+                                    // already resolve this connect attempt
+                                    // before this monitor's own outcome
+                                    // fired?
+                                    //
+                                    // `oauth_connecting` is the list-shared
+                                    // signal that the list-level
+                                    // `install_oauth_listener` (above, in
+                                    // `DatasourcesPage`) clears to `None`
+                                    // the instant ANY recognized OAuth
+                                    // `postMessage` arrives — success or
+                                    // error, for any row — because
+                                    // `OAuthMessage` carries no datasource
+                                    // id for that listener to filter on.
+                                    // `still_connecting` above
+                                    // (`connect_attempt_live`) never
+                                    // observes that message — by design,
+                                    // it is this row's own private
+                                    // "attempt still wanted" token, touched
+                                    // by nothing outside this row's own
+                                    // click handler, drain, and cleanup —
+                                    // so `on_outcome` fires here
+                                    // regardless of whether a message
+                                    // already resolved this attempt. This
+                                    // check is the missing piece.
+                                    //
+                                    // Consulted ONLY to decide whether to
+                                    // speak, never to decide whether to
+                                    // keep monitoring: `connect_attempt_live`
+                                    // stays the sole input to
+                                    // `still_connecting`, completely
+                                    // unchanged by this check, so the
+                                    // monitor still always runs to
+                                    // completion rather than silently
+                                    // self-stopping the moment an external
+                                    // writer touches the shared signal —
+                                    // the property KYO-440 cycle 3
+                                    // required and this must not regress.
+                                    // A future reader tempted to
+                                    // "simplify" `still_connecting` to
+                                    // read this same signal would
+                                    // reintroduce that exact regression.
+                                    //
+                                    // Read with `try_get_untracked()` at
+                                    // the moment `on_outcome` fires, for
+                                    // the same disposal-safety reason as
+                                    // `connect_attempt_live` above — this
+                                    // still runs inside a deferred
+                                    // `gloo_timers` callback, not a
+                                    // reactive tracking scope.
+                                    //
+                                    // `None` here means a message already
+                                    // arrived and the list-level listener
+                                    // already gave the user an accurate,
+                                    // complete response for SOME attempt
+                                    // (this row's own, most of the time) —
+                                    // a real `toast_success` plus cache
+                                    // invalidation, or the real
+                                    // `toast_error`. Recovering on top of
+                                    // that would either re-run the recovery
+                                    // fetch redundantly after a real
+                                    // success, or worse, show a false
+                                    // "connection cancelled." over a real
+                                    // error the user already saw described
+                                    // accurately — this was KYO-524. Say
+                                    // nothing: skip the fetch and the
+                                    // toast entirely, and leave this row's
+                                    // local state (`oauth_connecting`) to
+                                    // the guarded clear below on the next
+                                    // path that reaches it — it is already
+                                    // `None`, so there is nothing to
+                                    // clear.
+                                    //
+                                    // `Some(_)` — whether it names this
+                                    // row or a different one — means no
+                                    // message has resolved this attempt
+                                    // yet, so the recovery fetch below is
+                                    // the only source of truth available,
+                                    // exactly as before this fix.
+                                    //
+                                    // Residual gap, deliberately not
+                                    // closed here: if the settings MODAL's
+                                    // OAuth flow completes while this
+                                    // row's own popup is still open, the
+                                    // list-level listener still clears
+                                    // this shared signal to `None` — it
+                                    // has no way to know the message
+                                    // belonged to the modal's attempt, not
+                                    // this row's — so this row goes silent
+                                    // on its own genuine cancel/timeout
+                                    // too. The row's state still clears
+                                    // correctly (no spinner-forever); the
+                                    // user just gets no toast for that one
+                                    // overlapping attempt. This is
+                                    // strictly milder than either the
+                                    // spinner-forever bug or a false toast
+                                    // on a real error, so it is the safe
+                                    // direction to err — but it is NOT
+                                    // fixed here: `OAuthMessage` carries
+                                    // no datasource id, so "whose message
+                                    // was that?" is unanswerable from
+                                    // inside this row. Closing it needs a
+                                    // datasource id added to the message
+                                    // type, which touches `oauth_popup.rs`
+                                    // and the modal, both out of this
+                                    // PR's scope.
+                                    if oauth_connecting.try_get_untracked().flatten().is_none() {
+                                        return;
+                                    }
+
+                                    let ds_id_for_fetch = ds_id_for_recover.clone();
+                                    leptos::task::spawn_local(async move {
+                                        // No `fetch_oauth_status_once` /
+                                        // OAuthStatusSource wiring exists at
+                                        // the list level — this row's only
+                                        // source of truth is the
+                                        // "datasources" list query, so
+                                        // recovery re-fetches it and
+                                        // inspects this row's own
+                                        // credential_status (KYO-440),
+                                        // rather than re-checking a
+                                        // per-provider OAuth status
+                                        // endpoint like the modal does.
+                                        let recovered = list_datasources()
+                                            .await
+                                            .ok()
+                                            .and_then(|list| {
+                                                list.into_iter()
+                                                    .find(|d| d.id == ds_id_for_fetch)
+                                            })
+                                            .map(|d| {
+                                                credential_status_indicates_connected(
+                                                    &d.credential_status,
+                                                )
+                                            })
+                                            .unwrap_or(false);
+                                        if recovered {
+                                            // Reachable ONLY when
+                                            // `oauth_connecting` was
+                                            // `Some(_)` at the moment
+                                            // `on_outcome` fired (the guard
+                                            // above returns early
+                                            // otherwise) — i.e. no OAuth
+                                            // `postMessage` had resolved
+                                            // this attempt yet. So
+                                            // `recovered == true` here is
+                                            // NOT the redundant re-check on
+                                            // a real, already-toasted
+                                            // success that earlier
+                                            // revisions of this comment
+                                            // described (KYO-524 fixed
+                                            // that path — see the guard
+                                            // above): the postMessage
+                                            // plumbing genuinely never
+                                            // delivered anything for this
+                                            // attempt, yet the backend's
+                                            // credential_status flipped to
+                                            // connected anyway (e.g. the
+                                            // popup closed itself right at
+                                            // consent completion, before
+                                            // the message handler ran, or
+                                            // the message was lost/blocked
+                                            // in transit). This is the
+                                            // genuine KYO-437 recovery
+                                            // case this monitor exists
+                                            // for. Adopt silently — no
+                                            // toast — because the user
+                                            // never saw an error or a
+                                            // cancellation notice for this
+                                            // attempt to begin with; the
+                                            // row updating itself (via
+                                            // cache invalidation) is
+                                            // confirmation enough.
+                                            set_oauth_recovered.try_set(true);
+                                            query_cache.invalidate("datasources");
+                                        } else {
+                                            toast_error(popup_monitor_outcome_message(
+                                                provider, outcome,
+                                            ));
+                                        }
+                                        // Guarded: only clear if this row's
+                                        // id is still the one recorded —
+                                        // another row may have started its
+                                        // own connect while this recheck
+                                        // was in flight.
+                                        set_oauth_connecting.try_update(|current| {
+                                            if current.as_deref()
+                                                == Some(ds_id_for_fetch.as_str())
+                                            {
+                                                *current = None;
+                                            }
+                                        });
+                                    });
+                                },
+                            );
+                            popup_monitor.update_value(|slot| {
+                                // Drain before arming: invoke any cleanup
+                                // already stashed here for this row before
+                                // installing the new one, and clear this
+                                // row's `connect_attempt_live` for the
+                                // superseded attempt as part of the same
+                                // drain — load-bearing, not merely
+                                // defensive, since the click guard above
+                                // can no longer be trusted to prevent a
+                                // re-click on this row while an earlier
+                                // attempt here is still unresolved (see
+                                // `popup_monitor`'s own doc comment above
+                                // for why).
+                                if let Some(previous) = slot.take() {
+                                    set_connect_attempt_live.set(false);
+                                    previous.take()();
+                                }
+                                *slot = Some(send_wrapper::SendWrapper::new(
+                                    Box::new(cleanup) as Box<dyn FnOnce()>,
+                                ));
+                            });
+                            set_connect_attempt_live.set(true);
+                        }
+                        None => {
+                            set_oauth_connecting.set(None);
+                            toast_error(
+                                "Popup was blocked. Please allow popups for this site.",
+                            );
+                        }
                     }
                 }
                 #[cfg(not(target_arch = "wasm32"))]
@@ -1020,6 +1419,16 @@ fn DatasourceRow(
                 <Button
                     variant=ButtonVariant::Outline
                     size=ButtonSize::Sm
+                    // Reverted to this row's own state (KYO-440 cycle 4 —
+                    // see `connect_attempt_live`'s doc comment above for
+                    // why "any row connecting" stopped buying anything:
+                    // the settings modal, one of the writers that guard
+                    // was meant to close off from, never reads or writes
+                    // this signal, so widening the disabled state to every
+                    // row was a UX cost paid for an invariant that didn't
+                    // hold). A different row can legitimately be
+                    // connecting at the same time now — this button only
+                    // reflects its own row's state.
                     disabled=Signal::derive(move || is_connecting.get() || is_deleting.get())
                     on:click=on_oauth_click
                 >
@@ -1043,7 +1452,23 @@ fn DatasourceRow(
                 </Button>
             }
             .into_any()
+        };
+
+        // `class:hidden` lives here, inside the `Some` arm, not on a
+        // wrapper the call site renders unconditionally (KYO-440 review
+        // fix). `cred_action_view` is `None` for every row whose
+        // `credential_status` is "valid"/"shared" — the majority — and
+        // `oauth_recovered` starts `false` for every row, so a wrapper
+        // rendered unconditionally at the call site would render as a
+        // real, un-hidden, empty `<div>` for every one of those rows —
+        // and CSS flex `gap` puts space around any rendered flex item,
+        // content or not. Keeping the wrapper inside `Some` means `None`
+        // still renders nothing at all, exactly as it did before
+        // `oauth_recovered` existed.
+        view! {
+            <div class:hidden=move || oauth_recovered.get()>{button}</div>
         }
+        .into_any()
     });
 
     view! {
@@ -1116,7 +1541,17 @@ fn DatasourceRow(
             <div class="flex items-center gap-2 sm:gap-3 flex-wrap sm:flex-nowrap">
                 // Credential action button — only rendered when credentials are
                 // missing or expired. Provides the primary call-to-action for
-                // datasources that cannot be enabled yet.
+                // datasources that cannot be enabled yet. `cred_action_view`
+                // is `None` at the call site whenever `cred_action` is
+                // `None`, so a row with valid/shared credentials renders
+                // nothing here — exactly as before KYO-440. The
+                // `class:hidden` override (`oauth_recovered`, above — popup-
+                // monitor recovery can find the connection actually
+                // succeeded after the button was already rendered, and
+                // `<For>` won't re-render this row from fresh data alone)
+                // lives on the wrapper `<div>` inside `cred_action_view`'s
+                // `Some` arm instead, so it never adds a phantom flex-`gap`
+                // item to a row that has no button to hide.
                 {cred_action_view}
 
                 // User enable/disable toggle
