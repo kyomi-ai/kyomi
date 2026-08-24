@@ -415,5 +415,106 @@ echo
 
 gh_ok_empty
 
+# ─── Tests 16-20: STRANDED.md tombstones (KYO-529) ───────────────────────────
+#
+# check 3 (local worktrees) had NO coverage anywhere in this file before
+# KYO-529 — every test above exercises checks 1/2/4 against plain clones,
+# never `git worktree add`. These tests are therefore the first ones to
+# exercise check 3 at all, tombstoned or not (see the KYO-529 dispatch
+# report for this note; the ticket asked it to be called out explicitly).
+#
+# The marker itself is written with the real mark-worktree-stranded.sh
+# (except test 18, which needs a marker that deliberately does NOT name the
+# ticket) so these tests prove the two scripts actually interoperate, not
+# just that check-ticket-in-flight.sh can parse a hand-crafted fixture.
+MARK="$SCRIPT_DIR/mark-worktree-stranded.sh"
+
+# ─── Test 16: tombstoned local worktree is the only hit → CLEAR ─────────────
+echo "-- Test 16: tombstoned local worktree, only hit"
+t16="$tmpdir/t16"
+mkdir -p "$t16"
+bare16="$(new_bare_remote "$t16/remote.git")"
+seed_main "$bare16"
+clone_repo "$bare16" "$t16/workerB"
+git -C "$t16/workerB" worktree add -q -b jason/kyo-422-dead "$t16/wt-dead"
+"$MARK" 422 --worktree "$t16/wt-dead" >/dev/null
+gh_ok_empty
+run_check "$t16/workerB" 422
+assert_exit "a tombstoned worktree with no other evidence is CLEAR" 0
+assert_contains "still names the preserved path" "$t16/wt-dead"
+assert_contains "under the preserved-worktrees heading" "PRESERVED STRANDED WORKTREES"
+assert_not_contains "does not also list it as a hit" "local worktree at $t16/wt-dead"
+echo
+
+# ─── Test 17: an UNtombstoned local worktree is still a normal hit ─────────
+# The fail-closed default from KYO-471 must be completely unchanged for a
+# worktree that carries no marker at all.
+echo "-- Test 17: untombstoned local worktree, only hit"
+t17="$tmpdir/t17"
+mkdir -p "$t17"
+bare17="$(new_bare_remote "$t17/remote.git")"
+seed_main "$bare17"
+clone_repo "$bare17" "$t17/workerB"
+git -C "$t17/workerB" worktree add -q -b jason/kyo-422-live "$t17/wt-live"
+gh_ok_empty
+run_check "$t17/workerB" 422
+assert_exit "an untombstoned worktree is IN FLIGHT, unchanged from KYO-471" 1
+assert_contains "names the worktree hit" "local worktree at $t17/wt-live"
+echo
+
+# ─── Test 18: STRANDED.md that does NOT name the ticket is not honoured ────
+echo "-- Test 18: tombstone naming a different ticket is not honoured"
+t18="$tmpdir/t18"
+mkdir -p "$t18"
+bare18="$(new_bare_remote "$t18/remote.git")"
+seed_main "$bare18"
+clone_repo "$bare18" "$t18/workerB"
+git -C "$t18/workerB" worktree add -q -b jason/kyo-422-wrongkey "$t18/wt-wrongkey"
+printf '# STRANDED WORKTREE — KYO-999\n\nThis names a different ticket entirely.\n' >"$t18/wt-wrongkey/STRANDED.md"
+gh_ok_empty
+run_check "$t18/workerB" 422
+assert_exit "a marker naming a different ticket is IN FLIGHT" 1
+assert_contains "names the worktree hit" "local worktree at $t18/wt-wrongkey"
+echo
+
+# ─── Test 19: tombstoned worktree, but its branch is ALSO pushed to remote ─
+# Published work is still in flight — the tombstone must only ever suppress
+# LOCAL evidence, never a remote-branch hit.
+echo "-- Test 19: tombstoned worktree with a matching remote branch"
+t19="$tmpdir/t19"
+mkdir -p "$t19"
+bare19="$(new_bare_remote "$t19/remote.git")"
+seed_main "$bare19"
+clone_repo "$bare19" "$t19/workerB"
+git -C "$t19/workerB" worktree add -q -b jason/kyo-422-published "$t19/wt-published"
+echo "published work" >>"$t19/wt-published/README.md"
+git -C "$t19/wt-published" commit -q -am "published before the run died"
+git -C "$t19/wt-published" push -q origin jason/kyo-422-published
+"$MARK" 422 --worktree "$t19/wt-published" >/dev/null
+gh_ok_empty
+run_check "$t19/workerB" 422
+assert_exit "a tombstone must not mask a matching remote branch" 1
+assert_contains "names the remote branch hit" "remote branch: origin/jason/kyo-422-published"
+assert_contains "still reports the preserved worktree" "PRESERVED STRANDED WORKTREES"
+echo
+
+# ─── Test 20: tombstoned worktree, but its branch ALSO has an open PR ──────
+echo "-- Test 20: tombstoned worktree with a matching open PR"
+t20="$tmpdir/t20"
+mkdir -p "$t20"
+bare20="$(new_bare_remote "$t20/remote.git")"
+seed_main "$bare20"
+clone_repo "$bare20" "$t20/workerB"
+git -C "$t20/workerB" worktree add -q -b jason/kyo-422-haspr "$t20/wt-haspr"
+"$MARK" 422 --worktree "$t20/wt-haspr" >/dev/null
+gh_ok_prs $'504\tOPEN\tjason/kyo-422-haspr'
+run_check "$t20/workerB" 422
+assert_exit "a tombstone must not mask a matching open PR" 1
+assert_contains "names the PR hit" "PR #504 (OPEN) branch jason/kyo-422-haspr"
+assert_contains "still reports the preserved worktree" "PRESERVED STRANDED WORKTREES"
+echo
+
+gh_ok_empty
+
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

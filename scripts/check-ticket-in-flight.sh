@@ -108,6 +108,53 @@
 #     detached HEAD, or `main` — nobody's ticket branch is ever `main`)
 #   - every `--ignore-branch <name>` passed on the command line
 #
+# STRANDED-WORKTREE TOMBSTONES (KYO-529) — READ THIS BEFORE "FIXING" IT BACK
+#
+# Checks 3 and 4 (KYO-471) and Step 0.5's stranded-claim recovery in
+# /backlog-fast deadlocked each other. Step 0.5 deliberately *preserves* the
+# dead worktree of a run that died mid-ticket, so its unpushed work can be
+# salvaged by hand — but a preserved dead worktree is byte-for-byte
+# indistinguishable from a live worker's worktree to checks 3/4. From the
+# moment a ticket is released as stranded, every future worker sees "in
+# flight" forever: the ticket goes back to Backlog looking available and is
+# never picked up again, because Step 0.5 itself only iterates tickets in
+# In Progress. Observed on KYO-448 (twice) and KYO-463 — three permanently
+# unclaimable tickets found on this machine.
+#
+# The fix is a marker file, `STRANDED.md`, written at a preserved worktree's
+# root by scripts/mark-worktree-stranded.sh — the one place that owns the
+# marker's format (KYO-422 principle: callers invoke one script rather than
+# each restating the rule). This script reads it in check 3: a worktree that
+# matches the ticket AND holds a valid tombstone for it is reported
+# separately as "tombstoned" instead of counted in HITS, and its branch name
+# is recorded so check 4 (local branches) skips that same branch too — the
+# same branch checked out in that worktree would otherwise be flagged twice.
+#
+#   - THE TICKET-KEY REQUIREMENT IS NOT OPTIONAL. To be honoured for ticket
+#     N, STRANDED.md must contain `kyo-<N>` (case-insensitive, not
+#     immediately followed by another digit — the same substring-safety
+#     concern `matches_ticket`'s trailing-hyphen rule exists for, so ticket
+#     42 cannot be satisfied by a marker that only names kyo-422). A marker
+#     that does not name the ticket is NOT honoured and the worktree stays a
+#     normal hit. This keeps the fail-closed default intact against a stray
+#     or copy-pasted marker, and it costs nothing: the writer always knows
+#     the ticket it is tombstoning.
+#   - ONLY LOCAL EVIDENCE IS SUPPRESSED. A tombstone suppresses the local
+#     worktree hit and the local branch hit for that worktree's branch, and
+#     NOTHING ELSE. It must never suppress a remote-branch hit (check 1) or
+#     a PR hit (check 2) — those mean the work was published and is
+#     genuinely in flight, tombstone or not. Do not extend tombstone
+#     suppression to checks 1/2.
+#   - A SUPPRESSED TREE IS STILL REPORTED. Every tombstoned worktree is
+#     printed under its own heading in the verdict block, on every verdict
+#     (not only exit 0), so unsalvaged work is never silently forgotten.
+#   - STALE-TOMBSTONE CAVEAT. There is no automatic staleness detection, by
+#     design — this script has no way to know a human has since adopted a
+#     preserved tree and resumed work in it. If that happens, the human
+#     must delete STRANDED.md themselves; until they do, the tree keeps
+#     reading as "preserved, not a claim" and a second worker can walk right
+#     past it.
+#
 # USAGE
 #
 #   check-ticket-in-flight.sh <TICKET> [--remote <name>] [--ignore-branch <name>]...
@@ -117,9 +164,12 @@
 #
 # EXIT CODES
 #
-#   0 — clear. THE ONLY CODE THAT PERMITS CLAIMING THE TICKET.
+#   0 — clear. THE ONLY CODE THAT PERMITS CLAIMING THE TICKET. May still
+#       print preserved tombstoned worktrees (KYO-529) — that heading is not
+#       a hit, but the path is worth a look for salvageable work.
 #   1 — work in flight found (remote branch, PR, local worktree, or local
-#       branch, matched and not excluded). Do not claim.
+#       branch, matched and not excluded — an untombstoned local worktree
+#       hit counts here too). Do not claim.
 #   2 — usage error (missing/unparseable ticket argument, unknown flag).
 #   3 — a check could not be completed (remote unreachable, `gh` missing or
 #       failing, or the PR listing came back at PR_LIST_LIMIT rows and may
@@ -245,6 +295,25 @@ matches_ticket() {
     return 1
 }
 
+# ---- tombstone detection (KYO-529 — see the header section above) ----------
+# tombstone_names_ticket <marker_file> — true iff the file exists, is a
+# readable regular file, and its content names THIS ticket: `kyo-<N>`,
+# case-insensitive, not immediately followed by another digit (so ticket 42
+# is not satisfied by a marker that only names kyo-422 — the same
+# substring-safety concern SLUG_BARE/matches_ticket exist for above, applied
+# to free-form marker text instead of a branch name).
+tombstone_names_ticket() {
+    local marker="$1" content lower
+    [ -f "$marker" ] || return 1
+    content="$(cat "$marker" 2>/dev/null)" || return 1
+    lower="$(printf '%s' "$content" | tr '[:upper:]' '[:lower:]')"
+    case "$lower" in
+        *"$SLUG_BARE") return 0 ;;
+        *"$SLUG_BARE"[!0-9]*) return 0 ;;
+    esac
+    return 1
+}
+
 # ---- self-exclusion set -----------------------------------------------------
 CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)"
 
@@ -279,6 +348,21 @@ echo
 
 declare -a HITS=()
 declare -a FAILURES=()
+declare -a TOMBSTONED=()          # printable "path (branch X)" entries (KYO-529)
+declare -a TOMBSTONED_BRANCHES=() # branch names check 4 must not re-flag
+
+is_tombstoned_branch() {
+    local name="$1" b
+    if [ "${#TOMBSTONED_BRANCHES[@]}" -eq 0 ]; then
+        return 1
+    fi
+    for b in "${TOMBSTONED_BRANCHES[@]}"; do
+        if [ "$name" = "$b" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
 
 # ---- Check 1: remote branches ----------------------------------------------
 remote_stderr_file="$(mktemp)"
@@ -324,12 +408,21 @@ fi
 rm -f "$gh_stderr_file"
 
 # ---- Check 3: local worktrees ----------------------------------------------
+# A worktree that matches the ticket AND carries a valid tombstone for it
+# (KYO-529 — see header) is reported separately in TOMBSTONED instead of
+# HITS, and its branch is recorded in TOMBSTONED_BRANCHES so check 4 does
+# not re-flag the very same worktree via its branch name.
 wt_path=""
 wt_branch=""
 flush_worktree_entry() {
     if [ -n "$wt_branch" ]; then
         if ! is_excluded "$wt_branch" && matches_ticket "$wt_branch"; then
-            HITS+=("local worktree at ${wt_path} (branch ${wt_branch})")
+            if tombstone_names_ticket "${wt_path}/STRANDED.md"; then
+                TOMBSTONED+=("${wt_path} (branch ${wt_branch})")
+                TOMBSTONED_BRANCHES+=("$wt_branch")
+            else
+                HITS+=("local worktree at ${wt_path} (branch ${wt_branch})")
+            fi
         fi
     fi
     wt_path=""
@@ -349,6 +442,7 @@ flush_worktree_entry # in case the porcelain output has no trailing blank line
 while IFS= read -r branch; do
     [ -n "$branch" ] || continue
     is_excluded "$branch" && continue
+    is_tombstoned_branch "$branch" && continue
     if matches_ticket "$branch"; then
         HITS+=("local branch: $branch")
     fi
@@ -356,6 +450,17 @@ done < <(git branch --list --format='%(refname:short)')
 
 # ---- verdict -----------------------------------------------------------------
 echo
+if [ "${#TOMBSTONED[@]}" -gt 0 ]; then
+    # Printed on every verdict, not only exit 0 — a tombstone suppresses the
+    # local claim signal, never the fact that unsalvaged work is sitting on
+    # disk (KYO-529).
+    echo "PRESERVED STRANDED WORKTREES (not a claim — unsalvaged work lives here):"
+    for t in "${TOMBSTONED[@]}"; do
+        echo "  ~ $t"
+    done
+    echo
+fi
+
 if [ "${#FAILURES[@]}" -gt 0 ]; then
     echo "RESULT: COULD NOT COMPLETE ALL CHECKS — failing closed, do not claim KYO-${ticket_num}"
     for f in "${FAILURES[@]}"; do
