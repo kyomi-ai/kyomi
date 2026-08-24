@@ -4019,6 +4019,8 @@ pub fn DatasourceModal(
                                             set_oauth_connecting=set_modal_oauth_connecting
                                             datasource_disconnect_action=datasource_disconnect_action
                                             is_create_mode=is_create_mode
+                                            cfg_oauth_client_id=cfg_oauth_client_id
+                                            cfg_oauth_client_secret=cfg_oauth_client_secret
                                             is_admin=is_admin
                                             auth_modes=connection_auth_modes
                                             set_test_result=set_test_result
@@ -5153,6 +5155,31 @@ fn oauth_source_for_ds_type(ds_type: &str, auth_mode: &str) -> Option<OAuthStatu
     }
 }
 
+/// Whether an admin-configured OAuth Client ID/Secret pair is missing —
+/// i.e. an admin has not (yet, or not fully) configured OAuth for this
+/// provider, and a member's "Connect" button would start a flow that
+/// cannot succeed.
+///
+/// True when *either* field is empty, not only when both are. A
+/// half-filled config — exactly what an interrupted admin leaves behind —
+/// must still trip this, because the React predicate this ports
+/// (`OAuthConnect.jsx`'s `configFields.every(f => !!connectionConfig[f.name])`,
+/// negated) requires ALL fields present to consider OAuth configured, so
+/// "missing" is true the moment ANY one is empty. Every config-bearing
+/// OAuth surface (BigQuery `enterprise_oauth`, Snowflake, Databricks,
+/// Synapse) must derive its `cfg_missing` signal from this function
+/// rather than re-deriving the emptiness check inline — see
+/// `docs/standards/code-organization/propagate-predicate-changes-to-every-copy.md`.
+///
+/// The one deliberate exception is BigQuery's `kyomi_oauth` mode, which
+/// is account-level, globally-hosted Kyomi OAuth with no `configFields`
+/// at all — there is nothing for this function to check — so it keeps
+/// `cfg_missing=Signal::stored(false)` at its call site instead of
+/// calling this function. (KYO-519)
+fn oauth_config_missing(client_id: &str, client_secret: &str) -> bool {
+    client_id.is_empty() || client_secret.is_empty()
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Connection Test Result Badge
 // ─────────────────────────────────────────────────────────────────────────────
@@ -5469,9 +5496,12 @@ fn BigQueryAuthModeSection(
         format!("/api/v1/auth/oauth/bigquery-enterprise/connect?datasource_slug={s}")
     });
 
-    // ── Enterprise OAuth: "not configured" when client ID/secret are empty.
+    // ── Enterprise OAuth: "not configured" when client ID or secret is
+    // missing (KYO-519 — see oauth_config_missing's doc comment for why
+    // this must route through the shared predicate rather than an inline
+    // `&&`, which only catches a config left fully blank).
     let enterprise_cfg_missing = Signal::derive(move || {
-        cfg_oauth_client_id.get().is_empty() && cfg_oauth_client_secret.get().is_empty()
+        oauth_config_missing(&cfg_oauth_client_id.get(), &cfg_oauth_client_secret.get())
     });
 
     // ── Disconnect callbacks — wraps the Action dispatch in a Callback<()>.
@@ -5676,6 +5706,15 @@ fn BigQueryAuthModeSection(
                         set_oauth_connecting=set_oauth_connecting
                         provider_name="BigQuery"
                         connect_url=kyomi_oauth_url
+                        // KYO-519 — deliberately NOT oauth_config_missing(...).
+                        // kyomi_oauth is account-level, globally-hosted Kyomi
+                        // OAuth: it has no configFields (no per-datasource
+                        // Client ID/Secret) at all, so there is nothing for
+                        // that predicate to check. Leave this hardcoded
+                        // false rather than "fixing" it into a call — doing
+                        // so would read cfg_oauth_client_id/secret, which
+                        // belong to a different auth mode (enterprise_oauth)
+                        // entirely and are unrelated to this panel.
                         cfg_missing=Signal::stored(false)
                         connect_blocked=Signal::derive(move || {
                             !bq_kyomi_oauth_connect_ok.get()
@@ -5957,6 +5996,17 @@ fn SnowflakeAuthModeSection(
     datasource_disconnect_action: Action<(String, String), Result<crate::server_fns::datasource_oauth::DatasourceOAuthDisconnectResult, ServerFnError>>,
     /// True in create mode — OAuth status panel is hidden in create mode.
     is_create_mode: Signal<bool>,
+    /// Admin-configured OAuth Client ID (KYO-519). Read-only here — unlike
+    /// `DatabricksAuthModeSection`, this component doesn't render the
+    /// Client ID/Secret input fields itself (those live in
+    /// `ProviderConnectionFields`'s `"snowflake"` arm, reading/writing the
+    /// same signal); it only needs the value to compute `cfg_missing`
+    /// below, so no `set_cfg_oauth_client_id` is threaded through.
+    cfg_oauth_client_id: ReadSignal<String>,
+    /// Admin-configured OAuth Client Secret (KYO-519). Same rationale as
+    /// `cfg_oauth_client_id` above — read-only, computed into
+    /// `cfg_missing`.
+    cfg_oauth_client_secret: ReadSignal<String>,
     /// Gates the Authentication Mode selector — admin-only (KYO-184), it
     /// persists through `update_datasource_settings`. Does NOT gate the
     /// personal OAuth connect/disconnect panel below, which stays visible to
@@ -5980,6 +6030,15 @@ fn SnowflakeAuthModeSection(
     let sf_connect_url = Signal::derive(move || {
         let s = slug.get();
         format!("/api/v1/auth/oauth/snowflake/connect?datasource_slug={s}")
+    });
+
+    // cfg_missing: true when admin has not configured OAuth Client ID/Secret
+    // (KYO-519 — previously hardcoded Signal::stored(false), so a member
+    // saw a normal Connect button and a doomed connect attempt no matter
+    // what the admin had entered. Routed through the shared
+    // oauth_config_missing predicate, same as the other three providers).
+    let sf_cfg_missing = Signal::derive(move || {
+        oauth_config_missing(&cfg_oauth_client_id.get(), &cfg_oauth_client_secret.get())
     });
 
     // Redirect URL for display in OAuth mode.
@@ -6087,7 +6146,7 @@ fn SnowflakeAuthModeSection(
                         set_oauth_connecting=set_oauth_connecting
                         provider_name="Snowflake"
                         connect_url=sf_connect_url
-                        cfg_missing=Signal::stored(false)
+                        cfg_missing=sf_cfg_missing
                         on_disconnect=on_sf_disconnect
                         disconnect_pending=sf_disconnect_pending
                         on_recover=on_oauth_recover
@@ -6175,9 +6234,11 @@ fn DatabricksAuthModeSection(
     let db_disconnect_pending =
         Signal::derive(move || datasource_disconnect_action.pending().get());
 
-    // cfg_missing: true when admin has not configured OAuth Client ID/Secret.
+    // cfg_missing: true when admin has not configured OAuth Client ID/Secret
+    // (KYO-519 — routed through the shared oauth_config_missing predicate
+    // so this and its three siblings can't drift from each other again).
     let db_cfg_missing = Signal::derive(move || {
-        cfg_oauth_client_id.get().is_empty() || cfg_oauth_client_secret.get().is_empty()
+        oauth_config_missing(&cfg_oauth_client_id.get(), &cfg_oauth_client_secret.get())
     });
 
     // Re-fetch OAuth status whenever db_auth_mode changes to "oauth" so the
@@ -6414,9 +6475,12 @@ fn SynapseAuthModeSection(
         )
     });
 
-    // "not configured" when client ID/secret are empty
+    // "not configured" when client ID or secret is missing (KYO-519 —
+    // see oauth_config_missing's doc comment for why this must route
+    // through the shared predicate rather than an inline `&&`, which
+    // only catches a config left fully blank).
     let enterprise_cfg_missing = Signal::derive(move || {
-        cfg_oauth_client_id.get().is_empty() && cfg_oauth_client_secret.get().is_empty()
+        oauth_config_missing(&cfg_oauth_client_id.get(), &cfg_oauth_client_secret.get())
     });
 
     let slug_for_disconnect = slug;
