@@ -1190,6 +1190,22 @@ fn DatasourceRow(
 const MODAL_INPUT_CLASS: &str =
     "w-full px-3 py-2 border border-input rounded-md bg-background text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-ring";
 
+/// The `connection_config` key Azure Synapse's endpoint field is stored
+/// under. Every other host-taking datasource type (`postgres`, `sqlserver`,
+/// `databricks`'s `server_hostname`, ...) uses `"host"`, but the Synapse
+/// driver (`kyomi-connect` `crates/kyomi-datasource/src/providers/synapse.rs`)
+/// requires `"server"` specifically and rejects `"host"` with
+/// `Error::Provider("Azure Synapse requires a server address")`. This
+/// constant is the single place that key is spelled on the UI side — both
+/// `build_connection_config`'s `"synapse"` arm (write) and the edit-mode
+/// load-back (read) reference it, so a future rename on either side breaks
+/// a compile-time reference here rather than silently reintroducing the
+/// write/read key mismatch that made every Leptos-created Synapse
+/// datasource permanently unusable (KYO-516). It cannot pin the *driver's*
+/// expectation — that lives in a different repo — see the KYO-516 test
+/// module's doc comment for what this constant does and does not catch.
+const SYNAPSE_SERVER_CONFIG_KEY: &str = "server";
+
 /// Tab button active class.
 const TAB_ACTIVE: &str =
     "px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors border-primary text-primary";
@@ -1652,7 +1668,14 @@ pub fn DatasourceModal(
                                     .and_then(|v| v.as_bool())
                                     .unwrap_or(false)
                             };
-                            set_cfg_host.try_set(str_val("host"));
+                            // Synapse stores its endpoint under
+                            // SYNAPSE_SERVER_CONFIG_KEY ("server"), not "host" — see
+                            // that constant's doc comment for why (KYO-516).
+                            set_cfg_host.try_set(if settings.datasource_type == "synapse" {
+                                str_val(SYNAPSE_SERVER_CONFIG_KEY)
+                            } else {
+                                str_val("host")
+                            });
                             // Legacy datasources (created by the old React frontend)
                             // store port as a JSON string (e.g. "5439"). Try the
                             // number shape first, then fall back to string so the
@@ -2143,13 +2166,8 @@ pub fn DatasourceModal(
             }
             "synapse" => {
                 if !cfg_host.get_untracked().is_empty() {
-                    map.insert("host".to_string(), serde_json::json!(cfg_host.get_untracked()));
+                    map.insert(SYNAPSE_SERVER_CONFIG_KEY.to_string(), serde_json::json!(cfg_host.get_untracked()));
                 }
-                if let Ok(port) = cfg_port.get_untracked().parse::<i64>() {
-                    map.insert("port".to_string(), serde_json::json!(port));
-                }
-                map.insert("encrypt".to_string(), serde_json::json!(cfg_encrypt.get_untracked()));
-                map.insert("trust_server_certificate".to_string(), serde_json::json!(cfg_trust_cert.get_untracked()));
                 if !cfg_database.get_untracked().is_empty() {
                     map.insert("database".to_string(), serde_json::json!(cfg_database.get_untracked()));
                 }
@@ -6749,25 +6767,18 @@ fn ProviderConnectionFields(signals: ConnectionFieldsSignals) -> impl IntoView {
                 "synapse" => view! {
                     <div class="space-y-4">
                         <h4 class="text-sm font-medium">"Connection Settings"</h4>
-                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                            <div>
-                                <label class="block text-sm font-medium mb-1">
-                                    "Host " <span class="text-error-foreground">"*"</span>
-                                </label>
-                                <input type="text" class=MODAL_INPUT_CLASS
-                                    placeholder="myworkspace.sql.azuresynapse.net"
-                                    prop:value=move || cfg_host.get()
-                                    on:input=move |ev| set_cfg_host.set(event_target_value(&ev))
-                                />
-                            </div>
-                            <div>
-                                <label class="block text-sm font-medium mb-1">"Port"</label>
-                                <input type="number" class=MODAL_INPUT_CLASS
-                                    placeholder="1433"
-                                    prop:value=move || cfg_port.get()
-                                    on:input=move |ev| set_cfg_port.set(event_target_value(&ev))
-                                />
-                            </div>
+                        <div>
+                            <label class="block text-sm font-medium mb-1">
+                                "Server " <span class="text-error-foreground">"*"</span>
+                            </label>
+                            <input type="text" class=MODAL_INPUT_CLASS
+                                placeholder="my-workspace.sql.azuresynapse.net"
+                                prop:value=move || cfg_host.get()
+                                on:input=move |ev| set_cfg_host.set(event_target_value(&ev))
+                            />
+                            <p class="text-xs text-muted-foreground mt-1">
+                                "Synapse workspace SQL endpoint"
+                            </p>
                         </div>
                         <div>
                             <label class="block text-sm font-medium mb-1">"Database"</label>
@@ -6784,7 +6795,7 @@ fn ProviderConnectionFields(signals: ConnectionFieldsSignals) -> impl IntoView {
                         }>
                             <div>
                                 <label class="block text-sm font-medium mb-1">
-                                    "Tenant ID " <span class="text-error-foreground">"*"</span>
+                                    "Azure AD Tenant ID"
                                 </label>
                                 <input type="text" class=MODAL_INPUT_CLASS
                                     placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
@@ -6792,35 +6803,10 @@ fn ProviderConnectionFields(signals: ConnectionFieldsSignals) -> impl IntoView {
                                     on:input=move |ev| set_cfg_tenant_id.set(event_target_value(&ev))
                                 />
                                 <p class="text-xs text-muted-foreground mt-1">
-                                    "Required for Microsoft OAuth and Service Principal. \
-                                     Find in Azure Portal → Directory ID."
+                                    "Required for Microsoft OAuth. Find in Azure Portal → Directory ID."
                                 </p>
                             </div>
                         </Show>
-                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                            <label class="flex items-center gap-2 cursor-pointer">
-                                <input
-                                    type="checkbox"
-                                    class="h-4 w-4 rounded-md border-input"
-                                    prop:checked=move || cfg_encrypt.get()
-                                    on:change=move |ev| {
-                                        set_cfg_encrypt.set(event_target_checked(&ev));
-                                    }
-                                />
-                                <span class="text-sm">"Encrypt Connection"</span>
-                            </label>
-                            <label class="flex items-center gap-2 cursor-pointer">
-                                <input
-                                    type="checkbox"
-                                    class="h-4 w-4 rounded-md border-input"
-                                    prop:checked=move || cfg_trust_cert.get()
-                                    on:change=move |ev| {
-                                        set_cfg_trust_cert.set(event_target_checked(&ev));
-                                    }
-                                />
-                                <span class="text-sm">"Trust Server Certificate"</span>
-                            </label>
-                        </div>
                     </div>
                 }.into_any(),
 
