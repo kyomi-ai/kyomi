@@ -429,7 +429,11 @@ fn resolve_effective_ai_provider(
             has_api_key: !resolved.api_key.trim().is_empty(),
             title_model,
         },
-        Err(e) => ResolvedAiProviderView::Unconfigured { reason: e.to_string() },
+        // user_message() (KYO-448) — Display would leak the variant tag
+        // (e.g. "internal: no LLM provider configured: ...").
+        Err(e) => ResolvedAiProviderView::Unconfigured {
+            reason: e.user_message().to_string(),
+        },
     }
 }
 

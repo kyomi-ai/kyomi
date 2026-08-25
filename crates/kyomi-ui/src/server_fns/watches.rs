@@ -450,7 +450,8 @@ pub async fn run_watch_now(watch_id: String) -> Result<(), ServerFnError> {
         .embedding
         .wait_ready()
         .await
-        .map_err(|e| ServerFnError::new(format!("Embedding model not ready: {e}")))?
+        // user_message() (KYO-448) — Display would leak the variant tag.
+        .map_err(|e| ServerFnError::new(format!("Embedding model not ready: {}", e.user_message())))?
         .clone();
     let bg_ws_manager = ac
         .ctx

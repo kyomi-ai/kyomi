@@ -212,7 +212,9 @@ pub async fn store_chart_context_for_ask(
     // 30-day TTL — same as CHART_CONTEXT_TTL_SECS in kyomi-agent
     kv.set(&kv_key, &context_json, Some(30 * 24 * 60 * 60))
         .await
-        .map_err(|e| ServerFnError::new(format!("Failed to store chart context: {e}")))?;
+        // user_message() (KYO-448) — Display would leak the variant tag
+        // (kv.set() surfaces a Redis outage as kyomi_core::Error::Internal).
+        .map_err(|e| ServerFnError::new(format!("Failed to store chart context: {}", e.user_message())))?;
 
     Ok(chart_context_id)
 }
@@ -244,7 +246,9 @@ pub async fn get_websocket_config() -> Result<WebSocketConfig, ServerFnError> {
         15,
         extra,
     )
-    .map_err(|e| ServerFnError::new(format!("Failed to create WebSocket token: {e}")))?;
+    // user_message() (KYO-448) — Display would leak the variant tag
+    // (jwt encode failures surface as kyomi_core::Error::Internal).
+    .map_err(|e| ServerFnError::new(format!("Failed to create WebSocket token: {}", e.user_message())))?;
 
     Ok(WebSocketConfig {
         token,
