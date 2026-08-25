@@ -413,7 +413,9 @@ pub async fn get_slack_install_url() -> Result<String, ServerFnError> {
         }),
     )
     .await
-    .map_err(|e| ServerFnError::new(format!("Failed to store OAuth state: {e}")))?;
+    // user_message() (KYO-448) — Display would leak the variant tag
+    // (a Redis outage surfaces as kyomi_core::Error::Internal).
+    .map_err(|e| ServerFnError::new(format!("Failed to store OAuth state: {}", e.user_message())))?;
 
     let base = ac.ctx.config.frontend_url.trim_end_matches('/');
     let redirect_uri = format!("{base}/api/v1/slack/oauth/callback");

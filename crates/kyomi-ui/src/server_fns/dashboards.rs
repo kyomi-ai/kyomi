@@ -248,7 +248,8 @@ pub async fn create_dashboard(
 
     // Get embedding service for both embedding generation and rechunking
     let embedding_svc = ac.ctx.embedding.wait_ready().await
-        .map_err(|e| ServerFnError::new(format!("Embedding service unavailable: {e}")))?;
+        // user_message() (KYO-448) — Display would leak the variant tag.
+        .map_err(|e| ServerFnError::new(format!("Embedding service unavailable: {}", e.user_message())))?;
 
     let dashboard_id = kyomi_auth::dashboard_service::create_dashboard(
         ac.db(),
@@ -319,7 +320,8 @@ pub async fn update_dashboard(
     // Re-embed if content or title changed (matches REST handler — propagates error)
     if title.is_some() || content.is_some() {
         let embedding_svc = ac.ctx.embedding.wait_ready().await
-            .map_err(|e| ServerFnError::new(format!("Embedding service unavailable: {e}")))?;
+            // user_message() (KYO-448) — Display would leak the variant tag.
+            .map_err(|e| ServerFnError::new(format!("Embedding service unavailable: {}", e.user_message())))?;
         if let Ok(Some(d)) =
             kyomi_auth::dashboard_service::get_dashboard(ac.db(), &dashboard_id, &ac.ws_id, &ac.auth.user_id).await
         {
@@ -568,7 +570,8 @@ pub async fn restore_version(
 
     // Re-embed after restore (matches REST handler — propagates error)
     let embedding_svc = ac.ctx.embedding.wait_ready().await
-        .map_err(|e| ServerFnError::new(format!("Embedding service unavailable: {e}")))?;
+        // user_message() (KYO-448) — Display would leak the variant tag.
+        .map_err(|e| ServerFnError::new(format!("Embedding service unavailable: {}", e.user_message())))?;
     if let Ok(Some(d)) =
         kyomi_auth::dashboard_service::get_dashboard(ac.db(), &dashboard_id, &ac.ws_id, &ac.auth.user_id).await
     {

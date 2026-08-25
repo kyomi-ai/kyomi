@@ -297,7 +297,8 @@ pub async fn delete_copilot_session(session_id: String) -> Result<(), ServerFnEr
         Some(&ac.ws_id),
     )
     .await
-    .map_err(|e| ServerFnError::new(format!("Failed to delete copilot session: {e}")))?;
+    // user_message() (KYO-448) — Display would leak the variant tag.
+    .map_err(|e| ServerFnError::new(format!("Failed to delete copilot session: {}", e.user_message())))?;
 
     if deleted {
         tracing::info!(session_id = %session_id, "Deleted copilot session");

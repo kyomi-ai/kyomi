@@ -106,7 +106,8 @@ pub async fn get_google_oauth_projects() -> Result<GoogleOAuthProjectsResult, Se
     .await
     .map_err(|e| {
         tracing::error!(error = %e, "google_oauth_projects_service error");
-        ServerFnError::new(format!("{e}"))
+        // user_message() (KYO-448) — Display would leak the variant tag.
+        ServerFnError::new(e.user_message())
     })
 }
 

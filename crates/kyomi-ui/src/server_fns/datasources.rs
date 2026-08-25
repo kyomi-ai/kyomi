@@ -539,6 +539,24 @@ fn overlay_credentials(stored: serde_json::Value, provided: &serde_json::Value) 
     }
 }
 
+/// Build the client-facing "Failed to connect" message for a discovery
+/// failure.
+///
+/// Uses [`kyomi_core::Error::user_message`], never `Display` — `Display` is
+/// the log representation and deliberately carries the variant tag
+/// (`"internal: {0}"`, `"not found: {0}"`, ...), which must never reach a
+/// user (KYO-448). The raw error is always logged with `error = %e` at the
+/// call site before this runs, so the tag is never lost, only kept out of
+/// text a person reads. The result is sanitized the same way every other
+/// message in this fn is — the raw reason was already logged by the caller.
+#[cfg(feature = "ssr")]
+fn connect_failure_message(e: &kyomi_core::Error) -> String {
+    format!(
+        "Failed to connect: {}",
+        kyomi_core::sanitize_error(e.user_message())
+    )
+}
+
 /// Discover available resources (databases, schemas, warehouses, etc.) for a datasource.
 ///
 /// Uses provider-specific list methods (list_databases, list_schemas, list_warehouses, etc.),
@@ -664,7 +682,7 @@ pub async fn discover_datasource_resources(
                 success: false,
                 resources: std::collections::HashMap::new(),
                 resource_errors: std::collections::HashMap::new(),
-                message: e.to_string(),
+                message: e.user_message().to_string(),
             });
         }
         Err(DiscoveryPrepError::UserContext(e)) => {
@@ -679,7 +697,7 @@ pub async fn discover_datasource_resources(
                 success: false,
                 resources: std::collections::HashMap::new(),
                 resource_errors: std::collections::HashMap::new(),
-                message: format!("Failed to connect: {}", kyomi_core::sanitize_error(&e.to_string())),
+                message: connect_failure_message(&e),
             });
         }
     };
@@ -709,7 +727,7 @@ pub async fn discover_datasource_resources(
                 success: false,
                 resources: std::collections::HashMap::new(),
                 resource_errors: std::collections::HashMap::new(),
-                message: format!("Failed to connect: {}", kyomi_core::sanitize_error(&e.to_string())),
+                message: connect_failure_message(&e),
             });
         }
         Err(_) => {
@@ -1951,6 +1969,103 @@ mod discover_datasource_resources_logging_tests {
              eight terminal failure paths from KYO-469, plus the KYO-466 per-key discovery \
              failure warn) — found {warn_count}. If a new failure path was added, give it the \
              same three attribution fields and update this count."
+        );
+    }
+}
+
+// ── Client-facing error text must not leak the internal variant tag (KYO-448) ─
+
+#[cfg(all(test, feature = "ssr"))]
+mod connect_failure_message_tests {
+    //! KYO-448: `kyomi_core::Error`'s `Display` is the **log** representation
+    //! and deliberately carries the variant tag (`"internal: {0}"`,
+    //! `"not found: {0}"`, ...). `connect_failure_message` must build the
+    //! client-facing "Failed to connect" text from `Error::user_message()`
+    //! instead — the reported production bug (v2.6.1) was exactly a
+    //! `DiscoveryPrepError::UserContext` failure rendering as "Failed to
+    //! connect: internal: BigQuery kyomi_oauth mode requires user context
+    //! with OAuth data" instead of the same sentence with no tag.
+    //!
+    //! Each case below asserts the *exact* output via `assert_eq!` rather
+    //! than pairing it with a `!contains("internal:")` guard — the equality
+    //! assertion already pins the whole string, so a leaked tag would show
+    //! up as an equality failure; a trailing `!contains` on the same value
+    //! would be unreachable dead weight (see
+    //! `docs/standards/testing/contains-after-assert-eq-is-dead.md`).
+
+    use super::connect_failure_message;
+
+    #[test]
+    fn internal_variant_renders_without_its_tag() {
+        // The exact variant/message from the reported production bug.
+        let e = kyomi_core::Error::Internal(
+            "BigQuery kyomi_oauth mode requires user context with OAuth data".into(),
+        );
+        assert_eq!(
+            connect_failure_message(&e),
+            "Failed to connect: BigQuery kyomi_oauth mode requires user context with OAuth data"
+        );
+    }
+
+    #[test]
+    fn not_found_variant_renders_without_its_tag() {
+        let e = kyomi_core::Error::NotFound("datasource config".into());
+        assert_eq!(
+            connect_failure_message(&e),
+            "Failed to connect: datasource config"
+        );
+    }
+
+    #[test]
+    fn bad_request_variant_renders_without_its_tag() {
+        let e = kyomi_core::Error::BadRequest("missing required field: host".into());
+        assert_eq!(
+            connect_failure_message(&e),
+            "Failed to connect: missing required field: host"
+        );
+    }
+}
+
+#[cfg(all(test, feature = "ssr"))]
+mod discover_datasource_resources_decrypt_arm_tests {
+    //! KYO-448, the third leak site named in the ticket
+    //! (`DiscoveryPrepError::Decrypt`, distinct from the two
+    //! `connect_failure_message` call sites `connect_failure_message_tests`
+    //! pins directly): this arm builds `DiscoverResourcesResult.message`
+    //! inline rather than through the helper, so it needs its own guard.
+    //! A live call isn't exercisable here (no decryptable datasource in
+    //! this test environment — same rationale as the sibling
+    //! `discover_user_context_tests` / `discover_datasource_resources_logging_tests`
+    //! modules in this file), so this pins the fix at the source level,
+    //! anchored on the two match-arm heads rather than on any comment or
+    //! copy inside them (see
+    //! `docs/standards/testing/anchor-source-text-markers-on-code-not-copy.md`).
+
+    const SRC: &str = include_str!("datasources.rs");
+
+    #[test]
+    fn decrypt_arm_uses_user_message_not_display() {
+        let start = SRC
+            .find("Err(DiscoveryPrepError::Decrypt(e)) => {")
+            .expect("DiscoveryPrepError::Decrypt arm not found in datasources.rs");
+        let end = SRC[start..]
+            .find("Err(DiscoveryPrepError::UserContext(e)) => {")
+            .map(|i| start + i)
+            .unwrap_or_else(|| {
+                panic!("DiscoveryPrepError::UserContext arm not found after the Decrypt arm")
+            });
+        let arm = &SRC[start..end];
+
+        assert!(
+            arm.contains("e.user_message()"),
+            "the DiscoveryPrepError::Decrypt arm must build its client-facing message via \
+             Error::user_message(), not Display — arm body:\n{arm}"
+        );
+        assert!(
+            !arm.contains("e.to_string()"),
+            "regression guard: e.to_string() on a kyomi_core::Error leaks the internal variant \
+             tag (e.g. \"internal: \", \"not found: \") into client-visible text — this is the \
+             exact KYO-448 bug reborn in this arm:\n{arm}"
         );
     }
 }

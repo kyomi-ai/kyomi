@@ -133,15 +133,7 @@ pub async fn create_connect_datasource(
         },
     )
     .await
-    .map_err(|e| {
-        let msg = e.to_string();
-        // Normalize constraint violation errors so the client can reliably detect slug conflicts
-        if msg.contains("UNIQUE") || msg.contains("unique") || msg.contains("duplicate key") || msg.contains("already exists") {
-            ServerFnError::new("A datasource with this slug already exists in your workspace. Please choose a different name or slug.")
-        } else {
-            ServerFnError::new(msg)
-        }
-    })?;
+    .map_err(|e| create_datasource_conflict_message(&e.to_string(), e.user_message()))?;
 
     // Generate Connect JWT token and store the JTI for revocation
     let (token, jti) = generate_connect_token(
@@ -347,6 +339,38 @@ pub async fn discover_connect_containers(
 
 // ─── Helpers (server-only) ──────────────────────────────────────────────────
 
+/// Build the client-facing error for a `create_datasource` failure in
+/// [`create_connect_datasource`].
+///
+/// Detection and display read from different representations of the same
+/// error, on purpose:
+///
+/// - `raw` is `Error::to_string()` (the **log** representation, `Display`).
+///   The UNIQUE/duplicate-key/already-exists patterns below were written
+///   against the raw driver text — the common case is an app-level
+///   pre-check returning `Error::Conflict("... already exists ...")`, whose
+///   `Display` still carries that text; a same-instant race that instead
+///   reaches the database's own unique constraint arrives as `Error::Sqlx`,
+///   whose `Display` carries the raw driver text (e.g. `"UNIQUE constraint
+///   failed: ..."` / `"duplicate key value violates unique constraint
+///   ..."`) rather than `Error::Sqlx::user_message()`'s fixed `"internal
+///   server error"` string. This arm returns a hardcoded constant, so
+///   nothing from `raw` ever reaches the user — matching on the tagged
+///   `Display` form here is safe.
+/// - `user_message` is `Error::user_message()` (the **user** representation,
+///   no variant tag). It is only used in the `else` arm, the one path where
+///   the error's own text reaches the client — using `raw` there would leak
+///   the variant tag (e.g. `"conflict: "`, `"internal: "`) into copy a
+///   person reads (KYO-448).
+#[cfg(feature = "ssr")]
+fn create_datasource_conflict_message(raw: &str, user_message: &str) -> ServerFnError {
+    if raw.contains("UNIQUE") || raw.contains("unique") || raw.contains("duplicate key") || raw.contains("already exists") {
+        ServerFnError::new("A datasource with this slug already exists in your workspace. Please choose a different name or slug.")
+    } else {
+        ServerFnError::new(user_message)
+    }
+}
+
 /// Mint a Connect JWT for a datasource using the server's `ConnectTokenService`.
 ///
 /// Returns `(token, jti)` on success. This helper centralizes the `Option`
@@ -460,5 +484,75 @@ mod tests {
         let (_t2, jti2) =
             generate_connect_token(Some(&service), "ds-rot", "ws-rot", "mysql").unwrap();
         assert_ne!(jti1, jti2, "rotated token must have a fresh jti");
+    }
+}
+
+// ── Client-facing error text must not leak the internal variant tag (KYO-448) ─
+// ── while still detecting the DB-race slug-conflict path (regression guard) ──
+
+#[cfg(all(test, feature = "ssr"))]
+mod create_datasource_conflict_message_tests {
+    //! A previous KYO-448 pass swapped `create_connect_datasource`'s
+    //! constraint-violation detection from `Error::to_string()` (`Display`,
+    //! tagged) to `Error::user_message()` (untagged) wholesale. That de-tags
+    //! the text shown to the user (the goal), but a same-instant slug race
+    //! that reaches the database's own unique constraint surfaces as
+    //! `Error::Sqlx`, whose `user_message()` is the fixed `"internal server
+    //! error"` string rather than the raw driver text — so detection on
+    //! `user_message()` can never match `UNIQUE` / `unique` / `duplicate
+    //! key` on that path, and the friendly "already exists" message the
+    //! branch exists to produce never fires.
+    //!
+    //! `create_datasource_conflict_message` takes the two representations
+    //! `create_connect_datasource` derives from the same `kyomi_core::Error`
+    //! as plain `&str` — `raw` (`Display`) for detection, `user_message` for
+    //! display — so both halves are pinned here without needing to
+    //! construct a real `sqlx::Error` (awkward: its `Database` variant wraps
+    //! a `Box<dyn DatabaseError>` trait object). The strings below are
+    //! exactly what `Error::to_string()` / `Error::user_message()` produce
+    //! for the two variants in play, per `kyomi_core::Error`'s own
+    //! doc-pinned behavior (`crates/kyomi-core/src/error.rs`).
+
+    use super::create_datasource_conflict_message;
+
+    #[test]
+    fn sqlx_race_with_tagless_user_message_still_normalizes_via_raw_display() {
+        // The DB-race path: `Error::Sqlx`'s `Display` carries the raw driver
+        // text (sqlite's wording, chosen as a concrete example), but its
+        // `user_message()` is always the fixed "internal server error" —
+        // never the raw text. Detection must run on `raw`, not
+        // `user_message`, or this case is unreachable.
+        let raw = "UNIQUE constraint failed: datasource_configs.slug";
+        let user_message = "internal server error";
+
+        let err = create_datasource_conflict_message(raw, user_message);
+        assert_eq!(
+            err.to_string(),
+            "error running server function: A datasource with this slug \
+             already exists in your workspace. Please choose a different \
+             name or slug."
+        );
+    }
+
+    #[test]
+    fn tagged_variant_falls_through_to_the_untagged_user_message() {
+        // A variant whose `Display` carries a tag but whose text doesn't
+        // match any conflict pattern (e.g. `Error::Internal`, `Display` =
+        // "internal: db pool exhausted") must fall through to the `else`
+        // arm and render via `user_message` — with no "internal: " prefix
+        // reaching the user (KYO-448 itself).
+        let raw = "internal: db pool exhausted";
+        let user_message = "db pool exhausted";
+
+        let err = create_datasource_conflict_message(raw, user_message);
+        let rendered = err.to_string();
+        assert!(
+            !rendered.contains("internal:"),
+            "user-visible text must not carry the variant tag, got: {rendered}"
+        );
+        assert_eq!(
+            rendered,
+            "error running server function: db pool exhausted"
+        );
     }
 }

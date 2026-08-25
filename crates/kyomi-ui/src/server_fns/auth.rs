@@ -195,7 +195,8 @@ pub async fn datasource_oauth_callback(
     .await
     .map_err(|e| {
         tracing::error!(error = %e, provider = %provider, "datasource_oauth_callback_service error");
-        ServerFnError::new(format!("{e}"))
+        // user_message() (KYO-448) — Display would leak the variant tag.
+        ServerFnError::new(e.user_message())
     })?;
 
     Ok(DatasourceOAuthCallbackResult::Success {
@@ -551,7 +552,8 @@ pub async fn google_link_callback(
     .await
     .map_err(|e| {
         tracing::error!(error = %e, "google_link_callback_service error");
-        ServerFnError::new(format!("{e}"))
+        // user_message() (KYO-448) — Display would leak the variant tag.
+        ServerFnError::new(e.user_message())
     })?;
 
     Ok(GoogleLinkCallbackResult::Success {
@@ -648,7 +650,8 @@ pub async fn verify_email(token: String) -> Result<VerifyEmailResult, ServerFnEr
     .await
     .map_err(|e| {
         tracing::error!(error = %e, "verify_verification_token error");
-        ServerFnError::new(format!("{e}"))
+        // user_message() (KYO-448) — Display would leak the variant tag.
+        ServerFnError::new(e.user_message())
     })?;
 
     let Some(email) = email else {
@@ -659,7 +662,8 @@ pub async fn verify_email(token: String) -> Result<VerifyEmailResult, ServerFnEr
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "mark_user_verified error");
-            ServerFnError::new(format!("{e}"))
+            // user_message() (KYO-448) — Display would leak the variant tag.
+            ServerFnError::new(e.user_message())
         })?;
 
     Ok(VerifyEmailResult::Success { email })

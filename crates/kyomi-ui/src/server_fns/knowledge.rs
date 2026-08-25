@@ -31,7 +31,8 @@ pub async fn create_knowledge_doc(
         .embedding
         .wait_ready()
         .await
-        .map_err(|e| ServerFnError::new(format!("Embedding service unavailable: {e}")))?;
+        // user_message() (KYO-448) — Display would leak the variant tag.
+        .map_err(|e| ServerFnError::new(format!("Embedding service unavailable: {}", e.user_message())))?;
 
     let dashboard_id = kyomi_auth::dashboard_service::create_dashboard(
         ac.db(),
