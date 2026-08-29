@@ -16,7 +16,7 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, AuthenticatedContext, IntoServerFnError, IntoServerFnErrorCore};
+use super::{extract_auth, extract_context, AuthenticatedContext, IntoServerFnError, IntoServerFnErrorCore, IntoServerFnErrorSqlx};
 #[cfg(feature = "ssr")]
 use kyomi_types::Permission;
 
@@ -292,7 +292,7 @@ pub async fn get_subscription_info() -> Result<SubscriptionInfo, ServerFnError> 
     );
     let active_members: i32 = kyomi_core::db_fetch_scalar!(
         ac.db(), i64, &count_sql, &ac.ws_id
-    ).map_err(|e| ServerFnError::new(format!("Failed to count workspace members: {e}")))? as i32;
+    ).into_sfn_sqlx()? as i32;
 
     // Normalize all timestamps to RFC3339 so the frontend's date formatter
     // (which expects RFC3339) renders them correctly. Postgres's
@@ -545,7 +545,7 @@ pub async fn update_user_limit(limit: i32) -> Result<i32, ServerFnError> {
         "SELECT COUNT(*) FROM workspace_users WHERE workspace_id = $1 AND active = {bt}"
     );
     let active: i64 = kyomi_core::db_fetch_scalar!(ac.db(), i64, &count_sql, &ac.ws_id)
-        .map_err(|e| ServerFnError::new(format!("Failed to count members: {e}")))?;
+        .into_sfn_sqlx()?;
 
     if (limit as i64) < active {
         return Err(ServerFnError::new(format!(

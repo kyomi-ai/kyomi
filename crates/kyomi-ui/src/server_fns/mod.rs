@@ -331,6 +331,48 @@ impl<T> IntoServerFnErrorCore<T> for Result<T, kyomi_core::Error> {
     }
 }
 
+/// Extension trait that converts a raw `sqlx::Result<T>` into a server
+/// function result via `kyomi_core::Error::user_message()`, never
+/// `sqlx::Error`'s own `Display`.
+///
+/// `kyomi_core::db_fetch_scalar!` / `db_execute!` / `db_fetch_optional!`
+/// (`crates/kyomi-core/src/db.rs`) wrap `sqlx::query...().fetch_...()`
+/// directly and return `sqlx::Result<T>`, **not** `kyomi_core::Result<T>`.
+/// A bare `.map_err(|e| ServerFnError::new(format!("...: {e}")))` on one of
+/// those calls therefore bypasses both of this codebase's existing
+/// protections: `Error::user_message()`'s fixed `"internal server error"`
+/// for `Sqlx`/`Migrate`/`Redis`/`SerdeJson` (KYO-350) never applies because
+/// there is no `kyomi_core::Error` to call it on, and `.into_sfn()`'s
+/// `sanitize_error` only redacts URLs/credentials/hostnames — not the
+/// constraint/column/table detail `sqlx::Error`'s `Display` can carry. Raw
+/// driver detail reaches the client either way (KYO-526; see
+/// `docs/standards/error-handling/user-message-not-display-for-user-facing-text.md`).
+///
+/// Converting through `kyomi_core::Error::from` (the `#[from] sqlx::Error`
+/// arm) and reading `user_message()` routes these call sites onto the exact
+/// same fixed string `.into_sfn_core()` will produce for them once
+/// KYO-523/#433 lands and lets a caller convert to `kyomi_core::Error`
+/// earlier — so this composes with that change in either merge order. It
+/// also can't collide with the `NotKyomiCoreError`-gated `.into_sfn()` /
+/// `.into_sfn_core()` split #433 introduces: this trait is implemented for
+/// `sqlx::Error` directly, a type neither of those two ever will be.
+#[cfg(feature = "ssr")]
+pub(crate) trait IntoServerFnErrorSqlx<T> {
+    fn into_sfn_sqlx(self) -> Result<T, leptos::prelude::ServerFnError>;
+}
+
+#[cfg(feature = "ssr")]
+impl<T> IntoServerFnErrorSqlx<T> for Result<T, sqlx::Error> {
+    fn into_sfn_sqlx(self) -> Result<T, leptos::prelude::ServerFnError> {
+        self.map_err(|e| {
+            tracing::error!(error = %e, "server function db error");
+            leptos::prelude::ServerFnError::new(
+                kyomi_core::Error::from(e).user_message().to_string(),
+            )
+        })
+    }
+}
+
 #[cfg(all(test, feature = "ssr"))]
 mod into_sfn_error_tests {
     use super::*;
@@ -386,5 +428,45 @@ mod into_sfn_error_tests {
     fn into_sfn_still_works_for_non_core_error_types() {
         let err: Result<(), sqlx::Error> = Err(sqlx::Error::RowNotFound);
         assert!(err.into_sfn().is_err());
+    }
+}
+
+#[cfg(all(test, feature = "ssr"))]
+mod into_sfn_sqlx_tests {
+    //! KYO-526 regression guard: `.into_sfn_sqlx()` must build the
+    //! client-facing message from `kyomi_core::Error::user_message()`, so a
+    //! raw `sqlx::Error`'s `Display` — which can carry constraint, column,
+    //! or table detail — never reaches the client. If this test is
+    //! reverted to asserting against `e.to_string()` (the bug), it fails:
+    //! `sqlx::Error::RowNotFound`'s `Display` is `"no rows returned by a
+    //! query that expected to return at least one row"`, not
+    //! `"internal server error"`.
+    use super::IntoServerFnErrorSqlx;
+
+    #[test]
+    fn maps_sqlx_error_to_the_fixed_safe_string_not_its_raw_display() {
+        let e = sqlx::Error::RowNotFound;
+        // Sanity check on the fixture: if sqlx::Error's Display were already
+        // "internal server error" this test couldn't distinguish the fix
+        // from the bug it guards against.
+        assert_ne!(e.to_string(), "internal server error");
+
+        let result: Result<(), sqlx::Error> = Err(e);
+        let client_message = result.into_sfn_sqlx().unwrap_err().to_string();
+        // `ServerFnError::new(...)`'s own `Display` prepends "error running
+        // server function: " to whatever string it's given, so the assertion
+        // checks the fixed inner message survives intact rather than
+        // depending on leptos's exact wrapper format.
+        assert!(
+            client_message.ends_with("internal server error"),
+            "raw sqlx::Error detail must never reach the client (KYO-526) — expected the \
+             message to end with the fixed \"internal server error\" string, got \
+             {client_message:?}"
+        );
+        assert!(
+            !client_message.contains("no rows returned"),
+            "sqlx::Error::RowNotFound's raw Display leaked into the client-facing \
+             message: {client_message:?}"
+        );
     }
 }

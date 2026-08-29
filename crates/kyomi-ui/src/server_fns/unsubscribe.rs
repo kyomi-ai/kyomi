@@ -9,7 +9,7 @@
 use leptos::prelude::*;
 
 #[cfg(feature = "ssr")]
-use super::extract_context;
+use super::{extract_context, IntoServerFnErrorSqlx};
 
 /// Unsubscribe an email from marketing communications.
 ///
@@ -34,8 +34,7 @@ pub async fn unsubscribe_email(email: String) -> Result<(), ServerFnError> {
          SET marketing_consent = {bf}, updated_at = {now_expr} \
          WHERE email = $1"
     );
-    kyomi_core::db_execute!(&ctx.db, &sql, &email)
-        .map_err(|e| ServerFnError::new(format!("Failed to unsubscribe: {e}")))?;
+    kyomi_core::db_execute!(&ctx.db, &sql, &email).into_sfn_sqlx()?;
 
     tracing::info!(email = %email, "Unsubscribe processed via Leptos server fn");
 
