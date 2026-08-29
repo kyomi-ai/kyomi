@@ -35,3 +35,4 @@ To add a rule:
 - [Testing](standards/testing/) — *Standards for test structure, assertions, and what must be tested.*
 - [Version Control & Working Tree](standards/version-control-working-tree/) — *Standards for reasoning about repo state before drawing conclusions from it.*
 - [Build & Toolchain](standards/build-toolchain/) — *Standards for verifying builds and lint results against the toolchain that will actually enforce them, not just the one on your machine.*
+- [Agent Orchestration](standards/agent-orchestration/) — *Standards for how an agent dispatches, waits on, and reports the outcome of its own sub-agents.*
