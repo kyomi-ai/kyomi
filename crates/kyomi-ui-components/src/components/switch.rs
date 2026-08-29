@@ -52,9 +52,13 @@ pub fn Switch(
     checked: Signal<bool>,
     /// Called when the switch is toggled, with the new value.
     on_change: Callback<bool>,
-    /// Whether the switch is disabled.
-    #[prop(optional)]
-    disabled: bool,
+    /// Whether the switch is disabled. Reactive — matches `Button`'s
+    /// `disabled` convention (`MaybeProp<bool>` via `#[prop(into)]`) so a
+    /// caller holding a `Signal<bool>` (e.g. "disabled while deleting") can
+    /// pass it directly instead of snapshotting a stale value at
+    /// construction time. A plain `bool` still works via `Into`.
+    #[prop(optional, into)]
+    disabled: MaybeProp<bool>,
     /// Additional CSS classes for the track element.
     #[prop(optional, into)]
     class: String,
@@ -98,7 +102,7 @@ pub fn Switch(
     // wrapper — doing so would double-fire when the button itself is clicked
     // (button click bubbles to the label).
     let toggle_from_label = move |_| {
-        if !disabled {
+        if !disabled.get().unwrap_or(false) {
             on_change.run(!checked.get());
         }
     };
@@ -120,10 +124,10 @@ pub fn Switch(
                     role="switch"
                     aria-checked=move || checked.get().to_string()
                     attr:data-state=move || if checked.get() { "checked" } else { "unchecked" }
-                    disabled=disabled
+                    disabled=move || disabled.get().unwrap_or(false)
                     class=track_classes
                     on:click=move |_| {
-                        if !disabled {
+                        if !disabled.get().unwrap_or(false) {
                             on_change.run(!checked.get());
                         }
                     }
@@ -142,10 +146,10 @@ pub fn Switch(
                 role="switch"
                 aria-checked=move || checked.get().to_string()
                 attr:data-state=move || if checked.get() { "checked" } else { "unchecked" }
-                disabled=disabled
+                disabled=move || disabled.get().unwrap_or(false)
                 class=track_classes
                 on:click=move |_| {
-                    if !disabled {
+                    if !disabled.get().unwrap_or(false) {
                         on_change.run(!checked.get());
                     }
                 }
@@ -154,5 +158,104 @@ pub fn Switch(
             </button>
         }
         .into_any(),
+    }
+}
+
+// Rendering to HTML (`RenderHtml::to_html`) panics unless the shared
+// `leptos`/`tachys` `ssr` feature is active for this build — see the crate's
+// own `ssr` feature in Cargo.toml. Gating the module (rather than leaving it
+// to panic without that feature) matches `kyomi-ui`'s own convention for its
+// ssr-only test modules: `cargo test -p kyomi-ui-components` alone skips
+// this module cleanly; `--features ssr` is required to run it, exactly as
+// documented for `kyomi-ui`.
+#[cfg(all(test, feature = "ssr"))]
+mod tests {
+    use super::*;
+
+    /// Whether the rendered `<button>`'s HTML carries the boolean `disabled`
+    /// attribute — as opposed to merely containing the substring
+    /// `"disabled"`, which the track's own static Tailwind classes
+    /// (`disabled:cursor-not-allowed disabled:opacity-50`) always do,
+    /// regardless of the actual disabled state. Leptos serializes a `true`
+    /// boolean attribute as a bare `disabled` token immediately before
+    /// `class="..."`, and omits it entirely when `false` — so slicing off
+    /// everything from `class="` onward and checking the token immediately
+    /// preceding it is the precise way to read the real attribute state
+    /// back out of the markup.
+    fn button_html_is_disabled(html: &str) -> bool {
+        let (before_class, _) = html
+            .split_once("class=\"")
+            .expect("Switch's <button> always renders a class attribute");
+        before_class.trim_end().ends_with("disabled")
+    }
+
+    /// KYO-487 — `disabled` must be reactive, not a value snapshotted once
+    /// at construction time.
+    ///
+    /// This builds the `<Switch>` view *before* flipping the bound signal,
+    /// then renders it to HTML *after* the flip — asserting on the
+    /// rendered `disabled` attribute itself, not on the prop value that
+    /// was passed in. Against the pre-KYO-487 `disabled: bool` shape, the
+    /// value would have been copied into the button's closures at
+    /// construction time (the moment `Switch(..)` runs, which happens
+    /// eagerly when the `view!` macro builds the tree) — so this render,
+    /// happening strictly after the flip, would still show the stale
+    /// value. A component that genuinely re-reads the signal on render
+    /// cannot fail this.
+    #[test]
+    fn disabled_attribute_reflects_signal_flip_that_happens_after_construction() {
+        let owner = Owner::new();
+        owner.set();
+
+        let disabled_signal = RwSignal::new(false);
+        let checked = RwSignal::new(false);
+
+        let view = view! {
+            <Switch
+                checked=Signal::from(checked)
+                on_change=Callback::new(|_: bool| {})
+                disabled=disabled_signal
+            />
+        };
+
+        // Flip strictly after the view value above was constructed.
+        disabled_signal.set(true);
+
+        let html = view.to_html();
+        assert!(
+            button_html_is_disabled(&html),
+            "expected the rendered button to carry a `disabled` attribute \
+             after the bound signal flipped to true, but it did not \
+             (rendered html: {html})"
+        );
+    }
+
+    /// Mirror of the above in the other direction — rules out a component
+    /// that renders `disabled` unconditionally regardless of the signal.
+    #[test]
+    fn disabled_attribute_clears_when_signal_flips_to_false_after_construction() {
+        let owner = Owner::new();
+        owner.set();
+
+        let disabled_signal = RwSignal::new(true);
+        let checked = RwSignal::new(false);
+
+        let view = view! {
+            <Switch
+                checked=Signal::from(checked)
+                on_change=Callback::new(|_: bool| {})
+                disabled=disabled_signal
+            />
+        };
+
+        disabled_signal.set(false);
+
+        let html = view.to_html();
+        assert!(
+            !button_html_is_disabled(&html),
+            "expected no `disabled` attribute after the bound signal \
+             flipped to false, but the render still carried one \
+             (rendered html: {html})"
+        );
     }
 }

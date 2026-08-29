@@ -980,18 +980,16 @@ fn DatasourceRow(
     });
 
     let switch_disabled = !can_enable;
+    // Reactive disabled state for the Switch itself (KYO-487): true whenever
+    // this datasource can't be enabled at all (`switch_disabled`, static per
+    // row) OR this row is currently being deleted (`is_deleting`, reactive).
+    // `Switch::disabled` is a real `Signal`/`MaybeProp` now, so this is the
+    // control's actual disabled state — not just a handler-side guard — and
+    // subsumes the `on_toggle` bail that used to stand in for it.
+    let switch_disabled_signal = Signal::derive(move || switch_disabled || is_deleting.get());
 
     let on_toggle = Callback::new(move |new_val: bool| {
         if toggle_action.pending().get_untracked() {
-            return;
-        }
-        // KYO-467 — this row is being deleted; toggling it mid-delete makes
-        // no sense (and the row is visually disabled/dimmed for exactly
-        // this reason). Switch's `disabled` prop is a plain bool, not
-        // reactive (see its definition in switch.rs, out of this ticket's
-        // scope), so this guard is the functional backstop that keeps a
-        // stray keyboard toggle from doing anything during the delete.
-        if is_deleting.get_untracked() {
             return;
         }
         // Gate: cannot enable a datasource with missing credentials.
@@ -1615,10 +1613,16 @@ fn DatasourceRow(
             // of 70% opacity — see DESIGN.md) and `pointer-events-none` so
             // mouse interaction with this row's other controls is inert for
             // the whole 5-10s round trip, not just the delete button itself.
-            // `on_toggle`/`on_settings_click`/`on_oauth_click` each also
-            // guard on `is_deleting` directly (see above) so a keyboard user
-            // tabbing past `pointer-events-none` still can't act on a row
-            // mid-delete.
+            // A keyboard user tabbing past `pointer-events-none` still can't
+            // act on a row mid-delete, but the three controls achieve that
+            // differently. `on_settings_click` and `on_oauth_click` guard on
+            // `is_deleting` inside the handler (see above). The toggle no
+            // longer does: since KYO-487 its `Switch` takes a reactive
+            // `disabled=switch_disabled_signal`, so the rendered `disabled`
+            // attribute blocks activation natively — a stronger guarantee
+            // than the handler check it replaced, because it also removes the
+            // control from the tab order rather than accepting the event and
+            // discarding it.
             let base = "flex flex-col sm:flex-row sm:items-center sm:justify-between p-4 gap-3 \
                  hover:bg-muted/50 transition-colors transition-opacity duration-200";
             if is_deleting.get() {
@@ -1699,7 +1703,7 @@ fn DatasourceRow(
                     <Switch
                         checked=Signal::from(local_enabled)
                         on_change=on_toggle
-                        disabled=switch_disabled
+                        disabled=switch_disabled_signal
                         class=if !can_enable { "opacity-50 cursor-not-allowed".to_string() } else { String::new() }
                     />
                 </div>

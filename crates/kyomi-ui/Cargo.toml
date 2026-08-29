@@ -14,6 +14,12 @@ default = []
 # Server-side rendering — includes leptos_axum, accesses DB/services directly
 ssr = [
     "leptos/ssr",
+    # KYO-487: kyomi-ui-components' own `ssr` test module (switch.rs) needs
+    # its `ssr` feature active to render — wire it explicitly here rather
+    # than relying on incidental cargo feature unification of the shared
+    # `leptos` crate, so `cargo test --workspace` (CI) reliably exercises it
+    # via apps/server's `kyomi-ui = { features = ["ssr"] }`.
+    "kyomi-ui-components/ssr",
     "dep:leptos_axum",
     "leptos_router/ssr",
     "leptos_meta/ssr",

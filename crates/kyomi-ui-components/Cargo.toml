@@ -9,6 +9,18 @@ license = "AGPL-3.0-or-later"
 [lints]
 workspace = true
 
+[features]
+# Enables server-side (string) rendering — needed only to render a component
+# to HTML in tests (`RenderHtml::to_html`/`AnyView::to_html` panic without it;
+# see the `#[cfg(all(test, feature = "ssr"))]`-gated
+# `components::switch::tests`). Not
+# enabled by default. `kyomi-ui`'s own `ssr` feature enables this one too
+# (see its Cargo.toml) so `cargo test --workspace` (CI) exercises the gated
+# tests via apps/server's `kyomi-ui = { features = ["ssr"] }` — but nothing
+# in the production dependency graph needs it: `kyomi-ui` renders its own
+# SSR tree via its own `ssr` feature regardless of this one.
+ssr = ["leptos/ssr"]
+
 [dependencies]
 leptos = "0.8"
 phosphor-leptos = "0.8"
