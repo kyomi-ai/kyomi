@@ -84,7 +84,11 @@ pub fn KnowledgePage() -> impl IntoView {
 
     // Client-side search + sort derived from the in-memory store.
     let knowledge_signal = Signal::derive(move || {
-        let mut items = all_knowledge_docs.get();
+        // Mixed-lifetime derive (KYO-500): all_knowledge_docs comes from the
+        // Layout-scoped SyncStore and is never disposed with this page, so a
+        // bare .get() here is safe — query_signal/sort_signal below are the
+        // page-scoped side and already use try_get().
+        let mut items = all_knowledge_docs.get(); // lint-allow: disposal-safe=Layout-scoped SyncStore signal, never disposed with this page
         if let Some(q) = query_signal.try_get().flatten() {
             let q_lower = q.to_lowercase();
             items.retain(|d| {
@@ -203,9 +207,11 @@ pub fn KnowledgePage() -> impl IntoView {
 
                 <div class="flex items-center gap-2">
                     // Collections sidebar toggle
+                    // Single-source derive (page-scoped collections_open only) — no
+                    // Layout-scoped signal mixed in, so no disposal hazard (KYO-500).
                     <ToggleButton
                         variant=Signal::derive(move || {
-                            if collections_open.get() {
+                            if collections_open.get() { // lint-allow: disposal-safe=single-source derive, page-scoped collections_open only
                                 ButtonVariant::Active
                             } else {
                                 ButtonVariant::Secondary
@@ -223,7 +229,9 @@ pub fn KnowledgePage() -> impl IntoView {
                     <Button
                         size=ButtonSize::Sm
                         on:click=handle_create
-                        disabled=Signal::derive(move || creating.get())
+                        // Single-source derive (page-scoped creating only) — no
+                        // Layout-scoped signal mixed in, so no disposal hazard (KYO-500).
+                        disabled=Signal::derive(move || creating.get()) // lint-allow: disposal-safe=single-source derive, page-scoped creating only
                     >
                         <Show
                             when=move || !creating.get()
@@ -258,7 +266,9 @@ pub fn KnowledgePage() -> impl IntoView {
                                         let create_cb = Callback::new(handle_create);
                                         view! {
                                             <KnowledgeEmptyState
-                                                has_search=Signal::derive(move || query_signal.get().is_some())
+                                                // Single-source derive (page-scoped query_signal only) — no
+                                                // Layout-scoped signal mixed in, so no disposal hazard (KYO-500).
+                                                has_search=Signal::derive(move || query_signal.get().is_some()) // lint-allow: disposal-safe=single-source derive, page-scoped query_signal only
                                                 on_create=create_cb
                                             />
                                         }.into_any()
@@ -282,10 +292,13 @@ pub fn KnowledgePage() -> impl IntoView {
                 </div>
 
                 // Right sidebar — collections
+                // Both derives below are single-source (page-scoped
+                // collections_open / active_collection_id only) — no
+                // Layout-scoped signal mixed in, so no disposal hazard (KYO-500).
                 <CollectionsSidebar
-                    open=Signal::derive(move || collections_open.get())
+                    open=Signal::derive(move || collections_open.get()) // lint-allow: disposal-safe=single-source derive, page-scoped collections_open only
                     set_open=set_collections_open
-                    active_collection_id=Signal::derive(move || active_collection_id.get())
+                    active_collection_id=Signal::derive(move || active_collection_id.get()) // lint-allow: disposal-safe=single-source derive, page-scoped active_collection_id only
                     set_active_collection_id=set_active_collection_id
                     on_collections_changed=Callback::new(move |()| {
                         query_cache.invalidate("collections");
@@ -296,11 +309,14 @@ pub fn KnowledgePage() -> impl IntoView {
             </div>
 
             // Confirm dialog for delete
+            // All three derives below are single-source (page-scoped
+            // confirm_open / deleting_doc only) — no Layout-scoped signal
+            // mixed in, so no disposal hazard (KYO-500).
             <ConfirmDialog
-                open=Signal::derive(move || confirm_open.get())
+                open=Signal::derive(move || confirm_open.get()) // lint-allow: disposal-safe=single-source derive, page-scoped confirm_open only
                 title=Signal::derive(move || "Delete Document?".to_string())
                 message=Signal::derive(move || {
-                    deleting_doc.get()
+                    deleting_doc.get() // lint-allow: disposal-safe=single-source derive, page-scoped deleting_doc only
                         .map(|(_, title)| format!("Are you sure you want to delete \"{title}\"? This action cannot be undone."))
                         .unwrap_or_default()
                 })

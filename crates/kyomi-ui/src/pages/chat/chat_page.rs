@@ -261,8 +261,11 @@ pub fn ChatPage() -> impl IntoView {
     // Fix: parse session_id directly from use_location().pathname, which always
     // reflects the actual browser URL regardless of route nesting depth.
     let location = use_location();
+    // Both Memos below read only `location.pathname` — a single router-level
+    // signal that outlives every page (never page-scoped), so a bare .get()
+    // is safe (KYO-500).
     let url_session_id = Memo::new(move |_| {
-        let pathname = location.pathname.get();
+        let pathname = location.pathname.get(); // lint-allow: disposal-safe=single-source derive, router location.pathname only, never page-scoped
         // pathname is "/chat" or "/chat/:session_id"
         // Strip the "/chat/" prefix and treat the remainder as session_id.
         pathname
@@ -273,7 +276,7 @@ pub fn ChatPage() -> impl IntoView {
     });
 
     let is_on_chat_route = Memo::new(move |_| {
-        location.pathname.get().starts_with("/chat")
+        location.pathname.get().starts_with("/chat") // lint-allow: disposal-safe=single-source derive, router location.pathname only, never page-scoped
     });
 
     // ── User context (for ownership checks, multi_user_enabled, personal mode) ──
@@ -286,9 +289,11 @@ pub fn ChatPage() -> impl IntoView {
 
     // Derive the user's display name from the user context resource.
     // Uses the user's name if available, falls back to email prefix, then "there".
+    // Single-source derive (Layout-scoped user_ctx_resource only) — no
+    // page-scoped signal mixed in, so no disposal hazard (KYO-500).
     let user_display_name = Memo::new(move |_| {
         user_ctx_resource
-            .get()
+            .get() // lint-allow: disposal-safe=single-source derive, Layout-scoped user_ctx_resource only
             .and_then(|res| res.ok())
             .map(|ctx| {
                 ctx.name
@@ -391,8 +396,13 @@ pub fn ChatPage() -> impl IntoView {
             // KYO-494: fall back to the optimistic client-generated id while
             // `current_session_id` hasn't caught up yet (new-chat send in
             // flight) — see `pending_new_session_id`'s doc comment above.
+            // KYO-500: both signals here are page-scoped (declared at the top
+            // of this component) — no Layout-scoped signal mixed in, so no
+            // disposal hazard despite the lint's advisory WARN:B on this line
+            // (Rule B fires on every bare .get() in a derive by design, not
+            // just genuinely mixed ones — see enforcement-status.md).
             session_id: Signal::derive(move || {
-                resolve_engine_session_id(current_session_id.get(), pending_new_session_id.get())
+                resolve_engine_session_id(current_session_id.get(), pending_new_session_id.get()) // lint-allow: disposal-safe=both signals page-scoped (declared at top of this component), no Layout mix despite Rule B firing unconditionally here
             }),
         },
         context_type: None, // Main chat doesn't filter by context_type
@@ -409,17 +419,22 @@ pub fn ChatPage() -> impl IntoView {
     // Wire is_streaming and active_message_id from ChatStateMachine.
     let is_streaming = chat_state.is_streaming;
     let chat_state_active_message_id = chat_state.active_message_id();
-    let active_message_id = Signal::derive(move || chat_state_active_message_id.get());
+    // Single-source derive (page-scoped chat_state, owned by the ChatEngine
+    // created in this component body) — no Layout-scoped signal mixed in,
+    // so no disposal hazard (KYO-500).
+    let active_message_id = Signal::derive(move || chat_state_active_message_id.get()); // lint-allow: disposal-safe=single-source derive, page-scoped chat_state (owned by this page ChatEngine) only
 
     // ── WebSocket context ───────────────────────────────────────────────
     let ws_ctx = use_context::<WebSocketContext>();
 
     // Connection state as a string signal for ChatInput.
+    // Single-source derive (Layout-scoped WebSocketContext only) — no
+    // page-scoped signal mixed in, so no disposal hazard (KYO-500).
     let ws_ctx_for_connection = ws_ctx.clone();
     let connection_state_signal = Signal::derive(move || {
         ws_ctx_for_connection
             .as_ref()
-            .map(|ctx| ctx.connection_state.get().to_string())
+            .map(|ctx| ctx.connection_state.get().to_string()) // lint-allow: disposal-safe=single-source derive, Layout-scoped WebSocketContext only
             .unwrap_or_else(|| "disconnected".to_string())
     });
 
@@ -427,10 +442,12 @@ pub fn ChatPage() -> impl IntoView {
     // Provided by the layout-level SyncStore. Used to pass the workspace
     // default model to send_chat_message and to display the active model name.
     let sync_store = expect_context::<SyncStore>();
+    // Single-source derive (Layout-scoped SyncStore only) — no page-scoped
+    // signal mixed in, so no disposal hazard (KYO-500).
     let workspace_default_model = Signal::derive(move || {
         sync_store
             .workspace_settings()
-            .get()
+            .get() // lint-allow: disposal-safe=single-source derive, Layout-scoped SyncStore only
             .and_then(|ws| ws.default_model)
     });
 
@@ -449,8 +466,12 @@ pub fn ChatPage() -> impl IntoView {
     // fetching) rather than Effect::new + spawn_local. The key Memo filters
     // out just-created sessions so we don't reload data that already arrived
     // via WebSocket.
+    // Single-source derive (page-scoped url_session_id Memo only —
+    // `just_created_session` below is read with get_untracked(), which
+    // isn't a signal-read hazard) — no Layout-scoped signal mixed in, so no
+    // disposal hazard (KYO-500).
     let session_id_to_load = Memo::new(move |_| {
-        let session_id = url_session_id.get(); // tracked — triggers reload
+        let session_id = url_session_id.get(); // tracked — triggers reload // lint-allow: disposal-safe=single-source derive, page-scoped url_session_id Memo (owned by this same component) only
         let just_created = just_created_session.get_untracked(); // untracked — no extra rerun
         if just_created.is_some() && just_created.as_deref() == session_id.as_deref() {
             // This session was just created by on_send; data arrives via WebSocket.
@@ -1040,9 +1061,13 @@ pub fn ChatPage() -> impl IntoView {
     }
 
     // ── Filtered messages (pinned filter) ───────────────────────────────
+    // Same-scope derive: `messages` (owned by the page-scoped ChatEngine)
+    // and `show_pinned_only` (declared at the top of this component) are
+    // both page-scoped — no Layout-scoped signal mixed in, so no disposal
+    // hazard (KYO-500).
     let filtered_messages = Memo::new(move |_| {
-        let msgs = messages.get();
-        let pinned_only = show_pinned_only.get();
+        let msgs = messages.get(); // lint-allow: disposal-safe=same-scope derive, page-scoped messages (via this page ChatEngine) and show_pinned_only below, no Layout mix
+        let pinned_only = show_pinned_only.get(); // lint-allow: disposal-safe=same-scope derive, page-scoped show_pinned_only and messages above, no Layout mix
         if pinned_only {
             msgs.into_iter().filter(|m| m.pinned).collect::<Vec<_>>()
         } else {
@@ -1051,7 +1076,9 @@ pub fn ChatPage() -> impl IntoView {
     });
 
     // Whether any messages are pinned (controls filter button visibility).
-    let has_pinned = Memo::new(move |_| messages.get().iter().any(|m| m.pinned));
+    // Single-source derive (page-scoped messages only) — no Layout-scoped
+    // signal mixed in, so no disposal hazard (KYO-500).
+    let has_pinned = Memo::new(move |_| messages.get().iter().any(|m| m.pinned)); // lint-allow: disposal-safe=single-source derive, page-scoped messages only
 
     // ── C5 — MCP deep-link chart context (?chart=<id>) ─────────────────
     // When a user clicks "Continue in Kyomi" in the MCP chart app (Claude.ai),
@@ -1663,9 +1690,14 @@ pub fn ChatPage() -> impl IntoView {
     // Credits exhausted — disable chat input when workspace has no AI budget.
     // Matches React: Chat.jsx uses `creditsExhausted` from useCapabilities() to
     // disable the textarea and send button (Chat.jsx lines 1668-1677).
+    //
+    // KYO-500: this and the four derives immediately below (is_personal_mode,
+    // multi_user_enabled, is_self_hosted, current_user_id) are each a
+    // single-source derive reading only the Layout-scoped user_ctx_resource
+    // — no page-scoped signal mixed in, so no disposal hazard.
     let credits_exhausted = Signal::derive(move || {
         user_ctx_resource
-            .get()
+            .get() // lint-allow: disposal-safe=single-source derive, Layout-scoped user_ctx_resource only
             .and_then(|r| r.ok())
             .and_then(|ctx| ctx.capabilities.get("credits_exhausted").copied())
             .unwrap_or(false)
@@ -1674,7 +1706,7 @@ pub fn ChatPage() -> impl IntoView {
     // ── Derived: user context fields ──────────────────────────────────────
     let is_personal_mode = Signal::derive(move || {
         user_ctx_resource
-            .get()
+            .get() // lint-allow: disposal-safe=single-source derive, Layout-scoped user_ctx_resource only
             .and_then(|r| r.ok())
             .map(|ctx| ctx.is_personal_mode)
             .unwrap_or(false)
@@ -1682,7 +1714,7 @@ pub fn ChatPage() -> impl IntoView {
 
     let multi_user_enabled = Signal::derive(move || {
         user_ctx_resource
-            .get()
+            .get() // lint-allow: disposal-safe=single-source derive, Layout-scoped user_ctx_resource only
             .and_then(|r| r.ok())
             .and_then(|ctx| ctx.capabilities.get("multi_user_enabled").copied())
             .unwrap_or(false)
@@ -1690,7 +1722,7 @@ pub fn ChatPage() -> impl IntoView {
 
     let is_self_hosted = Signal::derive(move || {
         user_ctx_resource
-            .get()
+            .get() // lint-allow: disposal-safe=single-source derive, Layout-scoped user_ctx_resource only
             .and_then(|r| r.ok())
             .map(|ctx| ctx.is_self_hosted)
             .unwrap_or(false)
@@ -1698,7 +1730,7 @@ pub fn ChatPage() -> impl IntoView {
 
     let current_user_id = Signal::derive(move || {
         user_ctx_resource
-            .get()
+            .get() // lint-allow: disposal-safe=single-source derive, Layout-scoped user_ctx_resource only
             .and_then(|r| r.ok())
             .map(|ctx| ctx.user_id.clone())
             .unwrap_or_default()
@@ -1708,9 +1740,12 @@ pub fn ChatPage() -> impl IntoView {
     // In personal mode without an LLM, we show a special empty state.
     // The `llm_configured` capability is set by the backend when an API key
     // is present. We derive it from the user context resource.
+    // Single-source derive (Layout-scoped user_ctx_resource only, same as
+    // has_datasources below) — no page-scoped signal mixed in, so no
+    // disposal hazard (KYO-500).
     let llm_configured = Signal::derive(move || {
         user_ctx_resource
-            .get()
+            .get() // lint-allow: disposal-safe=single-source derive, Layout-scoped user_ctx_resource only
             .and_then(|r| r.ok())
             .and_then(|ctx| ctx.capabilities.get("llm_configured").copied())
             .unwrap_or(true) // Default to true so we don't flash the empty state
@@ -1719,16 +1754,21 @@ pub fn ChatPage() -> impl IntoView {
     // Check if any datasources exist (for empty state).
     let has_datasources = Signal::derive(move || {
         user_ctx_resource
-            .get()
+            .get() // lint-allow: disposal-safe=single-source derive, Layout-scoped user_ctx_resource only
             .and_then(|r| r.ok())
             .and_then(|ctx| ctx.capabilities.get("has_datasources").copied())
             .unwrap_or(true) // Default to true so we don't flash the empty state
     });
 
     // Is the current user the session owner?
+    // Same-scope derive: `current_user_id` (a page-owned Signal::derive,
+    // even though it transitively reads the Layout-scoped user_ctx_resource
+    // above) and `session_metadata` (declared at the top of this component)
+    // are both owned by this page's reactive scope — no Layout-scoped
+    // signal is read directly here, so no disposal hazard (KYO-500).
     let is_owner = Signal::derive(move || {
-        let uid = current_user_id.get();
-        let metadata = session_metadata.get();
+        let uid = current_user_id.get(); // lint-allow: disposal-safe=same-scope derive, page-scoped current_user_id and session_metadata below, no Layout mix
+        let metadata = session_metadata.get(); // lint-allow: disposal-safe=same-scope derive, page-scoped session_metadata and current_user_id above, no Layout mix
         metadata
             .created_by
             .as_ref()
@@ -1825,7 +1865,9 @@ pub fn ChatPage() -> impl IntoView {
                                         >
                                             // Inline editable title
                                             <InlineEditableTitle
-                                                value=Signal::derive(move || session_title.get())
+                                                // Single-source derive (page-scoped session_title only) — no
+                                                // Layout-scoped signal mixed in, so no disposal hazard (KYO-500).
+                                                value=Signal::derive(move || session_title.get()) // lint-allow: disposal-safe=single-source derive, page-scoped session_title only
                                                 on_save=on_title_save
                                                 placeholder="New Chat"
                                             />
@@ -2060,10 +2102,16 @@ pub fn ChatPage() -> impl IntoView {
                                                     let msg_id = message.message_id.clone();
                                                     // Signal::derive inside <For> children is correct —
                                                     // each child has its own reactive scope.
+                                                    // KYO-500: both derives below are single-source
+                                                    // (page-scoped thinking_state_signal / messages,
+                                                    // each owned by the ChatEngine created in this
+                                                    // component body) — the child scope is nested
+                                                    // under the page scope, not a Layout-scoped
+                                                    // survivor of it, so no disposal hazard.
                                                     let thinking_signal = Signal::derive({
                                                         let msg_id = msg_id.clone();
                                                         move || {
-                                                            thinking_state_signal.get()
+                                                            thinking_state_signal.get() // lint-allow: disposal-safe=single-source derive, page-scoped thinking_state_signal (via this page ChatEngine), For child scope nested under page scope
                                                                 .get(&msg_id)
                                                                 .cloned()
                                                                 .unwrap_or_default()
@@ -2075,7 +2123,7 @@ pub fn ChatPage() -> impl IntoView {
                                                     let is_pinned = Signal::derive({
                                                         let msg_id = msg_id.clone();
                                                         move || {
-                                                            messages.get()
+                                                            messages.get() // lint-allow: disposal-safe=single-source derive, page-scoped messages (via this page ChatEngine), For child scope nested under page scope
                                                                 .iter()
                                                                 .find(|m| m.message_id == msg_id)
                                                                 .map(|m| m.pinned)
@@ -2142,8 +2190,10 @@ pub fn ChatPage() -> impl IntoView {
 
         // Unshare confirmation dialog
         // Matches React: Chat.jsx lines 1405-1428 (confirm before making private)
+        // Single-source derive (page-scoped confirm_unshare_open only) — no
+        // Layout-scoped signal mixed in, so no disposal hazard (KYO-500).
         <ConfirmDialog
-            open=Signal::derive(move || confirm_unshare_open.get())
+            open=Signal::derive(move || confirm_unshare_open.get()) // lint-allow: disposal-safe=single-source derive, page-scoped confirm_unshare_open only
             title="Make Private?"
             message="Are you sure you want to make this conversation private? Other workspace members will lose access to it."
             confirm_text="Make Private"
@@ -2154,8 +2204,10 @@ pub fn ChatPage() -> impl IntoView {
 
         // Save to Dashboard modal
         // Matches React: Chat.jsx lines 1803-1809
+        // Single-source derive (page-scoped dashboard_modal_open only) — no
+        // Layout-scoped signal mixed in, so no disposal hazard (KYO-500).
         <SaveDashboardModal
-            open=Signal::derive(move || dashboard_modal_open.get())
+            open=Signal::derive(move || dashboard_modal_open.get()) // lint-allow: disposal-safe=single-source derive, page-scoped dashboard_modal_open only
             chart_yaml=dashboard_modal_content
             on_close=Callback::new(move |()| set_dashboard_modal_open.set(false))
             on_saved=Callback::new(move |_dashboard_id: String| {
@@ -2172,7 +2224,10 @@ pub fn ChatPage() -> impl IntoView {
             });
             view! {
                 <ChartInfoModal
-                    open=Signal::derive(move || chart_info_modal_open.get())
+                    // Single-source derive (page-scoped chart_info_modal_open
+                    // only) — no Layout-scoped signal mixed in, so no
+                    // disposal hazard (KYO-500).
+                    open=Signal::derive(move || chart_info_modal_open.get()) // lint-allow: disposal-safe=single-source derive, page-scoped chart_info_modal_open only
                     yaml=yaml_signal
                     on_close=Callback::new(move |()| set_chart_info_modal_open.set(false))
                 />

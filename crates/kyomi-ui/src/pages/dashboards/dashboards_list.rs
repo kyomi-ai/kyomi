@@ -109,7 +109,7 @@ pub fn DashboardsListPage() -> impl IntoView {
 
     // Client-side search + sort derived from the in-memory store.
     let dashboards_signal = Signal::derive(move || {
-        let mut items = all_dashboards.get();
+        let mut items = all_dashboards.get(); // lint-allow: disposal-safe=Layout-scoped SyncStore signal, never disposed with this page
         // Search filter — use try_get because query_signal is page-scoped
         // while all_dashboards is Layout-scoped (SyncStore). A sync update
         // after navigation would re-evaluate this derive with disposed page signals.
@@ -284,9 +284,11 @@ pub fn DashboardsListPage() -> impl IntoView {
 
                 <div class="flex items-center gap-2">
                     // Collections sidebar toggle
+                    // Single-source derive (page-scoped collections_open only) — no
+                    // Layout-scoped signal mixed in, so no disposal hazard (KYO-500).
                     <ToggleButton
                         variant=Signal::derive(move || {
-                            if collections_open.get() {
+                            if collections_open.get() { // lint-allow: disposal-safe=single-source derive, page-scoped collections_open only
                                 ButtonVariant::Active
                             } else {
                                 ButtonVariant::Secondary
@@ -304,7 +306,10 @@ pub fn DashboardsListPage() -> impl IntoView {
                     <Button
                         size=ButtonSize::Sm
                         on:click=handle_create
-                        disabled=Signal::derive(move || create_action.pending().get())
+                        // Single-source derive (page-scoped create_action.pending()
+                        // only) — no Layout-scoped signal mixed in, so no disposal
+                        // hazard (KYO-500).
+                        disabled=Signal::derive(move || create_action.pending().get()) // lint-allow: disposal-safe=single-source derive, page-scoped create_action only
                     >
                         <Show
                             when=move || !create_action.pending().get()
@@ -398,7 +403,9 @@ pub fn DashboardsListPage() -> impl IntoView {
                                         let has_active_collection = active_collection_id.get().is_some();
                                         view! {
                                             <DashboardsEmptyState
-                                                has_search=Signal::derive(move || query_signal.get().is_some())
+                                                // Single-source derive (page-scoped query_signal only) — no
+                                                // Layout-scoped signal mixed in, so no disposal hazard (KYO-500).
+                                                has_search=Signal::derive(move || query_signal.get().is_some()) // lint-allow: disposal-safe=single-source derive, page-scoped query_signal only
                                                 has_active_collection=has_active_collection
                                                 on_create=create_cb
                                             />
@@ -436,10 +443,13 @@ pub fn DashboardsListPage() -> impl IntoView {
                 </div>
 
                 // Right sidebar — collections
+                // Both derives below are single-source (page-scoped
+                // collections_open / active_collection_id only) — no
+                // Layout-scoped signal mixed in, so no disposal hazard (KYO-500).
                 <CollectionsSidebar
-                    open=Signal::derive(move || collections_open.get())
+                    open=Signal::derive(move || collections_open.get()) // lint-allow: disposal-safe=single-source derive, page-scoped collections_open only
                     set_open=set_collections_open
-                    active_collection_id=Signal::derive(move || active_collection_id.get())
+                    active_collection_id=Signal::derive(move || active_collection_id.get()) // lint-allow: disposal-safe=single-source derive, page-scoped active_collection_id only
                     set_active_collection_id=set_active_collection_id
                     on_collections_changed=Callback::new(move |()| {
                         query_cache.invalidate("collections");
@@ -450,11 +460,14 @@ pub fn DashboardsListPage() -> impl IntoView {
             </div>
 
             // Confirm dialog for delete
+            // All three derives below are single-source (page-scoped
+            // confirm_open / deleting_dashboard only) — no Layout-scoped
+            // signal mixed in, so no disposal hazard (KYO-500).
             <ConfirmDialog
-                open=Signal::derive(move || confirm_open.get())
+                open=Signal::derive(move || confirm_open.get()) // lint-allow: disposal-safe=single-source derive, page-scoped confirm_open only
                 title=Signal::derive(move || "Delete Dashboard?".to_string())
                 message=Signal::derive(move || {
-                    deleting_dashboard.get()
+                    deleting_dashboard.get() // lint-allow: disposal-safe=single-source derive, page-scoped deleting_dashboard only
                         .map(|(_, title)| format!("Are you sure you want to delete \"{title}\"? This action cannot be undone."))
                         .unwrap_or_default()
                 })
@@ -464,11 +477,14 @@ pub fn DashboardsListPage() -> impl IntoView {
             />
 
             // Confirm dialog for remove from collection
+            // All three derives below are single-source (page-scoped
+            // remove_confirm_open / removing_info only) — no Layout-scoped
+            // signal mixed in, so no disposal hazard (KYO-500).
             <ConfirmDialog
-                open=Signal::derive(move || remove_confirm_open.get())
+                open=Signal::derive(move || remove_confirm_open.get()) // lint-allow: disposal-safe=single-source derive, page-scoped remove_confirm_open only
                 title=Signal::derive(move || "Remove from Collection?".to_string())
                 message=Signal::derive(move || {
-                    removing_info.get()
+                    removing_info.get() // lint-allow: disposal-safe=single-source derive, page-scoped removing_info only
                         .map(|(_, _, name)| format!("Remove this dashboard from \"{name}\"?"))
                         .unwrap_or_default()
                 })
@@ -478,8 +494,11 @@ pub fn DashboardsListPage() -> impl IntoView {
             />
 
             // Add to Collection modal
+            // Single-source derive (page-scoped add_to_collection_dashboard
+            // only) — no Layout-scoped signal mixed in, so no disposal
+            // hazard (KYO-500).
             <AddToCollectionModal
-                dashboard=Signal::derive(move || add_to_collection_dashboard.get())
+                dashboard=Signal::derive(move || add_to_collection_dashboard.get()) // lint-allow: disposal-safe=single-source derive, page-scoped add_to_collection_dashboard only
                 collections=Signal::derive(get_collections)
                 on_close=Callback::new(move |()| {
                     set_add_to_collection_dashboard.set(None);
