@@ -2171,6 +2171,7 @@ pub async fn create_chat_session_from_alert(
         None,
         None,
         None,
+        None, // message_source
         Some(user_id),
         None,
         None,
@@ -2190,12 +2191,13 @@ pub async fn create_chat_session_from_alert(
         "assistant",
         execution.agent_response.as_deref().unwrap_or(""),
         metadata.as_ref(),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        None, // message_id
+        None, // current_time_user_tz
+        None, // message_source
+        None, // sent_by_user_id
+        None, // tool_call_id
+        None, // tool_name
+        None, // tool_calls
     )
     .await?;
 

@@ -1127,7 +1127,11 @@ impl CustomAgent {
 /// Build the metadata prefix for a user message.
 ///
 /// Format: `[source: X, user_local_time: Y] ` -- only if values are present.
-fn build_metadata_prefix(
+///
+/// `pub(crate)` (not private) so [`crate::adapter::db_message_to_agent_message`]
+/// can reuse it to reconstruct the prefix on read — see that function's doc
+/// for why (KYO-506).
+pub(crate) fn build_metadata_prefix(
     current_time_user_tz: Option<&str>,
     message_source: Option<&str>,
 ) -> String {

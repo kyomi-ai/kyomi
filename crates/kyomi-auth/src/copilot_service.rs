@@ -108,6 +108,13 @@ pub async fn prepare_copilot_message(
     };
 
     // Store user message.
+    //
+    // `message_source` is passed as `None` here — this write predates
+    // KYO-506 and has no source signal of its own to record (unlike
+    // `chat_service::prepare_chat_dispatch`, which knows it's always "web").
+    // Reconstruction degrades cleanly to a time-only annotation for these
+    // rows rather than fabricating a source; KYO-554 tracks threading one
+    // through from `copilot.rs`'s known "web" literal.
     let _user_message_id = crate::chat_service::add_message(
         db,
         encryption_key,
@@ -117,6 +124,7 @@ pub async fn prepare_copilot_message(
         None,
         None,
         current_time_user_tz,
+        None, // message_source — see comment above
         Some(user_id),
         None,
         None,
@@ -134,6 +142,7 @@ pub async fn prepare_copilot_message(
         None,
         None,
         None,
+        None, // message_source
         None,
         None,
         None,

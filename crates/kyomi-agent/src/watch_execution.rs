@@ -1190,13 +1190,14 @@ async fn execute_watch_inner(
         &session_id,
         "user",
         &format!("Monitor: {}\n\n{}", watch.name, watch.prompt),
-        None,
-        None,
-        None,
+        None, // metadata
+        None, // message_id
+        None, // current_time_user_tz
+        None, // message_source
         Some(&watch.created_by),
-        None,
-        None,
-        None,
+        None, // tool_call_id
+        None, // tool_name
+        None, // tool_calls
     )
     .await?;
 
