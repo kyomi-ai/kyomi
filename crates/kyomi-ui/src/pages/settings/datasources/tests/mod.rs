@@ -66,6 +66,7 @@ mod auth_mode_sections;
 mod oauth;
 mod credential_state_reset;
 mod create_mode;
+mod create_mode_bq_projects;
 mod catalog;
 mod list_view;
 mod connection_test_badge;
