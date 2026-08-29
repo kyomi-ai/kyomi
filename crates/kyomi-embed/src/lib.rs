@@ -319,6 +319,15 @@ impl Default for LazyEmbedding {
     }
 }
 
+// Pulls in build.rs's pure curl-argument logic so its tests actually run:
+// `build.rs` is never a `cargo test` target on its own (Cargo only ever
+// compiles and executes it as the build-script binary), so a `#[cfg(test)]`
+// module written directly inside `build.rs` is silently never exercised.
+// See `build_support.rs`'s module doc for the full explanation (KYO-510).
+#[cfg(test)]
+#[path = "../build_support.rs"]
+mod build_support;
+
 #[cfg(test)]
 mod tests {
     use super::*;
