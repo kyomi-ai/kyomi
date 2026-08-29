@@ -8,24 +8,39 @@
 use std::path::Path;
 use std::process::Command;
 
+// `curl_args` and its retry/timeout constants live in `build_support.rs`,
+// included here (rather than defined in this file) so the exact same
+// source is also compiled into `src/lib.rs`'s `#[cfg(test)]` module and
+// actually exercised by `cargo test` — see that file's module doc for why.
+include!("build_support.rs");
+
 const DEFAULT_BASE_URL: &str = "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main";
 
 fn base_url() -> String {
     std::env::var("KYOMI_MODEL_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.into())
 }
 
-/// Files to download: (remote_path, local_filename)
+/// Files to download: (remote_path, local_filename).
+///
+/// HuggingFace also serves `special_tokens_map.json` and
+/// `tokenizer_config.json` for this model, but they are not downloaded
+/// here: `kyomi_embed::EmbeddingService` loads the tokenizer with
+/// `Tokenizer::from_bytes` against `tokenizer.json` alone (the Rust
+/// `tokenizers` crate's self-contained "fast tokenizer" format). Those two
+/// extra files are only consulted by Python's `transformers`
+/// `AutoTokenizer.from_pretrained`, which this crate does not use. Fetching
+/// them bought nothing but two more network round trips, and two more
+/// chances for a build to fail on a file nothing reads (KYO-510).
 const MODEL_FILES: &[(&str, &str)] = &[
     ("model.safetensors", "model.safetensors"),
     ("tokenizer.json", "tokenizer.json"),
     ("config.json", "config.json"),
-    ("special_tokens_map.json", "special_tokens_map.json"),
-    ("tokenizer_config.json", "tokenizer_config.json"),
 ];
 
 fn main() {
     // Only re-run if build.rs itself changes — model files don't change
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=build_support.rs");
     println!("cargo:rerun-if-env-changed=KYOMI_MODEL_BASE_URL");
 
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
@@ -41,18 +56,11 @@ fn main() {
         }
 
         let url = format!("{base}/{remote_path}");
+        let dest_str = dest.to_str().expect("invalid path");
         println!("cargo:warning=Downloading {local_name} from {url}");
 
         let status = Command::new("curl")
-            .args([
-                "--fail",
-                "--silent",
-                "--show-error",
-                "--location",
-                "--output",
-                dest.to_str().expect("invalid path"),
-                &url,
-            ])
+            .args(curl_args(&url, dest_str))
             .status()
             .unwrap_or_else(|e| {
                 panic!(
@@ -63,7 +71,11 @@ fn main() {
 
         if !status.success() {
             panic!(
-                "Failed to download {local_name} from {url} (exit code: {})",
+                "Failed to download {local_name} from {url} after \
+                 {CURL_RETRY_COUNT} retries (exit code: {}). This is a \
+                 network problem talking to HuggingFace, not a code \
+                 problem — re-run the job, or set KYOMI_MODEL_BASE_URL to \
+                 a mirror if it keeps failing.",
                 status.code().unwrap_or(-1)
             );
         }

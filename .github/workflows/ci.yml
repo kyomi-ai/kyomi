@@ -232,7 +232,7 @@ jobs:
         ports:
           - 5434:5432
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U kyomi_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
@@ -302,7 +302,7 @@ jobs:
         ports:
           - 5434:5432
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U kyomi_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
@@ -491,7 +491,7 @@ jobs:
         ports:
           - 5434:5432
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U kyomi_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
