@@ -189,6 +189,93 @@ mod sort_sessions_by_recency_tests {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// KYO-500 — disposal-safety regression test for `filtered_sessions`
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Reproduces the exact disposal race `filtered_sessions` (below, in
+/// `ChatsListPage`) is exposed to, without needing a full page render.
+///
+/// `ChatsListPage::filtered_sessions` cannot be called directly in a unit
+/// test — it is a closure captured inside the component body, not a
+/// standalone function, and constructing a real `ChatsListPage` needs a
+/// router, a `SyncStore` in context, and a `UserContext` `LocalResource`
+/// fetched over a server function. Per KYO-500's own guidance ("if this
+/// proves hard to trigger deterministically, a unit test that disposes an
+/// owner and then re-runs the derive is acceptable"), this test instead
+/// builds a minimal `Owner` hierarchy that reproduces the same *shape*:
+///
+/// - `layout_signal` stands in for `all_sessions_from_store` /
+///   `user_ctx_resource` — owned by a parent `Owner` (the Layout), which is
+///   never disposed by page navigation.
+/// - `page_signal` stands in for `sessions` (itself a page-owned
+///   `Signal::derive` over the SyncStore, per `filtered_sessions`'s own
+///   comment) — owned by a child `Owner` (the page), which navigation DOES
+///   dispose.
+/// - `mixed_derive` stands in for `filtered_sessions` itself: it reads the
+///   page-scoped signal with `.try_get()` (the KYO-500 fix) and the
+///   Layout-scoped signal with a bare `.get()` (left unchanged, per the
+///   ticket's rule against mechanically converting every `.get()`).
+///
+/// Dropping `page_owner` disposes `page_signal` exactly as navigating away
+/// from `/chats` disposes the real page's signals. Updating `layout_signal`
+/// afterwards models the Layout-scoped `SyncStore` receiving a
+/// `sync_action` WebSocket update — the trigger the ticket names — and
+/// reading `mixed_derive.get()` at that point is what would panic pre-fix.
+#[cfg(test)]
+mod filtered_sessions_disposal_tests {
+    use leptos::prelude::*;
+
+    /// Reading a mixed-lifetime derive after its page-scoped side is
+    /// disposed must not panic, as long as the page-scoped read uses
+    /// `.try_get()` — the KYO-500 fix applied to `filtered_sessions`.
+    ///
+    /// Mutation coverage (see PR description): reverting the `try_get()`
+    /// call below to a bare `.get()` — exactly the pre-fix shape of
+    /// `filtered_sessions`'s `sessions.get()` read — makes this test panic
+    /// with "signal cannot be accessed: it has already been disposed",
+    /// proving the assertion is load-bearing rather than vacuous.
+    #[test]
+    fn mixed_derive_survives_page_disposal_after_layout_update() {
+        // Layout: outlives every page, exactly like the parent `Layout`
+        // route's `SyncStore` / `UserContext` LocalResource.
+        let layout_owner = Owner::new();
+        layout_owner.set();
+        let (layout_signal, set_layout_signal) = signal(vec![1_i32]);
+
+        // Page: a child scope, exactly like `ChatsListPage`'s own signals
+        // (and its `sessions` derive) nested under the Layout route.
+        let page_owner = layout_owner.child();
+        let page_signal = page_owner.with(|| signal(vec![10_i32, 20_i32]).0);
+
+        // Mirrors `filtered_sessions`: page-scoped read via try_get() with a
+        // neutral default (empty vec, same as the real fix), Layout-scoped
+        // read via bare .get() (never disposed, so always safe).
+        let mixed_derive = Signal::derive(move || {
+            let mut items = page_signal.try_get().unwrap_or_default();
+            items.extend(layout_signal.get());
+            items
+        });
+
+        assert_eq!(mixed_derive.get(), vec![10, 20, 1], "sanity check before disposal");
+
+        // Simulate navigating away from /chats: the page's reactive scope
+        // (and everything owned by it, including `page_signal`) is disposed.
+        drop(page_owner);
+
+        // Simulate the Layout-scoped SyncStore updating after the page is
+        // gone (e.g. a `sync_action` WebSocket message) — the trigger named
+        // in the ticket. This must not panic.
+        set_layout_signal.set(vec![2_i32, 3_i32]);
+
+        // The actual regression assertion: reading the derive post-disposal
+        // must not panic, and must fall back to the empty-vec default for
+        // the disposed page-scoped side while still reflecting the live
+        // Layout-scoped side.
+        assert_eq!(mixed_derive.get(), vec![2, 3]);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Chat filter enum
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -257,7 +344,11 @@ pub fn ChatsListPage() -> impl IntoView {
                 results
             }
         } else {
-            let mut items = all_sessions_from_store.get();
+            // Mixed-lifetime derive (KYO-500): all_sessions_from_store comes
+            // from the Layout-scoped SyncStore and is never disposed with
+            // this page, so a bare .get() here is safe — show_pinned_only
+            // just above is the page-scoped side and already uses try_get().
+            let mut items = all_sessions_from_store.get(); // lint-allow: disposal-safe=Layout-scoped SyncStore signal, never disposed with this page
             if show_pinned_only.try_get().unwrap_or(false) {
                 items.retain(|s| s.pinned_count > 0);
             }
@@ -506,11 +597,20 @@ pub fn ChatsListPage() -> impl IntoView {
     // Signal::derive so filter/sort changes DON'T force a <Transition>
     // re-render (which disposes child reactive scopes mid-evaluation).
     let filtered_sessions = Signal::derive(move || {
-        let current_sessions = sessions.get();
+        // KYO-500: `sessions` is the page-scoped derive defined above (it
+        // lives in this page's reactive scope even though it reads the
+        // Layout-scoped SyncStore internally), so it can be disposed by a
+        // navigation the Layout-scoped `user_ctx_resource` below survives.
+        // try_get() with an empty-list fallback avoids the disposal panic;
+        // `chat_filter` just below is the same page-scoped hazard and was
+        // already treated this way.
+        let current_sessions = sessions.try_get().unwrap_or_default();
         let filter = chat_filter.try_get().unwrap_or(ChatFilter::All);
 
+        // Layout-scoped (`expect_context` LocalResource from the parent
+        // Layout) — outlives this page, so a bare .get() here is safe.
         let user_id = user_ctx_resource
-            .get()
+            .get() // lint-allow: disposal-safe=Layout-scoped user_ctx_resource, safe side of this mixed derive
             .and_then(|r| r.ok())
             .map(|ctx| ctx.user_id.clone())
             .unwrap_or_default();
@@ -539,18 +639,22 @@ pub fn ChatsListPage() -> impl IntoView {
     });
 
     // ── Derived: multi_user_enabled capability ───────────────────────────
+    // Single-source derive (Layout-scoped user_ctx_resource only) — no
+    // page-scoped signal mixed in, so no disposal hazard (KYO-500).
     let multi_user_enabled = Signal::derive(move || {
         user_ctx_resource
-            .get()
+            .get() // lint-allow: disposal-safe=single-source derive, Layout-scoped user_ctx_resource only
             .and_then(|r| r.ok())
             .and_then(|ctx| ctx.capabilities.get("multi_user_enabled").copied())
             .unwrap_or(false)
     });
 
     // ── Derived: current user_id ─────────────────────────────────────────
+    // Single-source derive (Layout-scoped user_ctx_resource only) — no
+    // page-scoped signal mixed in, so no disposal hazard (KYO-500).
     let current_user_id = Signal::derive(move || {
         user_ctx_resource
-            .get()
+            .get() // lint-allow: disposal-safe=single-source derive, Layout-scoped user_ctx_resource only
             .and_then(|r| r.ok())
             .map(|ctx| ctx.user_id.clone())
             .unwrap_or_default()
@@ -643,7 +747,9 @@ pub fn ChatsListPage() -> impl IntoView {
                     </Show>
 
                     <SearchInput
-                        value=Signal::derive(move || search_input.get())
+                        // Single-source derive (page-scoped search_input only) — no
+                        // Layout-scoped signal mixed in, so no disposal hazard (KYO-500).
+                        value=Signal::derive(move || search_input.get()) // lint-allow: disposal-safe=single-source derive, page-scoped search_input only
                         on_input=Callback::new(move |val: String| set_search_input.set(val))
                         placeholder="Search chats..."
                         searching=MaybeProp::derive(move || Some(is_searching.get()))
@@ -668,26 +774,29 @@ pub fn ChatsListPage() -> impl IntoView {
                         let multi = multi_user_enabled.get();
                         view! {
                             <div class="flex items-center gap-2 mt-3">
+                                // The four FilterButton `active` derives below each read
+                                // only the page-scoped `chat_filter` signal — no Layout-scoped
+                                // signal mixed in, so no disposal hazard (KYO-500).
                                 <FilterButton
                                     label="All"
-                                    active=Signal::derive(move || chat_filter.get() == ChatFilter::All)
+                                    active=Signal::derive(move || chat_filter.get() == ChatFilter::All) // lint-allow: disposal-safe=single-source derive, page-scoped chat_filter only
                                     on_click=Callback::new(move |()| set_chat_filter.set(ChatFilter::All))
                                 />
                                 <Show when=move || multi>
                                     <FilterButton
                                         label="My Conversations"
-                                        active=Signal::derive(move || chat_filter.get() == ChatFilter::Mine)
+                                        active=Signal::derive(move || chat_filter.get() == ChatFilter::Mine) // lint-allow: disposal-safe=single-source derive, page-scoped chat_filter only
                                         on_click=Callback::new(move |()| set_chat_filter.set(ChatFilter::Mine))
                                     />
                                     <FilterButton
                                         label="Shared with Me"
-                                        active=Signal::derive(move || chat_filter.get() == ChatFilter::SharedWithMe)
+                                        active=Signal::derive(move || chat_filter.get() == ChatFilter::SharedWithMe) // lint-allow: disposal-safe=single-source derive, page-scoped chat_filter only
                                         on_click=Callback::new(move |()| set_chat_filter.set(ChatFilter::SharedWithMe))
                                     />
                                 </Show>
                                 <FilterButton
                                     label="Slack"
-                                    active=Signal::derive(move || chat_filter.get() == ChatFilter::Slack)
+                                    active=Signal::derive(move || chat_filter.get() == ChatFilter::Slack) // lint-allow: disposal-safe=single-source derive, page-scoped chat_filter only
                                     on_click=Callback::new(move |()| set_chat_filter.set(ChatFilter::Slack))
                                     icon=std::sync::Arc::new(|| view! {
                                         <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor">
@@ -953,7 +1062,9 @@ pub fn ChatsListPage() -> impl IntoView {
                 let message = confirm_message.get();
                 view! {
                     <ConfirmDialog
-                        open=Signal::derive(move || confirm_open.get())
+                        // Single-source derive (page-scoped confirm_open only) — no
+                        // Layout-scoped signal mixed in, so no disposal hazard (KYO-500).
+                        open=Signal::derive(move || confirm_open.get()) // lint-allow: disposal-safe=single-source derive, page-scoped confirm_open only
                         title=title
                         message=message
                         confirm_text="Delete"
