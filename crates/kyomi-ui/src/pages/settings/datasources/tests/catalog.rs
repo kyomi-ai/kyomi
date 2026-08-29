@@ -1,8 +1,10 @@
 //! Catalog tab wiring: registry-driven indexing auth modes (KYO-187),
 //! the create/edit-mode `include_public_datasets` read/write agreement
-//! (KYO-446), the catalog-scope copy audit (KYO-452), and the "Discover
-//! Available" outcome feedback (KYO-466).
+//! (KYO-446), the catalog-scope copy audit (KYO-452), the "Discover
+//! Available" outcome feedback (KYO-466), and the denial-copy switch plus
+//! its shared BigQuery-aware key lookup (KYO-474 / KYO-544).
 
+use super::super::{catalog_denial_key_for_type, discovery_resource_key_for_type};
 use super::{extract_between, MOD_TESTS_MARKER, SRC};
 
 // ── KYO-187: indexing auth modes come from the registry ────────────
@@ -599,5 +601,330 @@ fn test_action_effect_clears_bq_projects_error_on_a_successful_list() {
         "the r.resources.get(\"projects\") success branch must clear bq_projects_error \
          immediately after populating bq_projects — otherwise a stale error from a prior \
          failed attempt lingers next to a freshly successful project list: {f}"
+    );
+}
+
+// ── KYO-474: catalog-scope copy must detect (not infer) a listing
+// denial and switch to a direct manual-entry instruction ──────────────
+//
+// KYO-452 (above) made the catalog-scope copy stop promising an
+// unqualified "leave blank to index all" outcome. KYO-466 (above) then
+// gave the client a way to tell "the list is empty" apart from "the list
+// couldn't be read" via `DiscoverResourcesResult.resource_errors`. This
+// ticket is the payoff: once a listing denial is known (not merely
+// suspected from an empty list — that would re-introduce the exact
+// ambiguity KYO-466 removed), the copy must say so directly instead of
+// repeating the "leave blank" promise, which is actively wrong advice
+// for an account that cannot list anything to leave blank *for*.
+//
+// Both call sites gate their swapped copy on a boolean fed from a
+// `resource_errors` read — `catalog_discovery_denied` (a prop, computed
+// once in the modal's `test_action` Effect, the same Effect
+// `test_action_effect_computes_bq_projects_error_from_the_bound_reason`
+// above already scopes to) for `CreateModeCatalogPicker`, and the local
+// `discover_denied` signal (computed in `discover_action`'s Effect, the
+// same Effect `discover_effect_checks_resource_errors_before_reporting_success`
+// above scopes to via `discover_action_effect`) for `EditModeCatalogTab`.
+// Every test below is paired: one proves the denial copy appears when
+// the signal is true, its sibling proves the KYO-452 "leave blank" copy
+// survives untouched when the signal is false — so a fix that
+// conflates the two states (shows both, shows neither, or wires the
+// condition backwards) fails one half of a pair for the reason that
+// half exists.
+
+/// Bounds the extraction to just `CreateModeCatalogPicker`'s
+/// `helper_text` conditional — the two-branch `if catalog_discovery_denied
+/// .get() { .. } else { .. }` that replaced the KYO-452 unconditional
+/// `format!` call.
+fn create_mode_helper_text_conditional(src: &str) -> &str {
+    extract_between(
+        src,
+        "let helper_text = if catalog_discovery_denied.get() {",
+        "                    view! {",
+    )
+}
+
+/// The gate itself: `CreateModeCatalogPicker` must branch on the
+/// `catalog_discovery_denied` prop specifically — not on `items.is_empty()`
+/// (already true for "not attempted" and "succeeded, empty" alike, which
+/// is exactly the ambiguity KYO-466 exists to remove) and not on a second,
+/// independent `resource_errors` read of its own (the hard constraint:
+/// this component receives the fact, it never re-derives it).
+#[test]
+fn create_mode_picker_helper_text_is_gated_on_the_denied_prop() {
+    let f = extract_between(
+        SRC,
+        "fn CreateModeCatalogPicker(",
+        "fn view_service_account_form(",
+    );
+    assert!(
+        f.contains("catalog_discovery_denied: ReadSignal<bool>"),
+        "CreateModeCatalogPicker must receive the denial state as a prop — computed once \
+         by the caller from resource_errors, not re-derived locally: {f}"
+    );
+    assert!(
+        !f.contains(".resource_errors"),
+        "CreateModeCatalogPicker must never read resource_errors itself (a field access — \
+         `.resource_errors` — not merely the word in a doc comment) — the hard constraint \
+         is that the denial fact is computed exactly once, by the caller, and handed down \
+         as the catalog_discovery_denied prop. A local resource_errors read \
+         here would be a second, parallel derivation of the same fact that could disagree \
+         with the caller's: {f}"
+    );
+}
+
+/// Pair half 1: when the account cannot list this type's items, the
+/// fallback input's helper text must instruct the user to enter items
+/// manually — and must NOT also carry the KYO-452 "leave blank" promise,
+/// which is false advice in this state (leaving it blank indexes
+/// nothing, not "everything this account can list").
+#[test]
+fn create_mode_picker_denial_branch_instructs_manual_entry() {
+    let true_branch = extract_between(
+        create_mode_helper_text_conditional(SRC),
+        "catalog_discovery_denied.get() {",
+        "} else {",
+    );
+    assert!(
+        true_branch.contains(
+            "format!(\"This account can't list {noun}. Enter the {noun} you want indexed.\")"
+        ),
+        "the catalog_discovery_denied branch must tell the user their account can't list \
+         this type's items and instruct them to enter items manually, built from \
+         catalog_item_label_for_type's noun like every other per-provider string in this \
+         file: {true_branch}"
+    );
+    assert!(
+        !true_branch.contains("Leave blank to index all"),
+        "the denial branch must not also carry the KYO-452 'leave blank to index all this \
+         account can list' promise — for a denied account that promise is actively wrong: \
+         {true_branch}"
+    );
+}
+
+/// Pair half 2: a genuinely empty-but-successful discovery (or no
+/// discovery attempted yet) must keep exactly the KYO-452 copy verbatim
+/// — this is the regression guard for KYO-452 in the presence of the new
+/// branch: the else arm must be untouched, and must NOT pick up the new
+/// denial copy.
+#[test]
+fn create_mode_picker_non_denied_branch_keeps_the_kyo_452_copy_unchanged() {
+    let else_branch = extract_between(create_mode_helper_text_conditional(SRC), "} else {", "};");
+    assert!(
+        else_branch.contains(
+            "format!(\"Leave blank to index all {noun} this account can list.\")"
+        ),
+        "the non-denied branch must keep the exact KYO-452 wording — 'succeeded, \
+         genuinely empty' and 'not attempted yet' are still correctly served by the \
+         original promise: {else_branch}"
+    );
+    assert!(
+        !else_branch.contains("can't list"),
+        "the non-denied branch must not also carry the KYO-474 denial copy — an account \
+         that hasn't been proven unable to list its items must not be told it can't: \
+         {else_branch}"
+    );
+}
+
+/// Bounds the extraction to `EditModeCatalogTab`'s header `description`
+/// conditional — the two-branch `if discover_denied.get() { .. } else {
+/// .. }` that replaced the KYO-452 unconditional two-part sentence.
+fn edit_mode_description_conditional(src: &str) -> &str {
+    extract_between(
+        src,
+        "let description = if discover_denied.get() {",
+        "                        view! {",
+    )
+}
+
+/// The gate itself, mirrored for `EditModeCatalogTab`: it must branch on
+/// its own locally-computed `discover_denied` signal — populated in
+/// `discover_action`'s Effect (see `discover_action_effect` above) from
+/// `resource_errors`, never inferred from `discovered_items` being empty.
+#[test]
+fn edit_mode_catalog_tab_description_is_gated_on_discover_denied() {
+    let f = discover_action_effect(SRC);
+    assert!(
+        f.contains("set_discover_denied.set(true);"),
+        "discover_action's Effect must set discover_denied = true specifically in the \
+         r.resource_errors.get(key) branch — the same branch \
+         discover_effect_reports_a_resource_error_via_the_existing_error_state already \
+         pins: {f}"
+    );
+    assert!(
+        f.contains("set_discover_denied.set(false);"),
+        "discover_action's Effect must reset discover_denied = false on every other \
+         outcome (genuine success, connection-level failure) — otherwise a denial from a \
+         previous attempt lingers after a fresh attempt that no longer hits it: {f}"
+    );
+
+    let header = extract_between(SRC, "fn EditModeCatalogTab(", MOD_TESTS_MARKER);
+    assert!(
+        header.contains("let description = if discover_denied.get() {"),
+        "EditModeCatalogTab's header must branch its description on discover_denied, not \
+         on discovered_items.get().is_empty() (true for both \"not attempted\" and \
+         \"succeeded, empty\" — the exact ambiguity KYO-466 exists to remove): {header}"
+    );
+}
+
+/// Pair half 1: EditModeCatalogTab's header must give the same direct
+/// manual-entry instruction as CreateModeCatalogPicker when denied — and
+/// must not also carry the KYO-452 "leave empty" promise.
+#[test]
+fn edit_mode_catalog_tab_denial_branch_instructs_manual_entry() {
+    let true_branch = extract_between(
+        edit_mode_description_conditional(SRC),
+        "discover_denied.get() {",
+        "} else {",
+    );
+    assert!(
+        true_branch.contains("This account can't list {item_label}")
+            && true_branch.contains("Enter the {item_label} you want indexed."),
+        "the discover_denied branch must tell the user their account can't list this \
+         type's items and instruct them to enter items manually via the manual-entry field \
+         already rendered below this header: {true_branch}"
+    );
+    assert!(
+        !true_branch.contains("Leave empty to index all"),
+        "the denial branch must not also carry the KYO-452 'leave empty to index all this \
+         account can list' promise — for a denied account that promise is actively wrong: \
+         {true_branch}"
+    );
+}
+
+/// Pair half 2: the non-denied branch must keep the exact KYO-452
+/// wording verbatim, and must not pick up the new denial copy.
+#[test]
+fn edit_mode_catalog_tab_non_denied_branch_keeps_the_kyo_452_copy_unchanged() {
+    let else_branch = extract_between(edit_mode_description_conditional(SRC), "} else {", "};");
+    assert!(
+        else_branch.contains("Leave empty to index all {item_label} this account can list."),
+        "the non-denied branch must keep the exact KYO-452 wording — 'succeeded, \
+         genuinely empty' and 'not attempted yet' are still correctly served by the \
+         original promise: {else_branch}"
+    );
+    assert!(
+        !else_branch.contains("can't list"),
+        "the non-denied branch must not also carry the KYO-474 denial copy — an account \
+         that hasn't been proven unable to list its items must not be told it can't: \
+         {else_branch}"
+    );
+}
+
+// ── KYO-544 (folded into KYO-474): the denial-key lookup must be one
+// shared function, BigQuery included — not a per-caller duplicate ─────
+//
+// KYO-474's first pass computed the denial key two different ways: an
+// inline `if ds_type_val == "bigquery" { "projects" } else { ... }` in
+// the create-mode Effect, and a bare `discovery_resource_key_for_type`
+// call in `EditModeCatalogTab`'s `discover_action` Effect. The latter
+// falls through to `discovery_resource_key_for_type`'s `_ => "databases"`
+// default for BigQuery — a key BigQuery never populates in either
+// `resources` or `resource_errors` (it only ever emits `"projects"`) — so
+// a real `resourcemanager.projects.list` denial in edit mode always took
+// the "success, empty" branch and rendered "0 projects found" instead of
+// the KYO-474 denial copy. That is the exact case the ticket's Pointers
+// section named as the motivating real-world scenario (a trial customer
+// whose `BigQuery Job User` role lacks that permission), so it blocks
+// KYO-474's own first acceptance criterion for edit mode specifically.
+// `catalog_denial_key_for_type` replaces both call sites with one
+// function so they can't disagree again
+// (docs/standards/code-organization/propagate-predicate-changes-to-every-copy.md).
+
+/// The core of the fix, tested directly against the real function rather
+/// than via source text — `catalog_denial_key_for_type` is a plain
+/// synchronous helper with no reactive scope to work around, unlike the
+/// view-tree code the rest of this file has to test by source inspection.
+#[test]
+fn catalog_denial_key_for_type_maps_bigquery_to_projects() {
+    assert_eq!(
+        catalog_denial_key_for_type("bigquery"),
+        "projects",
+        "BigQuery's resources/resource_errors key is \"projects\" — never \"databases\", \
+         which is what discovery_resource_key_for_type's fallthrough would give it"
+    );
+}
+
+/// `catalog_denial_key_for_type` must be a thin wrapper around
+/// `discovery_resource_key_for_type` for every type it doesn't need to
+/// special-case — not a second, independently-typed-out mapping that
+/// could silently drift from the first for some type nobody thought to
+/// keep in sync.
+#[test]
+fn catalog_denial_key_for_type_agrees_with_discovery_resource_key_for_type_elsewhere() {
+    for ds_type in [
+        "postgres", "redshift", "sqlserver", "synapse", "flaredb", "databricks", "clickhouse",
+        "mysql", "snowflake",
+    ] {
+        assert_eq!(
+            catalog_denial_key_for_type(ds_type),
+            discovery_resource_key_for_type(ds_type),
+            "catalog_denial_key_for_type must delegate to discovery_resource_key_for_type \
+             for every type other than bigquery — {ds_type} disagreed, meaning the two \
+             functions have drifted apart for a type that was never meant to diverge"
+        );
+    }
+    assert_ne!(
+        catalog_denial_key_for_type("bigquery"),
+        discovery_resource_key_for_type("bigquery"),
+        "this divergence is deliberate and is the entire reason catalog_denial_key_for_type \
+         exists — if the two ever agree on bigquery again without an explicit code change \
+         here, something upstream silently changed discovery_resource_key_for_type's \
+         fallthrough instead of the wrapper, which this suite would then fail to catch"
+    );
+}
+
+/// The glue: `EditModeCatalogTab`'s `discover_action` Effect must compute
+/// its key via `catalog_denial_key_for_type`, not
+/// `discovery_resource_key_for_type` directly. Combined with the direct
+/// function test above (`catalog_denial_key_for_type("bigquery") ==
+/// "projects"`), this proves the full chain for the ticket's motivating
+/// case: a BigQuery datasource in edit mode uses `key == "projects"`, so
+/// `r.resource_errors.get(key)` is `r.resource_errors.get("projects")` —
+/// exactly the key the server populates on a `list_projects()` denial —
+/// which drives `discover_denied = true` and, per
+/// `edit_mode_catalog_tab_denial_branch_instructs_manual_entry` above,
+/// the direct manual-entry copy.
+#[test]
+fn edit_mode_discover_effect_uses_the_shared_denial_key_helper() {
+    let f = discover_action_effect(SRC);
+    assert!(
+        f.contains("let key = catalog_denial_key_for_type(&ds_type_val);"),
+        "EditModeCatalogTab's discover_action Effect must compute its key via \
+         catalog_denial_key_for_type — not discovery_resource_key_for_type directly, which \
+         silently reads a \"databases\" key BigQuery never populates (KYO-544): {f}"
+    );
+    assert!(
+        !f.contains("discovery_resource_key_for_type(&ds_type_val)"),
+        "found a direct discovery_resource_key_for_type(&ds_type_val) call in \
+         EditModeCatalogTab's discover_action Effect — the key computation must route \
+         through catalog_denial_key_for_type instead so BigQuery's denial can be detected \
+         (KYO-544): {f}"
+    );
+}
+
+/// The same glue on the create-mode side, guarding against a regression
+/// back to the inline `if ds_type_val == "bigquery" { "projects" } else {
+/// discovery_resource_key_for_type(&ds_type_val) }` that `test_action`'s
+/// Effect carried before this fix — that inline copy is exactly the
+/// duplicate `catalog_denial_key_for_type` replaced.
+#[test]
+fn create_mode_test_action_effect_uses_the_shared_denial_key_helper() {
+    let f = test_action_effect(SRC);
+    assert!(
+        f.contains(
+            "set_catalog_discovery_denied.set(\n                            r.resource_errors\n                                .contains_key(catalog_denial_key_for_type(&ds_type_val)),\n                        );"
+        ),
+        "test_action's Effect must compute catalog_discovery_denied from \
+         r.resource_errors.contains_key(catalog_denial_key_for_type(&ds_type_val)) — not a \
+         re-inlined `if ds_type_val == \"bigquery\" {{ \"projects\" }} else {{ ... }}` — so \
+         create mode and edit mode can never disagree about which key means what again \
+         (KYO-544): {f}"
+    );
+    assert!(
+        !f.contains("if ds_type_val == \"bigquery\""),
+        "found a reintroduced inline bigquery special-case in test_action's Effect — this \
+         must route through catalog_denial_key_for_type instead of duplicating its logic \
+         (KYO-544): {f}"
     );
 }

@@ -118,15 +118,47 @@ fn catalog_item_label_for_type(ds_type: &str) -> &'static str {
 /// holds the items relevant to catalog scope selection for a given datasource
 /// type.  Matches the pairs emitted by `discover_datasource_resources` in
 /// `server_fns/datasources.rs`.
+///
+/// Does NOT cover BigQuery correctly on its own — its `_` fallthrough
+/// returns "databases", a key BigQuery never populates. Callers that need
+/// a key that's right for every type, BigQuery included, must go through
+/// `catalog_denial_key_for_type` below instead of calling this directly
+/// (KYO-544).
 fn discovery_resource_key_for_type(ds_type: &str) -> &'static str {
     match ds_type {
         // postgres / redshift / sqlserver / synapse / flaredb: catalog scope = schemas
         "postgres" | "redshift" | "sqlserver" | "synapse" | "flaredb" => "schemas",
         // databricks: catalog scope = catalogs
         "databricks" => "catalogs",
-        // bigquery: no discovery support (text input only — requires auth flow)
-        // clickhouse / mysql / snowflake: catalog scope = databases
+        // clickhouse / mysql / snowflake (and bigquery, handled by the
+        // caller-facing wrapper below): catalog scope = databases
         _ => "databases",
+    }
+}
+
+/// The `resource_errors` (and matching `resources`) key that means "this
+/// type's catalog scope could not be listed" (KYO-466/KYO-474).
+///
+/// NOT the same as `discovery_resource_key_for_type` above: BigQuery's
+/// catalog scope is `projects`, but that function falls through to its
+/// `_ => "databases"` default for `"bigquery"`, and BigQuery never
+/// populates a `"databases"` key in either `resources` or
+/// `resource_errors` — it only ever emits `"projects"`. Reusing
+/// `discovery_resource_key_for_type` directly for BigQuery silently reads
+/// a key that can never be present, which is exactly the KYO-544 bug:
+/// a real `resourcemanager.projects.list` denial rendered as "0 projects
+/// found" instead of the denial copy, because the wrong key was checked.
+///
+/// `CreateModeCatalogPicker`'s caller and `EditModeCatalogTab`'s
+/// `discover_action` Effect both route through this single function —
+/// for the same key used to both fetch items (`resources.get(key)`) and
+/// detect a denial (`resource_errors.get(key)`) — so the two components
+/// can never disagree about which key means what
+/// (docs/standards/code-organization/propagate-predicate-changes-to-every-copy.md).
+fn catalog_denial_key_for_type(ds_type: &str) -> &'static str {
+    match ds_type {
+        "bigquery" => "projects",
+        other => discovery_resource_key_for_type(other),
     }
 }
 
@@ -2040,6 +2072,16 @@ pub fn DatasourceModal(
     let (discovered_schemas, set_discovered_schemas) = signal::<Vec<String>>(vec![]);
     let (discovered_warehouses, set_discovered_warehouses) = signal::<Vec<String>>(vec![]);
     let (discovered_catalogs, set_discovered_catalogs) = signal::<Vec<String>>(vec![]);
+    // KYO-474: true only when the last Test & Discover attempt succeeded at
+    // the connection level but `resource_errors` (KYO-466) named a denial
+    // for *this type's* catalog-scope key specifically — never inferred
+    // from `discovered_*` being empty, which is also true for "not
+    // attempted yet" and "succeeded, genuinely nothing there" (KYO-452
+    // still owns the copy for both of those). Read once here, in the same
+    // Effect that already reads `resource_errors` for `bq_projects_error`
+    // below, so `CreateModeCatalogPicker` never re-derives this fact from
+    // the raw resources map on its own.
+    let (catalog_discovery_denied, set_catalog_discovery_denied) = signal(false);
 
     // ── Catalog tab state (edit mode) ────────────────────────────────────
     // Selected catalog scope items (projects / databases / schemas / catalogs).
@@ -2141,6 +2183,7 @@ pub fn DatasourceModal(
         set_discovered_schemas.set(vec![]);
         set_discovered_warehouses.set(vec![]);
         set_discovered_catalogs.set(vec![]);
+        set_catalog_discovery_denied.set(false);
         set_is_sample.set(false);
         set_connection_type.set("direct".to_string());
         set_connect_token.set(None);
@@ -3147,12 +3190,29 @@ pub fn DatasourceModal(
                         } else if let Some(reason) = r.resource_errors.get("projects") {
                             set_bq_projects_error.set(Some(format!("Couldn't list projects: {reason}")));
                         }
+
+                        // KYO-474: same `resource_errors` read as the block
+                        // above, scoped to whichever key
+                        // `CreateModeCatalogPicker` actually renders for the
+                        // current type. `catalog_denial_key_for_type` (not
+                        // `discovery_resource_key_for_type`, which silently
+                        // reads a key BigQuery never populates — KYO-544) is
+                        // the exact function `EditModeCatalogTab`'s
+                        // `discover_action` Effect also uses, so the two
+                        // components can never disagree about which key
+                        // means what.
+                        let ds_type_val = ds_type.get_untracked();
+                        set_catalog_discovery_denied.set(
+                            r.resource_errors
+                                .contains_key(catalog_denial_key_for_type(&ds_type_val)),
+                        );
                     } else {
                         set_test_result.set(Some(TestConnectionResult {
                             success: false,
                             message: r.message,
                         }));
                         set_discovery_status.set("error".to_string());
+                        set_catalog_discovery_denied.set(false);
                     }
                 }
                 Err(e) => {
@@ -3161,6 +3221,7 @@ pub fn DatasourceModal(
                         message: e.to_string(),
                     }));
                     set_discovery_status.set("error".to_string());
+                    set_catalog_discovery_denied.set(false);
                 }
             }
         }
@@ -3173,6 +3234,7 @@ pub fn DatasourceModal(
         set_discovered_schemas.set(vec![]);
         set_discovered_warehouses.set(vec![]);
         set_discovered_catalogs.set(vec![]);
+        set_catalog_discovery_denied.set(false);
         // BigQuery service_account mode (KYO-405) — clear any stale project
         // list from a previous validate before dispatching a fresh one.
         // No-op for every other provider/mode, which never populate this.
@@ -4382,6 +4444,7 @@ pub fn DatasourceModal(
                                                     set_discovered_schemas.set(vec![]);
                                                     set_discovered_warehouses.set(vec![]);
                                                     set_discovered_catalogs.set(vec![]);
+                                                    set_catalog_discovery_denied.set(false);
                                                     // Invalidate create-mode catalog selections
                                                     // too — discovered items are for the old type.
                                                     set_create_catalog_selected.set(vec![]);
@@ -4816,6 +4879,7 @@ pub fn DatasourceModal(
                                     set_catalog_text=set_create_catalog_text
                                     include_public_datasets=create_include_public_datasets
                                     set_include_public_datasets=set_create_include_public_datasets
+                                    catalog_discovery_denied=catalog_discovery_denied
                                 />
                             </Show>
 
@@ -8469,6 +8533,13 @@ fn CreateModeCatalogPicker(
     /// BigQuery only: include public datasets in catalog indexing.
     include_public_datasets: ReadSignal<bool>,
     set_include_public_datasets: WriteSignal<bool>,
+    /// KYO-474: true when the last Test & Discover attempt succeeded but
+    /// this type's catalog-scope key was denied (`resource_errors`,
+    /// KYO-466) — read once by the caller and passed through here, never
+    /// re-derived from `items.is_empty()` below, which is also true for
+    /// "not attempted yet" and "succeeded, genuinely nothing there"
+    /// (KYO-452 still owns the copy for both of those).
+    catalog_discovery_denied: ReadSignal<bool>,
 ) -> impl IntoView {
     // Derive the available items for the current type from the discovery
     // signals.  Recomputed reactively on type changes.
@@ -8538,7 +8609,18 @@ fn CreateModeCatalogPicker(
                         _ => "Enter schema names, comma-separated",
                     };
                     let noun = catalog_item_label_for_type(&ds_type);
-                    let helper_text = format!("Leave blank to index all {noun} this account can list.");
+                    // KYO-474: a listing denial (`catalog_discovery_denied`,
+                    // sourced from `resource_errors` — KYO-466) replaces the
+                    // "leave blank" promise with a direct instruction, since
+                    // that promise fails for a permission-limited account.
+                    // "Not attempted yet" and "succeeded, genuinely empty"
+                    // still fall through to the unchanged KYO-452 copy below
+                    // — this must never be inferred from `items.is_empty()`.
+                    let helper_text = if catalog_discovery_denied.get() {
+                        format!("This account can't list {noun}. Enter the {noun} you want indexed.")
+                    } else {
+                        format!("Leave blank to index all {noun} this account can list.")
+                    };
                     view! {
                         <div class="space-y-1.5">
                             <input
@@ -9150,14 +9232,29 @@ fn EditModeCatalogTab(
     let (discover_status, set_discover_status) = signal("idle".to_string());
     let (discover_error, set_discover_error) = signal::<Option<String>>(None);
     let (discovered_items, set_discovered_items) = signal::<Vec<String>>(vec![]);
+    // KYO-474: true only when the last Discover attempt succeeded at the
+    // connection level but `resource_errors` (KYO-466) named a denial for
+    // this type's catalog-scope key specifically — never inferred from
+    // `discovered_items` being empty, which is also true for "not
+    // attempted yet" and "succeeded, genuinely nothing there" (KYO-452
+    // still owns the copy for both of those). Read in the same branch that
+    // already reads `resource_errors` below, not re-derived elsewhere.
+    let (discover_denied, set_discover_denied) = signal(false);
 
     Effect::new(move |_| {
         if let Some(result) = discover_action.value().get() {
             match result {
                 Ok(r) if r.success => {
                     // Extract the items relevant to this datasource type.
+                    // `catalog_denial_key_for_type` (not
+                    // `discovery_resource_key_for_type` — KYO-544) is used
+                    // for both the item lookup below and the
+                    // `resource_errors` check, because they must always
+                    // agree on which key means what: BigQuery emits its
+                    // items and its denial reason under the same
+                    // "projects" key, never "databases".
                     let ds_type_val = datasource_type.get_untracked();
-                    let key = discovery_resource_key_for_type(&ds_type_val);
+                    let key = catalog_denial_key_for_type(&ds_type_val);
                     // KYO-466: `r.success` only means the connection itself
                     // worked — the specific list this scope cares about can
                     // still have failed independently (e.g. BigQuery's
@@ -9175,22 +9272,26 @@ fn EditModeCatalogTab(
                         let noun = catalog_item_label_for_type(&ds_type_val);
                         set_discover_error.set(Some(format!("Couldn't list {noun}: {reason}")));
                         set_discovered_items.set(vec![]);
+                        set_discover_denied.set(true);
                     } else {
                         set_discover_status.set("success".to_string());
                         set_discover_error.set(None);
                         let items = r.resources.get(key).cloned().unwrap_or_default();
                         set_discovered_items.set(items);
+                        set_discover_denied.set(false);
                     }
                 }
                 Ok(r) => {
                     set_discover_status.set("error".to_string());
                     set_discover_error.set(Some(r.message));
                     set_discovered_items.set(vec![]);
+                    set_discover_denied.set(false);
                 }
                 Err(e) => {
                     set_discover_status.set("error".to_string());
                     set_discover_error.set(Some(e.to_string()));
                     set_discovered_items.set(vec![]);
+                    set_discover_denied.set(false);
                 }
             }
         }
@@ -9214,11 +9315,17 @@ fn EditModeCatalogTab(
                     set_discover_status.set("success".to_string());
                     set_discover_error.set(None);
                     set_discovered_items.set(names);
+                    // Connect discovery has no `resource_errors` — the live
+                    // agent either returns containers or the call errors
+                    // out entirely (the `Err` arm below), so a denial in
+                    // the KYO-466 sense can't happen on this path.
+                    set_discover_denied.set(false);
                 }
                 Err(e) => {
                     set_discover_status.set("error".to_string());
                     set_discover_error.set(Some(e.to_string()));
                     set_discovered_items.set(vec![]);
+                    set_discover_denied.set(false);
                 }
             }
         }
@@ -9233,6 +9340,7 @@ fn EditModeCatalogTab(
         set_discover_status.set("loading".to_string());
         set_discover_error.set(None);
         set_discovered_items.set(vec![]);
+        set_discover_denied.set(false);
 
         if is_connect.get_untracked() {
             let ds_id = datasource_id.get_untracked();
@@ -9474,6 +9582,23 @@ fn EditModeCatalogTab(
                             "databricks" => "Catalogs to Index",
                             _ => "Schemas to Index",
                         };
+                        // KYO-474: a listing denial from the last Discover
+                        // attempt (`discover_denied`, sourced from
+                        // `resource_errors` — KYO-466, never inferred from
+                        // `discovered_items` being empty) replaces the
+                        // "leave empty" promise with a direct instruction to
+                        // use the manual-entry field below, matching
+                        // `CreateModeCatalogPicker`'s fallback copy for the
+                        // same state.
+                        let description = if discover_denied.get() {
+                            format!(
+                                "This account can't list {item_label}. Enter the {item_label} you want indexed."
+                            )
+                        } else {
+                            format!(
+                                "Select which {item_label} to include in catalog indexing. Leave empty to index all {item_label} this account can list."
+                            )
+                        };
 
                         view! {
                             <div>
@@ -9481,11 +9606,7 @@ fn EditModeCatalogTab(
                                     {config_label}
                                 </h4>
                                 <p class="text-xs text-muted-foreground mb-3">
-                                    "Select which "
-                                    {item_label}
-                                    " to include in catalog indexing. Leave empty to index all "
-                                    {item_label}
-                                    " this account can list."
+                                    {description}
                                 </p>
                             </div>
                         }
