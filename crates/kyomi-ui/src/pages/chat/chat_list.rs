@@ -639,22 +639,33 @@ pub fn ChatsListPage() -> impl IntoView {
     });
 
     // ── Derived: multi_user_enabled capability ───────────────────────────
-    // Single-source derive (Layout-scoped user_ctx_resource only) — no
-    // page-scoped signal mixed in, so no disposal hazard (KYO-500).
+    // KYO-548: what this derive reads (Layout-scoped user_ctx_resource) does
+    // not establish disposal safety by itself -- `Signal::derive` registers
+    // against whatever Owner is current at CONSTRUCTION, which is this
+    // page's Owner regardless of what the closure reads (see
+    // docs/standards/leptos-frontend-patterns/derive-disposal-scope-is-where-it-was-created.md).
+    // This derive is page-owned and safe because every read of it
+    // (chat_list.rs:785, 900) is inside this page's own view tree -- a
+    // descendant reactive scope of the same page Owner -- so the derive and
+    // its readers are disposed together.
     let multi_user_enabled = Signal::derive(move || {
         user_ctx_resource
-            .get() // lint-allow: disposal-safe=single-source derive, Layout-scoped user_ctx_resource only
+            .get() // lint-allow: disposal-safe=page-owned derive, all reads confined to this page's own view tree (chat_list.rs:785,900); see KYO-548
             .and_then(|r| r.ok())
             .and_then(|ctx| ctx.capabilities.get("multi_user_enabled").copied())
             .unwrap_or(false)
     });
 
     // ── Derived: current user_id ─────────────────────────────────────────
-    // Single-source derive (Layout-scoped user_ctx_resource only) — no
-    // page-scoped signal mixed in, so no disposal hazard (KYO-500).
+    // KYO-548: page-owned derive (created here, in this page component
+    // body), safe on the same grounds as multi_user_enabled above -- every
+    // read of it (chat_list.rs:676 via selectable_session_ids, 899) is
+    // inside this page's own view/closure tree, a descendant scope of the
+    // same page Owner. See
+    // docs/standards/leptos-frontend-patterns/derive-disposal-scope-is-where-it-was-created.md.
     let current_user_id = Signal::derive(move || {
         user_ctx_resource
-            .get() // lint-allow: disposal-safe=single-source derive, Layout-scoped user_ctx_resource only
+            .get() // lint-allow: disposal-safe=page-owned derive, all reads confined to this page's own view tree (chat_list.rs:676,899); see KYO-548
             .and_then(|r| r.ok())
             .map(|ctx| ctx.user_id.clone())
             .unwrap_or_default()
