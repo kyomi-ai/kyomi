@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 
 use serde_json::json;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::types::{AgentTokenUsage, LLMResponse, Message, MessageRole, Tool, ToolCall};
 
@@ -379,6 +379,16 @@ impl AnthropicClient {
                 kyomi_core::Error::Internal("Anthropic API response missing 'content' array".into())
             })?;
 
+        // Extract stop reason up front (rather than after the block loop
+        // below) so a missing-`input` warning inside that loop can name it —
+        // "max_tokens" is the usual explanation for a `tool_use` block that
+        // got cut off before Anthropic ever wrote its `input` key.
+        let finish_reason = response
+            .get("stop_reason")
+            .and_then(|s| s.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+
         let mut text_parts: Vec<&str> = Vec::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
 
@@ -400,15 +410,38 @@ impl AnthropicClient {
                         .and_then(|v| v.as_str())
                         .unwrap_or_default()
                         .to_string();
-                    let arguments = block
-                        .get("input")
-                        .cloned()
-                        .unwrap_or(serde_json::Value::Null);
+                    // Unlike OpenAI, Anthropic returns `input` as an
+                    // already-parsed JSON value, not a string — there is no
+                    // `from_str` call here that can fail on malformed JSON.
+                    // But a `max_tokens` cutoff mid-`tool_use` block can omit
+                    // the `input` key entirely, and that used to be silently
+                    // coerced to `Value::Null` — indistinguishable from a
+                    // tool with a genuinely empty schema (KYO-535). Treat an
+                    // absent key as a parse failure, the same as OpenAI's.
+                    let (arguments, arguments_error) = match block.get("input") {
+                        Some(value) => (value.clone(), None),
+                        None => {
+                            warn!(
+                                tool = %name,
+                                finish_reason = %finish_reason,
+                                "tool_use block missing 'input' — treating as truncated \
+                                 rather than empty"
+                            );
+                            (
+                                json!({}),
+                                Some(format!(
+                                    "arguments ('input') were missing from the tool_use \
+                                     block (finish_reason={finish_reason})"
+                                )),
+                            )
+                        }
+                    };
 
                     tool_calls.push(ToolCall {
                         id,
                         name,
                         arguments,
+                        arguments_error,
                     });
                 }
                 _ => {
@@ -425,13 +458,6 @@ impl AnthropicClient {
 
         // Extract usage.
         let usage = Self::parse_usage(response);
-
-        // Extract stop reason.
-        let finish_reason = response
-            .get("stop_reason")
-            .and_then(|s| s.as_str())
-            .unwrap_or("unknown")
-            .to_string();
 
         info!(
             model = model,
@@ -542,6 +568,7 @@ mod tests {
             id: "toolu_abc".into(),
             name: "search_catalog".into(),
             arguments: json!({"query": "revenue"}),
+            arguments_error: None,
         }];
         let messages = vec![
             Message::system("prompt"),
@@ -574,6 +601,7 @@ mod tests {
             id: "toolu_abc".into(),
             name: "search_catalog".into(),
             arguments: json!({"query": "revenue"}),
+            arguments_error: None,
         }];
         let messages = vec![
             Message::system("prompt"),
@@ -868,11 +896,13 @@ mod tests {
                 id: "toolu_1".into(),
                 name: "search_catalog".into(),
                 arguments: json!({"query": "revenue"}),
+                arguments_error: None,
             },
             ToolCall {
                 id: "toolu_2".into(),
                 name: "get_table_info".into(),
                 arguments: json!({"table_name": "sales.orders", "datasource": "pg"}),
+                arguments_error: None,
             },
         ];
         let messages = vec![
@@ -1001,6 +1031,58 @@ mod tests {
         assert!(result.tool_calls.is_none());
     }
 
+    // -- Contract: tool_use block missing 'input' records arguments_error ----
+
+    #[test]
+    fn parse_response_tool_use_missing_input_records_arguments_error() {
+        // KYO-535: Anthropic's non-streaming API can return a tool_use block
+        // whose `input` key is absent entirely when the response was cut off
+        // by max_tokens mid-block. That used to be silently coerced to
+        // `Value::Null` — indistinguishable from a tool with a genuinely
+        // empty schema. It must now be recorded on arguments_error instead.
+        let response = json!({
+            "content": [
+                {"type": "tool_use", "id": "tc_1", "name": "update_dashboard"}
+            ],
+            "stop_reason": "max_tokens",
+            "usage": {"input_tokens": 50000, "output_tokens": 4096}
+        });
+        let result =
+            AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response).unwrap();
+        assert_eq!(result.finish_reason, "max_tokens");
+        let tool_calls = result.tool_calls.expect("tool_use block should still surface");
+        let tc = &tool_calls[0];
+        assert!(tc.arguments.is_object());
+        assert!(tc.arguments.as_object().unwrap().is_empty());
+        let error = tc
+            .arguments_error
+            .as_ref()
+            .expect("missing 'input' must set arguments_error, not silently default to null");
+        assert!(
+            error.contains("max_tokens"),
+            "arguments_error should name the max_tokens finish_reason, got: {error}"
+        );
+    }
+
+    #[test]
+    fn parse_response_tool_use_present_empty_input_is_not_an_error() {
+        // A tool with a genuinely empty schema sends `"input": {}` — this is
+        // legitimate and must NOT be confused with a missing key.
+        let response = json!({
+            "content": [
+                {"type": "tool_use", "id": "tc_1", "name": "list_datasources", "input": {}}
+            ],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 100, "output_tokens": 10}
+        });
+        let result =
+            AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response).unwrap();
+        let tool_calls = result.tool_calls.unwrap();
+        let tc = &tool_calls[0];
+        assert!(tc.arguments.as_object().unwrap().is_empty());
+        assert!(tc.arguments_error.is_none());
+    }
+
     #[test]
     fn parse_response_stop_reason_missing_defaults_to_unknown() {
         let response = json!({
@@ -1122,6 +1204,7 @@ mod tests {
                     id: "tc_1".into(),
                     name: "search_catalog".into(),
                     arguments: json!({"query": "revenue monthly"}),
+                    arguments_error: None,
                 }],
             ),
             Message::tool_result(

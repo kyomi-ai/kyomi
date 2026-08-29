@@ -170,6 +170,12 @@ pub struct ToolCall {
     pub name: String,
     /// JSON arguments to pass to the tool.
     pub arguments: serde_json::Value,
+    /// Set when the provider returned arguments that could not be parsed as JSON
+    /// (the usual cause is a `max_tokens` truncation mid-payload). Carries enough
+    /// detail for the loop to tell the model the truth instead of letting the tool
+    /// report a phantom missing parameter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments_error: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -350,6 +356,7 @@ mod tests {
             id: "tc_001".into(),
             name: "search_catalog".into(),
             arguments: serde_json::json!({"query": "revenue"}),
+            arguments_error: None,
         }];
         let msg = Message::assistant_with_tool_calls("Let me search.", tool_calls);
         assert_eq!(msg.role, MessageRole::Assistant);
@@ -407,6 +414,7 @@ mod tests {
                 "sql_query": "SELECT 1",
                 "datasource": "production-postgres"
             }),
+            arguments_error: None,
         };
         let json = serde_json::to_value(&tc).unwrap();
         assert_eq!(json["id"], "toolu_abc123");
@@ -512,11 +520,13 @@ mod tests {
                 id: "toolu_abc".into(),
                 name: "search_catalog".into(),
                 arguments: serde_json::json!({"query": "revenue"}),
+                arguments_error: None,
             },
             ToolCall {
                 id: "toolu_def".into(),
                 name: "query_datasource".into(),
                 arguments: serde_json::json!({"sql_query": "SELECT 1", "datasource": "pg"}),
+                arguments_error: None,
             },
         ];
         let msg = Message::assistant_with_tool_calls("Let me investigate.", tool_calls);
@@ -625,6 +635,59 @@ mod tests {
         assert_eq!(tool_calls[0].name, "search_catalog");
         assert_eq!(tool_calls[1].id, "tc_2");
         assert_eq!(tool_calls[1].name, "get_table_info");
+    }
+
+    // -- Contract: ToolCall::arguments_error backward compatibility ----------
+
+    #[test]
+    fn tool_call_deserializes_without_arguments_error_field() {
+        // Rows persisted before this field existed have no `arguments_error`
+        // key at all. `#[serde(default)]` must make that the same as
+        // `arguments_error: null` rather than a deserialization error.
+        let json = serde_json::json!({
+            "id": "tc_1",
+            "name": "search_catalog",
+            "arguments": {"query": "revenue"}
+        });
+        let tc: ToolCall = serde_json::from_value(json).unwrap();
+        assert!(tc.arguments_error.is_none());
+    }
+
+    #[test]
+    fn tool_call_serialization_omits_arguments_error_when_none() {
+        let tc = ToolCall {
+            id: "tc_1".into(),
+            name: "search_catalog".into(),
+            arguments: serde_json::json!({"query": "revenue"}),
+            arguments_error: None,
+        };
+        let json = serde_json::to_value(&tc).unwrap();
+        assert!(json.get("arguments_error").is_none());
+    }
+
+    #[test]
+    fn tool_call_serialization_includes_arguments_error_when_set() {
+        let tc = ToolCall {
+            id: "tc_1".into(),
+            name: "search_catalog".into(),
+            arguments: serde_json::json!({}),
+            arguments_error: Some("truncated by max_tokens".into()),
+        };
+        let json = serde_json::to_value(&tc).unwrap();
+        assert_eq!(json["arguments_error"], "truncated by max_tokens");
+    }
+
+    #[test]
+    fn tool_call_arguments_error_roundtrip() {
+        let tc = ToolCall {
+            id: "tc_1".into(),
+            name: "search_catalog".into(),
+            arguments: serde_json::json!({}),
+            arguments_error: Some("truncated by max_tokens".into()),
+        };
+        let json = serde_json::to_string(&tc).unwrap();
+        let restored: ToolCall = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.arguments_error.as_deref(), Some("truncated by max_tokens"));
     }
 
     // -- Contract: MessageRole rejects invalid values ------------------------
@@ -756,6 +819,7 @@ mod tests {
             id: "tc_1".into(),
             name: "search_catalog".into(),
             arguments: serde_json::json!({"query": "revenue"}),
+            arguments_error: None,
         }];
         let msg = Message::assistant_with_tool_calls("", tool_calls);
         assert_eq!(msg.content, "");
