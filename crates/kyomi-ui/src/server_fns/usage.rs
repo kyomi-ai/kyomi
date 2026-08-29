@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[cfg(feature = "ssr")]
-use super::{AuthenticatedContext, IntoServerFnError};
+use super::{AuthenticatedContext, IntoServerFnErrorCore};
 
 /// Workspace row — analytics-bundle-only.
 ///
@@ -105,7 +105,7 @@ pub async fn get_ai_usage_status() -> Result<UsageData, ServerFnError> {
     let status = billing_service
         .get_ai_usage_status(ac.db(), &ac.ws_id, &ac.auth.user_id)
         .await
-        .into_sfn()?;
+        .into_sfn_core()?;
 
     // Analytics bundle balance comes from the workspace row. The AI bundle
     // remaining comes from `status.bundle_remaining_usd` below — it's the

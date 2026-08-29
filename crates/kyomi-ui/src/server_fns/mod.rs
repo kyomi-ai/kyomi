@@ -258,7 +258,41 @@ impl AuthenticatedContext {
     }
 }
 
-/// Extension trait that converts any `Result<T, E: Display>` into a server
+/// Marker for error types that may build their `.into_sfn()` client message
+/// from `Display`/`to_string()`.
+///
+/// `kyomi_core::Error::Display` deliberately carries a log-only variant tag
+/// (`"internal: {0}"`, `"not found: {0}"`, ...) — see
+/// `docs/standards/error-handling/user-message-not-display-for-user-facing-text.md`.
+/// [`IntoServerFnError::into_sfn`] cannot special-case that one type: stable
+/// Rust has neither specialization nor negative impls, so a blanket
+/// `impl<E: Display>` and a specific `impl for kyomi_core::Error` would
+/// overlap (E0119). This sealed marker is the alternative — implemented for
+/// every *other* error type actually passed to `.into_sfn()` in this crate,
+/// deliberately never for `kyomi_core::Error`.
+///
+/// The payoff: a `.into_sfn()` call site with `E = kyomi_core::Error` is a
+/// **compile error**, not a runtime leak. If you land here from one:
+/// - `E` is `kyomi_core::Error` → use [`IntoServerFnErrorCore::into_sfn_core`],
+///   which reads `user_message()` instead of `Display`.
+/// - `E` is a new, different error type → implement this trait for it below,
+///   next to the other impls, once you've confirmed its `Display` has no
+///   log-only prefix a user shouldn't see.
+///
+/// (KYO-523 — 195 call sites migrated to `into_sfn_core`; audited by
+/// temporarily requiring this bound and reading off every resulting E0599.)
+#[cfg(feature = "ssr")]
+pub(crate) trait NotKyomiCoreError: std::fmt::Display {}
+
+#[cfg(feature = "ssr")]
+impl NotKyomiCoreError for sqlx::Error {}
+#[cfg(feature = "ssr")]
+impl NotKyomiCoreError for kyomi_auth::workspace_ai_config::WorkspaceAiConfigError {}
+#[cfg(feature = "ssr")]
+impl NotKyomiCoreError for kyomi_connect_protocol::Error {}
+
+/// Extension trait that converts any `Result<T, E: Display>` (other than
+/// `Result<T, kyomi_core::Error>` — see [`NotKyomiCoreError`]) into a server
 /// function result, replacing the boilerplate
 /// `.map_err(|e| ServerFnError::new(e.to_string()))`.
 #[cfg(feature = "ssr")]
@@ -267,11 +301,90 @@ pub(crate) trait IntoServerFnError<T> {
 }
 
 #[cfg(feature = "ssr")]
-impl<T, E: std::fmt::Display> IntoServerFnError<T> for Result<T, E> {
+impl<T, E: std::fmt::Display + NotKyomiCoreError> IntoServerFnError<T> for Result<T, E> {
     fn into_sfn(self) -> Result<T, leptos::prelude::ServerFnError> {
         self.map_err(|e| {
             tracing::error!(error = %e, "server function error");
             leptos::prelude::ServerFnError::new(kyomi_core::sanitize_error(&e.to_string()))
         })
+    }
+}
+
+/// Extension trait that converts `Result<T, kyomi_core::Error>` into a server
+/// function result using [`kyomi_core::Error::user_message`], not `Display` —
+/// see [`NotKyomiCoreError`] for why this can't just be another arm of
+/// [`IntoServerFnError`]. Logging still uses the full `Display` form (`%e`),
+/// so the variant tag survives in the log; only the client-facing string is
+/// built from `user_message()`.
+#[cfg(feature = "ssr")]
+pub(crate) trait IntoServerFnErrorCore<T> {
+    fn into_sfn_core(self) -> Result<T, leptos::prelude::ServerFnError>;
+}
+
+#[cfg(feature = "ssr")]
+impl<T> IntoServerFnErrorCore<T> for Result<T, kyomi_core::Error> {
+    fn into_sfn_core(self) -> Result<T, leptos::prelude::ServerFnError> {
+        self.map_err(|e| {
+            tracing::error!(error = %e, "server function error");
+            leptos::prelude::ServerFnError::new(kyomi_core::sanitize_error(e.user_message()))
+        })
+    }
+}
+
+#[cfg(all(test, feature = "ssr"))]
+mod into_sfn_error_tests {
+    use super::*;
+
+    /// KYO-523 regression guard: `.into_sfn_core()` must build the
+    /// client-facing message from `user_message()`, so none of
+    /// `kyomi_core::Error`'s log-only variant tags (`"internal: "`,
+    /// `"not found: "`, `"bad request: "`, ...) reach the client — even
+    /// though `Display` (used for the `tracing::error!` log line right next
+    /// to it) still carries the tag.
+    #[test]
+    fn into_sfn_core_strips_the_variant_tag_every_tagged_variant() {
+        let cases: Vec<(kyomi_core::Error, &str)> = vec![
+            (kyomi_core::Error::NotFound("widget missing".into()), "not found: "),
+            (kyomi_core::Error::Unauthorized("no token".into()), "unauthorized: "),
+            (kyomi_core::Error::Forbidden("no access".into()), "forbidden: "),
+            (kyomi_core::Error::BadRequest("bad input".into()), "bad request: "),
+            (kyomi_core::Error::Conflict("already exists".into()), "conflict: "),
+            (
+                kyomi_core::Error::TooManyRequests("slow down".into(), 30),
+                "too many requests: ",
+            ),
+            (kyomi_core::Error::NotImplemented("soon".into()), "not implemented: "),
+            (
+                kyomi_core::Error::ServiceUnavailable("down for maintenance".into()),
+                "service unavailable: ",
+            ),
+            (kyomi_core::Error::Internal("stack trace stuff".into()), "internal: "),
+        ];
+
+        for (err, tag) in cases {
+            // The bug this guards against: Display carries the tag...
+            assert!(
+                err.to_string().starts_with(tag),
+                "test fixture assumption broken: {err} should start with {tag:?}"
+            );
+
+            // ...but into_sfn_core's client-facing message must not.
+            let sfn_err: Result<(), _> = Err(err).into_sfn_core();
+            let client_message = sfn_err.unwrap_err().to_string();
+            assert!(
+                !client_message.contains(tag),
+                "variant tag {tag:?} leaked into client-facing message: {client_message:?}"
+            );
+        }
+    }
+
+    /// Sibling assurance for [`NotKyomiCoreError`]: `.into_sfn()` remains
+    /// available for the error types this crate actually pairs with it, so
+    /// migrating call sites to `into_sfn_core` didn't accidentally narrow the
+    /// blanket impl into uselessness for everything else.
+    #[test]
+    fn into_sfn_still_works_for_non_core_error_types() {
+        let err: Result<(), sqlx::Error> = Err(sqlx::Error::RowNotFound);
+        assert!(err.into_sfn().is_err());
     }
 }

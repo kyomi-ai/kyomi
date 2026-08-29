@@ -279,7 +279,7 @@ pub async fn get_session_messages(
         Some(&ac.ws_id),
     )
     .await
-    .into_sfn()?
+    .into_sfn_core()?
     .ok_or_else(|| ServerFnError::new("Session not found or access denied"))?;
 
     let encryption_key = ac.encryption_key()?;
@@ -291,7 +291,7 @@ pub async fn get_session_messages(
         200, // limit
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     Ok(SessionMessagesResponse {
         messages: messages
@@ -321,7 +321,7 @@ pub async fn update_session_title(
         Some(&ac.ws_id),
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     match session {
         Some(s) if s.user_id == ac.auth.user_id => {}
@@ -338,7 +338,7 @@ pub async fn update_session_title(
     let updated =
         kyomi_auth::chat_service::update_session_title(ac.db(), &session_id, &title)
             .await
-            .into_sfn()?;
+            .into_sfn_core()?;
 
     if !updated {
         return Err(ServerFnError::new("Session not found"));
@@ -368,7 +368,7 @@ pub async fn delete_chat_session(session_id: String) -> Result<(), ServerFnError
         Some(&ac.ws_id),
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     if !deleted {
         return Err(ServerFnError::new(
@@ -417,7 +417,7 @@ pub async fn bulk_delete_sessions(session_ids: Vec<String>) -> Result<(), Server
         &ac.ws_id,
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     tracing::info!(
         deleted_count = deleted_count,
@@ -457,7 +457,7 @@ pub async fn search_chat_messages(query: String) -> Result<Vec<ChatSessionItem>,
         50, // limit (matches default_search_limit)
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     Ok(sessions
         .into_iter()
@@ -556,7 +556,7 @@ pub async fn send_chat_message(
         },
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     // Early return for skip_ai path (service handled storage).
     let (session_id, is_new_session, user_message_id, assistant_message_id, is_shared) =
@@ -823,7 +823,7 @@ pub async fn share_session(session_id: String) -> Result<(), ServerFnError> {
 
     kyomi_auth::chat_service::set_session_shared(&ctx.db, &session_id, true)
         .await
-        .into_sfn()?;
+        .into_sfn_core()?;
 
     tracing::info!(
         session_id = %session_id,
@@ -895,7 +895,7 @@ pub async fn unshare_session(session_id: String) -> Result<(), ServerFnError> {
 
     kyomi_auth::chat_service::set_session_shared(&ctx.db, &session_id, false)
         .await
-        .into_sfn()?;
+        .into_sfn_core()?;
 
     tracing::info!(
         session_id = %session_id,
@@ -932,7 +932,7 @@ pub async fn mark_session_read(
         Some(&ac.ws_id),
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     if session.is_none() {
         return Err(ServerFnError::new(
@@ -1008,7 +1008,7 @@ pub async fn toggle_message_pin(
         Some(&ac.ws_id),
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     if success {
         tracing::info!(
@@ -1052,7 +1052,7 @@ pub async fn update_message_content(
         &content,
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     tracing::info!(
         session_id = %session_id,
@@ -1089,7 +1089,7 @@ pub async fn get_thinking_event_detail(
         &ac.ws_id,
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     Ok(text)
 }
@@ -1099,7 +1099,7 @@ pub async fn get_thinking_event_detail(
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, AuthenticatedContext, IntoServerFnError};
+use super::{extract_auth, extract_context, AuthenticatedContext, IntoServerFnError, IntoServerFnErrorCore};
 
 /// Convert a `chat_service::SessionListItem` to our `ChatSessionItem`.
 #[cfg(feature = "ssr")]

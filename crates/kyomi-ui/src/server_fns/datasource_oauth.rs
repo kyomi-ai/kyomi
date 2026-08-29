@@ -17,7 +17,7 @@
 use leptos::prelude::*;
 
 #[cfg(feature = "ssr")]
-use super::{AuthenticatedContext, IntoServerFnError};
+use super::{AuthenticatedContext, IntoServerFnErrorCore};
 
 // ---------------------------------------------------------------------------
 // Return types
@@ -61,7 +61,7 @@ pub async fn get_google_oauth_status() -> Result<GoogleOAuthStatus, ServerFnErro
 
     google_oauth_status_service(ac.db(), &ac.auth.user_id, &encryption_key)
         .await
-        .into_sfn()
+        .into_sfn_core()
 }
 
 /// List Google Cloud projects accessible to the authenticated user.
@@ -130,7 +130,7 @@ pub async fn disconnect_google_oauth() -> Result<GoogleOAuthDisconnectResult, Se
 
     google_oauth_disconnect_service(ac.db(), &ac.auth.user_id, &encryption_key)
         .await
-        .into_sfn()
+        .into_sfn_core()
 }
 
 /// Get the OAuth connection status for a per-datasource provider.
@@ -166,7 +166,7 @@ pub async fn get_datasource_oauth_status(
         &encryption_key,
     )
     .await
-    .into_sfn()
+    .into_sfn_core()
 }
 
 /// Disconnect per-datasource OAuth credentials for the authenticated user.
@@ -202,5 +202,5 @@ pub async fn disconnect_datasource_oauth(
         &datasource_slug,
     )
     .await
-    .into_sfn()
+    .into_sfn_core()
 }

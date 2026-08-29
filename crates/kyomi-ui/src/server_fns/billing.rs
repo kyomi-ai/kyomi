@@ -16,7 +16,7 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, AuthenticatedContext, IntoServerFnError};
+use super::{extract_auth, extract_context, AuthenticatedContext, IntoServerFnError, IntoServerFnErrorCore};
 #[cfg(feature = "ssr")]
 use kyomi_types::Permission;
 
@@ -395,7 +395,7 @@ pub async fn create_checkout(
             sub_id,
         )
         .await
-        .into_sfn()?;
+        .into_sfn_core()?;
 
         return Ok(CheckoutOutcome::Modified(
             "Subscription reactivated successfully".to_string(),

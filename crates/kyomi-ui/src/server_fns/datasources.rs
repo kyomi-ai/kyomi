@@ -21,7 +21,7 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
-use super::{AuthenticatedContext, IntoServerFnError};
+use super::{AuthenticatedContext, IntoServerFnError, IntoServerFnErrorCore};
 #[cfg(feature = "ssr")]
 use kyomi_auth::datasource_service::{
     DiscoveryConnectionInputs, DiscoveryConnectionRequest, DiscoveryPrepError,
@@ -95,7 +95,7 @@ pub async fn list_datasources() -> Result<Vec<DatasourceInfo>, ServerFnError> {
         &encryption_key,
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     Ok(items)
 }
@@ -158,7 +158,7 @@ pub async fn toggle_datasource(
         &encryption_key,
     )
     .await
-    .into_sfn()
+    .into_sfn_core()
 }
 
 /// Delete a datasource (workspace admin only).
@@ -172,7 +172,7 @@ pub async fn delete_datasource(datasource_id: String) -> Result<(), ServerFnErro
 
     kyomi_auth::datasource_service::delete_datasource(ac.db(), &datasource_id, &ac.ws_id)
         .await
-        .into_sfn()?;
+        .into_sfn_core()?;
 
     Ok(())
 }
@@ -191,7 +191,7 @@ pub async fn generate_ssh_key() -> Result<GeneratedSshKey, ServerFnError> {
 
     ac.require(Permission::ManageDatasources, "Workspace admin access required")?;
 
-    let generated = kyomi_auth::ssh_keygen::generate_ssh_keypair().into_sfn()?;
+    let generated = kyomi_auth::ssh_keygen::generate_ssh_keypair().into_sfn_core()?;
 
     Ok(generated)
 }
@@ -337,7 +337,7 @@ pub async fn create_datasource_modal(
         },
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     // Save credentials if provided
     let has_creds = credentials.as_object().map(|o| !o.is_empty()).unwrap_or(false);
@@ -351,7 +351,7 @@ pub async fn create_datasource_modal(
             &credentials,
         )
         .await
-        .into_sfn()?;
+        .into_sfn_core()?;
     }
 
     // Kick off catalog indexing in the background so tables show up
@@ -418,7 +418,7 @@ pub async fn update_datasource_settings(
         &encryption_key,
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     Ok(DatasourceResult {
         id: updated.id,
@@ -461,7 +461,7 @@ pub async fn save_datasource_credentials(
         &credentials,
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     Ok(())
 }
@@ -488,7 +488,7 @@ pub async fn get_datasource_settings(
         &encryption_key,
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     Ok(DatasourceSettingsResult {
         id: d.id,
@@ -1004,7 +1004,7 @@ pub(crate) async fn create_query_provider(
         false,
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     // Encryption key check AFTER resolve: even Connect-type datasources
     // (which skip per-user credential decryption) still need it to decrypt
@@ -1037,7 +1037,7 @@ pub(crate) async fn create_query_provider(
         ctx.connect_registry.as_ref(),
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     Ok((ds, provider))
 }

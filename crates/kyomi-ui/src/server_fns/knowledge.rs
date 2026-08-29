@@ -44,7 +44,7 @@ pub async fn create_knowledge_doc(
         Some(embedding_svc),
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
     kyomi_auth::dashboard_service::spawn_embedding_generation(
         ac.ctx.db.clone(),
         embedding_svc.clone(),
@@ -80,7 +80,7 @@ pub async fn delete_knowledge_doc(dashboard_id: String) -> Result<(), ServerFnEr
         &ac.auth.user_id,
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     if let Some(ws_manager) = &ac.ctx.ws_manager {
         kyomi_auth::websocket::helpers::broadcast_entity_delete(
@@ -94,4 +94,4 @@ pub async fn delete_knowledge_doc(dashboard_id: String) -> Result<(), ServerFnEr
 
 // SSR-only import — placed at bottom to match convention.
 #[cfg(feature = "ssr")]
-use super::{AuthenticatedContext, IntoServerFnError};
+use super::{AuthenticatedContext, IntoServerFnErrorCore};

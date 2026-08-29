@@ -25,7 +25,7 @@ pub async fn get_profile() -> Result<ProfileData, ServerFnError> {
 
     let user = kyomi_auth::user_service::get_user_by_id(&ctx.db, &auth.user_id)
         .await
-        .into_sfn()?
+        .into_sfn_core()?
         .ok_or_else(|| ServerFnError::new("User not found"))?;
 
     let metadata = user.extra_metadata.as_ref().and_then(|v| v.as_object());
@@ -84,7 +84,7 @@ pub async fn get_dashboards() -> Result<Vec<DashboardSummary>, ServerFnError> {
         100,
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     Ok(results
         .into_iter()
@@ -104,7 +104,7 @@ pub async fn get_pending_invitations() -> Result<Vec<InvitationData>, ServerFnEr
     let invitations =
         kyomi_auth::workspace_service::get_pending_invitations_enriched_for_email(&ctx.db, &auth.email)
             .await
-            .into_sfn()?;
+            .into_sfn_core()?;
 
     Ok(invitations
         .into_iter()
@@ -139,7 +139,7 @@ pub async fn update_profile_name(name: String) -> Result<(), ServerFnError> {
 
     kyomi_auth::user_service::update_user_name(&ctx.db, &auth.user_id, &trimmed)
         .await
-        .into_sfn()?;
+        .into_sfn_core()?;
 
     Ok(())
 }
@@ -157,7 +157,7 @@ pub async fn update_theme(theme: String) -> Result<(), ServerFnError> {
     let metadata = serde_json::json!({ "theme": theme });
     kyomi_auth::user_service::update_extra_metadata(&ctx.db, &auth.user_id, &metadata)
         .await
-        .into_sfn()?;
+        .into_sfn_core()?;
 
     Ok(())
 }
@@ -178,7 +178,7 @@ pub async fn update_landing_page(page: String) -> Result<(), ServerFnError> {
     let metadata = serde_json::json!({ "landing_page": page });
     kyomi_auth::user_service::update_extra_metadata(&ctx.db, &auth.user_id, &metadata)
         .await
-        .into_sfn()?;
+        .into_sfn_core()?;
 
     Ok(())
 }
@@ -196,7 +196,7 @@ pub async fn update_default_dashboard(dashboard_id: Option<String>) -> Result<()
 
     kyomi_auth::user_service::update_extra_metadata(&ctx.db, &auth.user_id, &value)
         .await
-        .into_sfn()?;
+        .into_sfn_core()?;
 
     Ok(())
 }
@@ -216,7 +216,7 @@ pub async fn update_query_retention(days: i32) -> Result<(), ServerFnError> {
     let metadata = serde_json::json!({ "query_history_retention_days": days });
     kyomi_auth::user_service::update_extra_metadata(&ctx.db, &auth.user_id, &metadata)
         .await
-        .into_sfn()?;
+        .into_sfn_core()?;
 
     Ok(())
 }
@@ -235,7 +235,7 @@ pub async fn update_chart_palette(palette: String) -> Result<(), ServerFnError> 
 
     kyomi_auth::user_service::update_chartml_config(&ctx.db, &auth.user_id, &config)
         .await
-        .into_sfn()?;
+        .into_sfn_core()?;
 
     Ok(())
 }
@@ -277,7 +277,7 @@ pub async fn accept_invitation(invitation_id: String) -> Result<(), ServerFnErro
 
     let inv = kyomi_auth::workspace_service::get_invitation(&ctx.db, &invitation_id)
         .await
-        .into_sfn()?
+        .into_sfn_core()?
         .ok_or_else(|| ServerFnError::new("Invitation not found"))?;
     check_invitation_acceptable(&inv, &auth.email, chrono::Utc::now())
         .map_err(ServerFnError::new)?;
@@ -310,7 +310,7 @@ pub async fn accept_invitation(invitation_id: String) -> Result<(), ServerFnErro
                 &device,
             )
             .await
-            .into_sfn()?
+            .into_sfn_core()?
         }
         None => {
             // No KV (single-instance/test) — still accept the invite; just can't
@@ -326,7 +326,7 @@ pub async fn accept_invitation(invitation_id: String) -> Result<(), ServerFnErro
                 Some(&ctx.config),
             )
             .await
-            .into_sfn()?;
+            .into_sfn_core()?;
             None
         }
     };
@@ -350,7 +350,7 @@ pub async fn decline_invitation(invitation_id: String) -> Result<(), ServerFnErr
 
     let inv = kyomi_auth::workspace_service::get_invitation(&ctx.db, &invitation_id)
         .await
-        .into_sfn()?
+        .into_sfn_core()?
         .ok_or_else(|| ServerFnError::new("Invitation not found"))?;
     check_invitation_acceptable(&inv, &auth.email, chrono::Utc::now())
         .map_err(ServerFnError::new)?;
@@ -361,7 +361,7 @@ pub async fn decline_invitation(invitation_id: String) -> Result<(), ServerFnErr
         "declined",
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     Ok(())
 }
@@ -391,7 +391,7 @@ pub async fn get_invitation_for_accept(
 
     let inv = kyomi_auth::workspace_service::get_invitation_enriched(&ctx.db, &invitation_id)
         .await
-        .into_sfn()?;
+        .into_sfn_core()?;
     let Some(inv) = inv else {
         return Ok(None);
     };
@@ -411,7 +411,7 @@ pub async fn get_invitation_for_accept(
 
 // Helpers — delegate to shared extractors in parent module
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, AuthenticatedContext, IntoServerFnError};
+use super::{extract_auth, extract_context, AuthenticatedContext, IntoServerFnErrorCore};
 
 #[cfg(all(test, feature = "ssr"))]
 mod tests {

@@ -18,7 +18,7 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
-use super::{AuthenticatedContext, IntoServerFnError};
+use super::{AuthenticatedContext, IntoServerFnErrorCore};
 
 /// Response from the copilot after submitting a user message.
 ///
@@ -122,7 +122,7 @@ pub async fn send_copilot_message(
         },
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     // ── Spawn AI agent execution ────────────────────────────────────────
     // Follows the same pattern as send_chat_message in chat.rs.

@@ -6,7 +6,7 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
-use super::{AuthenticatedContext, IntoServerFnError};
+use super::{AuthenticatedContext, IntoServerFnError, IntoServerFnErrorCore};
 #[cfg(feature = "ssr")]
 use kyomi_types::Permission;
 #[cfg(feature = "ssr")]
@@ -143,7 +143,7 @@ pub async fn list_query_history(
         search.as_deref(),
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     let entries: Vec<QueryHistoryEntry> = records
         .into_iter()
@@ -192,7 +192,7 @@ pub async fn save_query_history(
             &ac.ws_id,
         )
         .await
-        .into_sfn()?;
+        .into_sfn_core()?;
         ds.map(|d| d.id)
     } else {
         None
@@ -211,7 +211,7 @@ pub async fn save_query_history(
         error_message.as_deref(),
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     Ok(record.query_id)
 }
@@ -238,7 +238,7 @@ pub async fn update_query_history(
         None, // tags
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     if result.is_none() {
         return Err(ServerFnError::new(format!(
@@ -267,7 +267,7 @@ pub async fn delete_query_history(
         &ac.auth.user_id,
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     if !deleted {
         return Err(ServerFnError::new(format!(
@@ -601,7 +601,7 @@ pub async fn get_catalog_tree(
         false,
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     // Fetch all non-archived cached tables for this datasource, projected
     // to only what the tree needs for this `include_columns` mode (see
@@ -685,7 +685,7 @@ pub async fn search_catalog(
         false,
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     // Sample datasources used to live in a shared sentinel workspace and
     // required an `is_sample` branch here to read from `SAMPLE_DATA_WORKSPACE_ID`.
@@ -798,7 +798,7 @@ pub async fn refresh_catalog(
         false,
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     let encryption_key = ac.encryption_key()?;
 
@@ -825,7 +825,7 @@ pub async fn refresh_catalog(
         },
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     let credentials = match decision {
         kyomi_auth::datasource_service::ManualRefreshDecision::AlreadyRunning => {
@@ -922,7 +922,7 @@ pub async fn get_catalog_refresh_status(
         false,
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     #[derive(sqlx::FromRow)]
     struct DatasourceCatalogStatusRow {
@@ -992,7 +992,7 @@ pub async fn get_table_info(
         false,
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     // Parse the table_id (e.g., "project.dataset.table" or "dataset.table").
     let parts: Vec<&str> = table_id.splitn(3, '.').collect();

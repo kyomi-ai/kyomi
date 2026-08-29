@@ -156,7 +156,7 @@ pub async fn list_watches() -> Result<Vec<WatchListItem>, ServerFnError> {
 
     let watches = kyomi_auth::watch_service::list_watches(ac.db(), &ac.ws_id, &ac.auth.user_id)
         .await
-        .into_sfn()?;
+        .into_sfn_core()?;
 
     let mut items = Vec::with_capacity(watches.len());
     for w in &watches {
@@ -207,7 +207,7 @@ pub async fn create_watch(config: WatchConfig) -> Result<WatchListItem, ServerFn
         alert_emails_enabled.unwrap_or(false),
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     // Set the Slack alert channel if provided
     if let Some(ref channel_id) = slack_channel_id
@@ -323,14 +323,14 @@ pub async fn update_watch(
             &updates,
         )
         .await
-        .into_sfn()?;
+        .into_sfn_core()?;
         updated.created_by
     } else {
         // Slack-only update path — no field update call was made, so fetch
         // the current watch to learn its owner.
         kyomi_auth::watch_service::get_watch(ac.db(), &watch_id, &ac.ws_id, &ac.auth.user_id)
             .await
-            .into_sfn()?
+            .into_sfn_core()?
             .ok_or_else(|| ServerFnError::new("Watch not found"))?
             .created_by
     };
@@ -378,7 +378,7 @@ pub async fn delete_watch(watch_id: String) -> Result<(), ServerFnError> {
     let created_by =
         kyomi_auth::watch_service::delete_watch(ac.db(), &watch_id, &ac.ws_id, &ac.auth.user_id)
             .await
-            .into_sfn()?;
+            .into_sfn_core()?;
 
     if let Some(ws_manager) = &ac.ctx.ws_manager {
         kyomi_auth::websocket::helpers::broadcast_watch_sync(
@@ -397,7 +397,7 @@ pub async fn toggle_watch(watch_id: String) -> Result<(), ServerFnError> {
 
     let watch = kyomi_auth::watch_service::get_watch(ac.db(), &watch_id, &ac.ws_id, &ac.auth.user_id)
         .await
-        .into_sfn()?
+        .into_sfn_core()?
         .ok_or_else(|| ServerFnError::new("Watch not found"))?;
 
     kyomi_auth::watch_service::toggle_watch(
@@ -408,7 +408,7 @@ pub async fn toggle_watch(watch_id: String) -> Result<(), ServerFnError> {
         !watch.enabled,
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     if let Some(ws_manager) = &ac.ctx.ws_manager {
         kyomi_auth::websocket::helpers::broadcast_watch_sync(
@@ -435,7 +435,7 @@ pub async fn run_watch_now(watch_id: String) -> Result<(), ServerFnError> {
         &ac.auth.user_id,
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     if !can_run {
         return Err(ServerFnError::new(reason));
@@ -514,7 +514,7 @@ pub async fn get_watch_executions(
         limit,
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     Ok(executions.iter().map(|e| execution_to_item(e, false)).collect())
 }
@@ -535,7 +535,7 @@ pub async fn get_watch_execution(
         &ac.auth.user_id,
     )
     .await
-    .into_sfn()?
+    .into_sfn_core()?
     .ok_or_else(|| ServerFnError::new("Execution not found"))?;
 
     Ok(execution_to_item(&execution, true))
@@ -569,7 +569,7 @@ pub async fn get_alerts(
         &ac.auth.user_id,
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     Ok(AlertsPage {
         alerts: executions.iter().map(execution_to_alert).collect(),
@@ -584,7 +584,7 @@ pub async fn get_unread_alerts_count() -> Result<i64, ServerFnError> {
 
     kyomi_auth::watch_service::get_unread_alerts_count(ac.db(), &ac.ws_id, &ac.auth.user_id)
         .await
-        .into_sfn()
+        .into_sfn_core()
 }
 
 /// Mark an alert as read.
@@ -594,7 +594,7 @@ pub async fn mark_alert_read(execution_id: i32) -> Result<(), ServerFnError> {
 
     kyomi_auth::watch_service::mark_alert_read(ac.db(), execution_id, &ac.ws_id, &ac.auth.user_id)
         .await
-        .into_sfn()
+        .into_sfn_core()
 }
 
 /// Mark an alert as unread.
@@ -604,7 +604,7 @@ pub async fn mark_alert_unread(execution_id: i32) -> Result<(), ServerFnError> {
 
     kyomi_auth::watch_service::mark_alert_unread(ac.db(), execution_id, &ac.ws_id, &ac.auth.user_id)
         .await
-        .into_sfn()
+        .into_sfn_core()
 }
 
 /// Soft-delete an alert.
@@ -614,7 +614,7 @@ pub async fn delete_alert(execution_id: i32) -> Result<(), ServerFnError> {
 
     kyomi_auth::watch_service::delete_alert(ac.db(), execution_id, &ac.ws_id, &ac.auth.user_id)
         .await
-        .into_sfn()
+        .into_sfn_core()
 }
 
 /// Restore a soft-deleted alert.
@@ -624,7 +624,7 @@ pub async fn restore_alert(execution_id: i32) -> Result<(), ServerFnError> {
 
     kyomi_auth::watch_service::restore_alert(ac.db(), execution_id, &ac.ws_id, &ac.auth.user_id)
         .await
-        .into_sfn()
+        .into_sfn_core()
 }
 
 /// Bulk soft-delete alerts.
@@ -650,7 +650,7 @@ pub async fn bulk_delete_alerts(execution_ids: Vec<i32>) -> Result<(), ServerFnE
 
     kyomi_auth::watch_service::bulk_delete_alerts(ac.db(), &unique_ids, &ac.ws_id, &ac.auth.user_id)
         .await
-        .into_sfn()?;
+        .into_sfn_core()?;
 
     Ok(())
 }
@@ -683,7 +683,7 @@ pub async fn bulk_mark_alerts_read(execution_ids: Vec<i32>) -> Result<(), Server
         &ac.auth.user_id,
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     Ok(())
 }
@@ -716,7 +716,7 @@ pub async fn bulk_mark_alerts_unread(execution_ids: Vec<i32>) -> Result<(), Serv
         &ac.auth.user_id,
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     Ok(())
 }
@@ -738,7 +738,7 @@ pub async fn continue_alert_in_chat(execution_id: i32) -> Result<String, ServerF
         execution_id,
     )
     .await
-    .into_sfn()
+    .into_sfn_core()
 }
 
 /// Get thinking events for a specific execution.
@@ -762,7 +762,7 @@ pub async fn get_thinking_events(
         &ac.auth.user_id,
     )
     .await
-    .into_sfn()?
+    .into_sfn_core()?
     .ok_or_else(|| ServerFnError::new("Execution not found"))?;
 
     let mut thinking_events = serde_json::Value::Array(Vec::new());
@@ -813,4 +813,4 @@ pub async fn get_thinking_events(
 
 // SSR-only import — placed at bottom to match `dashboards.rs` convention.
 #[cfg(feature = "ssr")]
-use super::{AuthenticatedContext, IntoServerFnError};
+use super::{AuthenticatedContext, IntoServerFnErrorCore};

@@ -17,7 +17,7 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
-use super::{AuthenticatedContext, IntoServerFnError};
+use super::{AuthenticatedContext, IntoServerFnErrorCore};
 #[cfg(feature = "ssr")]
 use kyomi_types::Permission;
 
@@ -64,7 +64,7 @@ pub async fn list_analytics_sites() -> Result<Vec<AnalyticsSiteData>, ServerFnEr
 
     let sites = kyomi_auth::analytics_site_service::list_sites(ac.db(), &ac.ws_id)
         .await
-        .into_sfn()?;
+        .into_sfn_core()?;
 
     Ok(sites
         .iter()
@@ -233,7 +233,7 @@ pub async fn create_analytics_site(
         },
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     Ok(AnalyticsSiteData {
         id: site.id.clone(),
@@ -288,7 +288,7 @@ pub async fn update_analytics_site(
         },
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     Ok(AnalyticsSiteData {
         id: site.id.clone(),
@@ -318,7 +318,7 @@ pub async fn delete_analytics_site(site_id: String) -> Result<(), ServerFnError>
         ac.ctx.config.analytics_clickhouse_secure,
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     Ok(())
 }
