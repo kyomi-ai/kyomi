@@ -387,7 +387,7 @@ echo
 
 # ─── Test 14: the SCRIPT column widens to the longest script name ────────────
 # A hardcoded width silently misaligned every row once a cron wrapper longer
-# than the constant existed (kyomi-merge-sweeper-cron.sh, 28 chars vs 26).
+# than the constant existed (kyomi-merge-sweeper-cron.sh, 27 chars vs 26).
 echo "-- Test 14: SCRIPT column is sized to the data"
 t14="$tmpdir/t14.jsonl"
 : >"$t14"

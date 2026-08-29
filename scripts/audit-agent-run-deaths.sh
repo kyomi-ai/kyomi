@@ -428,7 +428,7 @@ def render(runs):
     if runs:
         # Width the SCRIPT column to the widest value actually present rather
         # than to a constant. A hardcoded 26 silently misaligned every row for
-        # kyomi-merge-sweeper-cron.sh (28 chars), and would do so again for any
+        # kyomi-merge-sweeper-cron.sh (27 chars), and would do so again for any
         # cron wrapper added later.
         script_w = max([len("SCRIPT")] + [len(r["script"]) for r in runs])
         header = (
