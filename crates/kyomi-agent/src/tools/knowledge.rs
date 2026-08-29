@@ -1089,24 +1089,7 @@ impl AgentTool for EditDocumentTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqlx::sqlite::SqlitePoolOptions;
-
-    async fn test_pool() -> kyomi_core::DbPool {
-        let _ = kyomi_core::constants::load_with_fallback();
-
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("connect in-memory sqlite");
-
-        sqlx::migrate!("../../apps/server/migrations-sqlite")
-            .run(&pool)
-            .await
-            .expect("run sqlite migrations");
-
-        kyomi_core::DbPool::Sqlite(pool)
-    }
+    use crate::test_support::{build_ctx, loaded_embedding, seed_user_and_workspace, test_pool};
 
     /// Seed workspace "ws-1" with one active BigQuery datasource whose
     /// `connection_config` is exactly `connection_config_json`.
@@ -1190,5 +1173,558 @@ mod tests {
         // No datasource_configs row at all for this workspace.
         let enabled = workspace_wants_bigquery_public_datasets(&db, "ws-1").await;
         assert!(!enabled);
+    }
+
+    // ---------------------------------------------------------------------
+    // SearchKnowledgeTool — KYO-537 characterization tests.
+    // ---------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn search_knowledge_missing_query_is_bad_request() {
+        let ctx = build_ctx(test_pool().await);
+        let err = SearchKnowledgeTool
+            .execute(serde_json::json!({}), &ctx)
+            .await
+            .expect_err("query is required");
+        assert!(matches!(err, kyomi_core::Error::BadRequest(_)), "got: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn search_knowledge_invalid_doc_type_is_bad_request() {
+        let ctx = build_ctx(test_pool().await);
+        let err = SearchKnowledgeTool
+            .execute(
+                serde_json::json!({"query": "revenue", "doc_type": "bogus"}),
+                &ctx,
+            )
+            .await
+            .expect_err("invalid doc_type must be rejected");
+        match err {
+            kyomi_core::Error::BadRequest(msg) => {
+                assert!(msg.contains("Invalid doc_type"), "{msg}");
+            }
+            other => panic!("expected BadRequest, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn search_knowledge_empty_workspace_returns_empty_results() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let mut ctx = build_ctx(db);
+        ctx.embedding = loaded_embedding();
+
+        let result = SearchKnowledgeTool
+            .execute(serde_json::json!({"query": "revenue"}), &ctx)
+            .await
+            .expect("search_knowledge execute");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+
+        assert_eq!(
+            parsed,
+            serde_json::json!({"results": [], "found": 0}),
+            "exact shape of an empty-workspace search: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_knowledge_unknown_datasource_filter_is_error() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let mut ctx = build_ctx(db);
+        ctx.embedding = loaded_embedding();
+
+        let err = SearchKnowledgeTool
+            .execute(
+                serde_json::json!({"query": "revenue", "datasource": "does-not-exist"}),
+                &ctx,
+            )
+            .await
+            .expect_err("an unresolvable datasource slug must error, not silently no-op");
+        assert!(matches!(err, kyomi_core::Error::NotFound(_)), "got: {err:?}");
+    }
+
+    // ---------------------------------------------------------------------
+    // WriteDocumentTool — KYO-537 characterization tests.
+    // ---------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn write_knowledge_file_missing_path_is_bad_request() {
+        let ctx = build_ctx(test_pool().await);
+        let err = WriteDocumentTool
+            .execute(serde_json::json!({"content": "hello"}), &ctx)
+            .await
+            .expect_err("path is required");
+        assert!(matches!(err, kyomi_core::Error::BadRequest(_)), "got: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn write_knowledge_file_missing_content_is_bad_request() {
+        let ctx = build_ctx(test_pool().await);
+        let err = WriteDocumentTool
+            .execute(serde_json::json!({"path": "Doc"}), &ctx)
+            .await
+            .expect_err("content is required");
+        assert!(matches!(err, kyomi_core::Error::BadRequest(_)), "got: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn write_knowledge_file_creates_new_document() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let mut ctx = build_ctx(db);
+        ctx.embedding = loaded_embedding();
+
+        let result = WriteDocumentTool
+            .execute(
+                serde_json::json!({"path": "Runbook", "content": "# Runbook\nSteps."}),
+                &ctx,
+            )
+            .await
+            .expect("write_knowledge_file execute");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+
+        assert_eq!(parsed["success"], serde_json::json!(true), "{result}");
+        assert_eq!(parsed["action"], serde_json::json!("created"), "{result}");
+        assert_eq!(parsed["path"], serde_json::json!("Runbook"), "{result}");
+        assert!(parsed["id"].as_str().is_some(), "{result}");
+        assert!(parsed["content_hash"].as_str().is_some(), "{result}");
+
+        // No 'doc_type' key was given, so the default per the tool's own
+        // parameter schema — 'knowledge', not 'dashboard' — must be what
+        // actually landed in the shared dashboards table.
+        let doc = find_document_by_title(&ctx.db, "ws-1", "user-a", "Runbook")
+            .await
+            .expect("lookup")
+            .expect("document exists");
+        assert_eq!(doc.doc_type(), DocType::Knowledge);
+        assert_eq!(doc.content, "# Runbook\nSteps.");
+    }
+
+    #[tokio::test]
+    async fn write_knowledge_file_updates_existing_document_by_title() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let mut ctx = build_ctx(db);
+        ctx.embedding = loaded_embedding();
+
+        let create_result = WriteDocumentTool
+            .execute(
+                serde_json::json!({"path": "Runbook", "content": "v1"}),
+                &ctx,
+            )
+            .await
+            .expect("create");
+        let created: serde_json::Value = serde_json::from_str(&create_result).expect("json");
+        let hash = created["content_hash"].as_str().expect("content_hash").to_string();
+
+        let update_result = WriteDocumentTool
+            .execute(
+                serde_json::json!({
+                    "path": "Runbook",
+                    "content": "v2",
+                    "content_hash": hash,
+                }),
+                &ctx,
+            )
+            .await
+            .expect("update");
+        let updated: serde_json::Value = serde_json::from_str(&update_result).expect("json");
+
+        assert_eq!(updated["success"], serde_json::json!(true), "{update_result}");
+        assert_eq!(updated["action"], serde_json::json!("updated"), "{update_result}");
+        assert_eq!(updated["id"], created["id"], "must update the same document, not create a second one");
+
+        let doc = find_document_by_title(&ctx.db, "ws-1", "user-a", "Runbook")
+            .await
+            .expect("lookup")
+            .expect("document exists");
+        assert_eq!(doc.content, "v2");
+    }
+
+    #[tokio::test]
+    async fn write_knowledge_file_conflict_on_stale_hash() {
+        // KYO-539 pin: write_knowledge_file DOES pass expected_content_hash
+        // through to update_dashboard (knowledge.rs ~694), so a caller
+        // supplying a stale hash gets a CAS conflict rather than silently
+        // clobbering a concurrent edit. Contrast with
+        // `modify_dashboard_cas_is_never_enforced` in tools/dashboard.rs,
+        // which pins the opposite for the dashboard-side tool.
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let mut ctx = build_ctx(db);
+        ctx.embedding = loaded_embedding();
+
+        WriteDocumentTool
+            .execute(
+                serde_json::json!({"path": "Runbook", "content": "v1"}),
+                &ctx,
+            )
+            .await
+            .expect("create");
+
+        let result = WriteDocumentTool
+            .execute(
+                serde_json::json!({
+                    "path": "Runbook",
+                    "content": "v2",
+                    "content_hash": "0000000000000000",
+                }),
+                &ctx,
+            )
+            .await
+            .expect("stale-hash write still returns Ok(..) with a structured failure");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+
+        assert_eq!(parsed["success"], serde_json::json!(false), "{result}");
+        assert!(
+            parsed["error"].as_str().unwrap_or_default().contains("Content hash mismatch"),
+            "{result}"
+        );
+
+        let doc = find_document_by_title(&ctx.db, "ws-1", "user-a", "Runbook")
+            .await
+            .expect("lookup")
+            .expect("document exists");
+        assert_eq!(doc.content, "v1", "a rejected CAS write must not apply");
+    }
+
+    // ---------------------------------------------------------------------
+    // ReadDocumentTool — KYO-537 characterization tests.
+    // ---------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn read_knowledge_file_missing_path_is_bad_request() {
+        let ctx = build_ctx(test_pool().await);
+        let err = ReadDocumentTool
+            .execute(serde_json::json!({}), &ctx)
+            .await
+            .expect_err("path is required");
+        assert!(matches!(err, kyomi_core::Error::BadRequest(_)), "got: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn read_knowledge_file_not_found_returns_error_json_not_err() {
+        let ctx = build_ctx(test_pool().await);
+        let result = ReadDocumentTool
+            .execute(serde_json::json!({"path": "Nope"}), &ctx)
+            .await
+            .expect("a missing document is a structured result, not an Err");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+        assert_eq!(
+            parsed,
+            serde_json::json!({"error": "Document not found: Nope"}),
+            "{result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_knowledge_file_returns_full_content() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let dashboard_id = kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Runbook", "full content here", DocType::Knowledge, None,
+        )
+        .await
+        .expect("seed knowledge doc");
+        let ctx = build_ctx(db);
+
+        let result = ReadDocumentTool
+            .execute(serde_json::json!({"path": "Runbook"}), &ctx)
+            .await
+            .expect("read_knowledge_file execute");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+
+        assert_eq!(parsed["id"], serde_json::json!(dashboard_id), "{result}");
+        assert_eq!(parsed["name"], serde_json::json!("Runbook"), "{result}");
+        assert_eq!(parsed["doc_type"], serde_json::json!("knowledge"), "{result}");
+        assert_eq!(parsed["content"], serde_json::json!("full content here"), "{result}");
+        assert!(parsed["content_hash"].as_str().is_some(), "{result}");
+        assert!(parsed["updated_at"].as_str().is_some(), "{result}");
+    }
+
+    // ---------------------------------------------------------------------
+    // ListDocumentsTool — KYO-537 characterization tests.
+    // ---------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn list_knowledge_files_returns_all_doc_types_when_unfiltered() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "A Dashboard", "content", DocType::Dashboard, None,
+        )
+        .await
+        .expect("seed dashboard");
+        kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "A Knowledge Doc", "content", DocType::Knowledge, None,
+        )
+        .await
+        .expect("seed knowledge doc");
+        let ctx = build_ctx(db);
+
+        let result = ListDocumentsTool
+            .execute(serde_json::json!({}), &ctx)
+            .await
+            .expect("list_knowledge_files execute");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+
+        assert_eq!(parsed["count"], serde_json::json!(2), "{result}");
+        assert_eq!(parsed["files"].as_array().expect("array").len(), 2, "{result}");
+    }
+
+    #[tokio::test]
+    async fn list_knowledge_files_filters_by_doc_type() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "A Dashboard", "content", DocType::Dashboard, None,
+        )
+        .await
+        .expect("seed dashboard");
+        kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "A Knowledge Doc", "content", DocType::Knowledge, None,
+        )
+        .await
+        .expect("seed knowledge doc");
+        let ctx = build_ctx(db);
+
+        let result = ListDocumentsTool
+            .execute(serde_json::json!({"doc_type": "knowledge"}), &ctx)
+            .await
+            .expect("list_knowledge_files execute");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+
+        assert_eq!(parsed["count"], serde_json::json!(1), "{result}");
+        assert_eq!(
+            parsed["files"][0]["title"],
+            serde_json::json!("A Knowledge Doc"),
+            "{result}"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // EditDocumentTool — KYO-537 characterization tests.
+    // ---------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn edit_knowledge_file_missing_path_is_bad_request() {
+        let ctx = build_ctx(test_pool().await);
+        let err = EditDocumentTool
+            .execute(
+                serde_json::json!({"old_text": "a", "new_text": "b"}),
+                &ctx,
+            )
+            .await
+            .expect_err("path is required");
+        assert!(matches!(err, kyomi_core::Error::BadRequest(_)), "got: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn edit_knowledge_file_missing_old_text_is_bad_request() {
+        let ctx = build_ctx(test_pool().await);
+        let err = EditDocumentTool
+            .execute(
+                serde_json::json!({"path": "Doc", "new_text": "b"}),
+                &ctx,
+            )
+            .await
+            .expect_err("old_text is required");
+        assert!(matches!(err, kyomi_core::Error::BadRequest(_)), "got: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn edit_knowledge_file_missing_new_text_is_bad_request() {
+        let ctx = build_ctx(test_pool().await);
+        let err = EditDocumentTool
+            .execute(
+                serde_json::json!({"path": "Doc", "old_text": "a"}),
+                &ctx,
+            )
+            .await
+            .expect_err("new_text is required");
+        assert!(matches!(err, kyomi_core::Error::BadRequest(_)), "got: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn edit_knowledge_file_document_not_found_is_err() {
+        let ctx = build_ctx(test_pool().await);
+        let err = EditDocumentTool
+            .execute(
+                serde_json::json!({"path": "Nope", "old_text": "a", "new_text": "b"}),
+                &ctx,
+            )
+            .await
+            .expect_err("a document that resolves to nothing must be an Err, unlike read_knowledge_file");
+        assert!(matches!(err, kyomi_core::Error::NotFound(_)), "got: {err:?}");
+    }
+
+    /// KYO-537 named pin (ticket item 1): `edit_knowledge_file`'s zero-match
+    /// guard (`knowledge.rs` ~999) returns a structured failure, not an Err.
+    #[tokio::test]
+    async fn edit_knowledge_file_zero_matches_returns_error_json() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Runbook", "alpha beta gamma", DocType::Knowledge, None,
+        )
+        .await
+        .expect("seed doc");
+        let ctx = build_ctx(db);
+
+        let result = EditDocumentTool
+            .execute(
+                serde_json::json!({"path": "Runbook", "old_text": "delta", "new_text": "x"}),
+                &ctx,
+            )
+            .await
+            .expect("execute");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+
+        assert_eq!(parsed["success"], serde_json::json!(false), "{result}");
+        assert_eq!(
+            parsed["error"],
+            serde_json::json!("old_text not found in document content"),
+            "{result}"
+        );
+    }
+
+    /// KYO-537 named pin (ticket item 1): `edit_knowledge_file`'s
+    /// multi-match guard (`knowledge.rs` ~1006) must name the exact
+    /// occurrence count in its error message — the model needs that number
+    /// to know how to disambiguate its next attempt.
+    #[tokio::test]
+    async fn edit_knowledge_file_multi_match_names_occurrence_count() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Runbook", "alpha beta alpha gamma alpha", DocType::Knowledge, None,
+        )
+        .await
+        .expect("seed doc");
+        let ctx = build_ctx(db);
+
+        let result = EditDocumentTool
+            .execute(
+                serde_json::json!({"path": "Runbook", "old_text": "alpha", "new_text": "x"}),
+                &ctx,
+            )
+            .await
+            .expect("execute");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+
+        assert_eq!(parsed["success"], serde_json::json!(false), "{result}");
+        assert_eq!(
+            parsed["error"],
+            serde_json::json!("old_text appears 3 times — must appear exactly once"),
+            "{result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_knowledge_file_applies_replacement_happy_path() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Runbook", "alpha beta gamma", DocType::Knowledge, None,
+        )
+        .await
+        .expect("seed doc");
+        let mut ctx = build_ctx(db);
+        ctx.embedding = loaded_embedding();
+
+        let result = EditDocumentTool
+            .execute(
+                serde_json::json!({"path": "Runbook", "old_text": "beta", "new_text": "BETA"}),
+                &ctx,
+            )
+            .await
+            .expect("execute");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+
+        assert_eq!(parsed["success"], serde_json::json!(true), "{result}");
+        assert!(parsed["content_hash"].as_str().is_some(), "{result}");
+
+        let doc = find_document_by_title(&ctx.db, "ws-1", "user-a", "Runbook")
+            .await
+            .expect("lookup")
+            .expect("document exists");
+        assert_eq!(doc.content, "alpha BETA gamma");
+    }
+
+    // NOTE (ticket item 5, CAS presence): unlike `write_knowledge_file`,
+    // there is no black-box test here forcing `edit_knowledge_file`'s CAS
+    // mismatch (`Err(Conflict)`) branch to fire. `write_knowledge_file`
+    // exposes `content_hash` as a caller-supplied argument, so a stale
+    // value can be passed in directly (see
+    // `write_knowledge_file_conflict_on_stale_hash` above) — a genuine,
+    // deterministic black-box trigger. `edit_knowledge_file` has no such
+    // parameter: its `expected_content_hash` (knowledge.rs ~1031) is always
+    // derived internally from the document state `resolve_document` just
+    // read a few lines earlier in the same `execute()` call, so it can only
+    // ever mismatch given a real concurrent writer racing between that read
+    // and this call's own `update_dashboard`. Constructing that
+    // deterministically (rather than hoping a sleep wins the race, which
+    // `docs/standards/testing/nondeterministic-verdict-is-a-failing-test.md`
+    // rules out) would require a synchronization checkpoint inside
+    // `execute()` that production code doesn't have — adding one is a
+    // production-code change, out of scope for a tests-only ticket. The
+    // fact that `edit_knowledge_file` *does* pass a real, non-`None` hash
+    // (mirroring `write_knowledge_file`'s CAS wiring, unlike
+    // `modify_dashboard`'s permanent `None`) is still exercised on every
+    // successful edit: `edit_knowledge_file_applies_replacement_happy_path`
+    // above asserts the returned `content_hash` changes to match the new
+    // content, which only happens by going through this same
+    // `update_dashboard` CAS-aware call.
+
+    /// KYO-537 named pin (ticket item 4 — "doc_type reach"): despite its
+    /// name, `edit_knowledge_file` is NOT knowledge-specific. It resolves
+    /// its target through `find_document_by_title`, which passes
+    /// `doc_type_filter: None` to `search_dashboards` (knowledge.rs ~545) —
+    /// so it happily resolves and edits a `Dashboard`-doc_type row too.
+    ///
+    /// NOTE: this is surprising, current, unfixed behavior, not a
+    /// recommendation. Stage 2 (KYO-538) is expected to reckon with it
+    /// deliberately; this test exists so that reckoning is a visible,
+    /// intentional diff against a known baseline rather than an unnoticed
+    /// behavior change.
+    #[tokio::test]
+    async fn edit_knowledge_file_reaches_across_doc_type_into_dashboards() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Q3 Revenue Dashboard", "initial content here", DocType::Dashboard, None,
+        )
+        .await
+        .expect("seed a Dashboard-doc_type row, not Knowledge");
+        let mut ctx = build_ctx(db);
+        ctx.embedding = loaded_embedding();
+
+        let result = EditDocumentTool
+            .execute(
+                serde_json::json!({
+                    "path": "Q3 Revenue Dashboard",
+                    "old_text": "initial",
+                    "new_text": "updated",
+                }),
+                &ctx,
+            )
+            .await
+            .expect("edit_knowledge_file executes against a dashboard-doc_type row without error");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+
+        assert_eq!(
+            parsed["success"],
+            serde_json::json!(true),
+            "edit_knowledge_file must currently succeed against a dashboard doc, \
+             per doc_type_filter: None in find_document_by_title: {result}"
+        );
+
+        let doc = find_document_by_title(&ctx.db, "ws-1", "user-a", "Q3 Revenue Dashboard")
+            .await
+            .expect("lookup")
+            .expect("document exists");
+        assert_eq!(doc.doc_type(), DocType::Dashboard, "doc_type must be unchanged by the edit");
+        assert_eq!(doc.content, "updated content here");
     }
 }

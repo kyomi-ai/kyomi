@@ -425,6 +425,9 @@ impl AgentTool for UpdateWatchCopilotTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kyomi_auth::websocket::WebSocketManager;
+
+    use crate::test_support::{build_ctx, seed_user_and_workspace, test_pool};
 
     // -- UpdateDashboardCopilotTool ------------------------------------------
 
@@ -626,5 +629,283 @@ mod tests {
             "Watch mode validation failed. Fix the mode and try again:\n\
              mode must be 'alert' or 'report', got 'summary'"
         );
+    }
+
+    // =========================================================================
+    // KYO-537 characterization tests — execute() behavior.
+    // =========================================================================
+
+    // -- UpdateDashboardCopilotTool ------------------------------------------
+
+    /// KYO-537 named pin (ticket item 3): the missing-`content` branch
+    /// (`copilot.rs` ~100).
+    #[tokio::test]
+    async fn update_dashboard_copilot_missing_content_is_bad_request() {
+        let ctx = build_ctx(test_pool().await);
+        let err = UpdateDashboardCopilotTool
+            .execute(serde_json::json!({"summary": "a change"}), &ctx)
+            .await
+            .expect_err("content is required");
+        assert!(matches!(err, kyomi_core::Error::BadRequest(_)), "got: {err:?}");
+    }
+
+    /// KYO-537 named pin (ticket item 3): the missing-`summary` branch
+    /// (`copilot.rs` ~108).
+    #[tokio::test]
+    async fn update_dashboard_copilot_missing_summary_is_bad_request() {
+        let ctx = build_ctx(test_pool().await);
+        let err = UpdateDashboardCopilotTool
+            .execute(serde_json::json!({"content": "# New content"}), &ctx)
+            .await
+            .expect_err("summary is required");
+        assert!(matches!(err, kyomi_core::Error::BadRequest(_)), "got: {err:?}");
+    }
+
+    /// KYO-537 named pin (ticket item 6 — "sink"): `update_dashboard`
+    /// (the copilot tool) writes NOTHING to the database and only ever
+    /// emits a WebSocket message. This is the property most easily lost
+    /// when this tool is folded into the DB-writing dashboard tools in a
+    /// later stage.
+    ///
+    /// KYO-536 is expected to deliberately invalidate this test by making
+    /// the copilot write directly — that is correct behavior to pin today
+    /// and let KYO-536 flip on purpose, not something to weaken in advance.
+    #[tokio::test]
+    async fn update_dashboard_copilot_writes_nothing_to_db_only_sends_websocket() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let dashboard_id = kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Untouched", "original content", kyomi_core::models::DocType::Dashboard, None,
+        )
+        .await
+        .expect("seed dashboard");
+
+        let manager = WebSocketManager::new(None, db.clone());
+        let (_conn, mut rx) = manager.connect("user-a").expect("connect user-a");
+        rx.try_recv().expect("heartbeat");
+
+        let mut ctx = build_ctx(db);
+        ctx.ws_manager = manager;
+        ctx.session_id = Some("sess-1".to_string());
+
+        let result = UpdateDashboardCopilotTool
+            .execute(
+                serde_json::json!({
+                    "content": "# Completely different content",
+                    "summary": "Rewrote the intro",
+                }),
+                &ctx,
+            )
+            .await
+            .expect("execute");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+
+        assert_eq!(
+            parsed,
+            serde_json::json!({"success": true, "message": "Dashboard content sent to user"}),
+            "{result}"
+        );
+
+        let msg = rx.try_recv().expect("dashboard_update broadcast");
+        assert!(msg.contains("\"type\":\"dashboard_update\""), "{msg}");
+        assert!(msg.contains("\"session_id\":\"sess-1\""), "{msg}");
+        assert!(msg.contains("Completely different content"), "{msg}");
+        assert!(msg.contains("\"context_type\":\"dashboard_copilot\""), "{msg}");
+        assert!(
+            rx.try_recv().is_err(),
+            "no second message (e.g. a sync_action) should ever be sent — this tool has no DB write to sync"
+        );
+
+        // The DB row this tool's message *describes* must be byte-for-byte
+        // unchanged — this tool never reaches ctx.db at all.
+        let dash = kyomi_auth::dashboard_service::get_dashboard(&ctx.db, &dashboard_id, "ws-1", "user-a")
+            .await
+            .expect("lookup")
+            .expect("exists");
+        assert_eq!(dash.content, "original content", "update_dashboard (copilot) must not write to the DB");
+        assert_eq!(dash.title, "Untouched");
+
+        // get_document_count (not get_dashboard_count, which filters to
+        // doc_type='dashboard' only) — a leaked write of *any* doc_type,
+        // knowledge included, must be caught here too.
+        let count = kyomi_auth::dashboard_service::get_document_count(&ctx.db, "ws-1", None, "user-a")
+            .await
+            .expect("count");
+        assert_eq!(count, 1, "no new document row of any doc_type may have been created either");
+    }
+
+    // -- UpdateChartCopilotTool ------------------------------------------------
+
+    #[tokio::test]
+    async fn update_chart_copilot_missing_content_is_bad_request() {
+        let ctx = build_ctx(test_pool().await);
+        let err = UpdateChartCopilotTool
+            .execute(serde_json::json!({"summary": "a change"}), &ctx)
+            .await
+            .expect_err("content is required");
+        assert!(matches!(err, kyomi_core::Error::BadRequest(_)), "got: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn update_chart_copilot_missing_summary_is_bad_request() {
+        let ctx = build_ctx(test_pool().await);
+        let err = UpdateChartCopilotTool
+            .execute(serde_json::json!({"content": "data: {}"}), &ctx)
+            .await
+            .expect_err("summary is required");
+        assert!(matches!(err, kyomi_core::Error::BadRequest(_)), "got: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn update_chart_copilot_invalid_chartml_returns_validation_failure() {
+        let ctx = build_ctx(test_pool().await);
+        // Missing the required 'visualize' key.
+        let result = UpdateChartCopilotTool
+            .execute(
+                serde_json::json!({"content": "data:\n  source: table", "summary": "try a chart"}),
+                &ctx,
+            )
+            .await
+            .expect("a validation failure is a structured result, not an Err");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+
+        assert_eq!(parsed["success"], serde_json::json!(false), "{result}");
+        assert_eq!(parsed["validation_failed"], serde_json::json!(true), "{result}");
+        assert_eq!(
+            parsed["errors"][0],
+            serde_json::json!("ChartML block missing required 'visualize' key"),
+            "{result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_chart_copilot_happy_path_sends_websocket() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let manager = WebSocketManager::new(None, db.clone());
+        let (_conn, mut rx) = manager.connect("user-a").expect("connect user-a");
+        rx.try_recv().expect("heartbeat");
+
+        let mut ctx = build_ctx(db);
+        ctx.ws_manager = manager;
+
+        let content = "data:\n  source: table\nvisualize:\n  type: bar";
+        let result = UpdateChartCopilotTool
+            .execute(
+                serde_json::json!({"content": content, "summary": "Switched to a bar chart"}),
+                &ctx,
+            )
+            .await
+            .expect("execute");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+
+        assert_eq!(
+            parsed,
+            serde_json::json!({"success": true, "message": "Chart content sent to user"}),
+            "{result}"
+        );
+
+        let msg = rx.try_recv().expect("chart_update broadcast");
+        assert!(msg.contains("\"type\":\"chart_update\""), "{msg}");
+        assert!(msg.contains("\"context_type\":\"chart_builder_copilot\""), "{msg}");
+    }
+
+    // -- UpdateWatchCopilotTool ------------------------------------------------
+
+    #[tokio::test]
+    async fn update_watch_copilot_missing_summary_is_bad_request() {
+        let ctx = build_ctx(test_pool().await);
+        let err = UpdateWatchCopilotTool
+            .execute(serde_json::json!({"name": "My Watch"}), &ctx)
+            .await
+            .expect_err("summary is required");
+        assert!(matches!(err, kyomi_core::Error::BadRequest(_)), "got: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn update_watch_copilot_invalid_schedule_returns_validation_failure() {
+        let ctx = build_ctx(test_pool().await);
+        let result = UpdateWatchCopilotTool
+            .execute(
+                serde_json::json!({"schedule": "0 9 * *", "summary": "daily check"}),
+                &ctx,
+            )
+            .await
+            .expect("a validation failure is a structured result, not an Err");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+
+        assert_eq!(parsed["success"], serde_json::json!(false), "{result}");
+        assert_eq!(parsed["validation_failed"], serde_json::json!(true), "{result}");
+        assert!(
+            parsed["errors"][0].as_str().unwrap_or_default().contains("Invalid cron expression"),
+            "{result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_watch_copilot_invalid_mode_returns_validation_failure() {
+        let ctx = build_ctx(test_pool().await);
+        let result = UpdateWatchCopilotTool
+            .execute(
+                serde_json::json!({"mode": "summary", "summary": "daily check"}),
+                &ctx,
+            )
+            .await
+            .expect("a validation failure is a structured result, not an Err");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+
+        assert_eq!(parsed["success"], serde_json::json!(false), "{result}");
+        assert_eq!(
+            parsed["errors"][0],
+            serde_json::json!("Watch mode must be 'alert' or 'report'"),
+            "{result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_watch_copilot_happy_path_forwards_only_provided_fields() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let manager = WebSocketManager::new(None, db.clone());
+        let (_conn, mut rx) = manager.connect("user-a").expect("connect user-a");
+        rx.try_recv().expect("heartbeat");
+
+        let mut ctx = build_ctx(db);
+        ctx.ws_manager = manager;
+
+        let result = UpdateWatchCopilotTool
+            .execute(
+                serde_json::json!({
+                    "name": "Revenue Watch",
+                    "schedule": "0 9 * * *",
+                    "summary": "Drafted a daily revenue watch",
+                }),
+                &ctx,
+            )
+            .await
+            .expect("execute");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+
+        assert_eq!(
+            parsed,
+            serde_json::json!({"success": true, "message": "Watch configuration sent to user"}),
+            "{result}"
+        );
+
+        let msg = rx.try_recv().expect("watch_update broadcast");
+        let msg_json: serde_json::Value = serde_json::from_str(&msg).expect("valid json");
+        assert_eq!(msg_json["type"], serde_json::json!("watch_update"), "{msg}");
+        assert_eq!(msg_json["data"]["name"], serde_json::json!("Revenue Watch"), "{msg}");
+        assert_eq!(msg_json["data"]["schedule"], serde_json::json!("0 9 * * *"), "{msg}");
+        assert_eq!(
+            msg_json["data"]["context_type"],
+            serde_json::json!("watch_copilot"),
+            "{msg}"
+        );
+        // Fields the caller never supplied (prompt, mode, slack_channel_id, ...)
+        // must be absent, not present-as-null — the frontend merges partial
+        // updates and a stray null would clobber existing draft state.
+        assert!(msg_json["data"].get("prompt").is_none(), "{msg}");
+        assert!(msg_json["data"].get("mode").is_none(), "{msg}");
     }
 }

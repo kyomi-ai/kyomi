@@ -780,6 +780,31 @@ impl AgentTool for DeleteDashboardTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kyomi_auth::websocket::WebSocketManager;
+
+    use crate::test_support::{build_ctx, seed_user_and_workspace, test_pool};
+
+    /// Insert a second user, `"user-b"`, into workspace `"ws-1"` alongside
+    /// the `"user-a"` owner `seed_user_and_workspace` sets up. Used by the
+    /// ownership-boundary tests below (a non-owner must never modify or
+    /// delete another user's dashboard).
+    async fn seed_second_user(db: &kyomi_core::DbPool) {
+        let sq = match db {
+            kyomi_core::DbPool::Sqlite(sq) => sq,
+            kyomi_core::DbPool::Postgres(_) => unreachable!("test pool is always sqlite"),
+        };
+        sqlx::query("INSERT INTO users (user_id, email) VALUES ('user-b', 'b@test.local')")
+            .execute(sq)
+            .await
+            .expect("insert user-b");
+        sqlx::query(
+            "INSERT INTO workspace_users (workspace_id, user_id, role, active) \
+             VALUES ('ws-1', 'user-b', 'user', 1)",
+        )
+        .execute(sq)
+        .await
+        .expect("insert workspace_users user-b");
+    }
 
     // -- SearchDashboardsTool ------------------------------------------------
 
@@ -951,5 +976,570 @@ mod tests {
     #[test]
     fn delete_dashboard_not_copilot_only() {
         assert!(!DeleteDashboardTool.is_copilot_only());
+    }
+
+    // =========================================================================
+    // KYO-537 characterization tests — execute() behavior, happy paths and
+    // every early-return failure branch.
+    // =========================================================================
+
+    // -- SearchDashboardsTool -------------------------------------------------
+
+    #[tokio::test]
+    async fn search_dashboards_execute_empty_workspace_returns_empty_results() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let ctx = build_ctx(db);
+
+        let result = SearchDashboardsTool
+            .execute(serde_json::json!({}), &ctx)
+            .await
+            .expect("search_dashboards execute");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+
+        assert_eq!(parsed["count"], serde_json::json!(0), "{result}");
+        assert_eq!(parsed["documents"], serde_json::json!([]), "{result}");
+        assert_eq!(parsed["dashboards"], serde_json::json!([]), "{result}");
+        assert_eq!(parsed["total_workspace_documents"], serde_json::json!(0), "{result}");
+        assert_eq!(parsed["sorted_by"], serde_json::json!("popularity"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn search_dashboards_execute_returns_seeded_dashboard_with_expected_fields() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let dashboard_id = kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Quarterly Revenue", "content", kyomi_core::models::DocType::Dashboard, None,
+        )
+        .await
+        .expect("seed dashboard");
+        let ctx = build_ctx(db);
+
+        let result = SearchDashboardsTool
+            .execute(serde_json::json!({}), &ctx)
+            .await
+            .expect("search_dashboards execute");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+
+        assert_eq!(parsed["count"], serde_json::json!(1), "{result}");
+        let doc = &parsed["documents"][0];
+        assert_eq!(doc["dashboard_id"], serde_json::json!(dashboard_id), "{result}");
+        assert_eq!(
+            doc["url"],
+            serde_json::json!(format!("http://localhost:5173/dashboard/{dashboard_id}")),
+            "{result}"
+        );
+        assert_eq!(doc["title"], serde_json::json!("Quarterly Revenue"), "{result}");
+        assert_eq!(doc["doc_type"], serde_json::json!("dashboard"), "{result}");
+        assert_eq!(doc["total_views"], serde_json::json!(0), "{result}");
+        assert_eq!(doc["recent_views"], serde_json::json!(0), "{result}");
+        // Same array object referenced by both keys — the "dashboards" alias
+        // documented at dashboard.rs as backward-compatible.
+        assert_eq!(parsed["documents"], parsed["dashboards"], "{result}");
+    }
+
+    // -- GetDashboardInfoTool --------------------------------------------------
+
+    #[tokio::test]
+    async fn get_dashboard_info_missing_dashboard_id_is_bad_request() {
+        let ctx = build_ctx(test_pool().await);
+        let err = GetDashboardInfoTool
+            .execute(serde_json::json!({}), &ctx)
+            .await
+            .expect_err("dashboard_id is required");
+        assert!(matches!(err, kyomi_core::Error::BadRequest(_)), "got: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn get_dashboard_info_not_found_returns_error_json_not_err() {
+        let ctx = build_ctx(test_pool().await);
+        let result = GetDashboardInfoTool
+            .execute(serde_json::json!({"dashboard_id": "nope"}), &ctx)
+            .await
+            .expect("a missing dashboard is a structured result, not an Err");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+        assert_eq!(
+            parsed,
+            serde_json::json!({"error": "Dashboard not found: nope"}),
+            "{result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_dashboard_info_happy_path() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let dashboard_id = kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Runbook", "full body content", kyomi_core::models::DocType::Dashboard, None,
+        )
+        .await
+        .expect("seed dashboard");
+        let ctx = build_ctx(db);
+
+        let result = GetDashboardInfoTool
+            .execute(serde_json::json!({"dashboard_id": dashboard_id}), &ctx)
+            .await
+            .expect("get_dashboard_info execute");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+
+        assert_eq!(parsed["success"], serde_json::json!(true), "{result}");
+        assert_eq!(parsed["dashboard_id"], serde_json::json!(dashboard_id), "{result}");
+        assert_eq!(parsed["title"], serde_json::json!("Runbook"), "{result}");
+        assert_eq!(parsed["content"], serde_json::json!("full body content"), "{result}");
+        assert_eq!(
+            parsed["message"],
+            serde_json::json!("Retrieved dashboard 'Runbook'"),
+            "{result}"
+        );
+    }
+
+    // -- CreateDashboardTool ----------------------------------------------------
+
+    #[tokio::test]
+    async fn create_dashboard_missing_title_is_bad_request() {
+        let ctx = build_ctx(test_pool().await);
+        let err = CreateDashboardTool
+            .execute(serde_json::json!({"verified_no_duplicates": true}), &ctx)
+            .await
+            .expect_err("title is required");
+        assert!(matches!(err, kyomi_core::Error::BadRequest(_)), "got: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn create_dashboard_unverified_duplicates_returns_error_json() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let ctx = build_ctx(db);
+
+        let result = CreateDashboardTool
+            .execute(serde_json::json!({"title": "New Dashboard"}), &ctx)
+            .await
+            .expect("execute");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+
+        assert!(
+            parsed["error"].as_str().unwrap_or_default().contains("search_dashboards tool first"),
+            "{result}"
+        );
+
+        let count = kyomi_auth::dashboard_service::get_dashboard_count(&ctx.db, "ws-1", Some("user-a"))
+            .await
+            .expect("count");
+        assert_eq!(count, 0, "an unverified create must not write a row");
+    }
+
+    #[tokio::test]
+    async fn create_dashboard_happy_path_creates_and_broadcasts() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let manager = WebSocketManager::new(None, db.clone());
+        let (_conn, mut rx) = manager.connect("user-a").expect("connect user-a");
+        rx.try_recv().expect("heartbeat");
+
+        let mut ctx = build_ctx(db);
+        ctx.ws_manager = manager;
+
+        let result = CreateDashboardTool
+            .execute(
+                serde_json::json!({"title": "New Dashboard", "verified_no_duplicates": true}),
+                &ctx,
+            )
+            .await
+            .expect("execute");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+
+        assert_eq!(parsed["success"], serde_json::json!(true), "{result}");
+        assert_eq!(parsed["title"], serde_json::json!("New Dashboard"), "{result}");
+        let dashboard_id = parsed["dashboard_id"].as_str().expect("dashboard_id").to_string();
+        assert_eq!(
+            parsed["url"],
+            serde_json::json!(format!("http://localhost:5173/dashboard/{dashboard_id}")),
+            "{result}"
+        );
+
+        let msg1 = rx.try_recv().expect("dashboard_update broadcast");
+        assert!(msg1.contains("dashboard_update"), "{msg1}");
+        assert!(msg1.contains("\"action\":\"created\""), "{msg1}");
+        let msg2 = rx.try_recv().expect("sync_action broadcast");
+        assert!(msg2.contains("sync_action"), "{msg2}");
+    }
+
+    #[tokio::test]
+    async fn create_dashboard_free_tier_limit_returns_forbidden_json() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let sq = match &db {
+            kyomi_core::DbPool::Sqlite(sq) => sq,
+            kyomi_core::DbPool::Postgres(_) => unreachable!(),
+        };
+        for i in 0..5 {
+            sqlx::query(
+                "INSERT INTO dashboards \
+                 (dashboard_id, user_id, workspace_id, title, content, doc_type, created_by, updated_by) \
+                 VALUES (?, 'user-a', 'ws-1', ?, '', 'dashboard', 'user-a', 'user-a')",
+            )
+            .bind(format!("d-{i}"))
+            .bind(format!("Existing {i}"))
+            .execute(sq)
+            .await
+            .expect("seed pre-existing dashboard");
+        }
+        let ctx = build_ctx(db);
+
+        let result = CreateDashboardTool
+            .execute(
+                serde_json::json!({"title": "One Too Many", "verified_no_duplicates": true}),
+                &ctx,
+            )
+            .await
+            .expect("execute");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+
+        assert_eq!(parsed["success"], serde_json::json!(false), "{result}");
+        assert_eq!(parsed["upgrade_required"], serde_json::json!(true), "{result}");
+        assert!(
+            parsed["error"].as_str().unwrap_or_default().contains("Free tier is limited to 5"),
+            "{result}"
+        );
+    }
+
+    // -- ModifyDashboardTool ------------------------------------------------
+
+    #[tokio::test]
+    async fn modify_dashboard_missing_dashboard_id_is_bad_request() {
+        let ctx = build_ctx(test_pool().await);
+        let err = ModifyDashboardTool
+            .execute(serde_json::json!({"title": "x"}), &ctx)
+            .await
+            .expect_err("dashboard_id is required");
+        assert!(matches!(err, kyomi_core::Error::BadRequest(_)), "got: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn modify_dashboard_no_title_or_content_returns_error_json() {
+        let ctx = build_ctx(test_pool().await);
+        let result = ModifyDashboardTool
+            .execute(serde_json::json!({"dashboard_id": "d-1"}), &ctx)
+            .await
+            .expect("execute");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+        assert_eq!(
+            parsed,
+            serde_json::json!({"error": "At least one of 'title' or 'content' must be provided"}),
+            "{result}"
+        );
+    }
+
+    /// KYO-537 named pin (ticket item 2): a title-only update against a
+    /// dashboard whose content is empty must be a hard failure
+    /// (`success: false`), not a soft `success: true`. The in-code comment
+    /// at `dashboard.rs` ~545 records that the soft-success version of this
+    /// branch caused a 21-call model loop — the model reads `success: true`
+    /// and repeats the same no-op call believing it worked.
+    #[tokio::test]
+    async fn modify_dashboard_title_only_on_empty_dashboard_is_hard_failure() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let dashboard_id = kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Empty Dashboard", "", kyomi_core::models::DocType::Dashboard, None,
+        )
+        .await
+        .expect("seed empty dashboard");
+        let ctx = build_ctx(db);
+
+        let result = ModifyDashboardTool
+            .execute(
+                serde_json::json!({"dashboard_id": dashboard_id, "title": "Renamed"}),
+                &ctx,
+            )
+            .await
+            .expect("execute");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+
+        assert_eq!(
+            parsed["success"],
+            serde_json::json!(false),
+            "a title-only update on an empty dashboard must hard-fail, not soft-succeed: {result}"
+        );
+        assert!(
+            parsed["error"].as_str().unwrap_or_default().contains("MUST include the 'content' parameter"),
+            "{result}"
+        );
+
+        let dash = kyomi_auth::dashboard_service::get_dashboard(&ctx.db, &dashboard_id, "ws-1", "user-a")
+            .await
+            .expect("lookup")
+            .expect("exists");
+        assert_eq!(dash.title, "Empty Dashboard", "the rejected title change must not apply");
+    }
+
+    #[tokio::test]
+    async fn modify_dashboard_title_only_on_nonempty_dashboard_succeeds() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let dashboard_id = kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Has Content", "not empty", kyomi_core::models::DocType::Dashboard, None,
+        )
+        .await
+        .expect("seed non-empty dashboard");
+        let ctx = build_ctx(db);
+
+        let result = ModifyDashboardTool
+            .execute(
+                serde_json::json!({"dashboard_id": dashboard_id, "title": "Renamed"}),
+                &ctx,
+            )
+            .await
+            .expect("execute");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+
+        assert_eq!(
+            parsed["success"],
+            serde_json::json!(true),
+            "the empty-dashboard hard-failure branch must not fire when content already exists: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn modify_dashboard_not_found_returns_error_json() {
+        let ctx = build_ctx(test_pool().await);
+        let result = ModifyDashboardTool
+            .execute(
+                serde_json::json!({"dashboard_id": "nope", "title": "x"}),
+                &ctx,
+            )
+            .await
+            .expect("a missing dashboard is a structured result, not an Err");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+        assert_eq!(
+            parsed["error"],
+            serde_json::json!("Dashboard nope not found"),
+            "{result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn modify_dashboard_forbidden_when_not_owner_returns_error_json() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        seed_second_user(&db).await;
+        let dashboard_id = kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-b", "ws-1", "Owned By B", "content", kyomi_core::models::DocType::Dashboard, None,
+        )
+        .await
+        .expect("seed dashboard owned by user-b");
+        let ctx = build_ctx(db); // build_ctx defaults to user-a
+
+        let result = ModifyDashboardTool
+            .execute(
+                serde_json::json!({"dashboard_id": dashboard_id, "title": "Hijacked"}),
+                &ctx,
+            )
+            .await
+            .expect("a forbidden update is a structured result, not an Err");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+        assert_eq!(
+            parsed["error"],
+            serde_json::json!("Only the dashboard owner can update it"),
+            "{result}"
+        );
+    }
+
+    /// KYO-537 named pin (ticket item 5, dashboard side): `modify_dashboard`
+    /// always passes `expected_content_hash: None` to `update_dashboard`
+    /// (`dashboard.rs` ~578, `// no CAS for agent tool`) — unlike the
+    /// knowledge-side tools (see `write_knowledge_file_conflict_on_stale_hash`
+    /// / `edit_knowledge_file_conflict_on_stale_hash` in `tools/knowledge.rs`),
+    /// a concurrent edit between two `modify_dashboard` calls can never be
+    /// rejected as a CAS conflict — the second call always wins outright.
+    /// KYO-539 is expected to change this deliberately; this test exists so
+    /// that change is a visible, intentional diff against a known baseline.
+    #[tokio::test]
+    async fn modify_dashboard_cas_is_never_enforced() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let dashboard_id = kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Contested", "v1", kyomi_core::models::DocType::Dashboard, None,
+        )
+        .await
+        .expect("seed dashboard");
+        let ctx = build_ctx(db);
+
+        // First "concurrent" writer changes the content (and hence the
+        // content_hash) out from under whatever the second writer read.
+        let first = ModifyDashboardTool
+            .execute(
+                serde_json::json!({"dashboard_id": dashboard_id, "content": "v2 from writer A"}),
+                &ctx,
+            )
+            .await
+            .expect("execute");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&first).expect("json")["success"],
+            serde_json::json!(true)
+        );
+
+        // Second writer's update also succeeds outright — no stale-hash
+        // rejection is possible via this tool, because it never supplies
+        // expected_content_hash in the first place.
+        let second = ModifyDashboardTool
+            .execute(
+                serde_json::json!({"dashboard_id": dashboard_id, "content": "v3 from writer B, clobbering A"}),
+                &ctx,
+            )
+            .await
+            .expect("execute");
+        let parsed: serde_json::Value = serde_json::from_str(&second).expect("json");
+        assert_eq!(
+            parsed["success"],
+            serde_json::json!(true),
+            "modify_dashboard must currently never reject on a stale write: {second}"
+        );
+
+        let dash = kyomi_auth::dashboard_service::get_dashboard(&ctx.db, &dashboard_id, "ws-1", "user-a")
+            .await
+            .expect("lookup")
+            .expect("exists");
+        assert_eq!(dash.content, "v3 from writer B, clobbering A");
+    }
+
+    #[tokio::test]
+    async fn modify_dashboard_happy_path_updates_and_broadcasts() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let dashboard_id = kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Original", "v1", kyomi_core::models::DocType::Dashboard, None,
+        )
+        .await
+        .expect("seed dashboard");
+
+        let manager = WebSocketManager::new(None, db.clone());
+        let (_conn, mut rx) = manager.connect("user-a").expect("connect user-a");
+        rx.try_recv().expect("heartbeat");
+
+        let mut ctx = build_ctx(db);
+        ctx.ws_manager = manager;
+
+        let result = ModifyDashboardTool
+            .execute(
+                serde_json::json!({
+                    "dashboard_id": dashboard_id,
+                    "title": "Renamed",
+                    "content": "v2",
+                }),
+                &ctx,
+            )
+            .await
+            .expect("execute");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+
+        assert_eq!(parsed["success"], serde_json::json!(true), "{result}");
+        assert_eq!(parsed["dashboard_id"], serde_json::json!(dashboard_id), "{result}");
+        assert_eq!(parsed["title"], serde_json::json!("Renamed"), "{result}");
+        assert_eq!(
+            parsed["message"],
+            serde_json::json!("Updated dashboard 'Renamed'"),
+            "{result}"
+        );
+
+        let msg1 = rx.try_recv().expect("dashboard_update broadcast");
+        assert!(msg1.contains("dashboard_update"), "{msg1}");
+        assert!(msg1.contains("\"action\":\"updated\""), "{msg1}");
+        let msg2 = rx.try_recv().expect("sync_action broadcast");
+        assert!(msg2.contains("sync_action"), "{msg2}");
+    }
+
+    // -- DeleteDashboardTool --------------------------------------------------
+
+    #[tokio::test]
+    async fn delete_dashboard_missing_dashboard_id_is_bad_request() {
+        let ctx = build_ctx(test_pool().await);
+        let err = DeleteDashboardTool
+            .execute(serde_json::json!({}), &ctx)
+            .await
+            .expect_err("dashboard_id is required");
+        assert!(matches!(err, kyomi_core::Error::BadRequest(_)), "got: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn delete_dashboard_not_found_returns_error_json() {
+        let ctx = build_ctx(test_pool().await);
+        let result = DeleteDashboardTool
+            .execute(serde_json::json!({"dashboard_id": "nope"}), &ctx)
+            .await
+            .expect("a missing dashboard is a structured result, not an Err");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+        assert_eq!(
+            parsed["error"],
+            serde_json::json!("Dashboard nope not found"),
+            "{result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_dashboard_forbidden_when_not_owner_returns_error_json() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        seed_second_user(&db).await;
+        let dashboard_id = kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-b", "ws-1", "Owned By B", "content", kyomi_core::models::DocType::Dashboard, None,
+        )
+        .await
+        .expect("seed dashboard owned by user-b");
+        let ctx = build_ctx(db); // build_ctx defaults to user-a
+
+        let result = DeleteDashboardTool
+            .execute(serde_json::json!({"dashboard_id": dashboard_id}), &ctx)
+            .await
+            .expect("a forbidden delete is a structured result, not an Err");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+        assert_eq!(
+            parsed["error"],
+            serde_json::json!("Only the dashboard owner can delete it"),
+            "{result}"
+        );
+
+        let still_there = kyomi_auth::dashboard_service::get_dashboard(&ctx.db, &dashboard_id, "ws-1", "user-b")
+            .await
+            .expect("lookup");
+        assert!(still_there.is_some(), "a forbidden delete must not remove the row");
+    }
+
+    #[tokio::test]
+    async fn delete_dashboard_happy_path_deletes_and_broadcasts() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let dashboard_id = kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Doomed", "content", kyomi_core::models::DocType::Dashboard, None,
+        )
+        .await
+        .expect("seed dashboard");
+
+        let manager = WebSocketManager::new(None, db.clone());
+        let (_conn, mut rx) = manager.connect("user-a").expect("connect user-a");
+        rx.try_recv().expect("heartbeat");
+
+        let mut ctx = build_ctx(db);
+        ctx.ws_manager = manager;
+
+        let result = DeleteDashboardTool
+            .execute(serde_json::json!({"dashboard_id": dashboard_id}), &ctx)
+            .await
+            .expect("execute");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+
+        assert_eq!(parsed["success"], serde_json::json!(true), "{result}");
+        assert_eq!(parsed["dashboard_id"], serde_json::json!(dashboard_id), "{result}");
+
+        let msg1 = rx.try_recv().expect("dashboard_update broadcast");
+        assert!(msg1.contains("dashboard_update"), "{msg1}");
+        assert!(msg1.contains("\"action\":\"deleted\""), "{msg1}");
+        let msg2 = rx.try_recv().expect("sync_action broadcast");
+        assert!(msg2.contains("sync_action"), "{msg2}");
+
+        let gone = kyomi_auth::dashboard_service::get_dashboard(&ctx.db, &dashboard_id, "ws-1", "user-a")
+            .await
+            .expect("lookup");
+        assert!(gone.is_none(), "the dashboard row must actually be gone");
     }
 }
