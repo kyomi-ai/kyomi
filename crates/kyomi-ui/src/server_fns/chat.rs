@@ -527,6 +527,15 @@ pub async fn send_chat_message(
         .unwrap_or(&ac.auth.email)
         .to_string();
 
+    // This server fn is the web chat surface — the one place
+    // `prepare_chat_dispatch` and the agent's `AgentExecutionConfig` (below)
+    // must agree on where the message came from (KYO-506): the stored
+    // `message_source` column and the live `[source: ...]` annotation
+    // `agent.chat()` builds for this turn must be the identical string, or a
+    // later turn's reconstructed context (`db_message_to_agent_message`)
+    // would silently disagree with what the model actually saw.
+    const MESSAGE_SOURCE: &str = "web";
+
     // 3–5. Find/create session, handle skip_ai, broadcast user message.
     // Callout 1 of 3.
     let outcome = kyomi_auth::chat_service::prepare_chat_dispatch(
@@ -541,6 +550,7 @@ pub async fn send_chat_message(
             is_new_session,
             message: &message,
             current_time_user_tz: current_time_user_tz.as_deref(),
+            message_source: Some(MESSAGE_SOURCE),
             skip_ai,
             client_msg_id: client_msg_id.as_deref(),
         },
@@ -608,7 +618,7 @@ pub async fn send_chat_message(
         workspace_user_ids: None,
         cancel_token: cancel_token.clone(),
         current_time_user_tz: current_time_user_tz.clone(),
-        message_source: Some("web".to_string()),
+        message_source: Some(MESSAGE_SOURCE.to_string()),
         system_prompt: None,
         tools_subset: None,
         // Main chat: a human is waiting and benefits from the extra room —

@@ -973,6 +973,17 @@ pub async fn get_session_messages(
 
 /// Add a message to a session. Encrypts content and metadata before storage.
 ///
+/// `message_source` (`"web"`, `"slack"`, `"mcp"`, `"Kyomi Watch"`, ...) is
+/// stored alongside `current_time_user_tz` so `get_agent_messages` can hand
+/// both back to `kyomi_agent::adapter::db_message_to_agent_message`, which
+/// reconstructs the `[source: X, user_local_time: Y]` prefix
+/// `agent.chat()`'s `build_metadata_prefix` builds for the live LLM call
+/// (KYO-506). Pass `None` when the caller has no source to record — in
+/// particular, `ChatAgentAdapter::persist_after_chat` must keep passing
+/// `None` here: its stored `content` already carries the prefix as literal
+/// text (baked in by `agent.chat()` before persistence), so reconstructing
+/// on top of that would double it.
+///
 /// Returns the message_id.
 #[allow(clippy::too_many_arguments)]
 pub async fn add_message(
@@ -984,6 +995,7 @@ pub async fn add_message(
     metadata: Option<&serde_json::Value>,
     message_id: Option<&str>,
     current_time_user_tz: Option<&str>,
+    message_source: Option<&str>,
     sent_by_user_id: Option<&str>,
     tool_call_id: Option<&str>,
     tool_name: Option<&str>,
@@ -1008,9 +1020,9 @@ pub async fn add_message(
         db,
         "INSERT INTO chat_messages \
          (message_id, session_id, role, content, sent_by_user_id, pinned, \
-          created_at, current_time_user_tz, extra_metadata, \
+          created_at, current_time_user_tz, message_source, extra_metadata, \
           tool_call_id, tool_name, tool_calls) \
-         VALUES ($1, $2, $3, $4, $5, false, $6, $7, $8, $9, $10, $11)",
+         VALUES ($1, $2, $3, $4, $5, false, $6, $7, $8, $9, $10, $11, $12)",
         &msg_id,
         session_id,
         role,
@@ -1018,6 +1030,7 @@ pub async fn add_message(
         sent_by_user_id,
         now,
         current_time_user_tz,
+        message_source,
         encrypted_metadata,
         tool_call_id,
         tool_name,
@@ -1852,6 +1865,23 @@ pub struct AgentMessage {
     pub tool_name: Option<String>,
     /// User ID of the sender (for user messages in shared conversations).
     pub sent_by_user_id: Option<String>,
+    /// User's local time at the moment this message was sent, ISO format
+    /// with offset. `None` for non-user roles and for rows written before
+    /// this column existed.
+    pub current_time_user_tz: Option<String>,
+    /// Where this message originated ("web", "slack", "mcp", "Kyomi Watch",
+    /// ...). `None` for non-user roles, for rows written before this column
+    /// existed (KYO-506), and for any write site that never captured a
+    /// source (e.g. `copilot_service::prepare_copilot_message`).
+    ///
+    /// Paired with `current_time_user_tz` by
+    /// `kyomi_agent::adapter::db_message_to_agent_message`, which
+    /// reconstructs the `[source: X, user_local_time: Y]` prefix
+    /// `agent.chat()`'s `build_metadata_prefix` builds for the live LLM
+    /// call — degrading to a time-only (or empty) annotation rather than
+    /// ever fabricating a source, since `build_metadata_prefix` already
+    /// omits whichever part is absent.
+    pub message_source: Option<String>,
 }
 
 /// Row type for agent message queries.
@@ -1864,6 +1894,8 @@ struct AgentMessageRow {
     tool_call_id: Option<String>,
     tool_name: Option<String>,
     sent_by_user_id: Option<String>,
+    current_time_user_tz: Option<String>,
+    message_source: Option<String>,
 }
 
 /// Get ALL messages for agent context restoration (including tool calls and tool results).
@@ -1899,7 +1931,8 @@ pub async fn get_agent_messages(
         kyomi_core::db_fetch_all!(
             db,
             AgentMessageRow,
-            "SELECT message_id, role, content, tool_calls, tool_call_id, tool_name, sent_by_user_id \
+            "SELECT message_id, role, content, tool_calls, tool_call_id, tool_name, \
+              sent_by_user_id, current_time_user_tz, message_source \
              FROM chat_messages \
              WHERE session_id = $1 AND created_at > $2 \
              ORDER BY created_at ASC",
@@ -1910,7 +1943,8 @@ pub async fn get_agent_messages(
         kyomi_core::db_fetch_all!(
             db,
             AgentMessageRow,
-            "SELECT message_id, role, content, tool_calls, tool_call_id, tool_name, sent_by_user_id \
+            "SELECT message_id, role, content, tool_calls, tool_call_id, tool_name, \
+              sent_by_user_id, current_time_user_tz, message_source \
              FROM chat_messages \
              WHERE session_id = $1 \
              ORDER BY created_at ASC",
@@ -1946,6 +1980,8 @@ pub async fn get_agent_messages(
             tool_call_id: row.tool_call_id,
             tool_name: row.tool_name,
             sent_by_user_id: row.sent_by_user_id,
+            current_time_user_tz: row.current_time_user_tz,
+            message_source: row.message_source,
         });
     }
 
@@ -2012,6 +2048,12 @@ pub struct ChatDispatchParams<'a> {
     pub is_new_session: bool,
     pub message: &'a str,
     pub current_time_user_tz: Option<&'a str>,
+    /// Where this message originated ("web", "slack", "mcp", "Kyomi Watch",
+    /// ...), stored alongside `current_time_user_tz` so a later
+    /// `get_agent_messages` load can reconstruct the same annotation
+    /// `agent.chat()` builds for the live LLM call (KYO-506). `send_chat_message`
+    /// (the only production caller) always passes `Some("web")`.
+    pub message_source: Option<&'a str>,
     pub skip_ai: bool,
     /// Optimistic client message ID for deduplication.
     pub client_msg_id: Option<&'a str>,
@@ -2095,10 +2137,13 @@ pub async fn prepare_chat_dispatch(
     // the LLM (`build_metadata_prefix`) — matching what the skip_ai path
     // has always stored. Display is unaffected: `get_session_messages`
     // strips the prefix before the UI ever sees it, and must keep doing so
-    // for pre-existing rows that still carry it (KYO-506 tracks the
-    // consequence that `get_agent_messages`, the LLM-context path, does
-    // not strip it, so past turns now reach the model without their
-    // annotation — not fixed here).
+    // for pre-existing rows that still carry it. KYO-506 closed the
+    // consequence this left open: `get_agent_messages`, the LLM-context
+    // path, doesn't strip a baked-in prefix either, but there is none to
+    // strip here any more — `current_time_user_tz` and `message_source` are
+    // recorded in their own columns instead, and
+    // `kyomi_agent::adapter::db_message_to_agent_message` reconstructs the
+    // same prefix from them when rebuilding context for a later turn.
     let saved_id = add_message(
         p.db,
         p.encryption_key,
@@ -2108,6 +2153,7 @@ pub async fn prepare_chat_dispatch(
         None,
         Some(&user_message_id),
         p.current_time_user_tz,
+        p.message_source,
         Some(p.user_id),
         None,
         None,
@@ -2223,7 +2269,8 @@ pub async fn save_agent_error(params: SaveAgentErrorParams<'_>) {
             &error_text,
             Some(&error_metadata),
             Some(assistant_message_id),
-            None,
+            None, // current_time_user_tz
+            None, // message_source
             None,
             None,
             None,
@@ -2947,6 +2994,7 @@ mod tests {
             is_new_session: true,
             message: "what was Q4 revenue",
             current_time_user_tz: None,
+            message_source: Some("web"),
             skip_ai: false,
             client_msg_id: None,
         })
@@ -3005,6 +3053,7 @@ mod tests {
             is_new_session: true,
             message: "log this only",
             current_time_user_tz: None,
+            message_source: Some("web"),
             skip_ai: true,
             client_msg_id: None,
         })
@@ -3049,6 +3098,7 @@ mod tests {
             is_new_session: true,
             message: "hello",
             current_time_user_tz: None,
+            message_source: Some("web"),
             skip_ai: true,
             client_msg_id: None,
         })
@@ -3089,6 +3139,7 @@ mod tests {
             is_new_session: true,
             message: "hello",
             current_time_user_tz: None,
+            message_source: Some("web"),
             skip_ai: true,
             client_msg_id: None,
         })
@@ -3127,6 +3178,7 @@ mod tests {
             is_new_session: true,
             message: "hijack attempt",
             current_time_user_tz: None,
+            message_source: Some("web"),
             skip_ai: true,
             client_msg_id: None,
         })

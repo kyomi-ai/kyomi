@@ -11,9 +11,21 @@
 //!
 //! ## Cache-hit principle
 //!
-//! Messages are stored in the DB exactly as the LLM sees them (including
-//! metadata prefixes on user messages). Loading them back for the next turn
-//! produces a byte-identical prefix, maximising prompt cache hits.
+//! Messages are stored in the DB exactly as the LLM sees them, or with
+//! enough information to reconstruct that byte-identical form on read.
+//! Loading them back for the next turn must produce the same prefix the
+//! live turn saw, maximising prompt cache hits.
+//!
+//! For most roles that means storing `content` verbatim. User messages sent
+//! via `chat_service::prepare_chat_dispatch` (KYO-492) are the one
+//! exception: `content` is stored raw (never annotated), and the
+//! `[source: X, user_local_time: Y]` prefix `agent.chat()`'s
+//! `build_metadata_prefix` builds for the live LLM call is instead
+//! recoverable from that row's own `current_time_user_tz` /
+//! `message_source` columns. [`db_message_to_agent_message`] rebuilds the
+//! identical prefix from those columns for every later turn (KYO-506) — see
+//! its doc for why a `AdapterPersists` row (Slack, copilot, watch) never
+//! needs this: its `content` already carries the prefix as literal text.
 
 use std::sync::Arc;
 
@@ -23,7 +35,7 @@ use tracing::{error, info, warn};
 use kyomi_auth::chat_service;
 use kyomi_core::DbPool;
 
-use crate::agent::CustomAgent;
+use crate::agent::{build_metadata_prefix, CustomAgent};
 use crate::thinking::AgentThinkingTracker;
 use crate::types::{Message, MessageRole, ToolCall};
 
@@ -396,6 +408,17 @@ impl ChatAgentAdapter {
                     None, // metadata
                     msg.message_id.as_deref(), // use tagged ID if set, else auto-generate
                     None, // current_time_user_tz
+                    // message_source: always None here — a message reaching
+                    // this branch of `chat()` (AdapterPersists — Slack,
+                    // copilot, watch) has its content built by
+                    // `agent.chat()`'s `build_metadata_prefix`, so any
+                    // source/local-time annotation is already baked into
+                    // `msg.content` as literal text. Recording it again in
+                    // this row's own columns would make
+                    // `db_message_to_agent_message` reconstruct a *second*
+                    // prefix on top of the one already there the next time
+                    // this row is loaded (KYO-506).
+                    None,
                     if msg.role == MessageRole::User {
                         msg.user_id.as_deref()
                     } else {
@@ -586,13 +609,45 @@ fn drop_pre_persisted_message(
 }
 
 /// Convert a database `AgentMessage` to an agent `Message`.
+///
+/// For a user message, reconstructs the `[source: X, user_local_time: Y]`
+/// prefix `agent.chat()`'s `build_metadata_prefix` builds ahead of `content`
+/// for the live LLM call, from that row's `current_time_user_tz` /
+/// `message_source` columns (KYO-506). This is safe to apply unconditionally
+/// rather than only for rows known to need it:
+///
+/// - A row written by `chat_service::prepare_chat_dispatch` has both columns
+///   populated and a raw `content` — reconstruction here is exactly what
+///   restores the annotation the live turn saw.
+/// - A row written by `ChatAgentAdapter::persist_after_chat` (the
+///   `AdapterPersists` paths — Slack, copilot, watch) has both columns
+///   `None` (see that call site) and a `content` that already carries the
+///   prefix as literal text — `build_metadata_prefix(None, None)` returns
+///   an empty string, so `content` passes through unchanged and is never
+///   double-prefixed.
+/// - A row written before this column pair existed has both columns `None`
+///   for the same reason as above: no annotation is fabricated, `content`
+///   passes through unchanged.
+/// - A row with `current_time_user_tz` but no `message_source` (or vice
+///   versa) — e.g. `copilot_service::prepare_copilot_message`, which never
+///   captures a source — gets the partial annotation `build_metadata_prefix`
+///   already supports; no source is ever invented for it.
 fn db_message_to_agent_message(msg: &chat_service::AgentMessage) -> Message {
     match msg.role.as_str() {
         "user" => {
-            if let Some(ref uid) = msg.sent_by_user_id {
-                Message::user_with_id(&msg.content, uid)
+            let prefix = build_metadata_prefix(
+                msg.current_time_user_tz.as_deref(),
+                msg.message_source.as_deref(),
+            );
+            let content = if prefix.is_empty() {
+                msg.content.clone()
             } else {
-                Message::user(&msg.content)
+                format!("{prefix}{}", msg.content)
+            };
+            if let Some(ref uid) = msg.sent_by_user_id {
+                Message::user_with_id(&content, uid)
+            } else {
+                Message::user(&content)
             }
         }
         "assistant" => {
@@ -640,6 +695,8 @@ mod tests {
             tool_call_id: None,
             tool_name: None,
             sent_by_user_id: None,
+            current_time_user_tz: None,
+            message_source: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::User);
@@ -656,6 +713,8 @@ mod tests {
             tool_call_id: None,
             tool_name: None,
             sent_by_user_id: None,
+            current_time_user_tz: None,
+            message_source: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::Assistant);
@@ -678,6 +737,8 @@ mod tests {
             tool_call_id: None,
             tool_name: None,
             sent_by_user_id: None,
+            current_time_user_tz: None,
+            message_source: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::Assistant);
@@ -696,6 +757,8 @@ mod tests {
             tool_call_id: Some("tc_001".into()),
             tool_name: Some("search_catalog".into()),
             sent_by_user_id: None,
+            current_time_user_tz: None,
+            message_source: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::Tool);
@@ -713,6 +776,8 @@ mod tests {
             tool_call_id: None,
             tool_name: None,
             sent_by_user_id: None,
+            current_time_user_tz: None,
+            message_source: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::System);
@@ -728,6 +793,8 @@ mod tests {
             tool_call_id: None,
             tool_name: None,
             sent_by_user_id: None,
+            current_time_user_tz: None,
+            message_source: None,
         };
         let result = db_message_to_agent_message(&msg);
         // Falls back to user.
@@ -748,6 +815,8 @@ mod tests {
             tool_call_id: None,
             tool_name: None,
             sent_by_user_id: None,
+            current_time_user_tz: None,
+            message_source: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::Assistant);
@@ -770,6 +839,8 @@ mod tests {
             tool_call_id: None,
             tool_name: None,
             sent_by_user_id: None,
+            current_time_user_tz: None,
+            message_source: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::Assistant);
@@ -791,6 +862,8 @@ mod tests {
             tool_call_id: None,
             tool_name: None,
             sent_by_user_id: None,
+            current_time_user_tz: None,
+            message_source: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::Tool);
@@ -800,6 +873,11 @@ mod tests {
 
     #[test]
     fn db_message_to_agent_message_user_preserves_content() {
+        // An AdapterPersists row (Slack/copilot/watch, via
+        // ChatAgentAdapter::persist_after_chat): the prefix is already baked
+        // into `content` as literal text and both new columns are `None` —
+        // db_message_to_agent_message must not reconstruct a second prefix
+        // on top of it.
         let msg = chat_service::AgentMessage {
             message_id: "m10".into(),
             role: "user".into(),
@@ -808,12 +886,123 @@ mod tests {
             tool_call_id: None,
             tool_name: None,
             sent_by_user_id: None,
+            current_time_user_tz: None,
+            message_source: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::User);
-        // Full content including metadata prefix is preserved.
-        assert!(result.content.contains("[source: web"));
-        assert!(result.content.contains("monthly revenue"));
+        // Full content including metadata prefix is preserved, unchanged.
+        assert_eq!(
+            result.content,
+            "[source: web, user_local_time: 2025-01-15T10:00:00+11:00] Show me monthly revenue broken down by region and product category.",
+            "content with a prefix already baked in must never gain a second one"
+        );
+    }
+
+    // -- Contract: db_message_to_agent_message reconstructs the metadata
+    // -- prefix from current_time_user_tz / message_source (KYO-506) --------
+    //
+    // chat_service::prepare_chat_dispatch (KYO-492) stores the RAW user
+    // message plus these two columns, unlike the AdapterPersists rows above
+    // whose prefix is baked into `content` itself. Without reconstruction
+    // here, get_agent_messages hands back the raw text and a later turn's
+    // rebuilt LLM context silently loses every earlier turn's
+    // source/local-time annotation — this is the exact regression KYO-506
+    // fixes.
+
+    #[test]
+    fn db_message_to_agent_message_reconstructs_full_prefix_from_columns() {
+        let msg = chat_service::AgentMessage {
+            message_id: "m10d".into(),
+            role: "user".into(),
+            content: "what was Q4 revenue".into(),
+            tool_calls: None,
+            tool_call_id: None,
+            tool_name: None,
+            sent_by_user_id: None,
+            current_time_user_tz: Some("2026-08-23T09:00:00+00:00".into()),
+            message_source: Some("web".into()),
+        };
+        let result = db_message_to_agent_message(&msg);
+        assert_eq!(result.role, MessageRole::User);
+        assert_eq!(
+            result.content,
+            "[source: web, user_local_time: 2026-08-23T09:00:00+00:00] what was Q4 revenue",
+            "both columns present must reconstruct the exact prefix build_metadata_prefix \
+             built for the live turn"
+        );
+    }
+
+    #[test]
+    fn db_message_to_agent_message_reconstructs_time_only_when_source_is_absent() {
+        // A row with current_time_user_tz but no message_source — either a
+        // write site that never captured a source (e.g.
+        // copilot_service::prepare_copilot_message) or a row written before
+        // the message_source column existed. The reconstructed annotation
+        // must degrade to time-only: no source may ever be invented.
+        let msg = chat_service::AgentMessage {
+            message_id: "m10e".into(),
+            role: "user".into(),
+            content: "what was Q4 revenue".into(),
+            tool_calls: None,
+            tool_call_id: None,
+            tool_name: None,
+            sent_by_user_id: None,
+            current_time_user_tz: Some("2026-08-23T09:00:00+00:00".into()),
+            message_source: None,
+        };
+        let result = db_message_to_agent_message(&msg);
+        assert_eq!(
+            result.content,
+            "[user_local_time: 2026-08-23T09:00:00+00:00] what was Q4 revenue",
+            "a missing message_source must never be papered over with a fabricated source"
+        );
+        assert!(
+            !result.content.contains("source:"),
+            "no source annotation may appear when message_source is None"
+        );
+    }
+
+    #[test]
+    fn db_message_to_agent_message_reconstructs_source_only_when_time_is_absent() {
+        let msg = chat_service::AgentMessage {
+            message_id: "m10f".into(),
+            role: "user".into(),
+            content: "what was Q4 revenue".into(),
+            tool_calls: None,
+            tool_call_id: None,
+            tool_name: None,
+            sent_by_user_id: None,
+            current_time_user_tz: None,
+            message_source: Some("slack".into()),
+        };
+        let result = db_message_to_agent_message(&msg);
+        assert_eq!(
+            result.content,
+            "[source: slack] what was Q4 revenue",
+            "a missing current_time_user_tz must never be papered over with a fabricated time"
+        );
+    }
+
+    #[test]
+    fn db_message_to_agent_message_adds_no_prefix_for_a_pre_kyo_506_row() {
+        // A row written before either column existed: both are None and
+        // `content` is raw (never had a prefix baked in). Reconstruction
+        // must leave it exactly as stored, not merely "without a source" —
+        // there must be no bracket annotation at all.
+        let msg = chat_service::AgentMessage {
+            message_id: "m10g".into(),
+            role: "user".into(),
+            content: "what was Q4 revenue".into(),
+            tool_calls: None,
+            tool_call_id: None,
+            tool_name: None,
+            sent_by_user_id: None,
+            current_time_user_tz: None,
+            message_source: None,
+        };
+        let result = db_message_to_agent_message(&msg);
+        assert_eq!(result.content, "what was Q4 revenue");
     }
 
     #[test]
@@ -826,6 +1015,8 @@ mod tests {
             tool_call_id: None,
             tool_name: None,
             sent_by_user_id: Some("user-abc-12345678".into()),
+            current_time_user_tz: None,
+            message_source: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::User);
@@ -842,6 +1033,8 @@ mod tests {
             tool_call_id: None,
             tool_name: None,
             sent_by_user_id: None,
+            current_time_user_tz: None,
+            message_source: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::User);
@@ -862,6 +1055,8 @@ mod tests {
             tool_call_id: None,
             tool_name: None,
             sent_by_user_id: None,
+            current_time_user_tz: None,
+            message_source: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::Assistant);
@@ -969,6 +1164,8 @@ mod tests {
             tool_call_id: None,
             tool_name: None,
             sent_by_user_id: None,
+            current_time_user_tz: None,
+            message_source: None,
         };
         let result = db_message_to_agent_message(&msg);
         // Falls back to user since "Assistant" != "assistant".
@@ -986,6 +1183,8 @@ mod tests {
             tool_call_id: None,
             tool_name: None,
             sent_by_user_id: None,
+            current_time_user_tz: None,
+            message_source: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::User);
@@ -1113,6 +1312,8 @@ mod tests {
             tool_call_id: None,
             tool_name: None,
             sent_by_user_id: None,
+            current_time_user_tz: None,
+            message_source: None,
         }
     }
 
@@ -1161,12 +1362,164 @@ mod tests {
 
     // -- Note: Adapter integration contracts --------------------------------
     //
-    // The following contracts require a real DB/Redis connection and are
-    // covered by integration tests rather than unit tests:
+    // The following contract requires a real DB/Redis connection and is
+    // covered by an integration test rather than a unit test:
     //
     // - `ChatAgentAdapter::persist_after_chat` when `session_id` is None:
     //   should skip persistence entirely and log a warning.
     //
-    // - `ChatAgentAdapter::load_context` restores full conversation history
-    //   including tool_calls and tool_results from the DB.
+    // `load_context` restoring history end to end — including the KYO-506
+    // metadata-prefix reconstruction — is covered below.
+
+    // -- Contract: ChatAgentAdapter::load_context, end to end (KYO-506) -----
+
+    /// An [`LLMProvider`] that is never called. `load_context()` only reads
+    /// the DB and pushes onto `agent.state_mut()` — the LLM is never
+    /// consulted — so any real provider would be dead weight here.
+    struct UnusedProvider;
+
+    #[async_trait::async_trait]
+    impl crate::provider::LLMProvider for UnusedProvider {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[crate::types::Tool],
+            _temperature: Option<f32>,
+            _max_tokens: u32,
+            _user_names: &std::collections::HashMap<String, String>,
+        ) -> kyomi_core::Result<crate::types::LLMResponse> {
+            unimplemented!("load_context() never calls the LLM provider")
+        }
+
+        fn model(&self) -> &str {
+            "unused"
+        }
+    }
+
+    /// Build a `ChatAgentAdapter` wired to a fresh in-memory `db`, for
+    /// `user_id`/`session_id`. The wrapped `CustomAgent` is never asked to
+    /// `chat()` in these tests — only `load_context()` is exercised.
+    fn adapter_over(
+        db: kyomi_core::DbPool,
+        user_id: &str,
+        session_id: &str,
+        encryption_key: Arc<[u8; 32]>,
+    ) -> ChatAgentAdapter {
+        let agent = CustomAgent::new(
+            Box::new(UnusedProvider),
+            crate::agent::AgentConfig::default(),
+            Arc::new(crate::tools::ToolRegistry::new()),
+            crate::test_support::build_ctx(db.clone()),
+            std::collections::HashMap::new(),
+        );
+
+        ChatAgentAdapter::new(
+            agent,
+            user_id.to_string(),
+            "ws-1".to_string(),
+            Some(session_id.to_string()),
+            "custom_agent".to_string(),
+            db,
+            encryption_key,
+        )
+    }
+
+    #[tokio::test]
+    async fn load_context_reconstructs_the_metadata_prefix_from_stored_columns() {
+        // KYO-506: chat_service::prepare_chat_dispatch (KYO-492) stores a
+        // user message's RAW content plus current_time_user_tz/message_source
+        // in their own columns, not the metadata-prefixed content
+        // agent.chat() builds for the live LLM call. Before this fix,
+        // load_context() (via get_agent_messages + db_message_to_agent_message)
+        // handed that raw content straight to the agent, so turn 2's rebuilt
+        // context silently lost turn 1's source/local-time annotation. This
+        // test seeds turn 1's row exactly the way prepare_chat_dispatch does,
+        // then asserts that loading context for turn 2 restores the
+        // annotation.
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let key: Arc<[u8; 32]> = Arc::new([7u8; 32]);
+
+        chat_service::create_session_with_id(&db, "user-a", "ws-1", "sess-1", None, "chat", None)
+            .await
+            .expect("create session");
+
+        chat_service::add_message(
+            &db,
+            &key,
+            "sess-1",
+            "user",
+            "what was Q4 revenue",
+            None,                                      // metadata
+            None,                                       // message_id
+            Some("2026-08-23T09:00:00+00:00"),          // current_time_user_tz
+            Some("web"),                                 // message_source
+            Some("user-a"),                              // sent_by_user_id
+            None,                                        // tool_call_id
+            None,                                        // tool_name
+            None,                                        // tool_calls
+        )
+        .await
+        .expect("store turn 1's user message the way prepare_chat_dispatch does");
+
+        let mut adapter = adapter_over(db, "user-a", "sess-1", key);
+
+        // This is exactly what runs at the top of turn 2, before the new
+        // user message is appended.
+        let loaded = adapter.load_context().await.expect("load_context should succeed");
+        assert!(loaded, "a session with one stored message must report context loaded");
+
+        let messages = &adapter.agent.state().messages;
+        assert_eq!(messages.len(), 1, "exactly turn 1's user message must be loaded");
+        assert_eq!(messages[0].role, MessageRole::User);
+        assert_eq!(
+            messages[0].content,
+            "[source: web, user_local_time: 2026-08-23T09:00:00+00:00] what was Q4 revenue",
+            "turn 2's rebuilt context must carry turn 1's source + local-time \
+             annotation, not just its raw stored text"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_context_reconstructs_time_only_for_a_row_with_no_message_source() {
+        // A row with current_time_user_tz but no message_source (a write
+        // site that never captured a source, or a pre-KYO-506 row) must
+        // reconstruct a time-only annotation through the full load_context
+        // path — never a fabricated source.
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let key: Arc<[u8; 32]> = Arc::new([7u8; 32]);
+
+        chat_service::create_session_with_id(&db, "user-a", "ws-1", "sess-2", None, "chat", None)
+            .await
+            .expect("create session");
+
+        chat_service::add_message(
+            &db,
+            &key,
+            "sess-2",
+            "user",
+            "what was Q4 revenue",
+            None,
+            None,
+            Some("2026-08-23T09:00:00+00:00"), // current_time_user_tz
+            None,                               // message_source — never captured
+            Some("user-a"),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("store a row with time but no source");
+
+        let mut adapter = adapter_over(db, "user-a", "sess-2", key);
+        adapter.load_context().await.expect("load_context should succeed");
+
+        let messages = &adapter.agent.state().messages;
+        assert_eq!(
+            messages[0].content,
+            "[user_local_time: 2026-08-23T09:00:00+00:00] what was Q4 revenue",
+            "a missing message_source must never be papered over with a fabricated source"
+        );
+    }
 }
