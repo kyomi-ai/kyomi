@@ -6,6 +6,9 @@ use async_trait::async_trait;
 
 use kyomi_auth::websocket::helpers as ws_helpers;
 
+use crate::tools::document::{
+    apply_update, ApplyUpdateOutcome, ApplyUpdateParams, DocumentDeleteTool, DocumentReadTool,
+};
 use crate::tools::{AgentTool, ToolContext};
 use crate::types::ToolAnnotations;
 
@@ -166,31 +169,29 @@ impl AgentTool for SearchDashboardsTool {
 // ---------------------------------------------------------------------------
 // GetDashboardInfoTool
 // ---------------------------------------------------------------------------
-
-/// Get detailed information about a specific dashboard.
+//
+// KYO-538: the actual logic moved to `tools::document::DocumentReadTool`,
+// which this unit struct delegates to entirely for `DocType::Dashboard`
+// (including the fire-and-forget `record_view` call — see `read_document`
+// there for the one real behavioural fork against the knowledge side). This
+// struct exists only so the pre-existing test module below
+// (`use super::*;`) keeps resolving `GetDashboardInfoTool` as a bare unit
+// value, unchanged. `create_default_registry` constructs
+// `document::DocumentReadTool::new(DocType::Dashboard)` directly, not this.
 pub struct GetDashboardInfoTool;
 
 #[async_trait]
 impl AgentTool for GetDashboardInfoTool {
     fn name(&self) -> &str {
-        "get_dashboard_info"
+        DocumentReadTool::name_for(kyomi_core::models::DocType::Dashboard)
     }
 
     fn description(&self) -> &str {
-        "Get detailed information about a specific dashboard including full content."
+        DocumentReadTool::description_for(kyomi_core::models::DocType::Dashboard)
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "dashboard_id": {
-                    "type": "string",
-                    "description": "The dashboard ID to retrieve"
-                }
-            },
-            "required": ["dashboard_id"]
-        })
+        DocumentReadTool::schema_for(kyomi_core::models::DocType::Dashboard)
     }
 
     fn annotations(&self) -> Option<ToolAnnotations> {
@@ -205,56 +206,7 @@ impl AgentTool for GetDashboardInfoTool {
         args: serde_json::Value,
         ctx: &ToolContext,
     ) -> kyomi_core::Result<String> {
-        let dashboard_id = args
-            .get("dashboard_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                kyomi_core::Error::BadRequest(
-                    "Missing required parameter 'dashboard_id'".into(),
-                )
-            })?;
-
-        let dashboard = kyomi_auth::dashboard_service::get_dashboard(
-            &ctx.db,
-            dashboard_id,
-            &ctx.workspace_id,
-            &ctx.user_id,
-        )
-        .await?;
-
-        let dashboard = match dashboard {
-            Some(d) => d,
-            None => {
-                return Ok(serde_json::json!({
-                    "error": format!("Dashboard not found: {dashboard_id}")
-                })
-                .to_string());
-            }
-        };
-
-        // Record the view for popularity tracking (fire-and-forget style error handling)
-        let _ = kyomi_auth::dashboard_service::record_view(
-            &ctx.db,
-            dashboard_id,
-            &ctx.user_id,
-            &ctx.workspace_id,
-        )
-        .await;
-
-        let frontend_url = &ctx.config.frontend_url;
-
-        Ok(serde_json::json!({
-            "success": true,
-            "dashboard_id": dashboard.dashboard_id,
-            "url": format!("{frontend_url}/dashboard/{}", dashboard.dashboard_id),
-            "title": dashboard.title,
-            "content": dashboard.content,
-            "created_at": dashboard.created_at.to_rfc3339(),
-            "updated_at": dashboard.updated_at.to_rfc3339(),
-            "last_change_summary": dashboard.last_change_summary,
-            "message": format!("Retrieved dashboard '{}'", dashboard.title),
-        })
-        .to_string())
+        DocumentReadTool::execute_for(kyomi_core::models::DocType::Dashboard, args, ctx).await
     }
 }
 
@@ -565,28 +517,38 @@ impl AgentTool for ModifyDashboardTool {
             .to_string());
         }
 
-        match kyomi_auth::dashboard_service::update_dashboard(
-            kyomi_auth::dashboard_service::UpdateDashboardParams {
-                db: &ctx.db,
-                embed: None, // no rechunking from agent tool (yet)
-                dashboard_id,
-                workspace_id: &ctx.workspace_id,
-                user_id: &ctx.user_id,
-                title,
-                content,
-                change_summary,
-                expected_content_hash: None, // no CAS for agent tool
-            },
-        )
+        match apply_update(ApplyUpdateParams {
+            db: &ctx.db,
+            dashboard_id,
+            workspace_id: &ctx.workspace_id,
+            user_id: &ctx.user_id,
+            title,
+            content,
+            change_summary,
+            expected_content_hash: None, // no CAS for agent tool
+        })
         .await
         {
-            Ok(updated) => {
-                if !updated {
-                    return Ok(serde_json::json!({
-                        "error": format!("Dashboard not found: {dashboard_id}")
-                    })
-                    .to_string());
-                }
+            Ok(ApplyUpdateOutcome::Updated) => {}
+            Ok(ApplyUpdateOutcome::NotFound) => {
+                return Ok(serde_json::json!({
+                    "error": format!("Dashboard not found: {dashboard_id}")
+                })
+                .to_string());
+            }
+            // Unreachable in practice: this call always passes
+            // expected_content_hash: None (see the comment above), and
+            // update_dashboard's CAS check never fires without an expected
+            // hash to compare against — pinned by
+            // `modify_dashboard_cas_is_never_enforced` below. Handled for
+            // exhaustiveness, matching apply_update's doc-type-agnostic
+            // return type.
+            Ok(ApplyUpdateOutcome::Conflict(msg)) => {
+                return Ok(serde_json::json!({
+                    "success": false,
+                    "error": msg,
+                })
+                .to_string());
             }
             Err(kyomi_core::Error::NotFound(msg)) => {
                 return Ok(serde_json::json!({ "error": msg }).to_string());
@@ -677,32 +639,27 @@ impl AgentTool for ModifyDashboardTool {
 // ---------------------------------------------------------------------------
 // DeleteDashboardTool
 // ---------------------------------------------------------------------------
-
-/// Delete a dashboard. Only the owner can delete.
+//
+// KYO-538: the actual logic moved to `tools::document::DocumentDeleteTool`,
+// which this unit struct delegates to entirely for `DocType::Dashboard`.
+// This struct exists only so the pre-existing test module below
+// (`use super::*;`) keeps resolving `DeleteDashboardTool` as a bare unit
+// value, unchanged. `create_default_registry` constructs
+// `document::DocumentDeleteTool::new(DocType::Dashboard)` directly, not this.
 pub struct DeleteDashboardTool;
 
 #[async_trait]
 impl AgentTool for DeleteDashboardTool {
     fn name(&self) -> &str {
-        "delete_dashboard"
+        DocumentDeleteTool::name_for(kyomi_core::models::DocType::Dashboard)
     }
 
     fn description(&self) -> &str {
-        "Delete a dashboard. You must be the owner to delete. This action \
-         cannot be undone."
+        DocumentDeleteTool::description_for(kyomi_core::models::DocType::Dashboard)
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "dashboard_id": {
-                    "type": "string",
-                    "description": "Dashboard ID to delete"
-                }
-            },
-            "required": ["dashboard_id"]
-        })
+        DocumentDeleteTool::schema_for(kyomi_core::models::DocType::Dashboard)
     }
 
     fn annotations(&self) -> Option<ToolAnnotations> {
@@ -717,59 +674,7 @@ impl AgentTool for DeleteDashboardTool {
         args: serde_json::Value,
         ctx: &ToolContext,
     ) -> kyomi_core::Result<String> {
-        let dashboard_id = args
-            .get("dashboard_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                kyomi_core::Error::BadRequest(
-                    "Missing required parameter 'dashboard_id'".into(),
-                )
-            })?;
-
-        match kyomi_auth::dashboard_service::delete_dashboard(
-            &ctx.db,
-            dashboard_id,
-            &ctx.workspace_id,
-            &ctx.user_id,
-        )
-        .await
-        {
-            Ok(_) => {
-                // Broadcast dashboard deletion to workspace members.
-                // Broadcast to all workspace members including the actor's other tabs —
-                // same-user multi-tab sync requires this. QueryCache is stale-while-
-                // revalidate so the actor's own tab refetches silently (no flash).
-                ws_helpers::send_dashboard_update(
-                    &ctx.ws_manager,
-                    &ctx.workspace_id,
-                    dashboard_id,
-                    "deleted",
-                    &ctx.user_id,
-                    &ctx.user_display_name,
-                    None,
-                )
-                .await;
-                ws_helpers::broadcast_entity_delete(
-                    &ctx.ws_manager, kyomi_types::sync::entity_types::DASHBOARD,
-                    dashboard_id, &ctx.workspace_id,
-                )
-                .await;
-
-                Ok(serde_json::json!({
-                    "success": true,
-                    "dashboard_id": dashboard_id,
-                    "message": format!("Deleted dashboard '{dashboard_id}'"),
-                })
-                .to_string())
-            }
-            Err(kyomi_core::Error::NotFound(msg)) => {
-                Ok(serde_json::json!({ "error": msg }).to_string())
-            }
-            Err(kyomi_core::Error::Forbidden(msg)) => {
-                Ok(serde_json::json!({ "error": msg }).to_string())
-            }
-            Err(e) => Err(e),
-        }
+        DocumentDeleteTool::execute_for(kyomi_core::models::DocType::Dashboard, args, ctx).await
     }
 }
 
