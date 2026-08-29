@@ -2065,28 +2065,11 @@ Chart 2:\n```chartml\ndata:\n  query: SELECT 2\nvisualize:\n  type: line\n```";
     /// Build a `ToolContext` over an in-memory sqlite pool and in-memory KV
     /// store. `session_id: None` keeps the agent off the ChartML validation
     /// log writes, so no migrated schema is required.
+    ///
+    /// Delegates to the shared `crate::test_support` fixture (KYO-537) —
+    /// see that module's docs for exactly what it does and does not cover.
     async fn test_tool_context() -> ToolContext {
-        let db = kyomi_core::DbPool::connect("sqlite::memory:")
-            .await
-            .expect("connect in-memory sqlite");
-        let ws_manager = kyomi_auth::websocket::WebSocketManager::new(None, db.clone());
-
-        ToolContext {
-            db,
-            kv: kyomi_core::kv_store_memory::InMemoryKVStore::new_pool(),
-            user_id: "user-a".to_string(),
-            workspace_id: "ws-1".to_string(),
-            encryption_key: Arc::new([0u8; 32]),
-            embedding: kyomi_embed::LazyEmbedding::new(),
-            ws_manager,
-            config: Arc::new(kyomi_core::Config::test_config()),
-            session_id: None,
-            supports_mcp_apps: false,
-            workspace_roles: Vec::new(),
-            connect_registry: None,
-            platforms: Arc::new(kyomi_core::platform::PlatformRegistry::new()),
-            user_display_name: "User A".to_string(),
-        }
+        crate::test_support::build_ctx(crate::test_support::test_pool().await)
     }
 
     /// Build an agent wired to a scripted provider and a one-tool registry,

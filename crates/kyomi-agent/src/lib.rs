@@ -45,6 +45,8 @@ pub mod prompt;
 pub mod provider;
 pub mod scheduler;
 // Slack message processor moved to enterprise/kyomi-slack crate (Phase 12).
+#[cfg(test)]
+mod test_support;
 pub mod thinking;
 pub mod tools;
 pub mod types;

@@ -502,48 +502,7 @@ fn format_table_info_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqlx::sqlite::SqlitePoolOptions;
-
-    async fn test_pool() -> kyomi_core::DbPool {
-        let _ = kyomi_core::constants::load_with_fallback();
-
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("connect in-memory sqlite");
-
-        sqlx::query("PRAGMA foreign_keys=ON")
-            .execute(&pool)
-            .await
-            .expect("enable foreign keys");
-
-        sqlx::migrate!("../../apps/server/migrations-sqlite")
-            .run(&pool)
-            .await
-            .expect("run sqlite migrations");
-
-        kyomi_core::DbPool::Sqlite(pool)
-    }
-
-    fn build_ctx(db: kyomi_core::DbPool) -> ToolContext {
-        ToolContext {
-            ws_manager: kyomi_auth::websocket::WebSocketManager::new(None, db.clone()),
-            db,
-            kv: kyomi_core::kv_store_memory::InMemoryKVStore::new_pool(),
-            user_id: "user-a".to_string(),
-            workspace_id: "ws-1".to_string(),
-            encryption_key: std::sync::Arc::new([0u8; 32]),
-            embedding: kyomi_embed::LazyEmbedding::new(),
-            config: std::sync::Arc::new(kyomi_core::Config::test_config()),
-            session_id: None,
-            supports_mcp_apps: false,
-            workspace_roles: Vec::new(),
-            connect_registry: None,
-            platforms: std::sync::Arc::new(kyomi_core::platform::PlatformRegistry::new()),
-            user_display_name: "User A".to_string(),
-        }
-    }
+    use crate::test_support::{build_ctx, test_pool};
 
     /// Seed workspace "ws-1" with one active BigQuery datasource (slug
     /// "bq") whose `connection_config` is exactly `connection_config_json`,
