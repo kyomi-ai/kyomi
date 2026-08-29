@@ -18,7 +18,7 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
-use super::{AuthenticatedContext, IntoServerFnError};
+use super::{AuthenticatedContext, IntoServerFnErrorCore};
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -117,7 +117,7 @@ pub async fn list_collections(
         doc_type.as_deref(),
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     Ok(collections.iter().map(to_collection_item).collect())
 }
@@ -148,7 +148,7 @@ pub async fn create_collection(
         },
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     Ok(bare_to_collection_item(&collection))
 }
@@ -179,13 +179,13 @@ pub async fn update_collection(
         ac.ctx.ws_manager.as_ref(),
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     // Re-fetch to get updated state with dashboards
     let collection =
         kyomi_auth::collection_service::get_collection(ac.db(), &collection_id, &ac.ws_id, &ac.auth.user_id)
             .await
-            .into_sfn()?;
+            .into_sfn_core()?;
 
     let collection = collection.ok_or_else(|| {
         ServerFnError::new("Collection not found")
@@ -206,7 +206,7 @@ pub async fn delete_collection(collection_id: String) -> Result<(), ServerFnErro
         ac.ctx.ws_manager.as_ref(),
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     Ok(())
 }
@@ -230,7 +230,7 @@ pub async fn add_dashboard_to_collection(
         None, // position — append to end
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     if let (Some(t), Some(ws_manager)) = (transition, &ac.ctx.ws_manager) {
         kyomi_auth::websocket::helpers::broadcast_dashboard_visibility_change(
@@ -256,7 +256,7 @@ pub async fn remove_dashboard_from_collection(
         &ac.ws_id,
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     if let (Some(t), Some(ws_manager)) = (transition, &ac.ctx.ws_manager) {
         kyomi_auth::websocket::helpers::broadcast_dashboard_visibility_change(

@@ -57,7 +57,7 @@ pub async fn submit_feedback(
         input,
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     Ok(FeedbackResponse {
         status: result.status,
@@ -68,4 +68,4 @@ pub async fn submit_feedback(
 
 // Helpers — delegate to shared extractors in parent module
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, IntoServerFnError};
+use super::{extract_auth, extract_context, IntoServerFnErrorCore};

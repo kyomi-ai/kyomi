@@ -21,7 +21,7 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
-use super::{extract_context, IntoServerFnError};
+use super::{extract_context, IntoServerFnErrorCore};
 
 /// Generic "check your email" message shared by both signup-start flows
 /// (password and passkey). Deliberately identical regardless of whether the
@@ -724,7 +724,7 @@ pub async fn recovery_start(email: String) -> Result<(), ServerFnError> {
         &ctx.db, &kv, &ip, email,
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     if let Some(r) = result {
         let recovery_url = format!(
@@ -797,7 +797,7 @@ pub async fn passkey_recovery_start(email: String) -> Result<(), ServerFnError> 
         &ctx.config.frontend_url,
     )
     .await
-    .into_sfn()
+    .into_sfn_core()
 }
 
 /// Verify a recovery token and create a short-lived recovery session.
@@ -947,7 +947,7 @@ pub async fn passkey_login_start() -> Result<PasskeyLoginStartResult, ServerFnEr
     // The browser will show all available passkeys for this relying party.
     let (mut rcr, disc_state) =
         kyomi_auth::webauthn::start_discoverable_authentication(webauthn)
-            .into_sfn()?;
+            .into_sfn_core()?;
 
     // Remove mediation hint — we want a modal prompt, not conditional UI autofill
     rcr.mediation = None;
@@ -963,7 +963,7 @@ pub async fn passkey_login_start() -> Result<PasskeyLoginStartResult, ServerFnEr
     });
     kyomi_auth::redis_ops::store_webauthn_challenge(&kv, &challenge_id, &challenge_data)
         .await
-        .into_sfn()?;
+        .into_sfn_core()?;
 
     let request_challenge = serde_json::to_string(&rcr)
         .map_err(|e| ServerFnError::new(format!("Serialize request challenge: {e}")))?;

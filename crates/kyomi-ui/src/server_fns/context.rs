@@ -18,7 +18,7 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, IntoServerFnError};
+use super::{extract_auth, extract_context, IntoServerFnErrorCore};
 
 /// Combined user, workspace, and capability context.
 ///
@@ -91,7 +91,7 @@ pub async fn get_user_context() -> Result<UserContext, ServerFnError> {
         let workspace =
             kyomi_auth::workspace_service::get_workspace_full(&ctx.db, ws_id)
                 .await
-                .into_sfn()?
+                .into_sfn_core()?
                 .ok_or_else(|| ServerFnError::new("Workspace not found"))?;
 
         kyomi_core::capability::compute_capabilities(&workspace)

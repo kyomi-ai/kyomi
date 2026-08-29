@@ -28,7 +28,7 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, IntoServerFnError};
+use super::{extract_auth, extract_context, IntoServerFnErrorCore};
 
 /// TOTP status returned by `get_totp_status()`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -51,7 +51,7 @@ pub async fn has_password() -> Result<bool, ServerFnError> {
 
     kyomi_auth::user_service::has_password(&ctx.db, &auth.user_id)
         .await
-        .into_sfn()
+        .into_sfn_core()
 }
 
 /// Set a password for a user who does not yet have one (e.g. OAuth-only users).
@@ -74,7 +74,7 @@ pub async fn set_password(new_password: String) -> Result<String, ServerFnError>
     // Check user does NOT already have a password
     let has_pw = kyomi_auth::user_service::has_password(&ctx.db, &auth.user_id)
         .await
-        .into_sfn()?;
+        .into_sfn_core()?;
     if has_pw {
         return Err(ServerFnError::new(
             "Password already set. Use change-password to update it.",
@@ -83,11 +83,11 @@ pub async fn set_password(new_password: String) -> Result<String, ServerFnError>
 
     // Hash and store
     let hash = kyomi_auth::password::hash_password(&new_password)
-        .into_sfn()?;
+        .into_sfn_core()?;
     let auth_data = serde_json::json!({"hash": hash});
     kyomi_auth::user_service::upsert_auth_method(&ctx.db, &auth.user_id, "password", &auth_data)
         .await
-        .into_sfn()?;
+        .into_sfn_core()?;
 
     Ok("Password set successfully".to_string())
 }
@@ -118,7 +118,7 @@ pub async fn change_password(
         &new_password,
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     Ok("Password changed successfully".to_string())
 }
@@ -135,7 +135,7 @@ pub async fn get_totp_status() -> Result<TotpStatus, ServerFnError> {
 
     let enabled = kyomi_auth::user_service::has_totp_enabled(&ctx.db, &auth.user_id)
         .await
-        .into_sfn()?;
+        .into_sfn_core()?;
 
     Ok(TotpStatus { enabled })
 }
@@ -157,7 +157,7 @@ pub async fn setup_totp() -> Result<TotpSetup, ServerFnError> {
     let result =
         kyomi_auth::security_service::setup_totp(&ctx.db, kv, &auth.user_id, &auth.email)
             .await
-            .into_sfn()?;
+            .into_sfn_core()?;
 
     Ok(TotpSetup {
         secret: result.secret,
@@ -181,7 +181,7 @@ pub async fn enable_totp(code: String) -> Result<String, ServerFnError> {
 
     kyomi_auth::security_service::enable_totp(&ctx.db, kv, &auth.user_id, &code)
         .await
-        .into_sfn()?;
+        .into_sfn_core()?;
 
     Ok("2FA has been successfully enabled".to_string())
 }
@@ -197,14 +197,14 @@ pub async fn disable_totp() -> Result<String, ServerFnError> {
 
     let enabled = kyomi_auth::user_service::has_totp_enabled(&ctx.db, &auth.user_id)
         .await
-        .into_sfn()?;
+        .into_sfn_core()?;
     if !enabled {
         return Err(ServerFnError::new("2FA is not currently enabled"));
     }
 
     kyomi_auth::user_service::remove_auth_method(&ctx.db, &auth.user_id, "totp")
         .await
-        .into_sfn()?;
+        .into_sfn_core()?;
 
     Ok("2FA has been successfully disabled".to_string())
 }
@@ -250,7 +250,7 @@ pub async fn get_sessions() -> Result<Vec<SessionEntry>, ServerFnError> {
     let (sessions, current_family_id) =
         kyomi_auth::security_service::get_sessions(&ctx.db, &auth.user_id, raw_token)
             .await
-            .into_sfn()?;
+            .into_sfn_core()?;
 
     let entries = sessions
         .iter()
@@ -285,7 +285,7 @@ pub async fn revoke_session(token_id: String) -> Result<String, ServerFnError> {
     let revoked =
         kyomi_auth::token_service::revoke_user_refresh_token(&ctx.db, &auth.user_id, &token_id)
             .await
-            .into_sfn()?;
+            .into_sfn_core()?;
 
     if !revoked {
         return Err(ServerFnError::new("Session not found"));
@@ -316,7 +316,7 @@ pub async fn logout() -> Result<(), ServerFnError> {
 
     kyomi_auth::security_service::logout(&ctx.db, raw_token)
         .await
-        .into_sfn()?;
+        .into_sfn_core()?;
 
     // Clear both HTTPOnly cookies so the browser forgets the session.
     let response_options = leptos::prelude::expect_context::<leptos_axum::ResponseOptions>();
@@ -340,7 +340,7 @@ pub async fn logout_all_sessions() -> Result<String, ServerFnError> {
     let revoked_count =
         kyomi_auth::token_service::revoke_all_user_refresh_tokens(&ctx.db, &auth.user_id)
             .await
-            .into_sfn()?;
+            .into_sfn_core()?;
 
     // Clear both HTTPOnly cookies so the browser forgets the current session.
     let response_options = leptos::prelude::expect_context::<leptos_axum::ResponseOptions>();
@@ -378,7 +378,7 @@ pub async fn list_passkeys() -> Result<Vec<PasskeyInfo>, ServerFnError> {
 
     let creds = kyomi_auth::user_service::get_passkey_credentials(&ctx.db, &auth.user_id)
         .await
-        .into_sfn()?;
+        .into_sfn_core()?;
 
     let passkeys: Vec<PasskeyInfo> = creds
         .iter()
@@ -438,7 +438,7 @@ pub async fn start_passkey_registration(
         &device_name,
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     let result = serde_json::json!({
         "challenge_id": challenge_id,
@@ -491,7 +491,7 @@ pub async fn complete_passkey_registration(
         &credential,
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     Ok(format!("Passkey '{}' added successfully", device_name))
 }
@@ -508,7 +508,7 @@ pub async fn delete_passkey(credential_id: String) -> Result<String, ServerFnErr
         &credential_id,
     )
     .await
-    .into_sfn()?
+    .into_sfn_core()?
     {
         None => Ok("Passkey deleted successfully".to_string()),
         Some(error_msg) => Err(ServerFnError::new(error_msg)),
@@ -543,7 +543,7 @@ pub async fn rename_passkey(
         &trimmed,
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     if !updated {
         return Err(ServerFnError::new("Passkey not found"));

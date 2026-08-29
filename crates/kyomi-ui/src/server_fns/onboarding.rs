@@ -14,7 +14,7 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
-use super::{extract_context, AuthenticatedContext, IntoServerFnError};
+use super::{extract_context, AuthenticatedContext, IntoServerFnErrorCore};
 #[cfg(feature = "ssr")]
 use kyomi_types::Permission;
 
@@ -119,7 +119,7 @@ pub async fn get_onboarding_state() -> Result<OnboardingState, ServerFnError> {
 
     kyomi_auth::onboarding_service::get_onboarding_state(ac.db(), &ac.ws_id, &ac.auth.user_id, is_admin, &encryption_key)
         .await
-        .into_sfn()
+        .into_sfn_core()
 }
 
 /// Create the sample datasource for the workspace (admin only).
@@ -140,7 +140,7 @@ pub async fn create_sample_datasource() -> Result<(), ServerFnError> {
     let datasources =
         kyomi_auth::datasource_service::list_datasources(ac.db(), &ac.ws_id, true)
             .await
-            .into_sfn()?;
+            .into_sfn_core()?;
 
     let has_sample = datasources.iter().any(|ds| {
         ds.connection_config
@@ -171,7 +171,7 @@ pub async fn create_sample_datasource() -> Result<(), ServerFnError> {
         },
     )
     .await
-    .into_sfn()?;
+    .into_sfn_core()?;
 
     tracing::info!(
         "Created sample datasource '{}' (id: {}) for workspace {} by user {}",
@@ -237,7 +237,7 @@ pub async fn check_sample_datasource_available()
     let datasources =
         kyomi_auth::datasource_service::list_datasources(ac.db(), &ac.ws_id, true)
             .await
-            .into_sfn()?;
+            .into_sfn_core()?;
 
     let already_added = datasources.iter().any(|ds| {
         ds.connection_config
