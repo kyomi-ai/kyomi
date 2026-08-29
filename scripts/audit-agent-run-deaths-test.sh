@@ -364,6 +364,52 @@ else
 fi
 echo
 
+# ─── Test 13: `--` is a real end-of-options marker ───────────────────────────
+# Before KYO-546's review nits were addressed, the `--` arm merely dropped the
+# token and re-entered the same dispatch, so a WINDOW beginning with a dash was
+# still rejected as an unknown argument. `--` must hand every remaining token to
+# the positional branch, and must keep enforcing the give-WINDOW-once rule.
+echo "-- Test 13: -- end-of-options"
+run_audit "$t1" -- "3 days ago"
+assert_exit "-- followed by a WINDOW is accepted" 0
+run_audit_raw -- "-3 days ago"
+CHECK_STATUS_AFTER_DASHDASH="$CHECK_STATUS"
+if [ "$CHECK_STATUS_AFTER_DASHDASH" -eq 2 ]; then
+    echo "  ✗ a dash-leading WINDOW after -- was still treated as a flag (exit 2)"
+    FAIL=$((FAIL + 1))
+else
+    echo "  ✓ a dash-leading WINDOW after -- is not treated as a flag (exit $CHECK_STATUS_AFTER_DASHDASH)"
+    PASS=$((PASS + 1))
+fi
+run_audit_raw --from-file "$t1" -- "3 days ago" "5 days ago"
+assert_exit "-- still enforces WINDOW-given-once" 2
+echo
+
+# ─── Test 14: the SCRIPT column widens to the longest script name ────────────
+# A hardcoded width silently misaligned every row once a cron wrapper longer
+# than the constant existed (kyomi-merge-sweeper-cron.sh, 28 chars vs 26).
+echo "-- Test 14: SCRIPT column is sized to the data"
+t14="$tmpdir/t14.jsonl"
+: >"$t14"
+r14a="$(result_json "cccccccc-0000-0000-0000-00000000000a" 12 end_turn completed success 0 0 0 0 0 0 0 full)"
+emit_cmdout "$t14" 14001 "$r14a" 1700000010000000
+emit_cmdend "$t14" 14001 "/home/jason/.local/bin/kyomi-merge-sweeper-cron.sh" 1700000010000000
+run_audit "$t14"
+assert_exit "long-script-name fixture parses" 0
+assert_contains "long script name is present in full" "kyomi-merge-sweeper-cron.sh"
+# The SESSION column must start at the same offset in the header and the data
+# row; that is exactly what a too-narrow SCRIPT column breaks.
+header_off="$(printf '%s\n' "$CHECK_OUTPUT" | awk '/TIMESTAMP \(UTC\)/ { print index($0, "SESSION"); exit }')"
+data_off="$(printf '%s\n' "$CHECK_OUTPUT" | awk '/kyomi-merge-sweeper-cron\.sh/ { print index($0, "cccccccc"); exit }')"
+if [ -n "$header_off" ] && [ -n "$data_off" ] && [ "$header_off" -eq "$data_off" ]; then
+    echo "  ✓ SESSION column aligns between header and data row (offset $header_off)"
+    PASS=$((PASS + 1))
+else
+    echo "  ✗ SESSION column misaligned (header offset '$header_off', data offset '$data_off')"
+    FAIL=$((FAIL + 1))
+fi
+echo
+
 # ─── summary ──────────────────────────────────────────────────────────────
 echo "============================================"
 echo "Results: $PASS passed, $FAIL failed"

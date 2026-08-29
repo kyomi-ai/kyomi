@@ -168,7 +168,21 @@ while [ "$#" -gt 0 ]; do
             shift 2
             ;;
         --)
+            # Real end-of-options: everything after `--` is positional, so a
+            # WINDOW that begins with a dash stays reachable. Previously this
+            # arm just dropped the token and re-entered the same dispatch,
+            # which meant `-- -3 days` still died as an unknown argument.
             shift
+            while [ "$#" -gt 0 ]; do
+                if [ "$WINDOW_SET" -eq 1 ]; then
+                    echo "ERROR: WINDOW given more than once ('$WINDOW' and '$1')" >&2
+                    usage
+                    exit 2
+                fi
+                WINDOW="$1"
+                WINDOW_SET=1
+                shift
+            done
             ;;
         -*)
             echo "ERROR: unknown argument: $1" >&2
@@ -412,8 +426,13 @@ def render(runs):
     print()
 
     if runs:
+        # Width the SCRIPT column to the widest value actually present rather
+        # than to a constant. A hardcoded 26 silently misaligned every row for
+        # kyomi-merge-sweeper-cron.sh (28 chars), and would do so again for any
+        # cron wrapper added later.
+        script_w = max([len("SCRIPT")] + [len(r["script"]) for r in runs])
         header = (
-            f'{"TIMESTAMP (UTC)":<20} {"SCRIPT":<26} {"SESSION":<10} '
+            f'{"TIMESTAMP (UTC)":<20} {"SCRIPT":<{script_w}} {"SESSION":<10} '
             f'{"TURNS":>5} {"STOP_REASON":<11} {"TERMINAL":<10} '
             f'{"SPAWN":>5} {"REQ_BG":>6} {"REQ_FG":>6} {"START_BG":>8} '
             f'{"DONE":>4} {"FAIL":>4} {"KILL.SYS":>8}'
@@ -424,7 +443,7 @@ def render(runs):
             sid = (r["session_id"] or "?")[:8]
             killed_disp = "N/A" if r["indeterminate"] else str(r["killed_system"])
             print(
-                f'{r["timestamp"]:<20} {r["script"]:<26} {sid:<10} '
+                f'{r["timestamp"]:<20} {r["script"]:<{script_w}} {sid:<10} '
                 f'{fmt(r["num_turns"]):>5} {fmt(r["stop_reason"]):<11} {fmt(r["terminal_reason"]):<10} '
                 f'{fmt(r["spawned"]):>5} {fmt(r["requested_background"]):>6} {fmt(r["requested_foreground"]):>6} '
                 f'{fmt(r["started_in_background"]):>8} {fmt(r["completed"]):>4} {fmt(r["failed"]):>4} '
