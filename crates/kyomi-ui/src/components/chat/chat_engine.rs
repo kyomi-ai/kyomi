@@ -567,6 +567,25 @@ pub(crate) fn should_handle(current_session_id: Option<&str>, msg_session_id: Op
     }
 }
 
+/// Extract `context_type` from a raw `error` event's `data` payload.
+///
+/// Pulled out as a plain function (rather than left inline in the
+/// `error` subscription closure, KYO-501) purely so the JSON shape is
+/// directly unit-testable: `error` events carry `context_type` at the
+/// *top level* (`data.context_type`), unlike `agent_thinking`'s, which
+/// nests it at `data.event.context_type`. Getting that path wrong is
+/// exactly the kind of mistake that would compile fine and silently
+/// disable the context filter (or, if copied the other way, silently
+/// disable it for `agent_thinking`).
+///
+/// `cfg(any(test, wasm32))`: see `context_type_matches` above — same
+/// reasoning, same set of production callers (the `error` handler in
+/// `setup_ws_subscriptions` below).
+#[cfg(any(test, target_arch = "wasm32"))]
+fn error_event_context_type(data: Option<&serde_json::Value>) -> Option<&str> {
+    data.and_then(|d| d.get("context_type")).and_then(|v| v.as_str())
+}
+
 // ─── WebSocket subscription setup ──────────────────────────────────────────
 
 /// Reactive signals owned by the engine — passed as a unit to `setup_ws_subscriptions`
@@ -838,17 +857,13 @@ fn setup_ws_subscriptions(
     let disposed_error = disposed.clone();
     let unsub_error = ws.subscribe("error", move |msg| {
         if disposed_error.load(std::sync::atomic::Ordering::Relaxed) { return; }
-        let ctx_type = context_type.try_get_value().flatten();
-        if let Some(ref expected_ctx) = ctx_type {
-            let event_context_type = msg
-                .data
-                .as_ref()
-                .and_then(|d| d.get("context_type"))
-                .and_then(|v| v.as_str());
+        // For error events, context_type is at data.context_type (top
+        // level) — unlike agent_thinking's, which is nested at
+        // data.event.context_type. See `error_event_context_type`.
+        let event_context_type = error_event_context_type(msg.data.as_ref());
 
-            if event_context_type != Some(expected_ctx.as_str()) {
-                return;
-            }
+        if !should_handle_event(event_context_type, msg.session_id.as_deref()) {
+            return;
         }
 
         let error_msg = msg
@@ -1046,5 +1061,81 @@ mod tests {
         let event_context_type = Some("dashboard_copilot");
         assert!(context_type_matches(ctx_filter, event_context_type));
         assert!(should_handle(Some("copilot-sess-1"), Some("copilot-sess-1")));
+    }
+
+    // ── KYO-501: the `error` handler ──────────────────────────────────────
+    //
+    // The `error` handler now routes through `should_handle_event`
+    // (context_type_matches + should_handle) instead of an inline
+    // context_type-only check that never looked at `msg.session_id` at
+    // all. `should_handle_event` itself is a wasm32-only closure over
+    // reactive signals and can't be called directly from a host-side unit
+    // test, so these compose its two pure dependencies the same way it
+    // does — and drive `error_event_context_type` with realistic `error`
+    // event JSON, so the top-level-vs-nested `context_type` extraction
+    // (the detail this ticket calls out explicitly) is exercised too, not
+    // just asserted about in prose.
+
+    #[test]
+    fn error_handler_denies_cross_session_event_on_main_chat() {
+        // Main chat page: context_type = None, so the context gate never
+        // fires — before KYO-501 this meant the inline check was skipped
+        // entirely and every session's `error` event was admitted. Engine
+        // is mounted on its own session, but the event belongs to another
+        // one of the user's sessions.
+        let ctx_filter: Option<&str> = None;
+        let data = serde_json::json!({ "message": "boom" });
+        let event_context_type = error_event_context_type(Some(&data));
+        assert!(context_type_matches(ctx_filter, event_context_type));
+
+        let engine_session_id = Some("sess-own");
+        let event_session_id = Some("sess-other");
+        assert!(
+            !should_handle(engine_session_id, event_session_id),
+            "a cross-session error event must not be admitted just because context_type has no filter"
+        );
+    }
+
+    #[test]
+    fn error_handler_admits_own_session_event() {
+        let ctx_filter: Option<&str> = None;
+        let data = serde_json::json!({ "message": "boom" });
+        let event_context_type = error_event_context_type(Some(&data));
+        assert!(context_type_matches(ctx_filter, event_context_type));
+
+        let engine_session_id = Some("sess-own");
+        let event_session_id = Some("sess-own");
+        assert!(
+            should_handle(engine_session_id, event_session_id),
+            "an error event for the engine's own session must still be admitted"
+        );
+    }
+
+    #[test]
+    fn error_handler_denies_context_type_mismatch() {
+        // Copilot sidebar: session ids match, but the event's context_type
+        // belongs to a different copilot surface. Must still be denied.
+        let ctx_filter = Some("dashboard_copilot");
+        let data = serde_json::json!({ "context_type": "chart_copilot", "message": "boom" });
+        let event_context_type = error_event_context_type(Some(&data));
+        assert!(!context_type_matches(ctx_filter, event_context_type));
+    }
+
+    #[test]
+    fn error_event_context_type_reads_top_level_not_nested() {
+        // The real risk this ticket calls out: `error` events carry
+        // `context_type` at the top level, unlike `agent_thinking`'s
+        // (nested at `data.event.context_type`). Reading the wrong path
+        // would silently disable the context filter for every copilot
+        // `error` event.
+        let top_level = serde_json::json!({ "context_type": "dashboard_copilot" });
+        assert_eq!(error_event_context_type(Some(&top_level)), Some("dashboard_copilot"));
+
+        // agent_thinking's shape must NOT be read as a match here.
+        let nested_like_agent_thinking =
+            serde_json::json!({ "event": { "context_type": "dashboard_copilot" } });
+        assert_eq!(error_event_context_type(Some(&nested_like_agent_thinking)), None);
+
+        assert_eq!(error_event_context_type(None), None);
     }
 }
