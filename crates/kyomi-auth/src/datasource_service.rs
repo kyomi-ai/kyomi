@@ -21,6 +21,7 @@ use kyomi_core::sql_compat;
 use kyomi_core::DbPool;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tracing::{info, warn};
 
 use crate::{credential_service, encryption};
 
@@ -838,6 +839,194 @@ pub async fn delete_user_credential(
     )?;
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// KYO-485: startup retype sweep for string-typed scalar credential leaves
+// ---------------------------------------------------------------------------
+
+/// `user_datasource_credentials.credentials` leaves that must be a real
+/// `Value::Bool`, never a `Value::String`, for the driver that reads them.
+///
+/// KYO-485 traced every non-string-typed read (`.as_bool()`, `.as_u64()`,
+/// `.as_i64()`, `.as_f64()`, and any `Value::Bool`/`Value::Number` pattern
+/// match) of the decrypted per-user credentials blob, across this repo and
+/// `kyomi-connect`'s `crates/kyomi-datasource` (every provider's `new()`,
+/// plus `factory.rs` and `oauth_refresh.rs`), and found exactly one: `iam`,
+/// read via `.and_then(|v| v.as_bool()).unwrap_or(false)` in
+/// `providers/redshift.rs::RedshiftProvider::new` to choose between IAM and
+/// username/password Redshift authentication. Every other credential leaf
+/// on every provider (`username`, `password`, `private_key`,
+/// `oauth_access_token`, `client_id`, `cluster_identifier`, `region`,
+/// `db_user`, `access_key_id`, `secret_access_key`, `billing_project`,
+/// `tenant_id`, `auth_type`, …) is read exclusively via `.as_str()`, so a
+/// string-vs-string leaf can never be corrupted by this bug.
+///
+/// Before KYO-428, `save_datasource_credentials` decoded its request body
+/// with the default `serde_qs` codec, which flattens every JSON scalar to
+/// text. A credentials blob written or re-saved through that path before
+/// the fix may still hold `"iam": "true"` (a string) instead of
+/// `"iam": true` (a bool) — `.as_bool()` returns `None` for the string,
+/// `.unwrap_or(false)` fires, and the driver silently uses the
+/// username/password branch even when IAM auth was intended.
+///
+/// Extend this list only after repeating that same trace for the new leaf
+/// — see
+/// `docs/standards/data-state-management/verify-config-keys-against-the-driver-that-reads-them.md`.
+const BOOLEAN_CREDENTIAL_LEAVES: &[&str] = &["iam"];
+
+/// Row shape for the startup retype sweep — just enough to decrypt, retype,
+/// and write back.
+#[derive(sqlx::FromRow)]
+struct CredentialRetypeCandidate {
+    id: i32,
+    credentials: String,
+}
+
+/// One-shot repair sweep for `user_datasource_credentials.credentials` rows
+/// whose scalar leaves were flattened to JSON strings by the pre-KYO-428,
+/// `serde_qs`-decoded `save_datasource_credentials`.
+///
+/// Unlike `datasource_configs.connection_config` — repaired in place by the
+/// KYO-460 SQL migration
+/// (`apps/server/migrations/20260823000000_retype_connection_config_scalars.sql`)
+/// — `credentials` is a single AES-256-GCM-encrypted blob (see
+/// `encryption::encrypt_json`/`decrypt_json`): a SQL `UPDATE` cannot see
+/// inside it. This sweep decrypts, retypes only
+/// [`BOOLEAN_CREDENTIAL_LEAVES`], and re-encrypts, following the same
+/// structure as `kyomi_auth::push_service::purge_invalid_subscriptions` —
+/// invoked once at every boot from `apps/server/src/main.rs`, immediately
+/// after migrations run.
+///
+/// Detection is by JSON type, never by value: a leaf is only ever touched
+/// when it is exactly `Value::String("true")` or `Value::String("false")`
+/// (case-sensitive, matching `serde_qs`'s lowercase `Display` output for
+/// Rust `bool` — the only casing this bug could ever have produced).
+/// Anything else — already a `Value::Bool`, absent, or a string that is not
+/// exactly `"true"`/`"false"` — is left byte-identical; this sweep never
+/// destroys or guesses at data.
+///
+/// Idempotent and safe to run on every boot: a row is only re-encrypted and
+/// written back when at least one leaf actually needed retyping. Once a row
+/// has been repaired, every leaf in [`BOOLEAN_CREDENTIAL_LEAVES`] is a real
+/// `Value::Bool`, so the next boot's pass finds nothing to change for that
+/// row and never re-writes it (each `encrypt_json` call draws a fresh nonce,
+/// so a needless re-write would still be safe, but it would not be a no-op
+/// on disk — the point is that after the first pass there simply is no
+/// leaf left to retype). A row that fails to decrypt (wrong/rotated key,
+/// corrupted data) is logged and left completely untouched — never dropped,
+/// never overwritten with a best-effort guess.
+///
+/// Returns the number of rows repaired.
+pub async fn retype_credential_scalars(
+    pool: &DbPool,
+    encryption_key: &[u8; 32],
+) -> kyomi_core::Result<u64> {
+    let candidates: Vec<CredentialRetypeCandidate> = kyomi_core::db_fetch_all!(
+        pool,
+        CredentialRetypeCandidate,
+        "SELECT id, credentials FROM user_datasource_credentials"
+    )
+    .map_err(|e| {
+        kyomi_core::Error::Internal(format!(
+            "failed to list user_datasource_credentials for startup retype sweep: {e}"
+        ))
+    })?;
+
+    let is_pg = pool.is_postgres();
+    let mut repaired = 0u64;
+
+    for candidate in candidates {
+        let mut plaintext =
+            match encryption::decrypt_json(&candidate.credentials, encryption_key) {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!(
+                        id = candidate.id,
+                        error = %e,
+                        "user_datasource_credentials row could not be decrypted during \
+                         startup retype sweep — left untouched (wrong/rotated key or \
+                         corrupted data)"
+                    );
+                    continue;
+                }
+            };
+
+        let Some(obj) = plaintext.as_object_mut() else {
+            // Not a JSON object (e.g. a legacy non-object payload) — nothing
+            // to retype, and nothing this sweep is safe to guess at.
+            continue;
+        };
+
+        let mut changed_fields: Vec<&'static str> = Vec::new();
+        for &field in BOOLEAN_CREDENTIAL_LEAVES {
+            let Some(Value::String(s)) = obj.get(field) else {
+                // Already correctly typed, or absent — never invented here.
+                continue;
+            };
+            let new_val = match s.as_str() {
+                "true" => Value::Bool(true),
+                "false" => Value::Bool(false),
+                _ => {
+                    // Not unambiguously convertible — leave exactly as
+                    // stored rather than guessing.
+                    warn!(
+                        id = candidate.id,
+                        field,
+                        value = %s,
+                        "credential leaf expected to be boolean holds a string that is \
+                         neither \"true\" nor \"false\" — left untouched"
+                    );
+                    continue;
+                }
+            };
+            obj.insert(field.to_string(), new_val);
+            changed_fields.push(field);
+        }
+
+        if changed_fields.is_empty() {
+            continue;
+        }
+
+        let encrypted = match encryption::encrypt_json(&plaintext, encryption_key) {
+            Ok(e) => e,
+            Err(e) => {
+                warn!(
+                    id = candidate.id,
+                    error = %e,
+                    "Failed to re-encrypt retyped credentials during startup sweep — \
+                     left untouched"
+                );
+                continue;
+            }
+        };
+
+        let sql = format!(
+            "UPDATE user_datasource_credentials SET credentials = $1, updated_at = {} \
+             WHERE id = $2",
+            sql_compat::now(is_pg)
+        );
+
+        match kyomi_core::db_execute!(pool, &sql, &encrypted, candidate.id) {
+            Ok(_) => {
+                repaired += 1;
+                info!(
+                    id = candidate.id,
+                    fields = ?changed_fields,
+                    "Retyped string-typed boolean credential leaf(s) at startup"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    id = candidate.id,
+                    error = %e,
+                    "Failed to persist retyped credentials during startup sweep"
+                );
+            }
+        }
+    }
+
+    Ok(repaired)
 }
 
 // ---------------------------------------------------------------------------
@@ -2217,6 +2406,232 @@ mod tests {
         let (count, refresh) = statuses.get("ds-a").expect("entry still present on failure");
         assert_eq!(*count, 0);
         assert!(refresh.is_some(), "last_catalog_refresh should survive the query failure");
+    }
+
+    // ─── retype_credential_scalars tests (KYO-485) ─────────────────────────
+    //
+    // `retype_credential_scalars`'s SQL is backend-generic (plain `$1`/`$2`
+    // positional binds, no `= ANY($1)` array bind or other Postgres-only
+    // shape), so — unlike the KYO-292 section below — these run against the
+    // in-memory `sqlite::memory:` pool like every other test in this module
+    // and need no live Postgres to exercise the real read-modify-write path.
+
+    fn test_encryption_key() -> [u8; 32] {
+        let mut key = [0u8; 32];
+        key[..16].copy_from_slice(b"kyo485-test-key-");
+        key[16..].copy_from_slice(b"0123456789abcdef");
+        key
+    }
+
+    /// Insert a `user_datasource_credentials` row with `credentials`
+    /// pre-encrypted from `plaintext` — the shape the sweep must operate on.
+    /// Returns the exact ciphertext written, so a caller that needs to
+    /// prove a row was left byte-identical has something other than a
+    /// fresh `encrypt_json` call to compare against (each call draws a new
+    /// AES-GCM nonce, so re-encrypting the same plaintext never reproduces
+    /// the original ciphertext).
+    async fn seed_encrypted_credential(
+        pool: &DbPool,
+        user_id: &str,
+        datasource_config_id: &str,
+        workspace_id: &str,
+        plaintext: &Value,
+        key: &[u8; 32],
+    ) -> String {
+        let sq = match pool {
+            DbPool::Sqlite(sq) => sq,
+            _ => panic!("test requires sqlite pool"),
+        };
+        let encrypted = encryption::encrypt_json(plaintext, key).expect("encrypt fixture credentials");
+        sqlx::query(
+            "INSERT INTO user_datasource_credentials \
+             (user_id, datasource_config_id, workspace_id, credentials) \
+             VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind(user_id)
+        .bind(datasource_config_id)
+        .bind(workspace_id)
+        .bind(&encrypted)
+        .execute(sq)
+        .await
+        .expect("insert encrypted credential row");
+        encrypted
+    }
+
+    /// The core regression test: a row whose `credentials` blob is
+    /// *encrypted* (never plaintext JSON — that would not exercise the
+    /// decrypt/retype/re-encrypt path this sweep exists for) and whose
+    /// `iam` leaf was flattened to the JSON string `"true"` by the
+    /// pre-KYO-428 codec must come out with `iam` as a real `Value::Bool`,
+    /// with every other leaf preserved untouched, and must still decrypt
+    /// with the same key afterward.
+    #[tokio::test]
+    async fn retype_credential_scalars_fixes_string_typed_iam_bool_in_an_encrypted_row() {
+        let pool = test_pool().await;
+        seed_workspace_and_owner(&pool, "ws-485", "user-485").await;
+        seed_datasource(&pool, "ds-485", "ws-485", "ds-485-slug", None).await;
+
+        let key = test_encryption_key();
+        let corrupted = json!({
+            "iam": "true",
+            "cluster_identifier": "prod-cluster",
+            "region": "us-east-1",
+            "db_user": "admin",
+        });
+        seed_encrypted_credential(&pool, "user-485", "ds-485", "ws-485", &corrupted, &key).await;
+
+        let repaired = retype_credential_scalars(&pool, &key)
+            .await
+            .expect("retype_credential_scalars must succeed");
+        assert_eq!(repaired, 1, "the one corrupted row must be repaired");
+
+        let cred = get_user_credential(&pool, "user-485", "ds-485")
+            .await
+            .expect("fetch repaired credential")
+            .expect("credential row must still exist");
+        let decrypted = encryption::decrypt_json(&cred.credentials, &key)
+            .expect("repaired row must still decrypt with the same key");
+
+        assert_eq!(
+            decrypted.get("iam"),
+            Some(&Value::Bool(true)),
+            "iam must now be a real JSON bool, not the string \"true\": {decrypted:?}"
+        );
+        assert_eq!(
+            decrypted.get("cluster_identifier").and_then(|v| v.as_str()),
+            Some("prod-cluster"),
+            "unrelated string leaves must be preserved exactly"
+        );
+        assert_eq!(decrypted.get("region").and_then(|v| v.as_str()), Some("us-east-1"));
+        assert_eq!(decrypted.get("db_user").and_then(|v| v.as_str()), Some("admin"));
+
+        // Idempotency: every leaf is now correctly typed, so a second pass
+        // must find nothing left to retype and must not re-write the row.
+        let repaired_again = retype_credential_scalars(&pool, &key)
+            .await
+            .expect("second retype pass must succeed");
+        assert_eq!(
+            repaired_again, 0,
+            "a row with no remaining string-typed boolean leaf must not be re-written"
+        );
+    }
+
+    /// A row whose `iam` leaf is already the correct type must not be
+    /// touched — proves the sweep detects by JSON type and does not simply
+    /// stamp every row with a fresh nonce (and a bumped `updated_at`) on
+    /// every boot.
+    #[tokio::test]
+    async fn retype_credential_scalars_leaves_an_already_correct_bool_untouched() {
+        let pool = test_pool().await;
+        seed_workspace_and_owner(&pool, "ws-485b", "user-485b").await;
+        seed_datasource(&pool, "ds-485b", "ws-485b", "ds-485b-slug", None).await;
+
+        let key = test_encryption_key();
+        let already_correct = json!({ "iam": true, "cluster_identifier": "prod-cluster" });
+        seed_encrypted_credential(&pool, "user-485b", "ds-485b", "ws-485b", &already_correct, &key)
+            .await;
+
+        let repaired = retype_credential_scalars(&pool, &key)
+            .await
+            .expect("retype_credential_scalars must succeed");
+        assert_eq!(repaired, 0, "an already-correctly-typed row must not be reported as repaired");
+    }
+
+    /// Conservative-by-construction: a string value that is neither exactly
+    /// `"true"` nor `"false"` is not unambiguously convertible, so it must
+    /// be left exactly as stored rather than guessed at.
+    #[tokio::test]
+    async fn retype_credential_scalars_leaves_a_non_bool_string_value_untouched() {
+        let pool = test_pool().await;
+        seed_workspace_and_owner(&pool, "ws-485c", "user-485c").await;
+        seed_datasource(&pool, "ds-485c", "ws-485c", "ds-485c-slug", None).await;
+
+        let key = test_encryption_key();
+        // Not a value this bug could ever have produced (serde_qs's bool
+        // Display output is always lowercase "true"/"false") and not
+        // unambiguously convertible — must be left alone rather than
+        // guessed at.
+        let ambiguous = json!({ "iam": "Yes" });
+        seed_encrypted_credential(&pool, "user-485c", "ds-485c", "ws-485c", &ambiguous, &key).await;
+
+        let repaired = retype_credential_scalars(&pool, &key)
+            .await
+            .expect("retype_credential_scalars must succeed");
+        assert_eq!(repaired, 0, "an ambiguous string value must not be converted or counted as repaired");
+
+        let cred = get_user_credential(&pool, "user-485c", "ds-485c")
+            .await
+            .expect("fetch credential")
+            .expect("credential row must still exist");
+        let decrypted = encryption::decrypt_json(&cred.credentials, &key).expect("must still decrypt");
+        assert_eq!(
+            decrypted.get("iam"),
+            Some(&Value::String("Yes".to_string())),
+            "an ambiguous value must be left byte-identical, not coerced to a bool: {decrypted:?}"
+        );
+    }
+
+    /// A row that cannot be decrypted (wrong/rotated key, corrupted data)
+    /// must be left completely untouched and must not abort the sweep for
+    /// the rows after it.
+    #[tokio::test]
+    async fn retype_credential_scalars_skips_an_undecryptable_row_without_aborting() {
+        let pool = test_pool().await;
+        seed_workspace_and_owner(&pool, "ws-485d", "user-485d").await;
+        seed_datasource(&pool, "ds-485d-a", "ws-485d", "ds-485d-a-slug", None).await;
+        seed_datasource(&pool, "ds-485d-b", "ws-485d", "ds-485d-b-slug", None).await;
+
+        let key = test_encryption_key();
+        let wrong_key = {
+            let mut k = key;
+            k[0] ^= 0xFF;
+            k
+        };
+        // Row A: encrypted with a different key — cannot be decrypted with `key`.
+        let row_a_original_ciphertext = seed_encrypted_credential(
+            &pool,
+            "user-485d",
+            "ds-485d-a",
+            "ws-485d",
+            &json!({ "iam": "true" }),
+            &wrong_key,
+        )
+        .await;
+        // Row B: a genuinely corrupted row the sweep must still repair.
+        seed_encrypted_credential(
+            &pool,
+            "user-485d",
+            "ds-485d-b",
+            "ws-485d",
+            &json!({ "iam": "false" }),
+            &key,
+        )
+        .await;
+
+        let repaired = retype_credential_scalars(&pool, &key)
+            .await
+            .expect("retype_credential_scalars must not error out on an undecryptable row");
+        assert_eq!(repaired, 1, "only the decryptable, genuinely corrupted row must be repaired");
+
+        let cred_a = get_user_credential(&pool, "user-485d", "ds-485d-a")
+            .await
+            .expect("fetch row A")
+            .expect("row A must still exist, untouched");
+        assert_eq!(
+            cred_a.credentials, row_a_original_ciphertext,
+            "an undecryptable row must be left byte-identical, never dropped or overwritten"
+        );
+        // Row A must still fail to decrypt with the real key — it was never
+        // touched, dropped, or overwritten with a best-effort guess.
+        assert!(encryption::decrypt_json(&cred_a.credentials, &key).is_err());
+
+        let cred_b = get_user_credential(&pool, "user-485d", "ds-485d-b")
+            .await
+            .expect("fetch row B")
+            .expect("row B must still exist");
+        let decrypted_b =
+            encryption::decrypt_json(&cred_b.credentials, &key).expect("row B must decrypt");
+        assert_eq!(decrypted_b.get("iam"), Some(&Value::Bool(false)));
     }
 
     // ─── Postgres coverage (KYO-292) ───────────────────────────────────────

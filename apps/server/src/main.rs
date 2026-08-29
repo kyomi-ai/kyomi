@@ -151,6 +151,30 @@ async fn serve() {
         }
     }
 
+    // Post-migration hook (KYO-485): `user_datasource_credentials.credentials`
+    // is a single AES-256-GCM-encrypted blob, so — unlike
+    // `datasource_configs.connection_config` (repaired in place by the
+    // KYO-460 SQL migration) — a SQL `UPDATE` cannot see inside it. This
+    // sweep decrypts each row, retypes any string-typed boolean leaf that
+    // predates KYO-428's `serde_qs` -> JSON codec fix (currently just
+    // `iam`, the Redshift IAM-auth flag — see
+    // `datasource_service::BOOLEAN_CREDENTIAL_LEAVES`), and re-encrypts.
+    // Idempotent and safe to run on every boot: a row with nothing to
+    // retype is never re-written. Non-fatal on failure — same posture as
+    // the push-subscription sweep above.
+    match kyomi_auth::datasource_service::retype_credential_scalars(&db, &encryption_key).await {
+        Ok(count) if count > 0 => {
+            tracing::info!(
+                retyped = count,
+                "Startup sweep retyped string-typed boolean credential leaves"
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "Credential startup retype sweep failed");
+        }
+    }
+
     // Personal mode: auto-provision local user and workspace on first boot
     if config.is_personal() {
         kyomi_server::auto_provision_personal_mode(&db)
