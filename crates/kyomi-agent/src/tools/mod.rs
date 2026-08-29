@@ -22,6 +22,7 @@ pub mod chartml;
 pub mod copilot;
 pub mod dashboard;
 pub mod datasource;
+pub mod document;
 pub mod forecast;
 pub mod knowledge;
 pub mod query_utils;
@@ -422,9 +423,9 @@ pub fn create_default_registry() -> ToolRegistry {
     // Knowledge tools (search + document CRUD)
     registry.register(Arc::new(knowledge::SearchKnowledgeTool));
     registry.register(Arc::new(knowledge::WriteDocumentTool));
-    registry.register(Arc::new(knowledge::ReadDocumentTool));
+    registry.register(Arc::new(document::DocumentReadTool::new(kyomi_core::models::DocType::Knowledge)));
     registry.register(Arc::new(knowledge::ListDocumentsTool));
-    registry.register(Arc::new(knowledge::EditDocumentTool));
+    registry.register(Arc::new(document::DocumentEditTool::new(kyomi_core::models::DocType::Knowledge)));
 
     // Workspace tools
     registry.register(Arc::new(workspace::GetWorkspaceInfoTool));
@@ -437,10 +438,10 @@ pub fn create_default_registry() -> ToolRegistry {
 
     // Dashboard tools
     registry.register(Arc::new(dashboard::SearchDashboardsTool));
-    registry.register(Arc::new(dashboard::GetDashboardInfoTool));
+    registry.register(Arc::new(document::DocumentReadTool::new(kyomi_core::models::DocType::Dashboard)));
     registry.register(Arc::new(dashboard::CreateDashboardTool));
     registry.register(Arc::new(dashboard::ModifyDashboardTool));
-    registry.register(Arc::new(dashboard::DeleteDashboardTool));
+    registry.register(Arc::new(document::DocumentDeleteTool::new(kyomi_core::models::DocType::Dashboard)));
 
     // Watch tools
     registry.register(Arc::new(watch::CreateWatchTool));

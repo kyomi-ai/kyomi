@@ -11,6 +11,10 @@ use async_trait::async_trait;
 use kyomi_auth::websocket::helpers as ws_helpers;
 use kyomi_core::models::DocType;
 
+use crate::tools::document::{
+    apply_update, find_document_by_title, ApplyUpdateOutcome, ApplyUpdateParams, DocumentEditTool,
+    DocumentReadTool,
+};
 use crate::tools::{AgentTool, ToolContext};
 use crate::types::ToolAnnotations;
 
@@ -533,70 +537,13 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
 // ---------------------------------------------------------------------------
 // Helper: look up a document by title (exact match via search)
 // ---------------------------------------------------------------------------
-
-/// Search for a document by exact title match within the workspace.
-/// Returns the dashboard if found.
-async fn find_document_by_title(
-    db: &kyomi_core::DbPool,
-    workspace_id: &str,
-    user_id: &str,
-    title: &str,
-) -> kyomi_core::Result<Option<kyomi_core::models::Dashboard>> {
-    let results = kyomi_auth::dashboard_service::search_dashboards(
-        db,
-        workspace_id,
-        user_id,
-        Some(title),
-        None,
-        kyomi_auth::dashboard_service::SearchSort::Recent,
-        100,
-    )
-    .await?;
-
-    // Find exact title match (case-sensitive)
-    let matched = results.iter().find(|d| d.title == title);
-
-    if let Some(m) = matched {
-        kyomi_auth::dashboard_service::get_dashboard(db, &m.dashboard_id, workspace_id, user_id).await
-    } else {
-        Ok(None)
-    }
-}
-
-/// Resolve a document by path or ID. Supports:
-/// - UUID lookup (if input looks like a UUID)
-/// - Exact title match
-/// - Backward compat: if path contains `/`, strip directory and search by filename
-async fn resolve_document(
-    db: &kyomi_core::DbPool,
-    workspace_id: &str,
-    user_id: &str,
-    path: &str,
-) -> kyomi_core::Result<Option<kyomi_core::models::Dashboard>> {
-    // If it looks like a UUID, try direct lookup first
-    if uuid::Uuid::parse_str(path).is_ok() {
-        let doc = kyomi_auth::dashboard_service::get_dashboard(db, path, workspace_id, user_id).await?;
-        if doc.is_some() {
-            return Ok(doc);
-        }
-    }
-
-    // Try exact title match
-    let doc = find_document_by_title(db, workspace_id, user_id, path).await?;
-    if doc.is_some() {
-        return Ok(doc);
-    }
-
-    // Backward compat: if path contains `/`, strip directory and search by filename
-    if let Some(slash_pos) = path.rfind('/') {
-        let filename = &path[slash_pos + 1..];
-        if !filename.is_empty() {
-            return find_document_by_title(db, workspace_id, user_id, filename).await;
-        }
-    }
-
-    Ok(None)
-}
+//
+// KYO-538: `find_document_by_title` and `resolve_document` moved unchanged
+// to `tools::document` (the shared document-operations core) — both are
+// doc_type-agnostic and are now also called from `tools::document`'s own
+// `DocumentReadTool` / `DocumentEditTool`. Imported above so this file's
+// production code and its pre-existing test module (`use super::*;` below)
+// keep resolving the same bare names.
 
 // ---------------------------------------------------------------------------
 // WriteDocumentTool
@@ -681,30 +628,20 @@ impl AgentTool for WriteDocumentTool {
 
         if let Some(doc) = existing {
             // Update existing document
-            match kyomi_auth::dashboard_service::update_dashboard(
-                kyomi_auth::dashboard_service::UpdateDashboardParams {
-                    db: &ctx.db,
-                    embed: None, // rechunking handled explicitly below
-                    dashboard_id: &doc.dashboard_id,
-                    workspace_id: &ctx.workspace_id,
-                    user_id: &ctx.user_id,
-                    title: None,
-                    content: Some(content),
-                    change_summary: None,
-                    expected_content_hash: content_hash,
-                },
-            )
-            .await
-            {
-                Ok(updated) => {
-                    if !updated {
-                        return Ok(serde_json::json!({
-                            "success": false,
-                            "error": "Document not found or not updated",
-                        })
-                        .to_string());
-                    }
+            let outcome = apply_update(ApplyUpdateParams {
+                db: &ctx.db,
+                dashboard_id: &doc.dashboard_id,
+                workspace_id: &ctx.workspace_id,
+                user_id: &ctx.user_id,
+                title: None,
+                content: Some(content),
+                change_summary: None,
+                expected_content_hash: content_hash,
+            })
+            .await?;
 
+            match outcome {
+                ApplyUpdateOutcome::Updated => {
                     // Rechunk after update
                     kyomi_auth::dashboard_service::rechunk_document(
                         &ctx.db,
@@ -732,14 +669,16 @@ impl AgentTool for WriteDocumentTool {
                     })
                     .to_string())
                 }
-                Err(kyomi_core::Error::Conflict(msg)) => {
-                    Ok(serde_json::json!({
-                        "success": false,
-                        "error": msg,
-                    })
-                    .to_string())
-                }
-                Err(e) => Err(e),
+                ApplyUpdateOutcome::NotFound => Ok(serde_json::json!({
+                    "success": false,
+                    "error": "Document not found or not updated",
+                })
+                .to_string()),
+                ApplyUpdateOutcome::Conflict(msg) => Ok(serde_json::json!({
+                    "success": false,
+                    "error": msg,
+                })
+                .to_string()),
             }
         } else {
             // Create new document
@@ -787,31 +726,28 @@ impl AgentTool for WriteDocumentTool {
 // ---------------------------------------------------------------------------
 // ReadDocumentTool
 // ---------------------------------------------------------------------------
-
+//
+// KYO-538: the actual logic moved to `tools::document::DocumentReadTool`,
+// which this unit struct delegates to entirely for `DocType::Knowledge` (see
+// `read_document` there for the one real behavioural fork against the
+// dashboard side). This struct exists only so the pre-existing test module
+// below (`use super::*;`) keeps resolving `ReadDocumentTool` as a bare unit
+// value, unchanged. `create_default_registry` constructs
+// `document::DocumentReadTool::new(DocType::Knowledge)` directly, not this.
 pub struct ReadDocumentTool;
 
 #[async_trait]
 impl AgentTool for ReadDocumentTool {
     fn name(&self) -> &str {
-        "read_knowledge_file"
+        DocumentReadTool::name_for(DocType::Knowledge)
     }
 
     fn description(&self) -> &str {
-        "Read a specific document by title or ID. Returns the full markdown content. \
-         Use this when you know which document to look at (from search results)."
+        DocumentReadTool::description_for(DocType::Knowledge)
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Document title, ID, or legacy path (e.g. 'Revenue/Metrics.md')"
-                }
-            },
-            "required": ["path"]
-        })
+        DocumentReadTool::schema_for(DocType::Knowledge)
     }
 
     fn annotations(&self) -> Option<ToolAnnotations> {
@@ -826,27 +762,7 @@ impl AgentTool for ReadDocumentTool {
         args: serde_json::Value,
         ctx: &ToolContext,
     ) -> kyomi_core::Result<String> {
-        let path = args["path"]
-            .as_str()
-            .ok_or_else(|| kyomi_core::Error::BadRequest("path is required".into()))?;
-
-        let doc = resolve_document(&ctx.db, &ctx.workspace_id, &ctx.user_id, path).await?;
-        match doc {
-            Some(d) => Ok(serde_json::json!({
-                "id": d.dashboard_id,
-                "path": path,
-                "name": d.title,
-                "doc_type": d.doc_type().as_str(),
-                "content": d.content,
-                "content_hash": d.content_hash,
-                "updated_at": d.updated_at.to_rfc3339(),
-            })
-            .to_string()),
-            None => Ok(serde_json::json!({
-                "error": format!("Document not found: {path}"),
-            })
-            .to_string()),
-        }
+        DocumentReadTool::execute_for(DocType::Knowledge, args, ctx).await
     }
 }
 
@@ -933,39 +849,29 @@ impl AgentTool for ListDocumentsTool {
 // ---------------------------------------------------------------------------
 // EditDocumentTool
 // ---------------------------------------------------------------------------
-
+//
+// KYO-538: the actual logic moved to `tools::document::DocumentEditTool`,
+// which this unit struct delegates to entirely for `DocType::Knowledge`
+// (including the CAS-via-`update_dashboard`, synchronous rechunk, and
+// single `broadcast_dashboard_sync` call this tool always performed). This
+// struct exists only so the pre-existing test module below
+// (`use super::*;`) keeps resolving `EditDocumentTool` as a bare unit
+// value, unchanged. `create_default_registry` constructs
+// `document::DocumentEditTool::new(DocType::Knowledge)` directly, not this.
 pub struct EditDocumentTool;
 
 #[async_trait]
 impl AgentTool for EditDocumentTool {
     fn name(&self) -> &str {
-        "edit_knowledge_file"
+        DocumentEditTool::name_for(DocType::Knowledge)
     }
 
     fn description(&self) -> &str {
-        "Make a targeted edit to an existing document using string replacement. \
-         Send only the old and new text. Fails if old_text is not found or appears multiple times."
+        DocumentEditTool::description_for(DocType::Knowledge)
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Document title, ID, or legacy path"
-                },
-                "old_text": {
-                    "type": "string",
-                    "description": "Exact string to find"
-                },
-                "new_text": {
-                    "type": "string",
-                    "description": "Replacement string"
-                }
-            },
-            "required": ["path", "old_text", "new_text"]
-        })
+        DocumentEditTool::schema_for(DocType::Knowledge)
     }
 
     fn annotations(&self) -> Option<ToolAnnotations> {
@@ -980,103 +886,7 @@ impl AgentTool for EditDocumentTool {
         args: serde_json::Value,
         ctx: &ToolContext,
     ) -> kyomi_core::Result<String> {
-        let path = args["path"]
-            .as_str()
-            .ok_or_else(|| kyomi_core::Error::BadRequest("path is required".into()))?;
-        let old_text = args["old_text"]
-            .as_str()
-            .ok_or_else(|| kyomi_core::Error::BadRequest("old_text is required".into()))?;
-        let new_text = args["new_text"]
-            .as_str()
-            .ok_or_else(|| kyomi_core::Error::BadRequest("new_text is required".into()))?;
-
-        let doc = resolve_document(&ctx.db, &ctx.workspace_id, &ctx.user_id, path)
-            .await?
-            .ok_or_else(|| kyomi_core::Error::NotFound(format!("Document not found: {path}")))?;
-
-        // Verify old_text appears exactly once
-        let occurrences = doc.content.matches(old_text).count();
-        if occurrences == 0 {
-            return Ok(serde_json::json!({
-                "success": false,
-                "error": "old_text not found in document content",
-            })
-            .to_string());
-        }
-        if occurrences > 1 {
-            return Ok(serde_json::json!({
-                "success": false,
-                "error": format!("old_text appears {occurrences} times — must appear exactly once"),
-            })
-            .to_string());
-        }
-
-        // Apply the replacement
-        let new_content = doc.content.replacen(old_text, new_text, 1);
-        let content_hash = doc.content_hash.as_deref();
-
-        let embed = ctx.embedding.wait_ready().await?;
-
-        // Update via dashboard_service with CAS
-        match kyomi_auth::dashboard_service::update_dashboard(
-            kyomi_auth::dashboard_service::UpdateDashboardParams {
-                db: &ctx.db,
-                embed: None, // rechunking handled explicitly below
-                dashboard_id: &doc.dashboard_id,
-                workspace_id: &ctx.workspace_id,
-                user_id: &ctx.user_id,
-                title: None,
-                content: Some(&new_content),
-                change_summary: None,
-                expected_content_hash: content_hash,
-            },
-        )
-        .await
-        {
-            Ok(updated) => {
-                if !updated {
-                    return Ok(serde_json::json!({
-                        "success": false,
-                        "error": "Document not found or not updated",
-                    })
-                    .to_string());
-                }
-
-                // Rechunk after edit
-                kyomi_auth::dashboard_service::rechunk_document(
-                    &ctx.db,
-                    embed,
-                    &doc.dashboard_id,
-                    &new_content,
-                    &ctx.workspace_id,
-                )
-                .await?;
-
-                ws_helpers::broadcast_dashboard_sync(
-                    &ctx.db, &ctx.ws_manager, &doc.dashboard_id, &ctx.workspace_id,
-                    kyomi_types::sync::SyncActionType::Update,
-                    &ctx.user_id,
-                )
-                .await;
-
-                let new_hash = kyomi_auth::dashboard_service::hash_content(&new_content);
-                Ok(serde_json::json!({
-                    "success": true,
-                    "id": doc.dashboard_id,
-                    "path": path,
-                    "content_hash": new_hash,
-                })
-                .to_string())
-            }
-            Err(kyomi_core::Error::Conflict(msg)) => {
-                Ok(serde_json::json!({
-                    "success": false,
-                    "error": msg,
-                })
-                .to_string())
-            }
-            Err(e) => Err(e),
-        }
+        DocumentEditTool::execute_for(DocType::Knowledge, args, ctx).await
     }
 }
 
