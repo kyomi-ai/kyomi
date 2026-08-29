@@ -289,11 +289,16 @@ pub fn ChatPage() -> impl IntoView {
 
     // Derive the user's display name from the user context resource.
     // Uses the user's name if available, falls back to email prefix, then "there".
-    // Single-source derive (Layout-scoped user_ctx_resource only) — no
-    // page-scoped signal mixed in, so no disposal hazard (KYO-500).
+    // KYO-548: `Memo::new` is arena-allocated the same way `Signal::derive`
+    // is (both wrap `ArenaItem::new_with_storage`), so it registers against
+    // THIS page's Owner regardless of what it reads. Safe because every
+    // read of it (chat_page.rs:713, 810) is inside this page's own effects,
+    // a descendant scope of the same page Owner -- not because
+    // user_ctx_resource itself outlives the page. See
+    // docs/standards/leptos-frontend-patterns/derive-disposal-scope-is-where-it-was-created.md.
     let user_display_name = Memo::new(move |_| {
         user_ctx_resource
-            .get() // lint-allow: disposal-safe=single-source derive, Layout-scoped user_ctx_resource only
+            .get() // lint-allow: disposal-safe=page-owned derive, all reads confined to this page's own effects (chat_page.rs:713,810); see KYO-548
             .and_then(|res| res.ok())
             .map(|ctx| {
                 ctx.name
@@ -428,13 +433,16 @@ pub fn ChatPage() -> impl IntoView {
     let ws_ctx = use_context::<WebSocketContext>();
 
     // Connection state as a string signal for ChatInput.
-    // Single-source derive (Layout-scoped WebSocketContext only) — no
-    // page-scoped signal mixed in, so no disposal hazard (KYO-500).
+    // KYO-548: page-owned derive (created here). Safe because every read of
+    // it (chat_page.rs:2114, 2201 — both passed as a prop inside this
+    // page's own view tree) is a descendant scope of this same page Owner,
+    // not because WebSocketContext itself outlives the page. See
+    // docs/standards/leptos-frontend-patterns/derive-disposal-scope-is-where-it-was-created.md.
     let ws_ctx_for_connection = ws_ctx.clone();
     let connection_state_signal = Signal::derive(move || {
         ws_ctx_for_connection
             .as_ref()
-            .map(|ctx| ctx.connection_state.get().to_string()) // lint-allow: disposal-safe=single-source derive, Layout-scoped WebSocketContext only
+            .map(|ctx| ctx.connection_state.get().to_string()) // lint-allow: disposal-safe=page-owned derive, all reads confined to this page's own view tree (chat_page.rs:2114,2201); see KYO-548
             .unwrap_or_else(|| "disconnected".to_string())
     });
 
@@ -442,12 +450,17 @@ pub fn ChatPage() -> impl IntoView {
     // Provided by the layout-level SyncStore. Used to pass the workspace
     // default model to send_chat_message and to display the active model name.
     let sync_store = expect_context::<SyncStore>();
-    // Single-source derive (Layout-scoped SyncStore only) — no page-scoped
-    // signal mixed in, so no disposal hazard (KYO-500).
+    // KYO-548: page-owned derive (created here). Safe because its only
+    // read (chat_page.rs:1519, `get_untracked()`) happens synchronously
+    // inside this page's own click handler -- before the `spawn_local`
+    // that follows it, not inside that detached async block -- so the read
+    // always occurs while the page is mounted, not because SyncStore
+    // itself outlives the page. See
+    // docs/standards/leptos-frontend-patterns/derive-disposal-scope-is-where-it-was-created.md.
     let workspace_default_model = Signal::derive(move || {
         sync_store
             .workspace_settings()
-            .get() // lint-allow: disposal-safe=single-source derive, Layout-scoped SyncStore only
+            .get() // lint-allow: disposal-safe=page-owned derive, only read is synchronous inside this page's own click handler before spawn_local (chat_page.rs:1519); see KYO-548
             .and_then(|ws| ws.default_model)
     });
 
@@ -1691,46 +1704,63 @@ pub fn ChatPage() -> impl IntoView {
     // Matches React: Chat.jsx uses `creditsExhausted` from useCapabilities() to
     // disable the textarea and send button (Chat.jsx lines 1668-1677).
     //
-    // KYO-500: this and the four derives immediately below (is_personal_mode,
-    // multi_user_enabled, is_self_hosted, current_user_id) are each a
-    // single-source derive reading only the Layout-scoped user_ctx_resource
-    // — no page-scoped signal mixed in, so no disposal hazard.
+    // KYO-548: this and the six derives immediately below (is_personal_mode,
+    // multi_user_enabled, is_self_hosted, current_user_id, llm_configured,
+    // has_datasources) are each a page-owned derive (created here, in this
+    // page component body) — `Signal::derive` registers against whatever
+    // Owner is current at construction, which is this page's Owner
+    // regardless of what the closure reads (see
+    // docs/standards/leptos-frontend-patterns/derive-disposal-scope-is-where-it-was-created.md).
+    // Reading only the Layout-scoped user_ctx_resource does not by itself
+    // make the DERIVE safe. Each is safe on the actual grounds: every read
+    // is confined to this page's own view/effect tree (a descendant scope
+    // of this same page Owner), so the derive and its readers dispose
+    // together. See each derive's own comment below for its read sites.
     let credits_exhausted = Signal::derive(move || {
         user_ctx_resource
-            .get() // lint-allow: disposal-safe=single-source derive, Layout-scoped user_ctx_resource only
+            .get() // lint-allow: disposal-safe=page-owned derive, all reads confined to this page's own view tree (chat_page.rs:2115,2202); see KYO-548
             .and_then(|r| r.ok())
             .and_then(|ctx| ctx.capabilities.get("credits_exhausted").copied())
             .unwrap_or(false)
     });
 
     // ── Derived: user context fields ──────────────────────────────────────
+    // KYO-548: page-owned derive; only read at chat_page.rs:1815
+    // (personal_no_llm, itself only called from this page's own <Show when=...>).
     let is_personal_mode = Signal::derive(move || {
         user_ctx_resource
-            .get() // lint-allow: disposal-safe=single-source derive, Layout-scoped user_ctx_resource only
+            .get() // lint-allow: disposal-safe=page-owned derive, all reads confined to this page's own view tree (chat_page.rs:1815); see KYO-548
             .and_then(|r| r.ok())
             .map(|ctx| ctx.is_personal_mode)
             .unwrap_or(false)
     });
 
+    // KYO-548: page-owned derive; only reads at chat_page.rs:1925, 1962,
+    // both inside this page's own view tree.
     let multi_user_enabled = Signal::derive(move || {
         user_ctx_resource
-            .get() // lint-allow: disposal-safe=single-source derive, Layout-scoped user_ctx_resource only
+            .get() // lint-allow: disposal-safe=page-owned derive, all reads confined to this page's own view tree (chat_page.rs:1925,1962); see KYO-548
             .and_then(|r| r.ok())
             .and_then(|ctx| ctx.capabilities.get("multi_user_enabled").copied())
             .unwrap_or(false)
     });
 
+    // KYO-548: page-owned derive; only read at chat_page.rs:2209, inside
+    // this page's own view tree.
     let is_self_hosted = Signal::derive(move || {
         user_ctx_resource
-            .get() // lint-allow: disposal-safe=single-source derive, Layout-scoped user_ctx_resource only
+            .get() // lint-allow: disposal-safe=page-owned derive, all reads confined to this page's own view tree (chat_page.rs:2209); see KYO-548
             .and_then(|r| r.ok())
             .map(|ctx| ctx.is_self_hosted)
             .unwrap_or(false)
     });
 
+    // KYO-548: page-owned derive; read at chat_page.rs:1802 (same-scope
+    // `is_owner` derive below, already correctly justified on these
+    // grounds) and chat_page.rs:2173, both inside this page's own tree.
     let current_user_id = Signal::derive(move || {
         user_ctx_resource
-            .get() // lint-allow: disposal-safe=single-source derive, Layout-scoped user_ctx_resource only
+            .get() // lint-allow: disposal-safe=page-owned derive, all reads confined to this page's own view/derive tree (chat_page.rs:1802,2173); see KYO-548
             .and_then(|r| r.ok())
             .map(|ctx| ctx.user_id.clone())
             .unwrap_or_default()
@@ -1740,21 +1770,23 @@ pub fn ChatPage() -> impl IntoView {
     // In personal mode without an LLM, we show a special empty state.
     // The `llm_configured` capability is set by the backend when an API key
     // is present. We derive it from the user context resource.
-    // Single-source derive (Layout-scoped user_ctx_resource only, same as
-    // has_datasources below) — no page-scoped signal mixed in, so no
-    // disposal hazard (KYO-500).
+    // KYO-548: page-owned derive, same grounds as credits_exhausted above;
+    // only read at chat_page.rs:1815 (personal_no_llm), inside this page's
+    // own view tree.
     let llm_configured = Signal::derive(move || {
         user_ctx_resource
-            .get() // lint-allow: disposal-safe=single-source derive, Layout-scoped user_ctx_resource only
+            .get() // lint-allow: disposal-safe=page-owned derive, all reads confined to this page's own view tree (chat_page.rs:1815); see KYO-548
             .and_then(|r| r.ok())
             .and_then(|ctx| ctx.capabilities.get("llm_configured").copied())
             .unwrap_or(true) // Default to true so we don't flash the empty state
     });
 
     // Check if any datasources exist (for empty state).
+    // KYO-548: page-owned derive; only read at chat_page.rs:1819
+    // (no_datasources), inside this page's own view tree.
     let has_datasources = Signal::derive(move || {
         user_ctx_resource
-            .get() // lint-allow: disposal-safe=single-source derive, Layout-scoped user_ctx_resource only
+            .get() // lint-allow: disposal-safe=page-owned derive, all reads confined to this page's own view tree (chat_page.rs:1819); see KYO-548
             .and_then(|r| r.ok())
             .and_then(|ctx| ctx.capabilities.get("has_datasources").copied())
             .unwrap_or(true) // Default to true so we don't flash the empty state
@@ -2328,5 +2360,100 @@ mod tests {
         assert_eq!(parts[2].chars().next(), Some('4'));
         // Variant nibble (first char of the fourth group) must be 8/9/a/b.
         assert!(matches!(parts[3].chars().next(), Some('8' | '9' | 'a' | 'b')));
+    }
+}
+
+// KYO-548 requires `Owner`/`Signal::derive` from `reactive_graph` directly, which
+// this crate's other reactive tests (e.g. `pages/settings/team.rs`'s
+// `current_user_id_from_memoized_...` test) exercise fine under plain `#[cfg(test)]`.
+// This module is still gated on `feature = "ssr"` to match the convention used
+// throughout this crate for tests that touch the reactive graph rather than pure
+// functions — see docs/standards (kyomi-ui tests need `--features ssr`, otherwise
+// the module silently does not compile and a zero-test run looks green).
+#[cfg(all(test, feature = "ssr"))]
+mod tests_disposal_scope {
+    //! KYO-548 — proves the *mechanism* behind
+    //! `docs/standards/leptos-frontend-patterns/derive-disposal-scope-is-where-it-was-created.md`
+    //! directly against `reactive_graph` 0.2.14 (pinned via `Cargo.lock`; leptos
+    //! 0.8.20), rather than reasoning about it from the Leptos book.
+    //!
+    //! This is a synthetic `Owner` hierarchy, not a live reproduction through real
+    //! routing. No live reproduction was attempted or found: tracing every read site
+    //! of the 12 corrected `chat_list.rs`/`chat_page.rs` justifications this ticket
+    //! covers turned up no reader that can plausibly outlive the page that created
+    //! the derive it reads (every read is inside that same page's own view/effect
+    //! tree — see the corrected `// lint-allow:` comments at those sites), so there
+    //! was no candidate panic path to drive through a mounted route. This test
+    //! commits the mechanism to CI instead: it is exactly the reasoning a future
+    //! `lint-allow: disposal-safe=` justification for this shape has to satisfy, and
+    //! previously only lived in a throwaway, never-staged reproduction (see KYO-548's
+    //! ticket description) that nobody else could re-run.
+    //!
+    //! What it proves: a `Signal::derive` registers against whichever `Owner` is
+    //! current when it is CREATED (`reactive_graph` `wrappers.rs:631-649` ->
+    //! `owner/arena_item.rs:47-64`), not against whatever it reads. Disposing that
+    //! Owner removes the derive from the arena regardless of the lifetime of what it
+    //! reads — contrasted here against the signal it reads, which is registered on a
+    //! *parent* Owner and is deliberately still alive afterwards.
+    use leptos::prelude::*;
+
+    #[test]
+    fn page_owned_derive_disposes_with_its_own_owner_while_what_it_reads_survives() {
+        // "Layout" — the long-lived parent scope. A real Layout component's Owner
+        // outlives every page mounted under it; a signal created here stands in for
+        // something like `user_ctx_resource`, `WebSocketContext`, or `SyncStore`.
+        let layout_owner = Owner::new();
+        layout_owner.set();
+        let (layout_signal, _set_layout_signal) = signal(42_i32);
+
+        // "Page" — a child scope created while the Layout owner is current, exactly
+        // as a routed page component is mounted as a child of its Layout's Owner.
+        let page_owner = layout_owner.child();
+        page_owner.set();
+
+        // This mirrors the 12 corrected sites exactly: a `Signal::derive` created in
+        // the page scope whose closure reads ONLY the Layout-scoped signal above —
+        // no page-scoped signal is mixed in.
+        let page_derive = Signal::derive(move || layout_signal.get() * 2);
+
+        // Both alive before any disposal. `Signal<T>` (the `Signal::derive` wrapper
+        // type) does not itself implement `IsDisposed` -- only the more primitive
+        // arena types (`ReadSignal`, `ArenaItem`, `ArcMemo`, ...) do -- so the
+        // derive's arena membership is asserted through `try_get()`'s `Option`
+        // directly instead: `Get::get()` is defined as exactly
+        // `self.try_get().unwrap_or_else(unwrap_signal!(self))` (`traits.rs:393`),
+        // so `try_get()` returning `Some`/`None` IS the same arena-membership check
+        // a bare `.get()` would panic on, not a proxy for it.
+        assert!(!layout_signal.is_disposed(), "layout signal must start alive");
+        assert_eq!(page_derive.try_get(), Some(84), "page derive must start alive");
+
+        // Simulate the page being navigated away from. `Owner::cleanup()` is the
+        // same explicit disposal path used in production (route unmount), not
+        // reliance on Rust's Drop/refcounting.
+        page_owner.cleanup();
+
+        // The derive is gone — this is the panic surface a bare `.get()` on
+        // `page_derive` would hit; `try_get()` reports it directly instead of
+        // panicking.
+        assert_eq!(
+            page_derive.try_get(),
+            None,
+            "a page-owned Signal::derive must be disposed when its own (page) Owner \
+             is cleaned up, regardless of what it reads -- the bare .get() this \
+             stands in for would panic with \"Tried to access a reactive value that \
+             has already been disposed.\""
+        );
+
+        // The contrast that is the whole point of this test: the signal the derive
+        // read is registered on the PARENT (Layout) owner, which was never disposed,
+        // so it is still perfectly alive. "This derive only reads a Layout-scoped
+        // signal" is true and irrelevant -- the derive's own disposal is governed by
+        // where IT was created, not by what it reads.
+        assert!(
+            !layout_signal.is_disposed(),
+            "the Layout-scoped signal the derive read must survive its child page's \
+             disposal untouched"
+        );
+        assert_eq!(layout_signal.try_get(), Some(42));
     }
 }

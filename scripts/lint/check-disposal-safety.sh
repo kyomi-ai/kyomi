@@ -28,10 +28,21 @@
 #
 #   Rule B — bare .get() inside Signal::derive / Memo::new closures
 #     [ADVISORY — prints WARN:B, does NOT affect exit status]
-#     A derive that subscribes to Layout-scoped signals (SyncStore) AND
-#     reads page-scoped signals via .get() will panic when the page is
-#     disposed and a sync update re-evaluates the derive. Use .try_get()
-#     instead.
+#     KYO-548: the panic condition is the OWN Owner of the derive itself —
+#     the one current when `Signal::derive`/`Memo::new` is CALLED
+#     (reactive_graph 0.2.14 wrappers.rs:631-649 -> owner/arena_item.rs:47-64)
+#     — not what the closure reads. Mixing Layout-scoped and page-scoped
+#     signals is the common, easy-to-spot way this goes wrong (a
+#     page-created derive that reads a long-lived SyncStore signal will
+#     panic if a sync update re-evaluates it after the page disposes), but
+#     a derive that reads ONLY Layout-scoped signals is not automatically
+#     safe either: if the derive was itself created in a page component
+#     body, it is page-owned regardless of what it reads, and a bare
+#     .get() on THAT DERIVE (not on what it reads) can still panic
+#     post-disposal if anything living outside that page keeps a handle to
+#     the derive and re-reads it later. See
+#     docs/standards/leptos-frontend-patterns/derive-disposal-scope-is-where-it-was-created.md.
+#     Use .try_get() where a post-disposal read is actually reachable.
 #
 # Escape hatch (require non-empty justification, ≥5 chars after `=` trimmed):
 #   `// lint-allow: disposal-safe=<why>`  on the same line as the violation
@@ -520,7 +531,7 @@ function rule_b_findings(text) {
         text !~ /\.[[:space:]]*get_untracked[[:space:]]*\(/ &&
         text !~ /\.[[:space:]]*try_get_untracked[[:space:]]*\(/ &&
         text !~ /\.[[:space:]]*get_value[[:space:]]*\(/) {
-        printf "%s:%d:WARN:B bare .get() inside Signal::derive/Memo — consider .try_get() if this derive mixes Layout-scoped and page-scoped signals\n",
+        printf "%s:%d:WARN:B bare .get() inside Signal::derive/Memo — disposal is governed by the construction-time Owner of THIS derive, not by what it reads (KYO-548); verify every reader is disposed no later than the derive itself, or use .try_get()\n",
             FILENAME, FNR
     }
 }
