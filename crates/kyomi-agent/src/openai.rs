@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 
 use serde_json::json;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::types::{AgentTokenUsage, LLMResponse, Message, MessageRole, Tool, ToolCall};
 
@@ -425,32 +425,10 @@ impl OpenAIProvider {
             content
         };
 
-        // Extract tool calls if present.
-        let tool_calls = message
-            .get("tool_calls")
-            .and_then(|tc| tc.as_array())
-            .map(|calls| {
-                calls
-                    .iter()
-                    .filter_map(|call| {
-                        let id = call.get("id")?.as_str()?.to_string();
-                        let function = call.get("function")?;
-                        let name = function.get("name")?.as_str()?.to_string();
-                        // OpenAI returns `arguments` as a JSON string — parse it.
-                        let arguments_str = function.get("arguments")?.as_str()?;
-                        let arguments: serde_json::Value =
-                            serde_json::from_str(arguments_str).unwrap_or(json!({}));
-                        Some(ToolCall {
-                            id,
-                            name,
-                            arguments,
-                        })
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .filter(|calls| !calls.is_empty());
-
-        // Map finish_reason to internal format.
+        // Map finish_reason to internal format. Computed before tool-call
+        // extraction below so a truncated-arguments warning can name it —
+        // `finish_reason == "max_tokens"` is the usual explanation for
+        // unparseable `arguments`.
         let raw_finish_reason = response
             .get("choices")
             .and_then(|c| c.as_array())
@@ -465,6 +443,58 @@ impl OpenAIProvider {
             "length" => "max_tokens".to_string(),
             other => other.to_string(),
         };
+
+        // Extract tool calls if present.
+        let tool_calls = message
+            .get("tool_calls")
+            .and_then(|tc| tc.as_array())
+            .map(|calls| {
+                calls
+                    .iter()
+                    .filter_map(|call| {
+                        let id = call.get("id")?.as_str()?.to_string();
+                        let function = call.get("function")?;
+                        let name = function.get("name")?.as_str()?.to_string();
+                        // OpenAI returns `arguments` as a JSON string — parse it.
+                        let arguments_str = function.get("arguments")?.as_str()?;
+                        // A `max_tokens` cutoff mid-payload leaves this string
+                        // unparseable. Distinguish that from arguments that are
+                        // legitimately `{}` rather than silently coercing both
+                        // to the same empty object — the caller (the agent
+                        // loop) must be able to tell the model the truth
+                        // instead of the tool reporting a phantom missing
+                        // parameter (KYO-535).
+                        let (arguments, arguments_error) =
+                            match serde_json::from_str::<serde_json::Value>(arguments_str) {
+                                Ok(value) => (value, None),
+                                Err(e) => {
+                                    warn!(
+                                        tool = %name,
+                                        finish_reason = %finish_reason,
+                                        arguments_len = arguments_str.len(),
+                                        error = %e,
+                                        "tool call arguments failed to parse as JSON — \
+                                         treating as truncated rather than empty"
+                                    );
+                                    (
+                                        json!({}),
+                                        Some(format!(
+                                            "arguments could not be parsed as JSON \
+                                             (finish_reason={finish_reason}): {e}"
+                                        )),
+                                    )
+                                }
+                            };
+                        Some(ToolCall {
+                            id,
+                            name,
+                            arguments,
+                            arguments_error,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .filter(|calls| !calls.is_empty());
 
         // Extract usage.
         let usage = Self::parse_usage(response);
@@ -582,6 +612,7 @@ mod tests {
             id: "call_abc".into(),
             name: "search_catalog".into(),
             arguments: json!({"query": "revenue"}),
+            arguments_error: None,
         }];
         let messages = vec![Message::assistant_with_tool_calls(
             "Let me search.",
@@ -611,6 +642,7 @@ mod tests {
             id: "call_abc".into(),
             name: "search_catalog".into(),
             arguments: json!({"query": "revenue"}),
+            arguments_error: None,
         }];
         let messages = vec![Message::assistant_with_tool_calls("", tool_calls)];
         let names = HashMap::new();
@@ -630,11 +662,13 @@ mod tests {
                 id: "call_1".into(),
                 name: "search_catalog".into(),
                 arguments: json!({"query": "revenue"}),
+                arguments_error: None,
             },
             ToolCall {
                 id: "call_2".into(),
                 name: "get_table_info".into(),
                 arguments: json!({"table_name": "sales.orders"}),
+                arguments_error: None,
             },
         ];
         let messages = vec![Message::assistant_with_tool_calls(
@@ -678,6 +712,7 @@ mod tests {
                     id: "call_1".into(),
                     name: "search_catalog".into(),
                     arguments: json!({"query": "revenue monthly"}),
+                    arguments_error: None,
                 }],
             ),
             Message::tool_result(
@@ -1296,6 +1331,7 @@ mod tests {
             id: "call_1".into(),
             name: "query".into(),
             arguments: json!({"sql": "SELECT 1", "limit": 10}),
+            arguments_error: None,
         }];
         let messages = vec![Message::assistant_with_tool_calls("", tool_calls)];
         let names = HashMap::new();
@@ -1341,8 +1377,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_response_malformed_arguments_defaults_to_empty_object() {
-        // If arguments is not valid JSON, we should default to {}.
+    fn parse_response_malformed_arguments_records_the_failure_not_a_silent_default() {
+        // KYO-535: unparseable `arguments` used to be silently coerced to `{}`
+        // with no signal that anything went wrong — the tool then reported a
+        // phantom "missing required parameter" instead of the truth. The
+        // struct still needs a placeholder `{}` so downstream tool code that
+        // expects an object doesn't panic, but the failure itself must be
+        // recorded on `arguments_error` rather than disappearing.
         let response = json!({
             "choices": [{
                 "message": {
@@ -1363,8 +1404,55 @@ mod tests {
         let response = OpenAIProvider::parse_response("gpt-4o-mini", &response).unwrap();
 
         let tc = &response.tool_calls.unwrap()[0];
+        // Placeholder object is still there for type stability downstream...
         assert!(tc.arguments.is_object());
         assert!(tc.arguments.as_object().unwrap().is_empty());
+        // ...but the failure is no longer silent.
+        let error = tc
+            .arguments_error
+            .as_ref()
+            .expect("unparseable arguments must set arguments_error, not silently default");
+        assert!(
+            !error.is_empty(),
+            "arguments_error must carry detail, not just be present"
+        );
+    }
+
+    #[test]
+    fn parse_response_truncated_arguments_names_max_tokens_in_the_error() {
+        // The production incident this ticket traces to: a `length` (mapped
+        // to "max_tokens") finish_reason cuts the JSON string off mid-payload.
+        // The recorded arguments_error should name that finish_reason so the
+        // agent loop (and anyone reading logs) doesn't have to re-derive it.
+        let response = json!({
+            "choices": [{
+                "message": {
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "update_dashboard",
+                            "arguments": "{\"content\": \"very long payload that got cut off mid"
+                        }
+                    }]
+                },
+                "finish_reason": "length"
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+        });
+        let response = OpenAIProvider::parse_response("gpt-4o-mini", &response).unwrap();
+
+        assert_eq!(response.finish_reason, "max_tokens");
+        let tc = &response.tool_calls.unwrap()[0];
+        let error = tc
+            .arguments_error
+            .as_ref()
+            .expect("truncated arguments must set arguments_error");
+        assert!(
+            error.contains("max_tokens"),
+            "arguments_error should name the max_tokens finish_reason, got: {error}"
+        );
     }
 
     // -- Cost extraction tests -------------------------------------------------

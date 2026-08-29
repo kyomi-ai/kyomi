@@ -513,6 +513,7 @@ mod contract_tests {
             id: "tc_1".into(),
             name: "query_datasource".into(),
             arguments: serde_json::json!({"sql": "SELECT 1"}),
+            arguments_error: None,
         }]);
 
         let messages = vec![
@@ -539,11 +540,13 @@ mod contract_tests {
                 id: "tc_1".into(),
                 name: "search_catalog".into(),
                 arguments: serde_json::json!({"query": "revenue"}),
+                arguments_error: None,
             },
             ToolCall {
                 id: "tc_2".into(),
                 name: "query_datasource".into(),
                 arguments: serde_json::json!({"sql": "SELECT 1"}),
+                arguments_error: None,
             },
         ]);
 
@@ -652,6 +655,7 @@ mod contract_tests {
             id: "tc_1".into(),
             name: "query_datasource".into(),
             arguments: large_args,
+            arguments_error: None,
         }]);
 
         // With 100K chars in args alone, at 4 chars/token = 25K tokens

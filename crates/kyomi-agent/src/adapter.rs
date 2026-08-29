@@ -888,6 +888,7 @@ mod tests {
                 id: "tc_1".into(),
                 name: "search_catalog".into(),
                 arguments: serde_json::json!({"query": "orders"}),
+                arguments_error: None,
             },
         ];
         let msg = Message::assistant_with_tool_calls("Investigating.", tool_calls);

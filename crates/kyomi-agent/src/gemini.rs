@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 
 use serde_json::json;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::types::{AgentTokenUsage, LLMResponse, Message, MessageRole, Tool, ToolCall};
 
@@ -360,6 +360,27 @@ impl GeminiProvider {
                 )
             })?;
 
+        // Extract and map the finish reason up front so it's available
+        // below both for the missing-`args` warning and for the final
+        // `finish_reason` value. Note `finish_reason` itself is overridden
+        // to "tool_use" whenever any tool call was found (below) — that
+        // predates this change and is orthogonal to it, so `mapped_finish_reason`
+        // (never overridden) is what the arguments_error text names, giving
+        // an accurate answer even on the "tool_use" branch.
+        let raw_finish_reason = response
+            .get("candidates")
+            .and_then(|c| c.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|c| c.get("finishReason"))
+            .and_then(|s| s.as_str())
+            .unwrap_or("unknown");
+
+        let mapped_finish_reason = match raw_finish_reason {
+            "STOP" => "end_turn".to_string(),
+            "MAX_TOKENS" => "max_tokens".to_string(),
+            other => other.to_lowercase(),
+        };
+
         let mut text_parts: Vec<&str> = Vec::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut tool_call_idx: usize = 0;
@@ -374,12 +395,38 @@ impl GeminiProvider {
                     .and_then(|v| v.as_str())
                     .unwrap_or_default()
                     .to_string();
-                let arguments = fc.get("args").cloned().unwrap_or(serde_json::Value::Null);
+                // Unlike OpenAI, Gemini returns `args` as an already-parsed
+                // JSON value, not a string — there is no `from_str` call
+                // here that can fail on malformed JSON. But a `MAX_TOKENS`
+                // cutoff mid-`functionCall` can omit the `args` key
+                // entirely, and that used to be silently coerced to
+                // `Value::Null` — indistinguishable from a tool with a
+                // genuinely empty schema (KYO-535). Treat an absent key as
+                // a parse failure, the same as OpenAI's.
+                let (arguments, arguments_error) = match fc.get("args") {
+                    Some(value) => (value.clone(), None),
+                    None => {
+                        warn!(
+                            tool = %name,
+                            finish_reason = %mapped_finish_reason,
+                            "functionCall missing 'args' — treating as truncated rather \
+                             than empty"
+                        );
+                        (
+                            json!({}),
+                            Some(format!(
+                                "arguments ('args') were missing from the functionCall \
+                                 (finish_reason={mapped_finish_reason})"
+                            )),
+                        )
+                    }
+                };
 
                 tool_calls.push(ToolCall {
                     id: format!("gemini_call_{tool_call_idx}"),
                     name,
                     arguments,
+                    arguments_error,
                 });
                 tool_call_idx += 1;
             }
@@ -390,23 +437,10 @@ impl GeminiProvider {
         // Extract usage from usageMetadata.
         let usage = Self::parse_usage(response);
 
-        // Extract and map finish reason.
-        let raw_finish_reason = response
-            .get("candidates")
-            .and_then(|c| c.as_array())
-            .and_then(|arr| arr.first())
-            .and_then(|c| c.get("finishReason"))
-            .and_then(|s| s.as_str())
-            .unwrap_or("unknown");
-
         let finish_reason = if !tool_calls.is_empty() {
             "tool_use".to_string()
         } else {
-            match raw_finish_reason {
-                "STOP" => "end_turn".to_string(),
-                "MAX_TOKENS" => "max_tokens".to_string(),
-                other => other.to_lowercase(),
-            }
+            mapped_finish_reason
         };
 
         info!(
@@ -532,6 +566,7 @@ mod tests {
             id: "tc_1".into(),
             name: "search_catalog".into(),
             arguments: json!({"query": "revenue"}),
+            arguments_error: None,
         }];
         let messages = vec![
             Message::user("show revenue"),
@@ -554,6 +589,7 @@ mod tests {
             id: "tc_1".into(),
             name: "search_catalog".into(),
             arguments: json!({"query": "revenue"}),
+            arguments_error: None,
         }];
         let messages = vec![
             Message::user("show revenue"),
@@ -575,11 +611,13 @@ mod tests {
                 id: "tc_1".into(),
                 name: "search_catalog".into(),
                 arguments: json!({"query": "revenue"}),
+                arguments_error: None,
             },
             ToolCall {
                 id: "tc_2".into(),
                 name: "get_table_info".into(),
                 arguments: json!({"table_name": "orders"}),
+                arguments_error: None,
             },
         ];
         let messages = vec![
@@ -609,6 +647,7 @@ mod tests {
                     id: "tc_1".into(),
                     name: "search_catalog".into(),
                     arguments: json!({"query": "orders"}),
+                    arguments_error: None,
                 }],
             ),
             Message::tool_result("tc_1", "search_catalog", r#"{"tables": ["orders"]}"#),
@@ -673,11 +712,13 @@ mod tests {
                         id: "tc_1".into(),
                         name: "search_catalog".into(),
                         arguments: json!({"query": "rev"}),
+                        arguments_error: None,
                     },
                     ToolCall {
                         id: "tc_2".into(),
                         name: "get_table_info".into(),
                         arguments: json!({"table": "t"}),
+                        arguments_error: None,
                     },
                 ],
             ),
@@ -999,6 +1040,69 @@ mod tests {
         assert_eq!(result.finish_reason, "tool_use");
     }
 
+    // -- Contract: functionCall missing 'args' records arguments_error ------
+
+    #[test]
+    fn parse_response_function_call_missing_args_records_arguments_error() {
+        // KYO-535: Gemini's non-streaming API can return a functionCall part
+        // whose `args` key is absent entirely when the response was cut off
+        // by MAX_TOKENS mid-call. That used to be silently coerced to
+        // `Value::Null` — indistinguishable from a tool with a genuinely
+        // empty schema. It must now be recorded on arguments_error instead.
+        //
+        // Note: `finish_reason` itself is "tool_use" here, not "max_tokens" —
+        // any tool call found overrides it (see `parse_response_finish_reason_
+        // with_tool_calls_overrides` above, a pre-existing, unrelated
+        // behavior). `arguments_error`'s text is unaffected by that override
+        // because it is built from `mapped_finish_reason` before the
+        // override is applied.
+        let response = json!({
+            "candidates": [{
+                "content": {
+                    "parts": [{ "functionCall": { "name": "update_dashboard" } }],
+                    "role": "model"
+                },
+                "finishReason": "MAX_TOKENS"
+            }],
+            "usageMetadata": { "promptTokenCount": 50000, "candidatesTokenCount": 4096 }
+        });
+        let result = GeminiProvider::parse_response("gemini-2.5-flash", &response).unwrap();
+        assert_eq!(result.finish_reason, "tool_use");
+        let tool_calls = result.tool_calls.expect("functionCall part should still surface");
+        let tc = &tool_calls[0];
+        assert!(tc.arguments.is_object());
+        assert!(tc.arguments.as_object().unwrap().is_empty());
+        let error = tc
+            .arguments_error
+            .as_ref()
+            .expect("missing 'args' must set arguments_error, not silently default to null");
+        assert!(
+            error.contains("max_tokens"),
+            "arguments_error should name the max_tokens finish reason, got: {error}"
+        );
+    }
+
+    #[test]
+    fn parse_response_function_call_present_empty_args_is_not_an_error() {
+        // A tool with a genuinely empty schema sends `"args": {}` — this is
+        // legitimate and must NOT be confused with a missing key.
+        let response = json!({
+            "candidates": [{
+                "content": {
+                    "parts": [{ "functionCall": { "name": "list_datasources", "args": {} } }],
+                    "role": "model"
+                },
+                "finishReason": "STOP"
+            }],
+            "usageMetadata": { "promptTokenCount": 10, "candidatesTokenCount": 5 }
+        });
+        let result = GeminiProvider::parse_response("gemini-2.5-flash", &response).unwrap();
+        let tool_calls = result.tool_calls.unwrap();
+        let tc = &tool_calls[0];
+        assert!(tc.arguments.as_object().unwrap().is_empty());
+        assert!(tc.arguments_error.is_none());
+    }
+
     #[test]
     fn parse_response_finish_reason_missing_defaults_to_unknown() {
         let response = json!({
@@ -1132,6 +1236,7 @@ mod tests {
                     id: "tc_1".into(),
                     name: "search_catalog".into(),
                     arguments: json!({"query": "revenue monthly"}),
+                    arguments_error: None,
                 }],
             ),
             Message::tool_result(

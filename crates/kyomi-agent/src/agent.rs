@@ -711,7 +711,28 @@ impl CustomAgent {
 
             // Execute each tool call.
             for tool_call in &tool_calls {
-                let result = self.execute_tool(tool_call).await;
+                // KYO-535: a provider marks `arguments_error` when it could
+                // not parse this call's arguments — almost always a
+                // `max_tokens` cutoff mid-payload. Do NOT execute the tool
+                // against the `{}` placeholder: the tool would report a
+                // generic "missing required parameter", which reads to the
+                // model as "I forgot a field" and provokes a retry of the
+                // *identical* call. (Production incident: four identical
+                // retries, ~50s of generation each, until the copilot's
+                // 3-minute `max_duration` guard tripped.)
+                //
+                // The turn itself must NOT be short-circuited here, though —
+                // a retry with a *smaller* payload is a legitimate recovery,
+                // and the model can only take it if the loop keeps going.
+                // So: skip execution, tell the model the truth (truncated,
+                // not malformed; send less), and `continue` the `for` loop
+                // exactly like a normal tool result — the outer `while` loop
+                // then gives the model another iteration to retry smaller.
+                let result = if tool_call.arguments_error.is_some() {
+                    truncated_arguments_message(tool_call, &response.finish_reason)
+                } else {
+                    self.execute_tool(tool_call).await
+                };
                 self.state.messages.push(Message::tool_result(
                     &tool_call.id,
                     &tool_call.name,
@@ -1138,6 +1159,36 @@ fn final_response_text(response: crate::types::LLMResponse) -> String {
     } else {
         response.content
     }
+}
+
+/// Build the tool-result text sent back to the model for a [`ToolCall`] the
+/// provider marked as having unparseable arguments (`arguments_error`,
+/// KYO-535).
+///
+/// Must read as "your last message got cut off, send it again smaller" —
+/// never as a missing-parameter error, which is what provoked the model into
+/// retrying the identical call in the production incident this exists to
+/// fix. Names `response_finish_reason` explicitly when it is `"max_tokens"`,
+/// since that is the strongest available confirmation of *why* the
+/// arguments were truncated.
+fn truncated_arguments_message(tool_call: &ToolCall, response_finish_reason: &str) -> String {
+    let mut message = format!(
+        "Tool call '{}' was not executed: its arguments were cut off before they \
+         finished streaming, so they could not be parsed ({}). This is NOT a missing \
+         parameter — do not resend the identical call. Instead, send the call again \
+         with a smaller payload so the full arguments fit within the response length.",
+        tool_call.name,
+        tool_call
+            .arguments_error
+            .as_deref()
+            .unwrap_or("no further detail available"),
+    );
+    if response_finish_reason == "max_tokens" {
+        message.push_str(
+            " The response was truncated because it exceeded the model's max_tokens limit.",
+        );
+    }
+    message
 }
 
 /// Check if text contains ChartML code blocks.
@@ -1904,6 +1955,7 @@ Chart 2:\n```chartml\ndata:\n  query: SELECT 2\nvisualize:\n  type: line\n```";
     // -----------------------------------------------------------------------
 
     use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
     use async_trait::async_trait;
@@ -1965,6 +2017,12 @@ Chart 2:\n```chartml\ndata:\n  query: SELECT 2\nvisualize:\n  type: line\n```";
         SlowToolCall(Duration),
         /// A provider failure.
         Failure(String),
+        /// A single tool call whose arguments the provider could not parse
+        /// (KYO-535) — carries `finish_reason: "max_tokens"`, matching the
+        /// truncation-mid-payload shape the ticket traces to. Drives the
+        /// loop into another iteration, same as `ToolCall`, but the noop
+        /// tool must NOT be executed for it.
+        TruncatedToolCall,
     }
 
     /// Build a single-tool-call [`LLMResponse`] carrying the given usage.
@@ -1981,6 +2039,7 @@ Chart 2:\n```chartml\ndata:\n  query: SELECT 2\nvisualize:\n  type: line\n```";
                 id: "tc_1".to_string(),
                 name: NOOP_TOOL_NAME.to_string(),
                 arguments: json!({}),
+                arguments_error: None,
             }]),
             cost: None,
             thinking_content: None,
@@ -2054,6 +2113,23 @@ Chart 2:\n```chartml\ndata:\n  query: SELECT 2\nvisualize:\n  type: line\n```";
                     Ok(tool_call_response(AgentTokenUsage::default()))
                 }
                 Reply::Failure(message) => Err(kyomi_core::Error::Internal(message)),
+                Reply::TruncatedToolCall => Ok(LLMResponse {
+                    content: String::new(),
+                    finish_reason: "max_tokens".to_string(),
+                    usage: AgentTokenUsage::default(),
+                    tool_calls: Some(vec![ToolCall {
+                        id: "tc_truncated".to_string(),
+                        name: NOOP_TOOL_NAME.to_string(),
+                        arguments: json!({}),
+                        arguments_error: Some(
+                            "arguments could not be parsed as JSON (finish_reason=max_tokens): \
+                             EOF while parsing an object"
+                                .to_string(),
+                        ),
+                    }]),
+                    cost: None,
+                    thinking_content: None,
+                }),
             }
         }
 
@@ -2890,5 +2966,127 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
              after 1 iteration: {recorded:?}"
         );
         assert_eq!(answer, "Ran to completion.");
+    }
+
+    // -----------------------------------------------------------------------
+    // Truncated tool-call arguments (KYO-535)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn truncated_arguments_message_names_truncation_not_a_missing_parameter() {
+        let tool_call = ToolCall {
+            id: "tc_1".to_string(),
+            name: "update_dashboard".to_string(),
+            arguments: json!({}),
+            arguments_error: Some(
+                "arguments could not be parsed as JSON (finish_reason=max_tokens): EOF".into(),
+            ),
+        };
+        let message = truncated_arguments_message(&tool_call, "max_tokens");
+
+        assert!(
+            message.contains("truncat") || message.contains("cut off"),
+            "message must name truncation: {message}"
+        );
+        assert!(
+            !message.contains("Missing required parameter"),
+            "message must not read as a missing parameter: {message}"
+        );
+        assert!(
+            message.contains("max_tokens"),
+            "message must say so explicitly when finish_reason is max_tokens: {message}"
+        );
+        assert!(
+            message.contains("update_dashboard"),
+            "message should name the tool call: {message}"
+        );
+    }
+
+    #[test]
+    fn truncated_arguments_message_omits_max_tokens_line_when_finish_reason_differs() {
+        // The provider can set arguments_error without the response's overall
+        // finish_reason being exactly "max_tokens" (e.g. Gemini's finish_reason
+        // is overridden to "tool_use" whenever any tool call is present — see
+        // GeminiProvider::parse_response). The base truncation wording must
+        // still be there; only the max_tokens-specific sentence is conditional.
+        let tool_call = ToolCall {
+            id: "tc_1".to_string(),
+            name: "update_dashboard".to_string(),
+            arguments: json!({}),
+            arguments_error: Some(
+                "arguments ('args') were missing from the functionCall \
+                 (finish_reason=max_tokens)"
+                    .into(),
+            ),
+        };
+        let message = truncated_arguments_message(&tool_call, "tool_use");
+
+        assert!(
+            message.contains("truncat") || message.contains("cut off"),
+            "base wording must still name truncation: {message}"
+        );
+        assert!(
+            !message.contains("Missing required parameter"),
+            "message must not read as a missing parameter: {message}"
+        );
+        assert!(
+            !message.contains("max_tokens limit"),
+            "the finish_reason-specific sentence must not fire when \
+             response_finish_reason isn't literally \"max_tokens\": {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn truncated_tool_call_is_never_executed_and_the_loop_continues() {
+        // Full agent-loop test: a max_tokens response carrying a tool call
+        // with arguments_error must not execute the tool, must produce a
+        // tool-result message naming truncation (not "Missing required
+        // parameter"), and — critically — must let the loop continue so the
+        // model gets a chance to retry with a smaller payload, rather than
+        // aborting the turn.
+        let (mut agent, _calls) = scripted_agent(
+            5,
+            vec![Reply::TruncatedToolCall],
+            Reply::Text("done".to_string()),
+        )
+        .await;
+
+        let tool_start_count = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&tool_start_count);
+        agent.callbacks_mut().on_tool_start = Some(Box::new(move |_name, _args| {
+            counter.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        let answer = agent
+            .chat("hello", CancellationToken::new(), None, None, None)
+            .await
+            .expect("chat should complete, not error — a truncated call must not abort the turn");
+
+        assert_eq!(
+            answer, "done",
+            "the loop must continue past the truncated call to the next iteration"
+        );
+        assert_eq!(
+            tool_start_count.load(Ordering::SeqCst),
+            0,
+            "the noop tool must never execute when arguments_error is set"
+        );
+
+        let tool_results: Vec<&Message> = agent
+            .state()
+            .messages
+            .iter()
+            .filter(|m| m.role == MessageRole::Tool)
+            .collect();
+        assert_eq!(tool_results.len(), 1, "exactly one tool-result message: {tool_results:?}");
+        let result_text = &tool_results[0].content;
+        assert!(
+            result_text.contains("truncat") || result_text.contains("cut off"),
+            "tool result must name truncation: {result_text}"
+        );
+        assert!(
+            !result_text.contains("Missing required parameter"),
+            "tool result must not read as a missing parameter: {result_text}"
+        );
     }
 }
