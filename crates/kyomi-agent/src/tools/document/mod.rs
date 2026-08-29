@@ -33,10 +33,12 @@
 //!
 //! KYO-538 is stage 2 of 7 in the document-tool consolidation and unifies
 //! *structure*, not *behaviour*. Every place the two families genuinely
-//! behave differently today (CAS enforcement, embedding-refresh timing,
-//! validation, targeted-edit reach across doc types) is preserved exactly
-//! and called out with a `NOTE:` naming the ticket that will decide whether
-//! to collapse it (KYO-539/541/542).
+//! behave differently today (embedding-refresh timing, validation,
+//! targeted-edit reach across doc types) is preserved exactly and called
+//! out with a `NOTE:` naming the ticket that will decide whether to
+//! collapse it (KYO-541/542). CAS enforcement was one such difference
+//! until KYO-539 unified it — both families now thread a real
+//! `expected_content_hash` through [`apply_update`].
 
 mod delete;
 mod edit;
@@ -210,18 +212,17 @@ pub(crate) enum ApplyUpdateOutcome {
 /// and `edit_knowledge_file` rechunk synchronously immediately after this
 /// call succeeds; `modify_dashboard` instead spawns a background embedding
 /// job (and only conditionally, when substantial content was supplied).
-/// KYO-539 is expected to unify embedding-refresh timing; preserved as-is
+/// KYO-541 is expected to unify embedding-refresh timing; preserved as-is
 /// here, and each caller keeps its own post-update step rather than this
 /// function attempting to own both policies.
 ///
 /// NOTE: CAS (`expected_content_hash`) is caller-supplied and not enforced
 /// by this function itself — it is simply threaded through to
-/// `update_dashboard`. Knowledge callers pass a real hash (from a prior
-/// read, or the document's current hash) and get `Conflict` back on a stale
-/// write; `modify_dashboard` always passes `None`, so a concurrent
-/// `modify_dashboard` call can never be rejected as a CAS conflict (pinned
-/// by `modify_dashboard_cas_is_never_enforced` in `tools::dashboard`).
-/// KYO-539 is expected to change this deliberately.
+/// `update_dashboard`. As of KYO-539, every caller in both families
+/// (knowledge and dashboard) passes a real hash from a prior read of the
+/// document (or `None` for legacy rows predating hashing, which disables
+/// CAS for that write exactly as it always has). A stale hash gets
+/// `Conflict` back rather than silently clobbering a concurrent write.
 pub(crate) async fn apply_update(
     params: ApplyUpdateParams<'_>,
 ) -> kyomi_core::Result<ApplyUpdateOutcome> {
