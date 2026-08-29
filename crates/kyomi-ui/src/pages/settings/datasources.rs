@@ -1860,6 +1860,60 @@ fn connection_auth_modes_unavailable_from(
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// BigQuery project-discovery reset (KYO-468 review follow-up)
+//
+// `bq_projects`, `bq_projects_error`, and `bq_projects_attempted` travel
+// together everywhere in this file: `bq_projects.is_empty()` alone can't
+// distinguish "never attempted" from "attempted and came back empty" from
+// "attempted and failed" — only `bq_projects_attempted` (whether a listing
+// run has actually started/completed) and `bq_projects_error` (why it
+// failed, if it did) disambiguate those. Three separate review cycles each
+// found one more site that cleared some but not all three: the auth-mode
+// and `ds_type` `on_change` handlers (cycle 1), the service_account "Remove"
+// chip (cycle 2), and `do_test_and_discover` plus both OAuth-disconnect
+// Effects (cycle 3, KYO-468). Patching sites individually only bought one
+// more cycle each time, so every reset site now funnels through one of
+// these two functions instead of writing the three signals inline —
+// resetting one or two of the three without the other is no longer
+// possible without skipping the call entirely.
+//
+// Two variants, not one, because this file's disposal-safety convention
+// (see `BqProjectField`'s doc comment below, KYO-500/KYO-429) depends on
+// *where* the write happens: same-scope writes (inside `DatasourceModal`
+// itself, which owns these signals) use `.set()` so a genuine disposal bug
+// still panics instead of failing silently; writes crossing into a child
+// component's props (`BigQueryAuthModeSection`) use `.try_set()` because the
+// parent may have already begun tearing down. Population sites — anywhere
+// that writes real discovered data, a `Some(...)` error, or flips
+// `bq_projects_attempted` to `true` — are deliberately untouched by both.
+
+/// Resets all three BigQuery project-discovery signals together. For sites
+/// in `DatasourceModal`'s own scope (the same scope that owns the signals).
+fn reset_bq_projects_signals(
+    set_bq_projects: WriteSignal<Vec<(String, String)>>,
+    set_bq_projects_error: WriteSignal<Option<String>>,
+    set_bq_projects_attempted: WriteSignal<bool>,
+) {
+    set_bq_projects.set(vec![]);
+    set_bq_projects_error.set(None);
+    set_bq_projects_attempted.set(false);
+}
+
+/// Resets all three BigQuery project-discovery signals together, via
+/// `try_set`. For sites in a child component (e.g. `BigQueryAuthModeSection`)
+/// writing across the parent/child signal boundary from a plain event
+/// handler, where the parent scope may already be disposed.
+fn try_reset_bq_projects_signals(
+    set_bq_projects: WriteSignal<Vec<(String, String)>>,
+    set_bq_projects_error: WriteSignal<Option<String>>,
+    set_bq_projects_attempted: WriteSignal<bool>,
+) {
+    set_bq_projects.try_set(vec![]);
+    set_bq_projects_error.try_set(None);
+    set_bq_projects_attempted.try_set(false);
+}
+
 /// Modal state for create/edit mode.
 ///
 /// Matches `apps/frontend/src/components/settings/DatasourceModal.jsx`.
@@ -2114,13 +2168,27 @@ pub fn DatasourceModal(
     let (modal_oauth_expired, set_modal_oauth_expired) = signal(false);
     let (modal_oauth_connecting, set_modal_oauth_connecting) = signal(false);
 
-    // ── BigQuery project list (fetched after OAuth connects) ─────────────
-    // Populated when modal_oauth_connected becomes true in kyomi_oauth or
-    // enterprise_oauth mode.  Used to drive a Select dropdown for
-    // billing_project instead of a free-text input.
+    // ── BigQuery project list (fetched after OAuth connects, or after a
+    // successful Test & Discover) ──────────────────────────────────────
+    // Populated by kyomi_oauth's post-connect fetch (below) or by
+    // service_account's "Validate & Discover Projects" (KYO-405, via
+    // `test_action`'s Effect). Never enterprise_oauth — its per-datasource
+    // organizational token can't list personal GCP projects, so it never
+    // attempts this at all (see the OAuth-connect Effect's comment below).
+    // Used to drive a Select dropdown for billing_project instead of a
+    // free-text input (`BqProjectField`), and — KYO-468 — to drive
+    // `CreateModeCatalogPicker`'s BigQuery checkbox list in create mode.
     let (bq_projects, set_bq_projects) = signal::<Vec<(String, String)>>(vec![]);
     let (bq_projects_loading, set_bq_projects_loading) = signal(false);
     let (bq_projects_error, set_bq_projects_error) = signal::<Option<String>>(None);
+    // KYO-468: true once a BigQuery project-listing attempt has actually
+    // started/completed for kyomi_oauth or service_account — never
+    // inferred from `bq_projects.is_empty()` alone, which is also true
+    // for "never attempted" (enterprise_oauth) and "attempted, genuinely
+    // empty". `CreateModeCatalogPicker` reads this once, passed down as a
+    // prop, exactly like `catalog_discovery_denied` above — never
+    // re-derived locally.
+    let (bq_projects_attempted, set_bq_projects_attempted) = signal(false);
 
     // ── Reset form ───────────────────────────────────────────────────────
     let reset_form = move || {
@@ -2204,9 +2272,8 @@ pub fn DatasourceModal(
         set_modal_oauth_email.set(None);
         set_modal_oauth_expired.set(false);
         set_modal_oauth_connecting.set(false);
-        set_bq_projects.set(vec![]);
         set_bq_projects_loading.set(false);
-        set_bq_projects_error.set(None);
+        reset_bq_projects_signals(set_bq_projects, set_bq_projects_error, set_bq_projects_attempted);
         set_use_indexing_credentials.set(false);
         set_indexing_creds_type.set(String::new());
         set_indexing_creds_json.set(String::new());
@@ -3187,8 +3254,10 @@ pub fn DatasourceModal(
                                 projects.iter().map(|p| (p.clone(), p.clone())).collect();
                             set_bq_projects.set(opts);
                             set_bq_projects_error.set(None);
+                            set_bq_projects_attempted.set(true);
                         } else if let Some(reason) = r.resource_errors.get("projects") {
                             set_bq_projects_error.set(Some(format!("Couldn't list projects: {reason}")));
+                            set_bq_projects_attempted.set(true);
                         }
 
                         // KYO-474: same `resource_errors` read as the block
@@ -3236,9 +3305,13 @@ pub fn DatasourceModal(
         set_discovered_catalogs.set(vec![]);
         set_catalog_discovery_denied.set(false);
         // BigQuery service_account mode (KYO-405) — clear any stale project
-        // list from a previous validate before dispatching a fresh one.
-        // No-op for every other provider/mode, which never populate this.
-        set_bq_projects.set(vec![]);
+        // list (and any error/attempted state from a previous validate)
+        // before dispatching a fresh one. No-op for every other
+        // provider/mode, which never populate these. KYO-468: also resets
+        // `bq_projects_error` — a fresh validate means no attempt has
+        // completed yet for *this* run, so a stale prior error must not
+        // outlive the dispatch that's about to replace it either.
+        reset_bq_projects_signals(set_bq_projects, set_bq_projects_error, set_bq_projects_attempted);
 
         let ds_type_val = ds_type.get_untracked();
         let conn_cfg = build_connection_config();
@@ -3278,8 +3351,11 @@ pub fn DatasourceModal(
                     set_modal_oauth_connected.set(false);
                     set_modal_oauth_email.set(None);
                     set_modal_oauth_expired.set(false);
-                    // Clear project list so dropdowns revert to text inputs.
-                    set_bq_projects.set(vec![]);
+                    // Clear project list (and error/attempted, KYO-468 — see
+                    // `reset_bq_projects_signals`) so dropdowns revert to text
+                    // inputs and no stale failure message survives the
+                    // disconnect.
+                    reset_bq_projects_signals(set_bq_projects, set_bq_projects_error, set_bq_projects_attempted);
                     // KYO-413 — the credentials that produced `test_result` no
                     // longer exist once the Google account is disconnected;
                     // leaving it `Some(success: true)` would keep "Next"
@@ -3317,8 +3393,11 @@ pub fn DatasourceModal(
                     set_modal_oauth_connected.set(false);
                     set_modal_oauth_email.set(None);
                     set_modal_oauth_expired.set(false);
-                    // Clear project list so dropdowns revert to text inputs.
-                    set_bq_projects.set(vec![]);
+                    // Clear project list (and error/attempted, KYO-468 — see
+                    // `reset_bq_projects_signals`) so dropdowns revert to text
+                    // inputs and no stale failure message survives the
+                    // disconnect.
+                    reset_bq_projects_signals(set_bq_projects, set_bq_projects_error, set_bq_projects_attempted);
                     // KYO-413 — shared by BigQuery enterprise_oauth, Snowflake,
                     // Databricks, and Synapse: whichever provider just
                     // disconnected, the credentials backing `test_result` are
@@ -3670,6 +3749,12 @@ pub fn DatasourceModal(
         if connected && mode == "kyomi_oauth" {
             set_bq_projects_loading.set(true);
             set_bq_projects_error.set(None);
+            // KYO-468: mark the attempt as made as soon as the fetch starts,
+            // not only on success — CreateModeCatalogPicker uses this (never
+            // set for enterprise_oauth, which skips this whole branch) to
+            // tell "still loading" / "attempted, failed" apart from "never
+            // attempted".
+            set_bq_projects_attempted.set(true);
             leptos::task::spawn_local(async move {
                 match get_google_oauth_projects().await {
                     Ok(result) => {
@@ -4450,6 +4535,15 @@ pub fn DatasourceModal(
                                                     set_create_catalog_selected.set(vec![]);
                                                     set_create_catalog_text.set(String::new());
                                                     set_create_include_public_datasets.set(false);
+                                                    // KYO-468 — the discovered BigQuery
+                                                    // project list belongs to whichever type
+                                                    // was previously selected; switching away
+                                                    // from bigquery (or between bigquery and
+                                                    // itself via a different provider round
+                                                    // trip) must not let a stale list survive
+                                                    // to be misread as belonging to the new
+                                                    // type once bigquery is reselected.
+                                                    reset_bq_projects_signals(set_bq_projects, set_bq_projects_error, set_bq_projects_attempted);
                                                 }
                                             />
                                         </div>
@@ -4593,6 +4687,8 @@ pub fn DatasourceModal(
                                             set_bq_projects=set_bq_projects
                                             bq_projects_loading=bq_projects_loading
                                             bq_projects_error=bq_projects_error
+                                            set_bq_projects_error=set_bq_projects_error
+                                            set_bq_projects_attempted=set_bq_projects_attempted
                                             is_admin=is_admin
                                             auth_modes=connection_auth_modes
                                             test_result=test_result
@@ -4880,6 +4976,11 @@ pub fn DatasourceModal(
                                     include_public_datasets=create_include_public_datasets
                                     set_include_public_datasets=set_create_include_public_datasets
                                     catalog_discovery_denied=catalog_discovery_denied
+                                    bq_projects=bq_projects
+                                    bq_projects_loading=bq_projects_loading
+                                    bq_projects_error=bq_projects_error
+                                    bq_projects_attempted=bq_projects_attempted
+                                    bq_auth_mode=bq_auth_mode
                                 />
                             </Show>
 
@@ -6000,19 +6101,38 @@ fn BigQueryAuthModeSection(
     /// GCP project list fetched after OAuth connects.  Empty until OAuth is
     /// connected; drives the billing project Select dropdown.
     bq_projects: ReadSignal<Vec<(String, String)>>,
-    /// Setter for `bq_projects`. The service-account "Remove" chip is a
-    /// teardown route that isn't an `Action` (see `set_test_result` above),
-    /// so it needs its own way to clear the discovered project list — the
-    /// same list `google_disconnect_action`'s and
-    /// `datasource_disconnect_action`'s Effects clear via `set_bq_projects`
-    /// in the parent, and that `do_test_and_discover` clears before every
-    /// fresh validate. `try_set` for the same parent/child boundary reason
-    /// as `set_test_result` (KYO-413).
+    /// Setter for `bq_projects`. The service-account "Remove" chip and the
+    /// Authentication Mode selector's `on_change` are teardown routes that
+    /// aren't `Action`s (see `set_test_result` above), so they need their
+    /// own way to clear the discovered project list — the same list
+    /// `google_disconnect_action`'s and `datasource_disconnect_action`'s
+    /// Effects clear in the parent, and that `do_test_and_discover` clears
+    /// before every fresh validate. Passed through to
+    /// `try_reset_bq_projects_signals` (KYO-468) alongside
+    /// `set_bq_projects_error`/`set_bq_projects_attempted` below rather than
+    /// written individually — `try_set` for the same parent/child boundary
+    /// reason as `set_test_result` (KYO-413).
     set_bq_projects: WriteSignal<Vec<(String, String)>>,
     /// True while the project list is being fetched.
     bq_projects_loading: ReadSignal<bool>,
     /// Non-None when the project fetch returned an error or warning message.
     bq_projects_error: ReadSignal<Option<String>>,
+    /// Setter for `bq_projects_error`. KYO-468: always reset alongside
+    /// `set_bq_projects`/`set_bq_projects_attempted` via
+    /// `try_reset_bq_projects_signals` — see that function's doc comment for
+    /// why the three travel together — so switching away from a mode that
+    /// failed a listing doesn't leave its error message attached to
+    /// whatever mode is selected next.
+    set_bq_projects_error: WriteSignal<Option<String>>,
+    /// Setter for `bq_projects_attempted` (owned by the parent
+    /// `DatasourceModal`). KYO-468: always reset alongside `set_bq_projects`/
+    /// `set_bq_projects_error` via `try_reset_bq_projects_signals` — without
+    /// it, `create_mode_catalog_uses_generic_picker` can keep routing to
+    /// `BqCreateModeProjectPicker` with another mode's stale `bq_projects`
+    /// after switching to `enterprise_oauth` (or any future non-populating
+    /// mode), since `bq_projects_attempted` alone doesn't know which mode
+    /// set it.
+    set_bq_projects_attempted: WriteSignal<bool>,
     /// Gates the admin-only connection-config surfaces in this section: the
     /// Authentication Mode selector, the Enterprise OAuth Client ID/Secret
     /// fields, and the Service Account JSON textarea. All three persist
@@ -6202,6 +6322,19 @@ fn BigQueryAuthModeSection(
                         // paths below.
                         set_test_result.try_set(None);
                         set_discovery_status.try_set("idle".to_string());
+                        // KYO-468 — same reasoning, for the discovered
+                        // project list: a project list (and any error)
+                        // fetched under the previous mode belongs to that
+                        // mode's credentials, not whatever mode was just
+                        // selected. Without this reset, switching from
+                        // service_account (populated) to enterprise_oauth
+                        // (never populates) leaves `bq_projects_attempted`
+                        // true and the create-mode Catalog tab would render
+                        // the previous mode's stale project checkboxes as
+                        // if they belonged to the new one. `try_reset_...`
+                        // for the same parent/child boundary reason as
+                        // `set_test_result` above.
+                        try_reset_bq_projects_signals(set_bq_projects, set_bq_projects_error, set_bq_projects_attempted);
                     }
                 />
                 <p class="text-xs text-muted-foreground">
@@ -6502,8 +6635,17 @@ fn BigQueryAuthModeSection(
                                             // Clear the discovered project list too — it
                                             // was populated by validating the credentials
                                             // just removed, so BqProjectField's dropdowns
-                                            // must not keep offering them (KYO-413).
-                                            set_bq_projects.try_set(vec![]);
+                                            // must not keep offering them (KYO-413). KYO-468
+                                            // — and the error/attempted flags that travel
+                                            // with it: without this, removing the
+                                            // credentials after a failed Validate leaves
+                                            // `bq_projects_attempted` true and
+                                            // `bq_projects_error` set, so the create-mode
+                                            // Catalog tab renders the stale failure message
+                                            // for a service account the user just removed
+                                            // instead of falling back to "not yet
+                                            // validated".
+                                            try_reset_bq_projects_signals(set_bq_projects, set_bq_projects_error, set_bq_projects_attempted);
                                         }
                                     >
                                         "Remove"
@@ -8501,6 +8643,235 @@ fn catalog_items_for_type<'a>(
     }
 }
 
+/// True when `CreateModeCatalogPicker` should render its original,
+/// `available_items`-driven branch (the generic checkbox-list-or-text-input
+/// pair that predates KYO-468) rather than [`BqCreateModeProjectPicker`].
+///
+/// That's every non-BigQuery type unconditionally — `available_items`
+/// already carries the right data for them — plus BigQuery itself unless
+/// *both*:
+///
+/// * `bq_auth_mode` is one of the two modes that ever populate
+///   `bq_projects` (`"kyomi_oauth"` or `"service_account"` — see the
+///   writers of `set_bq_projects`/`set_bq_projects_attempted` above).
+///   `"enterprise_oauth"`'s per-datasource organizational token can't list
+///   personal GCP projects and has no discovery button of its own, so it
+///   must never satisfy this regardless of `bq_projects_attempted`.
+/// * `bq_projects_attempted` is `true` for that mode.
+///
+/// Checking `bq_auth_mode` here — not just at the signals' reset sites — is
+/// the KYO-468 leak fix: `bq_projects_attempted`/`bq_projects` alone can't
+/// tell "genuinely attempted under the *current* mode" apart from "still
+/// true from a populating mode the user switched away from earlier in the
+/// same session" (e.g. `service_account` validates, then the user switches
+/// to `enterprise_oauth` — the auth-mode `on_change` resets the three
+/// signals, but a predicate that ignored `bq_auth_mode` would still be one
+/// missed future reset site away from rendering stale data). Once both
+/// conditions hold, this returns `false` and `CreateModeCatalogPicker`
+/// renders `BqCreateModeProjectPicker` instead, sourced from `bq_projects`
+/// rather than `available_items` (which never carries BigQuery data — see
+/// `catalog_items_for_type`'s `_ => databases` fallthrough).
+///
+/// Extracted as a plain function — rather than left as an inline `when=`
+/// closure — so this routing decision, the crux of the KYO-468 fix, can be
+/// asserted directly by value instead of only by source-text inspection
+/// like the rest of this view-tree file.
+fn create_mode_catalog_uses_generic_picker(
+    ds_type: &str,
+    bq_auth_mode: &str,
+    bq_projects_attempted: bool,
+) -> bool {
+    if ds_type != "bigquery" {
+        return true;
+    }
+    let mode_populates_bq_projects = matches!(bq_auth_mode, "kyomi_oauth" | "service_account");
+    !mode_populates_bq_projects || !bq_projects_attempted
+}
+
+/// Shared checkbox-list body for catalog scope selection: Select All /
+/// Clear controls, a live "N of M selected" count, and a scrollable list
+/// of checkboxes over `(value, label)` pairs. `value` is what gets
+/// written into `set_selected` (and ultimately persisted as catalog
+/// scope); `label` is what's shown to the user.
+///
+/// Used both by the generic database/schema/catalog list — where
+/// `value == label`, an ordinary discovered name — and by BigQuery's
+/// discovered-project checkboxes (KYO-468), where `value` is the project
+/// id (what catalog scope is persisted as) and `label` is `bq_projects`'s
+/// own "name (project_id)" / bare-id convention, already built by its
+/// producers (the kyomi_oauth post-connect fetch and the service_account
+/// `test_action` Effect, both above). Extracted so BigQuery's picker
+/// reuses the exact same affordances instead of a second, independently
+/// maintained copy of this markup.
+#[component]
+fn CatalogItemCheckboxList(
+    items: Signal<Vec<(String, String)>>,
+    selected: ReadSignal<Vec<String>>,
+    set_selected: WriteSignal<Vec<String>>,
+) -> impl IntoView {
+    view! {
+        <div class="space-y-2">
+            // Select all / Clear + count
+            <div class="flex items-center gap-2">
+                <button
+                    type="button"
+                    class="text-xs text-primary hover:underline"
+                    on:click=move |_| {
+                        set_selected.set(
+                            items.get_untracked().into_iter().map(|(value, _)| value).collect(),
+                        );
+                    }
+                >
+                    "Select all"
+                </button>
+                <span class="text-xs text-muted-foreground">"·"</span>
+                <button
+                    type="button"
+                    class="text-xs text-primary hover:underline"
+                    on:click=move |_| {
+                        set_selected.set(vec![]);
+                    }
+                >
+                    "Clear"
+                </button>
+                <span class="text-xs text-muted-foreground ml-auto">
+                    {move || {
+                        let sel = selected.get().len();
+                        let total = items.get().len();
+                        if sel == 0 {
+                            "all (leave unchecked to index everything)".to_string()
+                        } else {
+                            format!("{sel} of {total} selected")
+                        }
+                    }}
+                </span>
+            </div>
+            // Scrollable checkbox list
+            <div class="border border-border rounded-md divide-y divide-border max-h-60 overflow-y-auto">
+                <For
+                    each=move || items.get()
+                    key=|(value, _)| value.clone()
+                    let:item
+                >
+                    {
+                        let (value, label) = item;
+                        let value_for_change = value.clone();
+                        let value_for_check = value.clone();
+                        view! {
+                            <label class="flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-muted/40 transition-colors">
+                                <input
+                                    type="checkbox"
+                                    class="h-4 w-4 rounded border-input accent-primary"
+                                    prop:checked=move || {
+                                        selected.get().contains(&value_for_check)
+                                    }
+                                    on:change=move |ev| {
+                                        let checked = event_target_checked(&ev);
+                                        let val = value_for_change.clone();
+                                        set_selected.update(|list| {
+                                            if checked {
+                                                if !list.contains(&val) {
+                                                    list.push(val);
+                                                }
+                                            } else {
+                                                list.retain(|i| i != &val);
+                                            }
+                                        });
+                                    }
+                                />
+                                <span class="text-sm font-mono text-foreground">
+                                    {label}
+                                </span>
+                            </label>
+                        }
+                    }
+                </For>
+            </div>
+        </div>
+    }
+}
+
+/// BigQuery's create-mode catalog-scope picker (KYO-468), rendered by
+/// `CreateModeCatalogPicker` once a project-listing attempt has actually
+/// been made (`bq_projects_attempted`) — the caller keeps rendering the
+/// original `available_items`-driven fallback for the "never attempted"
+/// state (enterprise_oauth), so this component only has to distinguish
+/// the three states that follow an attempt:
+///
+/// * **in flight** (`bq_projects_loading`) — a "Discovering projects…"
+///   indicator.
+/// * **discovered N** — [`CatalogItemCheckboxList`], the same Select All
+///   / Clear affordances as every other provider's checkbox list.
+/// * **attempted, failed or genuinely empty** — a warning [`Alert`]
+///   carrying `bq_projects_error`'s text when set, otherwise an explicit
+///   "no projects found" message, either way alongside the manual-entry
+///   input as fallback.
+///
+/// Structured as nested `<Show>`s rather than a `{move || match ... }`
+/// branch, per this file's disposal-safety convention — see
+/// `BqProjectField`'s doc comment above (KYO-500/KYO-429): a branch swap
+/// inside a plain reactive closure destroys and recreates its subtree,
+/// which panics if a child's `Effect` fires mid-teardown. `<Show>` mounts
+/// and unmounts through the framework's own ownership tree instead.
+#[component]
+fn BqCreateModeProjectPicker(
+    bq_projects: ReadSignal<Vec<(String, String)>>,
+    bq_projects_loading: ReadSignal<bool>,
+    bq_projects_error: ReadSignal<Option<String>>,
+    catalog_selected: ReadSignal<Vec<String>>,
+    set_catalog_selected: WriteSignal<Vec<String>>,
+    catalog_text: ReadSignal<String>,
+    set_catalog_text: WriteSignal<String>,
+) -> impl IntoView {
+    view! {
+        <Show
+            when=move || bq_projects_loading.get()
+            fallback=move || view! {
+                <Show
+                    when=move || !bq_projects.get().is_empty()
+                    fallback=move || view! {
+                        <div class="space-y-1.5">
+                            <Show
+                                when=move || bq_projects_error.get().is_some()
+                                fallback=move || view! {
+                                    <p class="text-sm text-muted-foreground">
+                                        "No projects found."
+                                    </p>
+                                }
+                            >
+                                <Alert variant=AlertVariant::Warning>
+                                    <AlertDescription>
+                                        {move || bq_projects_error.get().unwrap_or_default()}
+                                        " You can still enter project IDs manually below."
+                                    </AlertDescription>
+                                </Alert>
+                            </Show>
+                            <input
+                                type="text"
+                                class=MODAL_INPUT_CLASS
+                                placeholder="Enter project IDs, comma-separated"
+                                prop:value=move || catalog_text.get()
+                                on:input=move |ev| set_catalog_text.set(event_target_value(&ev))
+                            />
+                        </div>
+                    }
+                >
+                    <CatalogItemCheckboxList
+                        items=Signal::derive(move || bq_projects.get())
+                        selected=catalog_selected
+                        set_selected=set_catalog_selected
+                    />
+                </Show>
+            }
+        >
+            <div class="flex items-center gap-2 text-sm text-muted-foreground py-2">
+                <Spinner size="h-4 w-4"/>
+                "Discovering projects…"
+            </div>
+        </Show>
+    }
+}
+
 /// Create-mode catalog tab body.
 ///
 /// The user has already run "Test & Discover" on the Connection tab, so the
@@ -8509,9 +8880,22 @@ fn catalog_items_for_type<'a>(
 /// * When items are available — shows a checkbox list with Select All / Clear
 ///   controls so the user can narrow which schemas/databases/catalogs get
 ///   indexed on first run.
-/// * When no items were discovered (BigQuery, or pre-test fallback) — shows a
-///   comma-separated text input as a manual override.
-/// * BigQuery only — shows the "Include Public Datasets" toggle.
+/// * When no items were discovered (pre-test fallback, or a denied/genuinely
+///   empty listing) — shows a comma-separated text input as a manual
+///   override.
+/// * BigQuery only — shows the "Include Public Datasets" toggle, and (KYO-468)
+///   drives its own item list from `bq_projects`/`bq_projects_loading`/
+///   `bq_projects_error`/`bq_projects_attempted` via
+///   [`BqCreateModeProjectPicker`] once a project-listing attempt has
+///   actually been made — `available_items` below never carries BigQuery
+///   data (see `catalog_items_for_type`'s `_ => databases` fallthrough,
+///   the exact bug this ticket fixed: the Catalog tab was reachable, but
+///   silently rendered only the manual-entry input regardless of what had
+///   already been discovered). Before an attempt has been made
+///   (`enterprise_oauth`, which deliberately never lists projects — see
+///   the OAuth-connect Effect's comment), BigQuery still falls through to
+///   the same `available_items`-driven text-input branch as every other
+///   type, unchanged.
 ///
 /// Header text uses `catalog_item_label_for_type` from KYO-300 (no duplication).
 #[component]
@@ -8540,9 +8924,37 @@ fn CreateModeCatalogPicker(
     /// "not attempted yet" and "succeeded, genuinely nothing there"
     /// (KYO-452 still owns the copy for both of those).
     catalog_discovery_denied: ReadSignal<bool>,
+    /// BigQuery only (KYO-468): the account-level discovered project list
+    /// — sourced from the modal's `bq_projects` signal (kyomi_oauth's
+    /// post-connect fetch, or service_account's Test & Discover), never
+    /// re-derived through `available_items`/`catalog_items_for_type`,
+    /// which never carries BigQuery data.
+    bq_projects: ReadSignal<Vec<(String, String)>>,
+    /// True while the fetch above is in flight.
+    bq_projects_loading: ReadSignal<bool>,
+    /// Set when the fetch above failed or was denied.
+    bq_projects_error: ReadSignal<Option<String>>,
+    /// KYO-468: true once a BigQuery project-listing attempt has actually
+    /// started/completed — never inferred from `bq_projects.is_empty()`,
+    /// which is also true for "never attempted" (`enterprise_oauth`) and
+    /// "attempted, genuinely empty". Computed once by the caller from the
+    /// modal's own state, never re-derived here — same discipline as
+    /// `catalog_discovery_denied` above.
+    bq_projects_attempted: ReadSignal<bool>,
+    /// BigQuery only: the currently selected Authentication Mode
+    /// (`"kyomi_oauth"` / `"enterprise_oauth"` / `"service_account"`).
+    /// KYO-468: `create_mode_catalog_uses_generic_picker` needs this
+    /// alongside `bq_projects_attempted` — the auth-mode `on_change`
+    /// handler resets `bq_projects_attempted` on every switch, but reading
+    /// the current mode directly here means the routing decision itself
+    /// stays correct even if some future teardown site misses that reset.
+    bq_auth_mode: ReadSignal<String>,
 ) -> impl IntoView {
     // Derive the available items for the current type from the discovery
-    // signals.  Recomputed reactively on type changes.
+    // signals.  Recomputed reactively on type changes. Yields (value,
+    // label) pairs — value == label for every type this derives items for
+    // — so it can be handed directly to `CatalogItemCheckboxList` without
+    // a second wrapping derive.
     let available_items = Signal::derive(move || {
         let ds_type = datasource_type.get();
         let dbs = discovered_databases.get();
@@ -8550,7 +8962,7 @@ fn CreateModeCatalogPicker(
         let cats = discovered_catalogs.get();
         // We need owned Vecs — clone from whichever bucket is relevant.
         let items_ref = catalog_items_for_type(&ds_type, &dbs, &schemas, &cats);
-        items_ref.to_vec()
+        items_ref.iter().map(|v| (v.clone(), v.clone())).collect::<Vec<(String, String)>>()
     });
 
     view! {
@@ -8591,7 +9003,33 @@ fn CreateModeCatalogPicker(
                 </label>
             </Show>
 
-            // Checkbox picker (when items were discovered) or text input fallback
+            // Checkbox picker (when items were discovered) or text input
+            // fallback. BigQuery only takes this branch before any
+            // project-listing attempt has been made — once
+            // `bq_projects_attempted` is true, it renders through
+            // `BqCreateModeProjectPicker` below instead, sourced from
+            // `bq_projects` rather than `available_items` (which never
+            // carries BigQuery data — KYO-468).
+            <Show
+                when=move || {
+                    create_mode_catalog_uses_generic_picker(
+                        &datasource_type.get(),
+                        &bq_auth_mode.get(),
+                        bq_projects_attempted.get(),
+                    )
+                }
+                fallback=move || view! {
+                    <BqCreateModeProjectPicker
+                        bq_projects=bq_projects
+                        bq_projects_loading=bq_projects_loading
+                        bq_projects_error=bq_projects_error
+                        catalog_selected=catalog_selected
+                        set_catalog_selected=set_catalog_selected
+                        catalog_text=catalog_text
+                        set_catalog_text=set_catalog_text
+                    />
+                }
+            >
             {move || {
                 let items = available_items.get();
                 if items.is_empty() {
@@ -8638,84 +9076,15 @@ fn CreateModeCatalogPicker(
                 } else {
                     // Discovery succeeded — checkbox list with Select All / Clear
                     view! {
-                        <div class="space-y-2">
-                            // Select all / Clear + count
-                            <div class="flex items-center gap-2">
-                                <button
-                                    type="button"
-                                    class="text-xs text-primary hover:underline"
-                                    on:click=move |_| {
-                                        set_catalog_selected.set(available_items.get_untracked());
-                                    }
-                                >
-                                    "Select all"
-                                </button>
-                                <span class="text-xs text-muted-foreground">"·"</span>
-                                <button
-                                    type="button"
-                                    class="text-xs text-primary hover:underline"
-                                    on:click=move |_| {
-                                        set_catalog_selected.set(vec![]);
-                                    }
-                                >
-                                    "Clear"
-                                </button>
-                                <span class="text-xs text-muted-foreground ml-auto">
-                                    {move || {
-                                        let sel = catalog_selected.get().len();
-                                        let total = available_items.get().len();
-                                        if sel == 0 {
-                                            "all (leave unchecked to index everything)".to_string()
-                                        } else {
-                                            format!("{sel} of {total} selected")
-                                        }
-                                    }}
-                                </span>
-                            </div>
-                            // Scrollable checkbox list
-                            <div class="border border-border rounded-md divide-y divide-border max-h-60 overflow-y-auto">
-                                <For
-                                    each=move || available_items.get()
-                                    key=|item| item.clone()
-                                    let:item
-                                >
-                                    {
-                                        let item_for_change = item.clone();
-                                        let item_for_check = item.clone();
-                                        view! {
-                                            <label class="flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-muted/40 transition-colors">
-                                                <input
-                                                    type="checkbox"
-                                                    class="h-4 w-4 rounded border-input accent-primary"
-                                                    prop:checked=move || {
-                                                        catalog_selected.get().contains(&item_for_check)
-                                                    }
-                                                    on:change=move |ev| {
-                                                        let checked = event_target_checked(&ev);
-                                                        let val = item_for_change.clone();
-                                                        set_catalog_selected.update(|list| {
-                                                            if checked {
-                                                                if !list.contains(&val) {
-                                                                    list.push(val);
-                                                                }
-                                                            } else {
-                                                                list.retain(|i| i != &val);
-                                                            }
-                                                        });
-                                                    }
-                                                />
-                                                <span class="text-sm font-mono text-foreground">
-                                                    {item.clone()}
-                                                </span>
-                                            </label>
-                                        }
-                                    }
-                                </For>
-                            </div>
-                        </div>
+                        <CatalogItemCheckboxList
+                            items=available_items
+                            selected=catalog_selected
+                            set_selected=set_catalog_selected
+                        />
                     }.into_any()
                 }
             }}
+            </Show>
         </div>
     }
 }

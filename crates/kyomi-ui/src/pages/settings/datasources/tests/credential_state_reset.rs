@@ -218,9 +218,11 @@ fn auth_mode_selectors_reset_test_result_on_mode_change() {
 /// KYO-413 finding: the service-account "Remove" chip must also clear
 /// `bq_projects`, mirroring its sibling teardown sites —
 /// `google_disconnect_action`'s and `datasource_disconnect_action`'s
-/// Effects both call `set_bq_projects.set(vec![])`, and
-/// `do_test_and_discover` clears it before every fresh validate.
-/// `bq_projects` is populated for `service_account` mode
+/// Effects, and `do_test_and_discover` before every fresh validate, all
+/// clear it too (as of KYO-468, all four route through the shared
+/// `reset_bq_projects_signals`/`try_reset_bq_projects_signals` helpers —
+/// see `create_mode_bq_projects.rs`). `bq_projects` is populated for
+/// `service_account` mode
 /// (`r.resources.get("projects")`) and `BqProjectField` renders it as a
 /// live `<Select>` whenever non-empty — without this reset, removing the
 /// service account leaves the billing project dropdown still offering
@@ -248,10 +250,13 @@ fn service_account_remove_clears_bq_projects() {
          on:click block, which must still reset test_result"
     );
     assert!(
-        remove_chip.contains("set_bq_projects.try_set(vec![]);"),
-        "the service-account Remove chip's on:click must clear bq_projects — \
-         otherwise BqProjectField's billing project dropdown keeps offering \
-         the removed service account's discovered projects (KYO-413)"
+        remove_chip.contains(
+            "try_reset_bq_projects_signals(set_bq_projects, set_bq_projects_error, set_bq_projects_attempted);"
+        ),
+        "the service-account Remove chip's on:click must clear bq_projects (via the \
+         shared try_reset_bq_projects_signals helper, KYO-468) — otherwise \
+         BqProjectField's billing project dropdown keeps offering the removed \
+         service account's discovered projects (KYO-413)"
     );
 }
 
