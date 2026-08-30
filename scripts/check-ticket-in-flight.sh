@@ -139,12 +139,16 @@
 #     normal hit. This keeps the fail-closed default intact against a stray
 #     or copy-pasted marker, and it costs nothing: the writer always knows
 #     the ticket it is tombstoning.
-#   - ONLY LOCAL EVIDENCE IS SUPPRESSED. A tombstone suppresses the local
-#     worktree hit and the local branch hit for that worktree's branch, and
-#     NOTHING ELSE. It must never suppress a remote-branch hit (check 1) or
-#     a PR hit (check 2) — those mean the work was published and is
-#     genuinely in flight, tombstone or not. Do not extend tombstone
-#     suppression to checks 1/2.
+#   - ONLY LOCAL EVIDENCE IS SUPPRESSED — WITH ONE NARROW, PRINCIPLED
+#     EXCEPTION (KYO-567, see below). STRANDED.md, a file any process with
+#     filesystem access can write, suppresses the local worktree hit and the
+#     local branch hit for that worktree's branch, and NOTHING ELSE. It must
+#     never suppress a PR hit (check 2) — a PR has a live consumer in
+#     /merge-sweeper, and no tombstone is ever a substitute for that
+#     consumer having looked at it. STRANDED.md alone must also never
+#     suppress a remote-branch hit (check 1) — a local file has no business
+#     overruling evidence the whole team can see on the remote. Do not
+#     extend STRANDED.md's suppression to checks 1/2.
 #   - A SUPPRESSED TREE IS STILL REPORTED. Every tombstoned worktree is
 #     printed under its own heading in the verdict block, on every verdict
 #     (not only exit 0), so unsalvaged work is never silently forgotten.
@@ -154,6 +158,45 @@
 #     must delete STRANDED.md themselves; until they do, the tree keeps
 #     reading as "preserved, not a claim" and a second worker can walk right
 #     past it.
+#
+# STRANDED REMOTE BRANCHES (KYO-567) — READ THIS BEFORE "FIXING" IT BACK
+#
+# A worker that gets as far as `git push` and then dies leaves its ticket
+# In Progress with a pushed branch and no PR — forever, because check 1
+# (remote branches) sees that branch and reports IN FLIGHT on every future
+# check, and /merge-sweeper cannot help since there is no PR to merge.
+# scripts/mark-branch-stranded.sh (the writer, run at release time — see
+# its own header for why the release path is a rename and not "open a PR")
+# renames such a branch on the remote to `stranded/<original-name>`. This
+# script honours that rename as a tombstone in BOTH check 1 (remote
+# branches) and check 4 (local branches, for the symmetric local rename
+# mark-branch-stranded.sh also performs when safe): a matching ref whose
+# name begins `stranded/` is reported under the preserved-work heading
+# instead of counted in HITS.
+#
+# THIS IS A DELIBERATE, NARROW EXCEPTION TO "ONLY LOCAL EVIDENCE IS
+# SUPPRESSED" ABOVE — NOT A CONTRADICTION OF IT. The general rule this
+# script follows is: A TOMBSTONE MAY ONLY SUPPRESS EVIDENCE NO MORE DURABLE
+# THAN THE TOMBSTONE ITSELF.
+#
+#   - STRANDED.md is a file on one machine's disk. It cannot outrank a
+#     remote branch (check 1) or a PR (check 2) — both are visible to, and
+#     were created by, anyone with access to the remote. A local file must
+#     never suppress evidence that durable.
+#   - A `stranded/<branch>` ref lives ON THE REMOTE ITSELF, beside the
+#     branch it tombstones, and can only be created by something with push
+#     access to that remote — the same bar the original branch had to clear
+#     to become "in flight" in the first place. It is therefore AT LEAST AS
+#     durable as the remote-branch evidence it suppresses, so suppressing
+#     check 1 is sound. It is still not as durable as a PR — a PR has a
+#     live consumer (/merge-sweeper) with its own review/merge lifecycle —
+#     so a `stranded/` rename must NEVER suppress check 2 either, and does
+#     not: mark-branch-stranded.sh itself refuses to tombstone any branch
+#     that has a PR in any state, and this script performs no PR-side
+#     suppression at all regardless.
+#
+# Do not generalize this further. A local file may not suppress a remote
+# branch; a remote ref may. Neither may ever suppress a PR.
 #
 # USAGE
 #
@@ -365,15 +408,30 @@ is_tombstoned_branch() {
 }
 
 # ---- Check 1: remote branches ----------------------------------------------
+# A ref under `stranded/` (KYO-567 — see header) is a tombstone written by
+# mark-branch-stranded.sh, not a live claim: it is reported separately in
+# TOMBSTONED, matched by stripping the `stranded/` prefix before applying
+# the same matches_ticket rule as a normal branch.
 remote_stderr_file="$(mktemp)"
 if remote_refs="$(git ls-remote --heads "$REMOTE" 2>"$remote_stderr_file")"; then
     while IFS=$'\t' read -r _sha ref; do
         [ -n "$ref" ] || continue
         branch="${ref#refs/heads/}"
-        is_excluded "$branch" && continue
-        if matches_ticket "$branch"; then
-            HITS+=("remote branch: $REMOTE/$branch")
-        fi
+        case "$branch" in
+            stranded/*)
+                orig="${branch#stranded/}"
+                is_excluded "$orig" && continue
+                if matches_ticket "$orig"; then
+                    TOMBSTONED+=("remote branch $REMOTE/$branch (was $REMOTE/$orig)")
+                fi
+                ;;
+            *)
+                is_excluded "$branch" && continue
+                if matches_ticket "$branch"; then
+                    HITS+=("remote branch: $REMOTE/$branch")
+                fi
+                ;;
+        esac
     done <<<"$remote_refs"
 else
     FAILURES+=("remote branches ($REMOTE): $(cat "$remote_stderr_file")")
@@ -418,7 +476,7 @@ flush_worktree_entry() {
     if [ -n "$wt_branch" ]; then
         if ! is_excluded "$wt_branch" && matches_ticket "$wt_branch"; then
             if tombstone_names_ticket "${wt_path}/STRANDED.md"; then
-                TOMBSTONED+=("${wt_path} (branch ${wt_branch})")
+                TOMBSTONED+=("worktree ${wt_path} (branch ${wt_branch})")
                 TOMBSTONED_BRANCHES+=("$wt_branch")
             else
                 HITS+=("local worktree at ${wt_path} (branch ${wt_branch})")
@@ -439,22 +497,39 @@ done < <(git worktree list --porcelain)
 flush_worktree_entry # in case the porcelain output has no trailing blank line
 
 # ---- Check 4: local branches ------------------------------------------------
+# Same `stranded/` handling as check 1, for the symmetric local rename
+# mark-branch-stranded.sh performs when the branch isn't checked out
+# anywhere (KYO-567).
 while IFS= read -r branch; do
     [ -n "$branch" ] || continue
-    is_excluded "$branch" && continue
-    is_tombstoned_branch "$branch" && continue
-    if matches_ticket "$branch"; then
-        HITS+=("local branch: $branch")
-    fi
+    case "$branch" in
+        stranded/*)
+            orig="${branch#stranded/}"
+            is_excluded "$orig" && continue
+            is_tombstoned_branch "$orig" && continue
+            if matches_ticket "$orig"; then
+                TOMBSTONED+=("local branch ${branch} (was ${orig})")
+            fi
+            ;;
+        *)
+            is_excluded "$branch" && continue
+            is_tombstoned_branch "$branch" && continue
+            if matches_ticket "$branch"; then
+                HITS+=("local branch: $branch")
+            fi
+            ;;
+    esac
 done < <(git branch --list --format='%(refname:short)')
 
 # ---- verdict -----------------------------------------------------------------
 echo
 if [ "${#TOMBSTONED[@]}" -gt 0 ]; then
     # Printed on every verdict, not only exit 0 — a tombstone suppresses the
-    # local claim signal, never the fact that unsalvaged work is sitting on
-    # disk (KYO-529).
-    echo "PRESERVED STRANDED WORKTREES (not a claim — unsalvaged work lives here):"
+    # claim signal, never the fact that unsalvaged/published work is sitting
+    # somewhere (KYO-529 worktrees, KYO-567 remote/local branches). Each
+    # entry is prefixed "worktree", "remote branch", or "local branch" so a
+    # reader can tell which kind of preserved work they're looking at.
+    echo "PRESERVED STRANDED WORK (not a claim — unsalvaged work lives here):"
     for t in "${TOMBSTONED[@]}"; do
         echo "  ~ $t"
     done

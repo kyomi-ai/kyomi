@@ -442,7 +442,7 @@ gh_ok_empty
 run_check "$t16/workerB" 422
 assert_exit "a tombstoned worktree with no other evidence is CLEAR" 0
 assert_contains "still names the preserved path" "$t16/wt-dead"
-assert_contains "under the preserved-worktrees heading" "PRESERVED STRANDED WORKTREES"
+assert_contains "under the preserved-worktrees heading" "PRESERVED STRANDED WORK"
 assert_not_contains "does not also list it as a hit" "local worktree at $t16/wt-dead"
 echo
 
@@ -495,7 +495,7 @@ gh_ok_empty
 run_check "$t19/workerB" 422
 assert_exit "a tombstone must not mask a matching remote branch" 1
 assert_contains "names the remote branch hit" "remote branch: origin/jason/kyo-422-published"
-assert_contains "still reports the preserved worktree" "PRESERVED STRANDED WORKTREES"
+assert_contains "still reports the preserved worktree" "PRESERVED STRANDED WORK"
 echo
 
 # ─── Test 20: tombstoned worktree, but its branch ALSO has an open PR ──────
@@ -511,7 +511,138 @@ gh_ok_prs $'504\tOPEN\tjason/kyo-422-haspr'
 run_check "$t20/workerB" 422
 assert_exit "a tombstone must not mask a matching open PR" 1
 assert_contains "names the PR hit" "PR #504 (OPEN) branch jason/kyo-422-haspr"
-assert_contains "still reports the preserved worktree" "PRESERVED STRANDED WORKTREES"
+assert_contains "still reports the preserved worktree" "PRESERVED STRANDED WORK"
+echo
+
+gh_ok_empty
+
+# ─── Tests 21-25: `stranded/` REMOTE/LOCAL BRANCH tombstones (KYO-567) ──────
+#
+# KYO-529's tombstone (STRANDED.md) is local-only evidence and must never
+# suppress a remote branch or PR hit — tests 16-20 above pin that. KYO-567's
+# tombstone is different: `stranded/<branch>` is a rename ON THE REMOTE
+# ITSELF (written by mark-branch-stranded.sh), so it IS allowed to suppress
+# a remote-branch hit (check 1) and the symmetric local-branch hit
+# (check 4) — but, same as the worktree tombstone, it must never suppress a
+# PR hit. Test 23 is the KYO-567 analogue of tests 19/20 above.
+MARK_BRANCH="$SCRIPT_DIR/mark-branch-stranded.sh"
+
+# ─── Test 21: plain pushed branch, no PR — still IN FLIGHT (unchanged) ─────
+# Pins the distinction the ticket calls out explicitly: this ticket relaxes
+# nothing about the claim guard itself, only adds a new way to retire a
+# claim. A bare pushed branch with no PR (the exact KYO-534/KYO-463 shape,
+# before release) must still block a second worker. Test 2 above already
+# exercises this path end to end (that's the KYO-422 acceptance criterion);
+# this test exists only to make the "unchanged" claim explicit and pinned
+# under its own name, right next to the tests that show what DOES change.
+echo "-- Test 21: pushed branch with no PR is still IN FLIGHT (unchanged by KYO-567)"
+t21="$tmpdir/t21"
+mkdir -p "$t21"
+bare21="$(new_bare_remote "$t21/remote.git")"
+seed_main "$bare21"
+clone_repo "$bare21" "$t21/workerA"
+git -C "$t21/workerA" checkout -q -b jason/kyo-422-nopr
+echo "died before opening a PR" >>"$t21/workerA/README.md"
+git -C "$t21/workerA" commit -q -am "workerA: died before PR"
+git -C "$t21/workerA" push -q origin jason/kyo-422-nopr
+clone_repo "$bare21" "$t21/workerB"
+gh_ok_empty
+run_check "$t21/workerB" 422
+assert_exit "an un-tombstoned pushed branch with no PR still blocks" 1
+assert_contains "names the remote branch" "remote branch: origin/jason/kyo-422-nopr"
+echo
+
+# ─── Test 22: matching remote branch under stranded/ → CLEAR ───────────────
+echo "-- Test 22: stranded/ remote branch is preserved, not a hit"
+t22="$tmpdir/t22"
+mkdir -p "$t22"
+bare22="$(new_bare_remote "$t22/remote.git")"
+seed_main "$bare22"
+clone_repo "$bare22" "$t22/helper"
+git -C "$t22/helper" push -q origin "main:refs/heads/stranded/jason/kyo-422-old"
+clone_repo "$bare22" "$t22/workerB"
+gh_ok_empty
+run_check "$t22/workerB" 422
+assert_exit "a stranded/ remote branch alone is CLEAR" 0
+assert_contains "under the preserved-work heading" "PRESERVED STRANDED WORK"
+assert_contains "names the stranded ref and what it tombstones" "remote branch origin/stranded/jason/kyo-422-old (was origin/jason/kyo-422-old)"
+assert_not_contains "does not also count it as a hit" "remote branch: origin/stranded/jason/kyo-422-old"
+echo
+
+# ─── Test 23: stranded/ remote branch must NOT mask a matching PR ─────────
+# The KYO-567 analogue of tests 19/20: this tombstone type IS allowed to
+# suppress a remote-branch hit, but like every tombstone in this script it
+# must never suppress a PR hit (check 2) — a PR has a live consumer
+# (/merge-sweeper) that no tombstone substitutes for.
+echo "-- Test 23: stranded/ remote branch does not mask a matching PR"
+t23="$tmpdir/t23"
+mkdir -p "$t23"
+bare23="$(new_bare_remote "$t23/remote.git")"
+seed_main "$bare23"
+clone_repo "$bare23" "$t23/helper"
+git -C "$t23/helper" push -q origin "main:refs/heads/stranded/jason/kyo-422-haspr"
+clone_repo "$bare23" "$t23/workerB"
+gh_ok_prs $'505\tOPEN\tjason/kyo-422-haspr'
+run_check "$t23/workerB" 422
+assert_exit "a tombstoned remote branch must not mask a matching PR" 1
+assert_contains "names the PR hit" "PR #505 (OPEN) branch jason/kyo-422-haspr"
+assert_contains "still reports the preserved remote branch" "PRESERVED STRANDED WORK"
+echo
+gh_ok_empty
+
+# ─── Test 24: local branch under stranded/ → CLEAR ─────────────────────────
+echo "-- Test 24: stranded/ local branch is preserved, not a hit"
+t24="$tmpdir/t24"
+mkdir -p "$t24"
+bare24="$(new_bare_remote "$t24/remote.git")"
+seed_main "$bare24"
+clone_repo "$bare24" "$t24/workerB"
+git -C "$t24/workerB" branch "stranded/jason/kyo-422-locallystranded"
+gh_ok_empty
+run_check "$t24/workerB" 422
+assert_exit "a stranded/ local branch alone is CLEAR" 0
+assert_contains "under the preserved-work heading" "PRESERVED STRANDED WORK"
+assert_contains "names the stranded local branch and what it tombstones" "local branch stranded/jason/kyo-422-locallystranded (was jason/kyo-422-locallystranded)"
+assert_not_contains "does not also count it as a hit" "local branch: stranded/jason/kyo-422-locallystranded"
+echo
+
+# ─── Test 25: interop — a ref mark-branch-stranded.sh actually created ────
+# Mirrors mark-worktree-stranded-test.sh's own interop test: this script
+# and check-ticket-in-flight.sh must agree on the marker format because one
+# writes it and the other reads it (KYO-422 principle). Released from a
+# THIRD clone that never checked out the ticket branch at all, since
+# mark-branch-stranded.sh refuses to touch a branch checked out elsewhere
+# without its own worktree tombstone — that refusal is covered by
+# mark-branch-stranded-test.sh, not here.
+echo "-- Test 25: interop with the real mark-branch-stranded.sh"
+t25="$tmpdir/t25"
+mkdir -p "$t25"
+bare25="$(new_bare_remote "$t25/remote.git")"
+seed_main "$bare25"
+clone_repo "$bare25" "$t25/workerA"
+git -C "$t25/workerA" checkout -q -b jason/kyo-422-interop
+echo "died mid-run" >>"$t25/workerA/README.md"
+git -C "$t25/workerA" commit -q -am "workerA: died before PR"
+git -C "$t25/workerA" push -q origin jason/kyo-422-interop
+clone_repo "$bare25" "$t25/releaser"
+gh_ok_empty
+if release_out="$(cd "$t25/releaser" && "$MARK_BRANCH" 422 --branch jason/kyo-422-interop 2>&1)"; then
+    release_status=0
+else
+    release_status=$?
+fi
+if [ "$release_status" -eq 0 ]; then
+    printf "  \xe2\x9c\x93 %s\n" "mark-branch-stranded.sh releases the branch"
+    PASS=$((PASS + 1))
+else
+    printf "  \xe2\x9c\x97 %s\n" "mark-branch-stranded.sh releases the branch"
+    printf '    %s\n' "$release_out" | sed 's/^/    | /'
+    FAIL=$((FAIL + 1))
+fi
+clone_repo "$bare25" "$t25/workerC"
+run_check "$t25/workerC" 422
+assert_exit "check-ticket-in-flight.sh honours the ref mark-branch-stranded.sh wrote" 0
+assert_contains "names the stranded ref it wrote" "remote branch origin/stranded/jason/kyo-422-interop (was origin/jason/kyo-422-interop)"
 echo
 
 gh_ok_empty
