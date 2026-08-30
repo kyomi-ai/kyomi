@@ -177,6 +177,15 @@ pub async fn send_copilot_message(
         max_iterations: 20,
         max_duration: Some(std::time::Duration::from_secs(3 * 60)),
         max_total_tokens: Some(400_000),
+        // The dashboard copilot's prompt contract requires resending the
+        // COMPLETE dashboard document — every ChartML block plus its SQL —
+        // to `update_dashboard` on every edit, which routinely exceeds the
+        // library's 4096-token default on its own. On a reasoning model,
+        // reasoning tokens are returned in the same completion and are
+        // drawn from this same budget before the tool call itself starts
+        // being written, so the ceiling has to cover both. 16384 is fixed
+        // by KYO-534, not derived — non-negotiable for this surface.
+        max_tokens: 16384,
         component: context_type.to_string(),
         user_message_persistence: kyomi_agent::UserMessagePersistence::AdapterPersists(None),
         assistant_message_id: Some(prep.assistant_message_id.clone()),

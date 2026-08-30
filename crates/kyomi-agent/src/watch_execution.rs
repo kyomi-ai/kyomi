@@ -79,6 +79,17 @@ const MAX_WATCH_DURATION: std::time::Duration = std::time::Duration::from_secs(1
 /// than chat's — same reasoning as `MAX_WATCH_DURATION`.
 const MAX_WATCH_TOTAL_TOKENS: u64 = 750_000;
 
+/// Per-call output-generation ceiling for a single watch agent LLM call
+/// (KYO-534). A watch's final response is a small, fixed JSON schema
+/// (`should_alert` / `alert_title` / `summary` / `alert_message`), and every
+/// other iteration is a tool call, not document generation — unlike the
+/// dashboard copilot, watch never has to resend a whole document. The
+/// library's 4096-token default already covers that shape, so this makes
+/// the budget explicit per-surface (matching `MAX_WATCH_ITERATIONS` /
+/// `MAX_WATCH_DURATION` / `MAX_WATCH_TOTAL_TOKENS` above) rather than
+/// leaving it as a silently inherited default.
+const MAX_WATCH_OUTPUT_TOKENS: u32 = 4096;
+
 // ---------------------------------------------------------------------------
 // System prompt constants — ported CHARACTER FOR CHARACTER from Python
 // ---------------------------------------------------------------------------
@@ -1222,6 +1233,7 @@ async fn execute_watch_inner(
         max_iterations: MAX_WATCH_ITERATIONS,
         max_duration: Some(MAX_WATCH_DURATION),
         max_total_tokens: Some(MAX_WATCH_TOTAL_TOKENS),
+        max_tokens: MAX_WATCH_OUTPUT_TOKENS,
         component: "kyomi_watch".into(),
         user_message_persistence: UserMessagePersistence::AdapterPersists(None),
         assistant_message_id: None,
@@ -1331,6 +1343,7 @@ async fn execute_watch_inner(
                         max_iterations: MAX_WATCH_ITERATIONS,
                         max_duration: Some(MAX_WATCH_DURATION),
                         max_total_tokens: Some(MAX_WATCH_TOTAL_TOKENS),
+                        max_tokens: MAX_WATCH_OUTPUT_TOKENS,
                         component: "kyomi_watch".into(),
                         user_message_persistence: UserMessagePersistence::AdapterPersists(None),
                         assistant_message_id: None,
@@ -1910,6 +1923,15 @@ mod tests {
     fn max_watch_duration_and_tokens_are_tighter_than_chat() {
         assert_eq!(MAX_WATCH_DURATION, std::time::Duration::from_secs(10 * 60));
         assert_eq!(MAX_WATCH_TOTAL_TOKENS, 750_000);
+    }
+
+    #[test]
+    fn max_watch_output_tokens_matches_library_default() {
+        // KYO-534: a watch's final output is a small fixed JSON schema and
+        // every other iteration is a tool call, not a document — the
+        // library default already fits, so this pins that the value stays
+        // deliberate rather than drifting away from the documented reason.
+        assert_eq!(MAX_WATCH_OUTPUT_TOKENS, 4096);
     }
 
     // -- System prompt constants match Python --

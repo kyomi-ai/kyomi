@@ -1837,6 +1837,13 @@ async fn run_slack_query(
         max_iterations: 25,
         max_duration: Some(std::time::Duration::from_secs(10 * 60)),
         max_total_tokens: Some(1_500_000),
+        // Slack replies are short-form text messages posted into a channel,
+        // not documents with charts to resend — the library's 4096-token
+        // default already covers a generous multi-paragraph answer, so
+        // there is no case here for either the copilot's 16384 or chat's
+        // 8192 ceiling (KYO-534). Made explicit rather than left as a
+        // silently inherited default, matching the three guards above.
+        max_tokens: 4096,
         component: "slack_agent".into(),
         user_message_persistence: kyomi_agent::UserMessagePersistence::AdapterPersists(Some(
             user_message_id,

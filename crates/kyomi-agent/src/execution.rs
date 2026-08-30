@@ -89,6 +89,18 @@ pub struct AgentExecutionConfig {
     /// `None` disables the guard. Excludes prompt-cache reads — see that
     /// field's doc for why.
     pub max_total_tokens: Option<u64>,
+    /// Per-call output-generation ceiling for the agent's `chat()` call,
+    /// mirrored onto
+    /// [`AgentConfig::max_tokens`](crate::agent::AgentConfig::max_tokens).
+    /// Unlike its two siblings above, this bounds a single LLM completion,
+    /// not the whole `chat()` call. On reasoning models, reasoning tokens
+    /// are returned in the same completion and are drawn from this same
+    /// budget before any visible content — including tool-call arguments —
+    /// starts being written, so a ceiling sized only for the visible output
+    /// can still be exhausted by reasoning alone. Per-surface values are
+    /// set by each call site (chat, copilot, Slack, watches) — see KYO-534,
+    /// following KYO-345's precedent for the three guards above.
+    pub max_tokens: u32,
     pub component: String,
     /// How the user's message for this execution reaches the database —
     /// see [`UserMessagePersistence`] for the two arms and the contract
@@ -139,6 +151,7 @@ impl Default for AgentExecutionConfig {
             // silently inherit interactive chat's more generous ceiling.
             max_duration: Some(Duration::from_secs(15 * 60)),
             max_total_tokens: Some(1_500_000),
+            max_tokens: 4096,
             component: "custom_agent".into(),
             user_message_persistence: UserMessagePersistence::AdapterPersists(None),
             assistant_message_id: None,
@@ -241,6 +254,31 @@ fn build_tool_context(config: &AgentExecutionConfig, env: &AgentExecutionEnv<'_>
         connect_registry: env.connect_registry.clone(),
         platforms: env.platforms.clone(),
         user_display_name: config.user_display_name.clone(),
+    }
+}
+
+/// Build the [`AgentConfig`] used to construct the [`CustomAgent`] for this
+/// execution.
+///
+/// Pulled out as a pure, synchronous function — mirrors the
+/// [`build_tool_context`] extraction just above — so the mapping of the
+/// per-surface guards (`max_iterations`, `max_duration`, `max_total_tokens`,
+/// `max_tokens`; see KYO-345 and KYO-534) and `temperature` from
+/// [`AgentExecutionConfig`] onto [`AgentConfig`] can be pinned by a unit
+/// test without exercising the rest of the async agent loop (LLM calls, DB
+/// writes, etc.). `tool_filter` is computed by the caller from
+/// `config.context_type`/`config.tools_subset` and passed in rather than
+/// recomputed here, since that decision isn't part of what this function
+/// exists to prove.
+fn build_agent_config(config: &AgentExecutionConfig, tool_filter: ToolFilter) -> AgentConfig {
+    AgentConfig {
+        max_iterations: config.max_iterations,
+        max_duration: config.max_duration,
+        max_total_tokens: config.max_total_tokens,
+        max_tokens: config.max_tokens,
+        temperature: Some(config.temperature),
+        tool_filter,
+        ..Default::default()
     }
 }
 
@@ -378,14 +416,7 @@ pub async fn execute_agent_chat(
         }
     };
 
-    let agent_config = AgentConfig {
-        max_iterations: config.max_iterations,
-        max_duration: config.max_duration,
-        max_total_tokens: config.max_total_tokens,
-        temperature: Some(config.temperature),
-        tool_filter,
-        ..Default::default()
-    };
+    let agent_config = build_agent_config(&config, tool_filter);
 
     // 5. Create tool registry (filtered by tools_subset if provided).
     let registry = Arc::new(create_default_registry());
@@ -1546,6 +1577,7 @@ mod tests {
         assert_eq!(config.max_iterations, 25);
         assert_eq!(config.max_duration, Some(Duration::from_secs(15 * 60)));
         assert_eq!(config.max_total_tokens, Some(1_500_000));
+        assert_eq!(config.max_tokens, 4096);
         assert_eq!(config.component, "custom_agent");
         assert_eq!(config.context_type, "chat");
         assert!(config.model_name.is_none());
@@ -1612,6 +1644,7 @@ mod tests {
         assert_eq!(config.max_iterations, 25);
         assert_eq!(config.max_duration, Some(Duration::from_secs(15 * 60)));
         assert_eq!(config.max_total_tokens, Some(1_500_000));
+        assert_eq!(config.max_tokens, 4096);
         assert_eq!(config.component, "custom_agent");
         assert!(config.assistant_message_id.is_none());
         assert_eq!(config.context_window, 0);
@@ -1643,6 +1676,7 @@ mod tests {
             max_iterations: 10,
             max_duration: Some(Duration::from_secs(600)),
             max_total_tokens: Some(500_000),
+            max_tokens: 8_000,
             component: "watch_agent".into(),
             assistant_message_id: Some("msg-pre-created".into()),
             user_message_persistence: UserMessagePersistence::CallerPersisted(
@@ -1666,6 +1700,7 @@ mod tests {
         assert_eq!(config.max_iterations, 10);
         assert_eq!(config.max_duration, Some(Duration::from_secs(600)));
         assert_eq!(config.max_total_tokens, Some(500_000));
+        assert_eq!(config.max_tokens, 8_000);
         assert_eq!(config.conversation_history.as_ref().unwrap().len(), 2);
         assert_eq!(config.workspace_roles, vec![WorkspaceRole::WorkspaceAdmin]);
     }
@@ -1932,5 +1967,48 @@ mod tests {
         let ctx = test_tool_context_for_roles(vec![]).await;
         assert!(!ctx.is_workspace_admin());
         assert!(ctx.workspace_roles.is_empty());
+    }
+
+    // -- Contract: build_agent_config mirrors execution guards onto AgentConfig
+    //
+    // KYO-534: `max_tokens` is the fourth per-surface generation guard
+    // (after KYO-345's `max_iterations` / `max_duration` / `max_total_tokens`),
+    // and nothing in this file ever proved any of the four actually reach
+    // the `AgentConfig` that gets handed to `CustomAgent`/`client.complete()`
+    // — every existing test here (`agent_execution_config_with_all_fields`
+    // and the two defaults tests above) only asserts on
+    // `AgentExecutionConfig`'s own fields. `build_agent_config` is the exact
+    // function `execute_agent_chat` calls to build that `AgentConfig`, so
+    // exercising it directly (no LLM/network/DB calls needed) pins the real
+    // mapping. Every value below is deliberately distinctive — not 4096,
+    // not any other field's default — so a copy-paste mix-up between
+    // fields would also be caught.
+    #[test]
+    fn build_agent_config_mirrors_execution_guards_onto_agent_config() {
+        let config = AgentExecutionConfig {
+            max_iterations: 7,
+            max_duration: Some(Duration::from_secs(123)),
+            max_total_tokens: Some(654_321),
+            max_tokens: 9_999,
+            temperature: 0.42,
+            ..AgentExecutionConfig::default()
+        };
+        let tool_filter = ToolFilter {
+            exclude_copilot_only: true,
+            exclude_mcp_only: true,
+            include_only: None,
+        };
+
+        let agent_config = build_agent_config(&config, tool_filter);
+
+        assert_eq!(agent_config.max_iterations, 7);
+        assert_eq!(agent_config.max_duration, Some(Duration::from_secs(123)));
+        assert_eq!(agent_config.max_total_tokens, Some(654_321));
+        assert_eq!(
+            agent_config.max_tokens, 9_999,
+            "AgentExecutionConfig::max_tokens must reach AgentConfig::max_tokens \
+             (KYO-534) — this is the seam client.complete() actually reads"
+        );
+        assert_eq!(agent_config.temperature, Some(0.42));
     }
 }
