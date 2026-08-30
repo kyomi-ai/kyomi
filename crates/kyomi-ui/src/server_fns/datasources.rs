@@ -21,7 +21,7 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
-use super::{AuthenticatedContext, IntoServerFnError, IntoServerFnErrorCore};
+use super::{AuthenticatedContext, IntoServerFnError, IntoServerFnErrorCore, IntoServerFnErrorSqlx};
 #[cfg(feature = "ssr")]
 use kyomi_auth::datasource_service::{
     DiscoveryConnectionInputs, DiscoveryConnectionRequest, DiscoveryPrepError,
@@ -1099,7 +1099,7 @@ pub async fn get_catalog_stats(
         &datasource_id,
         &ac.ws_id
     )
-    .map_err(|e| ServerFnError::new(format!("Failed to verify datasource: {e}")))?;
+    .into_sfn_sqlx()?;
     if ds_count == 0 {
         return Err(ServerFnError::new("Datasource not found"));
     }
@@ -1113,7 +1113,7 @@ pub async fn get_catalog_stats(
         ),
         &datasource_id
     )
-    .map_err(|e| ServerFnError::new(format!("Failed to count tables: {e}")))?;
+    .into_sfn_sqlx()?;
 
     let schema_count: i64 = kyomi_core::db_fetch_scalar!(
         ac.db(),
@@ -1124,7 +1124,7 @@ pub async fn get_catalog_stats(
         ),
         &datasource_id
     )
-    .map_err(|e| ServerFnError::new(format!("Failed to count schemas: {e}")))?;
+    .into_sfn_sqlx()?;
 
     #[derive(sqlx::FromRow)]
     struct LastIndexedRow {

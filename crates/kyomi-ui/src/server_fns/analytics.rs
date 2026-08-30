@@ -17,7 +17,7 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
-use super::{AuthenticatedContext, IntoServerFnErrorCore};
+use super::{AuthenticatedContext, IntoServerFnErrorCore, IntoServerFnErrorSqlx};
 #[cfg(feature = "ssr")]
 use kyomi_types::Permission;
 
@@ -150,7 +150,7 @@ pub async fn get_analytics_usage() -> Result<AnalyticsUsageData, ServerFnError> 
         "SELECT COALESCE(analytics_bundle_events, 0) FROM workspaces WHERE workspace_id = $1",
         &ac.ws_id
     )
-    .map_err(|e| ServerFnError::new(format!("Failed to load bundle balance: {e}")))?
+    .into_sfn_sqlx()?
     .max(0) as u64;
 
     // Status considers both the included quota AND the bundle reserve.

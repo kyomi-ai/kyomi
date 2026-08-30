@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[cfg(feature = "ssr")]
-use super::{AuthenticatedContext, IntoServerFnErrorCore};
+use super::{AuthenticatedContext, IntoServerFnErrorCore, IntoServerFnErrorSqlx};
 
 /// Workspace row — analytics-bundle-only.
 ///
@@ -117,7 +117,7 @@ pub async fn get_ai_usage_status() -> Result<UsageData, ServerFnError> {
          FROM workspaces WHERE workspace_id = $1",
         &ac.ws_id
     )
-    .map_err(|e| ServerFnError::new(format!("failed to fetch bundle balances: {e}")))?;
+    .into_sfn_sqlx()?;
 
     let analytics_bundle_events = bundles.map(|b| b.analytics_bundle_events).unwrap_or(0);
     let ai_bundle_remaining_usd = status.bundle_remaining_usd;
