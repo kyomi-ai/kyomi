@@ -159,7 +159,7 @@ if out="$(cd "$t1/primary" && "$CHECK" 529 2>&1)"; then
 else
     check_status=$?
 fi
-if [ "$check_status" -eq 0 ] && printf '%s' "$out" | grep -qF "PRESERVED STRANDED WORKTREES"; then
+if [ "$check_status" -eq 0 ] && printf '%s' "$out" | grep -qF "PRESERVED STRANDED WORK"; then
     pass "check-ticket-in-flight.sh honours the marker this script wrote"
 else
     fail "check-ticket-in-flight.sh honours the marker this script wrote" "exit=$check_status; $out"

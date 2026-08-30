@@ -94,12 +94,27 @@ All scripts are organized by environment. **Every script is environment-specific
   KYO-463). A worktree matching the ticket whose root holds a valid
   tombstone — written by `mark-worktree-stranded.sh`, below — is reported
   separately as *preserved*, not counted as a hit, and printed under its
-  own heading on every verdict so the unsalvaged work is never silently
-  forgotten. The tombstone only ever suppresses local evidence: a matching
-  remote branch or open PR still forces exit `1` regardless. Self-tested by
-  `scripts/check-ticket-in-flight-test.sh`, including a real simulated
-  double-pickup against a throwaway bare git remote (the KYO-422 acceptance
-  criterion) and real `git worktree add` fixtures for the tombstone cases.
+  own heading (`PRESERVED STRANDED WORK`) on every verdict so the
+  unsalvaged work is never silently forgotten. `STRANDED.md` only ever
+  suppresses local evidence: it never suppresses a PR, and never suppresses
+  a remote branch by itself.
+  **Also honours `stranded/` remote and local branches (KYO-567):** a
+  worker that gets as far as `git push` and then dies leaves a pushed
+  branch with no PR forever — check 1 previously reported it in flight
+  permanently, since there is no PR for /merge-sweeper to close and Step
+  0.5's stranded check never reaches it. `mark-branch-stranded.sh`, below,
+  renames such a branch on the remote (and locally, when safe) to
+  `stranded/<branch>`. Unlike a local `STRANDED.md`, a `stranded/` ref
+  lives on the remote itself and can only be created by something with
+  push access, so it clears the bar to suppress a *remote*-branch hit too
+  (check 1), not just local evidence — see the script's own header for the
+  durability rule this follows. It still never suppresses a PR hit (check
+  2); `mark-branch-stranded.sh` itself refuses to tombstone any branch that
+  has one. Self-tested by `scripts/check-ticket-in-flight-test.sh`,
+  including a real simulated double-pickup against a throwaway bare git
+  remote (the KYO-422 acceptance criterion), real `git worktree add`
+  fixtures for the `STRANDED.md` cases, and an interop check that a ref
+  `mark-branch-stranded.sh` actually created is honoured here.
 
 - **`mark-worktree-stranded.sh`** - The writer side of the KYO-529 tombstone
   above: writes `STRANDED.md` at a preserved worktree's root so
@@ -121,6 +136,42 @@ All scripts are organized by environment. **Every script is environment-specific
   write itself failed); `2` usage error. Self-tested by
   `scripts/mark-worktree-stranded-test.sh`, including an interop check that
   `check-ticket-in-flight.sh` actually honours a marker this script wrote.
+
+- **`mark-branch-stranded.sh`** - The writer side of the KYO-567 `stranded/`
+  remote-branch tombstone above, and the answer to "what does *releasing* a
+  ticket whose worker died after `git push` actually do?" It is
+  deliberately NOT "open a PR" — see the script's own header for why that
+  was investigated and rejected on evidence (both reproduction branches for
+  KYO-534/KYO-463 contained only a mined-coding-standards commit, never the
+  ticket's actual work, so a `Closes KYO-NNN` PR opened at release time
+  would hand `/merge-sweeper` a green PR that marks a real bug Done — a
+  silent false completion). Instead it renames `<branch>` to
+  `stranded/<branch>` on the remote: verifies the new ref exists and points
+  at the same sha *before* deleting the original (never destroys before the
+  copy is confirmed — any failed step aborts leaving the original ref
+  exactly as it was), and does the symmetric local rename when the branch
+  isn't checked out anywhere. Usage:
+  `scripts/mark-branch-stranded.sh <TICKET> --branch <name> [--remote <name>] [--note <text>]`
+  — `TICKET` accepts `KYO-567`, `kyo-567`, or `567`; `--branch` is required;
+  `--remote` defaults to `origin`; `--note` is optional free text folded
+  into the printed summary. Refuses branch `main`; refuses any branch that
+  has a PR in any state (matched via `gh pr list --head <branch>` — that
+  branch belongs to `/merge-sweeper`, not this script); is idempotent on a
+  branch already under `stranded/` or on a retry after a prior run already
+  completed; and if the local branch is checked out in some *other*
+  worktree, refuses unless that worktree already carries its own valid
+  `STRANDED.md` for the same ticket (printing the exact
+  `mark-worktree-stranded.sh` command to run first) — composing the two
+  tombstone mechanisms rather than leaving a local claim unexplained.
+  **Exit-code contract:** `0` tombstoned (or already tombstoned — this
+  script is idempotent); `1` error (main, has a PR, worktree checkout
+  lacks a tombstone, branch missing on the remote, any git/gh step failed,
+  or a post-push verification mismatch); `2` usage error. Self-tested by
+  `scripts/mark-branch-stranded-test.sh`, including the happy path against
+  a throwaway bare remote, both PR and worktree-tombstone refusals, both
+  idempotency shapes, and — the load-bearing case — that a failed push
+  (forced via a pre-existing conflicting `stranded/` ref) leaves the
+  original remote ref completely untouched.
 
 ## Directory Structure
 
