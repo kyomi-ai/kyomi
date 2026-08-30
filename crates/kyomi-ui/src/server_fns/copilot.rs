@@ -119,6 +119,7 @@ pub async fn send_copilot_message(
             message: &message,
             content: content.as_deref(),
             current_time_user_tz: current_time_user_tz.as_deref(),
+            message_source: Some("web"),
         },
     )
     .await
@@ -178,7 +179,9 @@ pub async fn send_copilot_message(
         max_duration: Some(std::time::Duration::from_secs(3 * 60)),
         max_total_tokens: Some(400_000),
         component: context_type.to_string(),
-        user_message_persistence: kyomi_agent::UserMessagePersistence::AdapterPersists(None),
+        user_message_persistence: kyomi_agent::UserMessagePersistence::CallerPersisted(
+            prep.user_message_id,
+        ),
         assistant_message_id: Some(prep.assistant_message_id.clone()),
         conversation_history: None,
         user_display_name: ac.auth.name.clone().unwrap_or_else(|| ac.auth.email.clone()),

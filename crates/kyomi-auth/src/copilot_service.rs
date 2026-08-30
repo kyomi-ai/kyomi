@@ -25,6 +25,12 @@ use crate::websocket::WebSocketManager;
 pub struct CopilotMessagePrep {
     /// The full user message with injected context content.
     pub user_message: String,
+    /// The message_id of the user message row already written to the DB.
+    /// The caller must pass this to
+    /// `kyomi_agent::UserMessagePersistence::CallerPersisted` so the agent
+    /// loop knows this row is already durable and must not be persisted a
+    /// second time (KYO-554).
+    pub user_message_id: String,
     /// The message_id of the assistant placeholder row, which the agent will
     /// update when it finishes.
     pub assistant_message_id: String,
@@ -48,6 +54,14 @@ pub struct CopilotMessageInputs<'a> {
     pub message: &'a str,
     pub content: Option<&'a str>,
     pub current_time_user_tz: Option<&'a str>,
+    /// Where this message originated ("web" for the one production caller,
+    /// `kyomi_ui::server_fns::copilot::send_copilot_message`), stored
+    /// alongside `current_time_user_tz` so a later turn's context load can
+    /// reconstruct the same `[source: X, user_local_time: Y]` annotation
+    /// `agent.chat()` builds for the live LLM call (KYO-506, KYO-554). See
+    /// `chat_service::ChatDispatchParams::message_source` for the same
+    /// contract on the other production write site.
+    pub message_source: Option<&'a str>,
 }
 
 /// Validate, check capabilities, verify session access, and store both the
@@ -65,6 +79,7 @@ pub async fn prepare_copilot_message(
         message,
         content,
         current_time_user_tz,
+        message_source,
     } = inputs;
     // Check AI capability.
     if !config.llm_configured() {
@@ -109,22 +124,23 @@ pub async fn prepare_copilot_message(
 
     // Store user message.
     //
-    // `message_source` is passed as `None` here — this write predates
-    // KYO-506 and has no source signal of its own to record (unlike
-    // `chat_service::prepare_chat_dispatch`, which knows it's always "web").
-    // Reconstruction degrades cleanly to a time-only annotation for these
-    // rows rather than fabricating a source; KYO-554 tracks threading one
-    // through from `copilot.rs`'s known "web" literal.
-    let _user_message_id = crate::chat_service::add_message(
+    // The id is minted explicitly (rather than left to `add_message`'s
+    // auto-generation) so it can be returned to the caller, which passes it
+    // to `kyomi_agent::UserMessagePersistence::CallerPersisted` — this is
+    // what tells the agent loop the row is already durable and must not be
+    // persisted again (KYO-554). Mirrors
+    // `chat_service::prepare_chat_dispatch`'s `user_message_id` exactly.
+    let user_message_id = uuid::Uuid::new_v4().to_string();
+    crate::chat_service::add_message(
         db,
         encryption_key,
         session_id,
         "user",
         &user_message,
         None,
-        None,
+        Some(&user_message_id),
         current_time_user_tz,
-        None, // message_source — see comment above
+        message_source,
         Some(user_id),
         None,
         None,
@@ -152,6 +168,7 @@ pub async fn prepare_copilot_message(
 
     Ok(CopilotMessagePrep {
         user_message,
+        user_message_id,
         assistant_message_id,
     })
 }
