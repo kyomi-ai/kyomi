@@ -629,6 +629,12 @@ pub async fn send_chat_message(
         max_iterations: 50,
         max_duration: Some(std::time::Duration::from_secs(15 * 60)),
         max_total_tokens: Some(1_500_000),
+        // Chat responses routinely include one or more ChartML blocks plus
+        // explanatory prose, which can exceed the library's 4096-token
+        // default on its own — but unlike the dashboard copilot, chat never
+        // has to resend an entire existing document on every turn, so it
+        // doesn't need the copilot's 16384 ceiling (KYO-534).
+        max_tokens: 8192,
         component: "custom_agent".to_string(),
         user_message_persistence: kyomi_agent::UserMessagePersistence::CallerPersisted(
             user_message_id.clone(),
