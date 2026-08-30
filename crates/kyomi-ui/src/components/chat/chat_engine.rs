@@ -586,6 +586,31 @@ fn error_event_context_type(data: Option<&serde_json::Value>) -> Option<&str> {
     data.and_then(|d| d.get("context_type")).and_then(|v| v.as_str())
 }
 
+/// Extract the human-readable reason from a `send_error` WS payload.
+///
+/// KYO-550: `send_error` (`kyomi-auth::websocket::helpers`) writes the
+/// reason under the key `"error"`. This reads that same key — and only
+/// that key. It deliberately does NOT also check `"message"`: a dual-key
+/// fallback would let a producer/consumer key mismatch keep working by
+/// accident, which is the exact bug this ticket fixes. If the producer's
+/// key ever changes again, this function must change with it, not grow a
+/// second key to try.
+///
+/// The generic fallback is for the case the payload genuinely carries no
+/// reason (e.g. a caller passes an empty error path some day) — it is not
+/// a substitute for agreeing on the key name.
+///
+/// `cfg(any(test, wasm32))`: see `context_type_matches` above — the only
+/// production caller is the wasm32-only `"error"` subscription in
+/// `setup_ws_subscriptions` below.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn error_event_message(data: Option<&serde_json::Value>) -> String {
+    data.and_then(|d| d.get("error"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("An error occurred")
+        .to_string()
+}
+
 // ─── WebSocket subscription setup ──────────────────────────────────────────
 
 /// Reactive signals owned by the engine — passed as a unit to `setup_ws_subscriptions`
@@ -866,13 +891,7 @@ fn setup_ws_subscriptions(
             return;
         }
 
-        let error_msg = msg
-            .data
-            .as_ref()
-            .and_then(|d| d.get("message"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("An error occurred")
-            .to_string();
+        let error_msg = error_event_message(msg.data.as_ref());
 
         chat_state_error.set_error(&error_msg);
     });
@@ -1137,5 +1156,48 @@ mod tests {
         assert_eq!(error_event_context_type(Some(&nested_like_agent_thinking)), None);
 
         assert_eq!(error_event_context_type(None), None);
+    }
+
+    // ── error_event_message (KYO-550) ────────────────────────────────────
+    //
+    // send_error writes the reason under "error"; the handler used to read
+    // "message", which is never present, so every server-sent chat error
+    // rendered as the generic fallback. These pin the corrected key and
+    // guard against silently re-adding a fallback to "message".
+
+    #[test]
+    fn error_event_message_reads_the_real_send_error_payload_shape() {
+        // Exact shape `send_error` (kyomi-auth::websocket::helpers) builds:
+        // `json!({ "error": error_message })`, optionally with `error_code`
+        // and `context_type` alongside it.
+        let payload = serde_json::json!({
+            "error": "LLM budget exhausted for this workspace",
+            "error_code": "budget_exhausted",
+            "context_type": "dashboard_copilot",
+        });
+        assert_eq!(
+            error_event_message(Some(&payload)),
+            "LLM budget exhausted for this workspace"
+        );
+    }
+
+    #[test]
+    fn error_event_message_falls_back_when_no_reason_is_present() {
+        assert_eq!(error_event_message(None), "An error occurred");
+        assert_eq!(
+            error_event_message(Some(&serde_json::json!({}))),
+            "An error occurred"
+        );
+    }
+
+    #[test]
+    fn error_event_message_does_not_fall_back_to_the_message_key() {
+        // Regression guard: this is the bug itself. A payload that carries
+        // "message" instead of "error" must NOT be read — if it were, this
+        // test would be re-creating the exact dual-key fallback KYO-550
+        // removed, which would hide a future producer/consumer mismatch
+        // instead of surfacing it.
+        let payload = serde_json::json!({ "message": "should not be read" });
+        assert_eq!(error_event_message(Some(&payload)), "An error occurred");
     }
 }
