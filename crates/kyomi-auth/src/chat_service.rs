@@ -1871,8 +1871,10 @@ pub struct AgentMessage {
     pub current_time_user_tz: Option<String>,
     /// Where this message originated ("web", "slack", "mcp", "Kyomi Watch",
     /// ...). `None` for non-user roles, for rows written before this column
-    /// existed (KYO-506), and for any write site that never captured a
-    /// source (e.g. `copilot_service::prepare_copilot_message`).
+    /// existed (KYO-506), and for any write site that still never captures
+    /// a source (e.g. watch execution's own pre-persisted user row —
+    /// `copilot_service::prepare_copilot_message` captures `"web"` since
+    /// KYO-554).
     ///
     /// Paired with `current_time_user_tz` by
     /// `kyomi_agent::adapter::db_message_to_agent_message`, which

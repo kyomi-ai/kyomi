@@ -22,10 +22,13 @@
 //! `[source: X, user_local_time: Y]` prefix `agent.chat()`'s
 //! `build_metadata_prefix` builds for the live LLM call is instead
 //! recoverable from that row's own `current_time_user_tz` /
-//! `message_source` columns. [`db_message_to_agent_message`] rebuilds the
-//! identical prefix from those columns for every later turn (KYO-506) — see
-//! its doc for why a `AdapterPersists` row (Slack, copilot, watch) never
-//! needs this: its `content` already carries the prefix as literal text.
+//! `message_source` columns. `kyomi_auth::copilot_service::prepare_copilot_message`
+//! (KYO-554) stores its user message the same way, via
+//! `UserMessagePersistence::CallerPersisted`.
+//! [`db_message_to_agent_message`] rebuilds the identical prefix from those
+//! columns for every later turn (KYO-506) — see its doc for why an
+//! `AdapterPersists` row (Slack, watch) never needs this: its `content`
+//! already carries the prefix as literal text.
 
 use std::sync::Arc;
 
@@ -83,14 +86,15 @@ pub enum UserMessagePersistence {
     /// in [`ChatAgentAdapter::persist_after_chat`]. `Some(id)` stamps that
     /// row with a caller-chosen id (matching the id already streamed to the
     /// client over WebSocket); `None` lets the database layer generate one.
-    /// Historical behaviour — Slack, copilot, and watch execution all use
-    /// this.
+    /// Historical behaviour — Slack (`Some(id)`, minted up front but never
+    /// pre-persisted) and watch execution (`None`) use this.
     AdapterPersists(Option<String>),
     /// The caller already wrote the user-message row to the DB *before*
     /// the agent was spawned (KYO-492 —
-    /// `kyomi_auth::chat_service::prepare_chat_dispatch`). The adapter must
-    /// neither re-load that row into context (`load_context` filters it out
-    /// via [`drop_pre_persisted_message`]) nor write it a second time
+    /// `kyomi_auth::chat_service::prepare_chat_dispatch`; KYO-554 —
+    /// `kyomi_auth::copilot_service::prepare_copilot_message`). The adapter
+    /// must neither re-load that row into context (`load_context` filters
+    /// it out via [`drop_pre_persisted_message`]) nor write it a second time
     /// (`persist_after_chat` skips it via [`should_persist_new_message`]).
     CallerPersisted(String),
 }
@@ -408,16 +412,21 @@ impl ChatAgentAdapter {
                     None, // metadata
                     msg.message_id.as_deref(), // use tagged ID if set, else auto-generate
                     None, // current_time_user_tz
-                    // message_source: always None here — a message reaching
-                    // this branch of `chat()` (AdapterPersists — Slack,
-                    // copilot, watch) has its content built by
-                    // `agent.chat()`'s `build_metadata_prefix`, so any
-                    // source/local-time annotation is already baked into
-                    // `msg.content` as literal text. Recording it again in
-                    // this row's own columns would make
+                    // message_source: always None here — a *user*-role
+                    // message reaching this branch (an AdapterPersists row
+                    // — Slack, watch; or a second user turn within one
+                    // CallerPersisted run, e.g. copilot/chat mid-conversation
+                    // follow-ups the loop itself injects) has its content
+                    // built by `agent.chat()`'s `build_metadata_prefix`, so
+                    // any source/local-time annotation is already baked
+                    // into `msg.content` as literal text. Recording it
+                    // again in this row's own columns would make
                     // `db_message_to_agent_message` reconstruct a *second*
                     // prefix on top of the one already there the next time
-                    // this row is loaded (KYO-506).
+                    // this row is loaded (KYO-506). Assistant/tool messages
+                    // (including copilot's, which is CallerPersisted for
+                    // its one user row since KYO-554) always reach this
+                    // branch too, but never carry a prefix to begin with.
                     None,
                     if msg.role == MessageRole::User {
                         msg.user_id.as_deref()
@@ -616,21 +625,23 @@ fn drop_pre_persisted_message(
 /// `message_source` columns (KYO-506). This is safe to apply unconditionally
 /// rather than only for rows known to need it:
 ///
-/// - A row written by `chat_service::prepare_chat_dispatch` has both columns
+/// - A row written by `chat_service::prepare_chat_dispatch` or
+///   `copilot_service::prepare_copilot_message` (KYO-554) has both columns
 ///   populated and a raw `content` — reconstruction here is exactly what
 ///   restores the annotation the live turn saw.
-/// - A row written by `ChatAgentAdapter::persist_after_chat` (the
-///   `AdapterPersists` paths — Slack, copilot, watch) has both columns
-///   `None` (see that call site) and a `content` that already carries the
-///   prefix as literal text — `build_metadata_prefix(None, None)` returns
-///   an empty string, so `content` passes through unchanged and is never
+/// - A row written by `ChatAgentAdapter::persist_after_chat` under the
+///   `AdapterPersists` paths (Slack, watch) has both columns `None` (see
+///   that call site) and a `content` that already carries the prefix as
+///   literal text — `build_metadata_prefix(None, None)` returns an empty
+///   string, so `content` passes through unchanged and is never
 ///   double-prefixed.
 /// - A row written before this column pair existed has both columns `None`
 ///   for the same reason as above: no annotation is fabricated, `content`
 ///   passes through unchanged.
 /// - A row with `current_time_user_tz` but no `message_source` (or vice
-///   versa) — e.g. `copilot_service::prepare_copilot_message`, which never
-///   captures a source — gets the partial annotation `build_metadata_prefix`
+///   versa) — e.g. a row written before the `message_source` column existed,
+///   or before KYO-554 gave `copilot_service::prepare_copilot_message` a
+///   source to record — gets the partial annotation `build_metadata_prefix`
 ///   already supports; no source is ever invented for it.
 fn db_message_to_agent_message(msg: &chat_service::AgentMessage) -> Message {
     match msg.role.as_str() {
@@ -873,7 +884,7 @@ mod tests {
 
     #[test]
     fn db_message_to_agent_message_user_preserves_content() {
-        // An AdapterPersists row (Slack/copilot/watch, via
+        // An AdapterPersists row (Slack/watch, via
         // ChatAgentAdapter::persist_after_chat): the prefix is already baked
         // into `content` as literal text and both new columns are `None` —
         // db_message_to_agent_message must not reconstruct a second prefix
@@ -936,10 +947,11 @@ mod tests {
     #[test]
     fn db_message_to_agent_message_reconstructs_time_only_when_source_is_absent() {
         // A row with current_time_user_tz but no message_source — either a
-        // write site that never captured a source (e.g.
-        // copilot_service::prepare_copilot_message) or a row written before
-        // the message_source column existed. The reconstructed annotation
-        // must degrade to time-only: no source may ever be invented.
+        // write site that never captures a source, or a row written before
+        // the message_source column existed (e.g. any
+        // copilot_service::prepare_copilot_message row from before
+        // KYO-554). The reconstructed annotation must degrade to
+        // time-only: no source may ever be invented.
         let msg = chat_service::AgentMessage {
             message_id: "m10e".into(),
             role: "user".into(),
@@ -1234,9 +1246,9 @@ mod tests {
 
     #[test]
     fn should_persist_new_message_persists_everything_when_none() {
-        // None means no row was pre-persisted (copilot/watch paths) —
-        // behaviour must be unchanged from before KYO-492: every new
-        // message gets persisted.
+        // None means no row was pre-persisted (watch execution's
+        // AdapterPersists(None) path) — behaviour must be unchanged from
+        // before KYO-492: every new message gets persisted.
         let user = Message::user("hello");
         let assistant = Message::assistant("hi there");
         let tool = Message::tool_result("tc_1", "search_catalog", "{}");
@@ -1405,8 +1417,56 @@ mod tests {
         session_id: &str,
         encryption_key: Arc<[u8; 32]>,
     ) -> ChatAgentAdapter {
+        adapter_with_provider(db, user_id, session_id, encryption_key, Box::new(UnusedProvider))
+    }
+
+    /// An [`LLMProvider`] that always replies with fixed text and no tool
+    /// calls, so `CustomAgent::chat()`'s iteration loop terminates after
+    /// exactly one round-trip. Unlike [`UnusedProvider`], this lets a test
+    /// drive a full turn through [`ChatAgentAdapter::chat`] end to end
+    /// (KYO-554).
+    struct TextReplyProvider {
+        reply: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::provider::LLMProvider for TextReplyProvider {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[crate::types::Tool],
+            _temperature: Option<f32>,
+            _max_tokens: u32,
+            _user_names: &std::collections::HashMap<String, String>,
+        ) -> kyomi_core::Result<crate::types::LLMResponse> {
+            Ok(crate::types::LLMResponse {
+                content: self.reply.to_string(),
+                finish_reason: "end_turn".to_string(),
+                usage: crate::types::AgentTokenUsage::default(),
+                tool_calls: None,
+                cost: None,
+                thinking_content: None,
+            })
+        }
+
+        fn model(&self) -> &str {
+            "text-reply-test-provider"
+        }
+    }
+
+    /// Same as [`adapter_over`] but with an explicit provider, for tests
+    /// that need to drive `ChatAgentAdapter::chat()` (not just
+    /// `load_context()`) and therefore need a provider that actually
+    /// replies instead of panicking.
+    fn adapter_with_provider(
+        db: kyomi_core::DbPool,
+        user_id: &str,
+        session_id: &str,
+        encryption_key: Arc<[u8; 32]>,
+        provider: Box<dyn crate::provider::LLMProvider>,
+    ) -> ChatAgentAdapter {
         let agent = CustomAgent::new(
-            Box::new(UnusedProvider),
+            provider,
             crate::agent::AgentConfig::default(),
             Arc::new(crate::tools::ToolRegistry::new()),
             crate::test_support::build_ctx(db.clone()),
@@ -1520,6 +1580,109 @@ mod tests {
             messages[0].content,
             "[user_local_time: 2026-08-23T09:00:00+00:00] what was Q4 revenue",
             "a missing message_source must never be papered over with a fabricated source"
+        );
+    }
+
+    // -- Contract: a copilot turn must not double-write the user message
+    // -- (KYO-554) --------------------------------------------------------
+    //
+    // `kyomi_ui::server_fns::copilot::send_copilot_message` calls
+    // `kyomi_auth::copilot_service::prepare_copilot_message` to write the
+    // user's message row up front, then drives the agent loop with
+    // `UserMessagePersistence::CallerPersisted(prep.user_message_id)` — the
+    // same contract `chat_service::prepare_chat_dispatch` (KYO-492) uses.
+    // `CallerPersisted`'s `caller_persisted_id()` returns the id
+    // `prepare_copilot_message` already wrote, so `load_context`'s
+    // `drop_pre_persisted_message` drops that row before it re-enters
+    // context, and `should_persist_new_message` skips writing it again in
+    // `persist_after_chat`. Before this fix, copilot used
+    // `AdapterPersists(None)`, which reports no `caller_persisted_id` at
+    // all — both of those steps became no-ops, so the row survived into
+    // context, `CustomAgent::chat()` pushed the same text again as a new
+    // `Message`, and `persist_after_chat` persisted it a second time. This
+    // test drives a full turn exactly the way `copilot.rs` configures it
+    // and counts the resulting "user"-role rows.
+
+    #[tokio::test]
+    async fn copilot_turn_via_adapter_persists_exactly_one_user_message() {
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let key: Arc<[u8; 32]> = Arc::new([7u8; 32]);
+
+        chat_service::create_session_with_id(
+            &db,
+            "user-a",
+            "ws-1",
+            "sess-copilot",
+            None,
+            "dashboard_copilot",
+            None,
+        )
+        .await
+        .expect("create session");
+
+        let config = kyomi_core::Config::test_config();
+
+        // Exactly what send_copilot_message does before spawning agent
+        // execution: validate, check capabilities, verify session access,
+        // and store the user message + assistant placeholder.
+        let prep = kyomi_auth::copilot_service::prepare_copilot_message(
+            kyomi_auth::copilot_service::CopilotMessageInputs {
+                db: &db,
+                encryption_key: &key,
+                config: &config,
+                workspace_id: "ws-1",
+                user_id: "user-a",
+                session_id: "sess-copilot",
+                message: "what was Q4 revenue",
+                content: None,
+                current_time_user_tz: Some("2026-08-23T09:00:00+00:00"),
+                message_source: Some("web"),
+            },
+        )
+        .await
+        .expect("prepare_copilot_message should succeed, exactly as send_copilot_message calls it");
+
+        let mut adapter = adapter_with_provider(
+            db.clone(),
+            "user-a",
+            "sess-copilot",
+            key.clone(),
+            Box::new(TextReplyProvider {
+                reply: "Q4 revenue was $1M.",
+            }),
+        );
+
+        // Exactly the persistence choice send_copilot_message configures
+        // post-fix: CallerPersisted(user_message_id) — the row
+        // prepare_copilot_message already wrote.
+        let persistence = UserMessagePersistence::CallerPersisted(prep.user_message_id.clone());
+        adapter
+            .chat(ChatParams {
+                message: &prep.user_message,
+                cancel_token: CancellationToken::new(),
+                current_time_user_tz: Some("2026-08-23T09:00:00+00:00"),
+                message_source: Some("web"),
+                user_id: Some("user-a"),
+                user_message_persistence: &persistence,
+                assistant_message_id: Some(&prep.assistant_message_id),
+            })
+            .await
+            .expect("chat() should succeed");
+
+        let stored = chat_service::get_agent_messages(&db, &key, "sess-copilot", None)
+            .await
+            .expect("get_agent_messages should succeed");
+
+        let user_rows: Vec<&chat_service::AgentMessage> =
+            stored.iter().filter(|m| m.role == "user").collect();
+
+        assert_eq!(
+            user_rows.len(),
+            1,
+            "exactly one user-role row must exist for this single turn; found {}: {:?}",
+            user_rows.len(),
+            user_rows.iter().map(|m| &m.content).collect::<Vec<_>>()
         );
     }
 }
