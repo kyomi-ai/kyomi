@@ -924,6 +924,143 @@ pub fn generate_dashboard_summary(params: DashboardSummaryParams) {
     });
 }
 
+/// Re-read the dashboard and CAS-write `summary` onto whatever content is
+/// stored *right now* — never content captured at spawn time (KYO-539).
+///
+/// `generate_dashboard_summary_inner` spawns as a background task and makes
+/// an LLM call that takes seconds of wall clock; any edit landing in that
+/// window was previously silently reverted, because the eventual write used
+/// the content captured before the LLM call and passed no
+/// `expected_content_hash`. This function is the fix: it re-reads the
+/// dashboard after the LLM call has already returned `summary`, builds the
+/// new content from that fresh read, and CAS-writes using the fresh read's
+/// `content_hash`. A conflict means some other write landed in between —
+/// the summary is dropped rather than either reverting that write or
+/// retrying, since a missing summary is recoverable (the next edit that
+/// triggers summary generation will pick it up) and a reverted edit is not.
+///
+/// Extracted into its own `pub(crate)` function, separate from the LLM call
+/// that produces `summary`, so this race-fix can be exercised by a test
+/// that computes `summary` itself and calls this directly — no LLM
+/// provider required.
+pub(crate) async fn apply_dashboard_summary(
+    db: &DbPool,
+    ws_manager: &WebSocketManager,
+    dashboard_id: &str,
+    workspace_id: &str,
+    user_id: &str,
+    summary: &str,
+) -> kyomi_core::Result<()> {
+    let Some(fresh) =
+        kyomi_auth::dashboard_service::get_dashboard(db, dashboard_id, workspace_id, user_id).await?
+    else {
+        // Dashboard is gone — nothing to attach a summary to.
+        return Ok(());
+    };
+
+    // A concurrent writer may have already generated and applied a summary
+    // between spawn time and now (e.g. two edits in quick succession each
+    // triggering summary generation). Don't stack a second one.
+    if kyomi_auth::dashboard_service::extract_summary(&fresh.content).is_some() {
+        return Ok(());
+    }
+
+    let new_content = format!("<!-- dashboard-summary: {summary} -->\n{}", fresh.content);
+
+    write_dashboard_summary_with_cas(WriteDashboardSummaryParams {
+        db,
+        ws_manager,
+        dashboard_id,
+        workspace_id,
+        user_id,
+        summary,
+        new_content: &new_content,
+        expected_content_hash: fresh.content_hash.as_deref(),
+    })
+    .await
+}
+
+/// Parameters for [`write_dashboard_summary_with_cas`].
+pub(crate) struct WriteDashboardSummaryParams<'a> {
+    pub db: &'a DbPool,
+    pub ws_manager: &'a WebSocketManager,
+    pub dashboard_id: &'a str,
+    pub workspace_id: &'a str,
+    pub user_id: &'a str,
+    pub summary: &'a str,
+    pub new_content: &'a str,
+    pub expected_content_hash: Option<&'a str>,
+}
+
+/// CAS-write `new_content` (already built by the caller) to `dashboard_id`,
+/// guarded by `expected_content_hash`. A conflict — some other write landed
+/// after the hash was read — is warned-and-dropped rather than surfaced as
+/// an error or retried; see [`apply_dashboard_summary`] for why a missing
+/// summary is the safe outcome.
+///
+/// Split out from [`apply_dashboard_summary`] as its own `pub(crate)`
+/// function purely so a test can drive this exact CAS-then-drop seam with a
+/// deliberately stale `expected_content_hash`. A real interleave inside
+/// `apply_dashboard_summary` itself — a write landing between its own
+/// re-read and this call — cannot be forced deterministically (same reason
+/// as `modify_dashboard`'s pre-read seam, see
+/// `dashboard_doc_type_apply_update_rejects_stale_hash` in
+/// `tools/dashboard.rs`), so this function exists to make the conflict
+/// branch reachable without faking a race. Behavior is unchanged from the
+/// inline version this replaced.
+pub(crate) async fn write_dashboard_summary_with_cas(
+    params: WriteDashboardSummaryParams<'_>,
+) -> kyomi_core::Result<()> {
+    let WriteDashboardSummaryParams {
+        db,
+        ws_manager,
+        dashboard_id,
+        workspace_id,
+        user_id,
+        summary,
+        new_content,
+        expected_content_hash,
+    } = params;
+
+    match kyomi_auth::dashboard_service::update_dashboard(
+        kyomi_auth::dashboard_service::UpdateDashboardParams {
+            db,
+            embed: None,
+            dashboard_id,
+            workspace_id,
+            user_id,
+            title: None,
+            content: Some(new_content),
+            change_summary: Some("Auto-generated summary"),
+            expected_content_hash,
+        },
+    )
+    .await
+    {
+        Ok(_) => {}
+        Err(kyomi_core::Error::Conflict(msg)) => {
+            warn!(
+                dashboard_id = %dashboard_id,
+                error = %msg,
+                "Dropping dashboard summary: content changed concurrently"
+            );
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    }
+
+    ws_helpers::send_dashboard_summary_ready(ws_manager, user_id, dashboard_id, summary, new_content).await;
+    ws_helpers::broadcast_dashboard_sync(
+        db, ws_manager, dashboard_id, workspace_id,
+        kyomi_types::sync::SyncActionType::Update,
+        user_id,
+    )
+    .await;
+    info!(dashboard_id = %dashboard_id, summary = %summary, "Generated dashboard summary");
+
+    Ok(())
+}
+
 async fn generate_dashboard_summary_inner(
     params: DashboardSummaryParams,
 ) -> kyomi_core::Result<()> {
@@ -992,24 +1129,7 @@ async fn generate_dashboard_summary_inner(
     }
     let summary = summary.replace("-->", "\u{2014}");
 
-    let new_content = format!("<!-- dashboard-summary: {summary} -->\n{content}");
-
-    kyomi_auth::dashboard_service::update_dashboard(
-        kyomi_auth::dashboard_service::UpdateDashboardParams {
-            db, embed: None, dashboard_id, workspace_id, user_id,
-            title: None, content: Some(&new_content),
-            change_summary: Some("Auto-generated summary"),
-            expected_content_hash: None,
-        },
-    ).await?;
-
-    ws_helpers::send_dashboard_summary_ready(ws_manager, user_id, dashboard_id, &summary, &new_content).await;
-    ws_helpers::broadcast_dashboard_sync(
-        db, ws_manager, dashboard_id, workspace_id,
-        kyomi_types::sync::SyncActionType::Update,
-        user_id,
-    ).await;
-    info!(dashboard_id = %dashboard_id, summary = %summary, "Generated dashboard summary");
+    apply_dashboard_summary(db, ws_manager, dashboard_id, workspace_id, user_id, &summary).await?;
 
     // -------------------------------------------------------------------------
     // Collection auto-tagging — evaluate whether the dashboard belongs to any
@@ -1156,6 +1276,234 @@ async fn generate_dashboard_summary_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::test_support::{seed_user_and_workspace, test_pool};
+
+    // -- apply_dashboard_summary — KYO-539 race fix ---------------------------
+    //
+    // `generate_dashboard_summary_inner` spawns as a background task and
+    // makes an LLM call before it ever writes; these tests drive the
+    // extracted post-LLM tail (`apply_dashboard_summary`) directly with a
+    // hand-supplied summary string, so the race and the CAS behavior around
+    // it are exercised without an LLM provider.
+
+    /// AC1: reproduces the reported data-loss bug. A background summary
+    /// task captures content A at spawn time; while its LLM call is in
+    /// flight, another writer updates the dashboard to content B. The old
+    /// code built its write from the captured content A and passed
+    /// `expected_content_hash: None`, so it always won, silently reverting
+    /// B back to (a summary of) A. `apply_dashboard_summary` must instead
+    /// re-read the dashboard and write on top of B, not A.
+    #[tokio::test]
+    async fn dashboard_summary_race_does_not_revert_concurrent_write() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let dashboard_id = kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Race", "AAAA spawn-time content", kyomi_core::models::DocType::Dashboard, None,
+        )
+        .await
+        .expect("seed dashboard with spawn-time content");
+
+        // Stand-in for the LLM call's output: a summary generated from the
+        // content that was current when the background task was spawned.
+        // The wording deliberately avoids echoing either marker string below
+        // so the later "must not contain" assertions can't collide with it.
+        let summary = "A short generated summary".to_string();
+
+        // While that (simulated) LLM call was in flight, another writer
+        // updated the dashboard's content out from under it.
+        kyomi_auth::dashboard_service::update_dashboard(
+            kyomi_auth::dashboard_service::UpdateDashboardParams {
+                db: &db,
+                embed: None,
+                dashboard_id: &dashboard_id,
+                workspace_id: "ws-1",
+                user_id: "user-a",
+                title: None,
+                content: Some("BBBB concurrent content"),
+                change_summary: None,
+                expected_content_hash: None,
+            },
+        )
+        .await
+        .expect("writer B updates dashboard to fresh content");
+
+        let ws_manager = kyomi_auth::websocket::WebSocketManager::new(None, db.clone());
+
+        apply_dashboard_summary(&db, &ws_manager, &dashboard_id, "ws-1", "user-a", &summary)
+            .await
+            .expect("apply_dashboard_summary");
+
+        let dash = kyomi_auth::dashboard_service::get_dashboard(&db, &dashboard_id, "ws-1", "user-a")
+            .await
+            .expect("lookup")
+            .expect("dashboard exists");
+
+        assert!(
+            dash.content.contains("BBBB concurrent content"),
+            "writer B's content must survive the summary write: {}",
+            dash.content
+        );
+        assert!(
+            !dash.content.contains("AAAA spawn-time content"),
+            "the stale content captured at spawn time must never be written back: {}",
+            dash.content
+        );
+        assert_eq!(
+            dash.content,
+            format!("<!-- dashboard-summary: {summary} -->\nBBBB concurrent content"),
+            "{}",
+            dash.content
+        );
+    }
+
+    // -- write_dashboard_summary_with_cas — conflict-arm coverage ------------
+    //
+    // The old test here (`apply_dashboard_summary_drops_summary_on_conflict_
+    // without_erroring`) called `apply_dashboard_summary` end-to-end, but
+    // that function re-reads the dashboard immediately before writing, so
+    // there is never a real interleave left for a stale hash to survive
+    // into — a mutation test (swapping the `Err(Conflict(msg))` arm's body
+    // for `panic!()`) proved the Conflict arm was never actually reached.
+    // `write_dashboard_summary_with_cas` was extracted for exactly this
+    // reason: it takes `expected_content_hash` as an explicit parameter, so
+    // a test can hand it a deliberately stale one and reach the Conflict
+    // arm for real — the same pattern already used for `apply_update` in
+    // `dashboard_doc_type_apply_update_rejects_stale_hash`
+    // (`tools/dashboard.rs`), rather than trying to fake a race.
+
+    /// Minimal in-memory `tracing` capture so the "drop is logged, not
+    /// silent" assertion below can check an actual log line rather than
+    /// only the return value. Mirrors `catalog::traits::tests::capture_logs`
+    /// (private to its own module, so not reused directly) — see that
+    /// copy's doc comment for why a hand-rolled capturing subscriber rather
+    /// than adding a `tracing-test` dependency.
+    #[derive(Clone, Default)]
+    struct CapturingWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl CapturingWriter {
+        fn contents(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().expect("lock poisoned")).into_owned()
+        }
+    }
+
+    impl std::io::Write for CapturingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("lock poisoned").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturingWriter {
+        type Writer = CapturingWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Installs a capturing `tracing` subscriber as the thread-local
+    /// default for the duration of the returned guard. `#[tokio::test]`
+    /// uses a current-thread runtime by default, so the thread-local
+    /// dispatcher stays active across `.await` points in the test body.
+    fn capture_logs() -> (CapturingWriter, tracing::subscriber::DefaultGuard) {
+        let writer = CapturingWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer.clone())
+            .with_ansi(false)
+            .without_time()
+            .with_target(false)
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+        (writer, guard)
+    }
+
+    /// Drives the CAS-then-drop seam directly with a deliberately stale
+    /// `expected_content_hash`, standing in for a summary write that lost a
+    /// race against a concurrent editor. Asserts all three things that
+    /// matter when that happens: the call still returns `Ok(())` (a
+    /// conflict is dropped, not surfaced as a turn error), the concurrent
+    /// writer's content survives completely untouched (no summary applied,
+    /// nothing reverted), and the drop is logged rather than silent.
+    #[tokio::test]
+    async fn write_dashboard_summary_with_cas_drops_on_stale_hash_and_logs() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let dashboard_id = kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Contested", "v1", kyomi_core::models::DocType::Dashboard, None,
+        )
+        .await
+        .expect("seed dashboard");
+
+        let dash_before = kyomi_auth::dashboard_service::get_dashboard(&db, &dashboard_id, "ws-1", "user-a")
+            .await
+            .expect("lookup")
+            .expect("exists");
+        let stale_hash = dash_before.content_hash.expect("hash present after create_dashboard");
+
+        // A concurrent writer lands after the hash above was captured but
+        // before the summary write below — exactly the interleave
+        // `expected_content_hash` exists to detect.
+        kyomi_auth::dashboard_service::update_dashboard(
+            kyomi_auth::dashboard_service::UpdateDashboardParams {
+                db: &db,
+                embed: None,
+                dashboard_id: &dashboard_id,
+                workspace_id: "ws-1",
+                user_id: "user-a",
+                title: None,
+                content: Some("v2, concurrent writer"),
+                change_summary: None,
+                expected_content_hash: None,
+            },
+        )
+        .await
+        .expect("concurrent writer bumps content_hash");
+
+        let ws_manager = kyomi_auth::websocket::WebSocketManager::new(None, db.clone());
+        let new_content = "<!-- dashboard-summary: a fresh summary -->\nv1";
+
+        let (log_writer, guard) = capture_logs();
+        let result = write_dashboard_summary_with_cas(WriteDashboardSummaryParams {
+            db: &db,
+            ws_manager: &ws_manager,
+            dashboard_id: &dashboard_id,
+            workspace_id: "ws-1",
+            user_id: "user-a",
+            summary: "a fresh summary",
+            new_content,
+            expected_content_hash: Some(&stale_hash),
+        })
+        .await;
+        drop(guard);
+
+        assert!(
+            result.is_ok(),
+            "a dropped summary must not surface as a turn error: {result:?}"
+        );
+
+        let dash = kyomi_auth::dashboard_service::get_dashboard(&db, &dashboard_id, "ws-1", "user-a")
+            .await
+            .expect("lookup")
+            .expect("exists");
+        assert_eq!(
+            dash.content, "v2, concurrent writer",
+            "the concurrent writer's content must survive untouched — no summary applied, \
+             nothing reverted: {}",
+            dash.content
+        );
+
+        let logs = log_writer.contents();
+        assert!(
+            logs.contains("Dropping dashboard summary") && logs.contains(&dashboard_id),
+            "the dropped summary must be logged, not silent: {logs}"
+        );
+    }
 
     // -- Contract: api_usage_log INSERT includes provider_cost_usd -----------
     //

@@ -493,16 +493,29 @@ impl AgentTool for ModifyDashboardTool {
             .to_string());
         }
 
+        // Single read that serves two purposes: (1) the "reject title-only
+        // updates on empty dashboards" guard below, and (2) the CAS hash
+        // passed to apply_update. `get_dashboard` never itself returns
+        // NotFound/Forbidden — a genuinely-missing or not-visible dashboard
+        // is `Ok(None)`, and that case is handled below by simply proceeding
+        // with no hash (apply_update's own fetch inside update_dashboard is
+        // the source of truth for those errors). A real `Err` here means the
+        // DB read itself failed, which is not the same thing — silently
+        // treating it as "no hash" would disable the CAS guard on exactly
+        // the kind of transient failure it exists to protect against, so it
+        // is propagated as a turn error instead.
+        let existing = kyomi_auth::dashboard_service::get_dashboard(
+            &ctx.db, dashboard_id, &ctx.workspace_id, &ctx.user_id,
+        )
+        .await?;
+
         // Reject title-only updates on empty dashboards before writing.
         // Returning success:true with a soft warning caused a 21-call loop —
         // models read "success" and repeat the same call. A hard failure breaks
         // the reinforcement cycle. Title-only renames on dashboards that already
         // have content still proceed normally below.
         if content.is_none()
-            && let Ok(Some(dash)) = kyomi_auth::dashboard_service::get_dashboard(
-                &ctx.db, dashboard_id, &ctx.workspace_id, &ctx.user_id,
-            )
-            .await
+            && let Some(dash) = existing.as_ref()
             && dash.content.trim().is_empty()
         {
             return Ok(serde_json::json!({
@@ -525,7 +538,7 @@ impl AgentTool for ModifyDashboardTool {
             title,
             content,
             change_summary,
-            expected_content_hash: None, // no CAS for agent tool
+            expected_content_hash: existing.as_ref().and_then(|d| d.content_hash.as_deref()),
         })
         .await
         {
@@ -536,13 +549,6 @@ impl AgentTool for ModifyDashboardTool {
                 })
                 .to_string());
             }
-            // Unreachable in practice: this call always passes
-            // expected_content_hash: None (see the comment above), and
-            // update_dashboard's CAS check never fires without an expected
-            // hash to compare against — pinned by
-            // `modify_dashboard_cas_is_never_enforced` below. Handled for
-            // exhaustiveness, matching apply_update's doc-type-agnostic
-            // return type.
             Ok(ApplyUpdateOutcome::Conflict(msg)) => {
                 return Ok(serde_json::json!({
                     "success": false,
@@ -1250,17 +1256,26 @@ mod tests {
         );
     }
 
-    /// KYO-537 named pin (ticket item 5, dashboard side): `modify_dashboard`
-    /// always passes `expected_content_hash: None` to `update_dashboard`
-    /// (`dashboard.rs` ~578, `// no CAS for agent tool`) — unlike the
-    /// knowledge-side tools (see `write_knowledge_file_conflict_on_stale_hash`
-    /// / `edit_knowledge_file_conflict_on_stale_hash` in `tools/knowledge.rs`),
-    /// a concurrent edit between two `modify_dashboard` calls can never be
-    /// rejected as a CAS conflict — the second call always wins outright.
-    /// KYO-539 is expected to change this deliberately; this test exists so
-    /// that change is a visible, intentional diff against a known baseline.
+    /// KYO-537 named pin (ticket item 5, dashboard side), **updated by
+    /// KYO-539** — this is the one ticket permitted to change this pin,
+    /// because it is the ticket that deliberately changes what it pins.
+    ///
+    /// Before KYO-539, `modify_dashboard` always passed
+    /// `expected_content_hash: None` to `update_dashboard`, so CAS was
+    /// structurally impossible to trigger via this tool. As of KYO-539,
+    /// `modify_dashboard` reads the document immediately before writing and
+    /// passes its real `content_hash` through (`dashboard.rs`, the
+    /// `existing` read above the `apply_update` call). Two *sequential*
+    /// calls (this test) still both succeed — but now for a materially
+    /// different reason: each call does its own fresh read immediately
+    /// before its own write, so neither one is ever holding a stale hash.
+    /// That is a different claim from "CAS is never enforced" (the old pin
+    /// this test used to assert), and the two must not be confused: see
+    /// `dashboard_doc_type_apply_update_rejects_stale_hash` below for the
+    /// genuinely new behavior — a write landing on top of an *already
+    /// stale* hash is now rejected.
     #[tokio::test]
-    async fn modify_dashboard_cas_is_never_enforced() {
+    async fn modify_dashboard_sequential_calls_both_succeed_via_fresh_reads() {
         let db = test_pool().await;
         seed_user_and_workspace(&db).await;
         let dashboard_id = kyomi_auth::dashboard_service::create_dashboard(
@@ -1270,8 +1285,8 @@ mod tests {
         .expect("seed dashboard");
         let ctx = build_ctx(db);
 
-        // First "concurrent" writer changes the content (and hence the
-        // content_hash) out from under whatever the second writer read.
+        // First writer's call: reads the current (pre-existing) hash and
+        // writes against it.
         let first = ModifyDashboardTool
             .execute(
                 serde_json::json!({"dashboard_id": dashboard_id, "content": "v2 from writer A"}),
@@ -1284,12 +1299,14 @@ mod tests {
             serde_json::json!(true)
         );
 
-        // Second writer's update also succeeds outright — no stale-hash
-        // rejection is possible via this tool, because it never supplies
-        // expected_content_hash in the first place.
+        // Second writer's call happens strictly after the first has fully
+        // completed (this test drives them sequentially, not concurrently),
+        // so its own pre-write read sees writer A's hash, not a stale one —
+        // it succeeds because it is not actually racing anyone, not because
+        // CAS is disabled.
         let second = ModifyDashboardTool
             .execute(
-                serde_json::json!({"dashboard_id": dashboard_id, "content": "v3 from writer B, clobbering A"}),
+                serde_json::json!({"dashboard_id": dashboard_id, "content": "v3 from writer B"}),
                 &ctx,
             )
             .await
@@ -1298,14 +1315,98 @@ mod tests {
         assert_eq!(
             parsed["success"],
             serde_json::json!(true),
-            "modify_dashboard must currently never reject on a stale write: {second}"
+            "a sequential (non-racing) second call must still succeed: {second}"
         );
 
         let dash = kyomi_auth::dashboard_service::get_dashboard(&ctx.db, &dashboard_id, "ws-1", "user-a")
             .await
             .expect("lookup")
             .expect("exists");
-        assert_eq!(dash.content, "v3 from writer B, clobbering A");
+        assert_eq!(dash.content, "v3 from writer B");
+    }
+
+    /// KYO-539: pins the behavior that genuinely changed, at the closest
+    /// seam that can be driven deterministically.
+    ///
+    /// The honest gap: `modify_dashboard`'s own read-then-write cannot be
+    /// forced into a real interleave through `ModifyDashboardTool::execute`'s
+    /// public surface — there is no hook between its pre-read (`existing` in
+    /// `dashboard.rs`) and its call into `apply_update`, and the tool's JSON
+    /// schema has no `expected_content_hash` parameter a caller could use to
+    /// hand it a deliberately stale one. Forcing the interleave would
+    /// require real concurrent execution with a scheduling-dependent
+    /// outcome, which is not a deterministic test.
+    ///
+    /// What *is* pinnable deterministically: `apply_update` — the exact
+    /// shared tail `modify_dashboard` now calls with a real hash instead of
+    /// `None` — rejects a stale write for a `DocType::Dashboard` row exactly
+    /// as it already did for knowledge rows. This drives that seam directly
+    /// with a deliberately stale hash and confirms both (a) the write is
+    /// rejected and does not apply, and (b) the resulting
+    /// `ApplyUpdateOutcome::Conflict` carries the same model-visible shape
+    /// (`success: false` + `error` mentioning the hash mismatch) that
+    /// `modify_dashboard`'s unchanged `Ok(ApplyUpdateOutcome::Conflict(msg))`
+    /// arm turns it into, and that `edit_knowledge_file` already returns for
+    /// the knowledge-side equivalent (see
+    /// `write_knowledge_file_conflict_on_stale_hash` in `tools/knowledge.rs`).
+    #[tokio::test]
+    async fn dashboard_doc_type_apply_update_rejects_stale_hash() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let dashboard_id = kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Contested", "v1", kyomi_core::models::DocType::Dashboard, None,
+        )
+        .await
+        .expect("seed dashboard");
+
+        // Advance the row's real content_hash out from under a reader still
+        // holding the pre-update ("v1") hash.
+        kyomi_auth::dashboard_service::update_dashboard(
+            kyomi_auth::dashboard_service::UpdateDashboardParams {
+                db: &db,
+                embed: None,
+                dashboard_id: &dashboard_id,
+                workspace_id: "ws-1",
+                user_id: "user-a",
+                title: None,
+                content: Some("v2"),
+                change_summary: None,
+                expected_content_hash: None,
+            },
+        )
+        .await
+        .expect("advance content_hash");
+
+        let outcome = apply_update(ApplyUpdateParams {
+            db: &db,
+            dashboard_id: &dashboard_id,
+            workspace_id: "ws-1",
+            user_id: "user-a",
+            title: None,
+            content: Some("v3, from a writer holding the stale v1 hash"),
+            change_summary: None,
+            expected_content_hash: Some("0000000000000000-not-the-real-hash"),
+        })
+        .await
+        .expect("apply_update");
+
+        match outcome {
+            ApplyUpdateOutcome::Conflict(msg) => {
+                let model_visible = serde_json::json!({"success": false, "error": msg});
+                assert_eq!(model_visible["success"], serde_json::json!(false));
+                assert!(
+                    model_visible["error"].as_str().unwrap_or_default().contains("Content hash mismatch"),
+                    "{model_visible}"
+                );
+            }
+            _ => panic!("a stale hash against a DocType::Dashboard row must yield Conflict"),
+        }
+
+        let dash = kyomi_auth::dashboard_service::get_dashboard(&db, &dashboard_id, "ws-1", "user-a")
+            .await
+            .expect("lookup")
+            .expect("exists");
+        assert_eq!(dash.content, "v2", "the rejected stale write must not apply");
     }
 
     #[tokio::test]

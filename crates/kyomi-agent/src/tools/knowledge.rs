@@ -1157,9 +1157,12 @@ mod tests {
         // KYO-539 pin: write_knowledge_file DOES pass expected_content_hash
         // through to update_dashboard (knowledge.rs ~694), so a caller
         // supplying a stale hash gets a CAS conflict rather than silently
-        // clobbering a concurrent edit. Contrast with
-        // `modify_dashboard_cas_is_never_enforced` in tools/dashboard.rs,
-        // which pins the opposite for the dashboard-side tool.
+        // clobbering a concurrent edit. The dashboard side now behaves the
+        // same way — see `dashboard_doc_type_apply_update_rejects_stale_hash`
+        // in tools/dashboard.rs. Before KYO-539 it did not, and this comment
+        // pointed at a `modify_dashboard_cas_is_never_enforced` test that
+        // pinned the opposite; both were removed when the asymmetry was
+        // collapsed.
         let db = test_pool().await;
         seed_user_and_workspace(&db).await;
         let mut ctx = build_ctx(db);
