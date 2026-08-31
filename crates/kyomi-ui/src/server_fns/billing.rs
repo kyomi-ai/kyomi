@@ -16,7 +16,10 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, AuthenticatedContext, IntoServerFnError, IntoServerFnErrorCore, IntoServerFnErrorSqlx};
+use super::{
+    extract_auth, extract_context, AuthenticatedContext, IntoServerFnErrorCore,
+    IntoServerFnErrorSqlx,
+};
 #[cfg(feature = "ssr")]
 use kyomi_types::Permission;
 
@@ -203,7 +206,7 @@ async fn load_workspace(
          FROM workspaces WHERE workspace_id = $1",
         ws_id
     )
-    .into_sfn()?
+    .into_sfn_sqlx()?
     .ok_or_else(|| ServerFnError::new("Workspace not found"))
 }
 
@@ -425,7 +428,7 @@ pub async fn create_checkout(
                 &new_customer_id,
                 &ac.ws_id
             )
-            .into_sfn()?;
+            .into_sfn_sqlx()?;
 
             new_customer_id
         }
@@ -476,7 +479,7 @@ pub async fn cancel_subscription() -> Result<BillingResult, ServerFnError> {
         "UPDATE workspaces SET subscription_status = 'cancelled' WHERE workspace_id = $1",
         &ac.ws_id
     )
-    .into_sfn()?;
+    .into_sfn_sqlx()?;
 
     Ok(BillingResult {
         message: "Subscription will be cancelled at the end of your billing period".to_string(),
@@ -513,7 +516,7 @@ pub async fn reactivate_subscription() -> Result<BillingResult, ServerFnError> {
         "UPDATE workspaces SET subscription_status = 'active' WHERE workspace_id = $1",
         &ac.ws_id
     )
-    .into_sfn()?;
+    .into_sfn_sqlx()?;
 
     Ok(BillingResult {
         message: "Subscription has been reactivated".to_string(),
@@ -559,7 +562,7 @@ pub async fn update_user_limit(limit: i32) -> Result<i32, ServerFnError> {
         limit,
         &ac.ws_id
     )
-    .into_sfn()?;
+    .into_sfn_sqlx()?;
 
     tracing::info!(workspace_id = %ac.ws_id, limit, "Updated workspace seat cap");
 
