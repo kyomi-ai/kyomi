@@ -974,6 +974,80 @@ pub async fn execute_watch(
     Ok(())
 }
 
+/// Data produced by [`prepare_watch_dispatch`] for the caller to attach to
+/// its [`AgentExecutionConfig`].
+pub(crate) struct WatchDispatchPrep {
+    /// The message_id of the user message row already written to the DB.
+    pub user_message_id: String,
+    /// The persistence variant the caller must set as
+    /// `AgentExecutionConfig::user_message_persistence` — ties the
+    /// in-flight agent turn back to the row [`prepare_watch_dispatch`]
+    /// already wrote.
+    pub user_message_persistence: UserMessagePersistence,
+}
+
+/// Mint the watch turn's `user_message_id`, write the human-readable watch
+/// prompt (`"Monitor: {name}\n\n{prompt}"`) as the durable `user`-role row
+/// (tagged with `message_source: "Kyomi Watch"`), and build the
+/// [`UserMessagePersistence::CallerPersisted`] value that ties an in-flight
+/// agent turn back to that row.
+///
+/// KYO-573: `execute_watch_inner` used to pre-write this row and then drive
+/// the agent loop with `UserMessagePersistence::AdapterPersists(None)` over
+/// it. `AdapterPersists`'s `caller_persisted_id()` returns `None` regardless
+/// of its inner id, so `should_persist_new_message` never recognised the in-flight
+/// `enhanced_watch_prompt` message (pushed into the agent's message list by
+/// `CustomAgent::chat()` regardless of persistence variant, since it always
+/// sends `message`) as the same row already on disk — `persist_after_chat`
+/// then wrote it a second time under different text, producing two `user`
+/// rows for one turn. The pre-written row also always carried
+/// `message_source: None`, even though the caller already knew it was
+/// `"Kyomi Watch"`, so a later turn's `load_context` could never
+/// reconstruct the `[source: Kyomi Watch, ...]` annotation (KYO-506).
+///
+/// This is the single seam both `execute_watch_inner` (the production
+/// caller, below) and the `adapter.rs` regression tests
+/// (`watch_turn_via_adapter_persists_exactly_one_user_message`,
+/// `watch_turn_via_adapter_persists_kyomi_watch_message_source`) go
+/// through — mirroring KYO-554's
+/// `kyomi_auth::copilot_service::prepare_copilot_message`. It lives in this
+/// crate rather than `kyomi-auth` because it is watch-specific dispatch,
+/// and is deliberately narrower than all of `execute_watch_inner`: the
+/// budget/workspace/membership checks that precede this point in that
+/// function make the rest of it unsuitable to drive directly from a test,
+/// so only the dispatch-preparation slice is extracted.
+pub(crate) async fn prepare_watch_dispatch(
+    db: &DbPool,
+    encryption_key: &[u8; 32],
+    session_id: &str,
+    watch_name: &str,
+    watch_prompt: &str,
+    created_by: &str,
+) -> kyomi_core::Result<WatchDispatchPrep> {
+    let user_message_id = uuid::Uuid::new_v4().to_string();
+    chat_service::add_message(
+        db,
+        encryption_key,
+        session_id,
+        "user",
+        &format!("Monitor: {watch_name}\n\n{watch_prompt}"),
+        None, // metadata
+        Some(&user_message_id),
+        None, // current_time_user_tz
+        Some("Kyomi Watch"),
+        Some(created_by),
+        None, // tool_call_id
+        None, // tool_name
+        None, // tool_calls
+    )
+    .await?;
+
+    Ok(WatchDispatchPrep {
+        user_message_persistence: UserMessagePersistence::CallerPersisted(user_message_id.clone()),
+        user_message_id,
+    })
+}
+
 /// Inner execution logic (separated for clean error handling).
 ///
 /// Returns `(execution_status, ws_status)` on success.
@@ -1194,23 +1268,26 @@ async fn execute_watch_inner(
         "Created session for watch execution"
     );
 
-    // Store the watch prompt as the user message in the session
-    chat_service::add_message(
+    // Store the watch prompt as the user message in the session, and build
+    // the persistence value that ties the agent turn below back to that
+    // row — see `prepare_watch_dispatch` for the full KYO-573 contract this
+    // exists to satisfy.
+    let watch_dispatch = prepare_watch_dispatch(
         db,
         encryption_key,
         &session_id,
-        "user",
-        &format!("Monitor: {}\n\n{}", watch.name, watch.prompt),
-        None, // metadata
-        None, // message_id
-        None, // current_time_user_tz
-        None, // message_source
-        Some(&watch.created_by),
-        None, // tool_call_id
-        None, // tool_name
-        None, // tool_calls
+        &watch.name,
+        &watch.prompt,
+        &watch.created_by,
     )
     .await?;
+
+    info!(
+        session_id = %session_id,
+        watch_id = %watch_id,
+        user_message_id = %watch_dispatch.user_message_id,
+        "Pre-wrote watch prompt as the durable user message for this run"
+    );
 
     // 9. Run agent via execute_agent_chat with limited tool set
     let tools_subset: Vec<String> = WATCH_TOOLS.iter().map(|s| s.to_string()).collect();
@@ -1235,7 +1312,18 @@ async fn execute_watch_inner(
         max_total_tokens: Some(MAX_WATCH_TOTAL_TOKENS),
         max_tokens: MAX_WATCH_OUTPUT_TOKENS,
         component: "kyomi_watch".into(),
-        user_message_persistence: UserMessagePersistence::AdapterPersists(None),
+        // CallerPersisted, not AdapterPersists(None): `prepare_watch_dispatch`
+        // above already made the pre-written row durable. The LLM still
+        // receives `enhanced_watch_prompt` (with the workspace-learnings
+        // prefix) for this turn — `CustomAgent::chat()` pushes `message`
+        // into the in-flight message list regardless of the persistence
+        // variant — but `caller_persisted_id()` returns `Some(user_message_id)`
+        // for `CallerPersisted` (unlike `AdapterPersists`, which returns `None`
+        // regardless of its inner id), so `should_persist_new_message` recognises
+        // that in-flight message as the same row already on disk and skips
+        // writing it again. `workspace_learnings` is per-run generated
+        // context, not user content, so it must not become the durable row.
+        user_message_persistence: watch_dispatch.user_message_persistence,
         assistant_message_id: None,
         conversation_history: None,
         user_display_name: "Kyomi Watch".to_string(),

@@ -1809,4 +1809,178 @@ mod tests {
              swallowed primary-key collision (KYO-572)"
         );
     }
+
+    // -- Contract: a watch turn must not double-write the user message,
+    // -- and must record message_source (KYO-573) --------------------------
+    //
+    // `kyomi_agent::watch_execution::execute_watch_inner` pre-writes the
+    // human-readable watch prompt ("Monitor: {name}\n\n{prompt}") as a user
+    // message row before spawning the agent, via
+    // `watch_execution::prepare_watch_dispatch` — which mints the row's id
+    // up front and returns `UserMessagePersistence::CallerPersisted` over
+    // that id — the same contract KYO-554 established for copilot via
+    // `copilot_service::prepare_copilot_message`. Before this fix
+    // `execute_watch_inner` used `AdapterPersists(None)` over the
+    // pre-written row instead: `caller_persisted_id()` returned `None`, so
+    // `load_context` never dropped the pre-written row from context and
+    // `CustomAgent::chat()` pushed the *enhanced* watch prompt
+    // (workspace-learnings prefix + watch.prompt — different text from the
+    // pre-written row) as a second user message, which `persist_after_chat`
+    // then persisted for real — two distinct user rows per watch run. The
+    // pre-written row was also always stored with `message_source: None`,
+    // even though the exec config passed to the agent loop already knew the
+    // source was "Kyomi Watch" — so a later turn's `load_context` could
+    // never reconstruct the `[source: Kyomi Watch, ...]` annotation
+    // (KYO-506).
+    //
+    // This helper calls `prepare_watch_dispatch` itself — the same
+    // production function `execute_watch_inner` calls — rather than
+    // replicating its body, so a regression in that function's behaviour
+    // (e.g. reverting to `AdapterPersists(None)`) is guaranteed to fail
+    // these tests too. It then drives one full turn exactly the way
+    // `execute_watch_inner` configures it post-fix, and returns every
+    // `user`-role row left in the session for the two tests below to make
+    // their own assertions against.
+    async fn run_watch_turn_and_fetch_user_rows(
+        db: kyomi_core::DbPool,
+        key: Arc<[u8; 32]>,
+        session_id: &str,
+    ) -> Vec<chat_service::AgentMessage> {
+        let watch_name = "Revenue Monitor";
+        let watch_prompt = "Alert me if revenue drops more than 10% week over week.";
+
+        // Exactly what execute_watch_inner does before spawning agent
+        // execution: go through the real dispatch-preparation seam, which
+        // mints the id, pre-writes the human-readable prompt as the durable
+        // user row with message_source recorded, and hands back the
+        // persistence value to drive the turn with.
+        let watch_dispatch = crate::watch_execution::prepare_watch_dispatch(
+            &db,
+            &key,
+            session_id,
+            watch_name,
+            watch_prompt,
+            "user-a",
+        )
+        .await
+        .expect("prepare_watch_dispatch should succeed, exactly as execute_watch_inner calls it");
+
+        let mut adapter = adapter_with_provider(
+            db.clone(),
+            "user-a",
+            session_id,
+            key.clone(),
+            Box::new(TextReplyProvider {
+                reply: r#"{"should_alert": false, "reason": "no anomaly"}"#,
+            }),
+        );
+
+        // Exactly the persistence choice execute_watch_inner configures
+        // post-fix: the `UserMessagePersistence::CallerPersisted` value
+        // `prepare_watch_dispatch` returned, over the row it already wrote
+        // above. The LLM turn itself still uses the *enhanced* prompt
+        // (workspace-learnings prefix + watch.prompt) — distinct text from
+        // the pre-written row — exactly as the exec config's `message`
+        // field does.
+        let enhanced_watch_prompt = format!("Workspace learnings: none.\n{watch_prompt}");
+        adapter
+            .chat(ChatParams {
+                message: &enhanced_watch_prompt,
+                cancel_token: CancellationToken::new(),
+                current_time_user_tz: None,
+                message_source: Some("Kyomi Watch"),
+                user_id: Some("user-a"),
+                user_message_persistence: &watch_dispatch.user_message_persistence,
+                assistant_message_id: None,
+            })
+            .await
+            .expect("chat() should succeed");
+
+        let user_rows: Vec<chat_service::AgentMessage> =
+            chat_service::get_agent_messages(&db, &key, session_id, None)
+                .await
+                .expect("get_agent_messages should succeed")
+                .into_iter()
+                .filter(|m| m.role == "user")
+                .collect();
+
+        // Sanity check baked into the shared helper (not just the "exactly
+        // one row" test below): whichever row survived must be the one
+        // `prepare_watch_dispatch` pre-wrote, identified by the id it
+        // minted and handed back in `watch_dispatch.user_message_id` — not
+        // some other row a broken implementation might persist instead.
+        if let [only_row] = user_rows.as_slice() {
+            assert_eq!(
+                only_row.message_id, watch_dispatch.user_message_id,
+                "the surviving user row must be the one prepare_watch_dispatch pre-wrote"
+            );
+        }
+
+        user_rows
+    }
+
+    #[tokio::test]
+    async fn watch_turn_via_adapter_persists_exactly_one_user_message() {
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let key: Arc<[u8; 32]> = Arc::new([9u8; 32]);
+
+        chat_service::create_session_with_id(
+            &db,
+            "user-a",
+            "ws-1",
+            "sess-watch-1",
+            Some("Watch: Revenue Monitor"),
+            "watch_execution",
+            None,
+        )
+        .await
+        .expect("create session");
+
+        let user_rows =
+            run_watch_turn_and_fetch_user_rows(db.clone(), key.clone(), "sess-watch-1").await;
+
+        assert_eq!(
+            user_rows.len(),
+            1,
+            "exactly one user-role row must exist for this single watch turn; found {}: {:?}",
+            user_rows.len(),
+            user_rows.iter().map(|m| &m.content).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn watch_turn_via_adapter_persists_kyomi_watch_message_source() {
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let key: Arc<[u8; 32]> = Arc::new([9u8; 32]);
+
+        chat_service::create_session_with_id(
+            &db,
+            "user-a",
+            "ws-1",
+            "sess-watch-2",
+            Some("Watch: Revenue Monitor"),
+            "watch_execution",
+            None,
+        )
+        .await
+        .expect("create session");
+
+        let user_rows =
+            run_watch_turn_and_fetch_user_rows(db.clone(), key.clone(), "sess-watch-2").await;
+
+        assert_eq!(
+            user_rows.len(),
+            1,
+            "sanity: exactly one user row must exist before checking its message_source"
+        );
+        assert_eq!(
+            user_rows[0].message_source.as_deref(),
+            Some("Kyomi Watch"),
+            "the persisted watch user row must carry message_source so a later turn's \
+             load_context can reconstruct the [source: Kyomi Watch, ...] annotation; got {:?}",
+            user_rows[0].message_source
+        );
+    }
 }
