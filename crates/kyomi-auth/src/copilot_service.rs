@@ -13,6 +13,7 @@
 //! dependency of `kyomi-auth` would create a circular dependency.
 
 use kyomi_core::{Config, DbPool};
+use tracing::error;
 
 use crate::websocket::WebSocketManager;
 
@@ -229,8 +230,8 @@ pub async fn handle_copilot_agent_error(params: CopilotAgentErrorParams<'_>) {
 
     // If no row existed, insert a new one so the user sees the error in the
     // conversation instead of losing it silently.
-    if !updated {
-        let _ = crate::chat_service::add_message(
+    if !updated
+        && let Err(e) = crate::chat_service::add_message(
             db,
             encryption_key,
             session_id,
@@ -245,7 +246,14 @@ pub async fn handle_copilot_agent_error(params: CopilotAgentErrorParams<'_>) {
             None,
             None,
         )
-        .await;
+        .await
+    {
+        error!(
+            session_id,
+            assistant_message_id,
+            error = %e,
+            "Failed to insert fallback error message after update no-ops"
+        );
     }
 
     crate::websocket::helpers::send_error(
