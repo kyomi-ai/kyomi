@@ -120,7 +120,7 @@ jobs:
                         noting breaking changes
 
                       ## What NOT to flag
-                      - Formatting or style preferences (CI enforces clippy + rustfmt)
+                      - Formatting or style preferences (CI enforces clippy; rustfmt is not enforced and the workspace is not rustfmt-clean)
                       - Low-priority suggestions that don't affect correctness or safety
                       - Issues already present in unchanged code (review only the diff)
                       - Missing tests unless the change is a bug fix that should have a
