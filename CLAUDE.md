@@ -75,6 +75,8 @@ Server-side Rust:         cargo build --locked --profile dev-server → restart 
 
 **Always pass `--locked` to cargo commands** (`cargo check --locked`, `cargo clippy --locked`, `cargo build --locked`). This prevents silent Cargo.lock drift from transitive dependency re-resolution. If `--locked` fails, run `cargo update` explicitly and commit the lock file as a separate change.
 
+**The workspace is not rustfmt-clean**, so `cargo fmt --check` cannot pass (~384 files fail on `main` @ `fcef65eb`) and is not a verification step. **Never run bare `cargo fmt`** — including `cargo fmt -- <files>`, which does not limit the blast radius — it rewrites the entire workspace. To format a single file, use `rustfmt --edition 2024 <path>` (bare `rustfmt` defaults to edition 2015 and errors on `async fn`; match the crate's own edition — 15 of 16 crates here are `2024`), noting it also reformats every module the target file declares with `mod`, so aim it at the leaf file you edited, not a crate root. Or match the surrounding style by hand.
+
 ## Sync Engine (Local-First Cache)
 
 **Read `~/repos/kyomi-private/docs/SYNC_ENGINE_ARCHITECTURE.md` before touching any sync/cache code.** That document is the intended authoritative reference — but treat it as *describing intent, not proof*: verify against the code. It fell behind the KYO-172 visibility work and documented the pre-fix (leaking) behaviour; KYO-203 tracks correcting it. Key rules: schema hash gates re-bootstrap on format changes, `session_type = 'chat'` filter on chat sync queries, IDB is a cache not source of truth.
