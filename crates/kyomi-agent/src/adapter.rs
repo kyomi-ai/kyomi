@@ -514,9 +514,22 @@ impl ChatAgentAdapter {
 
         // Persist all new messages and metadata regardless of success/failure.
         // We log at error level (not warn) because message persistence failures
-        // mean data loss — the user's conversation may not be saved.
+        // mean data loss — the user's conversation may not be saved. The error
+        // is deliberately not propagated: `result` below is what the caller
+        // already delivered to the user over the WebSocket, so failing this
+        // turn now would report success as failure without giving the user
+        // anything back. That makes this log line the only record of the
+        // loss (KYO-572), so it carries enough to identify exactly what was
+        // lost: which turn (session_id) and which row never made it to the
+        // DB (assistant_message_id).
         if let Err(e) = self.persist_after_chat().await {
-            error!(error = %e, "Failed to persist agent state after chat — messages may be lost");
+            error!(
+                session_id = self.session_id.as_deref().unwrap_or("<none>"),
+                assistant_message_id = params.assistant_message_id.unwrap_or("<none>"),
+                user_id = %self.user_id,
+                error = %e,
+                "Failed to persist agent state after chat — messages may be lost"
+            );
         }
 
         result
@@ -1683,6 +1696,117 @@ mod tests {
             "exactly one user-role row must exist for this single turn; found {}: {:?}",
             user_rows.len(),
             user_rows.iter().map(|m| &m.content).collect::<Vec<_>>()
+        );
+    }
+
+    // -- Contract: the assistant's real reply must be durably persisted
+    // -- (KYO-572) ----------------------------------------------------------
+    //
+    // Before the fix, `copilot_service::prepare_copilot_message` INSERTed an
+    // empty assistant placeholder row up front. `persist_after_chat` then
+    // tried to INSERT the real assistant reply under the *same*
+    // `message_id` — `chat_messages.message_id` is the primary key and
+    // `add_message` has no ON CONFLICT handling, so that second INSERT
+    // violated the PK, aborted `persist_after_chat` mid-loop, and the error
+    // was swallowed by `chat()`'s `if let Err(e) = ...` logging. The DB row
+    // was left permanently empty.
+    //
+    // This test deliberately does NOT use `get_agent_messages` — it filters
+    // out empty-content assistant rows with no tool_calls, which is exactly
+    // why the pre-existing test above stayed green through this bug. It
+    // reads back via `get_session_messages` (no such filter) and asserts the
+    // assistant row's decrypted content equals the provider's real reply.
+    #[tokio::test]
+    async fn copilot_turn_via_adapter_persists_real_assistant_content() {
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let key: Arc<[u8; 32]> = Arc::new([7u8; 32]);
+
+        chat_service::create_session_with_id(
+            &db,
+            "user-a",
+            "ws-1",
+            "sess-copilot-2",
+            None,
+            "dashboard_copilot",
+            None,
+        )
+        .await
+        .expect("create session");
+
+        let config = kyomi_core::Config::test_config();
+
+        // Exactly what send_copilot_message does before spawning agent
+        // execution: validate, check capabilities, verify session access,
+        // store the user message, and mint the assistant message id.
+        let prep = kyomi_auth::copilot_service::prepare_copilot_message(
+            kyomi_auth::copilot_service::CopilotMessageInputs {
+                db: &db,
+                encryption_key: &key,
+                config: &config,
+                workspace_id: "ws-1",
+                user_id: "user-a",
+                session_id: "sess-copilot-2",
+                message: "what was Q4 revenue",
+                content: None,
+                current_time_user_tz: Some("2026-08-23T09:00:00+00:00"),
+                message_source: Some("web"),
+            },
+        )
+        .await
+        .expect("prepare_copilot_message should succeed, exactly as send_copilot_message calls it");
+
+        const REAL_REPLY: &str = "Q4 revenue was $1M, up 12% quarter over quarter.";
+
+        let mut adapter = adapter_with_provider(
+            db.clone(),
+            "user-a",
+            "sess-copilot-2",
+            key.clone(),
+            Box::new(TextReplyProvider { reply: REAL_REPLY }),
+        );
+
+        let persistence = UserMessagePersistence::CallerPersisted(prep.user_message_id.clone());
+        adapter
+            .chat(ChatParams {
+                message: &prep.user_message,
+                cancel_token: CancellationToken::new(),
+                current_time_user_tz: Some("2026-08-23T09:00:00+00:00"),
+                message_source: Some("web"),
+                user_id: Some("user-a"),
+                user_message_persistence: &persistence,
+                assistant_message_id: Some(&prep.assistant_message_id),
+            })
+            .await
+            .expect("chat() should succeed");
+
+        // get_session_messages does NOT filter out empty-content assistant
+        // rows — unlike get_agent_messages, it is the right read path to
+        // prove the row actually holds the real reply.
+        let stored = chat_service::get_session_messages(&db, &key, "sess-copilot-2", 100)
+            .await
+            .expect("get_session_messages should succeed");
+
+        let assistant_rows: Vec<&chat_service::MessageItem> = stored
+            .iter()
+            .filter(|m| m.message_type == "assistant")
+            .collect();
+
+        assert_eq!(
+            assistant_rows.len(),
+            1,
+            "exactly one assistant-role row must exist for this single turn; found {}: {:?}",
+            assistant_rows.len(),
+            assistant_rows.iter().map(|m| &m.content).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            assistant_rows[0].message_id, prep.assistant_message_id,
+            "the persisted row must carry the same id used for WebSocket streaming"
+        );
+        assert_eq!(
+            assistant_rows[0].content, REAL_REPLY,
+            "the assistant row must hold the provider's real reply, not be left empty by a \
+             swallowed primary-key collision (KYO-572)"
         );
     }
 }

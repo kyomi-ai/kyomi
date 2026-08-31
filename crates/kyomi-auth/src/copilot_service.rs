@@ -13,6 +13,7 @@
 //! dependency of `kyomi-auth` would create a circular dependency.
 
 use kyomi_core::{Config, DbPool};
+use tracing::error;
 
 use crate::websocket::WebSocketManager;
 
@@ -31,8 +32,14 @@ pub struct CopilotMessagePrep {
     /// loop knows this row is already durable and must not be persisted a
     /// second time (KYO-554).
     pub user_message_id: String,
-    /// The message_id of the assistant placeholder row, which the agent will
-    /// update when it finishes.
+    /// The message_id minted for the assistant's reply. No row is written
+    /// for it yet — `kyomi_agent::adapter::ChatAgentAdapter::persist_after_chat`
+    /// inserts the real assistant message (with its real content) once the
+    /// agent loop finishes. Mirrors `chat_service::prepare_chat_dispatch`'s
+    /// `assistant_message_id`, which never pre-inserted a placeholder either;
+    /// this used to (KYO-572), and the pre-insert caused every real
+    /// assistant write to collide on the `chat_messages.message_id` primary
+    /// key and get silently dropped.
     pub assistant_message_id: String,
 }
 
@@ -40,8 +47,8 @@ pub struct CopilotMessagePrep {
 // Pre-spawn orchestration
 // ---------------------------------------------------------------------------
 
-/// Validate, check capabilities, verify session access, and store both the
-/// user message and the assistant placeholder in one atomic service call.
+/// Validate, check capabilities, verify session access, and store the user
+/// message; also mints (but does not persist) the assistant message id.
 ///
 /// Inputs for [`prepare_copilot_message`].
 pub struct CopilotMessageInputs<'a> {
@@ -64,8 +71,8 @@ pub struct CopilotMessageInputs<'a> {
     pub message_source: Option<&'a str>,
 }
 
-/// Validate, check capabilities, verify session access, and store both the
-/// user message and the assistant placeholder in one atomic service call.
+/// Validate, check capabilities, verify session access, and store the user
+/// message; also mints (but does not persist) the assistant message id.
 pub async fn prepare_copilot_message(
     inputs: CopilotMessageInputs<'_>,
 ) -> kyomi_core::Result<CopilotMessagePrep> {
@@ -148,23 +155,18 @@ pub async fn prepare_copilot_message(
     )
     .await?;
 
-    // Create assistant placeholder.
-    let assistant_message_id = crate::chat_service::add_message(
-        db,
-        encryption_key,
-        session_id,
-        "assistant",
-        "",
-        None,
-        None,
-        None,
-        None, // message_source
-        None,
-        None,
-        None,
-        None,
-    )
-    .await?;
+    // Mint the assistant message id without writing a row for it.
+    //
+    // This used to INSERT an empty placeholder row here, which the agent's
+    // `persist_after_chat` would supposedly "update" once it had the real
+    // reply. It never did — `persist_after_chat` INSERTs, it never UPDATEs,
+    // so that real INSERT collided on `chat_messages.message_id`'s primary
+    // key, the error aborted persistence mid-loop, and the row stayed a
+    // permanent empty placeholder while the error itself was swallowed
+    // (KYO-572). Mirrors `chat_service::prepare_chat_dispatch`, which mints
+    // `assistant_message_id` the same way and never pre-inserted a row for
+    // it.
+    let assistant_message_id = uuid::Uuid::new_v4().to_string();
 
     Ok(CopilotMessagePrep {
         user_message,
@@ -189,12 +191,21 @@ pub struct CopilotAgentErrorParams<'a> {
     pub error: &'a str,
 }
 
-/// Update the assistant placeholder with an error message and send a
+/// Record an agent execution error as the assistant's reply and send a
 /// WebSocket error event to the user.
 ///
 /// Called inside the `tokio::spawn` block when `execute_agent_chat` returns
 /// an error, so the user sees a meaningful failure message rather than a
-/// permanently empty assistant bubble.
+/// permanently missing assistant reply.
+///
+/// Tries to update an existing row for `assistant_message_id` first, and
+/// inserts a new one if nothing was affected. Since KYO-572,
+/// `prepare_copilot_message` no longer pre-inserts a placeholder row, so an
+/// agent error occurring before `ChatAgentAdapter::persist_after_chat` has
+/// written anything (e.g. the very first LLM call fails) means no row
+/// exists yet for this id — a bare `update_message` would silently affect
+/// zero rows and the user's error would never be persisted. Mirrors
+/// `chat_service::save_agent_error`'s update-then-insert shape exactly.
 pub async fn handle_copilot_agent_error(params: CopilotAgentErrorParams<'_>) {
     let CopilotAgentErrorParams {
         db, encryption_key, ws_manager, user_id, session_id,
@@ -206,14 +217,44 @@ pub async fn handle_copilot_agent_error(params: CopilotAgentErrorParams<'_>) {
         "error": error,
     });
 
-    let _ = crate::chat_service::update_message(
+    // Try update first (persist_after_chat may have already saved a row).
+    let updated = crate::chat_service::update_message(
         db,
         encryption_key,
         assistant_message_id,
         Some(&error_text),
         Some(&error_metadata),
     )
-    .await;
+    .await
+    .unwrap_or(false);
+
+    // If no row existed, insert a new one so the user sees the error in the
+    // conversation instead of losing it silently.
+    if !updated
+        && let Err(e) = crate::chat_service::add_message(
+            db,
+            encryption_key,
+            session_id,
+            "assistant",
+            &error_text,
+            Some(&error_metadata),
+            Some(assistant_message_id),
+            None, // current_time_user_tz
+            None, // message_source
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+    {
+        error!(
+            session_id,
+            assistant_message_id,
+            error = %e,
+            "Failed to insert fallback error message after update no-ops"
+        );
+    }
 
     crate::websocket::helpers::send_error(
         ws_manager,
