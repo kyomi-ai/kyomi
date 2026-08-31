@@ -271,21 +271,37 @@ impl AuthenticatedContext {
 /// every *other* error type actually passed to `.into_sfn()` in this crate,
 /// deliberately never for `kyomi_core::Error`.
 ///
-/// The payoff: a `.into_sfn()` call site with `E = kyomi_core::Error` is a
-/// **compile error**, not a runtime leak. If you land here from one:
+/// `sqlx::Error` is deliberately excluded too, for the same structural
+/// reason but a different underlying leak: its `Display` can carry raw
+/// constraint/column/table detail straight from the driver (KYO-557; see
+/// `docs/standards/error-handling/a-generic-conversion-is-a-leak-site.md`).
+/// Unlike `kyomi_core::Error`, `sqlx::Error` isn't hand-constructed at call
+/// sites — it also arrives via the `db_fetch_scalar!` / `db_execute!` /
+/// `db_fetch_optional!` macros (`crates/kyomi-core/src/db.rs`), which return
+/// `sqlx::Result<T>` directly, so a bare `.into_sfn()` after one of those
+/// macros bypassed both `Error::user_message()`'s `"internal server error"`
+/// fixed string (KYO-350) and `sanitize_error`'s redaction (which only
+/// covers URLs/credentials/hostnames, not driver-reported schema detail).
+///
+/// The payoff: a `.into_sfn()` call site with `E = kyomi_core::Error` or
+/// `E = sqlx::Error` is a **compile error**, not a runtime leak. If you land
+/// here from one:
 /// - `E` is `kyomi_core::Error` → use [`IntoServerFnErrorCore::into_sfn_core`],
 ///   which reads `user_message()` instead of `Display`.
+/// - `E` is `sqlx::Error` → use [`IntoServerFnErrorSqlx::into_sfn_sqlx`],
+///   which routes through `kyomi_core::Error::from(e).user_message()` so it
+///   collapses to the same fixed `"internal server error"` string.
 /// - `E` is a new, different error type → implement this trait for it below,
 ///   next to the other impls, once you've confirmed its `Display` has no
 ///   log-only prefix a user shouldn't see.
 ///
 /// (KYO-523 — 195 call sites migrated to `into_sfn_core`; audited by
-/// temporarily requiring this bound and reading off every resulting E0599.)
+/// temporarily requiring this bound and reading off every resulting E0599.
+/// KYO-557 removed the `sqlx::Error` impl the same way: 20 call sites
+/// migrated to `into_sfn_sqlx`.)
 #[cfg(feature = "ssr")]
 pub(crate) trait NotKyomiCoreError: std::fmt::Display {}
 
-#[cfg(feature = "ssr")]
-impl NotKyomiCoreError for sqlx::Error {}
 #[cfg(feature = "ssr")]
 impl NotKyomiCoreError for kyomi_auth::workspace_ai_config::WorkspaceAiConfigError {}
 #[cfg(feature = "ssr")]
@@ -347,15 +363,23 @@ impl<T> IntoServerFnErrorCore<T> for Result<T, kyomi_core::Error> {
 /// constraint/column/table detail `sqlx::Error`'s `Display` can carry. Raw
 /// driver detail reaches the client either way (KYO-526; see
 /// `docs/standards/error-handling/user-message-not-display-for-user-facing-text.md`).
+/// KYO-557 finished closing the gap: every remaining `.into_sfn()` call site
+/// with `E = sqlx::Error` was migrated to `.into_sfn_sqlx()`, and the
+/// `NotKyomiCoreError` impl for `sqlx::Error` was removed so a future one is
+/// a compile error, not a silent leak (see [`NotKyomiCoreError`]).
 ///
-/// Converting through `kyomi_core::Error::from` (the `#[from] sqlx::Error`
-/// arm) and reading `user_message()` routes these call sites onto the exact
-/// same fixed string `.into_sfn_core()` will produce for them once
-/// KYO-523/#433 lands and lets a caller convert to `kyomi_core::Error`
-/// earlier — so this composes with that change in either merge order. It
-/// also can't collide with the `NotKyomiCoreError`-gated `.into_sfn()` /
-/// `.into_sfn_core()` split #433 introduces: this trait is implemented for
-/// `sqlx::Error` directly, a type neither of those two ever will be.
+/// A distinctly-named method (rather than requiring every such call site to
+/// spell out `.map_err(kyomi_core::Error::from)?.into_sfn_core()`) documents
+/// intent at the call site: "this is a raw DB error, deliberately collapsed
+/// to a fixed string" reads differently from "this is already a
+/// `kyomi_core::Error`". The implementation below is just that conversion —
+/// `kyomi_core::Error::from` (the `#[from] sqlx::Error` arm) followed by
+/// [`IntoServerFnErrorCore::into_sfn_core`] — so the mapping logic itself
+/// exists in exactly one place. `Error::Sqlx` is `#[error(transparent)]`, so
+/// its `Display` delegates straight to the inner `sqlx::Error` with no added
+/// prefix — the `tracing::error!` line `into_sfn_core` emits still carries
+/// the full, untouched sqlx detail server-side; only the client-facing
+/// string is fixed.
 #[cfg(feature = "ssr")]
 pub(crate) trait IntoServerFnErrorSqlx<T> {
     fn into_sfn_sqlx(self) -> Result<T, leptos::prelude::ServerFnError>;
@@ -364,12 +388,7 @@ pub(crate) trait IntoServerFnErrorSqlx<T> {
 #[cfg(feature = "ssr")]
 impl<T> IntoServerFnErrorSqlx<T> for Result<T, sqlx::Error> {
     fn into_sfn_sqlx(self) -> Result<T, leptos::prelude::ServerFnError> {
-        self.map_err(|e| {
-            tracing::error!(error = %e, "server function db error");
-            leptos::prelude::ServerFnError::new(
-                kyomi_core::Error::from(e).user_message().to_string(),
-            )
-        })
+        self.map_err(kyomi_core::Error::from).into_sfn_core()
     }
 }
 
@@ -424,9 +443,17 @@ mod into_sfn_error_tests {
     /// available for the error types this crate actually pairs with it, so
     /// migrating call sites to `into_sfn_core` didn't accidentally narrow the
     /// blanket impl into uselessness for everything else.
+    ///
+    /// `sqlx::Error` is deliberately NOT used as the fixture here (KYO-557
+    /// removed `impl NotKyomiCoreError for sqlx::Error`, so `.into_sfn()` on
+    /// one is now a compile error, not something to assert against at
+    /// runtime — see [`into_sfn_sqlx_tests`] instead).
     #[test]
     fn into_sfn_still_works_for_non_core_error_types() {
-        let err: Result<(), sqlx::Error> = Err(sqlx::Error::RowNotFound);
+        let err: Result<(), kyomi_auth::workspace_ai_config::WorkspaceAiConfigError> =
+            Err(kyomi_auth::workspace_ai_config::WorkspaceAiConfigError::WorkspaceNotFound(
+                "ws_123".into(),
+            ));
         assert!(err.into_sfn().is_err());
     }
 }
@@ -441,6 +468,13 @@ mod into_sfn_sqlx_tests {
     //! `sqlx::Error::RowNotFound`'s `Display` is `"no rows returned by a
     //! query that expected to return at least one row"`, not
     //! `"internal server error"`.
+    //!
+    //! KYO-557 extends this guard rather than duplicating it: every
+    //! `.into_sfn()` call site in `server_fns/` with `E = sqlx::Error` was
+    //! migrated to `.into_sfn_sqlx()`, and
+    //! [`maps_column_not_found_constraint_style_detail_to_the_fixed_string`]
+    //! below reproduces the exact leak the ticket proved against sqlx-core
+    //! 0.8.6's real `Display` output: `no column found for name: ssn`.
     use super::IntoServerFnErrorSqlx;
 
     #[test]
@@ -467,6 +501,40 @@ mod into_sfn_sqlx_tests {
             !client_message.contains("no rows returned"),
             "sqlx::Error::RowNotFound's raw Display leaked into the client-facing \
              message: {client_message:?}"
+        );
+    }
+
+    /// KYO-557: reproduces the exact leak reported against sqlx-core 0.8.6 —
+    /// a schema detail (here, a column name; the ticket also verified a
+    /// unique-constraint name byte-for-byte) sitting in `sqlx::Error`'s
+    /// `Display` and reaching the client verbatim through the old bare
+    /// `.into_sfn()`. Mutation-proof: revert the call site this guards (or
+    /// `IntoServerFnErrorSqlx::into_sfn_sqlx`'s body) back to
+    /// `ServerFnError::new(kyomi_core::sanitize_error(&e.to_string()))` and
+    /// this test fails, because `sanitize_error`'s three regex passes (URL /
+    /// `key=value` credential / hostname redaction) do not touch column or
+    /// constraint names — they were never built to.
+    #[test]
+    fn maps_column_not_found_constraint_style_detail_to_the_fixed_string() {
+        let e = sqlx::Error::ColumnNotFound("ssn".into());
+        // Sanity check on the fixture: this is sqlx-core 0.8.6's real
+        // Display output for this variant, proven verbatim against a live
+        // query in the ticket. If it ever stopped containing the column
+        // name this test couldn't distinguish the fix from the bug.
+        assert_eq!(e.to_string(), "no column found for name: ssn");
+
+        let result: Result<(), sqlx::Error> = Err(e);
+        let client_message = result.into_sfn_sqlx().unwrap_err().to_string();
+        assert!(
+            client_message.ends_with("internal server error"),
+            "raw sqlx::Error column detail must never reach the client (KYO-557) — \
+             expected the message to end with the fixed \"internal server error\" \
+             string, got {client_message:?}"
+        );
+        assert!(
+            !client_message.contains("ssn") && !client_message.contains("column"),
+            "sqlx::Error::ColumnNotFound's raw Display (a schema column name) leaked \
+             into the client-facing message: {client_message:?}"
         );
     }
 }

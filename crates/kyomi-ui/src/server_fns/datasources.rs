@@ -1138,7 +1138,7 @@ pub async fn get_catalog_stats(
         &datasource_id,
         &ac.ws_id
     )
-    .into_sfn()?;
+    .into_sfn_sqlx()?;
 
     let last_indexed = row
         .and_then(|r| r.last_catalog_refresh)
@@ -1161,7 +1161,7 @@ pub async fn get_catalog_stats(
         &datasource_id,
         &ac.ws_id
     )
-    .into_sfn()?;
+    .into_sfn_sqlx()?;
 
     let refresh_failed = refresh_row
         .as_ref()

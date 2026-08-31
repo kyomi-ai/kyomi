@@ -6,7 +6,7 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
-use super::{AuthenticatedContext, IntoServerFnError, IntoServerFnErrorCore};
+use super::{AuthenticatedContext, IntoServerFnErrorCore, IntoServerFnErrorSqlx};
 #[cfg(feature = "ssr")]
 use kyomi_types::Permission;
 #[cfg(feature = "ssr")]
@@ -622,7 +622,7 @@ pub async fn get_catalog_tree(
         include_columns,
     )
     .await
-    .into_sfn()?;
+    .into_sfn_sqlx()?;
 
     // BigQuery public datasets: include if enabled (absent key defaults to
     // disabled — see kyomi_core::json_utils::bigquery_include_public).
@@ -638,7 +638,7 @@ pub async fn get_catalog_tree(
                 include_columns,
             )
             .await
-            .into_sfn()?;
+            .into_sfn_sqlx()?;
             cached_tables.extend(public_tables);
         }
     }
@@ -708,7 +708,7 @@ pub async fn search_catalog(
         &search_pattern,
     )
     .await
-    .into_sfn()?;
+    .into_sfn_sqlx()?;
 
     // BigQuery public datasets: include matching tables if enabled (absent
     // key defaults to disabled — see
@@ -725,7 +725,7 @@ pub async fn search_catalog(
                 &search_pattern,
             )
             .await
-            .into_sfn()?;
+            .into_sfn_sqlx()?;
             cached_tables.extend(public_tables);
         }
     }
@@ -938,7 +938,7 @@ pub async fn get_catalog_refresh_status(
         &datasource.id,
         &ac.ws_id
     )
-    .into_sfn()?;
+    .into_sfn_sqlx()?;
 
     let (status, progress) = match row {
         Some(row) => (
@@ -1042,7 +1042,7 @@ pub async fn get_table_info(
                     .bind(table_name)
                     .fetch_optional(pg)
                     .await
-                    .into_sfn()?
+                    .into_sfn_sqlx()?
             }
             kyomi_core::db::DbPool::Sqlite(sq) => {
                 sqlx::query_as::<_, kyomi_core::models::table_cache::DatasourceTableCache>(&sql)
@@ -1051,7 +1051,7 @@ pub async fn get_table_info(
                     .bind(table_name)
                     .fetch_optional(sq)
                     .await
-                    .into_sfn()?
+                    .into_sfn_sqlx()?
             }
         }
     } else {
@@ -1064,7 +1064,7 @@ pub async fn get_table_info(
                     .bind(table_name)
                     .fetch_optional(pg)
                     .await
-                    .into_sfn()?
+                    .into_sfn_sqlx()?
             }
             kyomi_core::db::DbPool::Sqlite(sq) => {
                 sqlx::query_as::<_, kyomi_core::models::table_cache::DatasourceTableCache>(&sql)
@@ -1074,7 +1074,7 @@ pub async fn get_table_info(
                     .bind(table_name)
                     .fetch_optional(sq)
                     .await
-                    .into_sfn()?
+                    .into_sfn_sqlx()?
             }
         }
     };

@@ -818,7 +818,7 @@ pub async fn share_session(session_id: String) -> Result<(), ServerFnError> {
         "SELECT user_id FROM chat_sessions WHERE session_id = $1",
         &session_id
     )
-    .into_sfn()?
+    .into_sfn_sqlx()?
     .ok_or_else(|| ServerFnError::new("Session not found"))?;
 
     if row.user_id != auth.user_id {
@@ -872,7 +872,7 @@ pub async fn unshare_session(session_id: String) -> Result<(), ServerFnError> {
         "SELECT user_id, platform_type, platform_thread_key FROM chat_sessions WHERE session_id = $1",
         &session_id
     )
-    .into_sfn()?
+    .into_sfn_sqlx()?
     .ok_or_else(|| ServerFnError::new("Session not found"))?;
 
     if row.user_id != auth.user_id {
@@ -962,7 +962,7 @@ pub async fn mark_session_read(
              ORDER BY created_at DESC LIMIT 1",
             &session_id
         )
-        .into_sfn()?;
+        .into_sfn_sqlx()?;
 
         latest.map(|r| r.message_id)
     };
@@ -982,7 +982,7 @@ pub async fn mark_session_read(
         &now_str,
         message_id.as_deref()
     )
-    .into_sfn()?;
+    .into_sfn_sqlx()?;
 
     tracing::info!(
         session_id = %session_id,
@@ -1105,7 +1105,10 @@ pub async fn get_thinking_event_detail(
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, AuthenticatedContext, IntoServerFnError, IntoServerFnErrorCore};
+use super::{
+    extract_auth, extract_context, AuthenticatedContext, IntoServerFnErrorCore,
+    IntoServerFnErrorSqlx,
+};
 
 /// Convert a `chat_service::SessionListItem` to our `ChatSessionItem`.
 #[cfg(feature = "ssr")]
