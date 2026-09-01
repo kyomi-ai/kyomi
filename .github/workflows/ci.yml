@@ -2,7 +2,7 @@
 # Kyomi — CI (Pull Request Checks)
 # =============================================================================
 # Runs on every PR to main, including new pushes to existing PRs.
-# Six jobs:
+# Seven jobs:
 #   1. lint-policy (fast, ~5s) — rejects new #[allow(...)] suppressions AND
 #      runs the server_fn/REST divergence linter across the full tree
 #   2. trivy-scan (~30s) — Trivy filesystem vulnerability scanner (HIGH/CRITICAL)
@@ -17,6 +17,9 @@
 #      comment for why it's a separate job rather than a step tacked onto
 #      clippy) — real trunk build of crates/kyomi-ui, then the SSR contract
 #      suite against it (KYO-255)
+#   7. worktree-lifecycle-selftests (fast, ~5s, no toolchain) — runs the
+#      self-test suites for the shell scripts that gate ticket claiming and
+#      stranded-worktree/branch recovery (KYO-578)
 #
 # A note on `timeout-minutes` (KYO-322): GitHub starts that clock when a
 # job is QUEUED, not when a runner picks it up, so a job that executes in
@@ -568,3 +571,74 @@ jobs:
         if: always()
         run: sccache --show-stats || true
 
+  # ---------------------------------------------------------------------------
+  # Worktree lifecycle self-tests (KYO-578)
+  #
+  # scripts/check-ticket-in-flight.sh, scripts/mark-worktree-stranded.sh,
+  # scripts/mark-branch-stranded.sh, scripts/append-review-log.sh, and
+  # scripts/audit-agent-run-deaths.sh are the gates that decide whether a
+  # ticket may be claimed and whether a stranded claim may be released. Each
+  # one carries a self-test suite (197 assertions total), but until this job
+  # existed none of the five ran anywhere except when a human or agent
+  # remembered to invoke it by hand — a load-bearing check that never runs in
+  # CI is a fail-open shape this workflow has already been bitten by twice
+  # (KYO-511, KYO-529).
+  #
+  # All five suites are hermetic: they build their own throwaway git repos
+  # (and, for two of them, a stub `gh` placed first on PATH) under mktemp -d,
+  # with `trap ... EXIT` cleanup, and pin their fixtures' branch names
+  # explicitly rather than relying on the runner's `init.defaultBranch`
+  # (which is `master` on ubuntu-latest, not `main`). None needs a Rust
+  # toolchain, a service container, $HOME, or ~/.claude — only bash, git,
+  # and python3 (for JSON encoding in audit-agent-run-deaths-test.sh; already
+  # on ubuntu-latest). audit-agent-run-deaths-test.sh's one test that uses
+  # the real journalctl skips itself if journalctl is not on PATH.
+  #
+  # Deliberately no `paths:` filter, unlike the ticket's original wording of
+  # "on push/PR touching scripts/**" — two reasons:
+  #   1. A `paths`-filtered job that becomes a required check never reports
+  #      on a PR that doesn't touch scripts/**, and that PR then blocks
+  #      forever waiting on a check that will never run — a well-known
+  #      GitHub Actions footgun.
+  #   2. The whole suite runs in seconds, so filtering saves nothing
+  #      measurable. Running unconditionally is strictly more protective,
+  #      which is what this ticket exists to buy.
+  # Note that ci.yml uses no `paths` filters anywhere else today either — this
+  # job isn't introducing an inconsistency, it's declining to introduce one.
+  #
+  # All five suites run even if an earlier one fails, so one broken suite
+  # never masks the others — the loop below collects every failure and the
+  # job fails at the end if any suite failed.
+  # ---------------------------------------------------------------------------
+  worktree-lifecycle-selftests:
+    name: Worktree Lifecycle Self-Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run worktree lifecycle self-test suites
+        run: |
+          suites=(
+            scripts/check-ticket-in-flight-test.sh
+            scripts/mark-worktree-stranded-test.sh
+            scripts/mark-branch-stranded-test.sh
+            scripts/append-review-log-test.sh
+            scripts/audit-agent-run-deaths-test.sh
+          )
+          failed=()
+          for suite in "${suites[@]}"; do
+            echo "::group::${suite}"
+            if bash "$suite"; then
+              echo "::endgroup::"
+            else
+              echo "::endgroup::"
+              echo "::error::${suite} failed."
+              failed+=("$suite")
+            fi
+          done
+          if [ "${#failed[@]}" -gt 0 ]; then
+            echo "::error::${#failed[@]} of ${#suites[@]} worktree lifecycle self-test suite(s) failed: ${failed[*]}"
+            exit 1
+          fi
+          echo "✅ All ${#suites[@]} worktree lifecycle self-test suites passed."
