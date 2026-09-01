@@ -2262,8 +2262,8 @@ pub async fn save_agent_error(params: SaveAgentErrorParams<'_>) {
 
     // If no placeholder existed, insert a new message so the user sees the
     // error in the conversation.
-    if !updated {
-        let _ = add_message(
+    if !updated
+        && let Err(e) = add_message(
             db,
             encryption_key,
             session_id,
@@ -2278,7 +2278,14 @@ pub async fn save_agent_error(params: SaveAgentErrorParams<'_>) {
             None,
             None,
         )
-        .await;
+        .await
+    {
+        tracing::error!(
+            session_id,
+            assistant_message_id,
+            error = %e,
+            "Failed to insert fallback error message after update no-ops"
+        );
     }
 
     crate::websocket::helpers::send_error(
@@ -2593,6 +2600,9 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
     use sqlx::sqlite::SqlitePoolOptions;
+    use tracing::Level;
+
+    use kyomi_test_tracing::capture_tracing;
 
     // Regression coverage for KYO-200: `thinking_event_details` existed only
     // as a Postgres migration (20260608000000_create_thinking_event_details.sql)
@@ -4805,5 +4815,84 @@ mod tests {
         );
 
         cleanup_pg(pg, &workspace_id, &[&owner_id, &viewer_id]).await;
+    }
+
+    // KYO-579: `save_agent_error`'s fallback `add_message` call used to
+    // discard its `Result` (`let _ = add_message(...).await;`), so a failure
+    // of the fallback INSERT was silently swallowed with no log trace.
+    //
+    // Drive the fallback-insert-fails branch with a *real* constraint
+    // violation instead of a mock: `chat_messages.session_id` carries a
+    // genuine FOREIGN KEY to `chat_sessions(session_id)` in both backends
+    // (apps/server/migrations-sqlite/00001_baseline.sql and the Postgres
+    // baseline), and this module's `test_pool()` already runs with
+    // `PRAGMA foreign_keys=ON` against the real migrations, so the
+    // constraint is genuinely enforced here — no mocking required.
+    //
+    // Pointing `save_agent_error` at a `session_id` that was never seeded
+    // into `chat_sessions` makes `update_message` no-op (`Ok(false)` — no
+    // row with that `message_id`), so `!updated` is true, and the fallback
+    // `add_message` INSERT then hits a genuine FK violation.
+    #[tokio::test]
+    async fn save_agent_error_survives_a_genuine_fk_violation_on_the_fallback_insert() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        let key = test_key();
+
+        let session_id = "sess-never-seeded";
+        let assistant_message_id = "msg-fk-violation";
+        let manager = crate::websocket::WebSocketManager::new(None, db.clone());
+
+        // Install the capture *before* the call under test — save_agent_error
+        // must not merely survive the FK violation without panicking, it must
+        // log it. The pre-fix code (`let _ = add_message(...).await;`)
+        // survives identically but emits nothing, which is exactly the bug
+        // KYO-579 fixes; the row-count assertion below can't distinguish the
+        // two, so this is the assertion that actually pins the fix.
+        let logs = capture_tracing();
+
+        save_agent_error(SaveAgentErrorParams {
+            db: &db,
+            encryption_key: &key,
+            ws_manager: &manager,
+            session_id,
+            user_id: "user-does-not-matter-here",
+            assistant_message_id,
+            context_type: "chat",
+            error: "boom",
+        })
+        .await;
+
+        let count: i64 =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM chat_messages WHERE message_id = $1")
+                .bind(assistant_message_id)
+                .fetch_one(sq)
+                .await
+                .expect("count query must succeed");
+
+        assert_eq!(
+            count, 0,
+            "the fallback INSERT must have failed on the FK violation against \
+             chat_sessions (session_id was never seeded) — a row here would mean \
+             either the FK wasn't actually enforced, or the test's own setup is \
+             wrong, not that the fix under test worked"
+        );
+
+        let error_events = logs.events_at(Level::ERROR);
+        assert!(
+            !error_events.is_empty(),
+            "save_agent_error must log an error! when the fallback add_message \
+             INSERT fails, instead of discarding the Result; captured: {:?}",
+            logs.events()
+        );
+        assert!(
+            error_events
+                .iter()
+                .any(|(_, message)| message.contains(session_id)
+                    && message.contains(assistant_message_id)),
+            "expected an error log carrying both session_id ({session_id}) and \
+             assistant_message_id ({assistant_message_id}); captured: {:?}",
+            logs.events()
+        );
     }
 }
