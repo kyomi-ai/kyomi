@@ -31,7 +31,7 @@ silently miss it.
 | `docs/CODING_STANDARDS.md` (this repo, tracked) | Index over `docs/standards/` — one file per rule (see KYO-375), grouped into section directories. Read the index for the list of sections; `ls docs/standards/<section>/` to see a section's rules. |
 | `docs/standards/<section>/` (this repo, tracked) | The coding standards themselves, mined from code reviews — one `README.md` blurb plus one `.md` file per rule. |
 | `DESIGN.md` (this repo, tracked) | Design system — visual/UI decisions |
-| `docs/*.md` (this repo, **untracked**) | Completed migration plans and historical reports only. `.gitignore` has `docs/*` with `!docs/product/` and `!docs/standards/`, so these exist on one machine and are not authoritative. |
+| `docs/*.md` (this repo, **untracked by default**) | Completed migration plans and historical reports only. `.gitignore` has `docs/*` with `!docs/product/` and `!docs/standards/`, so these exist on one machine and are not authoritative — except `docs/CODING_STANDARDS.md`, which is tracked (see the row above) as an explicit exception to this default. |
 | **`~/repos/kyomi-private/skills/`** | **Canonical.** The agent-workflow skill/build-test docs (`SKILL.md` for `backlog`/`backlog-fast`, and `build-test.md`) — see KYO-568. This repo's `.claude/build-test.md` is meant to be a symlink into it (via `kyomi-private/scripts/link-agent-skills.sh`); edit it there and open a PR in `kyomi-private`, not here. |
 
 **Do not add new engineering docs to this repo's `docs/`** — they will be
