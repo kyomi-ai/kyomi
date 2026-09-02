@@ -63,7 +63,11 @@ const MOD_TESTS_MARKER: &str = "#[cfg(all(test, feature = \"ssr\"))]\nmod tests;
 
 mod save_actions;
 mod auth_mode_sections;
-mod oauth;
+mod oauth_status_refetch;
+mod oauth_popup_recovery_modal;
+mod oauth_popup_recovery_list;
+mod oauth_access_gating;
+mod oauth_messaging;
 mod credential_state_reset;
 mod create_mode;
 mod create_mode_bq_projects;

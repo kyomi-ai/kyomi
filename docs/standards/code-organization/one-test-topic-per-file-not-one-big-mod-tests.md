@@ -32,11 +32,31 @@ crates/kyomi-ui/src/pages/settings/datasources.rs   (11,715 lines; mod tests
 // RIGHT — one file per topic; a new OAuth test never touches catalog.rs
 crates/kyomi-ui/src/pages/settings/datasources.rs        (production code only)
 crates/kyomi-ui/src/pages/settings/datasources/tests/mod.rs        (shared helpers)
-crates/kyomi-ui/src/pages/settings/datasources/tests/oauth.rs
+crates/kyomi-ui/src/pages/settings/datasources/tests/oauth_status_refetch.rs
+crates/kyomi-ui/src/pages/settings/datasources/tests/oauth_popup_recovery_modal.rs
+crates/kyomi-ui/src/pages/settings/datasources/tests/oauth_popup_recovery_list.rs
+crates/kyomi-ui/src/pages/settings/datasources/tests/oauth_access_gating.rs
+crates/kyomi-ui/src/pages/settings/datasources/tests/oauth_messaging.rs
 crates/kyomi-ui/src/pages/settings/datasources/tests/create_mode.rs
 crates/kyomi-ui/src/pages/settings/datasources/tests/catalog.rs
 crates/kyomi-ui/src/pages/settings/datasources/tests/...
 ```
+
+A topic file is not exempt from the collision it was created to avoid: `oauth.rs` was itself
+one topic out of the original `datasources.rs` split (KYO-455), grew past every other topic
+file as OAuth accumulated fixes (KYO-197, 404, 408, 411, 421, 426, 427, 435, 436, 437, 440,
+443, 477, 499, 519, 524), and by KYO-475 had become a second-order instance of the same
+problem one level down — 49 tests, more than double the next-largest topic file, and a
+serialising tail of its own. The fix is the same rule applied recursively: split by
+*sub*-topic, grouped by which component/predicate a test actually exercises (`oauth_status_refetch.rs`
+for the shared status-refetch hook and its create-mode fetch guard;
+`oauth_popup_recovery_modal.rs` / `oauth_popup_recovery_list.rs` for the two independent
+popup-monitor call sites, kept separate because they're owned by different components;
+`oauth_access_gating.rs` for the BigQuery attestation gates; `oauth_messaging.rs` for
+error-translation and config-missing wiring) rather than by the ticket number that added
+each test. Watch for this on any topic file that keeps absorbing fixes for one feature
+area — "one file per topic" bounds the *first* split, not a promise that a topic can never
+outgrow a second one.
 
 If the split module's tests assert against the source text of the file they
 cover (`include_str!` plus string-matching, the pattern this codebase uses for
@@ -51,6 +71,8 @@ a time, and confirm what each assertion means before and after; do not just
 adjust numbers until the suite goes green again.
 
 Flagged in KYO-375 (the same collision pattern in `docs/standards/` itself,
-resolved by the one-rule-per-file layout this document follows) and KYO-455
+resolved by the one-rule-per-file layout this document follows), KYO-455
 (`datasources.rs`'s `mod tests`, which had cost rework on PRs #371, #379, and
-three same-day rebases — #389, #391, and one more — before the split).
+three same-day rebases — #389, #391, and one more — before the split), and
+KYO-475 (`oauth.rs`, one of KYO-455's own topic files, outgrowing every
+sibling topic file in turn and needing the same split one level down).
