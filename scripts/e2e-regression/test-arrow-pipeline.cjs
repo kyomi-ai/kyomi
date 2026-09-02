@@ -15,11 +15,18 @@
  *   5. NULL values → should display as null
  *   6. Mixed-type query → all types render correctly in one result set
  *   7. Large result set (>5 rows) → pagination works with Arrow data
+ *
+ * Overrides (all optional — defaults target local dev):
+ *   E2E_BASE_URL    - app base URL          (default http://localhost:3000)
+ *   E2E_TEST_EMAIL  - regular-user login email     (default e2e-test@kyomi.dev)
+ *   E2E_TEST_PASSWORD - regular-user login password (default E2eTestPass123!)
  */
 
 const { chromium } = require('playwright');
 
-const BASE_URL = 'http://localhost:3000';
+const BASE_URL = process.env.E2E_BASE_URL || 'http://localhost:3000';
+const TEST_EMAIL = process.env.E2E_TEST_EMAIL || 'e2e-test@kyomi.dev';
+const TEST_PASSWORD = process.env.E2E_TEST_PASSWORD || 'E2eTestPass123!';
 const SCREENSHOT_DIR = '/tmp/e2e-arrow';
 
 let testsPassed = 0;
@@ -56,8 +63,8 @@ function fail(name, reason) {
   console.log('=== Setup ===');
   console.log('  Logging in...');
   await page.goto(`${BASE_URL}/login`, { waitUntil: 'networkidle', timeout: 15000 });
-  await page.fill('input[type="email"]', 'e2e-test@kyomi.dev', { timeout: 8000 });
-  await page.fill('input[type="password"]', 'E2eTestPass123!', { timeout: 8000 });
+  await page.fill('input[type="email"]', TEST_EMAIL, { timeout: 8000 });
+  await page.fill('input[type="password"]', TEST_PASSWORD, { timeout: 8000 });
   await page.click('button[type="submit"]', { timeout: 8000 });
   await page.waitForURL(url => !url.toString().includes('/login'), { timeout: 15000 });
   console.log('  Logged in.');
