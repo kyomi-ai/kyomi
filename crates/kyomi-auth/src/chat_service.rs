@@ -3637,6 +3637,44 @@ mod tests {
         );
     }
 
+    // ── KYO-270: set_session_shared must report `Ok(false)` — not swallow
+    //    the miss — when the UPDATE matches zero rows, in both directions.
+    //    This pins the contract `share_session` / `unshare_session`
+    //    (crates/kyomi-ui/src/server_fns/chat.rs) depend on to distinguish
+    //    a real share/unshare from a session that vanished between their
+    //    ownership SELECT and this UPDATE (e.g. deleted concurrently). The
+    //    service already returns `Ok(false)` for the zero-row case today —
+    //    these tests do not exercise the caller-side bug (the callers used
+    //    to discard the bool entirely); see the server_fns for that fix.
+
+    #[tokio::test]
+    async fn set_session_shared_true_reports_no_row_updated_for_unknown_session() {
+        let db = test_pool().await;
+
+        let updated = set_session_shared(&db, "does-not-exist", true)
+            .await
+            .expect("set_session_shared(true) must not error on a missing session");
+        assert!(
+            !updated,
+            "sharing a session that doesn't exist must report no row updated, \
+             not be indistinguishable from a real share"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_session_shared_false_reports_no_row_updated_for_unknown_session() {
+        let db = test_pool().await;
+
+        let updated = set_session_shared(&db, "does-not-exist", false)
+            .await
+            .expect("set_session_shared(false) must not error on a missing session");
+        assert!(
+            !updated,
+            "unsharing a session that doesn't exist must report no row updated, \
+             not be indistinguishable from a real unshare"
+        );
+    }
+
     // ── KYO-269: fetch_session_snapshot must not collapse "absent" and
     //    "query failed" into the same `None` ──
 

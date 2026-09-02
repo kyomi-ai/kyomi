@@ -827,9 +827,20 @@ pub async fn share_session(session_id: String) -> Result<(), ServerFnError> {
         ));
     }
 
-    kyomi_auth::chat_service::set_session_shared(&ctx.db, &session_id, true)
+    let shared = kyomi_auth::chat_service::set_session_shared(&ctx.db, &session_id, true)
         .await
         .into_sfn_core()?;
+
+    // KYO-270: the ownership SELECT above and this UPDATE are not atomic —
+    // the session can be deleted in between (e.g. by its owner in another
+    // tab). `set_session_shared` returns `Ok(false)` when the UPDATE
+    // matched zero rows; without this check that was indistinguishable
+    // from a real share, so we'd log success and broadcast a sync action
+    // for a row that no longer exists. Surface the same "not found" error
+    // the ownership check above uses, and skip the log/broadcast entirely.
+    if !shared {
+        return Err(ServerFnError::new("Session not found"));
+    }
 
     tracing::info!(
         session_id = %session_id,
@@ -899,9 +910,19 @@ pub async fn unshare_session(session_id: String) -> Result<(), ServerFnError> {
         }
     }
 
-    kyomi_auth::chat_service::set_session_shared(&ctx.db, &session_id, false)
+    let unshared = kyomi_auth::chat_service::set_session_shared(&ctx.db, &session_id, false)
         .await
         .into_sfn_core()?;
+
+    // KYO-270: same race as `share_session` — the ownership SELECT (and the
+    // Slack-channel guard above, which reads only from that same row) can
+    // both pass and then the session gets deleted before this UPDATE runs.
+    // `set_session_shared` returns `Ok(false)` for a zero-row UPDATE; treat
+    // it as the existing "not found" error instead of logging success and
+    // broadcasting an unshare for a session that's already gone.
+    if !unshared {
+        return Err(ServerFnError::new("Session not found"));
+    }
 
     tracing::info!(
         session_id = %session_id,
@@ -1187,5 +1208,150 @@ fn session_detail_to_session_detail(
         } else {
             None
         },
+    }
+}
+
+#[cfg(all(test, feature = "ssr"))]
+mod tests {
+    //! `share_session` / `unshare_session` run inside `extract_auth()` /
+    //! `extract_context()`, which need a real Leptos/Axum request context
+    //! (see `server_fns/analytics.rs`'s `mod tests` for the precedent and
+    //! why that can't be faked in a plain unit test). So, following that
+    //! same source-assertion technique, this test locks in the specific
+    //! regression KYO-270 fixed: both functions called
+    //! `chat_service::set_session_shared(...)` and discarded the returned
+    //! `bool` — the `UPDATE`'s "did this actually match a row?" signal —
+    //! so a session deleted between the ownership check and the `UPDATE`
+    //! (rows_affected == 0) still produced a success log and a sync
+    //! broadcast for a row that no longer exists. The fix added an early
+    //! return on `Ok(false)` *before* both the log and the broadcast; this
+    //! test pins that ordering so a regression that re-adds the guard only
+    //! after the broadcast (which "fixes" nothing) is caught too.
+
+    const SRC: &str = include_str!("chat.rs");
+
+    /// Returns the source slice from the first occurrence of `start` up to
+    /// (but not including) the first occurrence of `end` that follows it.
+    fn extract_between<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
+        let start_pos = src
+            .find(start)
+            .unwrap_or_else(|| panic!("marker not found in server_fns/chat.rs: {start:?}"));
+        let end_pos = src[start_pos..]
+            .find(end)
+            .map(|i| start_pos + i)
+            .unwrap_or_else(|| {
+                panic!("end marker not found after {start:?} in server_fns/chat.rs: {end:?}")
+            });
+        &src[start_pos..end_pos]
+    }
+
+    /// The marker that opens this very `mod tests` block — slicing `SRC` up
+    /// to this marker yields only production code, so this test's own
+    /// source text (the string literals below) can never accidentally
+    /// satisfy its own assertion.
+    const MOD_TESTS_MARKER: &str = "#[cfg(all(test, feature = \"ssr\"))]\nmod tests {";
+
+    fn production_src() -> &'static str {
+        SRC.split(MOD_TESTS_MARKER)
+            .next()
+            .expect("MOD_TESTS_MARKER must appear in server_fns/chat.rs")
+    }
+
+    /// `share_session` must return the zero-rows "Session not found" error
+    /// *before* logging success and broadcasting the sync update — a guard
+    /// that exists but runs after either of those has already fired the
+    /// bug KYO-270 exists to close.
+    #[test]
+    fn share_session_zero_rows_guard_precedes_log_and_broadcast() {
+        let fn_body = extract_between(
+            production_src(),
+            "pub async fn share_session(session_id: String) -> Result<(), ServerFnError> {",
+            "\n/// Make a session private (removes workspace-wide visibility).",
+        );
+
+        let guard_pos = fn_body.find("if !shared {").unwrap_or_else(|| {
+            panic!(
+                "share_session must check the bool set_session_shared returns and \
+                 early-return \"Session not found\" on Ok(false) (KYO-270) — without it, a \
+                 session deleted between the ownership check and the UPDATE still gets \
+                 logged as shared and broadcast to the workspace as if the row existed"
+            )
+        });
+        let log_pos = fn_body.find("\"Session shared\"").unwrap_or_else(|| {
+            panic!("expected the \"Session shared\" success log in share_session's body")
+        });
+        let broadcast_pos = fn_body
+            .find("broadcast_chat_session_sync(")
+            .unwrap_or_else(|| {
+                panic!("expected a broadcast_chat_session_sync(...) call in share_session's body")
+            });
+
+        assert!(
+            guard_pos < log_pos,
+            "KYO-270: the zero-rows guard (`if !shared`) must precede the \"Session shared\" \
+             log, or a session deleted mid-request still gets logged as successfully shared \
+             — found guard at byte {guard_pos}, log at byte {log_pos}"
+        );
+        assert!(
+            log_pos < broadcast_pos,
+            "KYO-270: the zero-rows guard must precede the sync broadcast — a guard placed \
+             after broadcast_chat_session_sync would still push a sync action for a session \
+             row that no longer exists, which is the exact defect this ticket closed — found \
+             log at byte {log_pos}, broadcast at byte {broadcast_pos}"
+        );
+    }
+
+    /// `unshare_session` likewise: the zero-rows guard must precede both
+    /// the success log and the unshare broadcast, and must not disturb the
+    /// pre-existing Slack-channel guard that runs earlier in the function.
+    #[test]
+    fn unshare_session_zero_rows_guard_precedes_log_and_broadcast() {
+        let fn_body = extract_between(
+            production_src(),
+            "pub async fn unshare_session(session_id: String) -> Result<(), ServerFnError> {",
+            "\n/// Mark a session as read up to the specified message",
+        );
+
+        let slack_guard_pos = fn_body
+            .find("Slack channel conversations cannot be unshared")
+            .expect("expected the Slack-channel guard in unshare_session's body");
+        let guard_pos = fn_body.find("if !unshared {").unwrap_or_else(|| {
+            panic!(
+                "unshare_session must check the bool set_session_shared returns and \
+                 early-return \"Session not found\" on Ok(false) (KYO-270) — without it, a \
+                 session deleted between the ownership check and the UPDATE still gets \
+                 logged as unshared and broadcast to the workspace as if the row existed"
+            )
+        });
+        let log_pos = fn_body.find("\"Session unshared\"").unwrap_or_else(|| {
+            panic!("expected the \"Session unshared\" success log in unshare_session's body")
+        });
+        let broadcast_pos = fn_body
+            .find("broadcast_chat_session_unshare(")
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected a broadcast_chat_session_unshare(...) call in unshare_session's \
+                     body"
+                )
+            });
+
+        assert!(
+            slack_guard_pos < guard_pos,
+            "the pre-existing Slack-channel guard must still run before the zero-rows check \
+             — found Slack guard at byte {slack_guard_pos}, zero-rows guard at byte {guard_pos}"
+        );
+        assert!(
+            guard_pos < log_pos,
+            "KYO-270: the zero-rows guard (`if !unshared`) must precede the \"Session \
+             unshared\" log, or a session deleted mid-request still gets logged as \
+             successfully unshared — found guard at byte {guard_pos}, log at byte {log_pos}"
+        );
+        assert!(
+            log_pos < broadcast_pos,
+            "KYO-270: the zero-rows guard must precede the unshare broadcast — a guard \
+             placed after broadcast_chat_session_unshare would still push a sync action for \
+             a session row that no longer exists, which is the exact defect this ticket \
+             closed — found log at byte {log_pos}, broadcast at byte {broadcast_pos}"
+        );
     }
 }
