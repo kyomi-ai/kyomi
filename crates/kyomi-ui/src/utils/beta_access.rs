@@ -136,6 +136,7 @@ pub const BETA_ACCESS_REQUEST_HREF: &str = "mailto:support@kyomi.ai?subject=Requ
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::extract_between;
 
     // ── `parse_stored_flag` — pure predicate, directly testable on host ──
 
@@ -227,31 +228,6 @@ mod tests {
 
     const DATASOURCES_SRC: &str = include_str!("../pages/settings/datasources.rs");
     const LOGIN_SRC: &str = include_str!("../pages/auth/login.rs");
-
-    /// Returns the substring of `src` starting just after the first
-    /// occurrence of `start` and ending just before the first occurrence of
-    /// `end` that follows it. Panics with a descriptive message if either
-    /// marker isn't found, so a typo'd marker fails loudly instead of
-    /// silently matching an empty/wrong range. Same contract as the
-    /// `extract_between` helpers in `pages/settings/datasources/tests/mod.rs`
-    /// and `pages/auth/login.rs`'s own test module — this is a third,
-    /// deliberately local copy (KYO-499 review): the two existing copies
-    /// live in modules this one has no business depending on (one is
-    /// private to `pages::auth::login`'s test module, the other sits under
-    /// `pages::settings::datasources`, an odd dependency direction for
-    /// `utils::beta_access` to take on), and the function is two lines of
-    /// `str::find`. A fourth copy would be the trigger to actually extract
-    /// a shared test-support crate.
-    fn extract_between<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
-        let start_idx = src
-            .find(start)
-            .unwrap_or_else(|| panic!("start marker not found: {start:?}"));
-        let after_start = start_idx + start.len();
-        let end_idx = src[after_start..]
-            .find(end)
-            .unwrap_or_else(|| panic!("end marker not found after start: {end:?}"));
-        &src[after_start..after_start + end_idx]
-    }
 
     /// The datasource modal's kyomi_oauth notice block — same bounds
     /// `oauth.rs`'s own tests use, so this can only match the real

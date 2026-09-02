@@ -643,28 +643,14 @@ fn icon_shield() -> impl IntoView {
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support::extract_between;
+
     /// This file's own source, for a source-text wiring assertion below —
     /// mirrors the `SRC`/`extract_between` pattern in `pages/auth/login.rs`
     /// (KYO-478), kept local here since this file is far below the size
     /// where `docs/standards/code-organization/one-test-topic-per-file-not-one-big-mod-tests.md`
     /// requires splitting `mod tests` out into its own directory.
     const SRC: &str = include_str!("accept_invite.rs");
-
-    /// Returns the substring of `src` starting just after the first
-    /// occurrence of `start` and ending just before the first occurrence
-    /// of `end` that follows it. Panics with a descriptive message if
-    /// either marker isn't found, so a typo'd marker fails loudly instead
-    /// of silently matching an empty/wrong range.
-    fn extract_between<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
-        let start_idx = src
-            .find(start)
-            .unwrap_or_else(|| panic!("start marker not found: {start:?}"));
-        let after_start = start_idx + start.len();
-        let end_idx = src[after_start..]
-            .find(end)
-            .unwrap_or_else(|| panic!("end marker not found after start: {end:?}"));
-        &src[after_start..after_start + end_idx]
-    }
 
     /// Pins the real support domain (kyomi.ai, not kyomi.dev — confirmed
     /// against `kyomi_core::Config::support_email`'s default in

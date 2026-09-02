@@ -733,6 +733,8 @@ fn WaitingForSetup(
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support::extract_between;
+
     /// This file's own source, for source-text wiring assertions below —
     /// mirrors the `SRC`/`extract_between` pattern in
     /// `pages/settings/datasources/tests/mod.rs`, kept local here since this
@@ -750,22 +752,6 @@ mod tests {
         SRC.split(TEST_MOD_MARKER)
             .next()
             .expect("TEST_MOD_MARKER must be found in SRC")
-    }
-
-    /// Returns the substring of `src` starting just after the first
-    /// occurrence of `start` and ending just before the first occurrence of
-    /// `end` that follows it. Panics with a descriptive message if either
-    /// marker isn't found, so a typo'd marker fails loudly instead of
-    /// silently matching an empty/wrong range.
-    fn extract_between<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
-        let start_idx = src
-            .find(start)
-            .unwrap_or_else(|| panic!("start marker not found: {start:?}"));
-        let after_start = start_idx + start.len();
-        let end_idx = src[after_start..]
-            .find(end)
-            .unwrap_or_else(|| panic!("end marker not found after start: {end:?}"));
-        &src[after_start..after_start + end_idx]
     }
 
     // ── KYO-421: GoogleError must translate; the other five providers must not ──
@@ -798,6 +784,10 @@ mod tests {
         );
     }
 
+    /// The window includes the five match-arm patterns themselves, since
+    /// `extract_between` is start-inclusive — so it spans the whole arm
+    /// header plus its body. Keep the needle out of those patterns when
+    /// editing these markers.
     #[test]
     fn onboarding_other_providers_error_arm_does_not_call_the_translation() {
         let others_arm = extract_between(
