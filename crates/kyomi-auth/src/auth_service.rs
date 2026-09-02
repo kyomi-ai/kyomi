@@ -2415,8 +2415,19 @@ pub struct RecoveryStartResult {
     pub raw_token: String,
 }
 
-/// Check rate limit, look up the verified user, and create a recovery token
-/// in one service call. Returns `None` if rate-limited or user not found/unverified.
+/// Check rate limit, look up the verified user, and — only if one exists and
+/// is verified — create a recovery token in one service call.
+///
+/// Like `passkey_recovery_start_service` below, the only signal returned to
+/// a caller besides rate-limiting is silence: whether the account exists,
+/// is unverified, or token minting failed are all indistinguishable from
+/// the caller's perspective — every one of those cases returns `Ok(None)`.
+/// Rate limiting is the one exception: a rate-limited call returns `Err`
+/// directly, and that check runs before any account lookup, so it leaks
+/// nothing about a specific email. This uniformity is deliberate, not
+/// incidental: see KYO-291, which closed two enumeration channels here (the
+/// user lookup and the token-mint) to bring this path to parity with the
+/// passkey one.
 pub async fn recovery_start_service(
     db: &kyomi_core::DbPool,
     kv: &KVPool,
@@ -2431,19 +2442,30 @@ pub async fn recovery_start_service(
         )));
     }
 
-    let user = crate::user_service::get_user_by_email(db, email).await?;
+    let user = lookup_recovery_user(db, email, "account_recovery").await;
     let Some(user) = user else { return Ok(None) };
     if !user.verified {
         return Ok(None);
     }
 
-    let raw_token = crate::token_service::create_verification_token_with_expiry(
+    let raw_token = match crate::token_service::create_verification_token_with_expiry(
         db,
         email,
         "account_recovery",
         Some(0.25),
     )
-    .await?;
+    .await
+    {
+        Ok(token) => token,
+        Err(e) => {
+            tracing::error!(
+                flow = "account_recovery",
+                error = %e,
+                "recovery: token creation failed"
+            );
+            return Ok(None);
+        }
+    };
 
     Ok(Some(RecoveryStartResult {
         user_name: user.name.unwrap_or_default(),
@@ -2451,22 +2473,29 @@ pub async fn recovery_start_service(
     }))
 }
 
-/// Look up the user for the enumeration-resistant passkey-recovery path.
+/// Look up the user for an enumeration-resistant recovery path.
 ///
 /// Returns `None` both when no such user exists and when the lookup fails —
 /// callers must not be able to distinguish those, or the endpoint leaks
 /// account existence. The difference is recorded in the logs instead, so a
-/// database outage on the recovery path is visible to operators rather than
-/// silently returning success to every caller.
+/// database outage on a recovery path is visible to operators rather than
+/// silently returning success to every caller. `flow` is logged alongside
+/// the error so operators can still tell which caller hit the failure —
+/// shared by `recovery_start_service` (account/password recovery) and
+/// `passkey_recovery_start_service` (passkey recovery) below.
 ///
 /// Ported from `lookup_recovery_user` in the REST passkey-recovery
 /// implementation this replaced (deleted in KYO-286 once the Leptos path
-/// fully replaced it).
-async fn lookup_recovery_user(db: &DbPool, email: &str) -> Option<kyomi_core::models::User> {
+/// fully replaced it); generalized in KYO-291 to serve account recovery too.
+async fn lookup_recovery_user(
+    db: &DbPool,
+    email: &str,
+    flow: &'static str,
+) -> Option<kyomi_core::models::User> {
     match crate::user_service::get_user_by_email(db, email).await {
         Ok(user) => user,
         Err(e) => {
-            tracing::error!(error = %e, "passkey recovery: user lookup failed");
+            tracing::error!(flow = flow, error = %e, "recovery: user lookup failed");
             None
         }
     }
@@ -2513,7 +2542,7 @@ pub async fn passkey_recovery_start_service(
 
     // Always proceed to Ok(()) below regardless of what happens here — do
     // the work silently, exactly as the reference REST handler does.
-    let user = lookup_recovery_user(db, email).await;
+    let user = lookup_recovery_user(db, email, "passkey_recovery").await;
 
     if let Some(user) = user
         && user.verified
@@ -3959,7 +3988,7 @@ mod tests {
         let email = "db-error-recovery-test@example.com";
         let logs = capture_tracing();
 
-        let result = lookup_recovery_user(&db, email).await;
+        let result = lookup_recovery_user(&db, email, "passkey_recovery").await;
 
         assert!(
             result.is_none(),
@@ -3969,7 +3998,7 @@ mod tests {
         let error_events = logs.events_at(Level::ERROR);
         assert!(
             !error_events.is_empty(),
-            "a DB error during passkey recovery must emit an error!-level log; captured: {:?}",
+            "a DB error during recovery must emit an error!-level log; captured: {:?}",
             logs.events()
         );
         assert!(
@@ -4000,7 +4029,7 @@ mod tests {
         let email = "absent-recovery-test@example.com";
         let logs = capture_tracing();
 
-        let result = lookup_recovery_user(&db, email).await;
+        let result = lookup_recovery_user(&db, email, "passkey_recovery").await;
 
         assert!(result.is_none(), "no such user should look up to None");
 
@@ -4008,6 +4037,151 @@ mod tests {
         assert!(
             error_events.is_empty(),
             "a merely-absent user must not log an error — only a DB failure should; captured: {:?}",
+            logs.events()
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // `recovery_start_service` — enumeration resistance (KYO-291)
+    // -----------------------------------------------------------------
+    //
+    // KYO-291: `recovery_start_service` used to propagate a DB-lookup
+    // error to its caller via `?`, observably distinct from the `Ok(None)`
+    // an unregistered email produces — an enumeration leak. It also
+    // propagated a token-mint failure the same way, a second leak of the
+    // same shape. Both are now folded into `Ok(None)`, matching
+    // `passkey_recovery_start_service`'s existing contract. These tests
+    // assert that absent, unverified, lookup-error, and token-mint-error
+    // account states are all indistinguishable to the caller.
+
+    /// Absent and present-but-unverified accounts must both resolve to
+    /// `Ok(None)` — the two cases that existed before KYO-291 and must
+    /// keep working identically after it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn recovery_start_service_returns_none_for_absent_and_unverified_users() {
+        let db = test_pool().await;
+        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+
+        let unknown_email = "recovery-start-unknown@example.com";
+        let unverified_email = "recovery-start-unverified@example.com";
+
+        crate::user_service::create_user(&db, unverified_email, Some("Unverified User"), false)
+            .await
+            .expect("create unverified user");
+
+        for email in [unknown_email, unverified_email] {
+            let result = recovery_start_service(&db, &kv, "127.0.0.1", email)
+                .await
+                .expect("service call should not error");
+
+            assert!(
+                result.is_none(),
+                "expected Ok(None) for {email} (unknown or unverified account), got Ok(Some(_))"
+            );
+        }
+    }
+
+    /// The KYO-291 regression test: a DB error during the user lookup must
+    /// resolve to `Ok(None)`, exactly like an absent user — not propagate
+    /// as `Err` to the caller (the enumeration leak this ticket closes).
+    /// It must still log at `error!` so the failure stays diagnosable to
+    /// operators, tagged with the `account_recovery` flow so it's
+    /// distinguishable from a passkey-recovery lookup failure.
+    #[tokio::test(flavor = "current_thread")]
+    async fn recovery_start_service_lookup_error_returns_none_and_logs_error() {
+        let db = test_pool().await;
+        match &db {
+            DbPool::Sqlite(pool) => pool.close().await,
+            DbPool::Postgres(_) => panic!("expected sqlite pool"),
+        }
+        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+
+        let email = "recovery-start-db-error@example.com";
+        let logs = capture_tracing();
+
+        let result = recovery_start_service(&db, &kv, "127.0.0.1", email)
+            .await
+            .expect("a lookup failure must resolve to Ok(None), not Err — that's the leak");
+
+        assert!(
+            result.is_none(),
+            "a DB error during account recovery must be reported as no user, not surfaced \
+             to the caller as an error (KYO-291 enumeration leak)"
+        );
+
+        let error_events = logs.events_at(Level::ERROR);
+        assert!(
+            !error_events.is_empty(),
+            "a DB error during account recovery must emit an error!-level log; captured: {:?}",
+            logs.events()
+        );
+        assert!(
+            error_events
+                .iter()
+                .any(|(_, message)| message.contains("user lookup failed")),
+            "expected an error log describing the lookup failure; captured: {:?}",
+            logs.events()
+        );
+        for (_, message) in &error_events {
+            assert!(
+                !message.contains(email),
+                "recovery error logs must never contain the requester's email \
+                 (that would reintroduce the enumeration leak through logs); got: {message}"
+            );
+        }
+    }
+
+    /// The second KYO-291 leak: a token-mint failure (after a verified user
+    /// is found) must also resolve to `Ok(None)` rather than `Err`, and log
+    /// at `error!`. Forces the failure by dropping `verification_tokens`
+    /// after the user lookup has already succeeded, so the INSERT inside
+    /// `create_verification_token_with_expiry` fails while the preceding
+    /// SELECT still works — isolating this half of the fix from the lookup
+    /// half covered above.
+    #[tokio::test(flavor = "current_thread")]
+    async fn recovery_start_service_token_mint_error_returns_none_and_logs_error() {
+        let db = test_pool().await;
+        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+
+        let email = "recovery-start-token-mint-error@example.com";
+        crate::user_service::create_user(&db, email, Some("Verified User"), true)
+            .await
+            .expect("create verified user");
+
+        match &db {
+            DbPool::Sqlite(pool) => {
+                sqlx::query("DROP TABLE verification_tokens")
+                    .execute(pool)
+                    .await
+                    .expect("drop verification_tokens table");
+            }
+            DbPool::Postgres(_) => panic!("expected sqlite pool"),
+        }
+
+        let logs = capture_tracing();
+
+        let result = recovery_start_service(&db, &kv, "127.0.0.1", email)
+            .await
+            .expect("a token-mint failure must resolve to Ok(None), not Err — that's the leak");
+
+        assert!(
+            result.is_none(),
+            "a token-mint failure for a verified user must be reported as no user, not \
+             surfaced to the caller as an error (KYO-291 enumeration leak)"
+        );
+
+        let error_events = logs.events_at(Level::ERROR);
+        assert!(
+            !error_events.is_empty(),
+            "a token-mint failure during account recovery must emit an error!-level log; \
+             captured: {:?}",
+            logs.events()
+        );
+        assert!(
+            error_events
+                .iter()
+                .any(|(_, message)| message.contains("token creation failed")),
+            "expected an error log describing the token-creation failure; captured: {:?}",
             logs.events()
         );
     }
