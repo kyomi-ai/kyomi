@@ -3,13 +3,13 @@
 //! Cookie helpers for setting and clearing HTTPOnly auth cookies.
 //!
 //! Must match Python's `set_token_cookies` and `clear_auth_cookies` exactly.
-//! Configuration from `shared/constants.toml`.
+//! Configuration from `data/constants.toml`.
 
 use axum::http::{HeaderMap, HeaderValue, header::SET_COOKIE};
 
 /// Set the access_token and/or refresh_token HTTPOnly cookies on a response.
 ///
-/// Cookie settings from `shared/constants.toml`:
+/// Cookie settings from `data/constants.toml`:
 /// - HTTPOnly, Secure, SameSite=Strict, Path=/
 /// - access_token max_age: 15 min (from jwt.access_token_expire_minutes)
 /// - refresh_token max_age: 7 days (from jwt.refresh_token_expire_days)

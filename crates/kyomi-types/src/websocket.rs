@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// WebSocket message types. 23 from `shared/constants.toml` plus workspace event types.
+/// WebSocket message types. 23 from `data/constants.toml` plus workspace event types.
 ///
 /// Serializes to/from snake_case strings (e.g., `ChatStream` ↔ `"chat_stream"`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

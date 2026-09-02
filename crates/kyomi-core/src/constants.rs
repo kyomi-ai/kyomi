@@ -35,7 +35,7 @@ pub fn load(path: &Path) -> crate::Result<&'static SharedConstants> {
 /// Load constants from disk, falling back to the embedded copy for standalone mode.
 ///
 /// Tries [`find_constants_file`] first. If the file is not found on disk,
-/// parses the compile-time embedded copy of `shared/constants.toml`.
+/// parses the compile-time embedded copy of `data/constants.toml`.
 pub fn load_with_fallback() -> crate::Result<&'static SharedConstants> {
     let content = match find_constants_file() {
         Ok(path) => {
