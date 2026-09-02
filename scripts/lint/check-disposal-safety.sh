@@ -185,6 +185,80 @@
 # design and leaves the judgment call to the reader. KYO-414 removed the
 # noise that had nothing to do with that judgment call in the first place.
 # ------------------------------------------------------------------------------
+# KYO-558 — the test-module skip must recognize wrapped cfg(test) forms
+# ------------------------------------------------------------------------------
+#
+# The test-module skip (both Rule A and Rule B) used to arm only on the
+# exact literal text `#[cfg(test)]`. This crate's standard ssr-gated test
+# module — `#[cfg(all(test, feature = "ssr"))] mod whatever_tests { ... }`
+# — does not match that literal text, and its module name need not start
+# with `tests` either (the OTHER, separate heuristic — see the `mod tests`
+# branch just below — that catches an un-gated `mod tests { ... }` by name
+# prefix, deliberately left untouched by this fix). Reproduced on KYO-548:
+# a real `#[cfg(all(test, feature = "ssr"))] mod disposal_scope_tests`
+# module was invisible to the skip, producing a spurious advisory Rule B
+# WARN; nothing in this crate hit it for the blocking Rule A at the time,
+# but the same skip governs both, so this was a latent false CI failure
+# waiting to happen, not just noise.
+#
+# Fixed by extract_cfg_predicate() + cfg_predicate_is_test() (defined
+# below, next to the other per-line helpers): the attribute's predicate is
+# extracted from inside its own outer parens and checked, exactly as
+# written with no rewrite step, for `test` as an active whole predicate
+# token in a FLAT recognized shape, so `#[cfg(test)]`,
+# `#[cfg(all(test, feature = "ssr"))]`, `#[cfg(any(test, feature = "x"))]`,
+# and `test` in a non-first position (`#[cfg(all(feature = "ssr", test))]`)
+# all arm the skip, while `#[cfg(not(test))]`, `#[cfg(feature = "test")]`,
+# and `#[cfg(test_util)]` correctly do not. A naming convention (requiring
+# every cfg-gated test module to be named with a `tests` prefix) was
+# considered and rejected: fixing the attribute match is strictly better
+# than documenting a convention nothing enforces, and it works regardless
+# of what the module is called.
+#
+# Two defects were found in review of the first pass at this fix and
+# corrected before merge:
+#
+# CRITICAL-1 — cfg_predicate_is_test() fails closed on anything that
+# is not a FLAT, recognized predicate shape (bare `test`, or a flat
+# `all(...)`/`any(...)` with no nested parens anywhere inside), checked
+# against the predicate exactly as written. The first pass matched `test`
+# as a token anywhere in the predicate, which also matched inside
+# `not(all(test, feature = "x"))` — a predicate that is TRUE in
+# essentially every production build. Treating that as test-only silently
+# disabled the BLOCKING Rule A on production code, which is strictly
+# worse than the false positive this ticket set out to fix. See
+# cfg_predicate_is_test()'s own comment for the full case-by-case
+# reasoning and the residual (intentionally fail-closed, not fail-open)
+# gap this leaves.
+#
+# CRITICAL-1, cycle 2 — the fix above originally shipped with a "strip a
+# direct `not(test)` wrap first" step ahead of the flatness check, using
+# an UNANCHORED `gsub`. Because the substitution was not anchored to the
+# whole predicate, it erased `not(test)` from *any* position, including
+# inside a still-nested predicate — so `#[cfg(any(not(test), test))]` (a
+# tautology, `NOT test OR test`, always true, ships in production) had
+# its `not(test)` erased down to `any( , test)` *before* the flatness
+# check ran, which then matched the now-disguised-as-flat result and
+# reported the module test-only. That silently reopened CRITICAL-1 on
+# exactly the class of input it was meant to close. The fix (this
+# revision) removes the substitution step entirely and checks the shape
+# of the predicate as written — see cfg_predicate_is_test()'s own comment
+# for why that closes the hole without a special case for `not`. KYO-558.
+#
+# CRITICAL-2 — the semicolon-declaration exclusion (both the
+# `cfg_test_pending` branch and the `mod tests`-prefix branch, a few
+# lines below) is name-agnostic
+# (`mod[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*;`), not
+# `mod[[:space:]]+tests[[:space:]]*;`. The name-specific version only
+# excluded a declaration literally named `tests`; broadening the cfg
+# match above makes the whole cfg(test) family reach a semicolon
+# declaration for the first time (e.g. `#[cfg(all(test, feature =
+# "ssr"))] mod some_tests;`), and any name other than exactly `tests`
+# armed `in_test_module` with no `{` ever coming to reset it — silently
+# swallowing every real line for the rest of the file. See the comment
+# just above the `cfg_test_pending` check, a few lines below, for the
+# full mechanism.
+# ------------------------------------------------------------------------------
 
 set -euo pipefail
 
@@ -377,6 +451,109 @@ function fill_run(count,   out) {
     return out
 }
 
+# KYO-558: extracts the predicate text inside a single-line `#[cfg(...)]`
+# attribute — the substring between the attributes own outer parens — or
+# "" if `code` does not open with `#[cfg(` immediately followed by a
+# balanced close within this same line. Scoping the `test` search in
+# cfg_predicate_is_test() to just this substring, rather than the whole
+# line, matters: `#[cfg(not(test))] mod test { ... }` has a real `test`
+# token sitting right after the attribute (the module name) that must not
+# be mistaken for a predicate.
+#
+# Like the rest of this scanner (header §1), this is line-by-line: a
+# `#[cfg(` whose matching `)` is on a later physical line is not a pattern
+# used anywhere in this crate today and returns "" (not recognized),
+# same as an unbalanced line would.
+function extract_cfg_predicate(code,    start, i, n, c, depth) {
+    if (!match(code, /^[[:space:]]*#\[cfg\(/)) return ""
+    start = RSTART + RLENGTH
+    n = length(code)
+    depth = 1
+    for (i = start; i <= n; i++) {
+        c = substr(code, i, 1)
+        if (c == "(") depth++
+        else if (c == ")") {
+            depth--
+            if (depth == 0) return substr(code, start, i - start)
+        }
+    }
+    return ""
+}
+
+# KYO-558: true when a `#[cfg(...)]` predicate contains `test` as an
+# active, non-negated predicate token — bare `test`, or `test` as one item
+# (in any position) of a FLAT `all(...)`/`any(...)` list (no nested
+# parens anywhere inside the list).
+#
+# KYO-558 CRITICAL-1 fix, cycle 2: this function FAILS CLOSED on anything
+# that is not one of those two flat, recognized shapes — the predicate,
+# AS WRITTEN, must be exactly `test`, or exactly `all(...)`/`any(...)`
+# with no nested parens anywhere inside; anything else is treated as NOT
+# test (skip does not arm, Rule A/B keep firing).
+#
+# There is deliberately no substitution step of any kind before that
+# shape check — earlier revisions of this function tried stripping a
+# directly-negated `not(test)` wrap before checking flatness, using an
+# UNANCHORED `gsub(/not[[:space:]]*\([[:space:]]*test[[:space:]]*\)/, "
+# ", tmp)`. Because it was unanchored, it stripped `not(test)` from
+# *anywhere* in the string, not just a wrap around the whole predicate —
+# so `#[cfg(any(not(test), test))]` (a tautology: `NOT test OR test` is
+# always true, so the item ships in production) had its `not(test)` piece
+# erased first, leaving `any( , test)`, which then passed the flat-shape
+# regex and was reported test-only. The substitution was disguising a
+# genuinely nested predicate as flat *before* the flatness check ever
+# ran, which silently re-opened the exact CRITICAL-1 hole this function
+# exists to close. Validating the shape of the predicate exactly as
+# written, with no rewrite step, closes that hole: `not(...)` can only
+# ever appear as a nested paren group, and the flat-shape regex
+# (`[^()]*` — no parens allowed inside the wrapper) rejects any predicate
+# containing one, in any position, so `not(test)`, `any(not(test),
+# test)`, `all(not(test), test)`, and `not(all(test, feature = "x"))` all
+# fail closed the same way a hand-rolled nested-paren detector would, but
+# without a special case for `not` at all — nesting of any shape is
+# unrecognized and Rule A/B keep firing.
+#
+# Whatever passes the flat-shape check must still contain `test` as a
+# whole token — bounded by a non-identifier character or string edge on
+# both sides — never as a prefix of a longer identifier (`test_util`,
+# `#[cfg(feature = "testing")]`). `pred` has already been through
+# strip_comment_and_literals() by the time this runs (code, not raw), so
+# string-literal content like `"test"` or `"testing"` inside a
+# `feature = "..."` predicate has already been replaced with filler (see
+# fill_run()) and can never supply a bare `test` token here — verified
+# empirically against gawks own output, not assumed.
+#
+# Residual gap, not required by KYO-558 and not observed in this crate: a
+# predicate that both nests AND is genuinely test-only — e.g.
+# `all(any(test, feature = "x"), debug_assertions)` — is treated as NOT
+# test (fail closed) rather than recognized: Rule A/B keep firing inside
+# a test module of that shape, a false positive rather than a missed
+# real one. That is the intentionally safe side of the tradeoff. This
+# lint already accepts equivalent narrow gaps elsewhere (header §3, §4)
+# rather than building a full cfg-predicate parser for a shape that does
+# not occur here.
+function cfg_predicate_is_test(pred,    tmp, inner) {
+    tmp = trim(pred)
+
+    # Bare `#[cfg(test)]`.
+    if (tmp == "test") return 1
+
+    # A single FLAT `all(...)`/`any(...)` wrapper — no nested parens
+    # anywhere inside, checked against the predicate exactly as written
+    # (no prior substitution — see the function comment for why). Any
+    # `not(...)`, in any position, can only appear as a nested paren
+    # group, so it can never match this branch; nothing here can be
+    # disguised as flat.
+    if (match(tmp, /^(all|any)[[:space:]]*\([^()]*\)$/)) {
+        inner = tmp
+        sub(/^(all|any)[[:space:]]*\(/, "", inner)
+        sub(/\)$/, "", inner)
+        return (inner ~ /(^|[^[:alnum:]_])test([^[:alnum:]_]|$)/) ? 1 : 0
+    }
+
+    return 0
+}
+
 function has_escape_hatch(line,  idx, tail, eqidx, just) {
     idx = index(line, "// lint-allow: disposal-safe=")
     if (idx == 0) return 0
@@ -557,28 +734,47 @@ BEGINFILE {
     raw = $0
     code = strip_comment_and_literals(raw)
 
-    # Skip test modules entirely. `#[cfg(test)]` can precede EITHER a block
-    # item (`mod tests { ... }`, `fn helper() { ... }`) OR a bare submodule
-    # declaration (`mod tests;`, the KYO-455 split-test-module form — no
-    # body, ever). Only the former should arm the skip; arming unconditionally
-    # on the attribute line (as before KYO-414) leaves it waiting forever
-    # for a `{` that a semicolon declaration will never produce, silently
-    # swallowing every real line after it as "test code" — including Rule A
-    # (blocking!) violations. So the attribute only marks a one-line lookahead
-    # (cfg_test_pending); the decision to actually arm is made once the very
-    # next line is seen. This does not handle multiple stacked attributes
-    # between `#[cfg(test)]` and the item (not used this way anywhere in
-    # this crate today) — see header §2.
+    # Skip test modules entirely. A test-gating cfg attribute (see
+    # cfg_predicate_is_test() — KYO-558: not just the literal `#[cfg(test)]`
+    # but also `#[cfg(all(test, ...))]` / `#[cfg(any(test, ...))]` / `test`
+    # in a non-first position, and NOT `#[cfg(not(test))]`) can precede
+    # EITHER a block item (`mod tests { ... }`, `fn helper() { ... }`) OR a
+    # bare submodule declaration (`mod tests;`, the KYO-455 split-test-module
+    # form — no body, ever). Only the former should arm the skip; arming
+    # unconditionally on the attribute line (as before KYO-414) leaves it
+    # waiting forever for a `{` that a semicolon declaration will never
+    # produce, silently swallowing every real line after it as "test code"
+    # — including Rule A (blocking!) violations. So the attribute only marks
+    # a one-line lookahead (cfg_test_pending); the decision to actually arm
+    # is made once the very next line is seen. This does not handle multiple
+    # stacked attributes between the cfg(test...) attribute and the item
+    # (not used this way anywhere in this crate today) — see header §2.
+    #
+    # KYO-558 CRITICAL-2 fix: the semicolon-declaration exclusion below is
+    # name-agnostic (`mod[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*;`),
+    # not `mod[[:space:]]+tests[[:space:]]*;`. The name-specific version
+    # only excluded a declaration named exactly `tests`; any other name
+    # (`mod some_tests;`, or the KYO-558 broadened cfg match reaching a
+    # semicolon declaration under `#[cfg(all(test, feature = "ssr"))]`)
+    # fell through, armed in_test_module, and — because a semicolon
+    # declaration never produces the `{` that test_module_depth needs in
+    # order to later reset (see update_stacks()) — never reset it for the
+    # rest of the file, silently swallowing every real line after it. The
+    # KYO-414 rationale for excluding the semicolon form at all ("waiting
+    # forever for a `{` that will never arrive") applies to any module
+    # name, so the exclusion is now name-agnostic at both sites it appears
+    # below.
     if (cfg_test_pending) {
         cfg_test_pending = 0
-        if (code !~ /^[[:space:]]*mod[[:space:]]+tests[[:space:]]*;/) {
+        if (code !~ /^[[:space:]]*mod[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*;/) {
             in_test_module = 1
         }
     }
-    if (code ~ /^[[:space:]]*#\[cfg\(test\)\]/) {
+    cfg_pred = extract_cfg_predicate(code)
+    if (cfg_pred != "" && cfg_predicate_is_test(cfg_pred)) {
         cfg_test_pending = 1
     } else if (code ~ /^[[:space:]]*mod tests/ &&
-               code !~ /^[[:space:]]*mod[[:space:]]+tests[[:space:]]*;/) {
+               code !~ /^[[:space:]]*mod[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*;/) {
         in_test_module = 1
     }
 

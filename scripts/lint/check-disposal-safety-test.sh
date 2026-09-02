@@ -367,6 +367,192 @@ fn my_component() {
 }
 RUST
 
+
+# ─── KYO-558 regression tests ────────────────────────────────────────────
+#
+# The test-module skip used to arm only on the exact literal text
+# `#[cfg(test)]`. These pin the fix that broadens it to also recognize
+# `test` wrapped in `all(...)`/`any(...)`, in any position — this crate's
+# standard `#[cfg(all(test, feature = "ssr"))]` ssr-gated-test-module shape
+# — without also arming on `not(test)` or a `test`-prefixed feature name
+# that is not actually the `test` predicate.
+
+# ─── Test 26: the ticket's exact shape — `#[cfg(all(test, feature =
+# "ssr"))] mod disposal_scope_tests { ... }` (KYO-548) containing BOTH a
+# Rule A trigger and a Rule B trigger. Must be fully skipped: A=0 B=0.
+run_test "cfg_all_test_ssr_module_skipped" 0 0 <<'RUST'
+fn production_code() {}
+
+#[cfg(all(test, feature = "ssr"))]
+mod disposal_scope_tests {
+    fn test_something() {
+        spawn_local(async move {
+            set_value.set(42);
+        });
+        let x = Signal::derive(move || {
+            val.get()
+        });
+    }
+}
+RUST
+
+# ─── Test 27: same idea via the `any(...)` form — must also be fully
+# skipped.
+run_test "cfg_any_test_module_skipped" 0 0 <<'RUST'
+fn production_code() {}
+
+#[cfg(any(test, feature = "x"))]
+mod misc_tests {
+    fn test_something() {
+        spawn_local(async move {
+            set_value.set(42);
+        });
+        let x = Signal::derive(move || {
+            val.get()
+        });
+    }
+}
+RUST
+
+# ─── Test 28: `test` in a non-first position inside `all(...)` — must
+# still be fully skipped.
+run_test "cfg_all_test_non_first_position_skipped" 0 0 <<'RUST'
+fn production_code() {}
+
+#[cfg(all(feature = "ssr", test))]
+mod ssr_first_tests {
+    fn test_something() {
+        spawn_local(async move {
+            set_value.set(42);
+        });
+        let x = Signal::derive(move || {
+            val.get()
+        });
+    }
+}
+RUST
+
+# ─── Test 29: negative — `#[cfg(not(test))]` must NOT arm the skip. This
+# is the guard that stops the fix from blanket-disabling the lint: a
+# module that is explicitly excluded FROM test builds is still production
+# code the lint must check.
+run_test "cfg_not_test_still_fires" 1 0 <<'RUST'
+fn production_code() {}
+
+#[cfg(not(test))]
+mod prod_only {
+    fn real_code() {
+        spawn_local(async move {
+            set_value.set(42);
+        });
+    }
+}
+RUST
+
+# ─── Test 30: negative — `test` as a prefix of a longer feature name
+# (`test_helpers`, not the bare `test` predicate) must NOT arm the skip.
+run_test "cfg_test_prefix_feature_still_fires" 1 0 <<'RUST'
+fn production_code() {}
+
+#[cfg(feature = "test_helpers")]
+mod helpers {
+    fn real_code() {
+        spawn_local(async move {
+            set_value.set(42);
+        });
+    }
+}
+RUST
+
+# ─── Test 31: CRITICAL-1 regression — `#[cfg(not(all(test, feature =
+# "x")))]` is a predicate that is TRUE in essentially every production
+# build (it only excludes the narrow case where BOTH test AND feature=x
+# hold), yet a token-anywhere search for `test` (the pre-fix behavior)
+# matched the `test` inside it anyway and wrongly treated the module as
+# test-only. cfg_predicate_is_test() only strips a DIRECT `not(test)`
+# wrap; this predicate isn't that shape, isn't bare `test`, and isn't a
+# flat `all(...)`/`any(...)`, so it must fail closed (not recognized as
+# test) and the skip must NOT arm — Rule A must still fire.
+run_test "cfg_not_all_test_wrapped_still_fires" 1 0 <<'RUST'
+fn production_code() {}
+
+#[cfg(not(all(test, feature = "x")))]
+mod weird_prod_module {
+    fn real_code() {
+        spawn_local(async move {
+            set_value.set(42);
+        });
+    }
+}
+RUST
+
+# ─── Test 32: CRITICAL-2 regression — a semicolon-form module
+# declaration named something OTHER than exactly `tests` (KYO-455 split-
+# test-module style, no body ever), reached via the KYO-558-broadened cfg
+# match, must not arm in_test_module and swallow the rest of the file.
+# Before the fix, `in_test_module` only reset on a `{` that a semicolon
+# declaration never produces — so a Rule A trigger appearing anywhere
+# after this declaration would go unscanned. Must still fire.
+run_test "semicolon_mod_other_name_does_not_swallow_rest_of_file" 1 0 <<'RUST'
+fn production_code() {}
+
+#[cfg(all(test, feature = "ssr"))]
+mod some_tests;
+
+fn after_semicolon_decl() {
+    spawn_local(async move {
+        set_value.set(42);
+    });
+}
+RUST
+
+# ─── Test 33: CRITICAL-1 cycle-2 regression — `#[cfg(any(not(test),
+# test))]` is a tautology (`NOT test OR test` is always true), so the
+# item it wraps compiles in PRODUCTION too, not just under `cfg(test)`.
+# The unanchored `gsub` this fix replaces stripped `not(test)` from
+# anywhere in the string, including this nested position, disguising the
+# predicate as the flat `any( , test)` before the flatness check ran —
+# which then wrongly armed the skip and silently disabled the BLOCKING
+# Rule A on shipping code. `not(...)` can only ever appear as a nested
+# paren group, so with no substitution step the flat-shape regex
+# (`[^()]*`, no parens allowed inside the wrapper) rejects this predicate
+# outright: fails closed, Rule A must still fire.
+run_test "cfg_any_not_test_test_tautology_still_fires" 1 0 <<'RUST'
+fn production_code() {}
+
+#[cfg(any(not(test), test))]
+mod the_module {
+    fn f() {
+        spawn_local(async move {
+            set_value.set(1);
+        });
+    }
+}
+RUST
+
+# ─── Test 34: CRITICAL-1 cycle-2 regression, `all(...)` variant —
+# `#[cfg(all(not(test), test))]` is unsatisfiable (`NOT test AND test` is
+# always false), so the item it wraps is dead code in every build, test
+# or production — no build ever activates it. The old unanchored `gsub`
+# still stripped `not(test)` out of this nested position too, disguising
+# it as the flat `all( , test)` and wrongly arming the skip so Rule A
+# went silent over dead code that should still be linted as ordinary
+# production code (nothing about `cfg` shape entitles code to a Rule A
+# exemption merely because it never builds). Fails closed the same way as
+# test 33: Rule A must still fire.
+run_test "cfg_all_not_test_test_unsatisfiable_still_fires" 1 0 <<'RUST'
+fn production_code() {}
+
+#[cfg(all(not(test), test))]
+mod the_module {
+    fn f() {
+        spawn_local(async move {
+            set_value.set(1);
+        });
+    }
+}
+RUST
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
