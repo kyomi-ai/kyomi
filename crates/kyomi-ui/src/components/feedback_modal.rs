@@ -8,10 +8,6 @@
 //! - Screenshot capture (screen capture API) or image upload
 //! - "Include technical context" checkbox
 //! - Console error / failed request context collection
-//!
-//! A fourth, normally-hidden type — "Request BigQuery Access" — appears only
-//! when opened via `access_request_context` (KYO-417). See
-//! [`ACCESS_REQUEST_TYPE`] and the `FeedbackModal` prop doc.
 
 use leptos::ev;
 use leptos::prelude::*;
@@ -23,76 +19,35 @@ use crate::components::checkbox::Checkbox;
 use crate::components::modal::{Modal, ModalLayer, ModalSize};
 use crate::server_fns::feedback::submit_feedback;
 
-/// Feedback type options shown to every caller of `FeedbackModal`.
-///
-/// These are the only options visible from the normal entry point
-/// (`crates/kyomi-ui/src/components/layout.rs`'s "Send Feedback" nav item).
-/// See [`ACCESS_REQUEST_TYPE`] for the one option that is *not* here.
+/// Feedback type options shown to every caller of `FeedbackModal` — the
+/// complete set. KYO-417/KYO-408 previously added a fourth, gated
+/// "Request BigQuery Access" type here; KYO-504 removed it because the
+/// only in-app trigger for it (`FeedbackAccessRequestHandle`, provided by
+/// `components/layout.rs`'s `Layout`) had no caller — the datasource
+/// modal's "Request beta access" link uses a plain `mailto:` link instead
+/// (see `utils::beta_access::BETA_ACCESS_REQUEST_HREF`, KYO-499).
 const FEEDBACK_TYPES: &[(&str, &str, phosphor_leptos::IconData)] = &[
     ("bug", "Bug", phosphor_leptos::BUG),
     ("feature", "Feature Request", phosphor_leptos::LIGHTBULB),
     ("question", "Question", phosphor_leptos::QUESTION),
 ];
 
-/// The BigQuery-access-request option (KYO-417).
-///
-/// Deliberately excluded from [`FEEDBACK_TYPES`] — it is meaningless
-/// outside the context of a user blocked on BigQuery Kyomi OAuth, and
-/// would clutter the Type selector for everyone else. It appears only
-/// when the modal is opened with `access_request_context` set; see
-/// [`visible_feedback_types`].
-///
-/// KYO-408 will drive this from a "Request BigQuery Access" link on the
-/// datasource connection page — that link doesn't exist yet, so today the
-/// only way to reach this option is `access_request_context=true`.
-const ACCESS_REQUEST_TYPE: (&str, &str, phosphor_leptos::IconData) =
-    ("access_request", "Request BigQuery Access", phosphor_leptos::KEY);
-
 /// The feedback type options to render in the Type selector.
-///
-/// `access_request_context` mirrors the modal's prop of the same name —
-/// pass `true` only when the modal was opened from a context where
-/// requesting BigQuery access makes sense (KYO-408's future link).
-/// Server-side validation accepts `access_request` regardless of this
-/// flag (see `kyomi_auth::feedback_service::is_valid_feedback_type`) —
-/// this is a UX gate, not a security boundary.
-fn visible_feedback_types(
-    access_request_context: bool,
-) -> Vec<(&'static str, &'static str, phosphor_leptos::IconData)> {
-    if access_request_context {
-        FEEDBACK_TYPES
-            .iter()
-            .copied()
-            .chain(std::iter::once(ACCESS_REQUEST_TYPE))
-            .collect()
-    } else {
-        FEEDBACK_TYPES.to_vec()
-    }
+fn visible_feedback_types() -> Vec<(&'static str, &'static str, phosphor_leptos::IconData)> {
+    FEEDBACK_TYPES.to_vec()
 }
 
 /// The feedback type preselected when the modal opens.
-fn default_feedback_type(access_request_context: bool) -> &'static str {
-    if access_request_context {
-        ACCESS_REQUEST_TYPE.0
-    } else {
-        "bug"
-    }
+fn default_feedback_type() -> &'static str {
+    "bug"
 }
 
 /// Placeholder text for the description textarea, keyed by feedback type.
-///
-/// `access_request`'s prompt is the one piece of information that request
-/// needs to be actionable: the Google account email to allowlist — Kyomi
-/// has no programmatic access to the OAuth consent screen's test-user
-/// list, so a human has to add it by hand from what's in this field.
 fn feedback_placeholder(feedback_type: &str) -> &'static str {
     match feedback_type {
         "bug" => "What happened? What did you expect to happen?",
         "feature" => "What would you like to see? How would it help you?",
         "question" => "What's your question? What are you trying to do?",
-        "access_request" => {
-            "What Google account email should we allowlist for BigQuery access? (e.g. jane@company.com)"
-        }
         _ => "Describe your feedback in detail...",
     }
 }
@@ -157,17 +112,6 @@ pub fn FeedbackModal(
     open: Signal<bool>,
     /// Called when the modal should open or close.
     on_open_change: Callback<bool>,
-    /// Reveals and preselects the "Request BigQuery Access" type (KYO-417).
-    ///
-    /// Defaults to `false`, so the normal entry point
-    /// (`crates/kyomi-ui/src/components/layout.rs`'s "Send Feedback" nav
-    /// item, which does not pass this prop) never sees the option. KYO-408
-    /// drives this from the datasource connection page: set a signal to
-    /// `true` immediately before opening the modal from its
-    /// "Request BigQuery Access" link, mirroring how `open`/`on_open_change`
-    /// are already driven by caller-owned state.
-    #[prop(into, default = Signal::stored(false))]
-    access_request_context: Signal<bool>,
 ) -> impl IntoView {
     // Form state
     let (feedback_type, set_feedback_type) = signal("bug".to_string());
@@ -197,12 +141,7 @@ pub fn FeedbackModal(
                 set_reopening_after_capture.set(false);
                 return;
             }
-            // Read at the moment the modal opens, not reactively — a later
-            // change to access_request_context (e.g. the caller resetting it
-            // after close) must not re-trigger this whole reset while the
-            // modal is already open and the user has typed something.
-            set_feedback_type
-                .set(default_feedback_type(access_request_context.get_untracked()).to_string());
+            set_feedback_type.set(default_feedback_type().to_string());
             set_description.set(String::new());
             set_include_context.set(true);
             set_screenshot_data.set(None);
@@ -392,8 +331,9 @@ pub fn FeedbackModal(
             title="Send Feedback"
             size=ModalSize::Md
             // KYO-434: this modal must be able to open on top of another
-            // already-open Modal (e.g. the Add Datasource modal's "Request
-            // access" notice, which opens this via access_request_context).
+            // already-open Modal — "Send Feedback" is reachable from the
+            // global sidebar user menu regardless of what page-level modal
+            // (e.g. Add Datasource) happens to be open underneath it.
             // Base's z-[1000] falls through to DOM order against another
             // Modal at the same layer — Elevated (z-[1050]) paints above it
             // while staying below Tooltip's z-[1100].
@@ -417,7 +357,7 @@ pub fn FeedbackModal(
                         <label class="block text-sm font-medium text-foreground mb-2">"Type"</label>
                         <div class="flex gap-2">
                             {move || {
-                                visible_feedback_types(access_request_context.get())
+                                visible_feedback_types()
                                     .into_iter()
                                     .map(|(value, label, icon)| {
                                         view! {
@@ -606,93 +546,68 @@ pub fn FeedbackModal(
 
 #[cfg(test)]
 mod tests {
-    //! KYO-417: the access-request option must be invisible from the normal
-    //! entry point and appear (preselected) only when the modal is opened
-    //! with `access_request_context` set. These tests cover the pure
-    //! selection logic the view closures call — see `visible_feedback_types`
-    //! and `default_feedback_type` above.
+    //! KYO-504 removed the gated "Request BigQuery Access" feedback type
+    //! (KYO-417/KYO-408) — its only in-app trigger, `Layout`'s
+    //! `FeedbackAccessRequestHandle` context, had no caller. These tests
+    //! cover what remains true of the pure selection logic the view
+    //! closures call — see `visible_feedback_types` and
+    //! `default_feedback_type` above.
 
     use super::*;
 
     #[test]
     fn access_request_is_absent_from_the_default_list() {
-        let types = visible_feedback_types(false);
+        let types = visible_feedback_types();
         assert_eq!(
             types.len(),
             3,
-            "the normal entry point (layout.rs) must see exactly bug/feature/question"
+            "the UI's only entry point (layout.rs's \"Send Feedback\" nav \
+             item) must see exactly bug/feature/question"
         );
         assert!(
             !types.iter().any(|(value, _, _)| *value == "access_request"),
-            "access_request must not appear when access_request_context is false"
+            "access_request must never appear — the UI has no path left \
+             that can request it (KYO-504)"
         );
     }
 
     #[test]
-    fn access_request_appears_when_context_gated() {
-        let types = visible_feedback_types(true);
-        assert_eq!(types.len(), 4);
-        assert!(
-            types.iter().any(|(value, _, _)| *value == "access_request"),
-            "access_request must appear when access_request_context is true"
-        );
+    fn default_type_is_bug() {
+        assert_eq!(default_feedback_type(), "bug");
     }
 
     #[test]
-    fn default_type_is_bug_outside_access_request_context() {
-        assert_eq!(default_feedback_type(false), "bug");
-    }
-
-    #[test]
-    fn default_type_is_access_request_when_gated() {
-        assert_eq!(
-            default_feedback_type(true),
-            "access_request",
-            "opening the modal via the gated context must preselect the option"
-        );
-    }
-
-    #[test]
-    fn placeholder_asks_for_the_google_account_email() {
-        let placeholder = feedback_placeholder("access_request");
-        assert!(
-            placeholder.to_lowercase().contains("google")
-                && placeholder.to_lowercase().contains("email"),
-            "the access_request placeholder must ask for the Google account \
-             email to allowlist — that's the one piece of information the \
-             request needs to be actionable, got: {placeholder}"
-        );
-    }
-
-    #[test]
-    fn ui_and_server_type_lists_do_not_drift() {
-        // The gated list (superset of the default list) is the full set the
-        // UI knows about. It must match the server's validation allowlist
-        // exactly — see kyomi_types::FEEDBACK_TYPE_VALUES and
-        // kyomi_auth::feedback_service::is_valid_feedback_type.
-        let mut ui_values: Vec<&str> = visible_feedback_types(true)
+    fn ui_types_are_a_subset_of_the_server_allowlist() {
+        // The server's validation allowlist (kyomi_types::FEEDBACK_TYPE_VALUES,
+        // enforced by kyomi_auth::feedback_service::is_valid_feedback_type)
+        // still includes "access_request" — KYO-417's server-side handling
+        // is intentionally context-free and that removal is a separate,
+        // deliberately out-of-scope question (KYO-504). This only asserts
+        // the half that must hold: every type the UI *can* submit is one
+        // the server accepts.
+        let ui_values: Vec<&str> = visible_feedback_types()
             .into_iter()
             .map(|(value, _, _)| value)
             .collect();
-        ui_values.sort_unstable();
 
-        let mut shared_values: Vec<&str> = kyomi_types::FEEDBACK_TYPE_VALUES.to_vec();
-        shared_values.sort_unstable();
-
-        assert_eq!(
-            ui_values, shared_values,
-            "kyomi-ui's feedback types and kyomi_types::FEEDBACK_TYPE_VALUES have drifted apart"
-        );
+        for value in &ui_values {
+            assert!(
+                kyomi_types::FEEDBACK_TYPE_VALUES.contains(value),
+                "kyomi-ui offers feedback type {value:?} that the server \
+                 does not accept"
+            );
+        }
     }
 
     // ── KYO-434: modal-over-modal stacking ──────────────────────────────
     //
-    // FeedbackModal is opened from inside the Add Datasource modal (via the
-    // BigQuery `kyomi_oauth` "Request access" notice) and previously
-    // rendered *behind* it — both modals used the same `z-[1000]` backdrop,
-    // so paint order fell through to DOM order. Whether the `<Modal>` call
-    // actually passes `layer=ModalLayer::Elevated` can't be observed without
-    // a running DOM/browser, so this asserts against the source text itself,
+    // FeedbackModal is reachable from the global sidebar "Send Feedback"
+    // nav item regardless of what page-level modal (e.g. Add Datasource)
+    // happens to be open underneath it, and previously rendered *behind*
+    // it — both modals used the same `z-[1000]` backdrop, so paint order
+    // fell through to DOM order. Whether the `<Modal>` call actually passes
+    // `layer=ModalLayer::Elevated` can't be observed without a running
+    // DOM/browser, so this asserts against the source text itself,
     // following the precedent in `pages/settings/datasources.rs`'s test
     // module.
 

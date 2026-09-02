@@ -6388,13 +6388,14 @@ fn BigQueryAuthModeSection(
                     // goes to the shared mailto constant in `utils::beta_access`
                     // (see that module for the exact target) — the same one
                     // `pages/auth/login.rs`'s Google sign-in notice uses —
-                    // rather than the `FeedbackAccessRequestHandle`/
-                    // FeedbackModal path this used before, because the
-                    // login page has no `Layout` context to reach that
-                    // modal and the two surfaces must use one identical
-                    // target (KYO-499's decision; React's own target,
-                    // `/beta-signup`, was never ported and stays out of
-                    // scope — see the ticket).
+                    // rather than the in-app `FeedbackModal` path this used
+                    // before, because the login page has no `Layout` context
+                    // to reach that modal and the two surfaces must use one
+                    // identical target (KYO-499's decision; React's own
+                    // target, `/beta-signup`, was never ported and stays out
+                    // of scope — see the ticket). KYO-504 later removed the
+                    // `FeedbackModal` access-request wiring entirely, since
+                    // this was its only caller.
                     //
                     // This comment deliberately does not quote the exact
                     // copy strings below — `tests/oauth.rs`'s source-text

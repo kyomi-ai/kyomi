@@ -899,14 +899,14 @@ fn CredentialsView(
                     //
                     // The link goes to the shared mailto constant in
                     // `utils::beta_access` (see that module for the exact
-                    // target) — no `FeedbackAccessRequestHandle` is
-                    // available pre-auth (that context is only provided by
-                    // `Layout`, which wraps authenticated pages), so this
-                    // can't open the in-app feedback modal the datasource
-                    // notice used to use; mailto is the one target
-                    // reachable from both surfaces, which is why the
-                    // datasource modal now uses it too instead of the
-                    // feedback modal (KYO-499).
+                    // target) — this pre-auth page has no `Layout` context,
+                    // so it could never have opened the in-app feedback
+                    // modal the datasource notice used to use; mailto is
+                    // the one target reachable from both surfaces, which is
+                    // why the datasource modal now uses it too instead of
+                    // the feedback modal (KYO-499). KYO-504 later removed
+                    // the feedback-modal wiring entirely, since this was
+                    // its only caller.
                     //
                     // This comment deliberately does not quote the exact
                     // copy strings below — this file's own test module
