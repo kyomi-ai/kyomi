@@ -1682,76 +1682,50 @@ mod json_input_codec_tests {
     //! and `create_datasource_modal_uses_the_json_input_codec` fails with
     //! exactly the message below. The attribute was restored immediately
     //! after and this test file was confirmed to pass again.
+    //!
+    //! The `input_encoding_of`/`assert_json_input_codec` machinery itself
+    //! lives in `server_fns::test_support` (KYO-476) — shared with
+    //! `sql_editor.rs`'s identical KYO-459 guard rather than duplicated a
+    //! third time.
 
     use super::{
         CreateDatasourceModal, DiscoverDatasourceResources, SaveDatasourceCredentials,
         UpdateDatasourceSettings,
     };
-    use leptos::server_fn::ServerFn;
+    use crate::server_fns::test_support::assert_json_input_codec;
 
-    /// Extract the type name of the *first* generic argument of
-    /// `server_fn::Http<Input, Output>` from a full `type_name::<Protocol>()`
-    /// string — i.e. the input encoding. Splitting on the first top-level
-    /// comma is sufficient here because neither `PostUrl` nor
-    /// `Post<JsonEncoding>` (what `server_fn::codec::Json` expands to)
-    /// contains a comma of its own.
-    fn input_encoding_of(protocol_type_name: &str) -> &str {
-        protocol_type_name
-            .split_once("Http<")
-            .and_then(|(_, rest)| rest.split_once(','))
-            .map(|(input, _)| input)
-            .unwrap_or_else(|| {
-                panic!(
-                    "expected `{protocol_type_name}` to be a server_fn::Http<Input, Output> \
-                     protocol with a comma-separated generic argument list"
-                )
-            })
-    }
-
-    /// Assert a server_fn's `Protocol::Input` side is the JSON codec, not
-    /// the default `PostUrl` form codec. `T` is one of the PascalCase
-    /// structs the `#[server]` macro generates for each function below
-    /// (`CreateDatasourceModal`, etc.) — asserting against the real
-    /// macro-generated type, not a hand-rolled stand-in, is what makes this
-    /// load-bearing against the attribute actually being removed.
-    fn assert_json_input_codec<T: ServerFn>() {
-        let protocol = std::any::type_name::<T::Protocol>();
-        let input_encoding = input_encoding_of(protocol);
-        assert!(
-            !input_encoding.contains("PostUrl"),
-            "expected a JSON input codec, but {protocol} still uses the \
-             default form-urlencoded PostUrl codec — this is the exact \
-             KYO-428 regression: serde_json::Value leaves that are numbers \
-             or booleans (port, secure, encrypt, trust_server_certificate) \
-             silently decode as strings under PostUrl, and the driver's \
-             .as_u64()/.as_bool() then falls back to its default instead \
-             of erroring"
-        );
-        assert!(
-            input_encoding.contains("JsonEncoding"),
-            "expected the input encoding to be server_fn::codec::Json \
-             (JsonEncoding), got {input_encoding} in protocol {protocol}"
-        );
-    }
+    /// KYO-428 regression this whole module guards against: `port`
+    /// decoding as `None` under `.as_u64()`, `secure`/`encrypt`/
+    /// `trust_server_certificate` decoding as `None` under `.as_bool()`,
+    /// and the driver silently falling back to its own default instead of
+    /// erroring — spliced into `assert_json_input_codec`'s failure message
+    /// so all four tests below report the exact same text they did before
+    /// the KYO-476 extraction.
+    const KYO_428_REGRESSION: &str = "this is the exact \
+         KYO-428 regression: serde_json::Value leaves that are numbers \
+         or booleans (port, secure, encrypt, trust_server_certificate) \
+         silently decode as strings under PostUrl, and the driver's \
+         .as_u64()/.as_bool() then falls back to its default instead \
+         of erroring";
 
     #[test]
     fn create_datasource_modal_uses_the_json_input_codec() {
-        assert_json_input_codec::<CreateDatasourceModal>();
+        assert_json_input_codec::<CreateDatasourceModal>(KYO_428_REGRESSION);
     }
 
     #[test]
     fn update_datasource_settings_uses_the_json_input_codec() {
-        assert_json_input_codec::<UpdateDatasourceSettings>();
+        assert_json_input_codec::<UpdateDatasourceSettings>(KYO_428_REGRESSION);
     }
 
     #[test]
     fn discover_datasource_resources_uses_the_json_input_codec() {
-        assert_json_input_codec::<DiscoverDatasourceResources>();
+        assert_json_input_codec::<DiscoverDatasourceResources>(KYO_428_REGRESSION);
     }
 
     #[test]
     fn save_datasource_credentials_uses_the_json_input_codec() {
-        assert_json_input_codec::<SaveDatasourceCredentials>();
+        assert_json_input_codec::<SaveDatasourceCredentials>(KYO_428_REGRESSION);
     }
 }
 

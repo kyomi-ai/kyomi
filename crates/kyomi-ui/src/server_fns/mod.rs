@@ -37,6 +37,14 @@ pub mod sidebar;
 pub mod slack;
 pub mod sql_editor;
 pub mod team;
+/// Shared test-only support for `#[server]` fns whose input must be decoded
+/// with `server_fn::codec::Json` — see the module doc comment in
+/// `test_support.rs` (KYO-476). Gated identically to the `mod
+/// json_input_codec_tests` / `mod chart_json_codec_tests` blocks that consume
+/// it, so it neither breaks the non-`ssr` build nor silently vanishes from a
+/// test run that omits `--features ssr`.
+#[cfg(all(test, feature = "ssr"))]
+pub(crate) mod test_support;
 pub mod unsubscribe;
 pub mod usage;
 pub mod watches;
