@@ -1,0 +1,142 @@
+# =============================================================================
+# Kyomi — Server-Fn Registry LTO Smoke Test (KYO-275)
+# =============================================================================
+# KYO-191 deleted 195 explicit `register_explicit::<T>()` calls after
+# measuring that `inventory`'s link-section statics already self-register
+# every `#[server]` fn with server_fn's Axum registry — no explicit
+# registration needed. Its replacement guard,
+# `server_fn_registration_tests::server_fn_registry_is_populated_via_inventory`
+# in crates/kyomi-ui/src/lib.rs, asserts the registry holds at least
+# `kyomi_ui::SERVER_FN_REGISTRY_FLOOR` entries. That test runs under
+# `cargo test`, which never builds with LTO.
+#
+# The risk this workflow exists for is specific to [profile.release]
+# (Cargo.toml: lto = true, codegen-units = 1, strip = true). If a future
+# toolchain or linker ever stops preserving `inventory`'s `#[used]`
+# link-section statics under LTO, every server function 404s in production
+# — and nothing else would notice: cargo check, clippy, and the unit suite
+# all run non-LTO and pass, and the release build itself still succeeds
+# (it's a link-stripping problem, not a compile error).
+#
+# crates/kyomi-ui/examples/server_fn_count.rs is the actual check — a
+# database-free binary that forces the kyomi_ui rlib to link
+# (`kyomi_ui::App`) and reports how many server fns the real
+# [profile.release] LTO/strip build registered. See that file's module docs
+# for the "0 means nothing was linked" trap this deliberately avoids.
+#
+# TRIGGER: schedule (weekly) + workflow_dispatch, deliberately NOT
+# pull_request. ci.yml's clippy job already runs ~35-40 minutes per PR
+# (KYO-322); a cold LTO/codegen-units=1 build of kyomi-ui (--features
+# ssr,slack, matching what release.yml actually ships — see the `slack`
+# feature note on the example's Cargo.toml entry) was measured locally at
+# 38m10s wall-clock (KYO-275 verification run), which would roughly double
+# per-PR CI time for a check whose failure mode is a toolchain/linker
+# regression, not something a single PR's diff is likely to trigger.
+# workflow_dispatch exists specifically so this workflow itself can be
+# verified on demand by the PR that introduces it — a purely scheduled job
+# cannot be exercised by its own PR.
+# =============================================================================
+
+name: Server-Fn Registry LTO Smoke Test
+
+on:
+  schedule:
+    # 04:00 UTC every Monday. This job guards a rare failure class (a
+    # future toolchain/linker regression stripping inventory's #[used]
+    # statics under LTO), not routine per-commit correctness, so a weekly
+    # cadence is enough; 04:00 UTC is simply an arbitrary off-peak time,
+    # picked to spread this workflow's runs away from the top of the hour.
+    # NOTE: this does NOT avoid contention with
+    # ~/.local/bin/kyomi-needs-build-cron.sh's 03:35 daily drain — that
+    # script runs on Jason's local machine, not a GitHub-hosted runner, so
+    # the two share no infrastructure and could never contend regardless of
+    # timing. An earlier version of this comment claimed otherwise; that
+    # was wrong (caught in KYO-275 review) and is recorded here so it isn't
+    # re-asserted.
+    - cron: '0 4 * * 1'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Build and run the database-free server_fn_count example under the real
+  # production release profile (lto = true, codegen-units = 1, strip = true).
+  # ---------------------------------------------------------------------------
+  server-fn-lto-smoke:
+    name: Server-Fn Registry (Release/LTO)
+    runs-on: ubuntu-latest
+    # A cold [profile.release] build of kyomi-ui (opt-level = "z", lto =
+    # true, codegen-units = 1, --features ssr,slack) was measured locally
+    # at 38m10s wall-clock with a cold target/ dir (KYO-275 verification
+    # run — sccache fell back to local compilation mid-build in that run,
+    # so this figure already reflects a worse-than-typical case). 60m
+    # leaves real but not huge headroom over that for runner-acquisition
+    # queue time, which counts against timeout-minutes too (KYO-259,
+    # KYO-322) — matching the sizing basis ci.yml's jobs use. Revisit this
+    # value if a real run gets close to it rather than assuming margin that
+    # isn't actually there.
+    timeout-minutes: 60
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@v4
+
+      # kyomi-ui's `ssr` feature pulls in kyomi-agent/kyomi-knowledge/
+      # kyomi-embed (candle-transformers -> tokenizers -> esaxx-rs compiles
+      # C++ via the `cc` crate); `slack` additionally pulls in
+      # enterprise/kyomi-slack, which needs no extra system packages beyond
+      # these. Same dependency shape ci.yml's clippy job builds, so it needs
+      # the same system packages.
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev clang
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Verify sccache can reach GHA cache
+        run: |
+          echo 'fn main(){}' > /tmp/sccache_test.rs
+          if sccache $(rustc --print sysroot)/bin/rustc /tmp/sccache_test.rs --crate-type bin -o /tmp/sccache_test_out; then
+            echo "SCCACHE_AVAILABLE=true" >> $GITHUB_ENV
+            sccache --show-stats 2>&1 | head -5
+          else
+            echo "::warning::sccache GHA cache probe failed (see above), building without cache"
+            echo "SCCACHE_AVAILABLE=false" >> $GITHUB_ENV
+          fi
+          rm -f /tmp/sccache_test.rs /tmp/sccache_test_out
+
+      # .cargo/config.toml sets `-C link-arg=-fuse-ld=mold` for local dev
+      # between these markers. mold isn't installed on the runner, so clang
+      # fails with "invalid linker name" on the first build-script link if
+      # this isn't stripped. Same step as ci.yml's clippy/schema-parity jobs.
+      - name: Strip local-dev mold linker config
+        run: sed -i '/# BEGIN_LOCAL_DEV_LINKER/,/# END_LOCAL_DEV_LINKER/d' .cargo/config.toml
+
+      # No database, no dist/ assets, no trunk build — this example only
+      # needs the kyomi-ui rlib itself compiled under the real production
+      # release profile, with the same features the shipping binary
+      # actually carries: `ssr` (leptos::server_fn::axum requires it) AND
+      # `slack` (apps/server/Cargo.toml's `default = ["slack"]`, built by
+      # release.yml with no --features override — omitting `slack` here
+      # would register the `#[cfg(not(feature = "slack"))]` variants in
+      # server_fns/slack.rs and workspace.rs instead of what ships).
+      - name: Build server_fn_count (release/LTO)
+        env:
+          RUSTC_WRAPPER: ${{ env.SCCACHE_AVAILABLE == 'true' && 'sccache' || '' }}
+        run: cargo build --locked --release --example server_fn_count -p kyomi-ui --features ssr,slack
+
+      # The load-bearing check. server_fn_count exits non-zero (see its own
+      # module docs) with a diagnostic naming KYO-191 if the count collapses
+      # to 0 or falls below kyomi_ui::SERVER_FN_REGISTRY_FLOOR.
+      - name: Run server_fn_count
+        run: ./target/release/examples/server_fn_count
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
