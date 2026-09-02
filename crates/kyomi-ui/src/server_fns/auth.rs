@@ -696,8 +696,14 @@ pub enum RecoverySetPasswordResult {
 ///
 /// Public endpoint — no authentication required.
 ///
-/// Always returns `Ok(())` to prevent email enumeration. Rate-limits and
-/// delegates email dispatch to a background task inline.
+/// Enumeration-resistant: whether the account exists, is unverified, or
+/// token minting failed are all indistinguishable to the caller — every one
+/// of those cases returns `Ok(())` with no email sent (see
+/// `kyomi_auth::auth_service::recovery_start_service`, KYO-291). The two
+/// exceptions that do return `Err` are rate-limiting and the self-hosted
+/// SMTP-not-configured precondition below, both of which fire before any
+/// account lookup and so leak nothing about a specific email. Delegates
+/// email dispatch to a background task inline.
 #[server(prefix = "/leptos-api")]
 pub async fn recovery_start(email: String) -> Result<(), ServerFnError> {
     let ctx = extract_context()?;
