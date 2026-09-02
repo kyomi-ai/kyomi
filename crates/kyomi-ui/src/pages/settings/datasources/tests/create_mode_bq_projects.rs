@@ -555,6 +555,20 @@ fn bigquery_auth_mode_section_declares_the_new_setter_props() {
 /// calls: asserting the single call is strictly stronger than asserting
 /// the three lines individually, since the helper's signature makes it
 /// impossible to pass only one or two of the three signals.
+///
+/// KYO-234 extracted the Authentication Mode `<Select>` itself into the
+/// shared `AuthModeSelector` component, used by all four providers — but
+/// this reset is BigQuery-specific (the other three providers have no
+/// discovered project list to invalidate), so it could not simply move
+/// into AuthModeSelector's own on_change alongside the test_result/
+/// discovery_status resets that are shared (see
+/// `auth_mode_selectors_reset_test_result_on_mode_change` in
+/// `credential_state_reset.rs`). Instead BigQueryAuthModeSection builds an
+/// `on_bq_auth_mode_changed` callback and passes it to AuthModeSelector's
+/// `on_mode_changed` prop, which AuthModeSelector runs after its own two
+/// resets. This test checks both halves: the callback's body still calls
+/// try_reset_bq_projects_signals, and the call site still wires it in —
+/// either one alone silently reintroduces the KYO-468 leak.
 #[test]
 fn bigquery_auth_mode_switch_resets_bq_projects_state() {
     let component = extract_between(
@@ -562,26 +576,26 @@ fn bigquery_auth_mode_switch_resets_bq_projects_state() {
         "#[component]\nfn BigQueryAuthModeSection(",
         "#[component]\nfn SnowflakeAuthModeSection(",
     );
-    let select_block = extract_between(
+    let callback_block = extract_between(
         component,
-        "<label class=\"block text-sm font-medium\">\"Authentication Mode\"</label>",
-        "<p class=\"text-xs text-muted-foreground\">",
+        "let on_bq_auth_mode_changed = Callback::new(move |()| {",
+        "});",
     );
     assert!(
-        select_block.contains("set_bq_auth_mode.set(val);"),
-        "sanity check on the extraction bounds: expected the Authentication Mode \
-         <Select> block: {select_block}"
-    );
-    assert!(
-        select_block.contains(
+        callback_block.contains(
             "try_reset_bq_projects_signals(set_bq_projects, set_bq_projects_error, set_bq_projects_attempted);"
         ),
-        "the Authentication Mode selector's on_change must reset bq_projects, \
-         bq_projects_error, and bq_projects_attempted together via \
-         try_reset_bq_projects_signals — otherwise state discovered/failed under a \
-         previous mode's credentials survives a switch to a mode that never \
-         listed anything, or that never listed at all (the KYO-468 leak): \
-         {select_block}"
+        "on_bq_auth_mode_changed must reset bq_projects, bq_projects_error, and \
+         bq_projects_attempted together via try_reset_bq_projects_signals — otherwise \
+         state discovered/failed under a previous mode's credentials survives a switch \
+         to a mode that never listed anything, or that never listed at all (the \
+         KYO-468 leak): {callback_block}"
+    );
+    assert!(
+        component.contains("on_mode_changed=on_bq_auth_mode_changed"),
+        "BigQueryAuthModeSection must wire on_bq_auth_mode_changed into \
+         AuthModeSelector's on_mode_changed prop — declaring the callback (checked \
+         above) is not enough if AuthModeSelector never runs it: {component}"
     );
 }
 

@@ -455,6 +455,80 @@ fn auth_mode_description(modes: &[AuthModeOption], mode_id: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Shared Authentication Mode selector for all four provider sections
+/// (BigQuery, Snowflake, Databricks, Synapse). Extracted (KYO-234) from
+/// four copy-pasted `<Show>` blocks that were already identical apart from
+/// which mode signal pair they read/wrote — the registry-driven options and
+/// description text itself was already unified onto
+/// `auth_mode_select_options`/`auth_mode_description` above by KYO-274.
+/// With one implementation, "does provider X's selector still read the
+/// registry, and still avoid a hardcoded `(Recommended)`" is enforced
+/// structurally rather than by four separately-maintained copies of the
+/// same guard test (see `tests/auth_mode_sections.rs`, which retargeted
+/// those two checks here for exactly this reason, plus a new test that
+/// every provider section actually renders `<AuthModeSelector`).
+///
+/// `is_admin` gates only this selector — it does **not** gate the per-user
+/// OAuth connection status panel that some provider sections render below
+/// it. That panel reflects whichever mode is already persisted and must
+/// stay visible to every workspace member regardless of role
+/// (`docs/DATASOURCE_ARCHITECTURE.md` §1/§5.2); each call site keeps its
+/// own admin-gated config fields (OAuth Client ID/Secret, Service Account
+/// JSON, ...) and its own unconditional status panel entirely outside this
+/// component (KYO-184).
+///
+/// `set_test_result`/`set_discovery_status` are reset to `None`/`"idle"`
+/// on every mode change (KYO-413): a `test_result` validated against the
+/// previous mode's credentials must not keep the modal's "Next" gate open
+/// for a mode that was never actually validated. Both use `try_set`
+/// because this write crosses the parent/child signal boundary from a
+/// plain `on_change` event handler rather than a call made while the
+/// owning scope is known to still be alive.
+///
+/// `on_mode_changed`, if given, runs after those two resets with no
+/// arguments. BigQuery is the only current caller that needs this —
+/// switching away from `service_account` must also clear the discovered
+/// GCP project list (`try_reset_bq_projects_signals`, KYO-468), which has
+/// no equivalent in the other three providers; folding that call into this
+/// component would give every provider a BigQuery-specific reset it
+/// doesn't need. Leave it unset for a provider with no extra per-mode-
+/// change side effect.
+#[component]
+fn AuthModeSelector(
+    auth_mode: ReadSignal<String>,
+    set_auth_mode: WriteSignal<String>,
+    auth_modes: Signal<Vec<AuthModeOption>>,
+    is_admin: Signal<bool>,
+    set_test_result: WriteSignal<Option<TestConnectionResult>>,
+    set_discovery_status: WriteSignal<String>,
+    #[prop(optional)] on_mode_changed: Option<Callback<()>>,
+) -> impl IntoView {
+    view! {
+        <Show when=move || is_admin.get()>
+            <div class="space-y-2 pb-4 border-b border-border">
+                <label class="block text-sm font-medium">"Authentication Mode"</label>
+                <Select
+                    value=Signal::derive(move || auth_mode.get())
+                    options=Signal::derive(move || auth_mode_select_options(&auth_modes.get()))
+                    on_change=move |val| {
+                        set_auth_mode.set(val);
+                        // KYO-413 — see this component's doc comment for why
+                        // this reset is needed.
+                        set_test_result.try_set(None);
+                        set_discovery_status.try_set("idle".to_string());
+                        if let Some(cb) = on_mode_changed {
+                            cb.run(());
+                        }
+                    }
+                />
+                <p class="text-xs text-muted-foreground">
+                    {move || auth_mode_description(&auth_modes.get(), &auth_mode.get())}
+                </p>
+            </div>
+        </Show>
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Main Page
 // ─────────────────────────────────────────────────────────────────────────────
@@ -6302,50 +6376,36 @@ fn BigQueryAuthModeSection(
 
     let enterprise_redirect_url_signal = Signal::stored(enterprise_redirect_url.clone());
 
+    // KYO-468 — switching Authentication Mode invalidates any discovered
+    // GCP project list, not just `test_result`/`discovery_status` (which
+    // AuthModeSelector itself resets for every provider): a project list
+    // (and any error) fetched under the previous mode belongs to that
+    // mode's credentials, not whatever mode was just selected. Without
+    // this, switching from service_account (populated) to enterprise_oauth
+    // (never populates) leaves `bq_projects_attempted` true and the
+    // create-mode Catalog tab would render the previous mode's stale
+    // project checkboxes as if they belonged to the new one. Passed to
+    // AuthModeSelector as `on_mode_changed` because BigQuery is the only
+    // provider with a discovered-project list to invalidate (KYO-234).
+    let on_bq_auth_mode_changed = Callback::new(move |()| {
+        try_reset_bq_projects_signals(set_bq_projects, set_bq_projects_error, set_bq_projects_attempted);
+    });
+
     view! {
-        // Authentication Mode selector — admin-only (KYO-184): persists via
-        // `update_datasource_settings`, which non-admins cannot call. The
-        // per-mode panels below still render correctly for non-admins using
-        // whatever mode was already loaded from the server (`bq_auth_mode`
-        // is set by the settings-load effect regardless of who is viewing).
-        <Show when=move || is_admin.get()>
-            <div class="space-y-2 pb-4 border-b border-border">
-                <label class="block text-sm font-medium">"Authentication Mode"</label>
-                <Select
-                    value=Signal::derive(move || bq_auth_mode.get())
-                    options=Signal::derive(move || auth_mode_select_options(&auth_modes.get()))
-                    on_change=move |val| {
-                        set_bq_auth_mode.set(val);
-                        // KYO-413 — switching auth mode invalidates any
-                        // `test_result` validated against the previous mode's
-                        // credentials; leaving it in place would let a stale
-                        // success keep "Next" open for a mode that was never
-                        // validated. `try_set` because this write crosses the
-                        // parent/child signal boundary from a plain event
-                        // handler, same as the Remove chip and JSON-clear
-                        // paths below.
-                        set_test_result.try_set(None);
-                        set_discovery_status.try_set("idle".to_string());
-                        // KYO-468 — same reasoning, for the discovered
-                        // project list: a project list (and any error)
-                        // fetched under the previous mode belongs to that
-                        // mode's credentials, not whatever mode was just
-                        // selected. Without this reset, switching from
-                        // service_account (populated) to enterprise_oauth
-                        // (never populates) leaves `bq_projects_attempted`
-                        // true and the create-mode Catalog tab would render
-                        // the previous mode's stale project checkboxes as
-                        // if they belonged to the new one. `try_reset_...`
-                        // for the same parent/child boundary reason as
-                        // `set_test_result` above.
-                        try_reset_bq_projects_signals(set_bq_projects, set_bq_projects_error, set_bq_projects_attempted);
-                    }
-                />
-                <p class="text-xs text-muted-foreground">
-                    {move || auth_mode_description(&auth_modes.get(), &bq_auth_mode.get())}
-                </p>
-            </div>
-        </Show>
+        // Authentication Mode selector (KYO-184) — see AuthModeSelector's
+        // doc comment for the shared admin gate. The per-mode panels below
+        // still render correctly for non-admins using whatever mode was
+        // already loaded from the server (`bq_auth_mode` is set by the
+        // settings-load effect regardless of who is viewing).
+        <AuthModeSelector
+            auth_mode=bq_auth_mode
+            set_auth_mode=set_bq_auth_mode
+            auth_modes=auth_modes
+            is_admin=is_admin
+            set_test_result=set_test_result
+            set_discovery_status=set_discovery_status
+            on_mode_changed=on_bq_auth_mode_changed
+        />
 
         // BigQuery Credentials section
         <div class="space-y-4 border-t border-border pt-4 mt-4">
@@ -6847,28 +6907,18 @@ fn SnowflakeAuthModeSection(
         Signal::derive(move || datasource_disconnect_action.pending().get());
 
     view! {
-        // Authentication Mode selector — admin-only (KYO-184). The OAuth
-        // status panel below still reflects whichever mode was already
-        // loaded from the server, so it renders correctly for non-admins too.
-        <Show when=move || is_admin.get()>
-            <div class="space-y-2 pb-4 border-b border-border">
-                <label class="block text-sm font-medium">"Authentication Mode"</label>
-                <Select
-                    value=Signal::derive(move || sf_auth_mode.get())
-                    options=Signal::derive(move || auth_mode_select_options(&auth_modes.get()))
-                    on_change=move |val| {
-                        set_sf_auth_mode.set(val);
-                        // KYO-413 — see BigQueryAuthModeSection's Authentication
-                        // Mode on_change for why this reset is needed.
-                        set_test_result.try_set(None);
-                        set_discovery_status.try_set("idle".to_string());
-                    }
-                />
-                <p class="text-xs text-muted-foreground">
-                    {move || auth_mode_description(&auth_modes.get(), &sf_auth_mode.get())}
-                </p>
-            </div>
-        </Show>
+        // Authentication Mode selector (KYO-184) — see AuthModeSelector's
+        // doc comment for the shared admin gate. The OAuth status panel
+        // below still reflects whichever mode was already loaded from the
+        // server, so it renders correctly for non-admins too.
+        <AuthModeSelector
+            auth_mode=sf_auth_mode
+            set_auth_mode=set_sf_auth_mode
+            auth_modes=auth_modes
+            is_admin=is_admin
+            set_test_result=set_test_result
+            set_discovery_status=set_discovery_status
+        />
 
         // OAuth connection status — shown only when OAuth mode is selected.
         <Show when=move || sf_auth_mode.get() == "oauth">
@@ -7036,26 +7086,16 @@ fn DatabricksAuthModeSection(
     let redirect_url_signal = Signal::stored(redirect_url_text);
 
     view! {
-        // Authentication Mode selector — admin-only (KYO-184).
-        <Show when=move || is_admin.get()>
-            <div class="space-y-2 pb-4 border-b border-border">
-                <label class="block text-sm font-medium">"Authentication Mode"</label>
-                <Select
-                    value=Signal::derive(move || db_auth_mode.get())
-                    options=Signal::derive(move || auth_mode_select_options(&auth_modes.get()))
-                    on_change=move |val| {
-                        set_db_auth_mode.set(val);
-                        // KYO-413 — see BigQueryAuthModeSection's Authentication
-                        // Mode on_change for why this reset is needed.
-                        set_test_result.try_set(None);
-                        set_discovery_status.try_set("idle".to_string());
-                    }
-                />
-                <p class="text-xs text-muted-foreground">
-                    {move || auth_mode_description(&auth_modes.get(), &db_auth_mode.get())}
-                </p>
-            </div>
-        </Show>
+        // Authentication Mode selector (KYO-184) — see AuthModeSelector's
+        // doc comment for the shared admin gate.
+        <AuthModeSelector
+            auth_mode=db_auth_mode
+            set_auth_mode=set_db_auth_mode
+            auth_modes=auth_modes
+            is_admin=is_admin
+            set_test_result=set_test_result
+            set_discovery_status=set_discovery_status
+        />
 
         // OAuth configuration — shown only when OAuth mode is selected.
         <Show when=move || db_auth_mode.get() == "oauth">
@@ -7260,26 +7300,16 @@ fn SynapseAuthModeSection(
     let redirect_url_signal = Signal::stored(redirect_url);
 
     view! {
-        // Authentication Mode selector — admin-only (KYO-184).
-        <Show when=move || is_admin.get()>
-            <div class="space-y-2 pb-4 border-b border-border">
-                <label class="block text-sm font-medium">"Authentication Mode"</label>
-                <Select
-                    value=Signal::derive(move || synapse_auth_mode.get())
-                    options=Signal::derive(move || auth_mode_select_options(&auth_modes.get()))
-                    on_change=move |val| {
-                        set_synapse_auth_mode.set(val);
-                        // KYO-413 — see BigQueryAuthModeSection's Authentication
-                        // Mode on_change for why this reset is needed.
-                        set_test_result.try_set(None);
-                        set_discovery_status.try_set("idle".to_string());
-                    }
-                />
-                <p class="text-xs text-muted-foreground">
-                    {move || auth_mode_description(&auth_modes.get(), &synapse_auth_mode.get())}
-                </p>
-            </div>
-        </Show>
+        // Authentication Mode selector (KYO-184) — see AuthModeSelector's
+        // doc comment for the shared admin gate.
+        <AuthModeSelector
+            auth_mode=synapse_auth_mode
+            set_auth_mode=set_synapse_auth_mode
+            auth_modes=auth_modes
+            is_admin=is_admin
+            set_test_result=set_test_result
+            set_discovery_status=set_discovery_status
+        />
 
         // Enterprise OAuth admin configuration + user connection panel
         <Show when=move || synapse_auth_mode.get() == "enterprise_oauth">

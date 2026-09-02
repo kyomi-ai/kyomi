@@ -94,22 +94,30 @@ fn datasource_disconnect_success_resets_test_result_and_discovery_status() {
     );
 }
 
-/// The BigQuery service-account "Remove" chip, the JSON textarea's
-/// clear/invalidate paths, and the Authentication Mode selector's
-/// `on_change` are the teardown routes in `BigQueryAuthModeSection` that
-/// aren't an `Action` — there's no disconnect endpoint to call, so this
-/// can't be fixed in a shared Effect like the two tests above. Four call
-/// sites clear a stale `test_result`: the "Remove" button's `on:click`,
-/// the two branches of `handle_service_account_json` that empty
+/// The BigQuery service-account "Remove" chip and the JSON textarea's
+/// clear/invalidate paths are the teardown routes in
+/// `BigQueryAuthModeSection` itself that aren't an `Action` — there's no
+/// disconnect endpoint to call, so this can't be fixed in a shared Effect
+/// like the two tests above. Three call sites in this component's own
+/// body clear a stale `test_result`: the "Remove" button's `on:click`,
+/// and the two branches of `handle_service_account_json` that empty
 /// `service_account_email` (valid JSON with no `client_email`, and an
-/// emptied textarea), and the Authentication Mode `<Select>`'s
-/// `on_change` (switching mode invalidates whatever `test_result` the
-/// previous mode's credentials produced). Each one must also reset
-/// `test_result`/`discovery_status` via `try_set` — `try_set` because
-/// these are plain event handlers writing a signal owned by the parent
-/// `DatasourceModal`, crossing the parent/child signal boundary
-/// (KYO-408 hit a same-shaped boundary bug that still compiled and
-/// silently did nothing).
+/// emptied textarea). Each one must also reset `test_result`/
+/// `discovery_status` via `try_set` — `try_set` because these are plain
+/// event handlers writing a signal owned by the parent `DatasourceModal`,
+/// crossing the parent/child signal boundary (KYO-408 hit a same-shaped
+/// boundary bug that still compiled and silently did nothing).
+///
+/// A fourth teardown route belongs to this component logically — the
+/// Authentication Mode `<Select>`'s `on_change`, which invalidates
+/// whatever `test_result` the previous mode's credentials produced — but
+/// KYO-234 moved that `<Select>` into the shared `AuthModeSelector`
+/// component all four providers call into, so its reset no longer appears
+/// in `BigQueryAuthModeSection`'s own body at all. It's covered instead by
+/// `auth_mode_selectors_reset_test_result_on_mode_change` above, which
+/// checks it once against `AuthModeSelector`'s body. This test's expected
+/// count therefore dropped from 4 to 3 as part of that extraction, not as
+/// a coverage loss.
 ///
 /// Bounds: the whole `BigQueryAuthModeSection` function body, using the
 /// `#[component]\nfn ...Section(` prefix on both markers to get
@@ -124,23 +132,25 @@ fn bigquery_service_account_teardown_resets_test_result_and_discovery_status() {
     );
     let reset_count = component.matches("set_test_result.try_set(None);").count();
     assert_eq!(
-        reset_count, 4,
-        "BigQueryAuthModeSection must reset test_result at all four teardown \
-         sites (the Remove button, both email-clearing branches of \
-         handle_service_account_json, and the Authentication Mode selector's \
-         on_change) — found {reset_count}. Without every one of them, some path \
-         that invalidates the validated credentials leaves a stale successful \
-         test_result behind and Next stays enabled (KYO-413). If this count \
-         legitimately changes, update it deliberately — don't let it silently \
-         pass or fail for the wrong reason."
+        reset_count, 3,
+        "BigQueryAuthModeSection must reset test_result at all three teardown \
+         sites remaining in its own body (the Remove button and both \
+         email-clearing branches of handle_service_account_json) — found \
+         {reset_count}. The Authentication Mode selector's own reset lives in the \
+         shared AuthModeSelector component now (KYO-234) and is checked separately \
+         by auth_mode_selectors_reset_test_result_on_mode_change. Without every one \
+         of these three, some path that invalidates the validated credentials \
+         leaves a stale successful test_result behind and Next stays enabled \
+         (KYO-413). If this count legitimately changes, update it deliberately — \
+         don't let it silently pass or fail for the wrong reason."
     );
     let discovery_reset_count = component
         .matches("set_discovery_status.try_set(\"idle\".to_string());")
         .count();
     assert_eq!(
-        discovery_reset_count, 4,
-        "discovery_status must be reset alongside test_result at all four \
-         teardown sites"
+        discovery_reset_count, 3,
+        "discovery_status must be reset alongside test_result at all three \
+         teardown sites remaining in BigQueryAuthModeSection's own body"
     );
 }
 
@@ -155,62 +165,68 @@ fn bigquery_service_account_teardown_resets_test_result_and_discovery_status() {
 /// applies to Snowflake, Databricks, and Synapse: each has more than one
 /// non-OAuth auth mode sharing the same unscoped `test_result` gate.
 ///
-/// Bounds each `<Select>`'s block between the "Authentication Mode"
-/// label and the description paragraph immediately after `</Select>` —
-/// unique within each already-bounded provider section — and confirms
-/// the mode setter is actually inside that block before asserting on
-/// the reset, so a bad bound fails loudly instead of silently passing.
+/// KYO-234 moved the `<Select>`'s `on_change` (and its reset) out of each
+/// provider's own body and into the shared `AuthModeSelector` component,
+/// so the reset itself is checked once against AuthModeSelector's body —
+/// not four times against a `<label>"Authentication Mode"</label>` bound
+/// that no longer exists in any of the four `*AuthModeSection` bodies.
+/// What each provider must still get right is wiring its *own* mode
+/// setter into that shared component; the loop below checks that instead
+/// of the old inline mode-setter sanity check.
 #[test]
 fn auth_mode_selectors_reset_test_result_on_mode_change() {
+    let selector = extract_between(SRC, "fn AuthModeSelector(", "enum DatasourcesViewState");
+    assert!(
+        selector.contains("set_test_result.try_set(None);"),
+        "AuthModeSelector's on_change must reset test_result — otherwise a stale \
+         success validated against a previous mode's credentials keeps Next enabled \
+         after switching to a mode that was never validated (KYO-413)"
+    );
+    assert!(
+        selector.contains("set_discovery_status.try_set(\"idle\".to_string());"),
+        "AuthModeSelector's on_change must also reset discovery_status alongside \
+         test_result"
+    );
+
     let sections: &[(&str, &str, &str, &str)] = &[
         (
             "BigQuery",
             "fn BigQueryAuthModeSection(",
             "fn SnowflakeAuthModeSection(",
-            "set_bq_auth_mode.set(val);",
+            "set_auth_mode=set_bq_auth_mode",
         ),
         (
             "Snowflake",
             "fn SnowflakeAuthModeSection(",
             "fn DatabricksAuthModeSection(",
-            "set_sf_auth_mode.set(val);",
+            "set_auth_mode=set_sf_auth_mode",
         ),
         (
             "Databricks",
             "fn DatabricksAuthModeSection(",
             "fn SynapseAuthModeSection(",
-            "set_db_auth_mode.set(val);",
+            "set_auth_mode=set_db_auth_mode",
         ),
         (
             "Synapse",
             "fn SynapseAuthModeSection(",
             "struct ConnectionFieldsSignals",
-            "set_synapse_auth_mode.set(val);",
+            "set_auth_mode=set_synapse_auth_mode",
         ),
     ];
-    for (name, start, end, mode_setter) in sections {
+    for (name, start, end, wiring) in sections {
         let f = extract_between(SRC, start, end);
-        let select_block = extract_between(
-            f,
-            "<label class=\"block text-sm font-medium\">\"Authentication Mode\"</label>",
-            "<p class=\"text-xs text-muted-foreground\">",
+        assert!(
+            f.contains("<AuthModeSelector"),
+            "{name}AuthModeSection must render its Authentication Mode selector via \
+             the shared <AuthModeSelector> component (KYO-234)"
         );
         assert!(
-            select_block.contains(*mode_setter),
-            "sanity check on the extraction bounds for {name}: expected the \
-             Authentication Mode <Select> block to contain the mode setter"
-        );
-        assert!(
-            select_block.contains("set_test_result.try_set(None);"),
-            "{name}'s Authentication Mode selector on_change must reset \
-             test_result — otherwise a stale success validated against a \
-             previous mode's credentials keeps Next enabled after switching \
-             to a mode that was never validated (KYO-413)"
-        );
-        assert!(
-            select_block.contains("set_discovery_status.try_set(\"idle\".to_string());"),
-            "{name}'s Authentication Mode selector on_change must also reset \
-             discovery_status alongside test_result"
+            f.contains(*wiring),
+            "{name}AuthModeSection must wire its own mode setter (`{wiring}`) into \
+             AuthModeSelector — passing the wrong provider's setter would silently \
+             let one provider's Authentication Mode selector write to another \
+             provider's mode signal"
         );
     }
 }

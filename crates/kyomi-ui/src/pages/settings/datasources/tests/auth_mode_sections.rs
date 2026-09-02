@@ -18,16 +18,24 @@ use super::{appears_shortly_before, extract_between, SRC};
 // on `when=move || is_admin.get()` catches both forms.
 const IS_ADMIN_GATE: &str = "when=move || is_admin.get()";
 
+// KYO-234: each provider's own `<Show when=is_admin.get()>` around the
+// "Authentication Mode" label used to be checked right here, once per
+// provider. That markup was extracted into the shared `AuthModeSelector`
+// component below, so the is_admin gate on the selector itself is now
+// checked once, against AuthModeSelector's own body
+// (`auth_mode_selector_gates_the_selector_on_is_admin`), and
+// `all_four_provider_sections_use_the_shared_auth_mode_selector` confirms
+// every provider actually calls into it rather than rolling its own. The
+// four tests below keep checking the gating this ticket did NOT touch —
+// the per-mode credential panels (OAuth Client ID/Secret, Service Account
+// JSON) — which KYO-197 and this ticket both left alone on purpose.
+
 #[test]
 fn bigquery_auth_mode_admin_fields_are_gated() {
     let f = extract_between(SRC, "fn BigQueryAuthModeSection(", "fn SnowflakeAuthModeSection(");
     assert!(
         f.contains("is_admin: Signal<bool>"),
         "BigQueryAuthModeSection must accept an is_admin prop"
-    );
-    assert!(
-        appears_shortly_before(f, IS_ADMIN_GATE, "\"Authentication Mode\"", 250),
-        "BigQuery Authentication Mode selector must be is_admin-gated"
     );
     assert!(
         appears_shortly_before(f, IS_ADMIN_GATE, "\"OAuth Client ID\"", 1500),
@@ -40,15 +48,12 @@ fn bigquery_auth_mode_admin_fields_are_gated() {
 }
 
 #[test]
-fn snowflake_auth_mode_selector_is_gated() {
+fn snowflake_auth_mode_section_declares_is_admin() {
     let f = extract_between(SRC, "fn SnowflakeAuthModeSection(", "fn DatabricksAuthModeSection(");
     assert!(
         f.contains("is_admin: Signal<bool>"),
-        "SnowflakeAuthModeSection must accept an is_admin prop"
-    );
-    assert!(
-        appears_shortly_before(f, IS_ADMIN_GATE, "\"Authentication Mode\"", 250),
-        "Snowflake Authentication Mode selector must be is_admin-gated"
+        "SnowflakeAuthModeSection must accept an is_admin prop — it has no admin-only \
+         fields of its own, but must still thread is_admin through to AuthModeSelector"
     );
 }
 
@@ -58,10 +63,6 @@ fn databricks_auth_mode_admin_fields_are_gated() {
     assert!(
         f.contains("is_admin: Signal<bool>"),
         "DatabricksAuthModeSection must accept an is_admin prop"
-    );
-    assert!(
-        appears_shortly_before(f, IS_ADMIN_GATE, "\"Authentication Mode\"", 250),
-        "Databricks Authentication Mode selector must be is_admin-gated"
     );
     assert!(
         appears_shortly_before(f, IS_ADMIN_GATE, "\"OAuth Client ID\"", 1500),
@@ -77,13 +78,49 @@ fn synapse_auth_mode_admin_fields_are_gated() {
         "SynapseAuthModeSection must accept an is_admin prop"
     );
     assert!(
-        appears_shortly_before(f, IS_ADMIN_GATE, "\"Authentication Mode\"", 250),
-        "Synapse Authentication Mode selector must be is_admin-gated"
-    );
-    assert!(
         appears_shortly_before(f, IS_ADMIN_GATE, "\"OAuth Client ID\"", 1500),
         "Synapse OAuth Client ID field must be is_admin-gated"
     );
+}
+
+/// AuthModeSelector's own is_admin gate — the single place the "Authentication
+/// Mode" `<Select>` now renders (KYO-234). `"enum DatasourcesViewState"` is the
+/// next structural item in the file after AuthModeSelector, so it can't be
+/// deleted by anything this component's own markup could plausibly change.
+#[test]
+fn auth_mode_selector_gates_the_selector_on_is_admin() {
+    let f = extract_between(SRC, "fn AuthModeSelector(", "enum DatasourcesViewState");
+    assert!(
+        appears_shortly_before(f, IS_ADMIN_GATE, "\"Authentication Mode\"", 250),
+        "AuthModeSelector's Authentication Mode selector must be is_admin-gated"
+    );
+}
+
+/// KYO-234: guards against a provider quietly reintroducing its own inline
+/// Authentication Mode selector (its own `<Show>`/`<Select>`) instead of
+/// calling the shared `AuthModeSelector` component. Without this test, a
+/// provider-local copy would escape every registry/gating/(Recommended)
+/// guard in this file, since every one of them now checks
+/// AuthModeSelector's body specifically rather than each provider's — this
+/// is the test that makes that retargeting not a weakening.
+#[test]
+fn all_four_provider_sections_use_the_shared_auth_mode_selector() {
+    let sections: &[(&str, &str, &str)] = &[
+        ("BigQuery", "fn BigQueryAuthModeSection(", "fn SnowflakeAuthModeSection("),
+        ("Snowflake", "fn SnowflakeAuthModeSection(", "fn DatabricksAuthModeSection("),
+        ("Databricks", "fn DatabricksAuthModeSection(", "fn SynapseAuthModeSection("),
+        ("Synapse", "fn SynapseAuthModeSection(", "struct ConnectionFieldsSignals"),
+    ];
+    for (name, start, end) in sections {
+        let f = extract_between(SRC, start, end);
+        assert!(
+            f.contains("<AuthModeSelector"),
+            "{name}AuthModeSection must render its Authentication Mode selector via \
+             the shared <AuthModeSelector> component (KYO-234), not its own inline \
+             <Show>/<Select> — a provider-local copy would escape every guard that \
+             checks AuthModeSelector's body instead of this one"
+        );
+    }
 }
 
 // ── KYO-274: connection auth modes come from the registry ──────────
@@ -104,8 +141,46 @@ fn synapse_auth_mode_admin_fields_are_gated() {
 // Synapse `oauth` entry so ids match on both sides, then made all four
 // components render `auth_modes` (from `get_datasource_types()`)
 // instead of a local hardcoded list, so the two can no longer diverge.
+//
+// KYO-234 then extracted the `<Show>`/`<Select>` markup all four bodies
+// shared into one `AuthModeSelector` component (see its doc comment).
+// `auth_mode_select_options(&auth_modes.get())` and
+// `auth_mode_description(&auth_modes.get()` therefore no longer appear in
+// any of the four `*AuthModeSection` bodies at all — they moved to
+// AuthModeSelector's body, which is the one place left to check them
+// against. This is not a weaker guarantee: with a single implementation,
+// per-provider drift of the kind described above is now structurally
+// impossible rather than merely re-checked four times, and
+// `all_four_provider_sections_use_the_shared_auth_mode_selector` (above)
+// is what makes that true — it fails if a provider ever stops calling
+// AuthModeSelector and starts rendering its own copy again.
 #[test]
 fn auth_mode_sections_read_options_from_registry_not_a_hardcoded_vec() {
+    let selector = extract_between(SRC, "fn AuthModeSelector(", "enum DatasourcesViewState");
+    assert!(
+        selector.contains("auth_modes: Signal<Vec<AuthModeOption>>"),
+        "AuthModeSelector must accept a registry-provided auth_modes prop"
+    );
+    assert!(
+        selector.contains("auth_mode_select_options(&auth_modes.get())"),
+        "AuthModeSelector's Select options must be built from \
+         auth_mode_select_options(&auth_modes.get()), not a hardcoded list"
+    );
+    assert!(
+        selector.contains("auth_mode_description(&auth_modes.get()"),
+        "AuthModeSelector's description paragraph must come from \
+         auth_mode_description(&auth_modes.get(), ...), not a local `match`"
+    );
+    assert!(
+        !selector.contains("options=Signal::stored(vec!["),
+        "AuthModeSelector must not hardcode Select options — that's the KYO-274 \
+         drift pattern (BigQuery's UI once said \"Kyomi OAuth (Recommended)\" while the \
+         registry said \"Google OAuth (Kyomi)\", and nothing caught it)"
+    );
+
+    // Belt-and-suspenders: each provider still declares the auth_modes prop
+    // (needed to pass it into AuthModeSelector) and must not reintroduce a
+    // hardcoded options list of its own alongside that call.
     let sections: &[(&str, &str, &str)] = &[
         ("BigQuery", "fn BigQueryAuthModeSection(", "fn SnowflakeAuthModeSection("),
         ("Snowflake", "fn SnowflakeAuthModeSection(", "fn DatabricksAuthModeSection("),
@@ -119,16 +194,6 @@ fn auth_mode_sections_read_options_from_registry_not_a_hardcoded_vec() {
             "{name}AuthModeSection must accept a registry-provided auth_modes prop"
         );
         assert!(
-            f.contains("auth_mode_select_options(&auth_modes.get())"),
-            "{name}AuthModeSection's Select options must be built from \
-             auth_mode_select_options(&auth_modes.get()), not a hardcoded list"
-        );
-        assert!(
-            f.contains("auth_mode_description(&auth_modes.get()"),
-            "{name}AuthModeSection's description paragraph must come from \
-             auth_mode_description(&auth_modes.get(), ...), not a local `match`"
-        );
-        assert!(
             !f.contains("options=Signal::stored(vec!["),
             "{name}AuthModeSection must not hardcode Select options — that's the KYO-274 \
              drift pattern (BigQuery's UI once said \"Kyomi OAuth (Recommended)\" while the \
@@ -138,14 +203,32 @@ fn auth_mode_sections_read_options_from_registry_not_a_hardcoded_vec() {
 }
 
 /// `(Recommended)` must stay a UI-rendered affordance driven by
-/// `AuthModeOption::is_default` — never baked into a per-provider
-/// component as a hardcoded string. It's fine (and required) for
-/// `auth_mode_select_options` itself to construct the suffix; this test
-/// checks the four `*AuthModeSection` bodies specifically, since a
-/// hardcoded "(Recommended)" there is exactly the pre-KYO-274 shape
-/// (BigQuery's UI baked it into a `Signal::stored(vec![...])` literal).
+/// `AuthModeOption::is_default` — never baked into the selector as a
+/// hardcoded string. It's fine (and required) for `auth_mode_select_options`
+/// itself to construct the suffix; this test checks `AuthModeSelector`'s own
+/// body specifically (KYO-234 — previously the four `*AuthModeSection`
+/// bodies, before the markup was consolidated), since a hardcoded
+/// "(Recommended)" there is exactly the pre-KYO-274 shape (BigQuery's UI
+/// baked it into a `Signal::stored(vec![...])` literal).
 #[test]
 fn recommended_suffix_is_rendered_not_baked_into_display_name() {
+    let selector = extract_between(SRC, "fn AuthModeSelector(", "enum DatasourcesViewState");
+    assert!(
+        !selector.contains("(Recommended)"),
+        "AuthModeSelector must not hardcode \"(Recommended)\" itself — that string \
+         belongs solely in the shared auth_mode_select_options helper, derived from \
+         AuthModeOption::is_default"
+    );
+
+    let helper = extract_between(SRC, "fn auth_mode_select_options(", "fn auth_mode_description(");
+    assert!(
+        helper.contains("m.is_default") && helper.contains("(Recommended)"),
+        "auth_mode_select_options must derive the \"(Recommended)\" suffix from \
+         AuthModeOption::is_default"
+    );
+
+    // Belt-and-suspenders per provider — same rationale as the sibling
+    // registry test above.
     let sections: &[(&str, &str, &str)] = &[
         ("BigQuery", "fn BigQueryAuthModeSection(", "fn SnowflakeAuthModeSection("),
         ("Snowflake", "fn SnowflakeAuthModeSection(", "fn DatabricksAuthModeSection("),
@@ -156,18 +239,9 @@ fn recommended_suffix_is_rendered_not_baked_into_display_name() {
         let f = extract_between(SRC, start, end);
         assert!(
             !f.contains("(Recommended)"),
-            "{name}AuthModeSection must not hardcode \"(Recommended)\" itself — that string \
-             belongs solely in the shared auth_mode_select_options helper, derived from \
-             AuthModeOption::is_default"
+            "{name}AuthModeSection must not hardcode \"(Recommended)\" itself"
         );
     }
-
-    let helper = extract_between(SRC, "fn auth_mode_select_options(", "fn auth_mode_description(");
-    assert!(
-        helper.contains("m.is_default") && helper.contains("(Recommended)"),
-        "auth_mode_select_options must derive the \"(Recommended)\" suffix from \
-         AuthModeOption::is_default"
-    );
 }
 
 // ── KYO-274 review follow-up: connection auth-mode fetch failure ───
