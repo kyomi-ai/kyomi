@@ -1638,13 +1638,18 @@ mod chart_json_codec_tests {
     //! and `generate_chart_from_results_uses_the_json_input_codec` fails
     //! with exactly the message below. The attribute was restored
     //! immediately after and this test file was confirmed to pass again.
+    //!
+    //! The `input_encoding_of`/`assert_json_input_codec` machinery itself
+    //! lives in `server_fns::test_support` (KYO-476) — shared with
+    //! `datasources.rs`'s identical KYO-428 guard rather than duplicated a
+    //! second time; this module previously kept its own inline copy.
 
     use super::{analyze_chart_column, GenerateChartFromResults};
+    use crate::server_fns::test_support::assert_json_input_codec;
     use axum::body::Body;
     use axum::http::Request;
     use leptos::prelude::ServerFnError;
     use leptos::server_fn::codec::{FromReq, PostUrl};
-    use leptos::server_fn::ServerFn;
 
     /// A `PostUrl` (`serde_qs`) body a real browser client would have sent
     /// for `generate_chart_from_results` before this fix, for two rows of
@@ -1701,42 +1706,21 @@ mod chart_json_codec_tests {
         );
     }
 
-    /// Extract the type name of the *first* generic argument of
-    /// `server_fn::Http<Input, Output>` from a full `type_name::<Protocol>()`
-    /// string — mirrors `datasources.rs`'s `json_input_codec_tests` helper
-    /// of the same name; duplicated here rather than shared because this
-    /// ticket's scope is limited to this file (KYO-459).
-    fn input_encoding_of(protocol_type_name: &str) -> &str {
-        protocol_type_name
-            .split_once("Http<")
-            .and_then(|(_, rest)| rest.split_once(','))
-            .map(|(input, _)| input)
-            .unwrap_or_else(|| {
-                panic!(
-                    "expected `{protocol_type_name}` to be a server_fn::Http<Input, Output> \
-                     protocol with a comma-separated generic argument list"
-                )
-            })
-    }
+    /// KYO-459 regression this test guards against: a genuinely numeric
+    /// `sample_rows` leaf decoding as a string under `PostUrl`, so
+    /// `analyze_chart_column`'s `is_numeric` check
+    /// (`values.iter().all(|v| v.is_number())`) misclassifies the column as
+    /// categorical — spliced into `assert_json_input_codec`'s failure
+    /// message so this test reports the exact same text it did before the
+    /// KYO-476 extraction.
+    const KYO_459_REGRESSION: &str = "this is the exact \
+         KYO-459 regression: serde_json::Value leaves in sample_rows \
+         that are numbers silently decode as strings under PostUrl, \
+         misclassifying every numeric column as categorical in \
+         analyze_chart_column";
 
     #[test]
     fn generate_chart_from_results_uses_the_json_input_codec() {
-        let protocol =
-            std::any::type_name::<<GenerateChartFromResults as ServerFn>::Protocol>();
-        let input_encoding = input_encoding_of(protocol);
-        assert!(
-            !input_encoding.contains("PostUrl"),
-            "expected a JSON input codec, but {protocol} still uses the \
-             default form-urlencoded PostUrl codec — this is the exact \
-             KYO-459 regression: serde_json::Value leaves in sample_rows \
-             that are numbers silently decode as strings under PostUrl, \
-             misclassifying every numeric column as categorical in \
-             analyze_chart_column"
-        );
-        assert!(
-            input_encoding.contains("JsonEncoding"),
-            "expected the input encoding to be server_fn::codec::Json \
-             (JsonEncoding), got {input_encoding} in protocol {protocol}"
-        );
+        assert_json_input_codec::<GenerateChartFromResults>(KYO_459_REGRESSION);
     }
 }
