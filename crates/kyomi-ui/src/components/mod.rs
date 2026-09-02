@@ -71,7 +71,7 @@ pub use kyomi_ui_components::components::{
 // App-specific re-exports
 pub use feedback_modal::FeedbackModal;
 pub use invitation_status_bar::InvitationStatusBar;
-pub use layout::{FeedbackAccessRequestHandle, Layout};
+pub use layout::Layout;
 pub use right_panel::RightPanel;
 pub use skeleton::{
     AlertsListSkeleton, DetailPageSkeleton, ListPageSkeleton, ModalListSkeleton,

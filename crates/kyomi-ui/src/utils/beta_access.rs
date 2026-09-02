@@ -120,10 +120,11 @@ pub fn install_beta_access_listener(on_change: impl Fn(bool) + 'static) -> impl 
 /// 363 lines, posts to `/api/v1/subscribe`; porting it is out of scope
 /// here) — and the two surfaces need ONE identical target so they can't
 /// drift the way KYO-477/478 did. `pages/auth/login.rs` is pre-auth (no
-/// `Layout`, so no `FeedbackAccessRequestHandle` context) and already used
-/// this address; `pages/settings/datasources.rs` previously opened the
-/// in-app `FeedbackModal` instead, which login can't reach — mailto is the
-/// only target reachable from both.
+/// `Layout` context at all) and already used this address;
+/// `pages/settings/datasources.rs` previously opened the in-app
+/// `FeedbackModal` instead, which login can't reach — mailto is the only
+/// target reachable from both. KYO-504 later removed that `FeedbackModal`
+/// access-request wiring entirely, since this was its only caller.
 ///
 /// Hardcoded rather than read from `kyomi_core::Config::support_email`
 /// (which defaults to this same address — see `config.rs`): `Config` lives
