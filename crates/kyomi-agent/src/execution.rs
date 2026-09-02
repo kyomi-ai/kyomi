@@ -1085,6 +1085,7 @@ pub(crate) async fn write_dashboard_summary_with_cas(
         db, ws_manager, dashboard_id, workspace_id,
         kyomi_types::sync::SyncActionType::Update,
         user_id,
+        None, // Update always resolves entity_type from the snapshot's doc_type
     )
     .await;
     info!(dashboard_id = %dashboard_id, summary = %summary, "Generated dashboard summary");

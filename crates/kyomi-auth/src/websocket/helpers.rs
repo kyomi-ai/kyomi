@@ -753,7 +753,13 @@ pub async fn send_sync_action(
 ///
 /// Fetches the full entity snapshot from the database and resolves the correct
 /// `entity_type` (dashboard vs knowledge) from the stored `doc_type`. For
-/// delete actions the snapshot is skipped (the entity is already gone).
+/// delete actions the row is already gone, so it cannot be re-read from the
+/// database — the caller must say what it was via `delete_entity_type`
+/// (`entity_types::DASHBOARD` or `entity_types::KNOWLEDGE`). It is ignored on
+/// every other action: Insert/Update always resolve `entity_type` from the
+/// snapshot's `doc_type`, never from this parameter, so a caller cannot
+/// override what the database actually says the row is. A `Delete` call that
+/// passes `None` gets no default — see below (KYO-262).
 ///
 /// Routes on visibility: public docs broadcast to the whole workspace,
 /// private docs go only to the owner via `manager.send_to_user`. If the
@@ -770,11 +776,28 @@ pub async fn broadcast_dashboard_sync(
     workspace_id: &str,
     action: kyomi_types::sync::SyncActionType,
     user_id: &str,
+    delete_entity_type: Option<&str>,
 ) {
     use kyomi_types::sync::{SyncAction, SyncActionType, entity_types};
 
     let (entity_type, data) = if matches!(action, SyncActionType::Delete) {
-        (entity_types::DASHBOARD.to_string(), None)
+        // The row is already gone — `entity_type` cannot be resolved from a
+        // snapshot the way Insert/Update do below, so the caller must supply
+        // it. Defaulting a missing value to `DASHBOARD` here is exactly the
+        // KYO-262 bug (a knowledge-doc delete silently routed as a dashboard
+        // delete on every client): treat a caller that got this wrong the
+        // same way every other unusable-state branch in this function does
+        // — log loudly and skip the broadcast, never guess.
+        let Some(entity_type) = delete_entity_type else {
+            tracing::error!(
+                dashboard_id,
+                "dashboard sync: Delete broadcast requires delete_entity_type; the row is \
+                 already gone so it cannot be resolved from a snapshot; skipping broadcast \
+                 rather than defaulting to \"dashboard\" (KYO-262)"
+            );
+            return;
+        };
+        (entity_type.to_string(), None)
     } else {
         match crate::dashboard_service::fetch_dashboard_snapshot(db, dashboard_id, user_id).await {
             Ok(Some(snapshot)) => {
@@ -1180,7 +1203,7 @@ pub async fn send_dashboard_summary_ready(
 mod tests {
     use super::*;
     use kyomi_core::DbPool;
-    use kyomi_types::sync::{SyncAction, SyncActionType};
+    use kyomi_types::sync::{SyncAction, SyncActionType, entity_types};
     use sqlx::sqlite::SqlitePoolOptions;
     use tokio::sync::mpsc;
 
@@ -1267,6 +1290,27 @@ mod tests {
         .execute(sq)
         .await
         .expect("insert dashboard");
+    }
+
+    async fn seed_knowledge_doc(
+        sq: &sqlx::SqlitePool,
+        dashboard_id: &str,
+        user_id: &str,
+        workspace_id: &str,
+        title: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO dashboards \
+             (dashboard_id, user_id, workspace_id, title, content, doc_type) \
+             VALUES ($1, $2, $3, $4, '# content', 'knowledge')",
+        )
+        .bind(dashboard_id)
+        .bind(user_id)
+        .bind(workspace_id)
+        .bind(title)
+        .execute(sq)
+        .await
+        .expect("insert knowledge doc");
     }
 
     async fn seed_public_collection(
@@ -1442,10 +1486,26 @@ mod tests {
         seed_chat_session(sq, "sess-shared", "owner", "ws-1", "Shared", true).await;
         seed_chat_session(sq, "sess-private", "owner", "ws-1", "Private", false).await;
 
-        broadcast_dashboard_sync(&db, &manager, "dash-1", "ws-1", SyncActionType::Update, "owner")
-            .await;
-        broadcast_dashboard_sync(&db, &manager, "dash-1", "ws-1", SyncActionType::Delete, "owner")
-            .await;
+        broadcast_dashboard_sync(
+            &db,
+            &manager,
+            "dash-1",
+            "ws-1",
+            SyncActionType::Update,
+            "owner",
+            None,
+        )
+        .await;
+        broadcast_dashboard_sync(
+            &db,
+            &manager,
+            "dash-1",
+            "ws-1",
+            SyncActionType::Delete,
+            "owner",
+            Some(entity_types::DASHBOARD),
+        )
+        .await;
         broadcast_dashboard_visibility_change(&db, &manager, "dash-1", "ws-1", "owner", true)
             .await;
         broadcast_dashboard_visibility_change(&db, &manager, "dash-1", "ws-1", "owner", false)
@@ -1535,6 +1595,7 @@ mod tests {
             "ws-1",
             SyncActionType::Update,
             "owner",
+            None,
         )
         .await;
         let owner_public = expect_single_sync_action(&mut rx_owner, "public dash, owner");
@@ -1549,11 +1610,85 @@ mod tests {
             "ws-1",
             SyncActionType::Update,
             "owner",
+            None,
         )
         .await;
         let owner_private = expect_single_sync_action(&mut rx_owner, "private dash, owner");
         assert_eq!(owner_private.entity_id, "dash-private");
         assert_no_sync_action(&mut rx_other, "private dash must not reach a non-owner");
+    }
+
+    // ── KYO-262: Delete must route on the caller-supplied entity_type ────
+
+    /// The client dispatches `SyncActionType::Delete` on `entity_type`
+    /// (`crates/kyomi-ui/src/cache/sync_engine.rs`: `DASHBOARD` ->
+    /// `remove_dashboard`, `KNOWLEDGE` -> `remove_knowledge_doc`). Before the
+    /// fix, `broadcast_dashboard_sync` hardcoded `entity_types::DASHBOARD` on
+    /// every Delete regardless of what was actually deleted, so a knowledge
+    /// doc's delete would tell the client to call `remove_dashboard` instead
+    /// of `remove_knowledge_doc`, leaving the deleted doc visible in the
+    /// client cache until a full re-bootstrap. This asserts the broadcast
+    /// for a knowledge-doc delete carries `entity_type: "knowledge"`.
+    #[tokio::test]
+    async fn broadcast_dashboard_sync_delete_uses_caller_supplied_entity_type_for_knowledge_doc()
+    {
+        let db = test_pool().await;
+        let (manager, mut rx_owner, mut rx_other) = setup_workspace_and_connections(&db).await;
+        let sq = sqlite_pool(&db);
+        seed_knowledge_doc(sq, "doc-1", "owner", "ws-1", "Owner's Knowledge Doc").await;
+
+        broadcast_dashboard_sync(
+            &db,
+            &manager,
+            "doc-1",
+            "ws-1",
+            SyncActionType::Delete,
+            "owner",
+            Some(entity_types::KNOWLEDGE),
+        )
+        .await;
+
+        let owner_action = expect_single_sync_action(&mut rx_owner, "knowledge doc delete, owner");
+        assert_eq!(
+            owner_action.entity_type,
+            entity_types::KNOWLEDGE,
+            "a knowledge doc's Delete broadcast must carry entity_type: \"knowledge\", not \
+             \"dashboard\", or the client routes it to remove_dashboard instead of \
+             remove_knowledge_doc: {owner_action:?}"
+        );
+        assert!(matches!(owner_action.action, SyncActionType::Delete));
+        assert!(owner_action.data.is_none());
+        assert_eq!(owner_action.entity_id, "doc-1");
+        assert_no_sync_action(&mut rx_other, "private doc must not reach a non-owner");
+    }
+
+    /// A `Delete` call that supplies no `delete_entity_type` must not
+    /// silently default to `entity_types::DASHBOARD` — that is the exact
+    /// KYO-262 bug reinstated behind an `Option`. It must skip the broadcast
+    /// loudly instead (logged, not silent) rather than guess.
+    #[tokio::test]
+    async fn broadcast_dashboard_sync_delete_without_entity_type_skips_broadcast() {
+        let db = test_pool().await;
+        let (manager, mut rx_owner, mut rx_other) = setup_workspace_and_connections(&db).await;
+        let sq = sqlite_pool(&db);
+        seed_knowledge_doc(sq, "doc-1", "owner", "ws-1", "Owner's Knowledge Doc").await;
+
+        broadcast_dashboard_sync(
+            &db,
+            &manager,
+            "doc-1",
+            "ws-1",
+            SyncActionType::Delete,
+            "owner",
+            None,
+        )
+        .await;
+
+        assert_no_sync_action(
+            &mut rx_owner,
+            "Delete without delete_entity_type must skip the broadcast, not default to dashboard",
+        );
+        assert_no_sync_action(&mut rx_other, "Delete without delete_entity_type must skip (other)");
     }
 
     #[tokio::test]
@@ -1721,6 +1856,7 @@ mod tests {
             "ws-1",
             SyncActionType::Update,
             "owner",
+            None,
         )
         .await;
 
@@ -1741,8 +1877,16 @@ mod tests {
         // hit in production (same technique as KYO-269 in chat_service.rs).
         sq.close().await;
 
-        broadcast_dashboard_sync(&db, &manager, "dash-1", "ws-1", SyncActionType::Update, "owner")
-            .await;
+        broadcast_dashboard_sync(
+            &db,
+            &manager,
+            "dash-1",
+            "ws-1",
+            SyncActionType::Update,
+            "owner",
+            None,
+        )
+        .await;
 
         assert_no_sync_action(&mut rx_owner, "fetch-failed must skip the broadcast (owner)");
         assert_no_sync_action(&mut rx_other, "fetch-failed must skip the broadcast (other)");

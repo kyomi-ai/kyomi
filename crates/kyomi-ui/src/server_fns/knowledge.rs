@@ -59,6 +59,7 @@ pub async fn create_knowledge_doc(
             ac.db(), ws_manager, &dashboard_id, &ac.ws_id,
             kyomi_types::sync::SyncActionType::Insert,
             &ac.auth.user_id,
+            None, // Insert always resolves entity_type from the snapshot's doc_type
         ).await;
     }
 

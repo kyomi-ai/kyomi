@@ -150,6 +150,7 @@ impl DocumentEditTool {
                     &ctx.db, &ctx.ws_manager, &doc.dashboard_id, &ctx.workspace_id,
                     kyomi_types::sync::SyncActionType::Update,
                     &ctx.user_id,
+                    None, // Update always resolves entity_type from the snapshot's doc_type
                 )
                 .await;
 
