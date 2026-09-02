@@ -339,22 +339,9 @@ mod tests {
     //! `ac.require(...)` call at all, while every sibling fn in this file
     //! had one.
 
-    const SRC: &str = include_str!("analytics.rs");
+    use crate::test_support::extract_between;
 
-    /// Returns the source slice from the first occurrence of `start` up to
-    /// (but not including) the first occurrence of `end` that follows it.
-    fn extract_between<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
-        let start_pos = src
-            .find(start)
-            .unwrap_or_else(|| panic!("marker not found in server_fns/analytics.rs: {start:?}"));
-        let end_pos = src[start_pos..]
-            .find(end)
-            .map(|i| start_pos + i)
-            .unwrap_or_else(|| {
-                panic!("end marker not found after {start:?} in server_fns/analytics.rs: {end:?}")
-            });
-        &src[start_pos..end_pos]
-    }
+    const SRC: &str = include_str!("analytics.rs");
 
     /// The marker that opens this very `mod tests` block — slicing `SRC` up
     /// to this marker yields only production code, so this test's own

@@ -554,6 +554,7 @@ mod tests {
     //! `default_feedback_type` above.
 
     use super::*;
+    use crate::test_support::extract_between;
 
     #[test]
     fn access_request_is_absent_from_the_default_list() {
@@ -610,23 +611,6 @@ mod tests {
     // DOM/browser, so this asserts against the source text itself,
     // following the precedent in `pages/settings/datasources.rs`'s test
     // module.
-
-    /// Returns the source slice from the first occurrence of `start` up to
-    /// (but not including) the first occurrence of `end` that follows it.
-    /// Panics with a clear message if either marker is missing — a missing
-    /// marker means the code it was anchoring has been renamed or removed.
-    fn extract_between<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
-        let start_pos = src
-            .find(start)
-            .unwrap_or_else(|| panic!("marker not found in feedback_modal.rs: {start:?}"));
-        let end_pos = src[start_pos..]
-            .find(end)
-            .map(|i| start_pos + i)
-            .unwrap_or_else(|| {
-                panic!("end marker not found after {start:?} in feedback_modal.rs: {end:?}")
-            });
-        &src[start_pos..end_pos]
-    }
 
     const SRC: &str = include_str!("feedback_modal.rs");
 

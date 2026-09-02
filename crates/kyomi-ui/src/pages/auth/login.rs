@@ -1423,6 +1423,7 @@ fn CheckEmailView(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::extract_between;
 
     /// This file's own source, for source-text wiring assertions below —
     /// mirrors the `SRC`/`extract_between` pattern in
@@ -1445,22 +1446,6 @@ mod tests {
         SRC.split(TEST_MOD_MARKER)
             .next()
             .expect("TEST_MOD_MARKER must be found in SRC")
-    }
-
-    /// Returns the substring of `src` starting just after the first
-    /// occurrence of `start` and ending just before the first occurrence
-    /// of `end` that follows it. Panics with a descriptive message if
-    /// either marker isn't found, so a typo'd marker fails loudly instead
-    /// of silently matching an empty/wrong range.
-    fn extract_between<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
-        let start_idx = src
-            .find(start)
-            .unwrap_or_else(|| panic!("start marker not found: {start:?}"));
-        let after_start = start_idx + start.len();
-        let end_idx = src[after_start..]
-            .find(end)
-            .unwrap_or_else(|| panic!("end marker not found after start: {end:?}"));
-        &src[after_start..after_start + end_idx]
     }
 
     // ── `google_sign_in_disabled` — pure predicate truth table ──────────

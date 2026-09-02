@@ -13,20 +13,7 @@
 //! Add a new test to the topic file it belongs with; add a new topic
 //! file (and declare it below) only when no existing one fits.
 
-/// Returns the source slice from the first occurrence of `start` up to
-/// (but not including) the first occurrence of `end` that follows it.
-/// Panics with a clear message if either marker is missing — a missing
-/// marker means the code it was anchoring has been renamed or removed.
-fn extract_between<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
-    let start_pos = src
-        .find(start)
-        .unwrap_or_else(|| panic!("marker not found in datasources.rs: {start:?}"));
-    let end_pos = src[start_pos..]
-        .find(end)
-        .map(|i| start_pos + i)
-        .unwrap_or_else(|| panic!("end marker not found after {start:?} in datasources.rs: {end:?}"));
-    &src[start_pos..end_pos]
-}
+use crate::test_support::extract_between;
 
 /// True when `needle` appears somewhere in the `window` characters
 /// immediately preceding the first occurrence of `anchor` in `haystack`.

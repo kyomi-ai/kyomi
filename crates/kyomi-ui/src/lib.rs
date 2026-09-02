@@ -19,6 +19,15 @@ pub mod types;
 pub mod utils;
 pub mod wasm_logging;
 
+/// Crate-local test-only support shared by this crate's source-assertion
+/// tests — see the module doc comment in `test_support.rs` (KYO-272).
+///
+/// Gated on plain `#[cfg(test)]` rather than
+/// `#[cfg(all(test, feature = "ssr"))]` because its consumers are split
+/// across both gates; `cfg(test)` is the only one implied by all of them.
+#[cfg(test)]
+pub(crate) mod test_support;
+
 #[cfg(target_arch = "wasm32")]
 mod wasm_math_shims;
 
