@@ -2229,6 +2229,7 @@ mod tests {
             "ws-1",
             SyncActionType::Insert,
             "user-a",
+            None,
         )
         .await;
 
@@ -2273,6 +2274,7 @@ mod tests {
             "ws-1",
             SyncActionType::Insert,
             "user-a",
+            None,
         )
         .await;
 
@@ -2307,6 +2309,7 @@ mod tests {
             "ws-1",
             SyncActionType::Delete,
             "user-a",
+            Some(entity_types::DASHBOARD),
         )
         .await;
 
@@ -2366,6 +2369,7 @@ mod tests {
             "ws-1",
             SyncActionType::Insert,
             "user-a",
+            None,
         )
         .await;
 
