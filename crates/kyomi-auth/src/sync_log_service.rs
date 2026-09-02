@@ -511,74 +511,7 @@ mod tests {
 
     // ─── Integration tests (async, in-memory SQLite) ─────────────────────────
 
-    use sqlx::sqlite::SqlitePoolOptions;
-
-    async fn test_pool() -> DbPool {
-        let _ = kyomi_core::constants::load_with_fallback();
-
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("connect in-memory sqlite");
-
-        sqlx::query("PRAGMA foreign_keys=ON")
-            .execute(&pool)
-            .await
-            .expect("enable foreign keys");
-
-        sqlx::migrate!("../../apps/server/migrations-sqlite")
-            .run(&pool)
-            .await
-            .expect("run sqlite migrations");
-
-        DbPool::Sqlite(pool)
-    }
-
-    fn sqlite_pool(db: &DbPool) -> &sqlx::SqlitePool {
-        match db {
-            DbPool::Sqlite(sq) => sq,
-            _ => panic!("test requires sqlite pool"),
-        }
-    }
-
-    async fn seed_user(sq: &sqlx::SqlitePool, user_id: &str, email: &str) {
-        sqlx::query("INSERT INTO users (user_id, email) VALUES ($1, $2)")
-            .bind(user_id)
-            .bind(email)
-            .execute(sq)
-            .await
-            .expect("insert user");
-    }
-
-    async fn seed_workspace(sq: &sqlx::SqlitePool, workspace_id: &str, owner_user_id: &str) {
-        sqlx::query(
-            "INSERT INTO workspaces (workspace_id, name, owner_user_id) VALUES ($1, $2, $3)",
-        )
-        .bind(workspace_id)
-        .bind(format!("Workspace {workspace_id}"))
-        .bind(owner_user_id)
-        .execute(sq)
-        .await
-        .expect("insert workspace");
-    }
-
-    async fn seed_workspace_member(
-        sq: &sqlx::SqlitePool,
-        workspace_id: &str,
-        user_id: &str,
-        role: &str,
-    ) {
-        sqlx::query(
-            "INSERT INTO workspace_users (workspace_id, user_id, role) VALUES ($1, $2, $3)",
-        )
-        .bind(workspace_id)
-        .bind(user_id)
-        .bind(role)
-        .execute(sq)
-        .await
-        .expect("insert workspace member");
-    }
+    use crate::test_support::{seed_membership, seed_user, seed_workspace, sqlite_pool, test_pool};
 
     async fn seed_dashboard(
         sq: &sqlx::SqlitePool,
@@ -696,7 +629,7 @@ mod tests {
         seed_user(sq, "user-a", "a@test.local").await;
         seed_user(sq, "user-b", "b@test.local").await;
         seed_workspace(sq, "ws-1", "user-a").await;
-        seed_workspace_member(sq, "ws-1", "user-b", "user").await;
+        seed_membership(sq, "ws-1", "user-b", "user", true).await;
 
         // Seed backing entities for sync entry references.
         seed_dashboard(sq, "dash-priv-a", "user-a", "ws-1", "dashboard").await;
@@ -925,7 +858,7 @@ mod tests {
         seed_user(sq, "user-a", "a@test.local").await;
         seed_user(sq, "user-b", "b@test.local").await;
         seed_workspace(sq, "ws-1", "user-a").await;
-        seed_workspace_member(sq, "ws-1", "user-b", "user").await;
+        seed_membership(sq, "ws-1", "user-b", "user", true).await;
         seed_dashboard(sq, "dash-1", "user-a", "ws-1", "dashboard").await;
         seed_collection(sq, "col-pub", "ws-1", "user-a", true).await;
         seed_collection_dashboard(sq, "col-pub", "dash-1").await;
@@ -980,7 +913,7 @@ mod tests {
         seed_user(sq, "user-a", "a@test.local").await;
         seed_user(sq, "user-b", "b@test.local").await;
         seed_workspace(sq, "ws-1", "user-a").await;
-        seed_workspace_member(sq, "ws-1", "user-b", "user").await;
+        seed_membership(sq, "ws-1", "user-b", "user", true).await;
         seed_dashboard(sq, "dash-1", "user-a", "ws-1", "dashboard").await;
         seed_collection(sq, "col-pub", "ws-1", "user-a", true).await;
         seed_collection_dashboard(sq, "col-pub", "dash-1").await;
@@ -1052,7 +985,7 @@ mod tests {
         seed_user(sq, "user-a", "a@test.local").await;
         seed_user(sq, "user-b", "b@test.local").await;
         seed_workspace(sq, "ws-1", "user-a").await;
-        seed_workspace_member(sq, "ws-1", "user-b", "user").await;
+        seed_membership(sq, "ws-1", "user-b", "user", true).await;
         seed_dashboard(sq, "dash-1", "user-a", "ws-1", "dashboard").await;
 
         // The exact shape `write_visibility_sync_log` sends for a "going
@@ -1236,7 +1169,7 @@ mod tests {
         seed_user(sq, "user-a", "a@test.local").await;
         seed_user(sq, "user-b", "b@test.local").await;
         seed_workspace(sq, "ws-1", "user-a").await;
-        seed_workspace_member(sq, "ws-1", "user-b", "user").await;
+        seed_membership(sq, "ws-1", "user-b", "user", true).await;
         seed_watch(sq, "watch-1", "ws-1", "user-a").await;
 
         // Write the sync_log row the way create_watch/update_watch/
@@ -1338,7 +1271,7 @@ mod tests {
         seed_user(sq, "user-a", "a@test.local").await;
         seed_user(sq, "user-b", "b@test.local").await;
         seed_workspace(sq, "ws-1", "user-a").await;
-        seed_workspace_member(sq, "ws-1", "user-b", "user").await;
+        seed_membership(sq, "ws-1", "user-b", "user", true).await;
         seed_watch(sq, "watch-deleted", "ws-1", "user-a").await;
         seed_watch(sq, "watch-leaked", "ws-1", "user-a").await;
 
@@ -1481,7 +1414,7 @@ mod tests {
         seed_user(sq, "user-a", "a@test.local").await;
         seed_user(sq, "user-b", "b@test.local").await;
         seed_workspace(sq, "ws-1", "user-a").await;
-        seed_workspace_member(sq, "ws-1", "user-b", "user").await;
+        seed_membership(sq, "ws-1", "user-b", "user", true).await;
         seed_dashboard(sq, "dash-pub", "user-a", "ws-1", "dashboard").await;
         seed_collection(sq, "col-pub", "ws-1", "user-a", true).await;
         seed_collection_dashboard(sq, "col-pub", "dash-pub").await;
@@ -1555,7 +1488,7 @@ mod tests {
         seed_user(sq, "user-a", "a@test.local").await;
         seed_user(sq, "user-b", "b@test.local").await;
         seed_workspace(sq, "ws-1", "user-a").await;
-        seed_workspace_member(sq, "ws-1", "user-b", "user").await;
+        seed_membership(sq, "ws-1", "user-b", "user", true).await;
         // Private dashboard: no collection membership at all.
         seed_dashboard(sq, "dash-priv", "user-a", "ws-1", "dashboard").await;
 
@@ -1679,7 +1612,7 @@ mod tests {
         seed_user(sq, "user-a", "a@test.local").await;
         seed_user(sq, "user-b", "b@test.local").await;
         seed_workspace(sq, "ws-1", "user-a").await;
-        seed_workspace_member(sq, "ws-1", "user-b", "user").await;
+        seed_membership(sq, "ws-1", "user-b", "user", true).await;
         seed_chat_session(sq, "chat-shared", "user-a", "ws-1").await;
         set_chat_session_shared(sq, "chat-shared", true).await;
 
@@ -1746,7 +1679,7 @@ mod tests {
         seed_user(sq, "user-a", "a@test.local").await;
         seed_user(sq, "user-b", "b@test.local").await;
         seed_workspace(sq, "ws-1", "user-a").await;
-        seed_workspace_member(sq, "ws-1", "user-b", "user").await;
+        seed_membership(sq, "ws-1", "user-b", "user", true).await;
         // Unshared — seed_chat_session leaves `shared` at its default (0).
         seed_chat_session(sq, "chat-private", "user-a", "ws-1").await;
 

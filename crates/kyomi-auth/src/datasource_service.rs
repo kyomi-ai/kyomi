@@ -2058,7 +2058,8 @@ pub async fn get_datasource_settings_detail(
 mod tests {
     use super::*;
     use serde_json::json;
-    use sqlx::sqlite::SqlitePoolOptions;
+
+    use crate::test_support::{seed_user, seed_workspace, sqlite_pool, test_key, test_pool};
 
     // -- generate_slug tests --
 
@@ -2122,13 +2123,6 @@ mod tests {
     }
 
     // -- merge_credentials tests --
-
-    fn test_key() -> [u8; 32] {
-        let mut key = [0u8; 32];
-        key[..16].copy_from_slice(b"test-key-1234567");
-        key[16..].copy_from_slice(b"8901234567890123");
-        key
-    }
 
     #[test]
     fn merge_no_existing_returns_new() {
@@ -2243,48 +2237,12 @@ mod tests {
     // -- fetch_catalog_statuses (KYO-201: N+1 -> single grouped query) --
 
     /// Build an in-memory SQLite pool with migrations applied.
-    async fn test_pool() -> DbPool {
-        let _ = kyomi_core::constants::load_with_fallback();
-
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("connect in-memory sqlite");
-
-        sqlx::query("PRAGMA foreign_keys=ON")
-            .execute(&pool)
-            .await
-            .expect("enable foreign keys");
-
-        sqlx::migrate!("../../apps/server/migrations-sqlite")
-            .run(&pool)
-            .await
-            .expect("run sqlite migrations");
-
-        DbPool::Sqlite(pool)
-    }
-
+    /// Insert an owner user + the workspace they own — the combination every
+    /// test in this module needs before it can seed a datasource.
     async fn seed_workspace_and_owner(pool: &DbPool, workspace_id: &str, owner_user_id: &str) {
-        let sq = match pool {
-            DbPool::Sqlite(sq) => sq,
-            _ => panic!("test requires sqlite pool"),
-        };
-        sqlx::query("INSERT INTO users (user_id, email) VALUES (?1, ?2)")
-            .bind(owner_user_id)
-            .bind(format!("{owner_user_id}@test.local"))
-            .execute(sq)
-            .await
-            .expect("insert owner user");
-        sqlx::query(
-            "INSERT INTO workspaces (workspace_id, name, owner_user_id) VALUES (?1, ?2, ?3)",
-        )
-        .bind(workspace_id)
-        .bind(format!("Workspace {workspace_id}"))
-        .bind(owner_user_id)
-        .execute(sq)
-        .await
-        .expect("insert workspace");
+        let sq = sqlite_pool(pool);
+        seed_user(sq, owner_user_id, &format!("{owner_user_id}@test.local")).await;
+        seed_workspace(sq, workspace_id, owner_user_id).await;
     }
 
     async fn seed_datasource(

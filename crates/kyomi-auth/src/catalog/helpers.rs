@@ -1315,9 +1315,7 @@ mod tests {
     /// success regardless of write order.
     #[tokio::test]
     async fn concurrent_datasources_retain_independent_terminal_status() {
-        let db = DbPool::connect("sqlite::memory:")
-            .await
-            .expect("connect in-memory sqlite");
+        let db = crate::test_support::test_pool().await;
         let DbPool::Sqlite(sq) = &db else {
             unreachable!("expected sqlite pool");
         };
@@ -1348,9 +1346,7 @@ mod tests {
     /// regardless of ordering.
     #[tokio::test]
     async fn concurrent_datasources_retain_independent_terminal_status_reverse_order() {
-        let db = DbPool::connect("sqlite::memory:")
-            .await
-            .expect("connect in-memory sqlite");
+        let db = crate::test_support::test_pool().await;
         let DbPool::Sqlite(sq) = &db else {
             unreachable!("expected sqlite pool");
         };

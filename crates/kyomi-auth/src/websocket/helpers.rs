@@ -1204,72 +1204,11 @@ mod tests {
     use super::*;
     use kyomi_core::DbPool;
     use kyomi_types::sync::{SyncAction, SyncActionType, entity_types};
-    use sqlx::sqlite::SqlitePoolOptions;
     use tokio::sync::mpsc;
 
+    use crate::test_support::{seed_membership, seed_user, seed_workspace, sqlite_pool, test_pool};
+
     // ── Fixture setup ────────────────────────────────────────────────────
-
-    async fn test_pool() -> DbPool {
-        let _ = kyomi_core::constants::load_with_fallback();
-
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("connect in-memory sqlite");
-
-        sqlx::query("PRAGMA foreign_keys=ON")
-            .execute(&pool)
-            .await
-            .expect("enable foreign keys");
-
-        sqlx::migrate!("../../apps/server/migrations-sqlite")
-            .run(&pool)
-            .await
-            .expect("run sqlite migrations");
-
-        DbPool::Sqlite(pool)
-    }
-
-    fn sqlite_pool(db: &DbPool) -> &sqlx::SqlitePool {
-        match db {
-            DbPool::Sqlite(sq) => sq,
-            _ => panic!("test requires sqlite pool"),
-        }
-    }
-
-    async fn seed_user(sq: &sqlx::SqlitePool, user_id: &str, email: &str) {
-        sqlx::query("INSERT INTO users (user_id, email) VALUES ($1, $2)")
-            .bind(user_id)
-            .bind(email)
-            .execute(sq)
-            .await
-            .expect("insert user");
-    }
-
-    async fn seed_workspace(sq: &sqlx::SqlitePool, workspace_id: &str, owner_user_id: &str) {
-        sqlx::query(
-            "INSERT INTO workspaces (workspace_id, name, owner_user_id) VALUES ($1, $2, $3)",
-        )
-        .bind(workspace_id)
-        .bind(format!("Workspace {workspace_id}"))
-        .bind(owner_user_id)
-        .execute(sq)
-        .await
-        .expect("insert workspace");
-    }
-
-    async fn seed_workspace_member(sq: &sqlx::SqlitePool, workspace_id: &str, user_id: &str) {
-        sqlx::query(
-            "INSERT INTO workspace_users (workspace_id, user_id, role, active) \
-             VALUES ($1, $2, 'user', 1)",
-        )
-        .bind(workspace_id)
-        .bind(user_id)
-        .execute(sq)
-        .await
-        .expect("insert workspace_users");
-    }
 
     async fn seed_dashboard(
         sq: &sqlx::SqlitePool,
@@ -1401,8 +1340,8 @@ mod tests {
         seed_user(sq, "owner", "owner@test.local").await;
         seed_user(sq, "other", "other@test.local").await;
         seed_workspace(sq, "ws-1", "owner").await;
-        seed_workspace_member(sq, "ws-1", "owner").await;
-        seed_workspace_member(sq, "ws-1", "other").await;
+        seed_membership(sq, "ws-1", "owner", "user", true).await;
+        seed_membership(sq, "ws-1", "other", "user", true).await;
 
         let manager = WebSocketManager::new(None, db.clone());
         let (_owner_conn, mut rx_owner) = manager.connect("owner").expect("connect owner");

@@ -437,6 +437,7 @@ mod tests {
 
     use super::*;
     use crate::test_env::EnvVarGuard;
+    use crate::test_support::{sqlite_pool, test_pool};
 
     fn with_hosts(value: &str) -> EnvVarGuard {
         EnvVarGuard::acquire().set(PUSH_ALLOWED_ENDPOINT_HOSTS_ENV, value)
@@ -617,19 +618,11 @@ mod tests {
 
     #[tokio::test]
     async fn sqlite_purge_migration_deletes_bad_rows_and_keeps_good_rows() {
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("connect in-memory sqlite");
-
-        sqlx::migrate!("../../apps/server/migrations-sqlite")
-            .run(&pool)
-            .await
-            .expect("run sqlite migrations");
+        let db = test_pool().await;
+        let pool = sqlite_pool(&db);
 
         sqlx::query("INSERT INTO users (user_id, email) VALUES ('u1', 'u1@test.local')")
-            .execute(&pool)
+            .execute(pool)
             .await
             .expect("seed user");
 
@@ -688,19 +681,19 @@ mod tests {
             )
             .bind("u1")
             .bind(*endpoint)
-            .execute(&pool)
+            .execute(pool)
             .await
             .unwrap_or_else(|e| panic!("seed subscription {i} ({endpoint}): {e}"));
         }
 
         // Re-run the purge statement shipped in the migration file itself.
         sqlx::query(SQLITE_PURGE_MIGRATION_SQL)
-            .execute(&pool)
+            .execute(pool)
             .await
             .expect("run purge statement");
 
         let remaining: Vec<String> = sqlx::query_scalar("SELECT endpoint FROM push_subscriptions")
-            .fetch_all(&pool)
+            .fetch_all(pool)
             .await
             .expect("fetch remaining endpoints");
 
@@ -741,19 +734,11 @@ mod tests {
     /// assertion.
     #[tokio::test]
     async fn purge_invalid_subscriptions_removes_row_the_sql_migration_would_keep() {
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("connect in-memory sqlite");
-
-        sqlx::migrate!("../../apps/server/migrations-sqlite")
-            .run(&pool)
-            .await
-            .expect("run sqlite migrations");
+        let db = test_pool().await;
+        let pool = sqlite_pool(&db);
 
         sqlx::query("INSERT INTO users (user_id, email) VALUES ('u1', 'u1@test.local')")
-            .execute(&pool)
+            .execute(pool)
             .await
             .expect("seed user");
 
@@ -771,14 +756,14 @@ mod tests {
         )
         .bind("u1")
         .bind(&overlong_endpoint)
-        .execute(&pool)
+        .execute(pool)
         .await
         .expect("seed overlong subscription");
 
         // Sanity check: confirm the SQL migration alone keeps this row —
         // otherwise this test wouldn't be exercising a real gap.
         sqlx::query(SQLITE_PURGE_MIGRATION_SQL)
-            .execute(&pool)
+            .execute(pool)
             .await
             .expect("run SQL purge migration");
 
@@ -786,7 +771,7 @@ mod tests {
             "SELECT COUNT(*) FROM push_subscriptions WHERE endpoint = ?",
         )
         .bind(&overlong_endpoint)
-        .fetch_one(&pool)
+        .fetch_one(pool)
         .await
         .expect("count after SQL pass");
         assert_eq!(
@@ -796,7 +781,6 @@ mod tests {
         );
 
         // The Rust sweep is what actually removes it.
-        let db = DbPool::Sqlite(pool);
         let purged = purge_invalid_subscriptions(&db)
             .await
             .expect("purge sweep should succeed");

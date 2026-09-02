@@ -80,6 +80,13 @@ pub(crate) mod test_env;
 #[cfg(test)]
 pub(crate) mod test_pg;
 
+/// Shared SQLite test-fixture scaffolding — pool creation, migrations, and
+/// `users`/`workspaces`/`workspace_users` seeding — used by every test
+/// module in this crate that needs a database (KYO-271, KYO-368). See its
+/// module docs for what belongs here vs. in the calling module.
+#[cfg(test)]
+mod test_support;
+
 /// Build a shared HTTP client with a proper User-Agent header.
 ///
 /// Some APIs (notably Snowflake) reject requests without a User-Agent.

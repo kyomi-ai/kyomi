@@ -1237,57 +1237,9 @@ mod tests {
     // `list_collections` (`doc_type` filter) failed with
     // "no such column: doc_type" on SQLite before that migration existed.
 
-    use sqlx::sqlite::SqlitePoolOptions;
-
-    async fn test_pool() -> DbPool {
-        let _ = kyomi_core::constants::load_with_fallback();
-
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("connect in-memory sqlite");
-
-        sqlx::query("PRAGMA foreign_keys=ON")
-            .execute(&pool)
-            .await
-            .expect("enable foreign keys");
-
-        sqlx::migrate!("../../apps/server/migrations-sqlite")
-            .run(&pool)
-            .await
-            .expect("run sqlite migrations");
-
-        DbPool::Sqlite(pool)
-    }
-
-    fn sqlite_pool(db: &DbPool) -> &sqlx::SqlitePool {
-        match db {
-            DbPool::Sqlite(sq) => sq,
-            _ => panic!("test requires sqlite pool"),
-        }
-    }
-
-    async fn seed_user(sq: &sqlx::SqlitePool, user_id: &str, email: &str) {
-        sqlx::query("INSERT INTO users (user_id, email) VALUES ($1, $2)")
-            .bind(user_id)
-            .bind(email)
-            .execute(sq)
-            .await
-            .expect("insert user");
-    }
-
-    async fn seed_workspace(sq: &sqlx::SqlitePool, workspace_id: &str, owner_user_id: &str) {
-        sqlx::query(
-            "INSERT INTO workspaces (workspace_id, name, owner_user_id) VALUES ($1, $2, $3)",
-        )
-        .bind(workspace_id)
-        .bind(format!("Workspace {workspace_id}"))
-        .bind(owner_user_id)
-        .execute(sq)
-        .await
-        .expect("insert workspace");
-    }
+    use crate::test_support::{
+        seed_two_users_one_workspace, seed_user, seed_workspace, sqlite_pool, test_pool,
+    };
 
     #[tokio::test]
     async fn create_and_list_collections_filters_by_doc_type_on_sqlite() {
@@ -1506,34 +1458,13 @@ mod tests {
     /// to resolve who to deliver to, so a member missing from that table
     /// silently never receives a broadcast (indistinguishable from a
     /// correctly-scoped exclusion without this).
-    async fn seed_two_users_one_workspace(sq: &sqlx::SqlitePool) {
-        seed_user(sq, "user-a", "a@test.local").await;
-        seed_user(sq, "user-b", "b@test.local").await;
-        seed_workspace(sq, "ws-1", "user-a").await;
-
-        sqlx::query(
-            "INSERT INTO workspace_users (workspace_id, user_id, role, active) \
-             VALUES ('ws-1', 'user-a', 'workspace_admin', 1)",
-        )
-        .execute(sq)
-        .await
-        .expect("insert workspace_users user-a");
-        sqlx::query(
-            "INSERT INTO workspace_users (workspace_id, user_id, role, active) \
-             VALUES ('ws-1', 'user-b', 'user', 1)",
-        )
-        .execute(sq)
-        .await
-        .expect("insert workspace_users user-b");
-    }
-
     // ── Live broadcast routing ───────────────────────────────────────────
 
     #[tokio::test]
     async fn add_dashboard_to_public_collection_pushes_update_to_non_owner_only() {
         let db = test_pool().await;
         let sq = sqlite_pool(&db);
-        seed_two_users_one_workspace(sq).await;
+        seed_two_users_one_workspace(sq, "a@test.local", "b@test.local").await;
 
         let dashboard_id = create_test_dashboard(&db, "user-a", "ws-1", "Private Dash").await;
         let collection = create_collection(NewCollectionParams {
@@ -1591,7 +1522,7 @@ mod tests {
     async fn remove_dashboard_evicts_non_owner_and_updates_owner() {
         let db = test_pool().await;
         let sq = sqlite_pool(&db);
-        seed_two_users_one_workspace(sq).await;
+        seed_two_users_one_workspace(sq, "a@test.local", "b@test.local").await;
 
         let dashboard_id = create_test_dashboard(&db, "user-a", "ws-1", "Shared Dash").await;
         let collection = create_collection(NewCollectionParams {
@@ -1659,7 +1590,7 @@ mod tests {
     async fn collection_visibility_fanout_reaches_every_dashboard() {
         let db = test_pool().await;
         let sq = sqlite_pool(&db);
-        seed_two_users_one_workspace(sq).await;
+        seed_two_users_one_workspace(sq, "a@test.local", "b@test.local").await;
 
         let d1 = create_test_dashboard(&db, "user-a", "ws-1", "Dash One").await;
         let d2 = create_test_dashboard(&db, "user-a", "ws-1", "Dash Two").await;
@@ -1792,7 +1723,7 @@ mod tests {
     async fn offline_non_owner_converges_via_delta_after_going_public() {
         let db = test_pool().await;
         let sq = sqlite_pool(&db);
-        seed_two_users_one_workspace(sq).await;
+        seed_two_users_one_workspace(sq, "a@test.local", "b@test.local").await;
 
         let dashboard_id = create_test_dashboard(&db, "user-a", "ws-1", "Private Dash").await;
         let collection = create_collection(NewCollectionParams {
@@ -1840,7 +1771,7 @@ mod tests {
     async fn offline_members_converge_via_delta_after_going_private() {
         let db = test_pool().await;
         let sq = sqlite_pool(&db);
-        seed_two_users_one_workspace(sq).await;
+        seed_two_users_one_workspace(sq, "a@test.local", "b@test.local").await;
 
         let dashboard_id = create_test_dashboard(&db, "user-a", "ws-1", "Shared Dash").await;
         let collection = create_collection(NewCollectionParams {
@@ -1919,7 +1850,7 @@ mod tests {
     async fn delete_collection_evicts_non_owner_and_updates_owner() {
         let db = test_pool().await;
         let sq = sqlite_pool(&db);
-        seed_two_users_one_workspace(sq).await;
+        seed_two_users_one_workspace(sq, "a@test.local", "b@test.local").await;
 
         let dashboard_id = create_test_dashboard(&db, "user-a", "ws-1", "Shared Dash").await;
         let collection = create_collection(NewCollectionParams {
@@ -1994,7 +1925,7 @@ mod tests {
     async fn delete_collection_does_not_evict_dashboard_still_public_via_another_collection() {
         let db = test_pool().await;
         let sq = sqlite_pool(&db);
-        seed_two_users_one_workspace(sq).await;
+        seed_two_users_one_workspace(sq, "a@test.local", "b@test.local").await;
 
         let dashboard_id = create_test_dashboard(&db, "user-a", "ws-1", "Doubly Shared Dash").await;
         let collection_1 = create_collection(NewCollectionParams {
@@ -2061,7 +1992,7 @@ mod tests {
     async fn delete_collection_pushes_live_broadcast_to_non_owner() {
         let db = test_pool().await;
         let sq = sqlite_pool(&db);
-        seed_two_users_one_workspace(sq).await;
+        seed_two_users_one_workspace(sq, "a@test.local", "b@test.local").await;
 
         let dashboard_id = create_test_dashboard(&db, "user-a", "ws-1", "Live Shared Dash").await;
         let collection = create_collection(NewCollectionParams {
@@ -2136,7 +2067,7 @@ mod tests {
     async fn delete_collection_tags_knowledge_doc_sync_log_entries_correctly() {
         let db = test_pool().await;
         let sq = sqlite_pool(&db);
-        seed_two_users_one_workspace(sq).await;
+        seed_two_users_one_workspace(sq, "a@test.local", "b@test.local").await;
 
         let doc_id = create_test_knowledge_doc(&db, "user-a", "ws-1", "Shared Knowledge Doc").await;
         let collection = create_collection(NewCollectionParams {
@@ -2214,7 +2145,7 @@ mod tests {
     async fn broadcast_dashboard_sync_upsert_includes_full_payload() {
         let db = test_pool().await;
         let sq = sqlite_pool(&db);
-        seed_two_users_one_workspace(sq).await;
+        seed_two_users_one_workspace(sq, "a@test.local", "b@test.local").await;
 
         let dashboard_id = create_test_dashboard(&db, "user-a", "ws-1", "A's Dashboard").await;
 
@@ -2261,7 +2192,7 @@ mod tests {
     async fn broadcast_dashboard_sync_upsert_for_missing_dashboard_sends_nothing() {
         let db = test_pool().await;
         let sq = sqlite_pool(&db);
-        seed_two_users_one_workspace(sq).await;
+        seed_two_users_one_workspace(sq, "a@test.local", "b@test.local").await;
 
         let manager = crate::websocket::WebSocketManager::new(None, db.clone());
         let (_conn_a, mut rx_a) = manager.connect("user-a").expect("connect user-a");
@@ -2293,7 +2224,7 @@ mod tests {
     async fn broadcast_dashboard_sync_delete_still_sends_null_payload() {
         let db = test_pool().await;
         let sq = sqlite_pool(&db);
-        seed_two_users_one_workspace(sq).await;
+        seed_two_users_one_workspace(sq, "a@test.local", "b@test.local").await;
 
         let dashboard_id =
             create_test_dashboard(&db, "user-a", "ws-1", "A's Dashboard To Delete").await;
@@ -2343,7 +2274,7 @@ mod tests {
     async fn broadcast_dashboard_sync_missing_knowledge_doc_is_never_mislabeled_dashboard() {
         let db = test_pool().await;
         let sq = sqlite_pool(&db);
-        seed_two_users_one_workspace(sq).await;
+        seed_two_users_one_workspace(sq, "a@test.local", "b@test.local").await;
 
         let doc_id = create_test_knowledge_doc(&db, "user-a", "ws-1", "A's Knowledge Doc").await;
 
@@ -2391,7 +2322,7 @@ mod tests {
     async fn create_dashboard_sync_log_entry_has_non_null_data() {
         let db = test_pool().await;
         let sq = sqlite_pool(&db);
-        seed_two_users_one_workspace(sq).await;
+        seed_two_users_one_workspace(sq, "a@test.local", "b@test.local").await;
 
         let dashboard_id =
             create_test_dashboard(&db, "user-a", "ws-1", "A's Sync Log Dashboard").await;

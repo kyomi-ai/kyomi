@@ -152,34 +152,8 @@ pub async fn switch_active_workspace(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqlx::sqlite::SqlitePoolOptions;
 
-    /// Build an in-memory SQLite pool with migrations applied.
-    ///
-    /// Mirrors the local `test_pool()` helper in `workspace_service.rs` and
-    /// `workspace_ai_config.rs` — the established in-memory-sqlite pattern
-    /// used across `kyomi-auth` unit tests.
-    async fn test_pool() -> DbPool {
-        let _ = kyomi_core::constants::load_with_fallback();
-
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("connect in-memory sqlite");
-
-        sqlx::query("PRAGMA foreign_keys=ON")
-            .execute(&pool)
-            .await
-            .expect("enable foreign keys");
-
-        sqlx::migrate!("../../apps/server/migrations-sqlite")
-            .run(&pool)
-            .await
-            .expect("run sqlite migrations");
-
-        DbPool::Sqlite(pool)
-    }
+    use crate::test_support::test_pool;
 
     #[tokio::test]
     async fn switch_active_workspace_rejects_workspace_with_no_active_membership() {

@@ -2599,7 +2599,6 @@ pub async fn get_thinking_event_detail(
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use sqlx::sqlite::SqlitePoolOptions;
     use tracing::Level;
 
     use kyomi_test_tracing::capture_tracing;
@@ -2610,62 +2609,9 @@ mod tests {
     // migration existed, `store_thinking_event_details` failed with
     // "no such table: thinking_event_details" on every self-hosted agent run.
 
-    async fn test_pool() -> DbPool {
-        let _ = kyomi_core::constants::load_with_fallback();
-
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("connect in-memory sqlite");
-
-        sqlx::query("PRAGMA foreign_keys=ON")
-            .execute(&pool)
-            .await
-            .expect("enable foreign keys");
-
-        sqlx::migrate!("../../apps/server/migrations-sqlite")
-            .run(&pool)
-            .await
-            .expect("run sqlite migrations");
-
-        DbPool::Sqlite(pool)
-    }
-
-    fn sqlite_pool(db: &DbPool) -> &sqlx::SqlitePool {
-        match db {
-            DbPool::Sqlite(sq) => sq,
-            _ => panic!("test requires sqlite pool"),
-        }
-    }
-
-    fn test_key() -> [u8; 32] {
-        let mut key = [0u8; 32];
-        key[..16].copy_from_slice(b"test-key-1234567");
-        key[16..].copy_from_slice(b"8901234567890123");
-        key
-    }
-
-    async fn seed_user(sq: &sqlx::SqlitePool, user_id: &str, email: &str) {
-        sqlx::query("INSERT INTO users (user_id, email) VALUES ($1, $2)")
-            .bind(user_id)
-            .bind(email)
-            .execute(sq)
-            .await
-            .expect("insert user");
-    }
-
-    async fn seed_workspace(sq: &sqlx::SqlitePool, workspace_id: &str, owner_user_id: &str) {
-        sqlx::query(
-            "INSERT INTO workspaces (workspace_id, name, owner_user_id) VALUES ($1, $2, $3)",
-        )
-        .bind(workspace_id)
-        .bind(format!("Workspace {workspace_id}"))
-        .bind(owner_user_id)
-        .execute(sq)
-        .await
-        .expect("insert workspace");
-    }
+    use crate::test_support::{
+        seed_two_users_one_workspace, seed_user, seed_workspace, sqlite_pool, test_key, test_pool,
+    };
 
     /// Parameters for [`seed_chat_session`].
     ///
@@ -3527,32 +3473,11 @@ mod tests {
 
     // ── KYO-258: set_session_shared persists sync_log for offline members ──
 
-    async fn seed_two_users_one_workspace(sq: &sqlx::SqlitePool) {
-        seed_user(sq, "user-a", "user-a@test.local").await;
-        seed_user(sq, "user-b", "user-b@test.local").await;
-        seed_workspace(sq, "ws-1", "user-a").await;
-
-        sqlx::query(
-            "INSERT INTO workspace_users (workspace_id, user_id, role, active) \
-             VALUES ('ws-1', 'user-a', 'workspace_admin', 1)",
-        )
-        .execute(sq)
-        .await
-        .expect("insert workspace_users user-a");
-        sqlx::query(
-            "INSERT INTO workspace_users (workspace_id, user_id, role, active) \
-             VALUES ('ws-1', 'user-b', 'user', 1)",
-        )
-        .execute(sq)
-        .await
-        .expect("insert workspace_users user-b");
-    }
-
     #[tokio::test]
     async fn offline_non_owner_converges_via_delta_after_session_shared() {
         let db = test_pool().await;
         let sq = sqlite_pool(&db);
-        seed_two_users_one_workspace(sq).await;
+        seed_two_users_one_workspace(sq, "user-a@test.local", "user-b@test.local").await;
         seed_chat_session(sq, SeedSession::new("sess-1", "user-a", "ws-1", "Private")).await;
 
         // user-b's last-synced cursor, captured before the transition —
@@ -3587,7 +3512,7 @@ mod tests {
     async fn offline_members_converge_via_delta_after_session_unshared() {
         let db = test_pool().await;
         let sq = sqlite_pool(&db);
-        seed_two_users_one_workspace(sq).await;
+        seed_two_users_one_workspace(sq, "user-a@test.local", "user-b@test.local").await;
         seed_chat_session(
             sq,
             SeedSession::new("sess-1", "user-a", "ws-1", "Shared").shared(true),

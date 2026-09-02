@@ -1471,28 +1471,9 @@ mod tests {
     use super::*;
     use sqlx::sqlite::SqlitePoolOptions;
 
-    /// Build an in-memory SQLite pool with migrations applied.
-    async fn test_pool() -> DbPool {
-        let _ = kyomi_core::constants::load_with_fallback();
-
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("connect in-memory sqlite");
-
-        sqlx::query("PRAGMA foreign_keys=ON")
-            .execute(&pool)
-            .await
-            .expect("enable foreign keys");
-
-        sqlx::migrate!("../../apps/server/migrations-sqlite")
-            .run(&pool)
-            .await
-            .expect("run sqlite migrations");
-
-        DbPool::Sqlite(pool)
-    }
+    use crate::test_support::{
+        seed_membership_at as seed_membership, seed_user, seed_workspace, sqlite_pool, test_pool,
+    };
 
     /// Build an in-memory SQLite pool with migrations applied and FK
     /// enforcement explicitly turned OFF (sqlx defaults it on). Used only
@@ -1519,61 +1500,6 @@ mod tests {
             .expect("disable foreign keys");
 
         DbPool::Sqlite(pool)
-    }
-
-    async fn seed_user(pool: &DbPool, user_id: &str, email: &str) {
-        let sq = match pool {
-            DbPool::Sqlite(sq) => sq,
-            _ => panic!("test requires sqlite pool"),
-        };
-        sqlx::query("INSERT INTO users (user_id, email) VALUES (?1, ?2)")
-            .bind(user_id)
-            .bind(email)
-            .execute(sq)
-            .await
-            .expect("insert user");
-    }
-
-    async fn seed_workspace(pool: &DbPool, workspace_id: &str, owner_user_id: &str) {
-        let sq = match pool {
-            DbPool::Sqlite(sq) => sq,
-            _ => panic!("test requires sqlite pool"),
-        };
-        sqlx::query(
-            "INSERT INTO workspaces (workspace_id, name, owner_user_id) VALUES (?1, ?2, ?3)",
-        )
-        .bind(workspace_id)
-        .bind(format!("Workspace {workspace_id}"))
-        .bind(owner_user_id)
-        .execute(sq)
-        .await
-        .expect("insert workspace");
-    }
-
-    /// Insert an active or inactive `workspace_users` membership at an
-    /// explicit `created_at`, so ordering can be asserted deterministically.
-    async fn seed_membership(
-        pool: &DbPool,
-        workspace_id: &str,
-        user_id: &str,
-        active: bool,
-        created_at: &str,
-    ) {
-        let sq = match pool {
-            DbPool::Sqlite(sq) => sq,
-            _ => panic!("test requires sqlite pool"),
-        };
-        sqlx::query(
-            "INSERT INTO workspace_users (workspace_id, user_id, role, active, created_at) \
-             VALUES (?1, ?2, 'workspace_user', ?3, ?4)",
-        )
-        .bind(workspace_id)
-        .bind(user_id)
-        .bind(active)
-        .bind(created_at)
-        .execute(sq)
-        .await
-        .expect("insert membership");
     }
 
     /// Insert a user, workspace, and workspace_invitation for testing.
@@ -1750,17 +1676,17 @@ mod tests {
     #[tokio::test]
     async fn get_user_workspaces_orders_by_created_at_and_excludes_inactive() {
         let pool = test_pool().await;
-        seed_user(&pool, "user-a", "a@test.local").await;
-        seed_workspace(&pool, "ws-second", "user-a").await;
-        seed_workspace(&pool, "ws-first", "user-a").await;
-        seed_workspace(&pool, "ws-inactive", "user-a").await;
+        seed_user(sqlite_pool(&pool), "user-a", "a@test.local").await;
+        seed_workspace(sqlite_pool(&pool), "ws-second", "user-a").await;
+        seed_workspace(sqlite_pool(&pool), "ws-first", "user-a").await;
+        seed_workspace(sqlite_pool(&pool), "ws-inactive", "user-a").await;
 
         // Inserted out of created_at order on purpose — the JOIN's
         // `ORDER BY wu.created_at ASC` must still sort them correctly.
-        seed_membership(&pool, "ws-second", "user-a", true, "2026-01-01 00:00:00").await;
-        seed_membership(&pool, "ws-first", "user-a", true, "2026-01-02 00:00:00").await;
+        seed_membership(sqlite_pool(&pool), "ws-second", "user-a", true, "2026-01-01 00:00:00").await;
+        seed_membership(sqlite_pool(&pool), "ws-first", "user-a", true, "2026-01-02 00:00:00").await;
         // Later created_at, but inactive — must be excluded entirely.
-        seed_membership(&pool, "ws-inactive", "user-a", false, "2026-01-03 00:00:00").await;
+        seed_membership(sqlite_pool(&pool), "ws-inactive", "user-a", false, "2026-01-03 00:00:00").await;
 
         let pairs = get_user_workspaces(&pool, "user-a").await.unwrap();
 
@@ -1784,11 +1710,11 @@ mod tests {
         // `if let Some(ws) = ...` behavior, so a future LEFT JOIN regression
         // would be caught here.
         let pool = test_pool_no_fk().await;
-        seed_user(&pool, "user-b", "b@test.local").await;
-        seed_workspace(&pool, "ws-real", "user-b").await;
+        seed_user(sqlite_pool(&pool), "user-b", "b@test.local").await;
+        seed_workspace(sqlite_pool(&pool), "ws-real", "user-b").await;
 
-        seed_membership(&pool, "ws-real", "user-b", true, "2026-01-01 00:00:00").await;
-        seed_membership(&pool, "ws-missing", "user-b", true, "2026-01-02 00:00:00").await;
+        seed_membership(sqlite_pool(&pool), "ws-real", "user-b", true, "2026-01-01 00:00:00").await;
+        seed_membership(sqlite_pool(&pool), "ws-missing", "user-b", true, "2026-01-02 00:00:00").await;
 
         let pairs = get_user_workspaces(&pool, "user-b").await.unwrap();
 
@@ -1799,7 +1725,7 @@ mod tests {
     #[tokio::test]
     async fn get_user_workspaces_returns_empty_for_user_with_no_memberships() {
         let pool = test_pool().await;
-        seed_user(&pool, "user-lonely", "lonely@test.local").await;
+        seed_user(sqlite_pool(&pool), "user-lonely", "lonely@test.local").await;
 
         let pairs = get_user_workspaces(&pool, "user-lonely").await.unwrap();
         assert!(pairs.is_empty());
@@ -1810,19 +1736,19 @@ mod tests {
     #[tokio::test]
     async fn get_user_workspaces_with_counts_returns_correct_member_counts() {
         let pool = test_pool().await;
-        seed_user(&pool, "user-c", "c@test.local").await;
-        seed_user(&pool, "user-d", "d@test.local").await;
-        seed_user(&pool, "user-e", "e@test.local").await;
-        seed_workspace(&pool, "ws-multi", "user-c").await;
-        seed_workspace(&pool, "ws-solo", "user-c").await;
+        seed_user(sqlite_pool(&pool), "user-c", "c@test.local").await;
+        seed_user(sqlite_pool(&pool), "user-d", "d@test.local").await;
+        seed_user(sqlite_pool(&pool), "user-e", "e@test.local").await;
+        seed_workspace(sqlite_pool(&pool), "ws-multi", "user-c").await;
+        seed_workspace(sqlite_pool(&pool), "ws-solo", "user-c").await;
 
         // ws-multi: 2 active members (user-c, user-d) + 1 inactive (user-e,
         // must not count).
-        seed_membership(&pool, "ws-multi", "user-c", true, "2026-01-01 00:00:00").await;
-        seed_membership(&pool, "ws-multi", "user-d", true, "2026-01-01 00:00:01").await;
-        seed_membership(&pool, "ws-multi", "user-e", false, "2026-01-01 00:00:02").await;
+        seed_membership(sqlite_pool(&pool), "ws-multi", "user-c", true, "2026-01-01 00:00:00").await;
+        seed_membership(sqlite_pool(&pool), "ws-multi", "user-d", true, "2026-01-01 00:00:01").await;
+        seed_membership(sqlite_pool(&pool), "ws-multi", "user-e", false, "2026-01-01 00:00:02").await;
         // ws-solo: 1 active member (user-c only).
-        seed_membership(&pool, "ws-solo", "user-c", true, "2026-01-02 00:00:00").await;
+        seed_membership(sqlite_pool(&pool), "ws-solo", "user-c", true, "2026-01-02 00:00:00").await;
 
         let summaries = get_user_workspaces_with_counts(&pool, "user-c").await.unwrap();
         assert_eq!(summaries.len(), 2);
@@ -1843,7 +1769,7 @@ mod tests {
     #[tokio::test]
     async fn get_user_workspaces_with_counts_returns_empty_without_erroring() {
         let pool = test_pool().await;
-        seed_user(&pool, "user-empty", "empty@test.local").await;
+        seed_user(sqlite_pool(&pool), "user-empty", "empty@test.local").await;
 
         let summaries = get_user_workspaces_with_counts(&pool, "user-empty").await.unwrap();
         assert!(summaries.is_empty());
@@ -1860,11 +1786,11 @@ mod tests {
     /// Seed an owner + a member with a Slack link and workspace-level Slack
     /// install, ready for `remove_workspace_member` to act on.
     async fn seed_offboard_fixture(pool: &DbPool, workspace_id: &str) {
-        seed_user(pool, "owner-off", "owner-off@test.local").await;
-        seed_user(pool, "member-off", "member-off@test.local").await;
-        seed_workspace(pool, workspace_id, "owner-off").await;
-        seed_membership(pool, workspace_id, "owner-off", true, "2026-01-01T00:00:00Z").await;
-        seed_membership(pool, workspace_id, "member-off", true, "2026-01-02T00:00:00Z").await;
+        seed_user(sqlite_pool(pool), "owner-off", "owner-off@test.local").await;
+        seed_user(sqlite_pool(pool), "member-off", "member-off@test.local").await;
+        seed_workspace(sqlite_pool(pool), workspace_id, "owner-off").await;
+        seed_membership(sqlite_pool(pool), workspace_id, "owner-off", true, "2026-01-01T00:00:00Z").await;
+        seed_membership(sqlite_pool(pool), workspace_id, "member-off", true, "2026-01-02T00:00:00Z").await;
     }
 
     #[tokio::test]
@@ -1918,7 +1844,7 @@ mod tests {
             .expect("remove member");
 
         // Re-add the same user to the workspace (e.g. re-invited and accepted).
-        seed_membership(&pool, "ws-off-3", "member-off", true, "2026-01-03T00:00:00Z").await;
+        seed_membership(sqlite_pool(&pool), "ws-off-3", "member-off", true, "2026-01-03T00:00:00Z").await;
 
         let link =
             kyomi_core::platform::get_platform_user_link(&pool, "ws-off-3", "member-off", "slack")

@@ -2833,57 +2833,7 @@ visualize:
     // is scoped the same way, rather than counting every row in the
     // workspace regardless of ownership or collection membership.
 
-    use sqlx::sqlite::SqlitePoolOptions;
-
-    async fn test_pool() -> DbPool {
-        let _ = kyomi_core::constants::load_with_fallback();
-
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("connect in-memory sqlite");
-
-        sqlx::query("PRAGMA foreign_keys=ON")
-            .execute(&pool)
-            .await
-            .expect("enable foreign keys");
-
-        sqlx::migrate!("../../apps/server/migrations-sqlite")
-            .run(&pool)
-            .await
-            .expect("run sqlite migrations");
-
-        DbPool::Sqlite(pool)
-    }
-
-    fn sqlite_pool(db: &DbPool) -> &sqlx::SqlitePool {
-        match db {
-            DbPool::Sqlite(sq) => sq,
-            _ => panic!("test requires sqlite pool"),
-        }
-    }
-
-    async fn seed_user(sq: &sqlx::SqlitePool, user_id: &str, email: &str) {
-        sqlx::query("INSERT INTO users (user_id, email) VALUES ($1, $2)")
-            .bind(user_id)
-            .bind(email)
-            .execute(sq)
-            .await
-            .expect("insert user");
-    }
-
-    async fn seed_workspace(sq: &sqlx::SqlitePool, workspace_id: &str, owner_user_id: &str) {
-        sqlx::query(
-            "INSERT INTO workspaces (workspace_id, name, owner_user_id) VALUES ($1, $2, $3)",
-        )
-        .bind(workspace_id)
-        .bind(format!("Workspace {workspace_id}"))
-        .bind(owner_user_id)
-        .execute(sq)
-        .await
-        .expect("insert workspace");
-    }
+    use crate::test_support::{seed_user, seed_workspace, sqlite_pool, test_pool};
 
     /// Seeds `ws-1` with two members: `user-a` (workspace owner) and
     /// `user-b`, a member who owns nothing shared with them by default.
