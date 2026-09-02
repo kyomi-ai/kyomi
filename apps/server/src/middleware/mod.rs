@@ -3,7 +3,7 @@
 //! Middleware stack — CORS, security headers, request logging,
 //! transparent access-token auto-refresh.
 //!
-//! All configuration values are read from `shared/constants.toml` via
+//! All configuration values are read from `data/constants.toml` via
 //! `kyomi_core::constants`. Nothing is hardcoded here.
 
 pub mod auth_refresh;
@@ -20,7 +20,7 @@ use tower_http::cors::{AllowHeaders, CorsLayer};
 
 /// Build the CORS layer from shared constants.
 ///
-/// Origins, methods, and credentials are read from `shared/constants.toml`
+/// Origins, methods, and credentials are read from `data/constants.toml`
 /// so both backends use identical configuration.
 pub fn cors_layer() -> CorsLayer {
     let constants = kyomi_core::constants::get();
@@ -59,7 +59,7 @@ pub fn cors_layer() -> CorsLayer {
 /// Security headers middleware.
 ///
 /// Adds defense-in-depth headers to every response. Header values are read
-/// from `shared/constants.toml`.
+/// from `data/constants.toml`.
 pub async fn security_headers(
     request: Request<Body>,
     next: Next,

@@ -2,7 +2,7 @@
 
 //! Redis operations for auth flows — OAuth state, pending signups, WebAuthn challenges.
 //!
-//! All key patterns and TTLs come from `shared/constants.toml`.
+//! All key patterns and TTLs come from `data/constants.toml`.
 //! Operations use SETEX (store), GET (peek), and GETDEL (consume) patterns.
 
 use kyomi_core::{KVPool, kv_consume_json, kv_peek_json, kv_store_json};

@@ -210,7 +210,7 @@ fn extract_token(parts: &Parts) -> kyomi_core::Result<String> {
         }
     }
 
-    // Fallback: access_token cookie (name from shared/constants.toml)
+    // Fallback: access_token cookie (name from data/constants.toml)
     let cookie_name = &kyomi_core::constants::get().cookies.access_token_name;
     let cookie_prefix = format!("{cookie_name}=");
     if let Some(cookie_header) = parts.headers.get("cookie") {
