@@ -20,4 +20,10 @@ A comment that justifies an edit with a tally (`appears exactly once in the whol
 
 The same applies to attributing an assertion to a group of tests: say which test asserts which property, or say "one of the two guard tests". Naming two when one covers it overstates the guard and hides a real gap.
 
+When the number *genuinely* is the contract — a fixed-size array, a protocol field width — don't stop at `grep -c`, which only proves the count correct at the moment you write it; assert it in code, where a compile-time check keeps it correct afterward:
+
+```rust
+const _: () = assert!(ROUTES.len() == 5);
+```
+
 Mined from the `2026-08-21` review log, which records three comment-accuracy findings of this shape across four review entries spanning two tickets — KYO-416's docs review and its cycle 2, and KYO-407's cycle-2 and cycle-3 re-reviews. (Date derived mechanically rather than recalled: all three appear in that day's log and in no other day's.) Deliberately cited by log date and by the *shape* of each claim rather than by file:line — those findings were logged against in-flight branch state, so their line numbers no longer resolve against `main`, and a citation a reader cannot follow is the very failure this rule is about. The three: a marker comment asserting a symbol "appears exactly once in the whole file" when it appeared three times and *leftmost match* was the property that actually made the edit safe; a follow-up comment claiming both marker strings "also occur below, in this comment" when neither appeared in the comment at all; and a standards-doc line attributing one assertion to "two guard tests" when only one made it and the sibling test checked something else. All three were 🟢 and none blocked signing — the cost is that each one invited a reader to grep and find the comment wrong. Sibling of [re-derive an enumeration comment from the source](re-derive-enumeration-comment-from-source.md): that one is about *repairing* such a comment, this one is about not reaching for a tally in the first place.
