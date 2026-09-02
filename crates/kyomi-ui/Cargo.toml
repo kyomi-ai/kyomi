@@ -53,6 +53,27 @@ hydrate = [
 # Slack integration — adds server functions for Slack connection management
 slack = ["dep:kyomi-slack"]
 
+[[example]]
+# KYO-275: standalone, database-free smoke check that inventory's server-fn
+# self-registration (KYO-191) survives [profile.release] (lto = true,
+# codegen-units = 1, strip = true). See examples/server_fn_count.rs for the
+# full explanation and crates/kyomi-ui/src/lib.rs's
+# `SERVER_FN_REGISTRY_FLOOR` for the shared floor with the dev/test-profile
+# unit test guard. `required-features` keeps a plain `cargo build --examples`
+# (no explicit --features) from failing on this — it needs `ssr` for
+# leptos::server_fn::axum, the same feature apps/server enables. It also
+# needs `slack`: apps/server/Cargo.toml sets `default = ["slack"]` and
+# release.yml builds `-p kyomi-server` with no `--features` override, so
+# the shipping binary always compiles kyomi-ui's `slack` feature in.
+# server_fns/slack.rs and workspace.rs both carry paired
+# `#[cfg(feature = "slack")]` / `#[cfg(not(...))]` server_fn implementations
+# — building this example with `ssr` alone would register the `not(slack)`
+# variants instead of what actually ships, silently testing a feature
+# combination Kyomi doesn't produce.
+name = "server_fn_count"
+path = "examples/server_fn_count.rs"
+required-features = ["ssr", "slack"]
+
 [dependencies]
 # Leptos framework
 leptos = "0.8"

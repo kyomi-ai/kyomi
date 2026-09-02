@@ -30,6 +30,26 @@ pub mod arrow_fetch;
 
 pub use app::App;
 
+/// Floor for the number of entries `leptos::server_fn::axum::server_fn_paths()`
+/// should return once `inventory` has registered every `#[server]` fn — a
+/// floor, not an exact count, so adding a server function never breaks
+/// either guard below it. KYO-191 measured 206 registered under the
+/// production build profile (`lto = true`, `codegen-units = 1`, `strip =
+/// true`) at the time this constant was introduced; 150 is comfortably
+/// below that while still catching "the registry came back empty or
+/// near-empty."
+///
+/// Shared by two independent guards against the same failure mode (a
+/// broken `inventory` registration silently 404ing every server function
+/// in production), which check it under two different build profiles:
+/// - `server_fn_registration_tests::server_fn_registry_is_populated_via_inventory`,
+///   below — runs under `cargo test`, i.e. the *non*-LTO dev/test profile.
+/// - `examples/server_fn_count.rs` (KYO-275) — built and run with
+///   `cargo build --release`, i.e. the real `[profile.release]` LTO/strip
+///   profile the dev/test run above cannot exercise. See that file for why
+///   the LTO case needs its own separate check.
+pub const SERVER_FN_REGISTRY_FLOOR: usize = 150;
+
 // KYO-191: server functions self-register with `server_fn`'s Axum registry
 // via `inventory` — the `#[server]` macro emits an `inventory::submit!` for
 // every function, and `server_fn::axum::server_fn_paths()` reads that
@@ -88,16 +108,15 @@ mod server_fn_registration_tests {
             .map(|(path, _method)| path.to_string())
             .collect();
 
-        // A floor, not an exact expectation: KYO-191 measured 206 registered
-        // functions under the production profile at the time this test was
-        // written. Hardcoding 206 would fail this test the next time anyone
-        // adds a server function; 150 is comfortably below that while still
-        // catching "the registry came back empty or near-empty."
+        // See `SERVER_FN_REGISTRY_FLOOR`'s doc comment (top of this file) for
+        // why this is a floor rather than an exact expectation, and for the
+        // KYO-275 release-profile counterpart to this dev/test-profile check.
+        let floor = super::SERVER_FN_REGISTRY_FLOOR;
         assert!(
-            paths.len() >= 150,
+            paths.len() >= floor,
             "expected the inventory-populated server_fn registry to contain \
-             at least 150 entries (a floor, not the exact count — KYO-191 \
-             measured 206 under the production profile), got {}. A \
+             at least {floor} entries (a floor, not the exact count — \
+             KYO-191 measured 206 under the production profile), got {}. A \
              collapsed registry means every server function 404s at \
              runtime with no signal at boot.",
             paths.len()
