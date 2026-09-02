@@ -90,6 +90,17 @@
 # agree; when only one side needed work, the summary says plainly which side
 # was already done and which one this run just fixed.
 #
+# THE FIX ABOVE HAD ITS OWN NARROWER VERSION OF THE SAME BUG (KYO-596 REWORK)
+#
+# The fix's own final summary picked its headline off LOCAL_RENAME_ATTEMPTED
+# — set the instant a rename is DECIDED, before `git branch -m` runs — rather
+# than off LOCAL_RENAMED, which records whether it actually succeeded. So a
+# run where the remote was already tombstoned AND the local rename then
+# FAILED still printed "TOMBSTONED (local branch only)" and exited 0: the
+# identical "exit 0 that meant unfinished" shape, one variable over. See the
+# comment above the final summary block for the full fix and the reasoning
+# for which failures still exit 0 and which do not.
+#
 # WHAT IT DOES
 #
 #   1. Refuses if `<branch>` already has a PR in any state — that branch
@@ -179,10 +190,19 @@
 #
 # EXIT CODES
 #
-#   0 — tombstoned (or already tombstoned — idempotent).
+#   0 — tombstoned (or already tombstoned — idempotent). Also covers a
+#       failed local rename of the NAMED branch, or of a swept OTHER
+#       branch, PROVIDED the remote side of the named branch was tombstoned
+#       during THIS run — see the KYO-596 rework comment above the final
+#       summary block for why that residue does not fail the run.
 #   1 — error: branch is main, branch has a PR, a local worktree checkout
 #       lacks a valid tombstone, the branch doesn't exist on the remote,
-#       any git/gh step failed, or a post-push verification mismatch.
+#       any git/gh step failed, a post-push verification mismatch, THE
+#       NAMED BRANCH'S LOCAL RENAME FAILED WHILE THE REMOTE WAS ALREADY
+#       TOMBSTONED BY A PRIOR RUN (this run's only job then accomplished
+#       nothing), or the other-branches SWEEP (step 5) failed to rename at
+#       least one matching branch (a swept branch has no remote counterpart
+#       to fall back on — see the same comment).
 #   2 — usage error (missing/unparseable ticket, missing --branch, unknown
 #       flag, missing value for a flag).
 # ------------------------------------------------------------------------------
@@ -205,7 +225,9 @@ Exit codes:
   0  tombstoned (or already tombstoned — idempotent)
   1  error (main, has a PR, worktree checkout lacks a tombstone, branch
      missing on remote, a git/gh step failed, post-push verification
-     mismatch)
+     mismatch, the named branch's local rename failed while the remote was
+     already tombstoned by a prior run, or the other-branches sweep failed
+     to rename a matching branch)
   2  usage error
 EOF
 }
@@ -637,6 +659,55 @@ print_local_summary() {
 }
 
 # ---- final summary, pasteable into a Trakkt release comment ---------------
+#
+# THE HEADLINE MUST KEY OFF LOCAL_RENAMED, NEVER LOCAL_RENAME_ATTEMPTED
+# (KYO-596 REWORK) — READ THIS BEFORE "SIMPLIFYING" IT BACK
+#
+# LOCAL_RENAME_ATTEMPTED is set to 1 the instant the script DECIDES to try
+# `git branch -m`, before the command runs, so it stays 1 whether the rename
+# succeeds or fails. A code reviewer caught this block picking its "local
+# branch only" SUCCESS headline off ATTEMPTED instead of off LOCAL_RENAMED
+# (which records the real outcome): a run where the rename actually FAILED
+# still printed "TOMBSTONED (local branch only)" and exited 0 — the exact
+# "exit 0 that means unfinished" bug KYO-596 exists to remove, reintroduced
+# one variable over. Reproduced live: pre-creating a conflicting local
+# `stranded/<branch>` ref forces `git branch -m` to fail, and the old
+# headline claimed success anyway while the local branch sat unrenamed and
+# check-ticket-in-flight.sh kept reporting the ticket IN FLIGHT forever.
+#
+# WHY THE PLAIN "TOMBSTONED (remote)" PATH BELOW STILL EXITS 0 ON A FAILED
+# LOCAL RENAME, BUT THE "REMOTE ALREADY DONE" PATH DOES NOT
+#
+# On the plain path, the remote rename happened THIS run. The remote is
+# what every OTHER machine reads (via `stranded/` on $REMOTE), so the
+# tombstone materially succeeded regardless of what happens to the local
+# branch afterward — a failed local rename there is local-only residue on
+# THIS machine, already surfaced in detail by print_local_summary with a
+# documented by-hand remedy. Exit 0 is defensible, but the headline is
+# qualified "(remote)" so it never reads as a claim about the local side
+# too — that claim belongs to the "Local:" line beneath it.
+#
+# On the "remote already done" path, a PRIOR run already tombstoned the
+# remote, so THIS run's entire deliverable for the named branch was the
+# local rename. If that fails, this run accomplished nothing at all, and
+# the headline must say so plainly, with a non-zero exit — anything else
+# tells the caller (a release script) that the release succeeded when the
+# ticket is exactly as stuck as it was before this run started.
+#
+# THE SWEEP (STEP 5) GETS THE SAME "NO REMOTE TO FALL BACK ON" TREATMENT
+#
+# A swept branch (SWEPT_RENAME_FAILED) never has a remote counterpart at
+# all — every one is a local-only leftover from an adopted worktree, never
+# pushed anywhere. So the "the remote materially succeeded elsewhere"
+# carve-out that excuses the named branch's local residue on the plain path
+# above never applies to a swept branch: no other machine can ever see it
+# tombstoned, and nothing else will ever clean it up. check-ticket-in-flight.sh's
+# check 4 matches a stray swept branch exactly like it matches the named
+# branch, so excluding sweep failures from the exit code would ship the
+# identical bug one function over, for a branch nobody was even watching by
+# name. A sweep failure therefore always forces a non-zero exit, regardless
+# of which headline above it fires.
+EXIT_CODE=0
 if [ "$NAMED_BRANCH_ALREADY_STRANDED_FORM" -eq 1 ]; then
     echo "ALREADY TOMBSTONED: '$BRANCH' is already under the stranded/ namespace — nothing to do."
     echo "  - Ticket:  ${TICKET_KEY}"
@@ -653,11 +724,13 @@ elif [ "$NAMED_REMOTE_ALREADY_DONE" -eq 1 ] && [ "$LOCAL_RENAME_ATTEMPTED" -eq 0
     echo "  - Sha:     ${FETCHED_SHA}"
     print_local_summary
     print_sweep_summary
-elif [ "$NAMED_REMOTE_ALREADY_DONE" -eq 1 ] && [ "$LOCAL_RENAME_ATTEMPTED" -eq 1 ]; then
-    # THE KYO-596 CASE: the remote side was already tombstoned by a prior
-    # run, but the local branch had NOT been renamed — this run just fixed
-    # that. Reported distinctly from plain "ALREADY TOMBSTONED" so a reader
-    # (or a Trakkt release comment) can see that real work happened here.
+elif [ "$NAMED_REMOTE_ALREADY_DONE" -eq 1 ] && [ "$LOCAL_RENAMED" -eq 1 ]; then
+    # THE KYO-596 CASE, successful: the remote side was already tombstoned
+    # by a prior run, but the local branch had NOT been renamed — this run
+    # just fixed that. Reported distinctly from plain "ALREADY TOMBSTONED"
+    # so a reader (or a Trakkt release comment) can see that real work
+    # happened here. Gated on LOCAL_RENAMED, not LOCAL_RENAME_ATTEMPTED —
+    # see the block comment above.
     echo "TOMBSTONED (local branch only): refs/heads/${BRANCH} was already gone and refs/heads/${STRANDED_BRANCH} already existed on $REMOTE (a prior run completed the remote side); the local branch had not been tombstoned yet."
     echo "  - Ticket:  ${TICKET_KEY}"
     echo "  - Remote:  ${REMOTE} (already done)"
@@ -665,8 +738,27 @@ elif [ "$NAMED_REMOTE_ALREADY_DONE" -eq 1 ] && [ "$LOCAL_RENAME_ATTEMPTED" -eq 1
     echo "  - Sha:     ${FETCHED_SHA}"
     print_local_summary
     print_sweep_summary
+elif [ "$NAMED_REMOTE_ALREADY_DONE" -eq 1 ]; then
+    # The remaining combination: LOCAL_RENAME_ATTEMPTED=1 and
+    # LOCAL_RENAMED=0 — the rename was tried and it FAILED, and the remote
+    # was already done by a prior run, so this run's only job accomplished
+    # nothing. See the block comment above for why this is the one case
+    # that exits non-zero rather than treating the failure as residue.
+    echo "NOT TOMBSTONED: local branch rename FAILED for '${BRANCH}' (refs/heads/${STRANDED_BRANCH} already existed on $REMOTE from a prior run — the local rename was this run's only job, and it did not happen)."
+    echo "  - Ticket:  ${TICKET_KEY}"
+    echo "  - Remote:  ${REMOTE} (already done)"
+    echo "  - Ref:     refs/heads/${STRANDED_BRANCH}"
+    echo "  - Sha:     ${FETCHED_SHA}"
+    print_local_summary
+    print_sweep_summary
+    EXIT_CODE=1
 else
-    echo "TOMBSTONED: ${BRANCH} -> ${STRANDED_BRANCH}"
+    # The remote rename happened during THIS run — see the block comment
+    # above for why the headline is qualified "(remote)" rather than an
+    # unqualified "TOMBSTONED", even though the common case also renames
+    # the local branch successfully: the local outcome is always the
+    # "Local:" line below, never implied by this headline alone.
+    echo "TOMBSTONED (remote): ${BRANCH} -> ${STRANDED_BRANCH}"
     echo "  - Ticket:  ${TICKET_KEY}"
     echo "  - Remote:  ${REMOTE}"
     echo "  - Sha:     ${FETCHED_SHA}"
@@ -677,4 +769,11 @@ if [ -n "$NOTE" ]; then
     echo "  - Note:    ${NOTE}"
 fi
 
-exit 0
+if [ "${#SWEPT_RENAME_FAILED[@]}" -gt 0 ]; then
+    # See the block comment above the branching above — a swept branch has
+    # no remote counterpart to fall back on, so its failure always fails
+    # the run, even when the headline above otherwise reports success.
+    EXIT_CODE=1
+fi
+
+exit "$EXIT_CODE"

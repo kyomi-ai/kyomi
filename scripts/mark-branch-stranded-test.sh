@@ -216,7 +216,7 @@ clone_repo "$bare1" "$t1/releaser" # no matching local branch here at all
 gh_ok_empty
 run_mark "$t1/releaser" 567 --branch jason/kyo-567-happy --note "smoke"
 assert_exit "tombstones successfully" 0
-assert_contains "reports the rename" "TOMBSTONED: jason/kyo-567-happy -> stranded/jason/kyo-567-happy"
+assert_contains "reports the rename" "TOMBSTONED (remote): jason/kyo-567-happy -> stranded/jason/kyo-567-happy"
 assert_contains "includes the note" "smoke"
 assert_ref_sha "stranded/ ref preserves the sha" "$bare1" "refs/heads/stranded/jason/kyo-567-happy" "$sha1"
 assert_ref_sha "original ref is gone" "$bare1" "refs/heads/jason/kyo-567-happy" "MISSING"
@@ -274,7 +274,7 @@ git -C "$t2b/workerA" branch -q stranded/jason/kyo-567-renamefail main # conflic
 gh_ok_empty
 run_mark "$t2b/workerA" 567 --branch jason/kyo-567-renamefail
 assert_exit "still tombstones the remote even though the local rename fails" 0
-assert_contains "reports the remote tombstone" "TOMBSTONED: jason/kyo-567-renamefail -> stranded/jason/kyo-567-renamefail"
+assert_contains "reports the remote tombstone" "TOMBSTONED (remote): jason/kyo-567-renamefail -> stranded/jason/kyo-567-renamefail"
 assert_contains "the pasteable summary carries the NOT-renamed warning" "  - Local:   NOT renamed"
 assert_contains "the summary names the stale branch" "stale local branch 'jason/kyo-567-renamefail'"
 assert_contains "the summary gives the --ignore-branch remedy" "--ignore-branch 'jason/kyo-567-renamefail'"
@@ -374,7 +374,7 @@ clone_repo "$bare6b" "$t6b/releaser"
 gh_ok_empty
 run_mark "$t6b/releaser" 567 --branch jason/kyo-567-samesha
 assert_exit "completes the interrupted tombstone" 0
-assert_contains "reports a genuine completion, not a no-op idempotency message" "TOMBSTONED: jason/kyo-567-samesha -> stranded/jason/kyo-567-samesha"
+assert_contains "reports a genuine completion, not a no-op idempotency message" "TOMBSTONED (remote): jason/kyo-567-samesha -> stranded/jason/kyo-567-samesha"
 assert_ref_sha "original ref is now gone" "$bare6b" "refs/heads/jason/kyo-567-samesha" "MISSING"
 assert_ref_sha "stranded/ ref still exists at the same sha" "$bare6b" "refs/heads/stranded/jason/kyo-567-samesha" "$sha6b"
 echo
@@ -415,7 +415,7 @@ git -C "$t8/wt-tombstoned" push -q origin jason/kyo-567-tombstoned
 gh_ok_empty
 run_mark "$t8/primary" 567 --branch jason/kyo-567-tombstoned
 assert_exit "succeeds — the worktree's own tombstone covers the local branch" 0
-assert_contains "reports the remote rename" "TOMBSTONED: jason/kyo-567-tombstoned -> stranded/jason/kyo-567-tombstoned"
+assert_contains "reports the remote rename" "TOMBSTONED (remote): jason/kyo-567-tombstoned -> stranded/jason/kyo-567-tombstoned"
 assert_contains "reports the local branch was left in place" "left in place, checked out at $t8/wt-tombstoned"
 if [ "$(git -C "$t8/wt-tombstoned" rev-parse --abbrev-ref HEAD)" = "jason/kyo-567-tombstoned" ]; then
     pass "local branch name in the worktree is unchanged"
@@ -512,6 +512,53 @@ assert_exit "check-ticket-in-flight.sh now reports CLEAR for KYO-567 (the bug's 
 assert_contains "reports CLEAR" "RESULT: CLEAR"
 echo
 
+# ─── Test 11b: remote already tombstoned, local rename FAILS (KYO-596 rework) ─
+# The narrower bug a code reviewer found in Test 11's own fix: the final
+# summary picked its "TOMBSTONED (local branch only)" SUCCESS headline off
+# LOCAL_RENAME_ATTEMPTED (set before `git branch -m` runs) instead of
+# LOCAL_RENAMED (set only if it actually succeeds), so a run where the
+# rename FAILS still claimed success and exited 0 — check-ticket-in-flight.sh
+# then kept reporting the ticket IN FLIGHT forever, the exact shape Test 11
+# exists to rule out, one variable over. Same setup as Test 11 (a prior run
+# tombstoned the remote and died before the local rename), plus Test 2b's
+# technique of pre-creating a conflicting local `stranded/<branch>` ref so
+# `git branch -m` has nowhere to land and is forced to fail. Asserts the
+# failure headline, a non-zero exit, and — the real-world consequence —
+# that check-ticket-in-flight.sh still reports the ticket IN FLIGHT rather
+# than the script and the checker disagreeing with each other.
+echo "-- Test 11b: remote already tombstoned, local rename fails (KYO-596 rework)"
+t11b="$tmpdir/t11b"
+mkdir -p "$t11b"
+bare11b="$t11b/remote.git"
+new_bare_remote "$bare11b"
+seed_main "$bare11b"
+clone_repo "$bare11b" "$t11b/workerA"
+push_new_branch "$t11b/workerA" "jason/kyo-567-halffail"
+# Simulate a prior run that tombstoned the REMOTE and then died before
+# renaming the LOCAL branch, exactly like Test 11.
+git -C "$t11b/workerA" push -q origin "jason/kyo-567-halffail:refs/heads/stranded/jason/kyo-567-halffail"
+git -C "$t11b/workerA" push -q origin ":refs/heads/jason/kyo-567-halffail"
+git -C "$t11b/workerA" checkout -q main
+# Force `git branch -m` to fail: pre-create the LOCAL stranded/ name it
+# would rename into, same technique as Test 2b.
+git -C "$t11b/workerA" branch -q stranded/jason/kyo-567-halffail main
+gh_ok_empty
+run_mark "$t11b/workerA" 567 --branch jason/kyo-567-halffail
+assert_exit "the run's only job failed, so it exits non-zero" 1
+assert_contains "reports the failure headline, not a success one" "NOT TOMBSTONED: local branch rename FAILED for 'jason/kyo-567-halffail'"
+assert_not_contains "never claims the local-branch-only success headline" "TOMBSTONED (local branch only)"
+assert_contains "the pasteable summary still carries the NOT-renamed detail" "  - Local:   NOT renamed"
+if git -C "$t11b/workerA" show-ref --verify --quiet "refs/heads/jason/kyo-567-halffail"; then
+    pass "original local branch name is still present (rename never happened)"
+else
+    fail "original local branch name is still present (rename never happened)" "$(git -C "$t11b/workerA" branch --list)"
+fi
+gh_ok_empty
+run_cif "$t11b/workerA" 567
+assert_exit "check-ticket-in-flight.sh still reports IN FLIGHT — script and checker now agree" 1
+assert_contains "reports IN FLIGHT, not CLEAR" "IN FLIGHT"
+echo
+
 # ─── Test 12: sweeps every OTHER local branch for the ticket (KYO-596) ────
 # A later attempt adopting an earlier attempt's worktree for its warm
 # target/ is a deliberate workflow, so a ticket can end its life with more
@@ -534,7 +581,7 @@ git -C "$t12/workerA" worktree add -q -b jason/kyo-567-multi-c "$t12/wt-multi-c"
 gh_ok_empty
 run_mark "$t12/workerA" 567 --branch jason/kyo-567-multi-a
 assert_exit "tombstones the named branch and sweeps the others" 0
-assert_contains "reports the named branch's remote tombstone" "TOMBSTONED: jason/kyo-567-multi-a -> stranded/jason/kyo-567-multi-a"
+assert_contains "reports the named branch's remote tombstone" "TOMBSTONED (remote): jason/kyo-567-multi-a -> stranded/jason/kyo-567-multi-a"
 assert_contains "reports the swept leftover branch" "jason/kyo-567-multi-b -> stranded/jason/kyo-567-multi-b"
 assert_contains "reports the checked-out branch was left alone" "jason/kyo-567-multi-c (checked out at $t12/wt-multi-c)"
 if git -C "$t12/workerA" show-ref --verify --quiet "refs/heads/stranded/jason/kyo-567-multi-b"; then
@@ -588,7 +635,7 @@ sha13_unrelated="$(git -C "$t13/workerA" rev-parse some-unrelated-branch)"
 gh_ok_empty
 run_mark "$t13/workerA" 596 --branch jason/kyo-596-primary
 assert_exit "tombstones the named branch" 0
-assert_contains "reports the named branch's remote tombstone" "TOMBSTONED: jason/kyo-596-primary -> stranded/jason/kyo-596-primary"
+assert_contains "reports the named branch's remote tombstone" "TOMBSTONED (remote): jason/kyo-596-primary -> stranded/jason/kyo-596-primary"
 
 # Positive control: the sweep is not a no-op — the ticket's own sibling
 # branch must be renamed in this same run.
