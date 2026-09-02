@@ -16,6 +16,16 @@
 # destroying," and that is only worth anything if a failure genuinely rolls
 # back to nothing having moved.
 #
+# Tests 11-13 cover KYO-596: remote and local must be tombstoned
+# independently (Test 11 reproduces the live KYO-463 failure — remote already
+# tombstoned, local branch left behind, reported as a no-op — and checks the
+# fix all the way through to check-ticket-in-flight.sh reporting CLEAR
+# afterward), every OTHER local branch for the ticket must be swept too
+# (Test 12), without ever touching one that's checked out somewhere, and the
+# sweep's matching rule must never over-match into a DIFFERENT ticket's
+# branches (Test 13 — a code-review MINOR: the sweep renames branches the
+# caller never named, so its matching rule needs its own regression test).
+#
 # Exit 0 = all pass, exit 1 = any failure.
 # ------------------------------------------------------------------------------
 
@@ -123,6 +133,22 @@ assert_not_contains() {
     else
         pass "$name"
     fi
+}
+
+run_cif() {
+    # run_cif <dir> <arg>...  — same shape as run_mark, but for
+    # check-ticket-in-flight.sh (KYO-596's Test 11 needs to prove the fix
+    # all the way through to that script's own verdict, not just inspect
+    # git state by hand). Never edits that script — see the KYO-596 ticket's
+    # explicit out-of-scope note.
+    local dir="$1" out
+    shift
+    if out="$(cd "$dir" && "$SCRIPT_DIR/check-ticket-in-flight.sh" "$@" 2>&1)"; then
+        RUN_STATUS=0
+    else
+        RUN_STATUS=$?
+    fi
+    RUN_OUTPUT="$out"
 }
 
 assert_ref_sha() {
@@ -438,6 +464,164 @@ run_mark "$tmpdir" 567 --branch
 assert_exit "--branch missing its value" 2
 run_mark "$tmpdir" 567 --branch x --bogus-flag
 assert_exit "unknown flag" 2
+echo
+
+# ─── Test 11: remote already tombstoned, local branch is NOT (KYO-596) ────
+# The exact failure observed live during KYO-463's release: a prior run
+# tombstoned the remote (pushed the copy to stranded/, deleted the original)
+# and then died before renaming the local branch. The old code treated
+# "remote already tombstoned" as proof the whole job was done and exited 0
+# without touching the local branch, so check-ticket-in-flight.sh kept
+# reporting the ticket IN FLIGHT forever. Asserts both the fixed local state
+# and — the actual bug report's reproduction — that check-ticket-in-flight.sh
+# now exits 0 afterward.
+echo "-- Test 11: remote already tombstoned but local branch is not (KYO-596)"
+t11="$tmpdir/t11"
+mkdir -p "$t11"
+bare11="$t11/remote.git"
+new_bare_remote "$bare11"
+seed_main "$bare11"
+clone_repo "$bare11" "$t11/workerA"
+push_new_branch "$t11/workerA" "jason/kyo-567-halfdone"
+# Simulate a prior run that tombstoned the REMOTE and then died before
+# renaming the LOCAL branch: push the copy to stranded/, delete the
+# original remote ref, but leave workerA's own local branch exactly as it
+# was — freed via `checkout main` first, same "not checked out anywhere"
+# convention Test 2 uses.
+git -C "$t11/workerA" push -q origin "jason/kyo-567-halfdone:refs/heads/stranded/jason/kyo-567-halfdone"
+git -C "$t11/workerA" push -q origin ":refs/heads/jason/kyo-567-halfdone"
+git -C "$t11/workerA" checkout -q main
+gh_ok_empty
+run_mark "$t11/workerA" 567 --branch jason/kyo-567-halfdone
+assert_exit "fixes the local side and exits 0" 0
+assert_contains "reports it fixed the local branch, not a no-op" "TOMBSTONED (local branch only)"
+assert_not_contains "does not claim nothing needed doing" "ALREADY TOMBSTONED: refs/heads/jason/kyo-567-halfdone is gone and refs/heads/stranded/jason/kyo-567-halfdone already exists"
+if git -C "$t11/workerA" show-ref --verify --quiet "refs/heads/stranded/jason/kyo-567-halfdone"; then
+    pass "local branch actually renamed to stranded/"
+else
+    fail "local branch actually renamed to stranded/" "$(git -C "$t11/workerA" branch --list)"
+fi
+if git -C "$t11/workerA" show-ref --verify --quiet "refs/heads/jason/kyo-567-halfdone"; then
+    fail "old local branch name is gone" "old local branch still present"
+else
+    pass "old local branch name is gone"
+fi
+gh_ok_empty
+run_cif "$t11/workerA" 567
+assert_exit "check-ticket-in-flight.sh now reports CLEAR for KYO-567 (the bug's own repro)" 0
+assert_contains "reports CLEAR" "RESULT: CLEAR"
+echo
+
+# ─── Test 12: sweeps every OTHER local branch for the ticket (KYO-596) ────
+# A later attempt adopting an earlier attempt's worktree for its warm
+# target/ is a deliberate workflow, so a ticket can end its life with more
+# than one local branch. Only the branch named on the command line
+# (multi-a) goes through the full remote+local flow; a second attempt's
+# leftover, never-pushed branch (multi-b) must be swept locally too; a third
+# branch that's currently checked out in another worktree (multi-c) must be
+# left completely alone.
+echo "-- Test 12: sweeps every other local branch for the ticket, skips checked-out ones"
+t12="$tmpdir/t12"
+mkdir -p "$t12"
+bare12="$t12/remote.git"
+new_bare_remote "$bare12"
+seed_main "$bare12"
+clone_repo "$bare12" "$t12/workerA"
+push_new_branch "$t12/workerA" "jason/kyo-567-multi-a"
+git -C "$t12/workerA" checkout -q main # free multi-a up, same convention as Test 2
+git -C "$t12/workerA" branch -q jason/kyo-567-multi-b main # leftover attempt, never pushed, not checked out
+git -C "$t12/workerA" worktree add -q -b jason/kyo-567-multi-c "$t12/wt-multi-c" # currently checked out — must survive untouched
+gh_ok_empty
+run_mark "$t12/workerA" 567 --branch jason/kyo-567-multi-a
+assert_exit "tombstones the named branch and sweeps the others" 0
+assert_contains "reports the named branch's remote tombstone" "TOMBSTONED: jason/kyo-567-multi-a -> stranded/jason/kyo-567-multi-a"
+assert_contains "reports the swept leftover branch" "jason/kyo-567-multi-b -> stranded/jason/kyo-567-multi-b"
+assert_contains "reports the checked-out branch was left alone" "jason/kyo-567-multi-c (checked out at $t12/wt-multi-c)"
+if git -C "$t12/workerA" show-ref --verify --quiet "refs/heads/stranded/jason/kyo-567-multi-b"; then
+    pass "leftover attempt branch was renamed to stranded/"
+else
+    fail "leftover attempt branch was renamed to stranded/" "$(git -C "$t12/workerA" branch --list)"
+fi
+if git -C "$t12/workerA" show-ref --verify --quiet "refs/heads/jason/kyo-567-multi-c"; then
+    pass "checked-out branch was left untouched under its original name"
+else
+    fail "checked-out branch was left untouched under its original name" "$(git -C "$t12/workerA" branch --list)"
+fi
+if [ "$(git -C "$t12/wt-multi-c" rev-parse --abbrev-ref HEAD)" = "jason/kyo-567-multi-c" ]; then
+    pass "checked-out worktree's branch name is unchanged"
+else
+    fail "checked-out worktree's branch name is unchanged" "$(git -C "$t12/wt-multi-c" rev-parse --abbrev-ref HEAD)"
+fi
+echo
+
+# ─── Test 13: sweep does not touch branches for a DIFFERENT ticket (KYO-596) ─
+# branch_matches_ticket_for_sweep's matching rule (a `kyo-<N>-` substring, or
+# an exact `kyo-<N>` suffix) is deliberately duplicated from
+# check-ticket-in-flight.sh's `matches_ticket`, specifically so a sweep run
+# for one ticket can never rename a branch belonging to another. This is the
+# sweep's riskiest property — it renames branches the caller never named —
+# so it gets its own regression test rather than resting on the fact that
+# the pattern is textually identical to the reader's (KYO-596 review, MINOR
+# coverage gap). Four foreign shapes: a shorter ticket number sharing a
+# prefix, a longer one sharing a prefix, a numerically adjacent ticket, and a
+# branch that doesn't match the jason/kyo-* shape at all. The ticket's own
+# sibling branch is asserted as swept in the SAME run, so this test cannot
+# pass by the sweep simply doing nothing.
+echo "-- Test 13: sweep does not touch branches for a different ticket"
+t13="$tmpdir/t13"
+mkdir -p "$t13"
+bare13="$t13/remote.git"
+new_bare_remote "$bare13"
+seed_main "$bare13"
+clone_repo "$bare13" "$t13/workerA"
+push_new_branch "$t13/workerA" "jason/kyo-596-primary"
+git -C "$t13/workerA" checkout -q main # free the named branch, same convention as Test 2
+git -C "$t13/workerA" branch -q jason/kyo-596-sibling main    # the ticket's OWN other branch — must still be swept
+git -C "$t13/workerA" branch -q jason/kyo-59-something main   # shorter number — prefix-collision direction
+git -C "$t13/workerA" branch -q jason/kyo-5967-something main # longer number — the other direction
+git -C "$t13/workerA" branch -q jason/kyo-597-something main  # adjacent ticket
+git -C "$t13/workerA" branch -q some-unrelated-branch main     # not the jason/kyo-* shape at all
+sha13_59="$(git -C "$t13/workerA" rev-parse jason/kyo-59-something)"
+sha13_5967="$(git -C "$t13/workerA" rev-parse jason/kyo-5967-something)"
+sha13_597="$(git -C "$t13/workerA" rev-parse jason/kyo-597-something)"
+sha13_unrelated="$(git -C "$t13/workerA" rev-parse some-unrelated-branch)"
+gh_ok_empty
+run_mark "$t13/workerA" 596 --branch jason/kyo-596-primary
+assert_exit "tombstones the named branch" 0
+assert_contains "reports the named branch's remote tombstone" "TOMBSTONED: jason/kyo-596-primary -> stranded/jason/kyo-596-primary"
+
+# Positive control: the sweep is not a no-op — the ticket's own sibling
+# branch must be renamed in this same run.
+if git -C "$t13/workerA" show-ref --verify --quiet "refs/heads/stranded/jason/kyo-596-sibling"; then
+    pass "the ticket's own sibling branch was swept (positive control)"
+else
+    fail "the ticket's own sibling branch was swept (positive control)" "$(git -C "$t13/workerA" branch --list)"
+fi
+
+# Foreign branches: same name, same sha, never renamed into stranded/.
+for pair in \
+    "jason/kyo-59-something:$sha13_59" \
+    "jason/kyo-5967-something:$sha13_5967" \
+    "jason/kyo-597-something:$sha13_597" \
+    "some-unrelated-branch:$sha13_unrelated"; do
+    name="${pair%%:*}"
+    expected_sha="${pair#*:}"
+    if git -C "$t13/workerA" show-ref --verify --quiet "refs/heads/${name}"; then
+        actual_sha="$(git -C "$t13/workerA" rev-parse "refs/heads/${name}")"
+        if [ "$actual_sha" = "$expected_sha" ]; then
+            pass "foreign branch ${name} left untouched (same name, same sha)"
+        else
+            fail "foreign branch ${name} left untouched (same name, same sha)" "expected $expected_sha, got $actual_sha"
+        fi
+    else
+        fail "foreign branch ${name} left untouched (same name, same sha)" "branch ${name} no longer exists at all"
+    fi
+    if git -C "$t13/workerA" show-ref --verify --quiet "refs/heads/stranded/${name}"; then
+        fail "foreign branch ${name} was NOT renamed into stranded/" "refs/heads/stranded/${name} exists — wrongly swept"
+    else
+        pass "foreign branch ${name} was NOT renamed into stranded/"
+    fi
+done
 echo
 
 echo "Results: $PASS passed, $FAIL failed"
