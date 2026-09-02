@@ -337,7 +337,17 @@ async fn has_security_headers() {
     );
 }
 
-#[ignore = "KYO-236: quarantined. KYO-257 — needs FRONTEND_URL=https://... set in the test environment for apply_runtime_overrides() to enable HSTS"]
+// KYO-257: HSTS is gated on two independent conditions — non-demo mode
+// (`!demo_mode`, apps/server/src/middleware/mod.rs) AND an https:// frontend
+// (`apply_runtime_overrides()`, crates/kyomi-core/src/constants.rs, reads
+// the FRONTEND_URL env var and clears `security_headers.hsts` unless it
+// starts with "https://"). `Config::test_config()` already sets
+// demo_mode=false, but nothing set FRONTEND_URL to an https:// value, so
+// this test could never pass and was quarantined. CI now sets
+// FRONTEND_URL for this suite (see the "cargo test (unit + integration
+// tests)" step in .github/workflows/ci.yml). Running just this test
+// locally needs the same: `FRONTEND_URL=https://localhost cargo test -p
+// kyomi-server --test contract_health has_hsts_header_when_not_demo`.
 #[tokio::test]
 async fn has_hsts_header_when_not_demo() {
     let base = base_url().await;
@@ -352,8 +362,9 @@ async fn has_hsts_header_when_not_demo() {
         .get("strict-transport-security")
         .map(|v| v.to_str().unwrap().to_string());
 
-    // In non-demo mode, HSTS should be present
-    // (test config has demo_mode=false)
+    // HSTS requires BOTH non-demo mode (test config has demo_mode=false)
+    // AND an https:// FRONTEND_URL (set by the test environment — see the
+    // comment above).
     assert_eq!(
         hsts.as_deref(),
         Some("max-age=31536000; includeSubDomains"),
