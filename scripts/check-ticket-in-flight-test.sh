@@ -22,6 +22,15 @@
 # the exact same fixture, so the fix — not an unrelated setup change — is
 # what flips the verdict.
 #
+# Tests 32-39 (KYO-607) cover recycled ticket keys: Trakkt's numbering
+# restarted in May 2026, so nine keys are shared between a retired ticket and
+# a current one, and the merged PR (plus its surviving remote branch) of the
+# retired one blocked the current one forever. Test 32 is the acceptance
+# criterion — a pre-restart merged PR AND its remote branch must together
+# still yield CLEAR — and test 34 is the precision test (the real KYO-293/294
+# shape: one pre-restart PR and one legitimate current-numbering PR on the
+# same key, where only the second may count).
+#
 # Exit 0 = all pass, exit 1 = any failure.
 # ------------------------------------------------------------------------------
 
@@ -60,11 +69,32 @@ STUB
 chmod +x "$STUB_BIN/gh"
 export PATH="$STUB_BIN:$PATH"
 
+# Fixture timestamps, either side of check-ticket-in-flight.sh's default
+# KEY_RESTART_CUTOFF of 2026-05-12T00:00:00Z (KYO-607). Named rather than
+# inlined so a reader can tell at a glance which side of the ticket-key
+# restart a fixture PR is meant to be on, and so the two values can never
+# drift apart between call sites.
+#
+# The real boundary they straddle: PR #39 (2026-05-09T08:44:14Z) is the last
+# retired-numbering PR, PR #41 (2026-05-13T09:25:07Z) the first of the
+# restarted numbering.
+PRE_RESTART_TS='2026-05-08T12:00:00Z'
+POST_RESTART_TS='2026-08-21T09:00:00Z'
+
+pr_row() {
+    # pr_row <number> <state> <createdAt> <headRefName> — one PR row in the
+    # exact 4-column TSV shape check-ticket-in-flight.sh asks `gh` to produce
+    # via `--jq '.[] | [.number, .state, .createdAt, .headRefName] | @tsv'`.
+    # A helper rather than a `$'...\t...'` literal at each call site because
+    # createdAt is usually one of the two named constants above, and `$'...'`
+    # does not interpolate.
+    printf '%s\t%s\t%s\t%s' "$1" "$2" "$3" "$4"
+}
+
 gh_ok_empty() { : >"$GH_STDOUT_FILE"; : >"$GH_STDERR_FILE"; echo 0 >"$GH_EXIT_FILE"; }
 gh_ok_prs() {
-    # gh_ok_prs '<number>\t<state>\t<headRefName>' [...]  — one arg per PR row,
-    # matching the exact TSV shape check-ticket-in-flight.sh asks `gh` to
-    # produce via `--jq '.[] | [.number, .state, .headRefName] | @tsv'`.
+    # gh_ok_prs '<number>\t<state>\t<createdAt>\t<headRefName>' [...]  — one
+    # arg per PR row; build each one with pr_row above.
     printf '%s\n' "$@" >"$GH_STDOUT_FILE"
     : >"$GH_STDERR_FILE"
     echo 0 >"$GH_EXIT_FILE"
@@ -75,12 +105,14 @@ gh_ok_prs_n() {
     # which no ticket number any test asks about can match, so a row's only
     # contribution is to the row COUNT — which is what the PR_LIST_LIMIT
     # truncation guard keys off. Lets a test reach the limit in three rows
-    # instead of five hundred.
+    # instead of five hundred. Fillers are dated POST_RESTART_TS so they are
+    # never classified as pre-restart either; a filler must influence nothing
+    # but the count.
     local count="$1" i
     shift
     : >"$GH_STDOUT_FILE"
     for ((i = 1; i <= count; i++)); do
-        printf '%d\tMERGED\tjason/kyo-90%d-filler\n' "$((9000 + i))" "$i" >>"$GH_STDOUT_FILE"
+        printf '%d\tMERGED\t%s\tjason/kyo-90%d-filler\n' "$((9000 + i))" "$POST_RESTART_TS" "$i" >>"$GH_STDOUT_FILE"
     done
     if [ "$#" -gt 0 ]; then
         printf '%s\n' "$@" >>"$GH_STDOUT_FILE"
@@ -220,7 +252,7 @@ mkdir -p "$t3"
 bare3="$(new_bare_remote "$t3/remote.git")"
 seed_main "$bare3"
 clone_repo "$bare3" "$t3/workerB"
-gh_ok_prs $'501\tOPEN\tjason/kyo-422-guard'
+gh_ok_prs "$(pr_row 501 OPEN "$POST_RESTART_TS" jason/kyo-422-guard)"
 run_check "$t3/workerB" 422
 assert_exit "remote clean but an open PR matches" 1
 assert_contains "names the PR number and state" "PR #501 (OPEN) branch jason/kyo-422-guard"
@@ -233,7 +265,7 @@ mkdir -p "$t4"
 bare4="$(new_bare_remote "$t4/remote.git")"
 seed_main "$bare4"
 clone_repo "$bare4" "$t4/workerB"
-gh_ok_prs $'502\tMERGED\tjason/kyo-422-guard'
+gh_ok_prs "$(pr_row 502 MERGED "$POST_RESTART_TS" jason/kyo-422-guard)"
 run_check "$t4/workerB" 422
 assert_exit "a merged PR means look before reimplementing" 1
 assert_contains "names the PR number and state" "PR #502 (MERGED) branch jason/kyo-422-guard"
@@ -416,7 +448,7 @@ mkdir -p "$t15"
 bare15="$(new_bare_remote "$t15/remote.git")"
 seed_main "$bare15"
 clone_repo "$bare15" "$t15/workerB"
-gh_ok_prs_n 1 $'503\tOPEN\tjason/kyo-422-guard'
+gh_ok_prs_n 1 "$(pr_row 503 OPEN "$POST_RESTART_TS" jason/kyo-422-guard)"
 PR_LIST_LIMIT=3 run_check "$t15/workerB" 422
 assert_exit "a complete listing with a match is IN FLIGHT" 1
 assert_contains "names the matching PR" "PR #503 (OPEN) branch jason/kyo-422-guard"
@@ -516,7 +548,7 @@ seed_main "$bare20"
 clone_repo "$bare20" "$t20/workerB"
 git -C "$t20/workerB" worktree add -q -b jason/kyo-422-haspr "$t20/wt-haspr"
 "$MARK" 422 --worktree "$t20/wt-haspr" >/dev/null
-gh_ok_prs $'504\tOPEN\tjason/kyo-422-haspr'
+gh_ok_prs "$(pr_row 504 OPEN "$POST_RESTART_TS" jason/kyo-422-haspr)"
 run_check "$t20/workerB" 422
 assert_exit "a tombstone must not mask a matching open PR" 1
 assert_contains "names the PR hit" "PR #504 (OPEN) branch jason/kyo-422-haspr"
@@ -591,7 +623,7 @@ seed_main "$bare23"
 clone_repo "$bare23" "$t23/helper"
 git -C "$t23/helper" push -q origin "main:refs/heads/stranded/jason/kyo-422-haspr"
 clone_repo "$bare23" "$t23/workerB"
-gh_ok_prs $'505\tOPEN\tjason/kyo-422-haspr'
+gh_ok_prs "$(pr_row 505 OPEN "$POST_RESTART_TS" jason/kyo-422-haspr)"
 run_check "$t23/workerB" 422
 assert_exit "a tombstoned remote branch must not mask a matching PR" 1
 assert_contains "names the PR hit" "PR #505 (OPEN) branch jason/kyo-422-haspr"
@@ -766,6 +798,228 @@ git -C "$t31/canonical" worktree add -q -b jason/kyo-422-ownwork "$t31/wt-own"
 gh_fail "gh: authentication required (stub failure)"
 run_check "$t31/canonical" 422 --self jason/kyo-422-ownwork
 assert_exit "a failing gh still exits 3 even with --self naming the caller's own branch" 3
+gh_ok_empty
+echo
+
+# ─── Tests 32-39: recycled ticket keys (KYO-607) ─────────────────────────────
+#
+# Trakkt's ticket-key numbering restarted in May 2026, so nine keys are shared
+# between a retired ticket and a current one. Every one of those keys had a
+# MERGED pre-restart PR *and* that PR's surviving remote branch, so the gate
+# reported IN FLIGHT on them forever while the current ticket sat in Backlog
+# looking available — permanently unclaimable.
+#
+# These tests use ticket 299 (the real KYO-299 → PR #37 +
+# origin/jason/kyo-299-add-get_catalog_stats-server-fn-for-datasource-catalog-tab
+# shape, shortened) so the fixtures read as the case they were written for.
+# Everything below straddles the script's DEFAULT KEY_RESTART_CUTOFF, except
+# test 35, which overrides it — the override is what proves the constant is
+# actually consulted rather than the classification falling out of some other
+# property of the fixtures.
+RECYCLED_HEADING="PRE-RESTART KEY REUSE"
+
+# ─── Test 32: THE KYO-607 ACCEPTANCE CRITERION ──────────────────────────────
+# A pre-restart merged PR AND its surviving remote branch — the exact shape
+# all nine collisions have — must together yield CLEAR, with both still
+# printed. Before the fix this fixture was exit 1, twice over.
+echo "-- Test 32: pre-restart merged PR + its remote branch (KYO-607 acceptance criterion)"
+t32="$tmpdir/t32"
+mkdir -p "$t32"
+bare32="$(new_bare_remote "$t32/remote.git")"
+seed_main "$bare32"
+clone_repo "$bare32" "$t32/helper"
+git -C "$t32/helper" push -q origin main:refs/heads/jason/kyo-299-old-numbering
+clone_repo "$bare32" "$t32/workerB"
+gh_ok_prs "$(pr_row 37 MERGED "$PRE_RESTART_TS" jason/kyo-299-old-numbering)"
+run_check "$t32/workerB" 299
+assert_exit "a pre-restart PR and its remote branch are together CLEAR" 0
+assert_contains "under the pre-restart heading" "$RECYCLED_HEADING"
+assert_contains "still prints the PR, with its creation date" "PR #37 (MERGED) branch jason/kyo-299-old-numbering — created $PRE_RESTART_TS"
+assert_contains "still prints the remote branch" "remote branch origin/jason/kyo-299-old-numbering"
+# Hits print with a "  - " bullet, classified entries with "  ~ " — asserting
+# on the bullet is what distinguishes "reported under the right heading" from
+# "reported at all", which is the entire behaviour change here.
+assert_not_contains "does not count the PR as a hit" "  - PR #37 (MERGED)"
+assert_not_contains "does not count the remote branch as a hit" "remote branch: origin/jason/kyo-299-old-numbering"
+assert_contains "verdict is CLEAR" "RESULT: CLEAR"
+echo
+
+# ─── Test 33: the same classification reaches checks 3 and 4 ────────────────
+# The pre-restart decision can only be made by check 2 (PRs carry the date),
+# so checks 1/3/4 read it out of RECYCLED_BRANCHES. Test 32 covered check 1;
+# this covers the local worktree (check 3) and local branch (check 4) a
+# retired-numbering run can leave behind on a machine. Both entries are
+# expected — before the fix they were two separate HITS, and classifying
+# rather than suppressing keeps the entry count identical.
+echo "-- Test 33: pre-restart classification reaches the local worktree and branch checks"
+t33="$tmpdir/t33"
+mkdir -p "$t33"
+bare33="$(new_bare_remote "$t33/remote.git")"
+seed_main "$bare33"
+clone_repo "$bare33" "$t33/workerB"
+git -C "$t33/workerB" worktree add -q -b jason/kyo-299-old-numbering "$t33/wt-old"
+gh_ok_prs "$(pr_row 37 MERGED "$PRE_RESTART_TS" jason/kyo-299-old-numbering)"
+run_check "$t33/workerB" 299
+assert_exit "a local worktree and branch for a pre-restart key are CLEAR" 0
+assert_contains "reports the worktree as pre-restart" "local worktree $t33/wt-old (branch jason/kyo-299-old-numbering)"
+assert_contains "reports the local branch as pre-restart" "local branch jason/kyo-299-old-numbering"
+assert_not_contains "does not count the worktree as a hit" "local worktree at $t33/wt-old"
+assert_not_contains "does not count the local branch as a hit" "local branch: jason/kyo-299-old-numbering"
+echo
+
+# ─── Test 34: THE PRECISION TEST — the real KYO-293/294 shape ──────────────
+# Keys 293 and 294 have BOTH a pre-restart PR (#5, #36) and a legitimate
+# current-numbering PR from August (#321, #322). The fix must drop the old one
+# and keep the new one. A fix that keyed off "this ticket number is one of the
+# nine" — or off anything coarser than the individual PR's date — would wrongly
+# clear these, which is the failure mode this test exists to catch.
+echo "-- Test 34: pre-restart AND current-numbering PRs on one key (KYO-293/294 shape)"
+t34="$tmpdir/t34"
+mkdir -p "$t34"
+bare34="$(new_bare_remote "$t34/remote.git")"
+seed_main "$bare34"
+clone_repo "$bare34" "$t34/workerB"
+gh_ok_prs \
+    "$(pr_row 5 MERGED "$PRE_RESTART_TS" jason/kyo-293-old-numbering)" \
+    "$(pr_row 321 OPEN "$POST_RESTART_TS" jason/kyo-293-real-work)"
+run_check "$t34/workerB" 293
+assert_exit "the current-numbering PR still blocks the ticket" 1
+assert_contains "lists ONLY the current-numbering PR as a hit" "  - PR #321 (OPEN) branch jason/kyo-293-real-work"
+assert_contains "still reports the pre-restart PR, classified" "PR #5 (MERGED) branch jason/kyo-293-old-numbering — created $PRE_RESTART_TS"
+assert_not_contains "does not count the pre-restart PR as a hit" "  - PR #5 (MERGED)"
+echo
+
+# ─── Test 35: a post-cutoff PR alone is unchanged; the boundary is exclusive ─
+# Guards against over-broad matching in the other direction: nothing about
+# this change may relax the gate for a current-numbering PR. Run three ways
+# from one fixture — a PR safely after the cutoff, a PR created at EXACTLY the
+# cutoff instant (the comparison is strictly-before, so this is NOT
+# pre-restart), and the same PR under an overridden cutoff that puts it in the
+# past. The third is the positive control: it proves KEY_RESTART_CUTOFF is
+# genuinely what the classification reads.
+echo "-- Test 35: post-cutoff PR alone still blocks; cutoff boundary is exclusive"
+t35="$tmpdir/t35"
+mkdir -p "$t35"
+bare35="$(new_bare_remote "$t35/remote.git")"
+seed_main "$bare35"
+clone_repo "$bare35" "$t35/workerB"
+gh_ok_prs "$(pr_row 321 OPEN "$POST_RESTART_TS" jason/kyo-299-real-work)"
+run_check "$t35/workerB" 299
+assert_exit "a post-cutoff PR alone is IN FLIGHT, unchanged" 1
+assert_not_contains "nothing is classified as pre-restart" "$RECYCLED_HEADING"
+
+gh_ok_prs "$(pr_row 322 OPEN '2026-05-12T00:00:00Z' jason/kyo-299-exactly-at-cutoff)"
+run_check "$t35/workerB" 299
+assert_exit "a PR created exactly AT the cutoff is not pre-restart" 1
+assert_contains "counts the at-cutoff PR as a hit" "  - PR #322 (OPEN) branch jason/kyo-299-exactly-at-cutoff"
+
+gh_ok_prs "$(pr_row 321 OPEN "$POST_RESTART_TS" jason/kyo-299-real-work)"
+KEY_RESTART_CUTOFF='2026-09-01T00:00:00Z' run_check "$t35/workerB" 299
+assert_exit "the same PR IS pre-restart under a later cutoff override" 0
+assert_contains "names the overridden cutoff it was compared against" "before the 2026-09-01T00:00:00Z key restart"
+echo
+
+# ─── Test 36: fail-closed — gh broken while a pre-restart branch exists ─────
+# The whole classification depends on check 2 having succeeded. If `gh` fails,
+# RECYCLED_BRANCHES is empty, so the remote branch stays a HIT and FAILURES
+# forces exit 3 exactly as before. A broken PR listing must never launder a
+# branch into "recycled" (KYO-511's rule, unchanged by KYO-607).
+echo "-- Test 36: fail closed — a failing gh cannot launder a branch into pre-restart"
+t36="$tmpdir/t36"
+mkdir -p "$t36"
+bare36="$(new_bare_remote "$t36/remote.git")"
+seed_main "$bare36"
+clone_repo "$bare36" "$t36/helper"
+git -C "$t36/helper" push -q origin main:refs/heads/jason/kyo-299-old-numbering
+clone_repo "$bare36" "$t36/workerB"
+gh_fail "gh: authentication required (stub failure)"
+run_check "$t36/workerB" 299
+assert_exit "a failing gh with a pre-restart remote branch present still exits 3" 3
+assert_not_contains "classifies nothing as pre-restart" "$RECYCLED_HEADING"
+gh_ok_empty
+echo
+
+# ─── Test 37: a malformed KEY_RESTART_CUTOFF is a usage error ──────────────
+# The ordering compare is only valid between two strings of the canonical
+# `gh` shape. A cutoff that isn't one cannot be compared safely, and silently
+# continuing would classify either every PR or no PR as pre-restart — so it
+# exits 2 rather than guessing.
+echo "-- Test 37: malformed KEY_RESTART_CUTOFF is a usage error"
+t37="$tmpdir/t37"
+mkdir -p "$t37"
+bare37="$(new_bare_remote "$t37/remote.git")"
+seed_main "$bare37"
+clone_repo "$bare37" "$t37/workerB"
+gh_ok_empty
+for bad in "not-a-timestamp" "2026-05-12" "2026-05-12T00:00:00+00:00" "2026-05-12T00:00:00.000Z" "26-05-12T00:00:00Z" "2026-13-99T00:00:00Z junk"; do
+    KEY_RESTART_CUTOFF="$bad" run_check "$t37/workerB" 299
+    assert_exit "KEY_RESTART_CUTOFF='$bad' is a usage error" 2
+done
+# An EXPLICITLY EMPTY override is not an error — it falls back to the built-in
+# default, the same `${VAR:-default}` semantics PR_LIST_LIMIT already has.
+# Pinned so the distinction between "unset/empty" and "set to nonsense" can't
+# be lost in a later refactor.
+KEY_RESTART_CUTOFF="" run_check "$t37/workerB" 299
+assert_exit "an empty KEY_RESTART_CUTOFF falls back to the default, not an error" 0
+echo
+
+# ─── Test 38: an unreadable createdAt fails CLOSED, not open ───────────────
+# The asymmetry from the header applies here too: a false "clear" costs a
+# duplicate implementation, a false "in flight" costs one work cycle. So a PR
+# row whose date cannot be read is treated as NOT pre-restart and keeps
+# blocking. Covers both an empty createdAt and a non-empty but unparseable
+# one.
+echo "-- Test 38: a PR with an empty or unparseable createdAt still blocks"
+t38="$tmpdir/t38"
+mkdir -p "$t38"
+bare38="$(new_bare_remote "$t38/remote.git")"
+seed_main "$bare38"
+clone_repo "$bare38" "$t38/workerB"
+gh_ok_prs "$(pr_row 39 MERGED '' jason/kyo-299-no-date)"
+run_check "$t38/workerB" 299
+assert_exit "an empty createdAt is not pre-restart — it stays a hit" 1
+assert_contains "counts it as a hit" "  - PR #39 (MERGED) branch jason/kyo-299-no-date"
+assert_not_contains "does not classify it as pre-restart" "$RECYCLED_HEADING"
+
+gh_ok_prs "$(pr_row 40 MERGED 'yesterday' jason/kyo-299-junk-date)"
+run_check "$t38/workerB" 299
+assert_exit "an unparseable createdAt is not pre-restart — it stays a hit" 1
+assert_contains "counts it as a hit" "  - PR #40 (MERGED) branch jason/kyo-299-junk-date"
+assert_not_contains "does not classify it as pre-restart" "$RECYCLED_HEADING"
+gh_ok_empty
+echo
+
+# ─── Test 39: a PR row that cannot be split into four fields exits 3 ────────
+# The reason check 2 stopped splitting rows with `IFS=$'\t' read` (KYO-607):
+# tab is an IFS *whitespace* character, so that form collapses `a\tb\t\td` to
+# three fields and silently moved the branch name into the createdAt slot,
+# skipping the PR entirely — a fail-OPEN. The row-splitting is now exact, and
+# a row it genuinely cannot read is a check it could not complete, so it exits
+# 3 like any other incomplete check rather than being skipped.
+#
+# Test 38's empty-createdAt row is the one that used to hit this path by
+# accident; the rows here are short and long by construction. Both use a
+# BRANCH THAT MATCHES the ticket where a branch is present, so an
+# implementation that skipped the row would report CLEAR — the fail-open this
+# pins shut.
+echo "-- Test 39: an unreadable PR row exits 3, it is not skipped"
+t39="$tmpdir/t39"
+mkdir -p "$t39"
+bare39="$(new_bare_remote "$t39/remote.git")"
+seed_main "$bare39"
+clone_repo "$bare39" "$t39/workerB"
+gh_ok_prs "$(printf '41\tMERGED\tjason/kyo-299-three-fields-only')"
+run_check "$t39/workerB" 299
+assert_exit "a three-field row is a check that could not be completed" 3
+assert_contains "says which row it could not read" "could not read row"
+
+gh_ok_prs "$(printf '42\tMERGED\t%s\tjason/kyo-299-extra\tstray' "$POST_RESTART_TS")"
+run_check "$t39/workerB" 299
+assert_exit "a five-field row is a check that could not be completed" 3
+
+gh_ok_prs "$(pr_row 43 MERGED "$POST_RESTART_TS" '')"
+run_check "$t39/workerB" 299
+assert_exit "a row with an empty headRefName is a check that could not be completed" 3
 gh_ok_empty
 echo
 
