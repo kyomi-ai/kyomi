@@ -13,6 +13,15 @@
 # double-pickup (worker A pushes, worker B — a separate, untouched clone —
 # checks before starting and is told no).
 #
+# Tests 26-31 (KYO-593) cover `--self`, the cwd-independent self-exclusion
+# flag: a worker running the pre-review call from outside its own worktree
+# (cwd on `main` in the canonical clone, its implementation living in a
+# linked worktree) previously had its own finished work reported IN FLIGHT
+# and abandoned it as a lost race (KYO-291, 2026-09-02). Test 26 reproduces
+# that symptom from a single fixture and then shows `--self` fixes it from
+# the exact same fixture, so the fix — not an unrelated setup change — is
+# what flips the verdict.
+#
 # Exit 0 = all pass, exit 1 = any failure.
 # ------------------------------------------------------------------------------
 
@@ -646,6 +655,119 @@ assert_contains "names the stranded ref it wrote" "remote branch origin/stranded
 echo
 
 gh_ok_empty
+
+# ─── Tests 26-31: `--self` cwd-independent self-exclusion (KYO-593) ─────────
+#
+# Test 26 is the KYO-593 acceptance criterion, built as ONE fixture exercised
+# twice: first without --self (reproducing the bug's original symptom —
+# pins that the fixture really does reproduce cwd-dependence), then with
+# --self against the identical, unmodified fixture (proving the flag, not a
+# setup difference, is what flips the verdict to CLEAR). Test 27 then adds a
+# second worker's worktree to the SAME fixture and shows duplicate detection
+# still fires even with --self set, which is the property that makes --self
+# safe to ship: it excludes nothing beyond the one branch it is told about.
+
+# ─── Test 26: cwd-independence — the bug reproduced, then fixed by --self ──
+echo "-- Test 26: --self makes the check cwd-independent (KYO-593 acceptance criterion)"
+t26="$tmpdir/t26"
+mkdir -p "$t26"
+bare26="$(new_bare_remote "$t26/remote.git")"
+seed_main "$bare26"
+clone_repo "$bare26" "$t26/canonical"
+# The caller's own ticket work lives in a LINKED WORKTREE, not in
+# $t26/canonical itself. $t26/canonical stays on "main" throughout this
+# test — simulating a caller whose shell cwd is the canonical clone while
+# its own finished implementation lives in a worktree elsewhere. That is
+# the exact KYO-593 shape: CURRENT_BRANCH resolves to "main" (already
+# discarded by the script) rather than to the caller's own branch, so cwd-
+# derived self-exclusion contributes nothing here.
+git -C "$t26/canonical" worktree add -q -b jason/kyo-422-ownwork "$t26/wt-own"
+echo "own work" >>"$t26/wt-own/README.md"
+git -C "$t26/wt-own" commit -q -am "own work for KYO-422"
+gh_ok_empty
+
+# Without --self: reproduces the original bug from this exact fixture.
+run_check "$t26/canonical" 422
+assert_exit "without --self, cwd-dependence reproduces the bug: own worktree reported IN FLIGHT" 1
+assert_contains "names the caller's own worktree as a hit" "local worktree at $t26/wt-own (branch jason/kyo-422-ownwork)"
+# The HINT is the only thing that tells a human reader this verdict may be
+# about their own work. It is advisory — it changes no exit code and no
+# hit/tombstone classification — but it is the signpost out of the KYO-593
+# trap, so it is asserted in both directions: present here, and absent in
+# test 27 where --self was passed and the hint would be wrong.
+assert_contains "prints the --self HINT when --self was not passed" "HINT: if one of the above is your own branch"
+
+# Same fixture, unmodified — only the flag differs.
+run_check "$t26/canonical" 422 --self jason/kyo-422-ownwork
+assert_exit "--self jason/kyo-422-ownwork makes it CLEAR from the same cwd" 0
+assert_not_contains "does not name the caller's own worktree" "$t26/wt-own"
+echo
+
+# ─── Test 27: duplicate detection survives --self ────────────────────────
+echo "-- Test 27: --self does not blind the check to a genuine second worker"
+# Builds on test 26's fixture: a second worktree/branch for the SAME ticket
+# appears, belonging to another worker. This is the criterion that proves
+# the fix did not weaken the check the script exists for — --self excludes
+# only the one branch it names.
+git -C "$t26/canonical" worktree add -q -b jason/kyo-422-otherworker "$t26/wt-other"
+echo "other worker's work" >>"$t26/wt-other/README.md"
+git -C "$t26/wt-other" commit -q -am "other worker's work for KYO-422"
+run_check "$t26/canonical" 422 --self jason/kyo-422-ownwork
+assert_exit "a second worker's worktree for the same ticket still blocks, even with --self" 1
+assert_contains "names the other worker's worktree" "local worktree at $t26/wt-other (branch jason/kyo-422-otherworker)"
+assert_not_contains "still does not name the caller's own worktree" "$t26/wt-own"
+assert_not_contains "suppresses the --self HINT when --self was already passed" "HINT: if one of the above is your own branch"
+echo
+
+# ─── Test 28: --self naming a branch that doesn't match the ticket ─────────
+echo "-- Test 28: --self naming a branch that doesn't match the ticket is a usage error"
+t28="$tmpdir/t28"
+mkdir -p "$t28"
+bare28="$(new_bare_remote "$t28/remote.git")"
+seed_main "$bare28"
+clone_repo "$bare28" "$t28/workerB"
+gh_ok_empty
+run_check "$t28/workerB" 422 --self jason/kyo-999-unrelated
+assert_exit "--self naming a branch for a different ticket is a usage error" 2
+echo
+
+# ─── Test 29: --self passed twice ────────────────────────────────────────
+echo "-- Test 29: --self passed twice is a usage error"
+t29="$tmpdir/t29"
+mkdir -p "$t29"
+bare29="$(new_bare_remote "$t29/remote.git")"
+seed_main "$bare29"
+clone_repo "$bare29" "$t29/workerB"
+gh_ok_empty
+run_check "$t29/workerB" 422 --self jason/kyo-422-a --self jason/kyo-422-b
+assert_exit "a second --self is a usage error" 2
+echo
+
+# ─── Test 30: --self with no following value ────────────────────────────
+echo "-- Test 30: --self with no value is a usage error"
+t30="$tmpdir/t30"
+mkdir -p "$t30"
+bare30="$(new_bare_remote "$t30/remote.git")"
+seed_main "$bare30"
+clone_repo "$bare30" "$t30/workerB"
+gh_ok_empty
+run_check "$t30/workerB" 422 --self
+assert_exit "--self with no following value is a usage error" 2
+echo
+
+# ─── Test 31: fail-closed preserved — --self must not turn exit 3 into 0 ──
+echo "-- Test 31: --self must not turn a fail-closed exit 3 into exit 0"
+t31="$tmpdir/t31"
+mkdir -p "$t31"
+bare31="$(new_bare_remote "$t31/remote.git")"
+seed_main "$bare31"
+clone_repo "$bare31" "$t31/canonical"
+git -C "$t31/canonical" worktree add -q -b jason/kyo-422-ownwork "$t31/wt-own"
+gh_fail "gh: authentication required (stub failure)"
+run_check "$t31/canonical" 422 --self jason/kyo-422-ownwork
+assert_exit "a failing gh still exits 3 even with --self naming the caller's own branch" 3
+gh_ok_empty
+echo
 
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

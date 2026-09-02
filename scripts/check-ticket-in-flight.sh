@@ -98,7 +98,7 @@
 # that already walks the one captured fetch — one `gh` call, and no pipe into
 # `wc -l`, per the rule above.
 #
-# SELF-EXCLUSION
+# SELF-EXCLUSION (KYO-593 — READ THIS BEFORE "FIXING" IT BACK)
 #
 # The script is meant to be called twice per ticket lifecycle (see
 # scripts/README.md) — once at pickup, once again right before dispatching
@@ -106,7 +106,51 @@
 # it must not count as "someone else". Excluded, by exact short-name match:
 #   - the branch checked out in the invoking worktree right now (unless
 #     detached HEAD, or `main` — nobody's ticket branch is ever `main`)
+#   - the branch named by `--self <branch>`, if given (see below)
 #   - every `--ignore-branch <name>` passed on the command line
+#
+# THE CWD-DERIVED EXCLUSION ALONE IS NOT ENOUGH FOR THE SECOND CALL. At
+# pickup, cwd is the canonical clone the worker claims the ticket from, so
+# `git rev-parse --abbrev-ref HEAD` correctly resolves to the worker's own
+# branch. But the skill's second call happens right before dispatching code
+# review, by which point the implementation may live in a worktree while the
+# caller's shell is still sitting in the canonical clone (or the reverse). In
+# that shape `CURRENT_BRANCH` resolves to whatever happens to be checked out
+# where the *command* runs — often `main`, which this script already
+# discards as never being anyone's ticket branch — and the caller's own,
+# fully-staged branch is then reported as somebody else's in-flight work.
+# Observed live on the KYO-291 run, 2026-09-02: the script exited 1 naming
+# the caller's own worktree; the skill's documented response to a non-zero
+# exit here is "stop, do not dispatch the reviewer, treat it as a lost
+# race"; a finished, staged implementation was abandoned chasing a collision
+# that didn't exist.
+#
+# `--self <branch>` is the fix: it lets a caller name its own ticket branch
+# explicitly, so self-exclusion no longer depends on which directory the
+# check happens to run from. Passing it makes the check cwd-independent;
+# omitting it preserves the cwd-derived behavior above unchanged, so a
+# caller that genuinely does run from its own worktree needs no flag at all.
+#
+# `--self` IS VALIDATED; `--ignore-branch` IS NOT — DELIBERATE, NOT AN
+# OVERSIGHT. `--self` adds no new suppression power over what
+# `CURRENT_BRANCH` / `--ignore-branch` already have — it only changes *how*
+# the caller's own branch is identified. But "my own branch" is a narrow,
+# checkable claim, so it is run through the same `matches_ticket` gate every
+# other candidate branch in this script is: the value MUST match KYO-<N>, or
+# the script exits 2 rather than silently accepting it. Skipping that check
+# would turn `--self` into an unvalidated silencer indistinguishable from
+# tampering — a caller (or a bug upstream of the caller) could point it at a
+# genuine competitor's branch and suppress a real collision. `--ignore-branch`
+# stays deliberately unvalidated: it is the operator escape hatch, used by a
+# human who already knows what they are suppressing and why, not a claim the
+# script can or should be checking on their behalf. Do not add validation to
+# `--ignore-branch`, and do not remove it from `--self`.
+#
+# `--self`'s value is captured during argument parsing but validated only
+# after the ticket number is normalized, because `matches_ticket` depends on
+# `SLUG_HYPHEN`/`SLUG_BARE`, which do not exist yet at parse time. Do not
+# move the slug computation earlier just to validate inline in the parse
+# loop — validate right after `matches_ticket` is defined instead.
 #
 # STRANDED-WORKTREE TOMBSTONES (KYO-529) — READ THIS BEFORE "FIXING" IT BACK
 #
@@ -200,10 +244,13 @@
 #
 # USAGE
 #
-#   check-ticket-in-flight.sh <TICKET> [--remote <name>] [--ignore-branch <name>]...
+#   check-ticket-in-flight.sh <TICKET> [--remote <name>] [--ignore-branch <name>]... [--self <branch>]
 #
 #   TICKET is KYO-422, kyo-422, or 422 — all equivalent.
 #   --remote defaults to origin. --ignore-branch is repeatable.
+#   --self <branch> names the caller's own ticket branch explicitly, so
+#   self-exclusion no longer depends on cwd (KYO-593 — see SELF-EXCLUSION
+#   above). Validated against the ticket; may be given at most once.
 #
 # EXIT CODES
 #
@@ -212,11 +259,17 @@
 #       a hit, but the path is worth a look for salvageable work.
 #   1 — work in flight found (remote branch, PR, local worktree, or local
 #       branch, matched and not excluded — an untombstoned local worktree
-#       hit counts here too). Do not claim.
-#   2 — usage error (missing/unparseable ticket argument, unknown flag).
+#       hit counts here too). Do not claim. If no --self was given, the
+#       verdict block adds a one-line HINT to try --self (KYO-593) — a
+#       message only, it changes no exit code or classification.
+#   2 — usage error (missing/unparseable ticket argument, unknown flag,
+#       --self given more than once, --self with no value, or a --self
+#       value that does not match the ticket — see SELF-EXCLUSION above).
 #   3 — a check could not be completed (remote unreachable, `gh` missing or
 #       failing, or the PR listing came back at PR_LIST_LIMIT rows and may
 #       therefore be truncated). Treat exactly like exit 1: do not claim.
+#       --self never turns this into exit 0 — the FAILURES check still runs
+#       before the HITS check, unchanged.
 #
 # Pure bash + git + gh. No Rust toolchain, no jq binary — the one JSON
 # extraction needed (from `gh pr list`) uses gh's own built-in `--jq`, since
@@ -245,11 +298,14 @@ PR_LIST_LIMIT="${PR_LIST_LIMIT:-500}"
 
 usage() {
     cat >&2 <<EOF
-Usage: $SCRIPT_NAME <TICKET> [--remote <name>] [--ignore-branch <name>]...
+Usage: $SCRIPT_NAME <TICKET> [--remote <name>] [--ignore-branch <name>]... [--self <branch>]
 
   TICKET                   KYO-422, kyo-422, or 422 (all equivalent)
   --remote <name>          remote to check (default: origin)
   --ignore-branch <name>   branch to exclude from matching (repeatable)
+  --self <branch>          the caller's own ticket branch, excluded from
+                           matching like --ignore-branch, but validated
+                           against TICKET (must be given at most once)
 
 Environment:
   PR_LIST_LIMIT            how many PRs to fetch (default: 500). Must exceed
@@ -259,7 +315,8 @@ Environment:
 Exit codes:
   0  clear — nothing in flight (the only code that permits claiming)
   1  work in flight found — do not claim
-  2  usage error
+  2  usage error (including --self given twice, with no value, or naming a
+     branch that doesn't match TICKET)
   3  a check could not be completed (including a possibly-truncated PR
      listing) — treat like exit 1, do not claim
 EOF
@@ -282,6 +339,8 @@ shift
 
 REMOTE="origin"
 declare -a IGNORE_BRANCHES=()
+SELF_BRANCH=""
+SELF_BRANCH_SET=""
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -299,6 +358,19 @@ while [ "$#" -gt 0 ]; do
                 exit 2
             fi
             IGNORE_BRANCHES+=("$2")
+            shift 2
+            ;;
+        --self)
+            if [ "$#" -lt 2 ]; then
+                echo "ERROR: --self requires a value" >&2
+                exit 2
+            fi
+            if [ -n "$SELF_BRANCH_SET" ]; then
+                echo "ERROR: --self may only be given once (already set to '$SELF_BRANCH')" >&2
+                exit 2
+            fi
+            SELF_BRANCH="$2"
+            SELF_BRANCH_SET=1
             shift 2
             ;;
         *)
@@ -338,6 +410,18 @@ matches_ticket() {
     return 1
 }
 
+# ---- --self validation (KYO-593 — see SELF-EXCLUSION in the header) --------
+# Deferred to here, rather than validated inline in the parse loop above,
+# because matches_ticket needs SLUG_HYPHEN/SLUG_BARE, which do not exist
+# until the ticket argument has been normalized (just above). --self is
+# validated (unlike --ignore-branch) because it claims a narrow, checkable
+# fact — "this is MY branch for THIS ticket" — and an unvalidated --self
+# would be an unvalidated silencer for a genuine competitor's branch.
+if [ -n "$SELF_BRANCH_SET" ] && ! matches_ticket "$SELF_BRANCH"; then
+    echo "ERROR: --self '$SELF_BRANCH' does not look like a branch for KYO-${ticket_num} (expected it to contain '${SLUG_HYPHEN}' or end in '${SLUG_BARE}')" >&2
+    exit 2
+fi
+
 # ---- tombstone detection (KYO-529 — see the header section above) ----------
 # tombstone_names_ticket <marker_file> — true iff the file exists, is a
 # readable regular file, and its content names THIS ticket: `kyo-<N>`,
@@ -363,6 +447,9 @@ CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)"
 declare -a EXCLUDE=()
 if [ "$CURRENT_BRANCH" != "HEAD" ] && [ "$CURRENT_BRANCH" != "main" ]; then
     EXCLUDE+=("$CURRENT_BRANCH")
+fi
+if [ -n "$SELF_BRANCH_SET" ]; then
+    EXCLUDE+=("$SELF_BRANCH")
 fi
 if [ "${#IGNORE_BRANCHES[@]}" -gt 0 ]; then
     EXCLUDE+=("${IGNORE_BRANCHES[@]}")
@@ -549,6 +636,13 @@ if [ "${#HITS[@]}" -gt 0 ]; then
     for h in "${HITS[@]}"; do
         echo "  - $h"
     done
+    # KYO-593: a message only — never changes the exit code or which entries
+    # landed in HITS above. Only shown when the caller didn't already tell us
+    # its own branch, since --self is exactly the fix this is pointing at.
+    if [ -z "$SELF_BRANCH_SET" ]; then
+        echo "  HINT: if one of the above is your own branch, you are probably running this"
+        echo "        from outside your worktree — re-run with --self <your-branch>."
+    fi
     exit 1
 fi
 

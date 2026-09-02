@@ -72,7 +72,7 @@ All scripts are organized by environment. **Every script is environment-specific
   immediately before dispatching code review — the second call is what
   catches two workers who were both already past the claim point when
   they started, which is exactly how KYO-416 happened. Usage:
-  `scripts/check-ticket-in-flight.sh <TICKET> [--remote <name>] [--ignore-branch <name>]...`,
+  `scripts/check-ticket-in-flight.sh <TICKET> [--remote <name>] [--ignore-branch <name>]... [--self <branch>]`,
   where `TICKET` is `KYO-422`, `kyo-422`, or `422` (equivalent). **Exit-code
   contract:** `0` — clear, **the only code that permits claiming the
   ticket**; `1` — work in flight found, do not claim; `2` — usage error;
@@ -85,6 +85,25 @@ All scripts are organized by environment. **Every script is environment-specific
   `500`, must exceed the repo's total PR count — it was 411 on 2026-08-24);
   raising it is the fix when the truncation guard trips, and the guard is
   why raising it is a deliberate act rather than a silently wrong answer.
+  **`--self <branch>` makes self-exclusion cwd-independent (KYO-593):** the
+  script's default self-exclusion is derived from
+  `git rev-parse --abbrev-ref HEAD` in the invoking shell's cwd, which is
+  right at pickup (cwd is the canonical clone the worker claims the ticket
+  from) but wrong for the pre-review call if the caller's implementation by
+  then lives in a worktree while its shell is still sitting elsewhere —
+  cwd-derived exclusion then resolves to the wrong branch (often `main`,
+  which the script already discards) and the caller's own finished work
+  reads as somebody else's. `--self <branch>` names the caller's own ticket
+  branch explicitly instead of inferring it from cwd, so the check works
+  from any directory. Unlike `--ignore-branch`, which is an unvalidated
+  operator escape hatch, `--self` **is validated** against the ticket
+  (`matches_ticket`, exit `2` if it doesn't match) — it changes only *how*
+  the caller's own branch is identified, never adding suppression power
+  `--ignore-branch` doesn't already have, so it cannot become a silencer for
+  a genuine competitor's branch. **Operational rule:** the pickup call needs
+  no flag (cwd-derived exclusion is correct there); the pre-review call
+  should pass `--self "$BRANCH"` so it works regardless of which directory
+  it happens to run from.
   **Honours `STRANDED.md` tombstones (KYO-529):** the local-worktree check
   and the local-branch check for /backlog-fast Step 0.5's stranded-claim
   recovery deadlocked each other — Step 0.5 deliberately preserves a dead
@@ -113,8 +132,11 @@ All scripts are organized by environment. **Every script is environment-specific
   has one. Self-tested by `scripts/check-ticket-in-flight-test.sh`,
   including a real simulated double-pickup against a throwaway bare git
   remote (the KYO-422 acceptance criterion), real `git worktree add`
-  fixtures for the `STRANDED.md` cases, and an interop check that a ref
-  `mark-branch-stranded.sh` actually created is honoured here.
+  fixtures for the `STRANDED.md` cases, an interop check that a ref
+  `mark-branch-stranded.sh` actually created is honoured here, and (KYO-593)
+  a fixture that reproduces the cwd-dependence bug from a checkout sitting
+  on `main` and shows `--self` clears it while a second worker's worktree
+  for the same ticket still blocks.
 
 - **`mark-worktree-stranded.sh`** - The writer side of the KYO-529 tombstone
   above: writes `STRANDED.md` at a preserved worktree's root so
