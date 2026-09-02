@@ -128,6 +128,38 @@ fn format_date(date_str: &str) -> String {
     }
 }
 
+/// Sentinel IP value produced by `kyomi_auth::request_meta::extract_client_ip`
+/// when no IP can be determined from headers or the TCP peer address. That
+/// crate is `ssr`-gated and unavailable to the wasm32 build this module also
+/// compiles for, so the value is duplicated here as a named constant rather
+/// than imported — see KYO-276.
+///
+/// This is deliberately an *extraction-layer* sentinel: it exists so
+/// rate-limiting always has an infallible bucket key, not to be shown to a
+/// user. `location_label` is the display boundary that must treat it as
+/// absent.
+const UNKNOWN_IP_SENTINEL: &str = "unknown";
+
+/// Build the "Location" column string for a session row from its stored
+/// IP address and country code.
+///
+/// Matches the React `SessionManagement.jsx` display logic: an IP with a
+/// resolved country code renders as `"1.2.3.4 (US)"`, an IP alone renders
+/// bare, and a missing IP renders as an em dash.
+///
+/// Filtering `UNKNOWN_IP_SENTINEL` is an *intentional divergence* from the
+/// React original, which rendered the sentinel verbatim — that was the
+/// KYO-276 bug. Do not "restore" parity on that clause. A country code must
+/// never resurrect the sentinel into a half-real-looking location.
+fn location_label(ip: Option<&str>, country: Option<&str>) -> String {
+    let ip = ip.filter(|ip| *ip != UNKNOWN_IP_SENTINEL);
+    match (ip, country) {
+        (Some(ip), Some(cc)) => format!("{ip} ({cc})"),
+        (Some(ip), None) => ip.to_string(),
+        _ => "\u{2014}".to_string(), // em dash
+    }
+}
+
 /// Session Management component.
 ///
 /// Loads active sessions on mount. Users can refresh, revoke individual
@@ -429,11 +461,7 @@ fn SessionRow(
         .unwrap_or(false);
 
     // Location display
-    let location = match (&session.ip_address, &session.country_code) {
-        (Some(ip), Some(cc)) => format!("{ip} ({cc})"),
-        (Some(ip), None) => ip.clone(),
-        _ => "\u{2014}".to_string(), // em dash
-    };
+    let location = location_label(session.ip_address.as_deref(), session.country_code.as_deref());
 
     // Date formatting
     let last_active = session
@@ -535,5 +563,70 @@ fn SessionRow(
                 })}
             </td>
         </tr>
+    }
+}
+
+// `location_label` is a pure function (no reactive graph, no I/O), so it runs
+// under plain `#[cfg(test)]` — same convention as `format_uuid_v4` in
+// `pages/chat/chat_page.rs` and the memoized-signal tests in
+// `pages/settings/team.rs`. Unlike the server_fns tests in this crate, this
+// does NOT need `--features ssr`: nothing here touches a DB pool, an axum
+// handler, or the Leptos reactive graph.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_ip_sentinel_renders_as_em_dash() {
+        assert_eq!(location_label(Some("unknown"), None), "\u{2014}");
+    }
+
+    #[test]
+    fn unknown_ip_sentinel_with_country_code_still_renders_as_em_dash() {
+        // A country header (e.g. `cf-ipcountry`) can resolve even when the
+        // IP itself could not be determined — the sentinel must win, not
+        // get papered over by a real-looking country code.
+        assert_eq!(location_label(Some("unknown"), Some("US")), "\u{2014}");
+    }
+
+    #[test]
+    fn real_ip_with_country_code_renders_both() {
+        assert_eq!(location_label(Some("1.2.3.4"), Some("US")), "1.2.3.4 (US)");
+    }
+
+    #[test]
+    fn real_ip_without_country_code_renders_ip_alone() {
+        assert_eq!(location_label(Some("1.2.3.4"), None), "1.2.3.4");
+    }
+
+    #[test]
+    fn missing_ip_renders_as_em_dash() {
+        assert_eq!(location_label(None, None), "\u{2014}");
+        assert_eq!(location_label(None, Some("US")), "\u{2014}");
+    }
+}
+
+/// Pins this module's copy of the extraction-layer sentinel against the
+/// producer in `kyomi-auth`. The constant is duplicated across a crate
+/// boundary out of necessity (see `UNKNOWN_IP_SENTINEL`), and a doc comment
+/// is not enforcement: `kyomi-auth`'s own test pins the value *within* that
+/// crate, so changing it there goes green after a single in-place edit and
+/// gives no signal that this second copy exists. Without this test the
+/// KYO-276 bug returns silently.
+///
+/// `ssr`-gated because that is what makes `axum::http::HeaderMap` nameable.
+/// `kyomi-auth` is an unconditional dev-dependency, and dev-dependencies
+/// never enter the wasm32 lib build, so the client build is unaffected.
+#[cfg(all(test, feature = "ssr"))]
+mod sentinel_agreement {
+    use super::UNKNOWN_IP_SENTINEL;
+    use axum::http::HeaderMap;
+
+    #[test]
+    fn sentinel_matches_extract_client_ip_fallback() {
+        assert_eq!(
+            kyomi_auth::request_meta::extract_client_ip(&HeaderMap::new(), None),
+            UNKNOWN_IP_SENTINEL,
+        );
     }
 }
