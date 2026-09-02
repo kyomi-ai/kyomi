@@ -20,6 +20,7 @@ use crate::components::select::Select;
 use crate::server_fns::context::UserContext;
 use crate::server_fns::team::*;
 use crate::types::{OwnershipTransferData, TeamInvitation, TeamMember};
+use crate::utils::permissions::use_permissions;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Ownership derivation (KYO-240)
@@ -163,6 +164,18 @@ fn TeamPageInner() -> impl IntoView {
     // `members`/`transfers` refetch). Without this, one stale
     // `UserContext` failure would re-log on every subsequent team action.
     let current_user_id = Memo::new(move |_| current_user_id_from(user_ctx.get()));
+
+    // ── Permission gate: Transfer Ownership button (KYO-231) ────────────
+    // `initiate_ownership_transfer` (server_fns/team.rs) requires
+    // `ac.require(Permission::TransferOwnership, ...)` server-side. Mirror
+    // that here via the canonical `use_permissions()` helper instead of
+    // re-deriving ownership from `members` — same pattern as
+    // `sql_editor/sidebar.rs`'s `can_refresh_catalog`. Backed by the shared
+    // `UserContext` resource provided by the parent Layout; this component
+    // already reads that same resource via `user_ctx` above, so
+    // `use_permissions` is safe here too.
+    let perms = use_permissions();
+    let can_transfer_ownership = Memo::new(move |_| perms.can(Permission::TransferOwnership));
 
     // Resources for members, invitations, transfers
     let (members_version, set_members_version) = signal(0u32);
@@ -433,12 +446,10 @@ fn TeamPageInner() -> impl IntoView {
                     </p>
                 </div>
                 <div class="flex gap-2 flex-shrink-0">
-                    // Transfer Ownership button — visible to owner only
+                    // Transfer Ownership button — visible only to holders of
+                    // TransferOwnership (KYO-231), read via `can_transfer_ownership`.
                     {move || {
-                        let current_user_id = current_user_id.get();
-                        let is_owner = is_owner_from(members.get(), &current_user_id);
-
-                        if is_owner {
+                        if can_transfer_ownership.get() {
                             view! {
                                 <Button
                                     variant=ButtonVariant::Outline
