@@ -392,6 +392,14 @@ jobs:
           # of silently reporting `ok` via the local skip path — see
           # crates/kyomi-auth/src/test_pg.rs module docs.
           KYOMI_REQUIRE_POSTGRES_TESTS: "1"
+          # KYO-257: apply_runtime_overrides() (kyomi-core/src/constants.rs)
+          # only enables HSTS when FRONTEND_URL starts with "https://". This
+          # value is never sent anywhere — it only feeds that starts_with()
+          # check and gets appended to the CORS allow-list — so a fake
+          # https:// host is fine here and lets
+          # apps/server/tests/contract_health.rs::has_hsts_header_when_not_demo
+          # run un-quarantined.
+          FRONTEND_URL: "https://ci-test.kyomi.invalid"
         run: cargo test --locked --workspace --lib --bins --tests --exclude kyomi-desktop --exclude kyomi-datasource-server
 
       # The step above passes explicit target flags (--lib --bins --tests),
