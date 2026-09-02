@@ -13,6 +13,7 @@
 //! - Stripe portal link ("Manage Billing")
 //! - Checkout redirect handling (checks URL params for ?checkout=success)
 
+use kyomi_types::Permission;
 use leptos::prelude::*;
 use phosphor_leptos::Icon;
 use crate::components::{
@@ -395,7 +396,7 @@ pub fn BillingPage() -> impl IntoView {
                             </Card>
                         }.into_any();
                     }
-                    if !ctx.is_owner {
+                    if !ctx.can(Permission::ManageBilling) {
                         let is_expired = matches!(
                             ctx.subscription_status.as_str(),
                             "past_due" | "cancelled" | "canceled" | "unpaid" | "incomplete_expired"

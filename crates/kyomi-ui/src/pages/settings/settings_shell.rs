@@ -103,8 +103,8 @@ fn visible_tabs(ctx: &UserContext) -> Vec<&'static str> {
         tabs.push("usage");
     }
 
-    // billing: owner only, billing enabled
-    if ctx.is_owner && ctx.billing_enabled {
+    // billing: requires ManageBilling (owner-only per permissions_for), billing enabled
+    if ctx.can(Permission::ManageBilling) && ctx.billing_enabled {
         tabs.push("billing");
     }
 
@@ -296,5 +296,22 @@ mod tests {
         // gates the datasources-page link and the analytics page itself.
         let tabs = visible_tabs(&ctx_with_billing(false, true, vec![]));
         assert!(!tabs.contains(&"analytics"), "expected no \"analytics\" tab for a member, got {tabs:?}");
+    }
+
+    #[test]
+    fn billing_tab_visible_with_manage_billing_permission() {
+        // KYO-231: the billing tab now gates on ManageBilling, not
+        // `is_owner` (the fixture's `is_owner` stays false throughout —
+        // this test pins the permission, not the flag).
+        let tabs = visible_tabs(&ctx_with_billing(false, true, vec![Permission::ManageBilling]));
+        assert!(tabs.contains(&"billing"), "expected \"billing\" tab with ManageBilling, got {tabs:?}");
+    }
+
+    #[test]
+    fn billing_tab_hidden_without_manage_billing_permission() {
+        // `billing_enabled` is true, so a false result here can only come
+        // from the permission check, not the capability flag.
+        let tabs = visible_tabs(&ctx_with_billing(false, true, vec![]));
+        assert!(!tabs.contains(&"billing"), "expected no \"billing\" tab without ManageBilling, got {tabs:?}");
     }
 }
