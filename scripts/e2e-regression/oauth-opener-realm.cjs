@@ -12,10 +12,13 @@
  * crates/kyomi-ui/src/utils/oauth_popup.rs are protecting against.
  *
  * Usage: NODE_PATH=<repo>/node_modules node scripts/e2e-regression/oauth-opener-realm.cjs
+ *
+ * Overrides (optional):
+ *   E2E_BASE_URL - app base URL (default http://localhost:3000)
  */
 const { chromium } = require('playwright');
 
-const BASE = process.env.KYOMI_BASE_URL || 'http://localhost:3000';
+const BASE = process.env.E2E_BASE_URL || 'http://localhost:3000';
 const results = [];
 const check = (name, pass, detail) => {
   results.push({ name, pass: !!pass });

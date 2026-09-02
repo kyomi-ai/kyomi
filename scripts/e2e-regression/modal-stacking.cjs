@@ -36,14 +36,21 @@
 //     NODE_PATH=/home/jason/repos/kyomi/node_modules \
 //         node scripts/e2e-regression/modal-stacking.cjs
 //
+// Overrides (all optional — defaults target local dev):
+//   E2E_BASE_URL        - app base URL          (default http://localhost:3000, or
+//                                                 http://localhost:$PORT if PORT is set)
+//   E2E_ADMIN_EMAIL     - admin login email     (default e2e-admin@kyomi.dev)
+//   E2E_ADMIN_PASSWORD  - admin login password  (default E2eAdminPass123!)
+//
 // Exits 0 when the feedback panel is topmost by both checks, 1 otherwise
 // (including when the DOM path to reproduce the scenario can't be found —
 // treated as inconclusive-and-failing, not silently skipped).
 
 const { chromium } = require('playwright');
 
-const PORT = process.env.PORT || '3000';
-const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
+const BASE_URL = process.env.E2E_BASE_URL || `http://localhost:${process.env.PORT || '3000'}`;
+const ADMIN_EMAIL = process.env.E2E_ADMIN_EMAIL || 'e2e-admin@kyomi.dev';
+const ADMIN_PASSWORD = process.env.E2E_ADMIN_PASSWORD || 'E2eAdminPass123!';
 const SCREENSHOT_PATH = '/tmp/kyo-434-modal-stacking.png';
 
 (async () => {
@@ -61,8 +68,8 @@ const SCREENSHOT_PATH = '/tmp/kyo-434-modal-stacking.png';
   try {
     // ── Auth + navigate to the scenario ──────────────────────────────────
     await page.goto(`${BASE_URL}/login`, { waitUntil: 'networkidle', timeout: 30000 });
-    await page.fill('input[type="email"]', 'e2e-admin@kyomi.dev', { timeout: 8000 });
-    await page.fill('input[type="password"]', 'E2eAdminPass123!', { timeout: 8000 });
+    await page.fill('input[type="email"]', ADMIN_EMAIL, { timeout: 8000 });
+    await page.fill('input[type="password"]', ADMIN_PASSWORD, { timeout: 8000 });
     await page.click('button[type="submit"]', { timeout: 8000 });
     await page.waitForURL((u) => !u.toString().includes('/login'), { timeout: 20000 });
 

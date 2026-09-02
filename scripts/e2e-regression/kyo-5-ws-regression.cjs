@@ -51,15 +51,29 @@
 //     NODE_PATH=/home/jason/repos/kyomi/node_modules \
 //         PORT=3204 \
 //         node scripts/e2e-regression/kyo-5-ws-regression.cjs
+//
+// Overrides (all optional):
+//   E2E_BASE_URL       - app base URL, takes precedence over PORT
+//                         (default http://localhost:3204, or http://localhost:$PORT
+//                          if PORT is set)
+//   E2E_TEST_EMAIL     - regular-user login email     (default e2e-test@kyomi.dev)
+//   E2E_TEST_PASSWORD  - regular-user login password  (default E2eTestPass123!)
+//   E2E_ADMIN_EMAIL    - admin login email            (default e2e-admin@kyomi.dev)
+//   E2E_ADMIN_PASSWORD - admin login password         (default E2eAdminPass123!)
 
 const { chromium } = require('playwright');
 
 // ── Config ────────────────────────────────────────────────────────────────
 
-const PORT = process.env.PORT || '3204';
-const BASE_URL = `http://localhost:${PORT}`;
-const PRIMARY_USER = { email: 'e2e-test@kyomi.dev', password: 'E2eTestPass123!' };
-const ADMIN_USER = { email: 'e2e-admin@kyomi.dev', password: 'E2eAdminPass123!' };
+const BASE_URL = process.env.E2E_BASE_URL || `http://localhost:${process.env.PORT || '3204'}`;
+const PRIMARY_USER = {
+    email: process.env.E2E_TEST_EMAIL || 'e2e-test@kyomi.dev',
+    password: process.env.E2E_TEST_PASSWORD || 'E2eTestPass123!',
+};
+const ADMIN_USER = {
+    email: process.env.E2E_ADMIN_EMAIL || 'e2e-admin@kyomi.dev',
+    password: process.env.E2E_ADMIN_PASSWORD || 'E2eAdminPass123!',
+};
 
 // Budget for "tab B sees the WS update after tab A mutation". Per the
 // acceptance criteria this must be within 2s.
