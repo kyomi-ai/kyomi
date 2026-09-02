@@ -28,6 +28,19 @@
 # implementation that is invisible to checks 1 and 2 — visible only in its
 # own worktree and local branch list.
 #
+# THOSE NUMBERS ARE THE CONCEPTUAL ORDER, NOT THE CODE ORDER (KYO-607). They
+# are used everywhere in this file, in scripts/README.md, and in both skill
+# files, so they are kept. But CHECK 2 PHYSICALLY RUNS FIRST below. It is the
+# only check that can see a PR's creation date, and therefore the only one
+# that can decide which branch names belong to the retired ticket-numbering
+# scheme (see RECYCLED TICKET KEYS below); checks 1, 3 and 4 consume that
+# decision via RECYCLED_BRANCHES, so they must run after it. The alternative
+# — buffer every candidate branch match and partition after the PR block —
+# was rejected because it spreads the classification across a second pass at
+# three more call sites purely to preserve a source ordering nothing depends
+# on. Do not reorder the code back to 1-2-3-4 without moving that decision
+# with it.
+#
 # DO NOT MATCH ON PR BODY OR TITLE — READ THIS BEFORE "FIXING" IT BACK (KYO-471)
 #
 # The KYO-422 ticket text, as originally written, recommended finding
@@ -242,6 +255,88 @@
 # Do not generalize this further. A local file may not suppress a remote
 # branch; a remote ref may. Neither may ever suppress a PR.
 #
+# RECYCLED TICKET KEYS (KYO-607) — READ THIS BEFORE "FIXING" IT BACK
+#
+# Trakkt's ticket-key numbering was RESTARTED in May 2026, so nine keys are
+# shared between a retired ticket and a current one. Because check 2 counts a
+# MERGED PR as in-flight — deliberately, see exit code 1 — each of those nine
+# keys returned exit 1 on every run, forever, while the *current* ticket
+# holding that key sat in Backlog looking available. Exit 0 is the only code
+# that permits claiming, so any agent honouring this gate skipped those nine
+# tickets permanently: the same species of silent, permanent deadlock KYO-529
+# fixed for stranded worktrees, reached by a different route.
+#
+# THE EVIDENCE, recorded here so nobody has to re-derive it. `gh pr list
+# --state all --limit 700 --json number,state,createdAt,headRefName`, run
+# over the whole PR corpus on 2026-09-03, shows one clean discontinuity. No
+# total is quoted: the corpus grows with every PR, so a tally here would be
+# stale within the day and falsifiable forever after, while the discontinuity
+# it documents is fixed (see
+# docs/standards/comments-documentation/name-the-invariant-not-a-count.md):
+#
+#   - PRs #5 … #39, created 2026-05-06T20:31:27Z … 2026-05-09T08:44:14Z, use
+#     keys 288, 289, 293, 294, 297, 298, 299, 300 and 301 — the retired
+#     numbering. Those nine ARE the collisions; there are no others.
+#   - PR #41, created 2026-05-13T09:25:07Z, is the first PR of the restarted
+#     numbering (it carries kyo-3; kyo-2 is PR #42). Every keyed PR from there
+#     on belongs to the current numbering. Keys do NOT ascend with PR number —
+#     tickets are worked out of numeric order, so the sequence is full of
+#     inversions. Only the dates matter below; nothing here relies on key
+#     order, and no current maximum is quoted because it changes weekly.
+#   - NO TICKET-KEYED PR EXISTS between 2026-05-09T08:44:14Z and
+#     2026-05-13T09:25:07Z. (PR #40, 2026-05-10T09:40:05Z, sits in the gap but
+#     carries no kyo-NN key, so it cannot collide with anything.) The restart
+#     is therefore a single event inside a four-day gap containing no keyed
+#     PR, and KEY_RESTART_CUTOFF below is simply a timestamp inside that gap —
+#     every instant in it classifies the whole corpus identically.
+#
+# WHY A FIXED DATE, AND NOT THE THREE ALTERNATIVES THE TICKET PROPOSED:
+#
+#   - "Ask Trakkt for the ticket's created_at" is the ideal answer and is NOT
+#     IMPLEMENTABLE HERE. Trakkt is reachable only as an OAuth HTTP MCP
+#     endpoint (https://trakkt.app/mcp). There is no `trakkt` CLI, and no API
+#     token exists anywhere this script could read — `.env` carries only
+#     TRAKKT_FEEDBACK_TEAM_KEY, which is not a credential for this. A bash
+#     script cannot complete an OAuth flow, so this option was unavailable,
+#     not merely rejected.
+#   - "Ignore merged PRs older than N months" is a ROLLING WINDOW: a guess
+#     whose meaning silently changes every day it runs, and which would
+#     eventually start discarding genuine merged PRs for current tickets —
+#     turning a permanent false-positive into an intermittent fail-OPEN,
+#     which is the one direction this script must never move (see FAIL CLOSED
+#     above).
+#   - "Keep a list of the nine affected keys" rots. It is a second copy of a
+#     fact the PR data already implies, with nothing to re-derive it.
+#
+# A fixed date has neither problem, because THE RESTART IS A ONE-TIME EVENT
+# AT A FIXED INSTANT IN THE PAST. A constant naming that instant is exact
+# rather than heuristic, and it never needs maintenance: a PR created before
+# it can only ever be retired-numbering, a PR created after it can only ever
+# be current-numbering, and both of those stay true forever. Do not replace
+# it with a rolling window.
+#
+# CLASSIFY, NEVER SUPPRESS. A pre-restart PR is not hidden or dropped: it
+# moves from HITS into RECYCLED and is printed under its own heading on EVERY
+# verdict (not only exit 0), exactly like the tombstones above, with its
+# creation date shown so a reader can check the classification for
+# themselves. RECYCLED never changes the exit code.
+#
+# Check 2 is the only check that can see a creation date. The `headRefName`
+# of every PR it classifies as pre-restart is recorded in RECYCLED_BRANCHES,
+# and checks 1, 3 and 4 classify a matching branch the same way — the nine
+# collisions each have a surviving remote branch as well as a merged PR, so
+# classifying only the PR would leave the branch blocking on its own. This is
+# why check 2 runs first in the code (see WHAT IT CHECKS above).
+#
+# FAIL CLOSED IS UNCHANGED (KYO-511), IN BOTH DIRECTIONS:
+#
+#   - If `gh pr list` fails, RECYCLED_BRANCHES is empty, so every branch
+#     match stays a HIT and the FAILURES check still forces exit 3. A broken
+#     PR listing can never launder a branch into "recycled".
+#   - A PR row whose createdAt is empty or is not a well-formed ISO-8601 Z
+#     timestamp is treated as NOT pre-restart and stays a HIT. An
+#     unclassifiable PR blocks; it does not get the benefit of the doubt.
+#
 # USAGE
 #
 #   check-ticket-in-flight.sh <TICKET> [--remote <name>] [--ignore-branch <name>]... [--self <branch>]
@@ -256,15 +351,17 @@
 #
 #   0 — clear. THE ONLY CODE THAT PERMITS CLAIMING THE TICKET. May still
 #       print preserved tombstoned worktrees (KYO-529) — that heading is not
-#       a hit, but the path is worth a look for salvageable work.
+#       a hit, but the path is worth a look for salvageable work. May also
+#       print pre-restart key reuse (KYO-607) — likewise not a hit.
 #   1 — work in flight found (remote branch, PR, local worktree, or local
 #       branch, matched and not excluded — an untombstoned local worktree
 #       hit counts here too). Do not claim. If no --self was given, the
 #       verdict block adds a one-line HINT to try --self (KYO-593) — a
 #       message only, it changes no exit code or classification.
 #   2 — usage error (missing/unparseable ticket argument, unknown flag,
-#       --self given more than once, --self with no value, or a --self
-#       value that does not match the ticket — see SELF-EXCLUSION above).
+#       --self given more than once, --self with no value, a --self value
+#       that does not match the ticket — see SELF-EXCLUSION above — or a
+#       malformed PR_LIST_LIMIT / KEY_RESTART_CUTOFF in the environment).
 #   3 — a check could not be completed (remote unreachable, `gh` missing or
 #       failing, or the PR listing came back at PR_LIST_LIMIT rows and may
 #       therefore be truncated). Treat exactly like exit 1: do not claim.
@@ -296,6 +393,27 @@ SCRIPT_NAME="$(basename "$0")"
 # stub `gh`.
 PR_LIST_LIMIT="${PR_LIST_LIMIT:-500}"
 
+# The instant Trakkt's ticket-key numbering restarted (KYO-607 — the full
+# evidence is in the RECYCLED TICKET KEYS section of the header above, read it
+# before changing this). Any PR created strictly BEFORE this belongs to the
+# retired numbering scheme, so its ticket key says nothing about the current
+# ticket that happens to share it.
+#
+# 2026-05-12T00:00:00Z sits inside the four-day gap between PR #39
+# (2026-05-09T08:44:14Z, the last retired-numbering PR) and PR #41
+# (2026-05-13T09:25:07Z, the first PR of the restarted numbering). No PR
+# exists in that gap, so every timestamp in it classifies the whole corpus
+# identically — the value is not a tuned threshold and there is nothing to
+# re-tune. It is deliberately NOT a rolling window ("older than N months"),
+# which would silently change meaning every day and eventually discard
+# genuine merged PRs for current tickets.
+#
+# Env-overridable for the same two reasons PR_LIST_LIMIT is: an operator can
+# probe a different boundary without editing this file, and the self-test
+# drives it to fixture-local values to exercise both sides of the comparison
+# cheaply.
+KEY_RESTART_CUTOFF="${KEY_RESTART_CUTOFF:-2026-05-12T00:00:00Z}"
+
 usage() {
     cat >&2 <<EOF
 Usage: $SCRIPT_NAME <TICKET> [--remote <name>] [--ignore-branch <name>]... [--self <branch>]
@@ -311,12 +429,18 @@ Environment:
   PR_LIST_LIMIT            how many PRs to fetch (default: 500). Must exceed
                            the repo's total PR count; a listing that comes
                            back at this many rows may be truncated and exits 3.
+  KEY_RESTART_CUTOFF       ISO-8601 Z instant (YYYY-MM-DDTHH:MM:SSZ) at which
+                           Trakkt's ticket-key numbering restarted (default:
+                           2026-05-12T00:00:00Z). PRs created before it belong
+                           to the retired numbering and are reported as
+                           pre-restart key reuse instead of as hits.
 
 Exit codes:
   0  clear — nothing in flight (the only code that permits claiming)
   1  work in flight found — do not claim
   2  usage error (including --self given twice, with no value, or naming a
-     branch that doesn't match TICKET)
+     branch that doesn't match TICKET; or a malformed PR_LIST_LIMIT or
+     KEY_RESTART_CUTOFF)
   3  a check could not be completed (including a possibly-truncated PR
      listing) — treat like exit 1, do not claim
 EOF
@@ -328,6 +452,52 @@ case "$PR_LIST_LIMIT" in
         exit 2
         ;;
 esac
+
+# is_iso8601_z <string> — true iff the string is EXACTLY the canonical shape
+# `gh` emits for createdAt: YYYY-MM-DDTHH:MM:SSZ, fixed width, UTC, no
+# fractional seconds and no numeric offset (KYO-607).
+#
+# The shape check is what makes the ordering compare below legitimate. Two
+# strings of this exact shape order identically whether you compare them as
+# strings or as instants, so no date parsing (and no `date -d`, which is not
+# portable across GNU/BSD) is needed anywhere in this script. A string that
+# is NOT of this shape carries no such guarantee, which is why an
+# unrecognised createdAt is treated as unclassifiable and fails closed rather
+# than being coerced.
+is_iso8601_z() {
+    case "$1" in
+        [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) return 0 ;;
+    esac
+    return 1
+}
+
+# Validated here, beside PR_LIST_LIMIT's own validation and before any work,
+# so a typo'd override is a usage error (exit 2) rather than a value that
+# silently classifies every PR as pre-restart or none of them. A cutoff that
+# is not of the canonical shape cannot be ordered against `gh`'s timestamps,
+# so there is no safe way to continue with one.
+if ! is_iso8601_z "$KEY_RESTART_CUTOFF"; then
+    echo "ERROR: KEY_RESTART_CUTOFF must be an ISO-8601 Z instant of the form YYYY-MM-DDTHH:MM:SSZ (the shape 'gh' emits), got '$KEY_RESTART_CUTOFF'" >&2
+    exit 2
+fi
+
+# is_pre_restart <createdAt> — true iff the PR was created strictly before
+# KEY_RESTART_CUTOFF, i.e. under the retired ticket-key numbering (KYO-607).
+#
+# FAILS CLOSED on anything it cannot read: an empty or non-canonical
+# createdAt returns false, so the PR stays a HIT and keeps blocking. Do not
+# "fix" that to return true for the unparseable case.
+#
+# Both operands are known to be the same fixed-width canonical shape (the
+# cutoff was validated above, the argument on the line before the compare),
+# so stripping the separators leaves two 14-digit numbers whose numeric order
+# IS the chronological order. Compared numerically rather than with `[[ < ]]`
+# so the result cannot depend on the ambient locale's collation rules.
+is_pre_restart() {
+    local created="$1"
+    is_iso8601_z "$created" || return 1
+    [ "${created//[!0-9]/}" -lt "${KEY_RESTART_CUTOFF//[!0-9]/}" ]
+}
 
 if [ "$#" -eq 0 ]; then
     usage
@@ -480,6 +650,8 @@ declare -a HITS=()
 declare -a FAILURES=()
 declare -a TOMBSTONED=()          # printable "path (branch X)" entries (KYO-529)
 declare -a TOMBSTONED_BRANCHES=() # branch names check 4 must not re-flag
+declare -a RECYCLED=()            # printable pre-restart entries (KYO-607)
+declare -a RECYCLED_BRANCHES=()   # branch names checks 1/3/4 classify as pre-restart
 
 is_tombstoned_branch() {
     local name="$1" b
@@ -494,11 +666,110 @@ is_tombstoned_branch() {
     return 1
 }
 
+# is_recycled_branch <name> — true iff this exact branch name is the head of a
+# PR that check 2 already classified as pre-restart (KYO-607). Populated only
+# by check 2, which is why check 2 runs first; if check 2 failed, the array is
+# empty and every branch match stays a HIT, so the fail-closed path is
+# unchanged.
+is_recycled_branch() {
+    local name="$1" b
+    if [ "${#RECYCLED_BRANCHES[@]}" -eq 0 ]; then
+        return 1
+    fi
+    for b in "${RECYCLED_BRANCHES[@]}"; do
+        if [ "$name" = "$b" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# ---- Check 2: pull requests (headRefName only — see KYO-471 note above) ---
+# RUNS FIRST, ahead of conceptual check 1 — see the WHAT IT CHECKS note in the
+# header. This is the only check that can see a creation date, so it is the
+# only one that can decide which branch names belong to the retired ticket-key
+# numbering (KYO-607); checks 1, 3 and 4 read that decision out of
+# RECYCLED_BRANCHES below, and so must run after it.
+#
+# Rows are counted in this same loop, over the SAME single captured fetch, so
+# the truncation guard below costs no second `gh` call and nothing is piped
+# into `wc -l` (see the KYO-511 note in the header).
+#
+# DO NOT SPLIT THIS WITH `IFS=$'\t' read` — READ THIS BEFORE "FIXING" IT BACK
+#
+# TAB IS AN IFS *WHITESPACE* CHARACTER, so `IFS=$'\t' read -r a b c d` collapses
+# a run of tabs into ONE delimiter and cannot represent an empty field. That is
+# harmless for a 3-column row where only the last field can be empty, and it
+# silently corrupts a 4-column one: a PR whose createdAt is empty arrives as
+# `<n>\t<state>\t\t<branch>`, collapses to THREE fields, and the branch name
+# lands in `pr_created` while `pr_branch` comes out empty — so the old
+# `[ -n "$pr_branch" ] || continue` skipped the PR entirely. A PR that should
+# have blocked the ticket vanished from the check: a textbook KYO-511
+# fail-OPEN, introduced by adding a column. Caught by the KYO-607 self-test,
+# not by review.
+#
+# Splitting on newlines instead is exact, because `jq`'s @tsv escapes any tab,
+# newline, carriage return or backslash *inside* a field (as the two-character
+# sequences \t, \n, \r, \\), so a real tab in the row is always a field
+# separator and a real newline never occurs inside one. Substituting tabs for
+# newlines and reading with `readarray -t` therefore yields exactly one array
+# element per column, empty ones included.
+#
+# A row that does not split into exactly four usable fields is a row this check
+# COULD NOT READ, so it goes to FAILURES (exit 3) rather than being skipped —
+# same rule as a `gh` that failed outright, and the reason the collapsing bug
+# above could not have been silent under this parser either.
+gh_stderr_file="$(mktemp)"
+if pr_lines="$(gh pr list --state all --limit "$PR_LIST_LIMIT" --json number,state,createdAt,headRefName \
+    --jq '.[] | [.number, .state, .createdAt, .headRefName] | @tsv' 2>"$gh_stderr_file")"; then
+    pr_row_count=0
+    declare -a pr_fields=()
+    while IFS= read -r pr_line; do
+        # A zero-PR listing is the empty string, which a herestring still
+        # feeds through as one empty line. That is not a row.
+        [ -n "$pr_line" ] || continue
+        pr_row_count=$((pr_row_count + 1))
+        readarray -t pr_fields <<<"${pr_line//$'\t'/$'\n'}"
+        if [ "${#pr_fields[@]}" -ne 4 ] || [ -z "${pr_fields[3]}" ]; then
+            FAILURES+=("gh pr list: could not read row '$pr_line' as number/state/createdAt/headRefName — the PR check is incomplete, so no verdict can be given")
+            continue
+        fi
+        pr_number="${pr_fields[0]}"
+        pr_state="${pr_fields[1]}"
+        pr_created="${pr_fields[2]}"
+        pr_branch="${pr_fields[3]}"
+        is_excluded "$pr_branch" && continue
+        if matches_ticket "$pr_branch"; then
+            # A pre-restart PR is classified, never dropped: it is still
+            # printed, with its creation date, under its own verdict heading.
+            # is_pre_restart fails closed on an empty or unparseable date, so
+            # an unclassifiable PR stays a HIT (KYO-607).
+            if is_pre_restart "$pr_created"; then
+                RECYCLED+=("PR #${pr_number} (${pr_state}) branch ${pr_branch} — created ${pr_created}, before the ${KEY_RESTART_CUTOFF} key restart")
+                RECYCLED_BRANCHES+=("$pr_branch")
+            else
+                HITS+=("PR #${pr_number} (${pr_state}) branch ${pr_branch}")
+            fi
+        fi
+    done <<<"$pr_lines"
+    if [ "$pr_row_count" -ge "$PR_LIST_LIMIT" ]; then
+        FAILURES+=("gh pr list: returned $pr_row_count rows, at the PR_LIST_LIMIT of $PR_LIST_LIMIT — the listing may be truncated, so any older PR went unchecked; re-run with a higher PR_LIST_LIMIT (e.g. PR_LIST_LIMIT=$((PR_LIST_LIMIT * 2)))")
+    fi
+else
+    FAILURES+=("gh pr list: $(cat "$gh_stderr_file")")
+fi
+rm -f "$gh_stderr_file"
+
 # ---- Check 1: remote branches ----------------------------------------------
 # A ref under `stranded/` (KYO-567 — see header) is a tombstone written by
 # mark-branch-stranded.sh, not a live claim: it is reported separately in
 # TOMBSTONED, matched by stripping the `stranded/` prefix before applying
 # the same matches_ticket rule as a normal branch.
+#
+# A branch that heads a pre-restart PR (KYO-607) is reported in RECYCLED
+# instead of HITS. Each of the nine colliding keys has BOTH a merged
+# pre-restart PR and that PR's surviving remote branch, so classifying only
+# the PR would leave the branch blocking the ticket on its own.
 remote_stderr_file="$(mktemp)"
 if remote_refs="$(git ls-remote --heads "$REMOTE" 2>"$remote_stderr_file")"; then
     while IFS=$'\t' read -r _sha ref; do
@@ -515,7 +786,11 @@ if remote_refs="$(git ls-remote --heads "$REMOTE" 2>"$remote_stderr_file")"; the
             *)
                 is_excluded "$branch" && continue
                 if matches_ticket "$branch"; then
-                    HITS+=("remote branch: $REMOTE/$branch")
+                    if is_recycled_branch "$branch"; then
+                        RECYCLED+=("remote branch $REMOTE/$branch")
+                    else
+                        HITS+=("remote branch: $REMOTE/$branch")
+                    fi
                 fi
                 ;;
         esac
@@ -525,44 +800,28 @@ else
 fi
 rm -f "$remote_stderr_file"
 
-# ---- Check 2: pull requests (headRefName only — see KYO-471 note above) ---
-# Rows are counted in this same loop, over the SAME single captured fetch, so
-# the truncation guard below costs no second `gh` call and nothing is piped
-# into `wc -l` (see the KYO-511 note in the header).
-gh_stderr_file="$(mktemp)"
-if pr_lines="$(gh pr list --state all --limit "$PR_LIST_LIMIT" --json number,state,headRefName \
-    --jq '.[] | [.number, .state, .headRefName] | @tsv' 2>"$gh_stderr_file")"; then
-    pr_row_count=0
-    while IFS=$'\t' read -r pr_number pr_state pr_branch; do
-        # A zero-PR listing is the empty string, which a herestring still
-        # feeds through as one empty line. That is not a row.
-        [ -n "$pr_number" ] || continue
-        pr_row_count=$((pr_row_count + 1))
-        [ -n "$pr_branch" ] || continue
-        is_excluded "$pr_branch" && continue
-        if matches_ticket "$pr_branch"; then
-            HITS+=("PR #${pr_number} (${pr_state}) branch ${pr_branch}")
-        fi
-    done <<<"$pr_lines"
-    if [ "$pr_row_count" -ge "$PR_LIST_LIMIT" ]; then
-        FAILURES+=("gh pr list: returned $pr_row_count rows, at the PR_LIST_LIMIT of $PR_LIST_LIMIT — the listing may be truncated, so any older PR went unchecked; re-run with a higher PR_LIST_LIMIT (e.g. PR_LIST_LIMIT=$((PR_LIST_LIMIT * 2)))")
-    fi
-else
-    FAILURES+=("gh pr list: $(cat "$gh_stderr_file")")
-fi
-rm -f "$gh_stderr_file"
-
 # ---- Check 3: local worktrees ----------------------------------------------
 # A worktree that matches the ticket AND carries a valid tombstone for it
 # (KYO-529 — see header) is reported separately in TOMBSTONED instead of
 # HITS, and its branch is recorded in TOMBSTONED_BRANCHES so check 4 does
 # not re-flag the very same worktree via its branch name.
+#
+# The pre-restart test (KYO-607) is applied FIRST, ahead of the tombstone
+# test, because the two answer different questions and only one of them can
+# be right: a branch heading a pre-restart PR belongs to a ticket in the
+# RETIRED numbering, so "preserved stranded work for KYO-<N>" would be a
+# false statement about it — the work it preserves is for a different ticket
+# that merely shares the key. Reporting it as pre-restart key reuse is the
+# accurate description. Neither classification affects the exit code, so this
+# ordering changes only which heading a reader sees.
 wt_path=""
 wt_branch=""
 flush_worktree_entry() {
     if [ -n "$wt_branch" ]; then
         if ! is_excluded "$wt_branch" && matches_ticket "$wt_branch"; then
-            if tombstone_names_ticket "${wt_path}/STRANDED.md"; then
+            if is_recycled_branch "$wt_branch"; then
+                RECYCLED+=("local worktree ${wt_path} (branch ${wt_branch})")
+            elif tombstone_names_ticket "${wt_path}/STRANDED.md"; then
                 TOMBSTONED+=("worktree ${wt_path} (branch ${wt_branch})")
                 TOMBSTONED_BRANCHES+=("$wt_branch")
             else
@@ -587,6 +846,18 @@ flush_worktree_entry # in case the porcelain output has no trailing blank line
 # Same `stranded/` handling as check 1, for the symmetric local rename
 # mark-branch-stranded.sh performs when the branch isn't checked out
 # anywhere (KYO-567).
+#
+# A pre-restart branch (KYO-607) is NOT skipped the way a tombstoned one is:
+# it is reported in RECYCLED here as well as in check 3, because the two are
+# separate pieces of evidence about the same branch and would each have
+# produced their own HIT before this classification existed. Every piece of
+# evidence that used to be reported is still reported, which is the whole
+# point of classifying rather than suppressing. (Do not read that as "the
+# entry count is unchanged" — a tombstoned pre-restart worktree gains one
+# line, because check 3 classifies it before reaching its tombstone arm, so
+# its branch never enters TOMBSTONED_BRANCHES and is no longer skipped here.
+# The extra line is more evidence, not less, so the direction is safe.) The
+# tombstone skip above exists for a different reason and is left as it was.
 while IFS= read -r branch; do
     [ -n "$branch" ] || continue
     case "$branch" in
@@ -602,7 +873,11 @@ while IFS= read -r branch; do
             is_excluded "$branch" && continue
             is_tombstoned_branch "$branch" && continue
             if matches_ticket "$branch"; then
-                HITS+=("local branch: $branch")
+                if is_recycled_branch "$branch"; then
+                    RECYCLED+=("local branch ${branch}")
+                else
+                    HITS+=("local branch: $branch")
+                fi
             fi
             ;;
     esac
@@ -619,6 +894,19 @@ if [ "${#TOMBSTONED[@]}" -gt 0 ]; then
     echo "PRESERVED STRANDED WORK (not a claim — unsalvaged work lives here):"
     for t in "${TOMBSTONED[@]}"; do
         echo "  ~ $t"
+    done
+    echo
+fi
+
+if [ "${#RECYCLED[@]}" -gt 0 ]; then
+    # Printed on every verdict, not only exit 0, and never counted in HITS —
+    # the KYO-607 ticket's own requirement is that the fix must not suppress
+    # or hide any PR, only classify it correctly. Every entry that would have
+    # been a hit is still here, under a heading that says what it actually
+    # is. This block never changes the exit code.
+    echo "PRE-RESTART KEY REUSE (not a claim — this key belongs to a retired ticket-numbering scheme):"
+    for r in "${RECYCLED[@]}"; do
+        echo "  ~ $r"
     done
     echo
 fi

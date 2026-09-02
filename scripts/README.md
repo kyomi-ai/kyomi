@@ -75,10 +75,12 @@ All scripts are organized by environment. **Every script is environment-specific
   `scripts/check-ticket-in-flight.sh <TICKET> [--remote <name>] [--ignore-branch <name>]... [--self <branch>]`,
   where `TICKET` is `KYO-422`, `kyo-422`, or `422` (equivalent). **Exit-code
   contract:** `0` — clear, **the only code that permits claiming the
-  ticket**; `1` — work in flight found, do not claim; `2` — usage error;
-  `3` — a check could not be completed (remote unreachable, `gh` missing
+  ticket**; `1` — work in flight found, do not claim; `2` — usage error,
+  including a malformed `KEY_RESTART_CUTOFF` (KYO-607); `3` — a check could
+  not be completed (remote unreachable, `gh` missing
   or failing, **or the PR listing came back at `--limit` and may therefore
-  be truncated**) and must be treated exactly like `1`, never like `0` —
+  be truncated**, or a PR row that did not split into four usable fields —
+  KYO-607) and must be treated exactly like `1`, never like `0` —
   the script fails closed by design, since a false "clear" costs a full
   duplicate implementation while a false "in flight" costs one skipped
   cycle. The PR page size is the env-overridable `PR_LIST_LIMIT` (default
@@ -137,6 +139,36 @@ All scripts are organized by environment. **Every script is environment-specific
   a fixture that reproduces the cwd-dependence bug from a checkout sitting
   on `main` and shows `--self` clears it while a second worker's worktree
   for the same ticket still blocks.
+  **Ignores pre-restart ticket keys (KYO-607):** Trakkt's key numbering was
+  restarted in May 2026, so nine keys — 288, 289, 293, 294, 297, 298, 299,
+  300, 301 — are shared between retired-numbering work and unrelated
+  current tickets. Because the PR check counts a **merged** PR and matches
+  on branch name, each of those keys was blocked *permanently*, not for a
+  cycle: the affected ticket sat in Backlog looking available while every
+  worker honouring the gate skipped it forever (KYO-299 is the confirmed
+  instance — PR #37, merged 2026-05-09, versus a ticket created
+  2026-08-03). The discontinuity is a one-time event at a fixed instant:
+  PRs #5–#39 (through `2026-05-09T08:44:14Z`) use the retired numbering,
+  and #41 (`2026-05-13T09:25:07Z`) is the first PR of the restarted
+  numbering. No ticket-keyed PR exists in the four-day gap between them, so
+  every instant in that gap classifies the corpus identically. A PR created
+  before the env-overridable
+  `KEY_RESTART_CUTOFF` is therefore classified as a pre-restart key reuse
+  rather than a hit, and its branch is classified the same way wherever
+  checks 1, 3 and 4 find it. Querying Trakkt for the ticket's own
+  `created_at` — the more obvious fix — is not available to a shell script:
+  Trakkt is reachable only as an OAuth MCP endpoint, with no CLI and no API
+  token. **Nothing is suppressed:** every such PR and branch is still
+  printed, under its own `PRE-RESTART KEY REUSE` heading, on every verdict
+  and without ever affecting the exit code — the same reporting contract as
+  `PRESERVED STRANDED WORK` above, and the reason this satisfies the rule
+  that nothing in this workflow may make a PR invisible. Fail-closed
+  behaviour is unchanged: a PR whose `createdAt` is missing or unparseable
+  is treated as **not** pre-restart and still blocks, and if `gh` fails the
+  classification is empty so matching branches still count as hits on top
+  of the exit `3` the failure already forces. Keys 293 and 294 remain in
+  flight after the fix, correctly — they also have legitimate
+  current-numbering PRs (#321, #322).
 
 - **`mark-worktree-stranded.sh`** - The writer side of the KYO-529 tombstone
   above: writes `STRANDED.md` at a preserved worktree's root so
