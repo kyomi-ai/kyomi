@@ -128,7 +128,7 @@ Badge pills render at 12% opacity background with full-color text and dot. On da
 
 ### Chart Colors
 
-Chart palettes live in `kyomi_palette()` in `crates/kyomi-ui/src/components/dashboard/markdown_renderer.rs`. Four options are available; new users and new workspaces default to **kyomi**.
+Chart palettes live in `kyomi_palette()` in `crates/kyomi-chart-theme/src/lib.rs`; `crates/kyomi-ui/src/components/dashboard/markdown_renderer.rs` re-exports it for in-crate use. Four options are available; new users and new workspaces default to **kyomi**.
 
 | Palette | Persona | Notes |
 |---|---|---|
@@ -141,7 +141,7 @@ Each palette is 12 colors tuned for perceptual distance in OKLCH space and valid
 
 ### Chart Chrome — "Editorial Figure" (Variant A)
 
-Charts are typeset like figures in a research paper, not drawn like dashboard widgets. The chrome is driven by `kyomi_theme(is_dark)` in `markdown_renderer.rs`, which constructs a `chartml_core::Theme` passed to every chartml instance via `ChartML::set_theme()`. Browser-side, the same values are mirrored as CSS custom properties in `main.css` so light/dark theme toggles update chart chrome instantly without re-rendering.
+Charts are typeset like figures in a research paper, not drawn like dashboard widgets. The chrome is driven by `kyomi_theme(is_dark)` in `crates/kyomi-chart-theme/src/lib.rs` (re-exported by `markdown_renderer.rs` for in-crate use), which constructs a `chartml_core::Theme` passed to every chartml instance via `ChartML::set_theme()`. Browser-side, the same values are mirrored as CSS custom properties in `crates/kyomi-ui/style/main.css` so light/dark theme toggles update chart chrome instantly without re-rendering.
 
 **Typography**
 - **Chart title:** Instrument Serif, 22px, weight 400 — editorial display, no other BI tool does this
