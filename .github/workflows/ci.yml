@@ -18,8 +18,9 @@
 #      clippy) — real trunk build of crates/kyomi-ui, then the SSR contract
 #      suite against it (KYO-255)
 #   7. worktree-lifecycle-selftests (fast, ~5s, no toolchain) — runs the
-#      self-test suites for the shell scripts that gate ticket claiming and
-#      stranded-worktree/branch recovery (KYO-578)
+#      self-test suites for the shell scripts that gate ticket claiming,
+#      stranded-worktree/branch recovery, and merged-PR-to-ticket
+#      reconciliation (KYO-578, KYO-617)
 #
 # A note on `timeout-minutes` (KYO-322): GitHub starts that clock when a
 # job is QUEUED, not when a runner picks it up, so a job that executes in
@@ -583,24 +584,40 @@ jobs:
   # Worktree lifecycle self-tests (KYO-578)
   #
   # scripts/check-ticket-in-flight.sh, scripts/mark-worktree-stranded.sh,
-  # scripts/mark-branch-stranded.sh, scripts/append-review-log.sh, and
-  # scripts/audit-agent-run-deaths.sh are the gates that decide whether a
-  # ticket may be claimed and whether a stranded claim may be released. Each
-  # one carries a self-test suite (197 assertions total), but until this job
-  # existed none of the five ran anywhere except when a human or agent
-  # remembered to invoke it by hand — a load-bearing check that never runs in
-  # CI is a fail-open shape this workflow has already been bitten by twice
-  # (KYO-511, KYO-529).
+  # scripts/mark-branch-stranded.sh, scripts/append-review-log.sh,
+  # scripts/audit-agent-run-deaths.sh, and scripts/reconcile-merged-tickets.sh
+  # are the gates that decide whether a ticket may be claimed, whether a
+  # stranded claim may be released, and (the newest of the six, KYO-617)
+  # whether a merged PR's ticket was actually reconciled to Done. Each one
+  # carries a self-test suite (382 assertions total, RECOUNTED LIVE on
+  # 2026-09-03 by actually running all six suites and summing their own
+  # "Results: N passed" lines — the number this comment carried immediately
+  # before that recount (287) was itself built on a stale prior figure (197)
+  # that undercounted the five pre-existing suites' real total by 86
+  # assertions (they sum to 283, not 197: check-ticket-in-flight-test.sh 119
+  # + mark-worktree-stranded-test.sh 32 + mark-branch-stranded-test.sh 78 +
+  # append-review-log-test.sh 11 + audit-agent-run-deaths-test.sh 43 = 283,
+  # plus this suite's own 99). Note per KYO-609 this tally is still
+  # hand-maintained and will re-rot on the next suite change; that is a
+  # known, separately-filed gap, not something this recount or this job
+  # fixes — the recount only makes today's number true, it does not make
+  # tomorrow's number self-maintaining), but
+  # until this job existed none of the five original scripts ran anywhere
+  # except when a human or agent remembered to invoke it by hand — a
+  # load-bearing check that never runs in CI is a fail-open shape this
+  # workflow has already been bitten by twice (KYO-511, KYO-529).
   #
-  # All five suites are hermetic: they build their own throwaway git repos
-  # (and, for two of them, a stub `gh` placed first on PATH) under mktemp -d,
-  # with `trap ... EXIT` cleanup, and pin their fixtures' branch names
-  # explicitly rather than relying on the runner's `init.defaultBranch`
-  # (which is `master` on ubuntu-latest, not `main`). None needs a Rust
-  # toolchain, a service container, $HOME, or ~/.claude — only bash, git,
-  # and python3 (for JSON encoding in audit-agent-run-deaths-test.sh; already
-  # on ubuntu-latest). audit-agent-run-deaths-test.sh's one test that uses
-  # the real journalctl skips itself if journalctl is not on PATH.
+  # All six suites are hermetic: they build their own throwaway git repos
+  # and/or JSON fixture files (and, for three of them, a stub `gh` placed
+  # first on PATH) under mktemp -d, with `trap ... EXIT` cleanup, and pin
+  # their fixtures' branch names explicitly rather than relying on the
+  # runner's `init.defaultBranch` (which is `master` on ubuntu-latest, not
+  # `main`). None needs a Rust toolchain, a service container, $HOME, or
+  # ~/.claude — only bash, git, and python3 (for JSON encoding in
+  # audit-agent-run-deaths-test.sh and reconcile-merged-tickets-test.sh, and
+  # for reconcile-merged-tickets.sh's own embedded PR-body parser; python3 is
+  # already on ubuntu-latest). audit-agent-run-deaths-test.sh's one test that
+  # uses the real journalctl skips itself if journalctl is not on PATH.
   #
   # Deliberately no `paths:` filter, unlike the ticket's original wording of
   # "on push/PR touching scripts/**" — two reasons:
@@ -614,7 +631,7 @@ jobs:
   # Note that ci.yml uses no `paths` filters anywhere else today either — this
   # job isn't introducing an inconsistency, it's declining to introduce one.
   #
-  # All five suites run even if an earlier one fails, so one broken suite
+  # All six suites run even if an earlier one fails, so one broken suite
   # never masks the others — the loop below collects every failure and the
   # job fails at the end if any suite failed.
   # ---------------------------------------------------------------------------
@@ -633,6 +650,7 @@ jobs:
             scripts/mark-branch-stranded-test.sh
             scripts/append-review-log-test.sh
             scripts/audit-agent-run-deaths-test.sh
+            scripts/reconcile-merged-tickets-test.sh
           )
           failed=()
           for suite in "${suites[@]}"; do
