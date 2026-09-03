@@ -673,9 +673,11 @@ jobs:
     timeout-minutes: 30
     steps:
       # fetch-depth: 0 (KYO-632, same reason lint-policy above uses it):
-      # scripts/lib/stale-tooling-guard.sh, now sourced by six of these
-      # eight scripts, determines staleness by comparing the calling
-      # script's on-disk content against the LOCAL `origin/main` ref
+      # scripts/lib/stale-tooling-guard.sh — sourced by seven production
+      # scripts, six of which have a suite in the array below (the seventh,
+      # scripts/mine-review-logs.sh, has none of its own) — determines
+      # staleness by comparing the calling script's on-disk content
+      # against the LOCAL `origin/main` ref
       # (`git show origin/main:<path>`, no `git fetch`). The default
       # actions/checkout (fetch-depth: 1) fetches only the ref under test
       # and never populates refs/remotes/origin/main at all, so without
