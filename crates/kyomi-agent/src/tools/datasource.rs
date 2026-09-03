@@ -49,18 +49,30 @@ impl AgentTool for ListDatasourcesTool {
             kyomi_auth::datasource_service::list_datasources(&ctx.db, &ctx.workspace_id, false)
                 .await?;
 
+        // Count cached (non-archived) tables for every datasource in a
+        // single grouped query via the canonical accessor — the same one
+        // `browse_catalog`'s `total_tables` derives from (KYO-615), so the
+        // two tools can never again report different numbers for the same
+        // datasource. The sample datasource is treated like any other — it
+        // gets its own per-workspace cache populated on creation by the
+        // initial catalog index, so there's no special-case sentinel lookup.
+        let ds_ids: Vec<String> = datasources.iter().map(|ds| ds.id.clone()).collect();
+        let table_counts =
+            match kyomi_auth::datasource_service::fetch_table_counts(&ctx.db, &ds_ids, None).await
+            {
+                Ok(counts) => counts,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "failed to fetch cached table counts for datasources; defaulting all to 0"
+                    );
+                    std::collections::HashMap::new()
+                }
+            };
+
         let mut results = Vec::new();
         for ds in &datasources {
-            // Count tables cached for this specific datasource config. The
-            // sample datasource is treated like any other — it gets its own
-            // per-workspace cache populated on creation by the initial
-            // catalog index, so there's no special-case sentinel lookup.
-            let table_count: i64 = kyomi_core::db_fetch_scalar!(
-                ctx.db, i64,
-                "SELECT COUNT(*) FROM datasource_table_cache WHERE datasource_config_id = $1",
-                &ds.id
-            )
-            .unwrap_or(0);
+            let table_count = table_counts.get(&ds.id).copied().unwrap_or(0);
 
             results.push(serde_json::json!({
                 "slug": ds.slug,
@@ -304,5 +316,132 @@ impl AgentTool for ValidateSqlTool {
         }
 
         Ok(response.to_string())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests — KYO-615: `list_datasources.tables_indexed` must exclude
+// soft-deleted (`is_archived`) rows and must batch every datasource's count
+// into a single query rather than one `COUNT(*)` per datasource.
+//
+// Real in-memory SQLite pool with full migrations applied, exercising the
+// actual tool `execute()` path end-to-end — mirrors the pattern in
+// `tools::catalog::tests`.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{build_ctx, seed_user_and_workspace, test_pool};
+
+    /// Insert a plain datasource row in workspace "ws-1".
+    async fn seed_datasource(db: &kyomi_core::DbPool, ds_id: &str, slug: &str) {
+        let sq = match db {
+            kyomi_core::DbPool::Sqlite(sq) => sq,
+            _ => unreachable!("test pool is always sqlite"),
+        };
+        sqlx::query(
+            "INSERT INTO datasource_configs \
+             (id, workspace_id, name, datasource_type, connection_config, slug) \
+             VALUES (?, 'ws-1', ?, 'postgres', '{}', ?)",
+        )
+        .bind(ds_id)
+        .bind(format!("Datasource {slug}"))
+        .bind(slug)
+        .execute(sq)
+        .await
+        .expect("insert datasource");
+    }
+
+    /// Insert one table cache row for `ds_id`.
+    async fn seed_table_row(db: &kyomi_core::DbPool, ds_id: &str, table_id: &str, is_archived: bool) {
+        let sq = match db {
+            kyomi_core::DbPool::Sqlite(sq) => sq,
+            _ => unreachable!("test pool is always sqlite"),
+        };
+        sqlx::query(
+            "INSERT INTO datasource_table_cache \
+             (workspace_id, project_id, dataset_id, table_id, table_metadata, \
+              datasource_config_id, is_archived) \
+             VALUES ('ws-1', 'proj', 'public', ?, '{}', ?, ?)",
+        )
+        .bind(table_id)
+        .bind(ds_id)
+        .bind(is_archived)
+        .execute(sq)
+        .await
+        .expect("insert table cache row");
+    }
+
+    /// Extract `tables_indexed` for `slug` out of a `list_datasources` JSON
+    /// response.
+    fn tables_indexed_for(parsed: &serde_json::Value, slug: &str) -> i64 {
+        parsed["datasources"]
+            .as_array()
+            .expect("datasources array present")
+            .iter()
+            .find(|d| d["slug"] == slug)
+            .unwrap_or_else(|| panic!("datasource '{slug}' present in response: {parsed}"))["tables_indexed"]
+            .as_i64()
+            .expect("tables_indexed is a number")
+    }
+
+    #[tokio::test]
+    async fn tables_indexed_excludes_archived_rows() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        seed_datasource(&db, "ds-a", "a").await;
+        seed_table_row(&db, "ds-a", "t1", false).await;
+        seed_table_row(&db, "ds-a", "t2", false).await;
+        seed_table_row(&db, "ds-a", "t3", true).await; // archived
+        let ctx = build_ctx(db);
+
+        let result = ListDatasourcesTool
+            .execute(serde_json::json!({}), &ctx)
+            .await
+            .expect("list_datasources execute");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("list_datasources result is JSON");
+
+        assert_eq!(
+            tables_indexed_for(&parsed, "a"),
+            2,
+            "the archived row must not be counted: {result}"
+        );
+    }
+
+    /// Structural proof of single-query batching (KYO-615): `execute()`
+    /// above calls `datasource_service::fetch_table_counts` exactly once,
+    /// with every datasource id, outside any per-datasource loop — the
+    /// per-datasource `COUNT(*)` loop this ticket replaces no longer exists
+    /// in the source at all. This crate has no query-count instrumentation
+    /// to assert "exactly one SQL statement executed" at runtime, so this
+    /// test instead proves *correctness* of that single batched call across
+    /// a zero-table datasource, a one-table datasource, and a two-table
+    /// datasource together in one response — which an N+1 implementation
+    /// would also get right, but which corroborates the single call reads
+    /// every id's count correctly rather than, say, only the first.
+    #[tokio::test]
+    async fn tables_indexed_is_correct_for_every_datasource_in_one_response() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        seed_datasource(&db, "ds-a", "a").await;
+        seed_datasource(&db, "ds-b", "b").await;
+        seed_datasource(&db, "ds-c", "c").await; // zero cached tables
+        seed_table_row(&db, "ds-a", "t1", false).await;
+        seed_table_row(&db, "ds-b", "t1", false).await;
+        seed_table_row(&db, "ds-b", "t2", false).await;
+        let ctx = build_ctx(db);
+
+        let result = ListDatasourcesTool
+            .execute(serde_json::json!({}), &ctx)
+            .await
+            .expect("list_datasources execute");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("list_datasources result is JSON");
+
+        assert_eq!(tables_indexed_for(&parsed, "a"), 1);
+        assert_eq!(tables_indexed_for(&parsed, "b"), 2);
+        assert_eq!(tables_indexed_for(&parsed, "c"), 0, "a datasource with no cached tables must read 0, not be omitted");
     }
 }
