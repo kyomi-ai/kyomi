@@ -23,8 +23,9 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use crate::catalog::helpers::{
-    archive_missing_tables, cache_table, fold_table_outcomes, update_datasource_last_refresh,
-    update_datasource_status, DatasetOutcome, IndexerContext, TableOutcome,
+    apply_container_coverage, archive_missing_tables, cache_table, check_container_coverage,
+    fold_table_outcomes, update_datasource_last_refresh, update_datasource_status, ArchiveScope,
+    ContainerKey, DatasetOutcome, IndexerContext, TableOutcome,
 };
 use crate::catalog::types::{CatalogIndexResult, ColumnEntry};
 
@@ -86,6 +87,16 @@ impl UserDatasetIndexer {
         let mut tables_indexed = 0usize;
         let mut errors = Vec::new();
         let mut seen_table_ids = HashSet::new();
+        // KYO-614: `(project_id, dataset_id)` pairs this run genuinely
+        // enumerated, i.e. whose table *listing* succeeded — independent of
+        // whether every individual table's schema read or cache write also
+        // succeeded. Keyed by the full pair, not bare `dataset_id`: a
+        // single datasource can index several GCP projects
+        // (`catalog_projects`), and two of them sharing a dataset name must
+        // not let one project's enumeration authorise archiving another's
+        // same-named, un-enumerated dataset — see `ContainerKey`'s doc
+        // comment.
+        let mut enumerated_datasets: HashSet<ContainerKey> = HashSet::new();
         let mut any_project_succeeded = false;
 
         for (i, project_id) in project_ids.iter().enumerate() {
@@ -105,6 +116,7 @@ impl UserDatasetIndexer {
                 project_id,
                 max_tables_per_dataset,
                 seen_table_ids: &mut seen_table_ids,
+                enumerated_datasets: &mut enumerated_datasets,
             })
             .await
             {
@@ -166,7 +178,37 @@ impl UserDatasetIndexer {
             .await;
         }
 
-        let outcome = resolve_run_outcome(!seen_table_ids.is_empty(), tables_indexed, &errors);
+        let mut outcome = resolve_run_outcome(!seen_table_ids.is_empty(), tables_indexed, &errors);
+
+        // KYO-614: which cached rows this run is even allowed to archive.
+        // Unlike the SQL-template and Connect paths, this module has no
+        // "user deliberately configured an empty scope" state at this layer
+        // (an empty `project_ids` returns `skipped(..)` above, before this
+        // point) — always `Containers`, never `EntireDatasource`.
+        let archive_scope = ArchiveScope::Containers(enumerated_datasets.clone());
+
+        // KYO-614: did this run enumerate enough of the datasource's
+        // currently-live datasets to trust an "idle" status? See the
+        // SQL-template path (`kyomi_agent::catalog::traits::index_catalog_sql`)
+        // for the identical reasoning.
+        match check_container_coverage(db, workspace_id, datasource_config_id, &enumerated_datasets)
+            .await
+        {
+            Ok(coverage) => apply_container_coverage(
+                coverage,
+                &mut outcome.status,
+                &mut outcome.failure_reason,
+                &mut errors,
+            ),
+            Err(e) => {
+                warn!(
+                    workspace_id,
+                    datasource_config_id,
+                    error = %e,
+                    "failed to check container coverage — skipping the shortfall check for this run"
+                );
+            }
+        }
 
         // Archive tables that no longer exist — see `resolve_run_outcome` for
         // why this is gated on "was anything listed" rather than "was
@@ -176,6 +218,7 @@ impl UserDatasetIndexer {
                 db,
                 workspace_id,
                 datasource_config_id,
+                &archive_scope,
                 &seen_table_ids,
             )
             .await
@@ -342,6 +385,11 @@ struct IndexProjectParams<'a> {
     project_id: &'a str,
     max_tables_per_dataset: Option<usize>,
     seen_table_ids: &'a mut HashSet<String>,
+    /// KYO-614: `(project_id, dataset_id)` pairs whose table listing
+    /// succeeded this run — see `ArchiveScope::Containers`'s /
+    /// `ContainerKey`'s doc comments for why the bare dataset id is not
+    /// enough once a datasource can span multiple GCP projects.
+    enumerated_datasets: &'a mut HashSet<ContainerKey>,
 }
 
 /// Parameters for [`index_dataset_tables`].
@@ -355,6 +403,9 @@ struct IndexDatasetParams<'a> {
     dataset_id: &'a str,
     max_tables: Option<usize>,
     seen_table_ids: &'a mut HashSet<String>,
+    /// KYO-614: `(project_id, dataset_id)` pairs whose table listing
+    /// succeeded this run.
+    enumerated_datasets: &'a mut HashSet<ContainerKey>,
 }
 
 /// Index all datasets in a single BigQuery project.
@@ -382,8 +433,12 @@ async fn index_project_datasets(
         project_id,
         max_tables_per_dataset,
         seen_table_ids,
+        enumerated_datasets,
     } = params;
-    // List all datasets in the project
+    // List all datasets in the project. An `Err` here (propagated via `?`)
+    // means no datasets are inserted into `enumerated_datasets` for this
+    // project at all (KYO-614) — exactly right, since none of them were
+    // enumerated.
     let datasets = list_bigquery_datasets(client, access_token, project_id).await?;
 
     let mut outcomes = Vec::with_capacity(datasets.len());
@@ -399,6 +454,7 @@ async fn index_project_datasets(
             dataset_id,
             max_tables: max_tables_per_dataset,
             seen_table_ids,
+            enumerated_datasets,
         })
         .await;
 
@@ -485,8 +541,17 @@ async fn index_dataset_tables(
         dataset_id,
         max_tables,
         seen_table_ids,
+        enumerated_datasets,
     } = params;
     let mut tables = list_bigquery_tables(client, access_token, project_id, dataset_id).await?;
+    // KYO-614: the table *listing* call above succeeded — this dataset was
+    // genuinely enumerated this run, regardless of whether any individual
+    // table's schema read or cache write also succeeds below. Recorded as
+    // the full `(project_id, dataset_id)` pair (see `ContainerKey`'s doc
+    // comment) — BigQuery can index several GCP projects in one datasource
+    // run, and two of them can share a dataset name, so `dataset_id` alone
+    // is not a unique container identity here.
+    enumerated_datasets.insert((project_id.to_string(), dataset_id.to_string()));
 
     // Apply limit if specified
     if let Some(max) = max_tables {
@@ -1195,6 +1260,193 @@ mod tests {
         assert_eq!(
             run_outcome.error_message,
             Some("No tables discovered — existing catalog preserved")
+        );
+    }
+
+    // ── ArchiveScope keyed by (project_id, dataset_id) (KYO-614 follow-up) ──
+    //
+    // A single datasource can index several GCP projects in one run
+    // (`catalog_projects` / `ConfiguredProjectScope::Explicit`, see
+    // `kyomi_agent::catalog::indexers::bigquery`), and two of them sharing a
+    // dataset name is a routine dev/prod convention, not an edge case. These
+    // tests are DB-backed — calling `archive_missing_tables` and
+    // `check_container_coverage` directly, the same shared helpers
+    // `index_workspace_catalog` calls — rather than end-to-end through the
+    // real BigQuery REST client: that boundary (no HTTP-mocking dependency
+    // in this crate) is about the REST client itself, not about these
+    // helpers, which take plain Rust values.
+
+    /// Seeds one BigQuery-shaped datasource with cache rows across possibly
+    /// multiple GCP projects. `rows` is `(project_id, dataset_id, table_id)`
+    /// triples, all inserted non-archived.
+    async fn seed_multi_project_fixture(
+        sq: &sqlx::SqlitePool,
+        suffix: &str,
+        rows: &[(&str, &str, &str)],
+    ) -> (String, String) {
+        let user_id = format!("u-mp-{suffix}");
+        let workspace_id = format!("ws-mp-{suffix}");
+        let datasource_config_id = format!("ds-mp-{suffix}");
+
+        sqlx::query("INSERT INTO users (user_id, email) VALUES (?, ?)")
+            .bind(&user_id)
+            .bind(format!("{user_id}@test.local"))
+            .execute(sq)
+            .await
+            .expect("insert user");
+        sqlx::query("INSERT INTO workspaces (workspace_id, name, owner_user_id) VALUES (?, 'WS', ?)")
+            .bind(&workspace_id)
+            .bind(&user_id)
+            .execute(sq)
+            .await
+            .expect("insert workspace");
+        sqlx::query(
+            "INSERT INTO datasource_configs (id, workspace_id, name, datasource_type, slug) \
+             VALUES (?, ?, 'DS', 'bigquery', ?)",
+        )
+        .bind(&datasource_config_id)
+        .bind(&workspace_id)
+        .bind(format!("ds-{suffix}"))
+        .execute(sq)
+        .await
+        .expect("insert datasource_config");
+
+        for (project_id, dataset_id, table_id) in rows {
+            sqlx::query(
+                r#"
+                INSERT INTO datasource_table_cache
+                    (workspace_id, datasource_config_id, project_id, dataset_id, table_id, table_metadata, is_archived)
+                VALUES (?, ?, ?, ?, ?, '{}', 0)
+                "#,
+            )
+            .bind(&workspace_id)
+            .bind(&datasource_config_id)
+            .bind(*project_id)
+            .bind(*dataset_id)
+            .bind(*table_id)
+            .execute(sq)
+            .await
+            .expect("seed cache row");
+        }
+
+        (workspace_id, datasource_config_id)
+    }
+
+    async fn row_archived(
+        sq: &sqlx::SqlitePool,
+        datasource_config_id: &str,
+        project_id: &str,
+        dataset_id: &str,
+        table_id: &str,
+    ) -> bool {
+        let is_archived: i64 = sqlx::query_scalar(
+            "SELECT is_archived FROM datasource_table_cache \
+             WHERE datasource_config_id = ? AND project_id = ? AND dataset_id = ? AND table_id = ?",
+        )
+        .bind(datasource_config_id)
+        .bind(project_id)
+        .bind(dataset_id)
+        .bind(table_id)
+        .fetch_one(sq)
+        .await
+        .expect("read archival state");
+        is_archived != 0
+    }
+
+    /// Headline regression: `acme-dev` and `acme-prod` both have a dataset
+    /// named `analytics` — a routine dev/prod convention. This run
+    /// enumerates only `acme-dev.analytics` (e.g. `acme-prod` failed this
+    /// run, the existing `Err(e) => { ...; errors.push(...) }` branch in
+    /// `index_workspace_catalog`, so none of its datasets were ever listed).
+    /// Before keying `ArchiveScope::Containers` by the full
+    /// `(project_id, dataset_id)` pair, the scope filter matched on bare
+    /// `dataset_id` alone, so `acme-prod.analytics`'s cached rows would pass
+    /// the filter, fail the (also project-blind) `seen_table_ids` check, and
+    /// be archived — the exact KYO-614 defect, arriving on the project axis
+    /// instead of the dataset axis.
+    #[tokio::test]
+    async fn subset_enumeration_across_projects_preserves_other_projects_shared_dataset_name() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        let (workspace_id, ds) = seed_multi_project_fixture(
+            sq,
+            "sharedname",
+            &[
+                ("acme-dev", "analytics", "t1"),
+                ("acme-prod", "analytics", "t1"),
+            ],
+        )
+        .await;
+
+        // Only acme-dev.analytics was enumerated this run — acme-prod
+        // failed outright and contributed nothing to `enumerated_datasets`.
+        let scope = ArchiveScope::Containers(HashSet::from([(
+            "acme-dev".to_string(),
+            "analytics".to_string(),
+        )]));
+        // Nothing was found in acme-dev.analytics this run either — a real
+        // deletion within the one project that WAS enumerated.
+        let seen_table_ids = HashSet::new();
+
+        let archived = archive_missing_tables(&db, &workspace_id, &ds, &scope, &seen_table_ids)
+            .await
+            .expect("archive_missing_tables");
+
+        assert_eq!(
+            archived,
+            vec!["acme-dev.analytics.t1".to_string()],
+            "only the enumerated project's dataset may be archived"
+        );
+        assert!(
+            !row_archived(sq, &ds, "acme-prod", "analytics", "t1").await,
+            "acme-prod.analytics was never enumerated this run (acme-prod failed outright) — \
+             its row must be untouched even though acme-dev's same-named dataset was \
+             enumerated and archived from"
+        );
+    }
+
+    /// `check_container_coverage`'s live-container count must not collapse
+    /// `acme-dev.analytics` and `acme-prod.analytics` into a single entry —
+    /// a bare `SELECT DISTINCT dataset_id` would under-count `live_count` as
+    /// 1 instead of 2, masking a multi-project shortfall from the
+    /// material-shortfall check entirely.
+    #[tokio::test]
+    async fn coverage_check_counts_same_named_datasets_in_different_projects_separately() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let (workspace_id, ds) = {
+            let DbPool::Sqlite(sq) = &db else {
+                unreachable!("expected sqlite pool");
+            };
+            seed_multi_project_fixture(
+                sq,
+                "covsharedname",
+                &[
+                    ("acme-dev", "analytics", "t1"),
+                    ("acme-prod", "analytics", "t1"),
+                ],
+            )
+            .await
+        };
+
+        let coverage = check_container_coverage(&db, &workspace_id, &ds, &HashSet::new())
+            .await
+            .expect("check_container_coverage");
+
+        let warning = coverage.warning.expect("warning must be present");
+        assert!(
+            warning.contains("0 of 2"),
+            "acme-dev.analytics and acme-prod.analytics must count as two distinct live \
+             containers, not one — got: {warning}"
+        );
+        assert!(
+            coverage.material,
+            "enumerating 0 of 2 live containers must be material"
         );
     }
 }

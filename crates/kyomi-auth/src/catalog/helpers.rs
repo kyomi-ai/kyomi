@@ -13,6 +13,7 @@ use kyomi_core::{DbPool, Result};
 use kyomi_embed::EmbeddingService;
 use pgvector::Vector;
 use serde_json::Value;
+use std::collections::HashSet;
 use tracing::{debug, info, warn};
 
 use super::search_entries::{compute_schema_signature, create_search_entries};
@@ -103,20 +104,93 @@ pub async fn can_refresh_now(
     }
 }
 
+/// A `(project_id, dataset_id)` pair identifying one container in
+/// `datasource_table_cache` — its unique key is
+/// `(workspace_id, datasource_config_id, project_id, dataset_id, table_id)`,
+/// and `dataset_id` alone is not enough to identify a container: BigQuery
+/// can index several GCP projects in one datasource
+/// (`catalog_projects`/`ConfiguredProjectScope::Explicit`,
+/// `kyomi_agent::catalog::indexers::bigquery`), and two of them sharing a
+/// dataset name (e.g. `acme-dev.analytics` / `acme-prod.analytics`, a
+/// routine dev/prod convention) is not an edge case. A bare `dataset_id`
+/// key would let one project's `analytics` enumeration authorise archiving
+/// another project's same-named, never-looked-at `analytics` — the exact
+/// KYO-614 defect, arriving on the project axis instead of the dataset
+/// axis. A tuple (rather than a delimiter-joined `"{project_id}.{dataset_id}"`
+/// string) is deliberate: a joined string reintroduces exactly this class
+/// of ambiguity the moment either half contains the delimiter.
+///
+/// For the SQL-template and Connect paths `project_id` is a constant for
+/// the whole run (`indexer.get_project_id(ctx)` and the literal `""`
+/// respectively), so this is a behavioural no-op there — the point is one
+/// shared key shape, not a provider fork.
+pub type ContainerKey = (String, String);
+
+/// Which cached rows a run is authorised to archive.
+///
+/// A catalog index run only ever *enumerates* part of a datasource's
+/// containers — a subset of schemas/datasets/catalogs, chosen by discovery
+/// or by user configuration. Before KYO-614, [`archive_missing_tables`]
+/// compared `seen_table_ids` against **every** non-archived row for the
+/// datasource, with no container filter at all: a run that enumerated one
+/// dataset out of four archived the other three datasets' tables in full,
+/// because "not seen this run" was indistinguishable from "no longer
+/// exists" for any container the run never looked at. An un-enumerated
+/// container is an unknown, not a confirmed absence — the asymmetry is
+/// decisive (preserving a genuinely-deleted table costs one stale row;
+/// archiving wrongly costs the customer their catalog with no error
+/// surfaced), so this type makes "which containers may this run touch at
+/// all" an explicit, required input rather than an implicit "all of them".
+#[derive(Debug)]
+pub enum ArchiveScope {
+    /// The user configured an empty container selection: the intended scope
+    /// is *nothing*, so every cached row is out of scope and may be
+    /// archived. This is the ONLY variant that may sweep the whole
+    /// datasource, and it must only be constructed from a deliberate user
+    /// action (KYO-162 / KYO-385's `empty_scope_is_expected`) — never from
+    /// discovery merely coming back empty (e.g. `discover_all_containers`
+    /// returning zero containers, or every configured container turning out
+    /// invalid this run). Those are enumeration shortfalls, not user intent,
+    /// and must resolve to `Containers` with whatever (possibly empty) set
+    /// was actually enumerated — archiving nothing when nothing was
+    /// enumerated, per the "when in doubt, preserve" invariant.
+    EntireDatasource,
+    /// Only these `(project_id, dataset_id)` pairs — see [`ContainerKey`] —
+    /// were completely enumerated this run. A cached row whose
+    /// `(project_id, dataset_id)` is not in this set is skipped before the
+    /// `seen_table_ids` check even runs: it was never looked at this run,
+    /// so "not seen" says nothing about whether it still exists (KYO-614).
+    /// An empty set is valid and means "archive nothing" — a run that
+    /// enumerated zero containers (as opposed to a user who configured
+    /// zero) must not touch the existing catalog at all.
+    Containers(HashSet<ContainerKey>),
+}
+
 /// Archive tables that were not seen during the current refresh cycle.
 ///
 /// Marks tables as `is_archived = true` in the cache. Returns the full_name
 /// strings of archived tables (format: `project_id.dataset_id.table_id`) so
 /// callers can forward them to graph cleanup.
+///
+/// `scope` (KYO-614) gates which cached rows are even eligible for
+/// archiving, before `seen_table_ids` is ever consulted — see
+/// [`ArchiveScope`]. This is deliberately a Rust-side filter over the rows
+/// this function already fetches and iterates, rather than a dynamic SQL
+/// `IN (...)` list: the number of containers is caller-controlled and
+/// unbounded, and a hand-built `IN` list would need to behave identically
+/// on both the Postgres and SQLite backends this function runs against.
 pub async fn archive_missing_tables(
     db: &DbPool,
     workspace_id: &str,
     datasource_config_id: &str,
-    seen_table_ids: &std::collections::HashSet<String>,
+    scope: &ArchiveScope,
+    seen_table_ids: &HashSet<String>,
 ) -> Result<Vec<String>> {
     // Callers are responsible for only calling this when discovery succeeded.
     // An empty seen_table_ids with a successful discovery means the datasource
-    // genuinely has no tables — archiving everything is correct in that case.
+    // genuinely has no tables — archiving everything is correct in that case
+    // (subject to `scope`, which still gates which containers were actually
+    // discovered this run).
 
     #[derive(sqlx::FromRow)]
     struct CacheRow {
@@ -147,6 +221,15 @@ pub async fn archive_missing_tables(
 
     let mut archived_names = Vec::new();
     for row in &rows {
+        // KYO-614: a row whose container was never enumerated this run is
+        // an unknown, not a confirmed absence — skip it before even
+        // consulting `seen_table_ids`.
+        if let ArchiveScope::Containers(containers) = scope
+            && !containers.contains(&(row.project_id.clone(), row.dataset_id.clone()))
+        {
+            continue;
+        }
+
         let full_id = kyomi_core::build_full_table_name(&row.project_id, &row.dataset_id, &row.table_id);
 
         if !seen_table_ids.contains(&full_id) {
@@ -404,6 +487,203 @@ pub fn resolve_run_outcome(
         archive: !nothing_listed,
         status,
         failure_reason,
+    }
+}
+
+// ─── Container coverage (KYO-614) ──────────────────────────────────────────────
+
+/// Cap on how many un-enumerated container names [`check_container_coverage`]
+/// lists individually in its warning, mirroring
+/// `MAX_TABLE_ERRORS_PER_DATASET`'s summarize-the-rest idiom above — a
+/// datasource with dozens of un-enumerated containers must not grow the
+/// persisted `warnings` array to dozens of near-identical lines.
+pub const MAX_MISSING_CONTAINERS_IN_WARNING: usize = 5;
+
+/// The outcome of comparing what a run enumerated against what the
+/// datasource's cache currently believes is live.
+pub struct ContainerCoverage {
+    /// A single warning entry naming the un-enumerated containers (capped at
+    /// [`MAX_MISSING_CONTAINERS_IN_WARNING`]), to append to the run's
+    /// `errors`/persisted `warnings`. `None` when every currently-live
+    /// container was enumerated this run (including the common case where
+    /// there is no prior cache to compare against at all).
+    pub warning: Option<String>,
+    /// Whether the shortfall is large enough that the run must not resolve
+    /// to `"idle"` — see [`is_material_shortfall`].
+    pub material: bool,
+}
+
+/// Whether an enumerated-vs-live container shortfall is "material" —
+/// large enough that reporting the run as `"idle"` would misrepresent how
+/// much of the datasource was actually looked at.
+///
+/// Proportional, not absolute: `enumerated_count * 2 <= live_count`, i.e.
+/// this run enumerated *at most half* of the datasource's currently-live
+/// containers. Chosen because it satisfies both ends of the requirement
+/// this check exists for — it fires on the confirmed production incident
+/// (1 of 4 datasets enumerated: `1 * 2 = 2 <= 4`, material) without
+/// flapping on the ordinary case of a single genuinely-deleted dataset out
+/// of ten (`9 * 2 = 18 > 10`, not material). An absolute threshold (e.g.
+/// "more than 2 missing") would either miss the four-dataset incident or
+/// misfire on datasources with dozens of containers where losing a handful
+/// to natural churn is unremarkable.
+fn is_material_shortfall(enumerated_count: usize, live_count: usize) -> bool {
+    enumerated_count.saturating_mul(2) <= live_count
+}
+
+/// Compare the containers a run enumerated against the containers the
+/// datasource's cache currently believes are live, and report whether the
+/// run fell materially short of full coverage.
+///
+/// This is deliberately independent of [`ArchiveScope`]: it is a coverage
+/// check on the run's *outcome* (did we look at enough of the datasource to
+/// trust a clean status?), not an input to what [`archive_missing_tables`]
+/// is allowed to touch. Callers should skip this check entirely when the
+/// run used [`ArchiveScope::EntireDatasource`] — a deliberately emptied
+/// selection is expected to leave every previously-live container
+/// "un-enumerated" by design, and warning about that would be noise, not
+/// signal.
+///
+/// On a first-ever run (or any datasource with nothing cached yet) the live
+/// count is zero, so there is nothing to fall short of — this always
+/// reports no shortfall in that case, matching `resolve_final_status`'s
+/// existing "empty-but-accessible is not a failure" doctrine.
+pub async fn check_container_coverage(
+    db: &DbPool,
+    workspace_id: &str,
+    datasource_config_id: &str,
+    enumerated_containers: &HashSet<ContainerKey>,
+) -> Result<ContainerCoverage> {
+    #[derive(sqlx::FromRow)]
+    struct ContainerRow {
+        project_id: String,
+        dataset_id: String,
+    }
+
+    let rows = kyomi_core::db_fetch_all!(
+        db,
+        ContainerRow,
+        r#"
+        SELECT DISTINCT project_id, dataset_id
+        FROM datasource_table_cache
+        WHERE workspace_id = $1
+          AND datasource_config_id = $2
+          AND is_archived = false
+        "#,
+        workspace_id,
+        datasource_config_id
+    )
+    .map_err(|e| {
+        kyomi_core::Error::Internal(format!("failed to check container coverage: {e}"))
+    })?;
+
+    let live_count = rows.len();
+    if live_count == 0 {
+        return Ok(ContainerCoverage {
+            warning: None,
+            material: false,
+        });
+    }
+
+    // KYO-614 follow-up: keyed by the full `(project_id, dataset_id)` pair —
+    // see `ContainerKey`'s doc comment for why `dataset_id` alone would
+    // collapse two same-named datasets in different BigQuery projects into
+    // one entry, under-counting both the shortfall here and the archive
+    // scope in `archive_missing_tables`.
+    let mut missing: Vec<ContainerKey> = rows
+        .into_iter()
+        .map(|r| (r.project_id, r.dataset_id))
+        .filter(|key| !enumerated_containers.contains(key))
+        .collect();
+
+    if missing.is_empty() {
+        return Ok(ContainerCoverage {
+            warning: None,
+            material: false,
+        });
+    }
+    missing.sort();
+
+    let material = is_material_shortfall(enumerated_containers.len(), live_count);
+
+    let shown_count = missing.len().min(MAX_MISSING_CONTAINERS_IN_WARNING);
+    let remainder = missing.len() - shown_count;
+    let shown = missing[..shown_count]
+        .iter()
+        .map(format_container_key)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let names = if remainder > 0 {
+        format!("{shown} (+{remainder} more)")
+    } else {
+        shown
+    };
+
+    let warning = format!(
+        "Catalog refresh enumerated {} of {live_count} known container(s) this run — \
+         not yet re-verified and left untouched: {names}",
+        enumerated_containers.len()
+    );
+
+    Ok(ContainerCoverage {
+        warning: Some(warning),
+        material,
+    })
+}
+
+/// Render a [`ContainerKey`] for a human-readable warning: `"project.dataset"`
+/// when the project half is non-empty (BigQuery), or just `dataset_id`
+/// otherwise (every other provider always has an empty `project_id` half
+/// here, per `ContainerKey`'s doc comment).
+fn format_container_key((project_id, dataset_id): &ContainerKey) -> String {
+    if project_id.is_empty() {
+        dataset_id.clone()
+    } else {
+        format!("{project_id}.{dataset_id}")
+    }
+}
+
+/// Apply a [`ContainerCoverage`] check's outcome onto a run's persisted
+/// status/failure-reason pair and its accumulated `errors`.
+///
+/// All three catalog-indexer call sites (`kyomi_agent::catalog::traits::
+/// index_catalog_sql`, `kyomi_agent::catalog::indexers::connect::
+/// process_discovered_catalog`, and this crate's own
+/// `UserDatasetIndexer::index_workspace_catalog`) need the exact same two
+/// rules applied to the exact same two outputs — extracted here rather than
+/// duplicated a third time (see `docs/CODING_STANDARDS.md`, "the third copy
+/// of a test helper is the extraction trigger": the same reasoning applies
+/// to a production decision, per
+/// [`RunOutcome`]'s own doc comment on why `resolve_run_outcome` itself was
+/// shared):
+///
+/// - A *material* shortfall overrides the status ONLY when it would
+///   otherwise be `"idle"` — a run already `"failed"` for an unrelated
+///   reason stays `"failed"` with its original reason, and the shortfall
+///   only contributes its warning.
+/// - The warning, when present, is always appended to `errors` (which
+///   becomes the persisted `warnings` array) regardless of `material` — a
+///   small, non-material shortfall still deserves a visible note about
+///   which container wasn't re-verified, it just must not flip a healthy
+///   status to `"failed"`.
+///
+/// Pure and I/O-free (the coverage check itself already happened) so this
+/// exact decision can be exercised directly by a unit test — including for
+/// `UserDatasetIndexer::index_workspace_catalog`, which has no HTTP-mocking
+/// seam to drive an end-to-end test through (no such dependency exists in
+/// this crate; verified against `[dev-dependencies]`).
+pub fn apply_container_coverage(
+    coverage: ContainerCoverage,
+    status: &mut &'static str,
+    failure_reason: &mut Option<String>,
+    errors: &mut Vec<String>,
+) {
+    if coverage.material && *status == "idle" {
+        *status = "failed";
+        *failure_reason = coverage.warning.clone();
+    }
+    if let Some(warning) = coverage.warning {
+        errors.push(warning);
     }
 }
 
@@ -1601,5 +1881,520 @@ mod tests {
             summary_plural, "proj-1.ds_b: 3 further table failures not shown",
             "plural wording must be exact for a multi-over-cap overflow"
         );
+    }
+
+    // ── ArchiveScope / archive_missing_tables (KYO-614) ──────────────────
+
+    /// Seeds one datasource with cache rows in two containers
+    /// (`dataset_id` values). `rows` is `(project_id, dataset_id, table_id)`
+    /// triples, all inserted non-archived — `project_id` is explicit (KYO-614
+    /// follow-up) rather than a constant baked into this helper, so a test
+    /// can seed two different projects sharing a dataset name.
+    async fn seed_container_scoped_fixture(
+        sq: &sqlx::SqlitePool,
+        suffix: &str,
+        rows: &[(&str, &str, &str)],
+    ) -> (String, String) {
+        let user_id = format!("u-cs-{suffix}");
+        let workspace_id = format!("ws-cs-{suffix}");
+        let datasource_config_id = format!("ds-cs-{suffix}");
+
+        sqlx::query("INSERT INTO users (user_id, email) VALUES (?, ?)")
+            .bind(&user_id)
+            .bind(format!("{user_id}@test.local"))
+            .execute(sq)
+            .await
+            .expect("insert user");
+        sqlx::query("INSERT INTO workspaces (workspace_id, name, owner_user_id) VALUES (?, 'WS', ?)")
+            .bind(&workspace_id)
+            .bind(&user_id)
+            .execute(sq)
+            .await
+            .expect("insert workspace");
+        sqlx::query(
+            "INSERT INTO datasource_configs (id, workspace_id, name, datasource_type, slug) \
+             VALUES (?, ?, 'DS', 'bigquery', ?)",
+        )
+        .bind(&datasource_config_id)
+        .bind(&workspace_id)
+        .bind(format!("ds-{suffix}"))
+        .execute(sq)
+        .await
+        .expect("insert datasource_config");
+
+        // KYO-614 follow-up: rows are `(project_id, dataset_id, table_id)`
+        // triples, not just `(dataset_id, table_id)` — every test must be
+        // explicit about `project_id`, since the whole point of this
+        // fixture shape is to let a test seed two different projects
+        // sharing a dataset name.
+        for (project_id, dataset_id, table_id) in rows {
+            sqlx::query(
+                r#"
+                INSERT INTO datasource_table_cache
+                    (workspace_id, datasource_config_id, project_id, dataset_id, table_id, table_metadata, is_archived)
+                VALUES (?, ?, ?, ?, ?, '{}', 0)
+                "#,
+            )
+            .bind(&workspace_id)
+            .bind(&datasource_config_id)
+            .bind(*project_id)
+            .bind(*dataset_id)
+            .bind(*table_id)
+            .execute(sq)
+            .await
+            .expect("seed cache row");
+        }
+
+        (workspace_id, datasource_config_id)
+    }
+
+    async fn archived_state(
+        sq: &sqlx::SqlitePool,
+        datasource_config_id: &str,
+        project_id: &str,
+        dataset_id: &str,
+        table_id: &str,
+    ) -> bool {
+        let is_archived: i64 = sqlx::query_scalar(
+            "SELECT is_archived FROM datasource_table_cache \
+             WHERE datasource_config_id = ? AND project_id = ? AND dataset_id = ? AND table_id = ?",
+        )
+        .bind(datasource_config_id)
+        .bind(project_id)
+        .bind(dataset_id)
+        .bind(table_id)
+        .fetch_one(sq)
+        .await
+        .expect("read archival state");
+        is_archived != 0
+    }
+
+    /// Headline regression (KYO-614): a run that only enumerated one dataset
+    /// out of two must not touch the OTHER dataset's rows at all, regardless
+    /// of `seen_table_ids` — before this fix, `archive_missing_tables` had
+    /// no container filter, so every row not present in `seen_table_ids`
+    /// (which only ever contained the enumerated dataset's tables) was
+    /// archived, including the entire un-enumerated dataset.
+    #[tokio::test]
+    async fn subset_enumeration_archives_nothing_outside_the_enumerated_set() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        let (workspace_id, ds) = seed_container_scoped_fixture(
+            sq,
+            "subset",
+            &[("proj-1", "dataset_a", "t1"), ("proj-1", "dataset_b", "t1")],
+        )
+        .await;
+
+        // This run enumerated ONLY dataset_a, and found nothing in it (t1
+        // does not appear in seen_table_ids) — a real deletion within the
+        // enumerated container.
+        let scope = ArchiveScope::Containers(HashSet::from([("proj-1".to_string(), "dataset_a".to_string())]));
+        let seen_table_ids = HashSet::new();
+
+        let archived = archive_missing_tables(&db, &workspace_id, &ds, &scope, &seen_table_ids)
+            .await
+            .expect("archive_missing_tables");
+
+        assert_eq!(
+            archived,
+            vec!["proj-1.dataset_a.t1".to_string()],
+            "only the enumerated dataset's unseen table may be archived"
+        );
+        assert!(
+            !archived_state(sq, &ds, "proj-1", "dataset_b", "t1").await,
+            "dataset_b was never enumerated this run — its row must be untouched \
+             even though it is absent from seen_table_ids"
+        );
+    }
+
+    /// A fully-enumerated container that genuinely lost one table must still
+    /// archive that table — the KYO-614 fix must not regress ordinary
+    /// deletions within a container that WAS enumerated (the
+    /// `nexata-dev`/`integration_tests` production precedent).
+    #[tokio::test]
+    async fn fully_enumerated_container_still_archives_a_genuinely_deleted_table() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        let (workspace_id, ds) = seed_container_scoped_fixture(
+            sq,
+            "deletion",
+            &[("proj-1", "dataset_a", "kept"), ("proj-1", "dataset_a", "deleted")],
+        )
+        .await;
+
+        let scope = ArchiveScope::Containers(HashSet::from([("proj-1".to_string(), "dataset_a".to_string())]));
+        let seen_table_ids = HashSet::from(["proj-1.dataset_a.kept".to_string()]);
+
+        let archived = archive_missing_tables(&db, &workspace_id, &ds, &scope, &seen_table_ids)
+            .await
+            .expect("archive_missing_tables");
+
+        assert_eq!(archived, vec!["proj-1.dataset_a.deleted".to_string()]);
+        assert!(!archived_state(sq, &ds, "proj-1", "dataset_a", "kept").await);
+        assert!(archived_state(sq, &ds, "proj-1", "dataset_a", "deleted").await);
+    }
+
+    /// AC3: a run whose enumeration returns zero containers (as opposed to a
+    /// user who deliberately configured zero, which is `EntireDatasource`)
+    /// must archive nothing at all, preserving the whole existing catalog.
+    #[tokio::test]
+    async fn empty_containers_scope_archives_nothing() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        let (workspace_id, ds) =
+            seed_container_scoped_fixture(sq, "zeroenum", &[("proj-1", "dataset_a", "t1")]).await;
+
+        let scope = ArchiveScope::Containers(HashSet::new());
+        let seen_table_ids = HashSet::new();
+
+        let archived = archive_missing_tables(&db, &workspace_id, &ds, &scope, &seen_table_ids)
+            .await
+            .expect("archive_missing_tables");
+
+        assert!(
+            archived.is_empty(),
+            "an empty enumerated-containers scope must archive nothing"
+        );
+        assert!(!archived_state(sq, &ds, "proj-1", "dataset_a", "t1").await);
+    }
+
+    /// The explicit-empty-selection carve-out: `ArchiveScope::EntireDatasource`
+    /// must apply no container filter at all — every row not in
+    /// `seen_table_ids` (empty here, since discovery is skipped entirely for
+    /// an intentionally emptied selection) is archived, across every
+    /// container.
+    #[tokio::test]
+    async fn entire_datasource_scope_archives_across_every_container() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        let (workspace_id, ds) = seed_container_scoped_fixture(
+            sq,
+            "entirewipe",
+            &[("proj-1", "dataset_a", "t1"), ("proj-1", "dataset_b", "t1")],
+        )
+        .await;
+
+        let scope = ArchiveScope::EntireDatasource;
+        let seen_table_ids = HashSet::new();
+
+        let mut archived = archive_missing_tables(&db, &workspace_id, &ds, &scope, &seen_table_ids)
+            .await
+            .expect("archive_missing_tables");
+        archived.sort();
+
+        assert_eq!(
+            archived,
+            vec![
+                "proj-1.dataset_a.t1".to_string(),
+                "proj-1.dataset_b.t1".to_string(),
+            ],
+            "an intentionally emptied selection must archive every container's rows"
+        );
+    }
+
+    // ── is_material_shortfall (KYO-614) ───────────────────────────────────
+
+    #[test]
+    fn material_shortfall_fires_on_the_confirmed_incident_shape() {
+        // 1 of 4 datasets enumerated — the confirmed production incident.
+        assert!(is_material_shortfall(1, 4));
+    }
+
+    #[test]
+    fn material_shortfall_does_not_fire_on_one_genuine_deletion_out_of_ten() {
+        assert!(!is_material_shortfall(9, 10));
+    }
+
+    #[test]
+    fn material_shortfall_boundary_is_inclusive_at_exactly_half() {
+        assert!(
+            is_material_shortfall(2, 4),
+            "enumerating exactly half must count as material"
+        );
+        assert!(!is_material_shortfall(3, 4));
+    }
+
+    // ── check_container_coverage (KYO-614) ────────────────────────────────
+
+    #[tokio::test]
+    async fn zero_live_containers_reports_no_shortfall() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let (workspace_id, ds) = {
+            let DbPool::Sqlite(sq) = &db else {
+                unreachable!("expected sqlite pool");
+            };
+            seed_container_scoped_fixture(sq, "covzero", &[]).await
+        };
+
+        let coverage = check_container_coverage(&db, &workspace_id, &ds, &HashSet::new())
+            .await
+            .expect("check_container_coverage");
+
+        assert!(coverage.warning.is_none());
+        assert!(!coverage.material);
+    }
+
+    #[tokio::test]
+    async fn full_coverage_reports_no_shortfall() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let (workspace_id, ds) = {
+            let DbPool::Sqlite(sq) = &db else {
+                unreachable!("expected sqlite pool");
+            };
+            seed_container_scoped_fixture(
+                sq,
+                "covfull",
+                &[("proj-1", "dataset_a", "t1"), ("proj-1", "dataset_b", "t1")],
+            )
+            .await
+        };
+
+        let enumerated = HashSet::from([
+            ("proj-1".to_string(), "dataset_a".to_string()),
+            ("proj-1".to_string(), "dataset_b".to_string()),
+        ]);
+        let coverage = check_container_coverage(&db, &workspace_id, &ds, &enumerated)
+            .await
+            .expect("check_container_coverage");
+
+        assert!(coverage.warning.is_none());
+        assert!(!coverage.material);
+    }
+
+    /// Reproduces the confirmed incident shape end to end: 4 live datasets,
+    /// only 1 enumerated. Must report both a warning naming the missing
+    /// three and `material == true`.
+    #[tokio::test]
+    async fn material_shortfall_end_to_end_matches_confirmed_incident() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let (workspace_id, ds) = {
+            let DbPool::Sqlite(sq) = &db else {
+                unreachable!("expected sqlite pool");
+            };
+            seed_container_scoped_fixture(
+                sq,
+                "covincident",
+                &[
+                    ("proj-1", "dataset_a", "t1"),
+                    ("proj-1", "dataset_b", "t1"),
+                    ("proj-1", "dataset_c", "t1"),
+                    ("proj-1", "dataset_d", "t1"),
+                ],
+            )
+            .await
+        };
+
+        let enumerated = HashSet::from([("proj-1".to_string(), "dataset_a".to_string())]);
+        let coverage = check_container_coverage(&db, &workspace_id, &ds, &enumerated)
+            .await
+            .expect("check_container_coverage");
+
+        assert!(coverage.material, "1 of 4 enumerated must be material");
+        let warning = coverage.warning.expect("warning must be present");
+        assert!(warning.contains("1 of 4"), "got: {warning}");
+        for missing in ["dataset_b", "dataset_c", "dataset_d"] {
+            assert!(
+                warning.contains(missing),
+                "warning must name {missing}, got: {warning}"
+            );
+        }
+    }
+
+    /// A small, non-material shortfall still produces a warning (so the
+    /// user can see exactly which container wasn't re-verified) but must
+    /// not be flagged `material`.
+    #[tokio::test]
+    async fn non_material_shortfall_still_warns_but_is_not_material() {
+        let rows: Vec<(String, String, String)> = (0..10)
+            .map(|i| ("proj-1".to_string(), format!("dataset_{i}"), "t1".to_string()))
+            .collect();
+        let rows_ref: Vec<(&str, &str, &str)> = rows
+            .iter()
+            .map(|(p, d, t)| (p.as_str(), d.as_str(), t.as_str()))
+            .collect();
+
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let (workspace_id, ds) = {
+            let DbPool::Sqlite(sq) = &db else {
+                unreachable!("expected sqlite pool");
+            };
+            seed_container_scoped_fixture(sq, "covsmall", &rows_ref).await
+        };
+
+        let enumerated: HashSet<ContainerKey> = (0..9)
+            .map(|i| ("proj-1".to_string(), format!("dataset_{i}")))
+            .collect();
+        let coverage = check_container_coverage(&db, &workspace_id, &ds, &enumerated)
+            .await
+            .expect("check_container_coverage");
+
+        assert!(
+            coverage.warning.is_some(),
+            "one un-enumerated container out of ten must still warn"
+        );
+        assert!(
+            !coverage.material,
+            "9 of 10 enumerated must not be material"
+        );
+    }
+
+    /// The missing-container list is capped at
+    /// `MAX_MISSING_CONTAINERS_IN_WARNING` with a trailing "(+N more)"
+    /// suffix, mirroring `fold_table_outcomes`'s summary-line idiom.
+    #[tokio::test]
+    async fn missing_container_list_is_capped_with_a_remainder_suffix() {
+        let total = MAX_MISSING_CONTAINERS_IN_WARNING + 3;
+        let rows: Vec<(String, String, String)> = (0..total)
+            .map(|i| ("proj-1".to_string(), format!("dataset_{i}"), "t1".to_string()))
+            .collect();
+        let rows_ref: Vec<(&str, &str, &str)> = rows
+            .iter()
+            .map(|(p, d, t)| (p.as_str(), d.as_str(), t.as_str()))
+            .collect();
+
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let (workspace_id, ds) = {
+            let DbPool::Sqlite(sq) = &db else {
+                unreachable!("expected sqlite pool");
+            };
+            seed_container_scoped_fixture(sq, "covcapped", &rows_ref).await
+        };
+
+        let coverage = check_container_coverage(&db, &workspace_id, &ds, &HashSet::new())
+            .await
+            .expect("check_container_coverage");
+
+        let warning = coverage.warning.expect("warning must be present");
+        assert!(
+            warning.contains(&format!("(+{} more)", total - MAX_MISSING_CONTAINERS_IN_WARNING)),
+            "got: {warning}"
+        );
+    }
+
+    // ── apply_container_coverage (KYO-614) ────────────────────────────────
+
+    /// AC4 core logic, exercised without any DB or HTTP dependency: a
+    /// material shortfall on an otherwise-`"idle"` run must flip it to
+    /// `"failed"` with the shortfall's warning as the reason, and the
+    /// warning must also land in `errors`.
+    #[test]
+    fn material_shortfall_overrides_idle_status() {
+        let mut status = "idle";
+        let mut failure_reason = None;
+        let mut errors = Vec::new();
+        let coverage = ContainerCoverage {
+            warning: Some("Catalog refresh enumerated 1 of 4 known container(s)".to_string()),
+            material: true,
+        };
+
+        apply_container_coverage(coverage, &mut status, &mut failure_reason, &mut errors);
+
+        assert_eq!(status, "failed");
+        assert_eq!(
+            failure_reason,
+            Some("Catalog refresh enumerated 1 of 4 known container(s)".to_string())
+        );
+        assert_eq!(
+            errors,
+            vec!["Catalog refresh enumerated 1 of 4 known container(s)".to_string()]
+        );
+    }
+
+    /// A run already `"failed"` for a real, unrelated reason must keep that
+    /// reason — a material shortfall must not overwrite a genuine failure
+    /// with the generic shortfall message, only add its warning to `errors`.
+    #[test]
+    fn material_shortfall_does_not_overwrite_an_existing_failure_reason() {
+        let mut status = "failed";
+        let mut failure_reason = Some("permission denied listing schema 'restricted'".to_string());
+        let mut errors = vec!["permission denied listing schema 'restricted'".to_string()];
+        let coverage = ContainerCoverage {
+            warning: Some("Catalog refresh enumerated 1 of 4 known container(s)".to_string()),
+            material: true,
+        };
+
+        apply_container_coverage(coverage, &mut status, &mut failure_reason, &mut errors);
+
+        assert_eq!(status, "failed");
+        assert_eq!(
+            failure_reason,
+            Some("permission denied listing schema 'restricted'".to_string()),
+            "the original failure reason must survive, not be replaced by the shortfall's"
+        );
+        assert_eq!(
+            errors,
+            vec![
+                "permission denied listing schema 'restricted'".to_string(),
+                "Catalog refresh enumerated 1 of 4 known container(s)".to_string(),
+            ],
+            "the shortfall warning must still be appended to errors"
+        );
+    }
+
+    /// A non-material shortfall must still warn (appended to `errors`) but
+    /// must leave an `"idle"` status untouched.
+    #[test]
+    fn non_material_shortfall_warns_without_overriding_status() {
+        let mut status = "idle";
+        let mut failure_reason = None;
+        let mut errors = Vec::new();
+        let coverage = ContainerCoverage {
+            warning: Some("Catalog refresh enumerated 9 of 10 known container(s)".to_string()),
+            material: false,
+        };
+
+        apply_container_coverage(coverage, &mut status, &mut failure_reason, &mut errors);
+
+        assert_eq!(status, "idle");
+        assert_eq!(failure_reason, None);
+        assert_eq!(
+            errors,
+            vec!["Catalog refresh enumerated 9 of 10 known container(s)".to_string()]
+        );
+    }
+
+    /// No shortfall at all (`warning: None`) must be a complete no-op.
+    #[test]
+    fn no_shortfall_is_a_no_op() {
+        let mut status = "idle";
+        let mut failure_reason = None;
+        let mut errors = Vec::new();
+        let coverage = ContainerCoverage {
+            warning: None,
+            material: false,
+        };
+
+        apply_container_coverage(coverage, &mut status, &mut failure_reason, &mut errors);
+
+        assert_eq!(status, "idle");
+        assert_eq!(failure_reason, None);
+        assert!(errors.is_empty());
     }
 }
