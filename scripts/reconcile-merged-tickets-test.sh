@@ -581,12 +581,24 @@ echo
 echo "-- Test 22: --print-gh-args is silent on stderr"
 run_print_gh_args --lookback-hours 24
 assert_exit "plain --print-gh-args, exit 0" 0
-if [ -z "$CHECK_STDERR" ]; then
-    printf "  \xe2\x9c\x93 --print-gh-args produces no stderr output\n"
+# scripts/reconcile-merged-tickets.sh sources scripts/lib/stale-tooling-guard.sh
+# (KYO-632), which may legitimately write its own diagnostic to stderr —
+# every line of it starts with the fixed "[stale-tooling-guard]" prefix
+# (see that file's STALE_TOOLING_GUARD_LOG_PREFIX). That diagnostic is
+# expected and is not what this test guards against; what it guards against
+# is $SCRIPT itself printing something unexpected here. Filter the guard's
+# own lines out before checking for silence, so this assertion keeps its
+# original meaning instead of becoming permanently unsatisfiable the moment
+# this checkout's copy of the script differs from (or can't be compared
+# against) origin/main — which is true of every PR that touches this
+# script, including the one that added the guard.
+non_guard_stderr="$(printf '%s\n' "$CHECK_STDERR" | grep -v '^\[stale-tooling-guard\]' || true)"
+if [ -z "$non_guard_stderr" ]; then
+    printf "  \xe2\x9c\x93 --print-gh-args produces no stderr output of its own (guard diagnostics aside)\n"
     PASS=$((PASS + 1))
 else
-    printf "  \xe2\x9c\x97 expected no stderr output, got:\n"
-    echo "$CHECK_STDERR" | sed 's/^/    | /'
+    printf "  \xe2\x9c\x97 expected no non-guard stderr output, got:\n"
+    echo "$non_guard_stderr" | sed 's/^/    | /'
     FAIL=$((FAIL + 1))
 fi
 echo

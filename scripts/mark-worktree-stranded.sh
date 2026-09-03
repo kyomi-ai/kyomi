@@ -75,11 +75,19 @@
 #       write failed.
 #   2 — usage error (missing/unparseable ticket argument, unknown flag,
 #       missing value for --worktree/--note).
+#  42 — this script's own on-disk content is stale relative to origin/main
+#       AND KYOMI_STALE_TOOLING_STRICT=1 is set. See
+#       scripts/lib/stale-tooling-guard.sh (KYO-632) — by default this is a
+#       loud warning on stderr, not a failure.
 # ------------------------------------------------------------------------------
 
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/stale-tooling-guard.sh
+source "${SCRIPT_DIR}/lib/stale-tooling-guard.sh"
+stale_tooling_guard "${BASH_SOURCE[0]}"
 
 usage() {
     cat >&2 <<EOF
