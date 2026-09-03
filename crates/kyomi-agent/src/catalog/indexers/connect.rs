@@ -17,8 +17,9 @@ use tracing::{info, warn};
 
 use crate::catalog::traits::CatalogIndexer;
 use kyomi_auth::catalog::helpers::{
-    archive_missing_tables, cache_table, resolve_run_outcome, update_datasource_last_refresh,
-    update_datasource_status, CacheTableParams, IndexerContext,
+    apply_container_coverage, archive_missing_tables, cache_table, check_container_coverage,
+    resolve_run_outcome, update_datasource_last_refresh, update_datasource_status, ArchiveScope,
+    CacheTableParams, ContainerKey, IndexerContext,
 };
 use kyomi_auth::catalog::types::{CatalogIndexResult, ColumnEntry};
 use kyomi_core::connect_protocol::{CatalogResult, DiscoverCatalogParams};
@@ -304,18 +305,78 @@ async fn process_discovered_catalog(params: ProcessDiscoveredCatalogParams<'_>) 
     // should be evicted, not preserved) and never report a failure for a
     // run that found nothing because nothing was ever selected. See
     // `resolve_run_outcome`'s doc comment for the full reasoning.
-    let outcome = resolve_run_outcome(
+    let mut outcome = resolve_run_outcome(
         !seen_table_ids.is_empty(),
         tables_indexed,
         &catalog_result.errors,
         explicit_empty,
     );
 
+    // KYO-614: which cached rows this run is even allowed to archive.
+    // `catalog_result.containers` already excludes any container whose
+    // discovery was denied (KYO-268 phase 2 — a denial is recorded in
+    // `catalog_result.errors` and the container simply omitted here), so
+    // its name is never in this set and its rows are correctly preserved.
+    // `explicit_empty` is the sole path to `EntireDatasource`. Keyed by the
+    // full `(project_id, dataset_id)` pair (`ContainerKey`) rather than
+    // bare `dataset_id` — `project_id` is always the literal `""` on this
+    // path (set once in the table loop above, not per-container), so this
+    // is a behavioural no-op for Connect specifically, but it keeps one
+    // shared key shape across all three indexers rather than forking it
+    // per provider (KYO-614 follow-up).
+    let archive_scope = if explicit_empty {
+        ArchiveScope::EntireDatasource
+    } else {
+        ArchiveScope::Containers(
+            catalog_result
+                .containers
+                .iter()
+                .map(|c| (String::new(), c.name.clone()))
+                .collect(),
+        )
+    };
+
+    // KYO-614: did this run enumerate enough of the datasource's currently
+    // -live containers to trust an "idle" status? Skipped for an
+    // intentionally emptied selection — see the SQL-template path
+    // (`kyomi_agent::catalog::traits::index_catalog_sql`) for the identical
+    // reasoning.
+    if !explicit_empty {
+        let enumerated: HashSet<ContainerKey> = catalog_result
+            .containers
+            .iter()
+            .map(|c| (String::new(), c.name.clone()))
+            .collect();
+        match check_container_coverage(
+            db,
+            &ctx.workspace_id,
+            &ctx.datasource_config_id,
+            &enumerated,
+        )
+        .await
+        {
+            Ok(coverage) => apply_container_coverage(
+                coverage,
+                &mut outcome.status,
+                &mut outcome.failure_reason,
+                &mut catalog_result.errors,
+            ),
+            Err(e) => {
+                warn!(
+                    datasource_config_id = ctx.datasource_config_id,
+                    error = %e,
+                    "failed to check container coverage — skipping the shortfall check for this run"
+                );
+            }
+        }
+    }
+
     let tables_archived = if outcome.archive {
         archive_missing_tables(
             db,
             &ctx.workspace_id,
             &ctx.datasource_config_id,
+            &archive_scope,
             &seen_table_ids,
         )
         .await
@@ -1053,6 +1114,212 @@ mod tests {
         assert!(
             warnings.is_empty(),
             "a clean run (zero discovery errors) must persist an empty warnings array, got: {envelope}"
+        );
+    }
+
+    // ── KYO-614: container-scoped archiving ────────────────────────────────
+
+    /// Headline regression (KYO-614), Connect path: a subset enumeration
+    /// (one container discovered, three pre-existing ones never mentioned)
+    /// must leave the un-enumerated containers' rows untouched.
+    #[tokio::test]
+    async fn subset_enumeration_preserves_unenumerated_containers() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        let ctx = seed_connect_fixture(sq, "subset").await;
+        let embedding = EmbeddingService::new().expect("load embedding model");
+
+        for (dataset_id, table_id) in [("ds_b", "t1"), ("ds_c", "t1")] {
+            sqlx::query(
+                r#"
+                INSERT INTO datasource_table_cache
+                    (workspace_id, datasource_config_id, project_id, dataset_id, table_id, table_metadata, is_archived)
+                VALUES (?, ?, '', ?, ?, '{}', 0)
+                "#,
+            )
+            .bind(&ctx.workspace_id)
+            .bind(&ctx.datasource_config_id)
+            .bind(dataset_id)
+            .bind(table_id)
+            .execute(sq)
+            .await
+            .expect("seed other-container cache row");
+        }
+
+        let catalog_result = CatalogResult {
+            containers: vec![kyomi_core::connect_protocol::CatalogContainer {
+                name: "ds_a".to_string(),
+                tables: Vec::new(),
+            }],
+            errors: Vec::new(),
+        };
+
+        process_discovered_catalog(ProcessDiscoveredCatalogParams {
+            db: &db,
+            embedding: &embedding,
+            ctx: &ctx,
+            catalog_result,
+            explicit_empty: false,
+            start_time: Utc::now(),
+        })
+        .await;
+
+        for dataset_id in ["ds_b", "ds_c"] {
+            let is_archived: i64 = sqlx::query_scalar(
+                "SELECT is_archived FROM datasource_table_cache WHERE datasource_config_id = ? AND dataset_id = ?",
+            )
+            .bind(&ctx.datasource_config_id)
+            .bind(dataset_id)
+            .fetch_one(sq)
+            .await
+            .expect("read archival state");
+            assert_eq!(
+                is_archived, 0,
+                "{dataset_id} was never enumerated this run and must be preserved"
+            );
+        }
+    }
+
+    /// AC4 (Connect path): enumerating 1 of 4 live containers is a material
+    /// shortfall (KYO-614) and must not resolve to `"idle"`, even though the
+    /// one container this run did discover is genuinely empty (not denied)
+    /// — the ordinary "accessible but empty ⇒ idle" case this check must
+    /// not defeat when coverage IS complete.
+    #[tokio::test]
+    async fn material_container_shortfall_does_not_report_idle() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        let ctx = seed_connect_fixture(sq, "matshortfall").await;
+        let embedding = EmbeddingService::new().expect("load embedding model");
+
+        for (dataset_id, table_id) in [("ds_b", "t1"), ("ds_c", "t1"), ("ds_d", "t1")] {
+            sqlx::query(
+                r#"
+                INSERT INTO datasource_table_cache
+                    (workspace_id, datasource_config_id, project_id, dataset_id, table_id, table_metadata, is_archived)
+                VALUES (?, ?, '', ?, ?, '{}', 0)
+                "#,
+            )
+            .bind(&ctx.workspace_id)
+            .bind(&ctx.datasource_config_id)
+            .bind(dataset_id)
+            .bind(table_id)
+            .execute(sq)
+            .await
+            .expect("seed other-container cache row");
+        }
+
+        let catalog_result = CatalogResult {
+            containers: vec![kyomi_core::connect_protocol::CatalogContainer {
+                name: "ds_a".to_string(),
+                tables: Vec::new(),
+            }],
+            errors: Vec::new(),
+        };
+
+        process_discovered_catalog(ProcessDiscoveredCatalogParams {
+            db: &db,
+            embedding: &embedding,
+            ctx: &ctx,
+            catalog_result,
+            explicit_empty: false,
+            start_time: Utc::now(),
+        })
+        .await;
+
+        assert_eq!(
+            datasource_status(sq, &ctx.datasource_config_id).await,
+            "failed",
+            "enumerating 1 of 4 live containers is a material shortfall and must not report idle"
+        );
+
+        for dataset_id in ["ds_b", "ds_c", "ds_d"] {
+            let is_archived: i64 = sqlx::query_scalar(
+                "SELECT is_archived FROM datasource_table_cache WHERE datasource_config_id = ? AND dataset_id = ?",
+            )
+            .bind(&ctx.datasource_config_id)
+            .bind(dataset_id)
+            .fetch_one(sq)
+            .await
+            .expect("read archival state");
+            assert_eq!(
+                is_archived, 0,
+                "{dataset_id} was never enumerated this run and must be preserved"
+            );
+        }
+    }
+
+    /// The explicit-empty-selection carve-out (KYO-162) must still use
+    /// `ArchiveScope::EntireDatasource` under the new container scoping —
+    /// every container's rows must still be archived, not just the ones
+    /// happening to appear in `catalog_result.containers` (which is empty
+    /// in this branch by construction).
+    #[tokio::test]
+    async fn explicit_empty_selection_still_archives_every_container() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        let ctx = seed_connect_fixture(sq, "explicitempty").await;
+        let embedding = EmbeddingService::new().expect("load embedding model");
+
+        for (dataset_id, table_id) in [("ds_a", "t1"), ("ds_b", "t1")] {
+            sqlx::query(
+                r#"
+                INSERT INTO datasource_table_cache
+                    (workspace_id, datasource_config_id, project_id, dataset_id, table_id, table_metadata, is_archived)
+                VALUES (?, ?, '', ?, ?, '{}', 0)
+                "#,
+            )
+            .bind(&ctx.workspace_id)
+            .bind(&ctx.datasource_config_id)
+            .bind(dataset_id)
+            .bind(table_id)
+            .execute(sq)
+            .await
+            .expect("seed cache row");
+        }
+
+        let result = process_discovered_catalog(ProcessDiscoveredCatalogParams {
+            db: &db,
+            embedding: &embedding,
+            ctx: &ctx,
+            catalog_result: CatalogResult {
+                containers: Vec::new(),
+                errors: Vec::new(),
+            },
+            explicit_empty: true,
+            start_time: Utc::now(),
+        })
+        .await;
+
+        assert_eq!(result.tables_archived, 2);
+        for dataset_id in ["ds_a", "ds_b"] {
+            let is_archived: i64 = sqlx::query_scalar(
+                "SELECT is_archived FROM datasource_table_cache WHERE datasource_config_id = ? AND dataset_id = ?",
+            )
+            .bind(&ctx.datasource_config_id)
+            .bind(dataset_id)
+            .fetch_one(sq)
+            .await
+            .expect("read archival state");
+            assert_eq!(is_archived, 1, "{dataset_id} must be archived — the selection was explicitly emptied");
+        }
+
+        assert_eq!(
+            datasource_status(sq, &ctx.datasource_config_id).await,
+            "idle",
+            "an intentionally emptied selection must never report failed"
         );
     }
 }

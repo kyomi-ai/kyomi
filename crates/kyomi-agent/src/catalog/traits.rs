@@ -21,8 +21,9 @@ use serde_json::Value;
 use tracing::{info, warn};
 
 use kyomi_auth::catalog::helpers::{
-    archive_missing_tables, cache_table, resolve_run_outcome, update_datasource_last_refresh,
-    update_datasource_status, CacheTableParams, IndexerContext,
+    apply_container_coverage, archive_missing_tables, cache_table, check_container_coverage,
+    resolve_run_outcome, update_datasource_last_refresh, update_datasource_status, ArchiveScope,
+    CacheTableParams, ContainerKey, IndexerContext,
 };
 use kyomi_auth::catalog::types::{CatalogIndexResult, ColumnEntry, TableEntry};
 
@@ -173,6 +174,36 @@ pub trait SQLCatalogIndexer: Send + Sync {
 // `update_datasource_last_refresh`, `cache_table` all live in
 // `kyomi_auth::catalog::helpers` and are imported above.
 
+/// The result of resolving which containers a run should index.
+///
+/// Split from a bare `Vec<String>` (KYO-614) so the caller can distinguish
+/// three states that used to collapse into one: containers the run will
+/// actually enumerate (`valid`), containers the user configured that
+/// `discover_all_containers` did not return (`missing` — item 3, previously
+/// dropped with only a `warn!`), and whether an empty `valid` list reflects
+/// the user's deliberate choice (`deliberately_empty`) or merely a
+/// discovery/configuration shortfall. That last distinction is exactly what
+/// [`kyomi_auth::catalog::helpers::ArchiveScope`] needs to decide between
+/// `EntireDatasource` (safe to sweep) and `Containers(..)` (must not sweep
+/// what was never looked at) — collapsing it back into "was `valid` empty?"
+/// is the KYO-614 bug in miniature.
+pub struct CatalogContainers {
+    /// Containers this run will actually enumerate.
+    pub valid: Vec<String>,
+    /// Containers the user configured that `discover_all_containers` did
+    /// not return this run — never enumerated, so never eligible for
+    /// archiving either.
+    pub missing: Vec<String>,
+    /// `true` only when the user configured `container_config_key` as an
+    /// explicit empty array — a deliberate "index nothing" selection
+    /// (KYO-162). `false` for every other empty case (nothing configured or
+    /// discovered, or every configured container turned out invalid this
+    /// run) — those are enumeration shortfalls, not user intent, and must
+    /// not be treated as authorization to sweep the whole datasource
+    /// (KYO-614).
+    pub deliberately_empty: bool,
+}
+
 /// Resolve which containers to index using the template method pattern.
 ///
 /// Logic:
@@ -184,7 +215,7 @@ pub async fn get_catalog_containers(
     ctx: &IndexerContext,
     indexer: &dyn SQLCatalogIndexer,
     provider: &dyn DatasourceProvider,
-) -> Result<Vec<String>> {
+) -> Result<CatalogContainers> {
     let config_key = indexer.container_config_key();
     let configured = ctx.connection_config.get(config_key);
 
@@ -196,11 +227,21 @@ pub async fn get_catalog_containers(
                 config_key,
                 "no catalog containers configured, discovering all"
             );
-            indexer.discover_all_containers(provider).await
+            let valid = indexer.discover_all_containers(provider).await?;
+            Ok(CatalogContainers {
+                valid,
+                missing: Vec::new(),
+                deliberately_empty: false,
+            })
         }
         Some(Value::Null) => {
             // Explicitly null -> discover all
-            indexer.discover_all_containers(provider).await
+            let valid = indexer.discover_all_containers(provider).await?;
+            Ok(CatalogContainers {
+                valid,
+                missing: Vec::new(),
+                deliberately_empty: false,
+            })
         }
         Some(Value::Array(arr)) if arr.is_empty() => {
             // Empty array -> user chose to index nothing
@@ -209,7 +250,11 @@ pub async fn get_catalog_containers(
                 config_key,
                 "catalog containers configured as empty, indexing nothing"
             );
-            Ok(Vec::new())
+            Ok(CatalogContainers {
+                valid: Vec::new(),
+                missing: Vec::new(),
+                deliberately_empty: true,
+            })
         }
         Some(Value::Array(arr)) => {
             // Specific containers configured -> validate they exist
@@ -219,24 +264,34 @@ pub async fn get_catalog_containers(
                 .collect();
 
             let available = indexer.discover_all_containers(provider).await?;
-            let valid: Vec<String> = configured
-                .into_iter()
-                .filter(|c| {
-                    let exists = available.iter().any(|a| a.eq_ignore_ascii_case(c));
-                    if !exists {
-                        warn!(
-                            workspace_id = ctx.workspace_id,
-                            container = c,
-                            label = indexer.container_label(),
-                            "configured {} not found on server, skipping",
-                            indexer.container_label()
-                        );
-                    }
-                    exists
-                })
-                .collect();
+            let mut valid = Vec::new();
+            let mut missing = Vec::new();
+            for c in configured {
+                let exists = available.iter().any(|a| a.eq_ignore_ascii_case(&c));
+                if exists {
+                    valid.push(c);
+                } else {
+                    warn!(
+                        workspace_id = ctx.workspace_id,
+                        container = c,
+                        label = indexer.container_label(),
+                        "configured {} not found on server, skipping",
+                        indexer.container_label()
+                    );
+                    missing.push(c);
+                }
+            }
 
-            Ok(valid)
+            // A configured-but-not-found container was never enumerated
+            // this run, even though the user asked for it — an empty
+            // `valid` here is a discovery shortfall (every requested
+            // container vanished), not the deliberate empty selection
+            // `deliberately_empty` exists to flag.
+            Ok(CatalogContainers {
+                valid,
+                missing,
+                deliberately_empty: false,
+            })
         }
         _ => {
             // Invalid type -> discover all as fallback
@@ -245,7 +300,12 @@ pub async fn get_catalog_containers(
                 config_key,
                 "unexpected type for catalog config key, discovering all"
             );
-            indexer.discover_all_containers(provider).await
+            let valid = indexer.discover_all_containers(provider).await?;
+            Ok(CatalogContainers {
+                valid,
+                missing: Vec::new(),
+                deliberately_empty: false,
+            })
         }
     }
 }
@@ -511,7 +571,11 @@ pub async fn index_catalog_sql(
     }
 
     // Discover containers
-    let containers = match get_catalog_containers(ctx, indexer, provider.as_ref()).await {
+    let CatalogContainers {
+        valid: containers,
+        missing: missing_containers,
+        deliberately_empty,
+    } = match get_catalog_containers(ctx, indexer, provider.as_ref()).await {
         Ok(c) => c,
         Err(e) => {
             provider.close().await;
@@ -552,6 +616,27 @@ pub async fn index_catalog_sql(
     let mut any_container_succeeded = false;
     let project_id = indexer.get_project_id(ctx);
 
+    // KYO-614: `(project_id, dataset_id)` pairs this run actually
+    // enumerated — see `ArchiveScope::Containers`'s / `ContainerKey`'s doc
+    // comments. `project_id` is a run constant here (`indexer.get_project_id`
+    // is called once above, not per-container), unlike the BigQuery REST
+    // path where it varies within a run — so this key shape is a
+    // behavioural no-op for this indexer, not a provider fork. A container
+    // the user configured but that `discover_all_containers` never
+    // returned was never enumerated at all, so it is never eligible for
+    // archiving either (item 3): each one is surfaced as a real `errors`
+    // entry so it reaches the persisted `warnings`/`failure_reason`,
+    // instead of the `warn!`-only handling `get_catalog_containers` used to
+    // give it.
+    let mut enumerated_containers: std::collections::HashSet<ContainerKey> =
+        std::collections::HashSet::new();
+    for missing in &missing_containers {
+        errors.push(format!(
+            "Configured {} '{missing}' not found on server — its cached tables were left untouched",
+            indexer.container_label()
+        ));
+    }
+
     // Analytics datasources use _-prefixed hidden tables for transforms;
     // only the public views (without _) should be indexed.
     let is_analytics = ctx
@@ -577,6 +662,20 @@ pub async fn index_catalog_sql(
         {
             Ok((t, partial_failures)) => {
                 any_container_succeeded = true;
+                // KYO-614: this container's listing call succeeded, so it
+                // was genuinely enumerated this run — record it under the
+                // same value a row with zero tables in it would have for
+                // `dataset_id`, so a container that is now completely empty
+                // (every table deleted) still archives correctly even
+                // though the table loop below never runs for it.
+                enumerated_containers.insert((
+                    project_id.clone(),
+                    if is_analytics {
+                        String::new()
+                    } else {
+                        container.clone()
+                    },
+                ));
                 (t, partial_failures)
             }
             Err(e) => {
@@ -633,6 +732,14 @@ pub async fn index_catalog_sql(
                 &table.name,
             );
             seen_table_ids.insert(archive_id);
+            // KYO-614: covers providers that set `table.dataset_override`
+            // (Snowflake `database.schema`, Databricks `catalog.schema`) —
+            // `cache_dataset` there is the sub-container actually derived
+            // from a table this run found, distinct from the top-level
+            // `container` name already inserted above. A no-op duplicate
+            // insert for every other provider, where `cache_dataset ==
+            // container` already.
+            enumerated_containers.insert((project_id.clone(), cache_dataset.clone()));
 
             // Get columns — use effective_dataset (real database name) so the
             // indexer can query system.columns correctly.
@@ -697,24 +804,72 @@ pub async fn index_catalog_sql(
     //   == false` and silently reported `"idle"`, no matter how many
     //   `errors` accumulated.
     //
-    // `containers.is_empty()` is the one exception: the user explicitly
+    // `deliberately_empty` is the one exception: the user explicitly
     // configured no containers, so an empty result is expected — archive
     // the existing catalog (removes stale tables from a datasource the user
     // intentionally emptied) and never report a failure for a run that
     // found nothing because there was nothing configured to look at. See
-    // `resolve_run_outcome`'s doc comment for the full reasoning.
-    let outcome = resolve_run_outcome(
+    // `resolve_run_outcome`'s doc comment for the full reasoning. This is
+    // NOT the same test as `containers.is_empty()` (KYO-614): the latter is
+    // also true when discovery itself came back with nothing, or every
+    // configured container turned out invalid — neither of those is user
+    // intent, and `ArchiveScope` below must not treat them as one.
+    let mut outcome = resolve_run_outcome(
         !seen_table_ids.is_empty(),
         tables_indexed,
         &errors,
-        containers.is_empty(),
+        deliberately_empty,
     );
+
+    // KYO-614: which cached rows this run is even allowed to archive.
+    // `deliberately_empty` is the sole path to `EntireDatasource` — every
+    // other empty-`containers` case (discovery found nothing, every
+    // configured container was invalid) resolves to `Containers` with
+    // whatever (possibly empty) set was actually enumerated, so an
+    // un-enumerated container's rows are never touched.
+    let archive_scope = if deliberately_empty {
+        ArchiveScope::EntireDatasource
+    } else {
+        ArchiveScope::Containers(enumerated_containers.clone())
+    };
+
+    // KYO-614: did this run enumerate enough of the datasource's currently
+    // -live containers to trust an "idle" status? Skipped for a
+    // deliberately emptied selection — every previously-live container is
+    // expected to look "un-enumerated" there by design, and warning about
+    // that would be noise, not signal.
+    if !deliberately_empty {
+        match check_container_coverage(
+            db,
+            &ctx.workspace_id,
+            &ctx.datasource_config_id,
+            &enumerated_containers,
+        )
+        .await
+        {
+            Ok(coverage) => apply_container_coverage(
+                coverage,
+                &mut outcome.status,
+                &mut outcome.failure_reason,
+                &mut errors,
+            ),
+            Err(e) => {
+                warn!(
+                    workspace_id = ctx.workspace_id,
+                    datasource_config_id = ctx.datasource_config_id,
+                    error = %e,
+                    "failed to check container coverage — skipping the shortfall check for this run"
+                );
+            }
+        }
+    }
 
     let tables_archived = if outcome.archive {
         let archived_names = archive_missing_tables(
             db,
             &ctx.workspace_id,
             &ctx.datasource_config_id,
+            &archive_scope,
             &seen_table_ids,
         )
         .await
@@ -1785,5 +1940,306 @@ mod tests {
             progress.contains("main.marketing"),
             "failure reason must name a real underlying error, not a generic message, got: {progress}"
         );
+    }
+
+    // ── KYO-614: container-scoped archiving wired through index_catalog_sql ──
+
+    /// KYO-614 item 3: a container the user configured that
+    /// `discover_all_containers` did not return must surface as a real
+    /// `errors` entry (reaching the persisted `warnings`/`failure_reason`),
+    /// and — because it was never enumerated this run — its cached rows
+    /// must be preserved, not archived.
+    #[tokio::test]
+    async fn configured_missing_container_is_surfaced_and_preserved() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+
+        sqlx::query("INSERT INTO users (user_id, email) VALUES ('u1', 'u1@test.local')")
+            .execute(sq)
+            .await
+            .expect("insert user");
+        sqlx::query(
+            "INSERT INTO workspaces (workspace_id, name, owner_user_id) VALUES ('ws1', 'WS', 'u1')",
+        )
+        .execute(sq)
+        .await
+        .expect("insert workspace");
+        sqlx::query(
+            "INSERT INTO datasource_configs (id, workspace_id, name, datasource_type, slug) \
+             VALUES ('ds1', 'ws1', 'RS', 'redshift', 'rs')",
+        )
+        .execute(sq)
+        .await
+        .expect("insert datasource_config");
+
+        // A cached row under the configured-but-missing container.
+        sqlx::query(
+            r#"
+            INSERT INTO datasource_table_cache
+                (workspace_id, datasource_config_id, project_id, dataset_id, table_id, table_metadata, is_archived)
+            VALUES ('ws1', 'ds1', 'analytics', 'ghost', 'old_table', '{}', 0)
+            "#,
+        )
+        .execute(sq)
+        .await
+        .expect("seed ghost cache row");
+
+        let embedding = EmbeddingService::new().expect("load embedding model");
+        let ctx = IndexerContext {
+            workspace_id: "ws1".to_string(),
+            datasource_config_id: "ds1".to_string(),
+            connection_config: json!({ "database": "analytics", "catalog_schemas": ["public", "ghost"] }),
+            encryption_key: std::sync::Arc::new([0u8; 32]),
+        };
+        let credentials = json!({ "user": "x", "password": "y" });
+
+        let result = index_catalog_sql(
+            &MockRedshiftIndexer,
+            &ctx,
+            &db,
+            &embedding,
+            None,
+            Some(&credentials),
+            None,
+        )
+        .await;
+
+        let errors = result
+            .errors
+            .as_deref()
+            .expect("the missing-container message must reach the caller-visible result");
+        assert!(
+            errors.iter().any(|e| e.contains("ghost")),
+            "the missing configured container must be named in errors, got: {errors:?}"
+        );
+
+        let ghost_archived: i64 = sqlx::query_scalar(
+            "SELECT is_archived FROM datasource_table_cache WHERE datasource_config_id = 'ds1' AND dataset_id = 'ghost'",
+        )
+        .fetch_one(sq)
+        .await
+        .expect("read ghost archival state");
+        assert_eq!(
+            ghost_archived, 0,
+            "a configured-but-missing container was never enumerated and must be preserved"
+        );
+    }
+
+    /// Configurable single-container mock for the material-shortfall test
+    /// below. Its one table is seeded to match exactly, so `cache_table`
+    /// takes the schema-unchanged/embeddings-exist skip branch (see
+    /// `partial_write_failure_one_cached_one_failed_resolves_to_idle` above
+    /// for why that fixture shape is needed on this in-memory SQLite pool)
+    /// and genuinely counts toward `tables_indexed` — the precondition for
+    /// this scenario, since without at least one real success the run would
+    /// resolve to `"failed"` regardless of the shortfall check this test
+    /// exists to pin.
+    struct MockSingleContainerIndexer {
+        container: String,
+        table_name: String,
+    }
+
+    #[async_trait]
+    impl SQLCatalogIndexer for MockSingleContainerIndexer {
+        fn container_label(&self) -> &str {
+            "schema"
+        }
+
+        fn container_config_key(&self) -> &str {
+            "catalog_schemas"
+        }
+
+        async fn create_provider(
+            &self,
+            _connection_config: &Value,
+            _credentials: &Value,
+        ) -> Result<Box<dyn DatasourceProvider>> {
+            Ok(Box::new(MockProvider))
+        }
+
+        async fn discover_all_containers(
+            &self,
+            _provider: &dyn DatasourceProvider,
+        ) -> Result<Vec<String>> {
+            Ok(vec![self.container.clone()])
+        }
+
+        async fn get_tables_in_container(
+            &self,
+            _provider: &dyn DatasourceProvider,
+            _container_name: &str,
+            _max_tables: Option<usize>,
+        ) -> Result<Vec<TableEntry>> {
+            Ok(vec![TableEntry {
+                name: self.table_name.clone(),
+                table_type: Some("BASE TABLE".to_string()),
+                dataset_override: None,
+            }])
+        }
+
+        async fn get_table_columns(
+            &self,
+            _provider: &dyn DatasourceProvider,
+            _container_name: &str,
+            _table_name: &str,
+        ) -> Result<Vec<ColumnEntry>> {
+            Ok(vec![ColumnEntry {
+                name: "id".to_string(),
+                col_type: Some("number".to_string()),
+                native_type: Some("INTEGER".to_string()),
+                description: None,
+            }])
+        }
+    }
+
+    /// AC4 (SQL-template path): enumerating 1 of 4 live containers is a
+    /// material shortfall (KYO-614) — the run must not report `"idle"` even
+    /// though the one container it did enumerate found a genuinely usable
+    /// table, and the three un-enumerated containers must be left
+    /// untouched (not just "not archived" — the coverage check itself must
+    /// not be the thing that archives them).
+    #[tokio::test]
+    async fn material_container_shortfall_does_not_report_idle() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+
+        sqlx::query("INSERT INTO users (user_id, email) VALUES ('u1', 'u1@test.local')")
+            .execute(sq)
+            .await
+            .expect("insert user");
+        sqlx::query(
+            "INSERT INTO workspaces (workspace_id, name, owner_user_id) VALUES ('ws1', 'WS', 'u1')",
+        )
+        .execute(sq)
+        .await
+        .expect("insert workspace");
+        sqlx::query(
+            "INSERT INTO datasource_configs (id, workspace_id, name, datasource_type, slug) \
+             VALUES ('ds1', 'ws1', 'PG', 'postgres', 'pg')",
+        )
+        .execute(sq)
+        .await
+        .expect("insert datasource_config");
+
+        // The schema-matching + embedded row so `ds_a.t_seed` takes the
+        // skip branch and genuinely counts as indexed.
+        let insert_result = sqlx::query(
+            r#"
+            INSERT INTO datasource_table_cache
+                (workspace_id, datasource_config_id, project_id, dataset_id, table_id, table_metadata, is_archived)
+            VALUES ('ws1', 'ds1', '', 'ds_a', 't_seed', ?, 0)
+            "#,
+        )
+        .bind(
+            json!({
+                "table_name": "t_seed",
+                "dataset_id": "ds_a",
+                "project_id": "",
+                "table_type": "BASE TABLE",
+                "columns": [
+                    {"name": "id", "type": "number", "native_type": "INTEGER", "description": ""}
+                ],
+            })
+            .to_string(),
+        )
+        .execute(sq)
+        .await
+        .expect("seed ds_a cache row");
+        let cache_id = insert_result.last_insert_rowid();
+        sqlx::query(
+            r#"
+            INSERT INTO datasource_search_embeddings
+                (table_cache_id, workspace_id, project_id, dataset_id, table_id, entry_type, text, weight, embedding, datasource_config_id)
+            VALUES (?, 'ws1', '', 'ds_a', 't_seed', 'schema_table', 'ds_a.t_seed', 1.0, ?, 'ds1')
+            "#,
+        )
+        .bind(cache_id)
+        .bind(vec![0u8; 4])
+        .execute(sq)
+        .await
+        .expect("seed embedding row");
+
+        // Three OTHER live containers this run never enumerates —
+        // `MockSingleContainerIndexer::discover_all_containers` only ever
+        // returns "ds_a".
+        for (dataset_id, table_id) in [("ds_b", "t1"), ("ds_c", "t1"), ("ds_d", "t1")] {
+            sqlx::query(
+                r#"
+                INSERT INTO datasource_table_cache
+                    (workspace_id, datasource_config_id, project_id, dataset_id, table_id, table_metadata, is_archived)
+                VALUES ('ws1', 'ds1', '', ?, ?, '{}', 0)
+                "#,
+            )
+            .bind(dataset_id)
+            .bind(table_id)
+            .execute(sq)
+            .await
+            .expect("seed other-container cache row");
+        }
+
+        let embedding = EmbeddingService::new().expect("load embedding model");
+        let ctx = IndexerContext {
+            workspace_id: "ws1".to_string(),
+            datasource_config_id: "ds1".to_string(),
+            connection_config: json!({}),
+            encryption_key: std::sync::Arc::new([0u8; 32]),
+        };
+        let credentials = json!({ "user": "x", "password": "y" });
+        let indexer = MockSingleContainerIndexer {
+            container: "ds_a".to_string(),
+            table_name: "t_seed".to_string(),
+        };
+
+        let result = index_catalog_sql(
+            &indexer,
+            &ctx,
+            &db,
+            &embedding,
+            None,
+            Some(&credentials),
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            result.tables_indexed, 1,
+            "the skip-branch table must genuinely count as indexed — the precondition \
+             this test needs (otherwise the run would already be \"failed\" for an \
+             unrelated reason)"
+        );
+
+        let status: String = sqlx::query_scalar(
+            "SELECT catalog_refresh_status FROM datasource_configs WHERE id = ?",
+        )
+        .bind(&ctx.datasource_config_id)
+        .fetch_one(sq)
+        .await
+        .expect("read datasource status");
+        assert_eq!(
+            status, "failed",
+            "enumerating 1 of 4 live containers is a material shortfall and must not report idle"
+        );
+
+        for dataset_id in ["ds_b", "ds_c", "ds_d"] {
+            let is_archived: i64 = sqlx::query_scalar(
+                "SELECT is_archived FROM datasource_table_cache WHERE datasource_config_id = 'ds1' AND dataset_id = ?",
+            )
+            .bind(dataset_id)
+            .fetch_one(sq)
+            .await
+            .expect("read archival state");
+            assert_eq!(
+                is_archived, 0,
+                "{dataset_id} was never enumerated this run and must be preserved"
+            );
+        }
     }
 }
