@@ -2941,7 +2941,7 @@ mod tests {
         seed_table_cache_row_pg(pg, &ds_a, &workspace_id, "table1", false).await;
         seed_table_cache_row_pg(pg, &ds_a, &workspace_id, "table2", false).await;
 
-        let unfiltered = fetch_table_counts(&db, &[ds_a.clone()], None)
+        let unfiltered = fetch_table_counts(&db, std::slice::from_ref(&ds_a), None)
             .await
             .expect("fetch_table_counts (unfiltered) must succeed against a real Postgres pool");
         assert_eq!(unfiltered.get(&ds_a).copied(), Some(2));
@@ -2949,12 +2949,12 @@ mod tests {
         // `seed_table_cache_row_pg` always writes `dataset_id = 'dataset'`,
         // so filtering to that schema must return the same count, and
         // filtering to a schema with no rows must return none at all.
-        let filtered = fetch_table_counts(&db, &[ds_a.clone()], Some("dataset"))
+        let filtered = fetch_table_counts(&db, std::slice::from_ref(&ds_a), Some("dataset"))
             .await
             .expect("fetch_table_counts (filtered) must succeed against a real Postgres pool");
         assert_eq!(filtered.get(&ds_a).copied(), Some(2));
 
-        let filtered_out = fetch_table_counts(&db, &[ds_a.clone()], Some("other-schema"))
+        let filtered_out = fetch_table_counts(&db, std::slice::from_ref(&ds_a), Some("other-schema"))
             .await
             .expect("fetch_table_counts (filtered_out) must succeed against a real Postgres pool");
         assert_eq!(
