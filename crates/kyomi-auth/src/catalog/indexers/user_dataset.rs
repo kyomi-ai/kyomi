@@ -24,8 +24,9 @@ use tracing::{info, warn};
 
 use crate::catalog::helpers::{
     apply_container_coverage, archive_missing_tables, cache_table, check_container_coverage,
-    fold_table_outcomes, update_datasource_last_refresh, update_datasource_status, ArchiveScope,
-    ContainerKey, DatasetOutcome, IndexerContext, TableOutcome,
+    fold_table_outcomes, log_container_table_summary, log_run_enumeration_summary,
+    update_datasource_last_refresh, update_datasource_status, ArchiveScope, ContainerKey,
+    DatasetOutcome, IndexerContext, TableOutcome,
 };
 use crate::catalog::types::{CatalogIndexResult, ColumnEntry};
 
@@ -98,6 +99,13 @@ impl UserDatasetIndexer {
         // comment.
         let mut enumerated_datasets: HashSet<ContainerKey> = HashSet::new();
         let mut any_project_succeeded = false;
+        // KYO-616: every dataset entry BigQuery's `datasets.list` handed
+        // back across all processed projects, whether or not its own
+        // `tables.list` (which is what actually earns it a place in
+        // `enumerated_datasets`) went on to succeed — the gap between this
+        // and `enumerated_datasets.len()` is exactly "discovered but not
+        // enumerated", the per-run enumeration summary logged below.
+        let mut total_datasets_discovered = 0usize;
 
         for (i, project_id) in project_ids.iter().enumerate() {
             info!(
@@ -120,9 +128,10 @@ impl UserDatasetIndexer {
             })
             .await
             {
-                Ok((count, dataset_errors)) => {
+                Ok((datasets_discovered, count, dataset_errors)) => {
                     any_project_succeeded = true;
                     tables_indexed += count;
+                    total_datasets_discovered += datasets_discovered;
                     errors.extend(dataset_errors);
                 }
                 Err(e) => {
@@ -178,6 +187,19 @@ impl UserDatasetIndexer {
             .await;
         }
 
+        // KYO-616: per-run enumeration summary — containers (datasets)
+        // discovered vs. successfully enumerated, and the enumerated ones'
+        // names — logged before the archive/status decisions below so a
+        // destructive run is legible from logs alone, matching the other
+        // two catalog indexer paths.
+        log_run_enumeration_summary(
+            workspace_id,
+            datasource_config_id,
+            "dataset",
+            total_datasets_discovered,
+            &enumerated_datasets,
+        );
+
         let mut outcome = resolve_run_outcome(!seen_table_ids.is_empty(), tables_indexed, &errors);
 
         // KYO-614: which cached rows this run is even allowed to archive.
@@ -220,6 +242,7 @@ impl UserDatasetIndexer {
                 datasource_config_id,
                 &archive_scope,
                 &seen_table_ids,
+                tables_indexed,
             )
             .await
             .unwrap_or_default();
@@ -411,9 +434,11 @@ struct IndexDatasetParams<'a> {
 /// Index all datasets in a single BigQuery project.
 ///
 /// Lists datasets via BigQuery REST API, then iterates tables in each.
-/// Returns the total number of tables indexed across all datasets in the
-/// project, plus any per-dataset errors collected along the way (KYO-264) —
-/// e.g. IAM allowing `bigquery.datasets.list` but denying
+/// Returns how many datasets `datasets.list` discovered (KYO-616 — every
+/// entry it returned, whether or not that dataset's own `tables.list` went
+/// on to succeed), the total number of tables indexed across all datasets in
+/// the project, plus any per-dataset errors collected along the way
+/// (KYO-264) — e.g. IAM allowing `bigquery.datasets.list` but denying
 /// `bigquery.tables.list` on every dataset. The `Err` return here is
 /// reserved for a whole-project failure (listing the datasets themselves
 /// failed, including an expired-OAuth 401 the caller checks for) — it is
@@ -423,7 +448,7 @@ struct IndexDatasetParams<'a> {
 /// succeeded.
 async fn index_project_datasets(
     params: IndexProjectParams<'_>,
-) -> Result<(usize, Vec<String>)> {
+) -> Result<(usize, usize, Vec<String>)> {
     let IndexProjectParams {
         client,
         db,
@@ -440,6 +465,7 @@ async fn index_project_datasets(
     // project at all (KYO-614) — exactly right, since none of them were
     // enumerated.
     let datasets = list_bigquery_datasets(client, access_token, project_id).await?;
+    let datasets_discovered = datasets.len();
 
     let mut outcomes = Vec::with_capacity(datasets.len());
 
@@ -470,7 +496,8 @@ async fn index_project_datasets(
         outcomes.push((dataset_id.clone(), outcome));
     }
 
-    Ok(fold_dataset_outcomes(project_id, outcomes))
+    let (tables_indexed, errors) = fold_dataset_outcomes(project_id, outcomes);
+    Ok((datasets_discovered, tables_indexed, errors))
 }
 
 /// Fold per-dataset indexing outcomes into a project's total indexed-table
@@ -609,6 +636,23 @@ async fn index_dataset_tables(
     let dataset_label = format!("{project_id}.{dataset_id}");
     let dataset_outcome = fold_table_outcomes(&dataset_label, outcomes);
     seen_table_ids.extend(dataset_outcome.seen_table_ids.iter().cloned());
+
+    // KYO-616: per-container (per-dataset) tables listed/cached/errored —
+    // `tables.len()` is the exact listed count (post-`max_tables` truncation,
+    // matching what was actually attempted this run); `tables_errored` is
+    // derived from `dataset_outcome.tables_indexed` rather than
+    // `table_errors.len()` because the latter is capped
+    // (`MAX_TABLE_ERRORS_PER_DATASET`) for the persisted summary, while this
+    // count must stay exact.
+    log_container_table_summary(
+        &ctx.workspace_id,
+        &ctx.datasource_config_id,
+        "dataset",
+        &dataset_label,
+        tables.len(),
+        dataset_outcome.tables_indexed,
+        tables.len() - dataset_outcome.tables_indexed,
+    );
 
     Ok(dataset_outcome)
 }
@@ -1340,7 +1384,7 @@ mod tests {
         // deletion within the one project that WAS enumerated.
         let seen_table_ids = HashSet::new();
 
-        let archived = archive_missing_tables(&db, &workspace_id, &ds, &scope, &seen_table_ids)
+        let archived = archive_missing_tables(&db, &workspace_id, &ds, &scope, &seen_table_ids, 0)
             .await
             .expect("archive_missing_tables");
 

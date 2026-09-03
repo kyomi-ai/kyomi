@@ -22,8 +22,9 @@ use tracing::{info, warn};
 
 use kyomi_auth::catalog::helpers::{
     apply_container_coverage, archive_missing_tables, cache_table, check_container_coverage,
-    resolve_run_outcome, update_datasource_last_refresh, update_datasource_status, ArchiveScope,
-    CacheTableParams, ContainerKey, IndexerContext,
+    log_container_table_summary, log_run_enumeration_summary, resolve_run_outcome,
+    update_datasource_last_refresh, update_datasource_status, ArchiveScope, CacheTableParams,
+    ContainerKey, IndexerContext,
 };
 use kyomi_auth::catalog::types::{CatalogIndexResult, ColumnEntry, TableEntry};
 
@@ -695,6 +696,11 @@ pub async fn index_catalog_sql(
         // shared accumulator without a second log line.
         errors.extend(partial_failures);
 
+        // KYO-616: per-container tables listed/cached/errored, logged once
+        // this container's table loop finishes below.
+        let mut container_tables_cached = 0usize;
+        let mut container_tables_errored = 0usize;
+
         for table in &tables {
             // Skip hidden transform tables (e.g. _sessions, _visitors) for analytics datasources
             if is_analytics && table.name.starts_with('_') {
@@ -755,6 +761,7 @@ pub async fn index_catalog_sql(
                     );
                     warn!("{msg}");
                     errors.push(msg);
+                    container_tables_errored += 1;
                     continue;
                 }
             };
@@ -778,15 +785,45 @@ pub async fn index_catalog_sql(
             })
             .await
             {
-                Ok(()) => tables_indexed += 1,
+                Ok(()) => {
+                    tables_indexed += 1;
+                    container_tables_cached += 1;
+                }
                 Err(e) => {
                     let msg = format!("Failed to cache table {full_table_id}: {e}");
                     warn!("{msg}");
                     errors.push(msg);
+                    container_tables_errored += 1;
                 }
             }
         }
+
+        // KYO-616: `tables.len()` here counts every table this container's
+        // listing returned, including any analytics hidden (`_`-prefixed)
+        // tables skipped above — those are neither cached nor errored, so
+        // `tables_listed` can legitimately exceed `cached + errored`.
+        log_container_table_summary(
+            &ctx.workspace_id,
+            &ctx.datasource_config_id,
+            indexer.container_label(),
+            container,
+            tables.len(),
+            container_tables_cached,
+            container_tables_errored,
+        );
     }
+
+    // KYO-616: per-run enumeration summary — containers discovered vs.
+    // successfully enumerated, and the enumerated ones' names — logged
+    // before the archive/status decisions below so a destructive run is
+    // legible from logs alone.
+    log_run_enumeration_summary(
+        &ctx.workspace_id,
+        &ctx.datasource_config_id,
+        indexer.container_label(),
+        containers.len(),
+        &enumerated_containers,
+    );
 
     // Resolve the archive/status decision (KYO-385). These are two
     // different questions and must not be answered by one predicate:
@@ -871,6 +908,7 @@ pub async fn index_catalog_sql(
             &ctx.datasource_config_id,
             &archive_scope,
             &seen_table_ids,
+            tables_indexed,
         )
         .await
         .unwrap_or_default();
