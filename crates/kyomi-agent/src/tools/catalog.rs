@@ -417,15 +417,72 @@ impl AgentTool for BrowseCatalogTool {
                 })
             })
             .collect();
-        let total_tables: usize = schema_list
+        // How many tables are actually present in this response's payload —
+        // i.e. `rows.len()` after the LIMIT-based truncation above. This is
+        // NOT the true table count when the browse was truncated; see
+        // `total_tables` below for that.
+        let returned: usize = schema_list
             .iter()
             .map(|s| s["table_count"].as_u64().unwrap_or(0) as usize)
             .sum();
+
+        // The true total — not "rows returned" — via the same canonical
+        // accessor `ListDatasourcesTool.tables_indexed` uses (KYO-615), so
+        // the two tools can never again disagree about how many tables a
+        // datasource has. Scoped to `schema_filter` when set, so a
+        // schema-filtered browse reports that schema's total rather than
+        // the whole datasource's (fixing only `tables_indexed`'s archived-row
+        // bug would still leave this tool truncation-limited to 100).
+        let mut total_tables: i64 =
+            match kyomi_auth::datasource_service::fetch_table_counts(
+                &ctx.db,
+                std::slice::from_ref(&ds.id),
+                schema_filter,
+            )
+            .await
+            {
+                Ok(counts) => counts.get(&ds.id).copied().unwrap_or(0),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        datasource = %ds.slug,
+                        "failed to fetch canonical table count for browse_catalog; defaulting to 0"
+                    );
+                    0
+                }
+            };
+        // BigQuery public rows are counted separately: they live under the
+        // shared sentinel workspace, not this datasource's own
+        // `datasource_config_id`, so the accessor above never sees them —
+        // mirroring how the row query above unions in a second query for
+        // the same reason.
+        if ds.datasource_type == DatasourceType::Bigquery
+            && bigquery_include_public(&ds.connection_config)
+        {
+            match kyomi_auth::datasource_service::count_tables_for_workspace(
+                &ctx.db,
+                PUBLIC_DATA_WORKSPACE_ID,
+                schema_filter,
+            )
+            .await
+            {
+                Ok(public_count) => total_tables += public_count,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        datasource = %ds.slug,
+                        "failed to fetch canonical public-dataset table count for browse_catalog; \
+                         omitting its contribution"
+                    );
+                }
+            }
+        }
 
         let mut response = serde_json::json!({
             "datasource": datasource_slug,
             "type": ds.datasource_type,
             "total_tables": total_tables,
+            "returned": returned,
             "schemas": schema_list,
         });
         if truncated {
@@ -502,7 +559,7 @@ fn format_table_info_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{build_ctx, test_pool};
+    use crate::test_support::{build_ctx, seed_user_and_workspace, test_pool};
 
     /// Seed workspace "ws-1" with one active BigQuery datasource (slug
     /// "bq") whose `connection_config` is exactly `connection_config_json`,
@@ -696,5 +753,224 @@ mod tests {
             "a public table must be found when include_public_datasets is true: {result}"
         );
         assert_eq!(parsed["table"], serde_json::json!("bigquery-public-data.hacker_news.full"));
+    }
+
+    // ---------------------------------------------------------------------
+    // Tests — KYO-615: `list_datasources.tables_indexed` and
+    // `browse_catalog.total_tables` must report the SAME number for the
+    // same datasource. Two independent defects made them disagree: (1)
+    // `tables_indexed` counted archived rows, (2) `total_tables` was the
+    // post-truncation row count, not the true total. Both are fixed by
+    // routing both tools through the canonical `datasource_service`
+    // accessors (`fetch_table_counts` / `count_tables_for_workspace`).
+    // ---------------------------------------------------------------------
+
+    /// Insert a plain (non-BigQuery) datasource row in workspace "ws-1".
+    async fn seed_plain_datasource(db: &kyomi_core::DbPool, ds_id: &str, slug: &str) {
+        let sq = match db {
+            kyomi_core::DbPool::Sqlite(sq) => sq,
+            _ => unreachable!("test pool is always sqlite"),
+        };
+        sqlx::query(
+            "INSERT INTO datasource_configs \
+             (id, workspace_id, name, datasource_type, connection_config, slug) \
+             VALUES (?, 'ws-1', ?, 'postgres', '{}', ?)",
+        )
+        .bind(ds_id)
+        .bind(format!("Datasource {slug}"))
+        .bind(slug)
+        .execute(sq)
+        .await
+        .expect("insert datasource");
+    }
+
+    /// Insert `count` table cache rows for `ds_id` under `dataset_id`, all
+    /// with distinct `table_id`s (`{prefix}0000`, `{prefix}0001`, ...) and
+    /// the given `is_archived` state.
+    async fn seed_table_rows(
+        db: &kyomi_core::DbPool,
+        ds_id: &str,
+        dataset_id: &str,
+        prefix: &str,
+        count: usize,
+        is_archived: bool,
+    ) {
+        let sq = match db {
+            kyomi_core::DbPool::Sqlite(sq) => sq,
+            _ => unreachable!("test pool is always sqlite"),
+        };
+        for i in 0..count {
+            sqlx::query(
+                "INSERT INTO datasource_table_cache \
+                 (workspace_id, project_id, dataset_id, table_id, table_metadata, \
+                  datasource_config_id, is_archived) \
+                 VALUES ('ws-1', 'proj', ?, ?, '{}', ?, ?)",
+            )
+            .bind(dataset_id)
+            .bind(format!("{prefix}{i:04}"))
+            .bind(ds_id)
+            .bind(is_archived)
+            .execute(sq)
+            .await
+            .expect("insert table cache row");
+        }
+    }
+
+    /// AC1 headline (KYO-615): seed one datasource with BOTH archived rows
+    /// AND more than `BROWSE_CATALOG_LIMIT` live tables — the minimal fixture
+    /// that fails if either defect is reverted alone. Fixing only the
+    /// archived-row filter (defect 1) would leave `browse_catalog` reporting
+    /// the truncated (100) count while `list_datasources` reports the true
+    /// (150) count; fixing only the truncation bug (defect 2) would leave
+    /// `browse_catalog` including the 9 archived rows that `list_datasources`
+    /// correctly excludes. Only fixing both makes the two numbers equal.
+    #[tokio::test]
+    async fn headline_list_datasources_and_browse_catalog_agree_on_table_count() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let live_count = BROWSE_CATALOG_LIMIT + 50;
+        seed_plain_datasource(&db, "ds-big", "big").await;
+        seed_table_rows(&db, "ds-big", "public", "t", live_count, false).await;
+        seed_table_rows(&db, "ds-big", "public", "arch", 9, true).await;
+        let ctx = build_ctx(db);
+
+        let list_result = crate::tools::datasource::ListDatasourcesTool
+            .execute(serde_json::json!({}), &ctx)
+            .await
+            .expect("list_datasources execute");
+        let list_parsed: serde_json::Value =
+            serde_json::from_str(&list_result).expect("list_datasources result is JSON");
+        let tables_indexed = list_parsed["datasources"]
+            .as_array()
+            .expect("datasources array present")
+            .iter()
+            .find(|d| d["slug"] == "big")
+            .expect("the seeded datasource is present")["tables_indexed"]
+            .as_i64()
+            .expect("tables_indexed is a number");
+
+        let browse_result = BrowseCatalogTool
+            .execute(serde_json::json!({"datasource": "big"}), &ctx)
+            .await
+            .expect("browse_catalog execute");
+        let browse_parsed: serde_json::Value =
+            serde_json::from_str(&browse_result).expect("browse_catalog result is JSON");
+        let total_tables = browse_parsed["total_tables"]
+            .as_i64()
+            .expect("total_tables is a number");
+
+        assert_eq!(
+            tables_indexed, live_count as i64,
+            "sanity: tables_indexed must be the live count, archived rows excluded"
+        );
+        assert_eq!(
+            tables_indexed, total_tables,
+            "list_datasources.tables_indexed and browse_catalog.total_tables must agree: \
+             tables_indexed={tables_indexed}, total_tables={total_tables} \
+             (list={list_result}, browse's total/returned/truncated: {}/{}/{})",
+            browse_parsed["total_tables"], browse_parsed["returned"], browse_parsed["truncated"],
+        );
+    }
+
+    /// AC2 (KYO-615): a >100-table datasource's `browse_catalog` response
+    /// must report the TRUE total (not the truncated row count) as
+    /// `total_tables`, a separate `returned` count for what's actually in
+    /// the payload, and must still set `truncated`.
+    #[tokio::test]
+    async fn browse_catalog_reports_true_total_and_distinct_returned_count_when_truncated() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let live_count = BROWSE_CATALOG_LIMIT + 37;
+        seed_plain_datasource(&db, "ds-huge", "huge").await;
+        seed_table_rows(&db, "ds-huge", "public", "t", live_count, false).await;
+        let ctx = build_ctx(db);
+
+        let result = BrowseCatalogTool
+            .execute(serde_json::json!({"datasource": "huge"}), &ctx)
+            .await
+            .expect("browse_catalog execute");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("browse_catalog result is JSON");
+
+        assert_eq!(
+            parsed["total_tables"],
+            serde_json::json!(live_count),
+            "total_tables must be the true count, not the truncated row count: {result}"
+        );
+        assert_eq!(
+            parsed["returned"],
+            serde_json::json!(BROWSE_CATALOG_LIMIT),
+            "returned must be the number of tables actually in the payload: {result}"
+        );
+        assert_eq!(
+            parsed["truncated"],
+            serde_json::json!(true),
+            "truncated must still be set when the response was capped: {result}"
+        );
+    }
+
+    /// AC5 (KYO-615): a `schema` filter must report that schema's total,
+    /// not the whole datasource's — a datasource with two schemas, filtered
+    /// to one, must not leak the other schema's tables into `total_tables`.
+    #[tokio::test]
+    async fn browse_catalog_schema_filter_reports_that_schemas_total_not_the_datasources() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        seed_plain_datasource(&db, "ds-multi", "multi").await;
+        seed_table_rows(&db, "ds-multi", "sales", "t", 5, false).await;
+        seed_table_rows(&db, "ds-multi", "marketing", "t", 3, false).await;
+        let ctx = build_ctx(db);
+
+        let unfiltered = BrowseCatalogTool
+            .execute(serde_json::json!({"datasource": "multi"}), &ctx)
+            .await
+            .expect("browse_catalog execute (unfiltered)");
+        let unfiltered_parsed: serde_json::Value =
+            serde_json::from_str(&unfiltered).expect("browse_catalog result is JSON");
+        assert_eq!(
+            unfiltered_parsed["total_tables"],
+            serde_json::json!(8),
+            "sanity: unfiltered total spans both schemas"
+        );
+
+        let filtered = BrowseCatalogTool
+            .execute(serde_json::json!({"datasource": "multi", "schema": "sales"}), &ctx)
+            .await
+            .expect("browse_catalog execute (schema-filtered)");
+        let filtered_parsed: serde_json::Value =
+            serde_json::from_str(&filtered).expect("browse_catalog result is JSON");
+        assert_eq!(
+            filtered_parsed["total_tables"],
+            serde_json::json!(5),
+            "a schema filter must report that schema's total, not the datasource's: {filtered}"
+        );
+    }
+
+    /// BigQuery-public rows live under the shared sentinel workspace, not
+    /// this datasource's own `datasource_config_id` — `total_tables` must
+    /// still include them when `include_public_datasets` is enabled,
+    /// mirroring how the row query itself unions in a second query for the
+    /// same reason (complication (b) in KYO-615).
+    #[tokio::test]
+    async fn browse_catalog_total_tables_includes_bigquery_public_contribution_when_enabled() {
+        let db = test_pool().await;
+        seed_bigquery_datasource(&db, r#"{"include_public_datasets": true}"#).await;
+        let ctx = build_ctx(db);
+
+        let result = BrowseCatalogTool
+            .execute(serde_json::json!({"datasource": "bq"}), &ctx)
+            .await
+            .expect("browse_catalog execute");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("browse_catalog result is JSON");
+
+        // seed_bigquery_datasource seeds exactly one own-datasource row
+        // ("acme.sales.orders") and one public-sentinel row
+        // ("bigquery-public-data.hacker_news.full") — both non-archived.
+        assert_eq!(
+            parsed["total_tables"],
+            serde_json::json!(2),
+            "total_tables must include the public-dataset contribution when enabled: {result}"
+        );
     }
 }

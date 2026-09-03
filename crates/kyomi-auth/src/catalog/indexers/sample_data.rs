@@ -15,7 +15,7 @@
 //! - Data is static, so index once and reuse (weekly refresh threshold)
 
 use chrono::{DateTime, TimeDelta, Utc};
-use kyomi_core::{db_fetch_scalar, DbPool, Result};
+use kyomi_core::{DbPool, Result};
 use kyomi_embed::EmbeddingService;
 use tracing::{info, warn};
 
@@ -293,14 +293,17 @@ impl SampleDataIndexer {
     }
 
     /// Get the count of cached sample data tables.
+    ///
+    /// Routed through the canonical `datasource_service::count_tables_for_workspace`
+    /// accessor (KYO-615) rather than a hand-rolled `COUNT(*)`, so the
+    /// `is_archived` exclusion lives in exactly one place.
     pub async fn get_sample_table_count(db: &DbPool) -> i64 {
-        db_fetch_scalar!(
-            db,
-            i64,
-            "SELECT COUNT(*) FROM datasource_table_cache WHERE workspace_id = $1",
-            SAMPLE_DATA_WORKSPACE_ID
-        )
-        .unwrap_or(0)
+        crate::datasource_service::count_tables_for_workspace(db, SAMPLE_DATA_WORKSPACE_ID, None)
+            .await
+            .unwrap_or_else(|e| {
+                warn!(error = %e, "failed to count cached sample-data tables; defaulting to 0");
+                0
+            })
     }
 }
 

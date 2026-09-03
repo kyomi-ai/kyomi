@@ -1688,15 +1688,16 @@ struct TableCountRow {
 }
 
 /// Fetch cached (non-archived) table counts for a list of datasource ids in
-/// a single grouped query.
+/// a single grouped query, optionally restricted to one schema/dataset.
 ///
 /// Uses `= ANY($1)` on Postgres and individual placeholders on SQLite,
 /// mirroring `chat_service::fetch_session_counts`. A datasource with zero
-/// cached tables is simply absent from the returned rows.
-async fn fetch_table_counts(
+/// matching cached tables is simply absent from the returned rows.
+async fn fetch_table_counts_raw(
     db: &DbPool,
     ds_ids: &[String],
     bf: &str,
+    schema: Option<&str>,
 ) -> Result<Vec<TableCountRow>, sqlx::Error> {
     if ds_ids.is_empty() {
         return Ok(Vec::new());
@@ -1707,27 +1708,76 @@ async fn fetch_table_counts(
             let sql = format!(
                 "SELECT datasource_config_id, COUNT(*) as count FROM datasource_table_cache \
                  WHERE datasource_config_id = ANY($1) AND is_archived = {bf} \
+                   AND ($2 IS NULL OR dataset_id = $2) \
                  GROUP BY datasource_config_id"
             );
             sqlx::query_as::<_, TableCountRow>(&sql)
                 .bind(ds_ids)
+                .bind(schema)
                 .fetch_all(pg)
                 .await
         }
         DbPool::Sqlite(sq) => {
-            let (in_clause, _) = in_clause_placeholders(ds_ids.len(), 1);
+            let (in_clause, next_idx) = in_clause_placeholders(ds_ids.len(), 1);
             let sql = format!(
                 "SELECT datasource_config_id, COUNT(*) as count FROM datasource_table_cache \
                  WHERE datasource_config_id IN {in_clause} AND is_archived = {bf} \
+                   AND (${next_idx} IS NULL OR dataset_id = ${next_idx}) \
                  GROUP BY datasource_config_id"
             );
             let mut query = sqlx::query_as::<_, TableCountRow>(&sql);
             for id in ds_ids {
                 query = query.bind(id);
             }
+            query = query.bind(schema);
             query.fetch_all(sq).await
         }
     }
+}
+
+/// Canonical accessor for "how many non-archived tables does this
+/// datasource have cached", batched over one or more datasource ids and
+/// optionally restricted to a single schema/dataset.
+///
+/// This is the single source of truth for a datasource's table count —
+/// `ListDatasourcesTool` and `BrowseCatalogTool` (`crates/kyomi-agent/src/tools/`)
+/// both call it rather than hand-rolling their own `COUNT(*)` query, so the
+/// `is_archived` exclusion can never again be dropped at a new call site
+/// (KYO-615). Hides the Postgres/SQLite bool-literal plumbing `fetch_table_counts_raw`
+/// needs — callers just get a map keyed by `datasource_config_id`, with
+/// zero-count datasources simply absent.
+pub async fn fetch_table_counts(
+    db: &DbPool,
+    ds_ids: &[String],
+    schema: Option<&str>,
+) -> Result<std::collections::HashMap<String, i64>, sqlx::Error> {
+    let bf = sql_compat::bool_false(db.is_postgres());
+    let rows = fetch_table_counts_raw(db, ds_ids, bf, schema).await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.datasource_config_id, row.count))
+        .collect())
+}
+
+/// Canonical accessor for "how many non-archived tables live in this
+/// sentinel workspace" — the workspace-keyed sibling of [`fetch_table_counts`]
+/// for tables that live under a synthetic workspace (the BigQuery-public or
+/// sample-data shared caches) rather than a real `datasource_config_id`.
+/// Optionally restricted to a single schema/dataset. Shares the same
+/// `is_archived` exclusion discipline; callers are `BrowseCatalogTool`'s
+/// public-dataset contribution and the `bigquery_public`/`sample_data`
+/// indexers' own table-count helpers (KYO-615).
+pub async fn count_tables_for_workspace(
+    db: &DbPool,
+    workspace_id: &str,
+    schema: Option<&str>,
+) -> Result<i64, sqlx::Error> {
+    let bf = sql_compat::bool_false(db.is_postgres());
+    let sql = format!(
+        "SELECT COUNT(*) FROM datasource_table_cache \
+         WHERE workspace_id = $1 AND is_archived = {bf} AND ($2 IS NULL OR dataset_id = $2)"
+    );
+    kyomi_core::db_fetch_scalar!(db, i64, &sql, workspace_id, schema)
 }
 
 /// Fetch catalog status (table count + last indexed) for all datasources.
@@ -1749,14 +1799,12 @@ async fn fetch_catalog_statuses(
         .collect();
 
     let ds_ids: Vec<String> = datasources.iter().map(|ds| ds.id.clone()).collect();
-    let is_pg = db.is_postgres();
-    let bf = sql_compat::bool_false(is_pg);
 
-    match fetch_table_counts(db, &ds_ids, bf).await {
-        Ok(rows) => {
-            for row in rows {
-                if let Some(entry) = result.get_mut(&row.datasource_config_id) {
-                    entry.0 = row.count;
+    match fetch_table_counts(db, &ds_ids, None).await {
+        Ok(counts) => {
+            for (ds_id, count) in counts {
+                if let Some(entry) = result.get_mut(&ds_id) {
+                    entry.0 = count;
                 }
             }
         }
@@ -2408,6 +2456,128 @@ mod tests {
         assert!(refresh.is_some(), "last_catalog_refresh should survive the query failure");
     }
 
+    // ─── fetch_table_counts / count_tables_for_workspace (KYO-615) ─────────
+    //
+    // These are the canonical accessors `ListDatasourcesTool` and
+    // `BrowseCatalogTool` (crates/kyomi-agent/src/tools/) both call, in
+    // place of hand-rolled per-call-site `COUNT(*)` queries.
+
+    /// Insert a table cache row with an explicit `dataset_id`, unlike
+    /// `seed_table_cache_row` above which hardcodes `dataset_id = 'dataset'`.
+    /// `datasource_config_id` is optional so this can also seed sentinel
+    /// rows (BigQuery-public / sample-data) that belong to a workspace but
+    /// no real datasource config.
+    async fn seed_table_cache_row_with_dataset(
+        pool: &DbPool,
+        datasource_config_id: Option<&str>,
+        workspace_id: &str,
+        dataset_id: &str,
+        table_id: &str,
+        is_archived: bool,
+    ) {
+        let sq = match pool {
+            DbPool::Sqlite(sq) => sq,
+            _ => panic!("test requires sqlite pool"),
+        };
+        sqlx::query(
+            "INSERT INTO datasource_table_cache \
+             (workspace_id, project_id, dataset_id, table_id, table_metadata, is_archived, datasource_config_id) \
+             VALUES (?1, 'proj', ?2, ?3, '{}', ?4, ?5)",
+        )
+        .bind(workspace_id)
+        .bind(dataset_id)
+        .bind(table_id)
+        .bind(is_archived)
+        .bind(datasource_config_id)
+        .execute(sq)
+        .await
+        .expect("insert table cache row");
+    }
+
+    #[tokio::test]
+    async fn fetch_table_counts_excludes_archived_and_batches_multiple_ids_in_one_call() {
+        let pool = test_pool().await;
+        seed_workspace_and_owner(&pool, "ws-1", "owner-1").await;
+        seed_datasource(&pool, "ds-a", "ws-1", "ds-a", None).await;
+        seed_datasource(&pool, "ds-b", "ws-1", "ds-b", None).await;
+
+        seed_table_cache_row(&pool, "ds-a", "ws-1", "table1", false).await;
+        seed_table_cache_row(&pool, "ds-a", "ws-1", "table2", false).await;
+        seed_table_cache_row(&pool, "ds-a", "ws-1", "table3", true).await; // archived
+        seed_table_cache_row(&pool, "ds-b", "ws-1", "table4", false).await;
+
+        // One call with both ids — the "batches N datasources in a single
+        // query, not N" structural proof: a single await on one function
+        // call returns counts for every id, rather than the caller looping
+        // and awaiting once per datasource.
+        let counts = fetch_table_counts(&pool, &["ds-a".to_string(), "ds-b".to_string()], None)
+            .await
+            .expect("fetch_table_counts must succeed");
+
+        assert_eq!(counts.get("ds-a").copied(), Some(2), "archived row must not be counted");
+        assert_eq!(counts.get("ds-b").copied(), Some(1));
+    }
+
+    #[tokio::test]
+    async fn fetch_table_counts_schema_filter_reports_that_schemas_total_not_the_datasources() {
+        let pool = test_pool().await;
+        seed_workspace_and_owner(&pool, "ws-1", "owner-1").await;
+        seed_datasource(&pool, "ds-a", "ws-1", "ds-a", None).await;
+
+        seed_table_cache_row_with_dataset(&pool, Some("ds-a"), "ws-1", "sales", "orders", false)
+            .await;
+        seed_table_cache_row_with_dataset(&pool, Some("ds-a"), "ws-1", "sales", "refunds", false)
+            .await;
+        seed_table_cache_row_with_dataset(&pool, Some("ds-a"), "ws-1", "marketing", "leads", false)
+            .await;
+
+        let unfiltered = fetch_table_counts(&pool, &["ds-a".to_string()], None)
+            .await
+            .expect("fetch_table_counts (unfiltered) must succeed");
+        assert_eq!(unfiltered.get("ds-a").copied(), Some(3), "sanity: whole-datasource total");
+
+        let sales_only = fetch_table_counts(&pool, &["ds-a".to_string()], Some("sales"))
+            .await
+            .expect("fetch_table_counts (schema-filtered) must succeed");
+        assert_eq!(
+            sales_only.get("ds-a").copied(),
+            Some(2),
+            "a schema filter must report that schema's total, not the whole datasource's"
+        );
+    }
+
+    #[tokio::test]
+    async fn count_tables_for_workspace_excludes_archived_and_respects_schema_filter() {
+        let pool = test_pool().await;
+
+        // Sentinel-workspace rows (BigQuery-public/sample-data shape): a
+        // real `workspace_id`, no `datasource_config_id`. No `workspaces`
+        // row needed — `workspace_id` on this table carries no FK.
+        seed_table_cache_row_with_dataset(&pool, None, "public-data-workspace", "hacker_news", "full", false)
+            .await;
+        seed_table_cache_row_with_dataset(&pool, None, "public-data-workspace", "hacker_news", "stories", false)
+            .await;
+        seed_table_cache_row_with_dataset(&pool, None, "public-data-workspace", "hacker_news", "old", true)
+            .await; // archived
+        seed_table_cache_row_with_dataset(&pool, None, "public-data-workspace", "covid19", "cases", false)
+            .await;
+
+        let total = count_tables_for_workspace(&pool, "public-data-workspace", None)
+            .await
+            .expect("count_tables_for_workspace (unfiltered) must succeed");
+        assert_eq!(total, 3, "archived row must not be counted");
+
+        let scoped = count_tables_for_workspace(&pool, "public-data-workspace", Some("hacker_news"))
+            .await
+            .expect("count_tables_for_workspace (schema-filtered) must succeed");
+        assert_eq!(scoped, 2, "schema filter must report only that schema's tables");
+
+        let other_workspace = count_tables_for_workspace(&pool, "sample-data-workspace", None)
+            .await
+            .expect("count_tables_for_workspace for an empty sentinel workspace must succeed");
+        assert_eq!(other_workspace, 0);
+    }
+
     // ─── retype_credential_scalars tests (KYO-485) ─────────────────────────
     //
     // `retype_credential_scalars`'s SQL is backend-generic (plain `$1`/`$2`
@@ -2643,6 +2813,11 @@ mod tests {
     // and skips cleanly — with a visible `SKIP:` line — when Postgres isn't
     // reachable, so `cargo test -p kyomi-auth` with no Postgres available
     // still passes.
+    //
+    // KYO-615: exercises the pub `fetch_table_counts` accessor (not the
+    // private `fetch_table_counts_raw`) — this is the same function
+    // `ListDatasourcesTool` and `BrowseCatalogTool` call, so this test's
+    // Postgres coverage of the archived-row exclusion applies to both.
 
     /// Seed the owner user and workspace together — a thin composition of
     /// the two shared `crate::test_pg` fixtures, since every Postgres test
@@ -2730,18 +2905,63 @@ mod tests {
         seed_table_cache_row_pg(pg, &ds_a, &workspace_id, "table2", false).await;
         seed_table_cache_row_pg(pg, &ds_a, &workspace_id, "table3", true).await;
 
-        let bf = sql_compat::bool_false(true);
-        let counts = fetch_table_counts(&db, &[ds_a.clone(), ds_b.clone()], bf)
+        let counts = fetch_table_counts(&db, &[ds_a.clone(), ds_b.clone()], None)
             .await
             .expect("fetch_table_counts must succeed against a real Postgres pool");
 
         assert_eq!(
             counts.len(),
             1,
-            "only ds_a has cache rows, ds_b must not produce a group: {counts:?}"
+            "only ds_a has cache rows, ds_b must not produce an entry: {counts:?}"
         );
-        assert_eq!(counts[0].datasource_config_id, ds_a);
-        assert_eq!(counts[0].count, 2, "the archived row must not be counted");
+        assert_eq!(
+            counts.get(&ds_a).copied(),
+            Some(2),
+            "the archived row must not be counted"
+        );
+
+        cleanup_pg(pg, &workspace_id, &owner_id).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_fetch_table_counts_respects_schema_filter() {
+        let test_name = "postgres_fetch_table_counts_respects_schema_filter";
+        let Some(db) = crate::test_pg::postgres_test_pool_or_skip(test_name).await else {
+            return;
+        };
+        let pg = crate::test_pg::postgres_pool(&db);
+
+        let workspace_id = crate::test_pg::unique_test_id("ws");
+        let owner_id = crate::test_pg::unique_test_id("owner");
+        let ds_a = crate::test_pg::unique_test_id("ds-a");
+
+        seed_workspace_and_owner_pg(pg, &workspace_id, &owner_id).await;
+        seed_datasource_pg(pg, &ds_a, &workspace_id, "ds-a-slug").await;
+
+        seed_table_cache_row_pg(pg, &ds_a, &workspace_id, "table1", false).await;
+        seed_table_cache_row_pg(pg, &ds_a, &workspace_id, "table2", false).await;
+
+        let unfiltered = fetch_table_counts(&db, &[ds_a.clone()], None)
+            .await
+            .expect("fetch_table_counts (unfiltered) must succeed against a real Postgres pool");
+        assert_eq!(unfiltered.get(&ds_a).copied(), Some(2));
+
+        // `seed_table_cache_row_pg` always writes `dataset_id = 'dataset'`,
+        // so filtering to that schema must return the same count, and
+        // filtering to a schema with no rows must return none at all.
+        let filtered = fetch_table_counts(&db, &[ds_a.clone()], Some("dataset"))
+            .await
+            .expect("fetch_table_counts (filtered) must succeed against a real Postgres pool");
+        assert_eq!(filtered.get(&ds_a).copied(), Some(2));
+
+        let filtered_out = fetch_table_counts(&db, &[ds_a.clone()], Some("other-schema"))
+            .await
+            .expect("fetch_table_counts (filtered_out) must succeed against a real Postgres pool");
+        assert_eq!(
+            filtered_out.get(&ds_a),
+            None,
+            "a schema filter that matches no rows must produce no entry, not a zero-value one"
+        );
 
         cleanup_pg(pg, &workspace_id, &owner_id).await;
     }
