@@ -18,6 +18,95 @@ use tracing::{debug, info, warn};
 
 use super::search_entries::{compute_schema_signature, create_search_entries};
 use super::types::ColumnEntry;
+
+// ─── Test-only tracing interest-cache race guard (KYO-616) ────────────────────
+//
+// `tracing`'s per-callsite `Interest` cache is process-global, not per-thread.
+// A callsite's cached interest is decided the FIRST time ANY thread executes
+// it: `DefaultCallsite::register()` runs exactly once per callsite (a
+// compare-exchange-guarded state machine), folding together every currently
+// *registered* `Dispatch` (i.e. every `Dispatch::new(..)`-backed subscriber
+// still alive anywhere in the process — `Dispatch::none()`, the true
+// no-subscriber fallback, is never one of them) via `Interest::and`. If that
+// registered set is empty at the exact moment of first execution — which
+// happens whenever the winning thread has no thread-local override and no
+// global default subscriber exists yet — the result is `Interest::never()`,
+// cached permanently. Every later attempt to observe that exact line, no
+// matter what subscriber it installs, silently sees nothing: `enabled()`/
+// `event()` are skipped entirely once a callsite is cached `never`.
+//
+// This module's tests deliberately exercise the SAME production `warn!`/
+// `info!`/`debug!` call sites both with (`kyomi_test_tracing::capture_tracing`)
+// and without a capturing subscriber (most of the pre-existing `archive_
+// missing_tables`/`check_container_coverage` tests only assert on return
+// values). Under `cargo test`'s default parallelism, a non-capturing test's
+// thread can win the once-only registration race for a call site an instant
+// before a capturing test reaches it, permanently caching `never` for the
+// rest of the process — independent of `tracing::callsite::
+// rebuild_interest_cache()`, which only re-resolves interest against
+// whatever is registered *at the moment it's called*: it cannot prevent a
+// DIFFERENT thread from winning a DIFFERENT call site's one-time race a
+// moment later (confirmed empirically: rebuild_interest_cache() alone still
+// flaked ~1-in-5 runs of the full `catalog::` suite).
+//
+// The fix that actually closes the race (rather than narrowing it): ensure a
+// permanent, always-interested `Dispatch` is registered before ANY thread
+// can possibly win a KYO-616 call site's one-time registration. Since a
+// registered `Dispatch`'s presence alone guarantees `Interest::and` never
+// folds down to `None`/`never` (folding one dispatcher's `Always` with
+// anything at all yields `Always` or `Sometimes`, never `Never`), installing
+// this ONE always-interested subscriber as the process's global default
+// (`tracing::subscriber::set_global_default`, guarded by `Once` so it only
+// ever installs once) makes `Interest::never()` structurally unreachable
+// for every callsite this test binary can ever touch, from that point on —
+// not just less likely.
+//
+// Called (guarded, so effectively free after the first call) from the top
+// of every production function in this crate that a KYO-616 log line was
+// added to — `archive_missing_tables`, `check_container_coverage`,
+// `log_run_enumeration_summary`, `log_container_table_summary` here, and
+// the BigQuery REST response-shape parsing in `indexers::bigquery_rest` —
+// rather than from each test body, so a new test can never reintroduce this
+// race by forgetting to opt in. `#[cfg(test)]`-gated end to end: compiled
+// out entirely, zero cost, in every non-test build.
+#[cfg(test)]
+pub(crate) mod test_tracing_race_guard {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+
+    /// A `Subscriber` that is unconditionally interested in every callsite
+    /// (the default, unoverridden `register_callsite`/`enabled` behavior)
+    /// and does nothing with what it's given. Never asserted on directly —
+    /// its only job is to exist, permanently, as *a* registered dispatcher,
+    /// so `Interest::and` always has something to fold against.
+    struct AlwaysInterestedNoop;
+
+    impl tracing::Subscriber for AlwaysInterestedNoop {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+        fn event(&self, _event: &tracing::Event<'_>) {}
+        fn enter(&self, _span: &tracing::span::Id) {}
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    /// Ensure the permanent always-interested global default subscriber
+    /// exists. Idempotent and cheap after the first call (`Once`'s fast
+    /// path is a single atomic load). `set_global_default` can only
+    /// succeed once per process; failure here means some other global
+    /// default already exists, which is just as effective at keeping the
+    /// registered-dispatcher set non-empty, so the error is deliberately
+    /// discarded rather than logged or panicked on.
+    pub(crate) fn ensure_installed() {
+        INSTALL.call_once(|| {
+            let _ = tracing::subscriber::set_global_default(AlwaysInterestedNoop);
+        });
+    }
+}
 use crate::embedding_persistence::{
     delete_embeddings_for_table, store_search_embeddings, SearchEntryInsert,
 };
@@ -166,6 +255,74 @@ pub enum ArchiveScope {
     Containers(HashSet<ContainerKey>),
 }
 
+/// Whether one cached row is a candidate for archiving under `scope` and
+/// `seen_table_ids`.
+///
+/// Shared between the KYO-616 read-only pre-pass in [`archive_missing_tables`]
+/// that logs the archive decision and the loop right below it that actually
+/// performs the archiving, so the two can never independently drift onto a
+/// different answer for the same row — see
+/// `docs/standards/code-organization/propagate-predicate-changes-to-every-copy.md`.
+fn is_archive_candidate(
+    scope: &ArchiveScope,
+    seen_table_ids: &HashSet<String>,
+    project_id: &str,
+    dataset_id: &str,
+    table_id: &str,
+) -> bool {
+    let in_scope = match scope {
+        ArchiveScope::EntireDatasource => true,
+        ArchiveScope::Containers(containers) => {
+            containers.contains(&(project_id.to_string(), dataset_id.to_string()))
+        }
+    };
+    if !in_scope {
+        return false;
+    }
+
+    let full_id = kyomi_core::build_full_table_name(project_id, dataset_id, table_id);
+    !seen_table_ids.contains(&full_id)
+}
+
+/// KYO-616: ratio threshold for the "disproportionate archive" WARN in
+/// [`archive_missing_tables`] — a run whose archived count is at least this
+/// many times its indexed count is flagged as worth a human's attention.
+/// Anchored to the confirmed production incident this ticket exists to
+/// prevent: 34 tables archived against 2 indexed is a 17x ratio. `5` is
+/// deliberately well below that, with headroom so an ordinary partial
+/// refresh — a container that legitimately shed a handful more tables than
+/// this run happened to (re-)index, e.g. 3 archived against 1 indexed —
+/// does not cry wolf on every routine run.
+///
+/// PURELY OBSERVATIONAL. This constant gates a log line only — it MUST
+/// NEVER be used to gate archiving, status, or any other control-flow
+/// decision. The one and only decision threshold for "did this run look at
+/// enough of the datasource" is [`is_material_shortfall`]
+/// (`check_container_coverage`/`apply_container_coverage`); reusing this
+/// value as a second decision threshold is exactly the two-thresholds-that-
+/// can-silently-disagree anti-pattern KYO-616 was explicitly told to avoid.
+const DISPROPORTIONATE_ARCHIVE_RATIO: usize = 5;
+
+/// Whether this run's about-to-archive count is disproportionate to what it
+/// indexed — the KYO-616 "disproportionate archive" WARN trigger. See
+/// [`DISPROPORTIONATE_ARCHIVE_RATIO`]'s doc comment: purely observational,
+/// never a decision input.
+///
+/// `tables_indexed == 0` with anything archived is treated as always
+/// disproportionate (rather than skipped as "undefined ratio", and rather
+/// than divided by zero) — a run that indexed nothing yet still archived
+/// rows, even a deliberate [`ArchiveScope::EntireDatasource`] wipe, is
+/// exactly the shape worth a human's glance rather than silence.
+fn is_disproportionate_archive(tables_indexed: usize, archived_count: usize) -> bool {
+    if archived_count == 0 {
+        return false;
+    }
+    if tables_indexed == 0 {
+        return true;
+    }
+    archived_count >= tables_indexed.saturating_mul(DISPROPORTIONATE_ARCHIVE_RATIO)
+}
+
 /// Archive tables that were not seen during the current refresh cycle.
 ///
 /// Marks tables as `is_archived = true` in the cache. Returns the full_name
@@ -179,13 +336,25 @@ pub enum ArchiveScope {
 /// `IN (...)` list: the number of containers is caller-controlled and
 /// unbounded, and a hand-built `IN` list would need to behave identically
 /// on both the Postgres and SQLite backends this function runs against.
+///
+/// KYO-616: before any row is mutated, this logs exactly what is about to
+/// happen — the run that destroyed most of a production catalog left only
+/// `tables_indexed:2 tables_archived:34 errors:0`, reconstructable
+/// afterward only by diffing the database. The log line below is built from
+/// a read-only pass over `rows` using the *same* [`is_archive_candidate`]
+/// predicate the mutating loop uses, so it can never claim a different
+/// decision than the one that actually runs.
 pub async fn archive_missing_tables(
     db: &DbPool,
     workspace_id: &str,
     datasource_config_id: &str,
     scope: &ArchiveScope,
     seen_table_ids: &HashSet<String>,
+    tables_indexed: usize,
 ) -> Result<Vec<String>> {
+    #[cfg(test)]
+    test_tracing_race_guard::ensure_installed();
+
     // Callers are responsible for only calling this when discovery succeeded.
     // An empty seen_table_ids with a successful discovery means the datasource
     // genuinely has no tables — archiving everything is correct in that case
@@ -219,29 +388,113 @@ pub async fn archive_missing_tables(
     let is_pg = db.is_postgres();
     let now_expr = kyomi_core::sql_compat::now(is_pg);
 
-    let mut archived_names = Vec::new();
+    // KYO-616: the archive decision, before anything is written. See the
+    // function doc comment — this is the read-only twin of the mutating
+    // loop below, sharing `is_archive_candidate` so the two can't disagree.
+    let to_archive: Vec<&CacheRow> = rows
+        .iter()
+        .filter(|row| {
+            is_archive_candidate(
+                scope,
+                seen_table_ids,
+                &row.project_id,
+                &row.dataset_id,
+                &row.table_id,
+            )
+        })
+        .collect();
+
+    let about_to_archive_containers: HashSet<ContainerKey> = to_archive
+        .iter()
+        .map(|row| (row.project_id.clone(), row.dataset_id.clone()))
+        .collect();
+
+    match scope {
+        ArchiveScope::EntireDatasource => {
+            info!(
+                workspace_id,
+                datasource_config_id,
+                archive_scope = "entire_datasource",
+                seen_count = seen_table_ids.len(),
+                candidates_about_to_archive = to_archive.len(),
+                about_to_archive_containers = about_to_archive_containers.len(),
+                about_to_archive_container_names =
+                    %format_container_keys_capped(&about_to_archive_containers),
+                "evaluating archive scope before applying destructive changes"
+            );
+        }
+        ArchiveScope::Containers(enumerated) => {
+            info!(
+                workspace_id,
+                datasource_config_id,
+                archive_scope = "containers",
+                enumerated_containers = enumerated.len(),
+                enumerated_container_names = %format_container_keys_capped(enumerated),
+                seen_count = seen_table_ids.len(),
+                candidates_about_to_archive = to_archive.len(),
+                about_to_archive_containers = about_to_archive_containers.len(),
+                about_to_archive_container_names =
+                    %format_container_keys_capped(&about_to_archive_containers),
+                "evaluating archive scope before applying destructive changes"
+            );
+        }
+    }
+
+    // KYO-616: purely observational — see `DISPROPORTIONATE_ARCHIVE_RATIO`'s
+    // doc comment. Sits alongside the archive-decision log above rather than
+    // replacing it: that log answers "what is this run about to do and to
+    // which containers"; this WARN answers a narrower question — "is the
+    // archive count wildly out of proportion to what this run indexed" —
+    // and can fire (or not) independently of the coverage-shortfall WARN in
+    // `check_container_coverage`, which answers a third, different question
+    // ("did this run look at enough of the datasource at all"). A run can
+    // trip either WARN alone: full container coverage with a disproportionate
+    // archive trips only this one; partial coverage with a small, proportionate
+    // archive trips only the other.
+    if is_disproportionate_archive(tables_indexed, to_archive.len()) {
+        let archive_to_indexed_ratio = if tables_indexed == 0 {
+            "undefined (zero indexed)".to_string()
+        } else {
+            format!("{:.1}x", to_archive.len() as f64 / tables_indexed as f64)
+        };
+        warn!(
+            workspace_id,
+            datasource_config_id,
+            tables_indexed,
+            candidates_about_to_archive = to_archive.len(),
+            archive_to_indexed_ratio = %archive_to_indexed_ratio,
+            "this run is about to archive a disproportionately large share of the \
+             catalog relative to what it indexed this run — worth a human's \
+             attention even though the archive scope/coverage checks did not \
+             block it"
+        );
+    }
+
+    let mut archived_names = Vec::with_capacity(to_archive.len());
     for row in &rows {
         // KYO-614: a row whose container was never enumerated this run is
         // an unknown, not a confirmed absence — skip it before even
-        // consulting `seen_table_ids`.
-        if let ArchiveScope::Containers(containers) = scope
-            && !containers.contains(&(row.project_id.clone(), row.dataset_id.clone()))
-        {
+        // consulting `seen_table_ids`. Same predicate the log line above
+        // was computed from.
+        if !is_archive_candidate(
+            scope,
+            seen_table_ids,
+            &row.project_id,
+            &row.dataset_id,
+            &row.table_id,
+        ) {
             continue;
         }
 
         let full_id = kyomi_core::build_full_table_name(&row.project_id, &row.dataset_id, &row.table_id);
-
-        if !seen_table_ids.contains(&full_id) {
-            let sql = format!(
-                "UPDATE datasource_table_cache SET is_archived = true, updated_at = {now_expr} WHERE id = $1"
-            );
-            kyomi_core::db_execute!(db, &sql, row.id)
-                .map_err(|e| {
-                    kyomi_core::Error::Internal(format!("failed to archive table {full_id}: {e}"))
-                })?;
-            archived_names.push(full_id);
-        }
+        let sql = format!(
+            "UPDATE datasource_table_cache SET is_archived = true, updated_at = {now_expr} WHERE id = $1"
+        );
+        kyomi_core::db_execute!(db, &sql, row.id)
+            .map_err(|e| {
+                kyomi_core::Error::Internal(format!("failed to archive table {full_id}: {e}"))
+            })?;
+        archived_names.push(full_id);
     }
 
     if !archived_names.is_empty() {
@@ -554,6 +807,9 @@ pub async fn check_container_coverage(
     datasource_config_id: &str,
     enumerated_containers: &HashSet<ContainerKey>,
 ) -> Result<ContainerCoverage> {
+    #[cfg(test)]
+    test_tracing_race_guard::ensure_installed();
+
     #[derive(sqlx::FromRow)]
     struct ContainerRow {
         project_id: String,
@@ -606,6 +862,24 @@ pub async fn check_container_coverage(
 
     let material = is_material_shortfall(enumerated_containers.len(), live_count);
 
+    // KYO-616: this is the logging half of the KYO-614 material-shortfall
+    // check above — reusing `material` (from `is_material_shortfall`)
+    // rather than a second, independently-tuned threshold on top of it, so
+    // there is exactly one definition of "materially short" anywhere in the
+    // catalog indexers rather than two that can silently disagree.
+    if material {
+        warn!(
+            workspace_id,
+            datasource_config_id,
+            enumerated_containers = enumerated_containers.len(),
+            live_containers = live_count,
+            missing_containers = missing.len(),
+            "catalog refresh's container enumeration fell materially short of this \
+             datasource's known containers — archive/status decisions for this run treat \
+             that as elevated risk rather than a clean pass"
+        );
+    }
+
     let shown_count = missing.len().min(MAX_MISSING_CONTAINERS_IN_WARNING);
     let remainder = missing.len() - shown_count;
     let shown = missing[..shown_count]
@@ -641,6 +915,97 @@ fn format_container_key((project_id, dataset_id): &ContainerKey) -> String {
     } else {
         format!("{project_id}.{dataset_id}")
     }
+}
+
+/// Render a capped, sorted, human-readable list of container keys —
+/// mirrors [`check_container_coverage`]'s own "+N more" summarization
+/// (sharing its [`MAX_MISSING_CONTAINERS_IN_WARNING`] cap rather than a
+/// second cap value) so a datasource with dozens of containers doesn't blow
+/// up a single KYO-616 log line.
+fn format_container_keys_capped(containers: &HashSet<ContainerKey>) -> String {
+    let mut sorted: Vec<&ContainerKey> = containers.iter().collect();
+    sorted.sort();
+
+    let shown_count = sorted.len().min(MAX_MISSING_CONTAINERS_IN_WARNING);
+    let remainder = sorted.len() - shown_count;
+    let shown = sorted[..shown_count]
+        .iter()
+        .map(|k| format_container_key(k))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    if remainder > 0 {
+        format!("{shown} (+{remainder} more)")
+    } else {
+        shown
+    }
+}
+
+// ─── Cross-indexer enumeration logging (KYO-616) ───────────────────────────────
+//
+// The three catalog indexer paths — the SQL-template method
+// (`kyomi_agent::catalog::traits::index_catalog_sql`), the BigQuery
+// user-dataset REST indexer (`kyomi_auth::catalog::indexers::user_dataset`),
+// and the Connect indexer (`kyomi_agent::catalog::indexers::connect`) — each
+// walk their own containers/tables with a genuinely different loop shape (a
+// generic trait-driven container loop; nested BigQuery project/dataset REST
+// calls; a single already-materialized `CatalogResult`), so there is no one
+// loop to share between them. What IS shared is the log line itself — its
+// field names and what "discovered" vs. "enumerated" mean — so the three
+// paths report the same incident-reconstruction vocabulary instead of three
+// independently-worded ones.
+
+/// Log a run's enumeration summary: how many containers were discovered vs.
+/// successfully enumerated this run, and the enumerated containers' names
+/// (capped). Called once per run, after the container-discovery/enumeration
+/// loop completes, by all three catalog indexer paths.
+pub fn log_run_enumeration_summary(
+    workspace_id: &str,
+    datasource_config_id: &str,
+    container_label: &str,
+    containers_discovered: usize,
+    enumerated_containers: &HashSet<ContainerKey>,
+) {
+    #[cfg(test)]
+    test_tracing_race_guard::ensure_installed();
+
+    info!(
+        workspace_id,
+        datasource_config_id,
+        container_label,
+        containers_discovered,
+        containers_enumerated = enumerated_containers.len(),
+        enumerated_container_names = %format_container_keys_capped(enumerated_containers),
+        "catalog run enumeration summary"
+    );
+}
+
+/// Log one container's per-table indexing summary: how many tables it
+/// listed, how many were cached successfully, and how many errored (a
+/// schema-read denial or a `cache_table` write failure). Called once per
+/// container by all three catalog indexer paths.
+pub fn log_container_table_summary(
+    workspace_id: &str,
+    datasource_config_id: &str,
+    container_label: &str,
+    container_name: &str,
+    tables_listed: usize,
+    tables_cached: usize,
+    tables_errored: usize,
+) {
+    #[cfg(test)]
+    test_tracing_race_guard::ensure_installed();
+
+    debug!(
+        workspace_id,
+        datasource_config_id,
+        container_label,
+        container = container_name,
+        tables_listed,
+        tables_cached,
+        tables_errored,
+        "catalog container indexing summary"
+    );
 }
 
 /// Apply a [`ContainerCoverage`] check's outcome onto a run's persisted
@@ -1234,6 +1599,22 @@ pub fn fold_table_outcomes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Thin wrapper around `kyomi_test_tracing::capture_tracing()`.
+    ///
+    /// The actual fix for the KYO-616 `tracing` interest-cache race (a
+    /// `rebuild_interest_cache()` call here alone was tried and confirmed
+    /// insufficient — it only re-resolves interest at the moment it's
+    /// called, and cannot stop a different, subscriber-less test's thread
+    /// from winning a call site's one-time registration race a moment
+    /// later) now lives at the source: `test_tracing_race_guard::
+    /// ensure_installed()`, called from the top of every production
+    /// function a KYO-616 log line was added to. See that module's doc
+    /// comment for the full mechanism. This wrapper exists only so call
+    /// sites read the same either way, regardless of which fix backs them.
+    fn capture_tracing_for_test() -> kyomi_test_tracing::TracingCapture {
+        kyomi_test_tracing::capture_tracing()
+    }
 
     // ── resolve_final_status (KYO-126) ───────────────────────────────────
 
@@ -1996,7 +2377,7 @@ mod tests {
         let scope = ArchiveScope::Containers(HashSet::from([("proj-1".to_string(), "dataset_a".to_string())]));
         let seen_table_ids = HashSet::new();
 
-        let archived = archive_missing_tables(&db, &workspace_id, &ds, &scope, &seen_table_ids)
+        let archived = archive_missing_tables(&db, &workspace_id, &ds, &scope, &seen_table_ids, 0)
             .await
             .expect("archive_missing_tables");
 
@@ -2034,7 +2415,7 @@ mod tests {
         let scope = ArchiveScope::Containers(HashSet::from([("proj-1".to_string(), "dataset_a".to_string())]));
         let seen_table_ids = HashSet::from(["proj-1.dataset_a.kept".to_string()]);
 
-        let archived = archive_missing_tables(&db, &workspace_id, &ds, &scope, &seen_table_ids)
+        let archived = archive_missing_tables(&db, &workspace_id, &ds, &scope, &seen_table_ids, 1)
             .await
             .expect("archive_missing_tables");
 
@@ -2060,7 +2441,7 @@ mod tests {
         let scope = ArchiveScope::Containers(HashSet::new());
         let seen_table_ids = HashSet::new();
 
-        let archived = archive_missing_tables(&db, &workspace_id, &ds, &scope, &seen_table_ids)
+        let archived = archive_missing_tables(&db, &workspace_id, &ds, &scope, &seen_table_ids, 0)
             .await
             .expect("archive_missing_tables");
 
@@ -2094,7 +2475,7 @@ mod tests {
         let scope = ArchiveScope::EntireDatasource;
         let seen_table_ids = HashSet::new();
 
-        let mut archived = archive_missing_tables(&db, &workspace_id, &ds, &scope, &seen_table_ids)
+        let mut archived = archive_missing_tables(&db, &workspace_id, &ds, &scope, &seen_table_ids, 0)
             .await
             .expect("archive_missing_tables");
         archived.sort();
@@ -2106,6 +2487,447 @@ mod tests {
                 "proj-1.dataset_b.t1".to_string(),
             ],
             "an intentionally emptied selection must archive every container's rows"
+        );
+    }
+
+    // ── cross-indexer enumeration logging (KYO-616) ────────────────────────
+    //
+    // `log_run_enumeration_summary`/`log_container_table_summary` are the
+    // one shared implementation all three catalog indexer paths (SQL
+    // template, BigQuery user-dataset REST, Connect) call from their own
+    // differently-shaped loops — tested directly here rather than through
+    // each of the three call sites' own heavier fixtures.
+
+    #[test]
+    fn run_enumeration_summary_reports_discovered_vs_enumerated_and_names() {
+        let logs = capture_tracing_for_test();
+        let enumerated = HashSet::from([
+            ("".to_string(), "public".to_string()),
+            ("".to_string(), "analytics".to_string()),
+        ]);
+
+        log_run_enumeration_summary("ws-1", "ds-1", "schema", 3, &enumerated);
+
+        let (level, message) = logs
+            .events()
+            .into_iter()
+            .find(|(_, msg)| msg.contains("catalog run enumeration summary"))
+            .expect("expected the enumeration-summary log line");
+        assert_eq!(level, tracing::Level::INFO);
+        assert!(message.contains("container_label=\"schema\""), "got: {message}");
+        assert!(message.contains("containers_discovered=3"), "got: {message}");
+        assert!(message.contains("containers_enumerated=2"), "got: {message}");
+        assert!(message.contains("enumerated_container_names=public, analytics")
+            || message.contains("enumerated_container_names=analytics, public"), "got: {message}");
+    }
+
+    #[test]
+    fn container_table_summary_reports_listed_cached_and_errored() {
+        let logs = capture_tracing_for_test();
+
+        log_container_table_summary("ws-1", "ds-1", "dataset", "proj-1.dataset_a", 5, 3, 2);
+
+        assert!(
+            logs.has_message_containing(tracing::Level::DEBUG, "catalog container indexing summary"),
+            "captured: {:?}",
+            logs.events()
+        );
+        assert!(
+            logs.has_message_containing(tracing::Level::DEBUG, "tables_listed=5"),
+            "captured: {:?}",
+            logs.events()
+        );
+        assert!(
+            logs.has_message_containing(tracing::Level::DEBUG, "tables_cached=3"),
+            "captured: {:?}",
+            logs.events()
+        );
+        assert!(
+            logs.has_message_containing(tracing::Level::DEBUG, "tables_errored=2"),
+            "captured: {:?}",
+            logs.events()
+        );
+        assert!(
+            logs.has_message_containing(tracing::Level::DEBUG, "container=\"proj-1.dataset_a\""),
+            "captured: {:?}",
+            logs.events()
+        );
+    }
+
+    // ── archive-decision log line (KYO-616) ───────────────────────────────
+    //
+    // The production incident this ticket exists to prevent left only
+    // `tables_indexed:2 tables_archived:34 errors:0` in the logs —
+    // reconstructable afterward only by diffing the database. These pin
+    // that the archive *decision*, not just its outcome, is legible: the
+    // seen-count, the count about to be archived, and the distinct
+    // containers on each side (enumerated vs. about-to-be-archived).
+
+    #[tokio::test]
+    async fn archive_decision_log_reports_seen_and_about_to_archive_counts_and_containers() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        let (workspace_id, ds) = seed_container_scoped_fixture(
+            sq,
+            "archivelog",
+            &[
+                ("proj-1", "dataset_a", "kept"),
+                ("proj-1", "dataset_a", "deleted"),
+                ("proj-1", "dataset_b", "t1"),
+            ],
+        )
+        .await;
+
+        // Only dataset_a was enumerated this run; "deleted" was listed but
+        // not seen this cycle. dataset_b was never enumerated at all and
+        // must appear on neither side of the decision.
+        let scope = ArchiveScope::Containers(HashSet::from([(
+            "proj-1".to_string(),
+            "dataset_a".to_string(),
+        )]));
+        let seen_table_ids = HashSet::from(["proj-1.dataset_a.kept".to_string()]);
+
+        let logs = capture_tracing_for_test();
+        let archived = archive_missing_tables(&db, &workspace_id, &ds, &scope, &seen_table_ids, 1)
+            .await
+            .expect("archive_missing_tables");
+        assert_eq!(archived, vec!["proj-1.dataset_a.deleted".to_string()]);
+
+        let decision_events: Vec<(tracing::Level, String)> = logs
+            .events()
+            .into_iter()
+            .filter(|(_, msg)| {
+                msg.contains("evaluating archive scope before applying destructive changes")
+            })
+            .collect();
+        assert_eq!(
+            decision_events.len(),
+            1,
+            "expected exactly one archive-decision log line; captured: {:?}",
+            logs.events()
+        );
+        let (level, message) = &decision_events[0];
+        assert_eq!(*level, tracing::Level::INFO);
+        assert!(message.contains("archive_scope=\"containers\""), "got: {message}");
+        assert!(
+            message.contains("seen_count=1"),
+            "expected the seen-count in the log line, got: {message}"
+        );
+        assert!(
+            message.contains("candidates_about_to_archive=1"),
+            "expected the about-to-archive count, got: {message}"
+        );
+        assert!(
+            message.contains("about_to_archive_containers=1"),
+            "expected the distinct about-to-archive container count, got: {message}"
+        );
+        assert!(
+            message.contains("about_to_archive_container_names=proj-1.dataset_a"),
+            "expected the about-to-archive container's name, got: {message}"
+        );
+        assert!(
+            message.contains("enumerated_containers=1"),
+            "expected the enumerated-container count from the ArchiveScope, got: {message}"
+        );
+        assert!(
+            message.contains("enumerated_container_names=proj-1.dataset_a"),
+            "expected the enumerated container's name, got: {message}"
+        );
+        assert!(
+            !message.contains("dataset_b"),
+            "dataset_b was never enumerated this run and must not appear on either side \
+             of the archive decision, got: {message}"
+        );
+    }
+
+    /// `ArchiveScope::EntireDatasource` has no bounded enumerated-container
+    /// set — the log line must say so via `archive_scope="entire_datasource"`
+    /// rather than fabricating an `enumerated_containers` count for a scope
+    /// that has none.
+    #[tokio::test]
+    async fn archive_decision_log_reports_entire_datasource_scope_label() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        let (workspace_id, ds) =
+            seed_container_scoped_fixture(sq, "archivelogwipe", &[("proj-1", "dataset_a", "t1")])
+                .await;
+
+        let logs = capture_tracing_for_test();
+        let _ = archive_missing_tables(
+            &db,
+            &workspace_id,
+            &ds,
+            &ArchiveScope::EntireDatasource,
+            &HashSet::new(),
+            0,
+        )
+        .await
+        .expect("archive_missing_tables");
+
+        assert!(
+            logs.has_message_containing(
+                tracing::Level::INFO,
+                "archive_scope=\"entire_datasource\""
+            ),
+            "expected the entire-datasource scope label in the archive-decision log; \
+             captured: {:?}",
+            logs.events()
+        );
+    }
+
+    // ── disproportionate-archive WARN (KYO-616) ───────────────────────────
+    //
+    // Purely observational (see `DISPROPORTIONATE_ARCHIVE_RATIO`'s doc
+    // comment) — a run can trip this WARN even with FULL container
+    // coverage, which the material-shortfall WARN above cannot see at all:
+    // that is exactly the gap this section exists to close (a run that
+    // enumerates everything and still archives far more than it indexed
+    // must not come out silent just because coverage looked clean).
+
+    #[tokio::test]
+    async fn disproportionate_archive_warns_on_the_confirmed_incident_shape() {
+        // 34 tables archived against 2 indexed — the confirmed production
+        // incident shape (17x ratio), reproduced with `EntireDatasource` so
+        // every seeded row is a genuine archive candidate.
+        let rows: Vec<(String, String, String)> = (0..34)
+            .map(|i| ("proj-1".to_string(), "dataset_a".to_string(), format!("t{i}")))
+            .collect();
+        let rows_ref: Vec<(&str, &str, &str)> =
+            rows.iter().map(|(p, d, t)| (p.as_str(), d.as_str(), t.as_str())).collect();
+
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let (workspace_id, ds) = {
+            let DbPool::Sqlite(sq) = &db else {
+                unreachable!("expected sqlite pool");
+            };
+            seed_container_scoped_fixture(sq, "dispro34", &rows_ref).await
+        };
+
+        let logs = capture_tracing_for_test();
+        let archived = archive_missing_tables(
+            &db,
+            &workspace_id,
+            &ds,
+            &ArchiveScope::EntireDatasource,
+            &HashSet::new(),
+            2,
+        )
+        .await
+        .expect("archive_missing_tables");
+        assert_eq!(archived.len(), 34);
+
+        let warn_events = logs.events_at(tracing::Level::WARN);
+        assert!(
+            warn_events.iter().any(|(_, msg)| {
+                msg.contains("tables_indexed=2")
+                    && msg.contains("candidates_about_to_archive=34")
+                    && msg.contains("archive_to_indexed_ratio=17.0x")
+            }),
+            "expected a WARN naming the disproportionate archive-to-indexed ratio; \
+             captured: {:?}",
+            logs.events()
+        );
+    }
+
+    /// The negative case: a run that archives only a small, proportionate
+    /// multiple of what it indexed (well below `DISPROPORTIONATE_ARCHIVE_RATIO`)
+    /// must not emit the disproportionate-archive WARN at all.
+    #[tokio::test]
+    async fn small_proportionate_archive_does_not_warn() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let (workspace_id, ds) = {
+            let DbPool::Sqlite(sq) = &db else {
+                unreachable!("expected sqlite pool");
+            };
+            seed_container_scoped_fixture(
+                sq,
+                "dispronoWarn",
+                &[
+                    ("proj-1", "dataset_a", "t1"),
+                    ("proj-1", "dataset_a", "t2"),
+                    ("proj-1", "dataset_a", "t3"),
+                ],
+            )
+            .await
+        };
+
+        let logs = capture_tracing_for_test();
+        // 3 archived against 1 indexed — a 3x ratio, routine, well below
+        // the 5x threshold.
+        let archived = archive_missing_tables(
+            &db,
+            &workspace_id,
+            &ds,
+            &ArchiveScope::EntireDatasource,
+            &HashSet::new(),
+            1,
+        )
+        .await
+        .expect("archive_missing_tables");
+        assert_eq!(archived.len(), 3);
+
+        assert!(
+            !logs.has_message_containing(tracing::Level::WARN, "disproportionately large"),
+            "a small, proportionate archive must not trip the disproportionate-archive \
+             WARN; captured: {:?}",
+            logs.events()
+        );
+    }
+
+    /// The zero-indexed decision (documented on `is_disproportionate_archive`):
+    /// a run that indexed nothing at all but still archives rows — even via
+    /// a deliberate `ArchiveScope::EntireDatasource` wipe — must still warn,
+    /// rather than skip the check as "undefined" or divide by zero.
+    #[tokio::test]
+    async fn zero_indexed_run_that_archives_anything_still_warns() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let (workspace_id, ds) = {
+            let DbPool::Sqlite(sq) = &db else {
+                unreachable!("expected sqlite pool");
+            };
+            seed_container_scoped_fixture(sq, "dispro0idx", &[("proj-1", "dataset_a", "t1")]).await
+        };
+
+        let logs = capture_tracing_for_test();
+        let archived = archive_missing_tables(
+            &db,
+            &workspace_id,
+            &ds,
+            &ArchiveScope::EntireDatasource,
+            &HashSet::new(),
+            0,
+        )
+        .await
+        .expect("archive_missing_tables");
+        assert_eq!(archived.len(), 1);
+
+        assert!(
+            logs.has_message_containing(
+                tracing::Level::WARN,
+                "archive_to_indexed_ratio=undefined (zero indexed)"
+            ),
+            "a zero-indexed run that archives anything must still warn, not divide by \
+             zero or skip the check; captured: {:?}",
+            logs.events()
+        );
+    }
+
+    #[test]
+    fn is_disproportionate_archive_ignores_a_zero_archive_count() {
+        // Nothing archived is never disproportionate, regardless of
+        // tables_indexed (including the zero/zero case).
+        assert!(!is_disproportionate_archive(0, 0));
+        assert!(!is_disproportionate_archive(5, 0));
+    }
+
+    #[test]
+    fn is_disproportionate_archive_boundary_is_inclusive_at_the_ratio() {
+        assert!(
+            is_disproportionate_archive(2, 10),
+            "exactly 5x must count as disproportionate"
+        );
+        assert!(
+            !is_disproportionate_archive(2, 9),
+            "just under 5x must not"
+        );
+    }
+
+    // ── material-shortfall WARN (KYO-616) ──────────────────────────────────
+    //
+    // Item 3 of KYO-616 reuses `is_material_shortfall`'s existing
+    // determination (`coverage.material`) as the sole trigger for this WARN
+    // — no second, independently-tuned threshold.
+
+    #[tokio::test]
+    async fn material_shortfall_emits_a_warn_naming_the_coverage_counts() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let (workspace_id, ds) = {
+            let DbPool::Sqlite(sq) = &db else {
+                unreachable!("expected sqlite pool");
+            };
+            seed_container_scoped_fixture(
+                sq,
+                "covwarn",
+                &[
+                    ("proj-1", "dataset_a", "t1"),
+                    ("proj-1", "dataset_b", "t1"),
+                    ("proj-1", "dataset_c", "t1"),
+                    ("proj-1", "dataset_d", "t1"),
+                ],
+            )
+            .await
+        };
+        let enumerated = HashSet::from([("proj-1".to_string(), "dataset_a".to_string())]);
+
+        let logs = capture_tracing_for_test();
+        let coverage = check_container_coverage(&db, &workspace_id, &ds, &enumerated)
+            .await
+            .expect("check_container_coverage");
+        assert!(coverage.material, "1 of 4 enumerated must be material");
+
+        let warn_events = logs.events_at(tracing::Level::WARN);
+        assert!(
+            warn_events.iter().any(|(_, msg)| {
+                msg.contains("enumerated_containers=1")
+                    && msg.contains("live_containers=4")
+                    && msg.contains("missing_containers=3")
+            }),
+            "expected a WARN naming the exact coverage counts driving the material-shortfall \
+             determination; captured: {:?}",
+            logs.events()
+        );
+    }
+
+    /// The negative case: a run with full (non-material) coverage must not
+    /// emit the material-shortfall WARN at all — proving the WARN is gated
+    /// on `coverage.material`, not unconditional.
+    #[tokio::test]
+    async fn non_material_shortfall_does_not_emit_the_material_warn() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let (workspace_id, ds) = {
+            let DbPool::Sqlite(sq) = &db else {
+                unreachable!("expected sqlite pool");
+            };
+            seed_container_scoped_fixture(
+                sq,
+                "covnowarn",
+                &[("proj-1", "dataset_a", "t1"), ("proj-1", "dataset_b", "t1")],
+            )
+            .await
+        };
+        let enumerated = HashSet::from([
+            ("proj-1".to_string(), "dataset_a".to_string()),
+            ("proj-1".to_string(), "dataset_b".to_string()),
+        ]);
+
+        let logs = capture_tracing_for_test();
+        let coverage = check_container_coverage(&db, &workspace_id, &ds, &enumerated)
+            .await
+            .expect("check_container_coverage");
+        assert!(!coverage.material, "full coverage must not be material");
+
+        assert!(
+            !logs.has_message_containing(tracing::Level::WARN, "materially short"),
+            "full coverage must not emit the material-shortfall WARN; captured: {:?}",
+            logs.events()
         );
     }
 

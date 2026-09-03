@@ -18,8 +18,9 @@ use tracing::{info, warn};
 use crate::catalog::traits::CatalogIndexer;
 use kyomi_auth::catalog::helpers::{
     apply_container_coverage, archive_missing_tables, cache_table, check_container_coverage,
-    resolve_run_outcome, update_datasource_last_refresh, update_datasource_status, ArchiveScope,
-    CacheTableParams, ContainerKey, IndexerContext,
+    log_container_table_summary, log_run_enumeration_summary, resolve_run_outcome,
+    update_datasource_last_refresh, update_datasource_status, ArchiveScope, CacheTableParams,
+    ContainerKey, IndexerContext,
 };
 use kyomi_auth::catalog::types::{CatalogIndexResult, ColumnEntry};
 use kyomi_core::connect_protocol::{CatalogResult, DiscoverCatalogParams};
@@ -242,6 +243,9 @@ async fn process_discovered_catalog(params: ProcessDiscoveredCatalogParams<'_>) 
     let mut seen_table_ids = HashSet::new();
 
     for container in &catalog_result.containers {
+        let mut container_tables_cached = 0usize;
+        let mut container_tables_errored = 0usize;
+
         for table in &container.tables {
             let columns: Vec<ColumnEntry> = table
                 .columns
@@ -275,14 +279,29 @@ async fn process_discovered_catalog(params: ProcessDiscoveredCatalogParams<'_>) 
             })
             .await
             {
-                Ok(()) => tables_indexed += 1,
+                Ok(()) => {
+                    tables_indexed += 1;
+                    container_tables_cached += 1;
+                }
                 Err(e) => {
                     let msg = format!("Failed to cache table {full_table_id}: {e}");
                     warn!("{msg}");
                     catalog_result.errors.push(msg);
+                    container_tables_errored += 1;
                 }
             }
         }
+
+        // KYO-616: per-container tables listed/cached/errored.
+        log_container_table_summary(
+            &ctx.workspace_id,
+            &ctx.datasource_config_id,
+            "container",
+            &container.name,
+            container.tables.len(),
+            container_tables_cached,
+            container_tables_errored,
+        );
     }
 
     // Resolve the archive/status decision (KYO-385). These are two
@@ -324,17 +343,39 @@ async fn process_discovered_catalog(params: ProcessDiscoveredCatalogParams<'_>) 
     // is a behavioural no-op for Connect specifically, but it keeps one
     // shared key shape across all three indexers rather than forking it
     // per provider (KYO-614 follow-up).
+    // KYO-616: computed once and shared by `archive_scope`, the coverage
+    // check below, and the per-run enumeration-summary log — previously
+    // `archive_scope`'s `Containers` arm and the coverage check each built
+    // their own independent copy of this exact expression (see
+    // `docs/standards/code-organization/propagate-predicate-changes-to-every-copy.md`).
+    let enumerated_containers: HashSet<ContainerKey> = if explicit_empty {
+        HashSet::new()
+    } else {
+        catalog_result
+            .containers
+            .iter()
+            .map(|c| (String::new(), c.name.clone()))
+            .collect()
+    };
+
     let archive_scope = if explicit_empty {
         ArchiveScope::EntireDatasource
     } else {
-        ArchiveScope::Containers(
-            catalog_result
-                .containers
-                .iter()
-                .map(|c| (String::new(), c.name.clone()))
-                .collect(),
-        )
+        ArchiveScope::Containers(enumerated_containers.clone())
     };
+
+    // KYO-616: per-run enumeration summary. For Connect, "discovered" and
+    // "enumerated" are the same set — KYO-268 phase 2 already omits any
+    // denied container from `catalog_result.containers` (its denial is
+    // recorded in `catalog_result.errors` instead), so every container that
+    // was discovered was, by construction, also enumerated.
+    log_run_enumeration_summary(
+        &ctx.workspace_id,
+        &ctx.datasource_config_id,
+        "container",
+        catalog_result.containers.len(),
+        &enumerated_containers,
+    );
 
     // KYO-614: did this run enumerate enough of the datasource's currently
     // -live containers to trust an "idle" status? Skipped for an
@@ -342,16 +383,11 @@ async fn process_discovered_catalog(params: ProcessDiscoveredCatalogParams<'_>) 
     // (`kyomi_agent::catalog::traits::index_catalog_sql`) for the identical
     // reasoning.
     if !explicit_empty {
-        let enumerated: HashSet<ContainerKey> = catalog_result
-            .containers
-            .iter()
-            .map(|c| (String::new(), c.name.clone()))
-            .collect();
         match check_container_coverage(
             db,
             &ctx.workspace_id,
             &ctx.datasource_config_id,
-            &enumerated,
+            &enumerated_containers,
         )
         .await
         {
@@ -378,6 +414,7 @@ async fn process_discovered_catalog(params: ProcessDiscoveredCatalogParams<'_>) 
             &ctx.datasource_config_id,
             &archive_scope,
             &seen_table_ids,
+            tables_indexed,
         )
         .await
         .unwrap_or_default()

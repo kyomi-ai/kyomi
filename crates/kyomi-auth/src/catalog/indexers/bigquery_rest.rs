@@ -36,6 +36,7 @@
 
 use kyomi_core::Result;
 use serde_json::Value;
+use tracing::{debug, warn};
 
 use crate::catalog::types::ColumnEntry;
 
@@ -122,7 +123,21 @@ pub(crate) fn parse_list_field<T>(
     extract: impl Fn(&Value) -> Option<T>,
     missing_key_hint: Option<&str>,
 ) -> Result<Vec<T>> {
+    // KYO-616: closes a `tracing` interest-cache race across parallel test
+    // threads — see the doc comment on `catalog::helpers::test_tracing_race_guard`.
+    #[cfg(test)]
+    crate::catalog::helpers::test_tracing_race_guard::ensure_installed();
+
     let Some(value) = body.get(key) else {
+        // KYO-616: this is the exact production incident KYO-619 fixed —
+        // log it as its own field-carrying line (not just the propagated
+        // `Err`'s text) so "absent" is directly greppable/queryable,
+        // distinct from "present but empty" below.
+        warn!(
+            key,
+            key_state = "absent",
+            "BigQuery list field absent from response — not treated as zero results"
+        );
         let hint = missing_key_hint.map(|h| format!(" ({h})")).unwrap_or_default();
         return Err(kyomi_core::Error::Internal(format!(
             "BigQuery response missing expected \"{key}\" field — the API did not confirm \
@@ -131,12 +146,23 @@ pub(crate) fn parse_list_field<T>(
     };
 
     let Some(array) = value.as_array() else {
+        warn!(key, key_state = "not_array", "BigQuery list field is not a JSON array");
         return Err(kyomi_core::Error::Internal(format!(
             "BigQuery response \"{key}\" field is not an array"
         )));
     };
 
-    Ok(array.iter().filter_map(extract).collect())
+    let array_len = array.len();
+    let extracted: Vec<T> = array.iter().filter_map(extract).collect();
+    debug!(
+        key,
+        key_state = if array_len == 0 { "present_empty" } else { "populated" },
+        array_len,
+        extracted_len = extracted.len(),
+        "BigQuery list field parsed"
+    );
+
+    Ok(extracted)
 }
 
 /// Perform one page of a BigQuery REST list GET request — `maxResults`
@@ -154,6 +180,10 @@ pub(crate) async fn fetch_bigquery_list_page(
     page_token: Option<String>,
     request_label: &str,
 ) -> Result<Value> {
+    // KYO-616: see `catalog::helpers::test_tracing_race_guard`'s doc comment.
+    #[cfg(test)]
+    crate::catalog::helpers::test_tracing_race_guard::ensure_installed();
+
     let mut query: Vec<(&str, String)> =
         vec![("maxResults", super::BIGQUERY_API_MAX_RESULTS.to_string())];
     if let Some(token) = page_token {
@@ -169,13 +199,18 @@ pub(crate) async fn fetch_bigquery_list_page(
         .await
         .map_err(|e| kyomi_core::Error::Internal(format!("{request_label} failed: {e}")))?;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
+    let status = resp.status();
+    if !status.is_success() {
+        // KYO-616: the response body is not logged (it may echo request
+        // details) — only the status, which is what a caller needs to tell
+        // "denied" from "server error" from "not found" at a glance.
+        warn!(request_label, status = %status, "BigQuery list page request failed");
         let body = resp.text().await.unwrap_or_default();
         return Err(kyomi_core::Error::Internal(format!(
             "{request_label} failed (HTTP {status}): {body}"
         )));
     }
+    debug!(request_label, status = %status, "BigQuery list page fetched");
 
     resp.json().await.map_err(|e| {
         kyomi_core::Error::Internal(format!("Failed to parse {request_label} response: {e}"))
@@ -230,12 +265,17 @@ where
     F: FnMut(Option<String>) -> Fut,
     Fut: std::future::Future<Output = Result<Value>>,
 {
+    // KYO-616: see `catalog::helpers::test_tracing_race_guard`'s doc comment.
+    #[cfg(test)]
+    crate::catalog::helpers::test_tracing_race_guard::ensure_installed();
+
     let mut results = Vec::new();
     let mut page_token: Option<String> = None;
 
     loop {
         let body = fetch_page(page_token.take()).await?;
         let items = parse_list_field(&body, list_key, &extract, missing_key_hint)?;
+        let page_item_count = items.len();
         results.extend(items);
 
         page_token = body
@@ -243,6 +283,14 @@ where
             .and_then(|t| t.as_str())
             .filter(|t| !t.is_empty())
             .map(String::from);
+
+        debug!(
+            list_key,
+            page_item_count,
+            next_page_token_present = page_token.is_some(),
+            total_so_far = results.len(),
+            "BigQuery list pagination page processed"
+        );
 
         if page_token.is_none() {
             break;
@@ -256,6 +304,17 @@ where
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Thin wrapper around `kyomi_test_tracing::capture_tracing()` — the
+    /// actual KYO-616 interest-cache race fix now lives at the source, in
+    /// `parse_list_field`/`fetch_bigquery_list_page`/`paginate` themselves
+    /// via `catalog::helpers::test_tracing_race_guard::ensure_installed()`.
+    /// See that module's doc comment for the full mechanism, and why a
+    /// `rebuild_interest_cache()` call here alone was tried and confirmed
+    /// insufficient.
+    fn capture_tracing_for_test() -> kyomi_test_tracing::TracingCapture {
+        kyomi_test_tracing::capture_tracing()
+    }
 
     fn dataset_id(v: &Value) -> Option<String> {
         v.get("datasetReference")?
@@ -361,6 +420,110 @@ mod tests {
             result,
             vec!["ds_a".to_string()],
             "malformed individual entries are dropped, not treated as a whole-response failure"
+        );
+    }
+
+    // ── response-shape logging (KYO-616) ───────────────────────────────────
+    //
+    // KYO-619 made absent-vs-empty a real distinction in `parse_list_field`'s
+    // *return value*; these pin that the distinction is also visible in
+    // logs — status/key-state/array-length/pagination — without needing a
+    // database diff to reconstruct what a BigQuery list call actually saw.
+
+    #[test]
+    fn absent_key_logs_warn_with_key_state_absent() {
+        let logs = capture_tracing_for_test();
+        let body = json!({"kind": "bigquery#datasetList"});
+        let _ = parse_list_field(&body, "datasets", dataset_id, None);
+
+        assert!(
+            logs.has_message_containing(tracing::Level::WARN, "key_state=\"absent\""),
+            "expected a WARN naming the absent key state; captured: {:?}",
+            logs.events()
+        );
+    }
+
+    #[test]
+    fn present_empty_key_logs_debug_with_key_state_and_zero_length() {
+        let logs = capture_tracing_for_test();
+        let body = json!({"kind": "bigquery#datasetList", "datasets": []});
+        let _ = parse_list_field(&body, "datasets", dataset_id, None).unwrap();
+
+        assert!(
+            logs.has_message_containing(
+                tracing::Level::DEBUG,
+                "key_state=\"present_empty\""
+            ),
+            "expected a log line distinguishing present-but-empty from absent; captured: {:?}",
+            logs.events()
+        );
+        assert!(
+            logs.has_message_containing(tracing::Level::DEBUG, "array_len=0"),
+            "captured: {:?}",
+            logs.events()
+        );
+    }
+
+    #[test]
+    fn populated_key_logs_debug_with_the_real_array_length() {
+        let logs = capture_tracing_for_test();
+        let body = json!({
+            "datasets": [
+                {"datasetReference": {"datasetId": "ds_a"}},
+                {"datasetReference": {"datasetId": "ds_b"}},
+                {"datasetReference": {"datasetId": "ds_c"}},
+            ],
+        });
+        let _ = parse_list_field(&body, "datasets", dataset_id, None).unwrap();
+
+        assert!(
+            logs.has_message_containing(tracing::Level::DEBUG, "key_state=\"populated\""),
+            "captured: {:?}",
+            logs.events()
+        );
+        assert!(
+            logs.has_message_containing(tracing::Level::DEBUG, "array_len=3"),
+            "the log must carry the real element count, not just a truthy flag; captured: {:?}",
+            logs.events()
+        );
+    }
+
+    #[tokio::test]
+    async fn paginate_logs_next_page_token_presence_per_page() {
+        let logs = capture_tracing_for_test();
+        let pages = [
+            json!({
+                "datasets": [{"datasetReference": {"datasetId": "ds_a"}}],
+                "nextPageToken": "page-2",
+            }),
+            json!({
+                "datasets": [{"datasetReference": {"datasetId": "ds_b"}}],
+            }),
+        ];
+
+        let mut call = 0usize;
+        let _ = paginate("datasets", dataset_id, None, |_token| {
+            call += 1;
+            let page = pages[call - 1].clone();
+            async move { Ok(page) }
+        })
+        .await
+        .unwrap();
+
+        let debug_events = logs.events_at(tracing::Level::DEBUG);
+        assert!(
+            debug_events
+                .iter()
+                .any(|(_, msg)| msg.contains("next_page_token_present=true")),
+            "the first page must report a present nextPageToken; captured: {:?}",
+            logs.events()
+        );
+        assert!(
+            debug_events
+                .iter()
+                .any(|(_, msg)| msg.contains("next_page_token_present=false")),
+            "the final page must report an absent nextPageToken; captured: {:?}",
+            logs.events()
         );
     }
 
