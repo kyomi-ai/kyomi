@@ -382,7 +382,8 @@ pub async fn complete_passkey_registration(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqlx::sqlite::SqlitePoolOptions;
+
+    use crate::test_support::test_pool;
 
     const REGISTER_CREDENTIAL_JSON: &str = r#"
     {
@@ -394,28 +395,6 @@ mod tests {
         },
         "type":"public-key"}
     "#;
-
-    async fn test_pool() -> DbPool {
-        let _ = kyomi_core::constants::load_with_fallback();
-
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("connect in-memory sqlite");
-
-        sqlx::query("PRAGMA foreign_keys=ON")
-            .execute(&pool)
-            .await
-            .expect("enable foreign keys");
-
-        sqlx::migrate!("../../apps/server/migrations-sqlite")
-            .run(&pool)
-            .await
-            .expect("run sqlite migrations");
-
-        DbPool::Sqlite(pool)
-    }
 
     fn test_webauthn() -> Webauthn {
         crate::webauthn::build_webauthn(

@@ -298,85 +298,11 @@ async fn load_personal_user(db: &kyomi_core::DbPool) -> kyomi_core::Result<AuthU
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
-    use sqlx::sqlite::SqlitePoolOptions;
     use std::collections::HashMap;
 
+    use crate::test_support::{seed_membership, seed_user_with_active, seed_workspace, sqlite_pool, test_pool};
+
     const SECRET: &str = "test-secret-key";
-
-    /// Build an in-memory SQLite pool with migrations applied.
-    ///
-    /// Mirrors the established `test_pool()` helper in `session.rs`,
-    /// `workspace_service.rs`, and `workspace_ai_config.rs`.
-    async fn test_pool() -> kyomi_core::DbPool {
-        let _ = kyomi_core::constants::load_with_fallback();
-
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("connect in-memory sqlite");
-
-        sqlx::query("PRAGMA foreign_keys=ON")
-            .execute(&pool)
-            .await
-            .expect("enable foreign keys");
-
-        sqlx::migrate!("../../apps/server/migrations-sqlite")
-            .run(&pool)
-            .await
-            .expect("run sqlite migrations");
-
-        kyomi_core::DbPool::Sqlite(pool)
-    }
-
-    fn sqlite_of(pool: &kyomi_core::DbPool) -> &sqlx::SqlitePool {
-        match pool {
-            kyomi_core::DbPool::Sqlite(sq) => sq,
-            _ => panic!("test requires sqlite pool"),
-        }
-    }
-
-    async fn seed_user(pool: &kyomi_core::DbPool, user_id: &str, active: bool) {
-        sqlx::query("INSERT INTO users (user_id, email, active) VALUES ($1, $2, $3)")
-            .bind(user_id)
-            .bind(format!("{user_id}@test.local"))
-            .bind(active)
-            .execute(sqlite_of(pool))
-            .await
-            .expect("insert user");
-    }
-
-    async fn seed_workspace(pool: &kyomi_core::DbPool, workspace_id: &str, owner_user_id: &str) {
-        sqlx::query(
-            "INSERT INTO workspaces (workspace_id, name, owner_user_id) VALUES ($1, $2, $3)",
-        )
-        .bind(workspace_id)
-        .bind(format!("Workspace {workspace_id}"))
-        .bind(owner_user_id)
-        .execute(sqlite_of(pool))
-        .await
-        .expect("insert workspace");
-    }
-
-    async fn seed_membership(
-        pool: &kyomi_core::DbPool,
-        workspace_id: &str,
-        user_id: &str,
-        role: &str,
-        active: bool,
-    ) {
-        sqlx::query(
-            "INSERT INTO workspace_users (workspace_id, user_id, role, active) \
-             VALUES ($1, $2, $3, $4)",
-        )
-        .bind(workspace_id)
-        .bind(user_id)
-        .bind(role)
-        .bind(active)
-        .execute(sqlite_of(pool))
-        .await
-        .expect("insert membership");
-    }
 
     fn mint_token(user_id: &str, workspace_id: Option<&str>, expires_minutes: i64) -> String {
         let mut extra: HashMap<String, serde_json::Value> = HashMap::new();
@@ -417,9 +343,9 @@ mod tests {
     #[tokio::test]
     async fn valid_token_active_user_active_membership_yields_authuser() {
         let pool = test_pool().await;
-        seed_user(&pool, "user-1", true).await;
-        seed_workspace(&pool, "ws-1", "user-1").await;
-        seed_membership(&pool, "ws-1", "user-1", "workspace_admin", true).await;
+        seed_user_with_active(sqlite_pool(&pool), "user-1", "user-1@test.local", true).await;
+        seed_workspace(sqlite_pool(&pool), "ws-1", "user-1").await;
+        seed_membership(sqlite_pool(&pool), "ws-1", "user-1", "workspace_admin", true).await;
 
         let token = mint_token("user-1", Some("ws-1"), 15);
         let mut parts = parts_with_bearer(&token);
@@ -467,7 +393,7 @@ mod tests {
     #[tokio::test]
     async fn expired_token_is_unauthorized() {
         let pool = test_pool().await;
-        seed_user(&pool, "user-1", true).await;
+        seed_user_with_active(sqlite_pool(&pool), "user-1", "user-1@test.local", true).await;
 
         // Expired 5 minutes ago — well past jsonwebtoken's default leeway.
         let token = mint_token("user-1", None, -5);
@@ -561,7 +487,7 @@ mod tests {
     #[tokio::test]
     async fn inactive_user_is_unauthorized() {
         let pool = test_pool().await;
-        seed_user(&pool, "user-1", false).await;
+        seed_user_with_active(sqlite_pool(&pool), "user-1", "user-1@test.local", false).await;
 
         let token = mint_token("user-1", None, 15);
         let mut parts = parts_with_bearer(&token);
@@ -583,12 +509,12 @@ mod tests {
     #[tokio::test]
     async fn revoked_workspace_membership_is_unauthorized() {
         let pool = test_pool().await;
-        seed_user(&pool, "user-1", true).await;
-        seed_user(&pool, "owner-2", true).await;
-        seed_workspace(&pool, "ws-1", "owner-2").await;
+        seed_user_with_active(sqlite_pool(&pool), "user-1", "user-1@test.local", true).await;
+        seed_user_with_active(sqlite_pool(&pool), "owner-2", "owner-2@test.local", true).await;
+        seed_workspace(sqlite_pool(&pool), "ws-1", "owner-2").await;
         // user-1 was a member once, but the membership row is now inactive —
         // simulating removal from the workspace after the JWT was issued.
-        seed_membership(&pool, "ws-1", "user-1", "workspace_user", false).await;
+        seed_membership(sqlite_pool(&pool), "ws-1", "user-1", "workspace_user", false).await;
 
         let token = mint_token("user-1", Some("ws-1"), 15);
         let mut parts = parts_with_bearer(&token);
@@ -611,9 +537,9 @@ mod tests {
     #[tokio::test]
     async fn no_workspace_membership_row_at_all_is_unauthorized() {
         let pool = test_pool().await;
-        seed_user(&pool, "user-1", true).await;
-        seed_user(&pool, "owner-2", true).await;
-        seed_workspace(&pool, "ws-1", "owner-2").await;
+        seed_user_with_active(sqlite_pool(&pool), "user-1", "user-1@test.local", true).await;
+        seed_user_with_active(sqlite_pool(&pool), "owner-2", "owner-2@test.local", true).await;
+        seed_workspace(sqlite_pool(&pool), "ws-1", "owner-2").await;
         // No workspace_users row for user-1 in ws-1 whatsoever.
 
         let token = mint_token("user-1", Some("ws-1"), 15);
@@ -639,11 +565,11 @@ mod tests {
     #[tokio::test]
     async fn is_owner_false_for_admin_who_is_not_the_workspace_owner() {
         let pool = test_pool().await;
-        seed_user(&pool, "owner-1", true).await;
-        seed_user(&pool, "admin-2", true).await;
-        seed_workspace(&pool, "ws-1", "owner-1").await;
+        seed_user_with_active(sqlite_pool(&pool), "owner-1", "owner-1@test.local", true).await;
+        seed_user_with_active(sqlite_pool(&pool), "admin-2", "admin-2@test.local", true).await;
+        seed_workspace(sqlite_pool(&pool), "ws-1", "owner-1").await;
         // admin-2 has the admin role but did not create/own the workspace.
-        seed_membership(&pool, "ws-1", "admin-2", "workspace_admin", true).await;
+        seed_membership(sqlite_pool(&pool), "ws-1", "admin-2", "workspace_admin", true).await;
 
         let token = mint_token("admin-2", Some("ws-1"), 15);
         let mut parts = parts_with_bearer(&token);
@@ -667,9 +593,9 @@ mod tests {
     #[tokio::test]
     async fn is_owner_true_for_the_actual_workspace_owner() {
         let pool = test_pool().await;
-        seed_user(&pool, "owner-1", true).await;
-        seed_workspace(&pool, "ws-1", "owner-1").await;
-        seed_membership(&pool, "ws-1", "owner-1", "workspace_admin", true).await;
+        seed_user_with_active(sqlite_pool(&pool), "owner-1", "owner-1@test.local", true).await;
+        seed_workspace(sqlite_pool(&pool), "ws-1", "owner-1").await;
+        seed_membership(sqlite_pool(&pool), "ws-1", "owner-1", "workspace_admin", true).await;
 
         let token = mint_token("owner-1", Some("ws-1"), 15);
         let mut parts = parts_with_bearer(&token);
@@ -687,9 +613,9 @@ mod tests {
     #[tokio::test]
     async fn workspace_roles_reflects_workspace_admin_membership_row() {
         let pool = test_pool().await;
-        seed_user(&pool, "owner-1", true).await;
-        seed_workspace(&pool, "ws-1", "owner-1").await;
-        seed_membership(&pool, "ws-1", "owner-1", "workspace_admin", true).await;
+        seed_user_with_active(sqlite_pool(&pool), "owner-1", "owner-1@test.local", true).await;
+        seed_workspace(sqlite_pool(&pool), "ws-1", "owner-1").await;
+        seed_membership(sqlite_pool(&pool), "ws-1", "owner-1", "workspace_admin", true).await;
 
         let token = mint_token("owner-1", Some("ws-1"), 15);
         let mut parts = parts_with_bearer(&token);
@@ -707,10 +633,10 @@ mod tests {
     #[tokio::test]
     async fn workspace_roles_reflects_workspace_user_membership_row() {
         let pool = test_pool().await;
-        seed_user(&pool, "owner-1", true).await;
-        seed_user(&pool, "user-2", true).await;
-        seed_workspace(&pool, "ws-1", "owner-1").await;
-        seed_membership(&pool, "ws-1", "user-2", "workspace_user", true).await;
+        seed_user_with_active(sqlite_pool(&pool), "owner-1", "owner-1@test.local", true).await;
+        seed_user_with_active(sqlite_pool(&pool), "user-2", "user-2@test.local", true).await;
+        seed_workspace(sqlite_pool(&pool), "ws-1", "owner-1").await;
+        seed_membership(sqlite_pool(&pool), "ws-1", "user-2", "workspace_user", true).await;
 
         let token = mint_token("user-2", Some("ws-1"), 15);
         let mut parts = parts_with_bearer(&token);
@@ -731,10 +657,10 @@ mod tests {
     #[tokio::test]
     async fn personal_mode_returns_owner_admin_for_local_user_and_workspace() {
         let pool = test_pool().await;
-        seed_user(&pool, "user-local", true).await;
-        seed_workspace(&pool, "workspace-local", "user-local").await;
+        seed_user_with_active(sqlite_pool(&pool), "user-local", "user-local@test.local", true).await;
+        seed_workspace(sqlite_pool(&pool), "workspace-local", "user-local").await;
         seed_membership(
-            &pool,
+            sqlite_pool(&pool),
             "workspace-local",
             "user-local",
             "workspace_admin",
@@ -775,7 +701,7 @@ mod tests {
     #[tokio::test]
     async fn personal_mode_without_local_workspace_is_service_unavailable() {
         let pool = test_pool().await;
-        seed_user(&pool, "user-local", true).await;
+        seed_user_with_active(sqlite_pool(&pool), "user-local", "user-local@test.local", true).await;
         // No workspace-local row.
 
         let mut parts = parts_with_no_auth();

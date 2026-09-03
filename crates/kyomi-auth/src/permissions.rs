@@ -195,81 +195,11 @@ mod tests {
         use super::*;
         use axum::extract::FromRequestParts;
         use axum::http::request::Parts;
-        use sqlx::sqlite::SqlitePoolOptions;
 
         use crate::middleware::AuthState;
+        use crate::test_support::{seed_membership, seed_user, seed_workspace, sqlite_pool, test_pool};
 
         const SECRET: &str = "test-secret-key";
-
-        async fn test_pool() -> kyomi_core::DbPool {
-            let _ = kyomi_core::constants::load_with_fallback();
-
-            let pool = SqlitePoolOptions::new()
-                .max_connections(1)
-                .connect("sqlite::memory:")
-                .await
-                .expect("connect in-memory sqlite");
-
-            sqlx::query("PRAGMA foreign_keys=ON")
-                .execute(&pool)
-                .await
-                .expect("enable foreign keys");
-
-            sqlx::migrate!("../../apps/server/migrations-sqlite")
-                .run(&pool)
-                .await
-                .expect("run sqlite migrations");
-
-            kyomi_core::DbPool::Sqlite(pool)
-        }
-
-        fn sqlite_of(pool: &kyomi_core::DbPool) -> &sqlx::SqlitePool {
-            match pool {
-                kyomi_core::DbPool::Sqlite(sq) => sq,
-                _ => panic!("test requires sqlite pool"),
-            }
-        }
-
-        async fn seed_user(pool: &kyomi_core::DbPool, user_id: &str) {
-            sqlx::query("INSERT INTO users (user_id, email, active) VALUES ($1, $2, $3)")
-                .bind(user_id)
-                .bind(format!("{user_id}@test.local"))
-                .bind(true)
-                .execute(sqlite_of(pool))
-                .await
-                .expect("insert user");
-        }
-
-        async fn seed_workspace(pool: &kyomi_core::DbPool, workspace_id: &str, owner_user_id: &str) {
-            sqlx::query(
-                "INSERT INTO workspaces (workspace_id, name, owner_user_id) VALUES ($1, $2, $3)",
-            )
-            .bind(workspace_id)
-            .bind(format!("Workspace {workspace_id}"))
-            .bind(owner_user_id)
-            .execute(sqlite_of(pool))
-            .await
-            .expect("insert workspace");
-        }
-
-        async fn seed_membership(
-            pool: &kyomi_core::DbPool,
-            workspace_id: &str,
-            user_id: &str,
-            role: &str,
-        ) {
-            sqlx::query(
-                "INSERT INTO workspace_users (workspace_id, user_id, role, active) \
-                 VALUES ($1, $2, $3, $4)",
-            )
-            .bind(workspace_id)
-            .bind(user_id)
-            .bind(role)
-            .bind(true)
-            .execute(sqlite_of(pool))
-            .await
-            .expect("insert membership");
-        }
 
         fn mint_token(user_id: &str, workspace_id: &str) -> String {
             let mut extra: std::collections::HashMap<String, serde_json::Value> =
@@ -292,13 +222,13 @@ mod tests {
         #[tokio::test]
         async fn admin_accepted_member_rejected_by_manage_team_gate() {
             let pool = test_pool().await;
-            seed_user(&pool, "owner-1").await;
-            seed_user(&pool, "admin-1").await;
-            seed_user(&pool, "member-1").await;
-            seed_workspace(&pool, "ws-1", "owner-1").await;
-            seed_membership(&pool, "ws-1", "owner-1", "workspace_admin").await;
-            seed_membership(&pool, "ws-1", "admin-1", "workspace_admin").await;
-            seed_membership(&pool, "ws-1", "member-1", "workspace_user").await;
+            seed_user(sqlite_pool(&pool), "owner-1", "owner-1@test.local").await;
+            seed_user(sqlite_pool(&pool), "admin-1", "admin-1@test.local").await;
+            seed_user(sqlite_pool(&pool), "member-1", "member-1@test.local").await;
+            seed_workspace(sqlite_pool(&pool), "ws-1", "owner-1").await;
+            seed_membership(sqlite_pool(&pool), "ws-1", "owner-1", "workspace_admin", true).await;
+            seed_membership(sqlite_pool(&pool), "ws-1", "admin-1", "workspace_admin", true).await;
+            seed_membership(sqlite_pool(&pool), "ws-1", "member-1", "workspace_user", true).await;
 
             let state = AuthState {
                 jwt_secret: SECRET.to_string(),
@@ -363,13 +293,13 @@ mod tests {
         #[tokio::test]
         async fn admin_accepted_member_rejected_by_manage_analytics_gate() {
             let pool = test_pool().await;
-            seed_user(&pool, "owner-2").await;
-            seed_user(&pool, "admin-2").await;
-            seed_user(&pool, "member-2").await;
-            seed_workspace(&pool, "ws-2", "owner-2").await;
-            seed_membership(&pool, "ws-2", "owner-2", "workspace_admin").await;
-            seed_membership(&pool, "ws-2", "admin-2", "workspace_admin").await;
-            seed_membership(&pool, "ws-2", "member-2", "workspace_user").await;
+            seed_user(sqlite_pool(&pool), "owner-2", "owner-2@test.local").await;
+            seed_user(sqlite_pool(&pool), "admin-2", "admin-2@test.local").await;
+            seed_user(sqlite_pool(&pool), "member-2", "member-2@test.local").await;
+            seed_workspace(sqlite_pool(&pool), "ws-2", "owner-2").await;
+            seed_membership(sqlite_pool(&pool), "ws-2", "owner-2", "workspace_admin", true).await;
+            seed_membership(sqlite_pool(&pool), "ws-2", "admin-2", "workspace_admin", true).await;
+            seed_membership(sqlite_pool(&pool), "ws-2", "member-2", "workspace_user", true).await;
 
             let state = AuthState {
                 jwt_secret: SECRET.to_string(),

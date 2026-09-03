@@ -747,9 +747,10 @@ mod tests {
     // These run against an in-memory SQLite pool that applies the full
     // `apps/server/migrations-sqlite` chain, so they exercise the real
     // `workspaces` schema (including `ai_provider`, `ai_api_key_encrypted`,
-    // and `ai_base_url` added by 00015). The fixture lives in the nested
-    // `test_support` module below — kept in-file because it's only used by
-    // this module and is `#[cfg(test)]`.
+    // and `ai_base_url` added by 00015). The pool/seeding primitives come
+    // from the crate-wide `crate::test_support` fixture module (KYO-271,
+    // KYO-368); `insert_test_workspace` below is this module's own thin
+    // composition of them.
 
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -772,67 +773,17 @@ mod tests {
 
     // --- Fixture helpers ------------------------------------------------
 
-    mod test_support {
-        use kyomi_core::DbPool;
-        use sqlx::sqlite::SqlitePoolOptions;
+    use crate::test_support::{seed_user, seed_workspace, sqlite_pool, test_pool as test_sqlite_pool};
 
-        /// Build an in-memory SQLite pool with the full server migration
-        /// chain applied. A single shared connection is used because
-        /// `:memory:` databases are per-connection in SQLite; `max_connections=1`
-        /// guarantees all queries hit the same in-memory database.
-        pub async fn test_sqlite_pool() -> DbPool {
-            let pool = SqlitePoolOptions::new()
-                .max_connections(1)
-                .connect("sqlite::memory:")
-                .await
-                .expect("connect in-memory sqlite");
-
-            sqlx::query("PRAGMA foreign_keys=ON")
-                .execute(&pool)
-                .await
-                .expect("enable foreign keys");
-
-            sqlx::migrate!("../../apps/server/migrations-sqlite")
-                .run(&pool)
-                .await
-                .expect("run sqlite migrations");
-
-            DbPool::Sqlite(pool)
-        }
-
-        /// Insert a minimal users row + workspaces row. All non-defaulted
-        /// NOT NULL columns are supplied; everything else uses the schema
-        /// default (including `ai_provider` which defaults to `'kyomi'`).
-        pub async fn insert_test_workspace(db: &DbPool, workspace_id: &str) {
-            let sq = match db {
-                DbPool::Sqlite(sq) => sq,
-                _ => panic!("test fixture requires sqlite pool"),
-            };
-
-            let user_id = format!("user-{workspace_id}");
-            let email = format!("{workspace_id}@test.local");
-
-            sqlx::query("INSERT INTO users (user_id, email) VALUES (?1, ?2)")
-                .bind(&user_id)
-                .bind(&email)
-                .execute(sq)
-                .await
-                .expect("insert user");
-
-            sqlx::query(
-                "INSERT INTO workspaces (workspace_id, name, owner_user_id) \
-                 VALUES (?1, ?2, ?3)",
-            )
-            .bind(workspace_id)
-            .bind("Test Workspace")
-            .bind(&user_id)
-            .execute(sq)
-            .await
-            .expect("insert workspace");
-        }
+    /// Insert a minimal users row + workspaces row. All non-defaulted
+    /// NOT NULL columns are supplied; everything else uses the schema
+    /// default (including `ai_provider` which defaults to `'kyomi'`).
+    async fn insert_test_workspace(db: &DbPool, workspace_id: &str) {
+        let sq = sqlite_pool(db);
+        let user_id = format!("user-{workspace_id}");
+        seed_user(sq, &user_id, &format!("{workspace_id}@test.local")).await;
+        seed_workspace(sq, workspace_id, &user_id).await;
     }
-
-    use test_support::{insert_test_workspace, test_sqlite_pool};
 
     // --- Tests ----------------------------------------------------------
 

@@ -2698,70 +2698,8 @@ mod contract_tests {
 #[cfg(test)]
 mod privacy_tests {
     use super::*;
-    use sqlx::sqlite::SqlitePoolOptions;
 
-    async fn test_pool() -> DbPool {
-        let _ = kyomi_core::constants::load_with_fallback();
-
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("connect in-memory sqlite");
-
-        sqlx::query("PRAGMA foreign_keys=ON")
-            .execute(&pool)
-            .await
-            .expect("enable foreign keys");
-
-        sqlx::migrate!("../../apps/server/migrations-sqlite")
-            .run(&pool)
-            .await
-            .expect("run sqlite migrations");
-
-        DbPool::Sqlite(pool)
-    }
-
-    /// Seed two users ("user-a", "user-b") in one workspace ("ws-1", owned by
-    /// user-a). Returns the pool with fixtures in place.
-    async fn seed_workspace_with_two_users(pool: &DbPool) {
-        let sq = match pool {
-            DbPool::Sqlite(sq) => sq,
-            _ => unreachable!(),
-        };
-
-        sqlx::query("INSERT INTO users (user_id, email) VALUES ('user-a', 'a@test.local')")
-            .execute(sq)
-            .await
-            .expect("insert user-a");
-        sqlx::query("INSERT INTO users (user_id, email) VALUES ('user-b', 'b@test.local')")
-            .execute(sq)
-            .await
-            .expect("insert user-b");
-
-        sqlx::query(
-            "INSERT INTO workspaces (workspace_id, name, owner_user_id) \
-             VALUES ('ws-1', 'Shared Workspace', 'user-a')",
-        )
-        .execute(sq)
-        .await
-        .expect("insert workspace");
-
-        sqlx::query(
-            "INSERT INTO workspace_users (workspace_id, user_id, role, active) \
-             VALUES ('ws-1', 'user-a', 'workspace_admin', 1)",
-        )
-        .execute(sq)
-        .await
-        .expect("insert workspace_users user-a");
-        sqlx::query(
-            "INSERT INTO workspace_users (workspace_id, user_id, role, active) \
-             VALUES ('ws-1', 'user-b', 'user', 1)",
-        )
-        .execute(sq)
-        .await
-        .expect("insert workspace_users user-b");
-    }
+    use crate::test_support::{seed_two_users_one_workspace, sqlite_pool, test_pool};
 
     async fn create_test_watch(pool: &DbPool, created_by: &str, name: &str) -> kyomi_core::models::Watch {
         create_watch(
@@ -2811,7 +2749,7 @@ mod privacy_tests {
     #[tokio::test]
     async fn list_watches_for_sync_excludes_other_users_watches() {
         let pool = test_pool().await;
-        seed_workspace_with_two_users(&pool).await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
 
         let wa = create_test_watch(&pool, "user-a", "A's Watch").await;
         let wb = create_test_watch(&pool, "user-b", "B's Watch").await;
@@ -2841,7 +2779,7 @@ mod privacy_tests {
     #[tokio::test]
     async fn count_watches_for_sync_matches_list_scoping() {
         let pool = test_pool().await;
-        seed_workspace_with_two_users(&pool).await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
 
         create_test_watch(&pool, "user-a", "A's Watch").await;
         create_test_watch(&pool, "user-b", "B's First Watch").await;
@@ -2872,7 +2810,7 @@ mod privacy_tests {
     #[tokio::test]
     async fn list_watches_excludes_other_users_watches() {
         let pool = test_pool().await;
-        seed_workspace_with_two_users(&pool).await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
 
         let wa = create_test_watch(&pool, "user-a", "A's Watch").await;
         let wb = create_test_watch(&pool, "user-b", "B's Watch").await;
@@ -2893,7 +2831,7 @@ mod privacy_tests {
     #[tokio::test]
     async fn search_watches_excludes_other_users_watches_with_query() {
         let pool = test_pool().await;
-        seed_workspace_with_two_users(&pool).await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
 
         // Both users have a watch whose name matches the same search term
         // (watch names are unique per workspace, so the names differ but
@@ -2921,7 +2859,7 @@ mod privacy_tests {
     #[tokio::test]
     async fn search_watches_excludes_other_users_watches_without_query() {
         let pool = test_pool().await;
-        seed_workspace_with_two_users(&pool).await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
 
         // No query term — exercises the no-query branch.
         let wa = create_test_watch(&pool, "user-a", "A's Watch").await;
@@ -2945,7 +2883,7 @@ mod privacy_tests {
     #[tokio::test]
     async fn sync_delta_excludes_other_users_watch_creation() {
         let pool = test_pool().await;
-        seed_workspace_with_two_users(&pool).await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
 
         // B's cursor starts at the current watermark (0 — nothing synced yet).
         let cursor = sync_log_service::get_latest_sync_id(&pool, "ws-1")
@@ -2989,7 +2927,7 @@ mod privacy_tests {
     #[tokio::test]
     async fn alerts_queries_exclude_other_users_alerts() {
         let pool = test_pool().await;
-        seed_workspace_with_two_users(&pool).await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
 
         let wa = create_test_watch(&pool, "user-a", "A's Alert Watch").await;
         let wb = create_test_watch(&pool, "user-b", "B's Alert Watch").await;
@@ -3026,7 +2964,7 @@ mod privacy_tests {
     #[tokio::test]
     async fn alerts_remain_visible_to_owner_after_watch_deleted() {
         let pool = test_pool().await;
-        seed_workspace_with_two_users(&pool).await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
 
         let wa = create_test_watch(&pool, "user-a", "A's Watch To Delete").await;
         insert_triggered_alert(&pool, &wa.watch_id, "user-a").await;
@@ -3076,7 +3014,7 @@ mod privacy_tests {
     #[tokio::test]
     async fn broadcast_watch_sync_routes_to_owner_only() {
         let pool = test_pool().await;
-        seed_workspace_with_two_users(&pool).await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
 
         let wa = create_test_watch(&pool, "user-a", "A's Broadcast Watch").await;
 
@@ -3119,7 +3057,7 @@ mod privacy_tests {
     #[tokio::test]
     async fn broadcast_watch_sync_upsert_includes_full_payload() {
         let pool = test_pool().await;
-        seed_workspace_with_two_users(&pool).await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
 
         let wa = create_test_watch(&pool, "user-a", "A's Payload Watch").await;
 
@@ -3173,7 +3111,7 @@ mod privacy_tests {
     #[tokio::test]
     async fn broadcast_watch_sync_upsert_for_missing_watch_sends_nothing() {
         let pool = test_pool().await;
-        seed_workspace_with_two_users(&pool).await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
 
         let manager = crate::websocket::WebSocketManager::new(None, pool.clone());
         let (_conn_a, mut rx_a) = manager.connect("user-a").expect("connect user-a");
@@ -3203,7 +3141,7 @@ mod privacy_tests {
     #[tokio::test]
     async fn broadcast_watch_sync_delete_still_sends_null_payload() {
         let pool = test_pool().await;
-        seed_workspace_with_two_users(&pool).await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
 
         let wa = create_test_watch(&pool, "user-a", "A's Watch To Delete Broadcast").await;
 
@@ -3248,7 +3186,7 @@ mod privacy_tests {
     #[tokio::test]
     async fn create_watch_sync_log_entry_has_non_null_data() {
         let pool = test_pool().await;
-        seed_workspace_with_two_users(&pool).await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
 
         let wa = create_test_watch(&pool, "user-a", "A's Sync Log Watch").await;
 
@@ -3277,7 +3215,7 @@ mod privacy_tests {
     #[tokio::test]
     async fn get_watch_returns_none_for_non_owner() {
         let pool = test_pool().await;
-        seed_workspace_with_two_users(&pool).await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
 
         let wa = create_test_watch(&pool, "user-a", "A's Private Watch").await;
 
@@ -3293,7 +3231,7 @@ mod privacy_tests {
     #[tokio::test]
     async fn update_watch_rejects_non_owner_and_leaves_watch_unchanged() {
         let pool = test_pool().await;
-        seed_workspace_with_two_users(&pool).await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
 
         let wa = create_test_watch(&pool, "user-a", "A's Watch").await;
 
@@ -3322,7 +3260,7 @@ mod privacy_tests {
     #[tokio::test]
     async fn delete_watch_rejects_non_owner_and_leaves_watch_intact() {
         let pool = test_pool().await;
-        seed_workspace_with_two_users(&pool).await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
 
         let wa = create_test_watch(&pool, "user-a", "A's Watch To Keep").await;
 
@@ -3345,7 +3283,7 @@ mod privacy_tests {
     #[tokio::test]
     async fn toggle_watch_rejects_non_owner_and_leaves_enabled_unchanged() {
         let pool = test_pool().await;
-        seed_workspace_with_two_users(&pool).await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
 
         let wa = create_test_watch(&pool, "user-a", "A's Toggle Watch").await;
         assert!(wa.enabled, "sanity check: watches are created enabled");
@@ -3369,7 +3307,7 @@ mod privacy_tests {
     #[tokio::test]
     async fn get_executions_returns_empty_for_non_owner() {
         let pool = test_pool().await;
-        seed_workspace_with_two_users(&pool).await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
 
         let wa = create_test_watch(&pool, "user-a", "A's Execution Watch").await;
         insert_triggered_alert(&pool, &wa.watch_id, "user-a").await;
@@ -3386,7 +3324,7 @@ mod privacy_tests {
     #[tokio::test]
     async fn owner_can_still_get_update_toggle_and_delete_their_own_watch() {
         let pool = test_pool().await;
-        seed_workspace_with_two_users(&pool).await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
 
         let wa = create_test_watch(&pool, "user-a", "A's Own Watch").await;
 
@@ -3474,7 +3412,7 @@ mod privacy_tests {
     #[tokio::test]
     async fn create_chat_session_from_alert_rejects_non_owner_and_leaks_nothing() {
         let pool = test_pool().await;
-        seed_workspace_with_two_users(&pool).await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
 
         let wa = create_test_watch(&pool, "user-a", "A's Secret Revenue Watch").await;
         let execution_id = insert_triggered_alert_with_content(
@@ -3536,7 +3474,7 @@ mod privacy_tests {
     #[tokio::test]
     async fn create_chat_session_from_alert_succeeds_for_owner() {
         let pool = test_pool().await;
-        seed_workspace_with_two_users(&pool).await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
 
         let wa = create_test_watch(&pool, "user-a", "A's Own Alert Watch").await;
         let execution_id = insert_triggered_alert_with_content(
@@ -3602,7 +3540,7 @@ mod privacy_tests {
     #[tokio::test]
     async fn mark_alert_read_rejects_non_owner_and_leaves_alert_unchanged() {
         let pool = test_pool().await;
-        seed_workspace_with_two_users(&pool).await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
 
         let wa = create_test_watch(&pool, "user-a", "A's Alert Watch").await;
         let execution_id = insert_triggered_alert(&pool, &wa.watch_id, "user-a").await;
@@ -3624,7 +3562,7 @@ mod privacy_tests {
     #[tokio::test]
     async fn mark_alert_unread_rejects_non_owner_and_leaves_alert_unchanged() {
         let pool = test_pool().await;
-        seed_workspace_with_two_users(&pool).await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
 
         let wa = create_test_watch(&pool, "user-a", "A's Alert Watch").await;
         let execution_id = insert_triggered_alert(&pool, &wa.watch_id, "user-a").await;
@@ -3658,7 +3596,7 @@ mod privacy_tests {
     #[tokio::test]
     async fn delete_alert_rejects_non_owner_and_leaves_alert_unchanged() {
         let pool = test_pool().await;
-        seed_workspace_with_two_users(&pool).await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
 
         let wa = create_test_watch(&pool, "user-a", "A's Alert Watch").await;
         let execution_id = insert_triggered_alert(&pool, &wa.watch_id, "user-a").await;
@@ -3686,7 +3624,7 @@ mod privacy_tests {
     #[tokio::test]
     async fn restore_alert_rejects_non_owner_and_leaves_alert_unchanged() {
         let pool = test_pool().await;
-        seed_workspace_with_two_users(&pool).await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
 
         let wa = create_test_watch(&pool, "user-a", "A's Alert Watch").await;
         let execution_id = insert_triggered_alert(&pool, &wa.watch_id, "user-a").await;
@@ -3729,7 +3667,7 @@ mod privacy_tests {
     #[tokio::test]
     async fn bulk_delete_alerts_rejects_non_owner_and_leaves_alert_unchanged() {
         let pool = test_pool().await;
-        seed_workspace_with_two_users(&pool).await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
 
         let wa = create_test_watch(&pool, "user-a", "A's Alert Watch").await;
         let execution_id = insert_triggered_alert(&pool, &wa.watch_id, "user-a").await;
@@ -3755,7 +3693,7 @@ mod privacy_tests {
     #[tokio::test]
     async fn bulk_mark_alerts_read_rejects_non_owner_and_leaves_alert_unchanged() {
         let pool = test_pool().await;
-        seed_workspace_with_two_users(&pool).await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
 
         let wa = create_test_watch(&pool, "user-a", "A's Alert Watch").await;
         let execution_id = insert_triggered_alert(&pool, &wa.watch_id, "user-a").await;
@@ -3781,7 +3719,7 @@ mod privacy_tests {
     #[tokio::test]
     async fn bulk_mark_alerts_unread_rejects_non_owner_and_leaves_alert_unchanged() {
         let pool = test_pool().await;
-        seed_workspace_with_two_users(&pool).await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
 
         let wa = create_test_watch(&pool, "user-a", "A's Alert Watch").await;
         let execution_id = insert_triggered_alert(&pool, &wa.watch_id, "user-a").await;
@@ -3818,7 +3756,7 @@ mod privacy_tests {
     #[tokio::test]
     async fn owner_can_still_mark_delete_restore_and_bulk_mutate_their_own_alerts() {
         let pool = test_pool().await;
-        seed_workspace_with_two_users(&pool).await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
 
         let wa = create_test_watch(&pool, "user-a", "A's Lifecycle Watch").await;
 
@@ -3908,7 +3846,7 @@ mod privacy_tests {
     #[tokio::test]
     async fn bulk_delete_alerts_mixed_batch_affects_only_callers_own_alert() {
         let pool = test_pool().await;
-        seed_workspace_with_two_users(&pool).await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
 
         let wa = create_test_watch(&pool, "user-a", "A's Watch").await;
         let wb = create_test_watch(&pool, "user-b", "B's Watch").await;
@@ -3945,7 +3883,7 @@ mod privacy_tests {
     #[tokio::test]
     async fn bulk_mark_alerts_read_mixed_batch_affects_only_callers_own_alert() {
         let pool = test_pool().await;
-        seed_workspace_with_two_users(&pool).await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
 
         let wa = create_test_watch(&pool, "user-a", "A's Watch").await;
         let wb = create_test_watch(&pool, "user-b", "B's Watch").await;
@@ -3982,7 +3920,7 @@ mod privacy_tests {
     #[tokio::test]
     async fn bulk_mark_alerts_unread_mixed_batch_affects_only_callers_own_alert() {
         let pool = test_pool().await;
-        seed_workspace_with_two_users(&pool).await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
 
         let wa = create_test_watch(&pool, "user-a", "A's Watch").await;
         let wb = create_test_watch(&pool, "user-b", "B's Watch").await;
