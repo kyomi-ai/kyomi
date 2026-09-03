@@ -21,6 +21,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
+use super::bigquery_rest::{extract_column_entry, extract_table_id, MISSING_LIST_KEY_HINT};
 use crate::catalog::helpers::{
     cache_table, fold_table_outcomes, resolve_final_status, DatasetOutcome, IndexerContext,
     TableOutcome,
@@ -302,48 +303,29 @@ async fn index_public_dataset_tables(
         dataset_id,
         max_tables,
     } = params;
-    // List tables in the dataset
+    // List tables in the dataset. Paginates via `nextPageToken` (KYO-619)
+    // and errs, rather than silently returning zero, when a page's `tables`
+    // key is absent — see `bigquery_rest::parse_list_field`.
     let url = format!(
         "https://bigquery.googleapis.com/bigquery/v2/projects/{project_id}/datasets/{dataset_id}/tables"
     );
+    let request_label = format!("BigQuery tables list for {project_id}.{dataset_id}");
 
-    let resp = client
-        .get(&url)
-        .query(&[("maxResults", super::BIGQUERY_API_MAX_RESULTS)])
-        .header("Authorization", format!("Bearer {access_token}"))
-        .timeout(std::time::Duration::from_secs(30))
-        .send()
-        .await
-        .map_err(|e| {
-            kyomi_core::Error::Internal(format!("BigQuery tables list failed: {e}"))
-        })?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(kyomi_core::Error::Internal(format!(
-            "BigQuery tables list failed for {project_id}.{dataset_id} (HTTP {status}): {body}"
-        )));
-    }
-
-    let body: Value = resp.json().await.map_err(|e| {
-        kyomi_core::Error::Internal(format!("Failed to parse BigQuery tables response: {e}"))
-    })?;
-
-    let mut table_ids: Vec<String> = body
-        .get("tables")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|t| {
-                    t.get("tableReference")
-                        .and_then(|r| r.get("tableId"))
-                        .and_then(|v| v.as_str())
-                        .map(String::from)
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut table_ids: Vec<String> = super::bigquery_rest::paginate(
+        "tables",
+        extract_table_id,
+        Some(MISSING_LIST_KEY_HINT),
+        |page_token| {
+            super::bigquery_rest::fetch_bigquery_list_page(
+                client,
+                access_token,
+                &url,
+                page_token,
+                &request_label,
+            )
+        },
+    )
+    .await?;
 
     // Apply limit
     if let Some(max) = max_tables {
@@ -408,6 +390,11 @@ async fn index_public_dataset_tables(
 }
 
 /// Fetch column schema for a public BigQuery table.
+///
+/// `tables.get` returns a single resource, not a paginated list, so this
+/// makes exactly one request. It still routes through
+/// `bigquery_rest::parse_list_field` for `schema.fields` so an absent
+/// `fields` key errs instead of silently reporting zero columns (KYO-619).
 async fn get_public_table_schema(
     client: &reqwest::Client,
     access_token: &str,
@@ -441,34 +428,13 @@ async fn get_public_table_schema(
         kyomi_core::Error::Internal(format!("Failed to parse BigQuery table response: {e}"))
     })?;
 
-    let columns = body
-        .get("schema")
-        .and_then(|s| s.get("fields"))
-        .and_then(|f| f.as_array())
-        .map(|fields| {
-            fields
-                .iter()
-                .filter_map(|field| {
-                    let name = field.get("name")?.as_str()?.to_string();
-                    let col_type = field.get("type").and_then(|v| v.as_str()).map(String::from);
-                    let description = field
-                        .get("description")
-                        .and_then(|v| v.as_str())
-                        .filter(|s| !s.is_empty())
-                        .map(String::from);
+    let schema = body.get("schema").ok_or_else(|| {
+        kyomi_core::Error::Internal(
+            "BigQuery table response missing expected \"schema\" field".to_string(),
+        )
+    })?;
 
-                    Some(ColumnEntry {
-                        name,
-                        col_type: col_type.clone(),
-                        native_type: col_type,
-                        description,
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    Ok(columns)
+    super::bigquery_rest::parse_list_field(schema, "fields", extract_column_entry, None)
 }
 
 #[cfg(test)]

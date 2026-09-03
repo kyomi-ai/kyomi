@@ -12,6 +12,7 @@
 //! is available without a cyclic dependency.
 
 pub mod bigquery_public;
+pub(crate) mod bigquery_rest;
 pub mod sample_data;
 pub mod user_dataset;
 
