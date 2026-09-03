@@ -227,6 +227,34 @@ All scripts are organized by environment. **Every script is environment-specific
   (forced via a pre-existing conflicting `stranded/` ref) leaves the
   original remote ref completely untouched.
 
+- **`preflight-clippy.sh`** - Runs `.github/workflows/ci.yml`'s three
+  `cargo clippy` passes locally with byte-identical flags (KYO-629), so a
+  lint hiding inside a `#[cfg(test)]` module — invisible to the pre-PR gate
+  the `/backlog-fast` and `/backlog` skills document, which only approximates
+  CI's first pass — is caught before CI runs instead of after (confirmed
+  instance: PR #480, three `clippy::cloned_ref_to_slice_refs` errors CI
+  caught that the documented gate had passed clean over). Also runs CI's
+  "Ensure kyomi-ui/dist/ exists for RustEmbed" `mkdir -p` first; deliberately
+  does **not** run CI's "Strip local-dev mold linker config" step, since that
+  exists only to work around GitHub's runners not having mold, and mold is
+  wanted locally. Usage: `scripts/preflight-clippy.sh [-p <crate>]...
+  [--help]` — `-p <crate>` (repeatable) narrows passes 1 and 2 to the given
+  crates instead of the full workspace, carrying every other flag over
+  unchanged; pass 3 (kyomi-ui, wasm32) still runs when `kyomi-ui` is among
+  the narrowed crates or when `-p` is omitted, and is otherwise skipped with
+  an explicit note in the summary. Runs all three passes even after an
+  earlier one fails, so one cold run surfaces every problem instead of just
+  the first. **Exit-code contract:** `0` every pass that ran was clean; `1`
+  at least one pass reported lints; `2` usage error; `3` a pass could not be
+  run at all (`wasm32-unknown-unknown` not installed) — deliberately never
+  reported as `0`, checked ahead of `1` the same way
+  `check-ticket-in-flight.sh` checks its FAILURES ahead of its HITS.
+  Self-tested by `scripts/preflight-clippy-test.sh`, which stubs `cargo` and
+  `rustup` to pin the exact argv this script emits (no Rust toolchain
+  needed) and, most importantly, parses the three `run: cargo clippy` lines
+  back out of `.github/workflows/ci.yml` itself and diffs them against what
+  this script runs, so the two cannot silently drift apart again.
+
 ## Directory Structure
 
 ```
