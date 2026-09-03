@@ -19,7 +19,9 @@
 #      suite against it (KYO-255)
 #   7. worktree-lifecycle-selftests (fast, ~5s, no toolchain) — runs the
 #      self-test suites for the shell scripts that gate ticket claiming and
-#      stranded-worktree/branch recovery (KYO-578)
+#      stranded-worktree/branch recovery (KYO-578), plus (KYO-629) the
+#      preflight-clippy.sh/ci.yml flag-parity suite — the job hosts more than
+#      worktree-lifecycle scripts now, see its own header comment
 #
 # A note on `timeout-minutes` (KYO-322): GitHub starts that clock when a
 # job is QUEUED, not when a runner picks it up, so a job that executes in
@@ -592,7 +594,18 @@ jobs:
   # CI is a fail-open shape this workflow has already been bitten by twice
   # (KYO-511, KYO-529).
   #
-  # All five suites are hermetic: they build their own throwaway git repos
+  # KYO-629 (2026-09-03) added a sixth suite, scripts/preflight-clippy-test.sh.
+  # It isn't a ticket-claim gate like the other five — it asserts that
+  # scripts/preflight-clippy.sh's `cargo clippy` invocations stay byte-identical
+  # to the three below in this file's own `clippy` job, so the pre-PR gate
+  # documented in /backlog-fast and /backlog can't silently drift from what CI
+  # actually enforces. It rides in this job rather than starting a second one
+  # because it satisfies the same fast/hermetic/no-toolchain constraints
+  # described below, not because it shares this job's original ticket-lifecycle
+  # purpose — hence "Worktree Lifecycle & Script Self-Tests" below, not just
+  # "Worktree Lifecycle".
+  #
+  # All six suites are hermetic: they build their own throwaway git repos
   # (and, for two of them, a stub `gh` placed first on PATH) under mktemp -d,
   # with `trap ... EXIT` cleanup, and pin their fixtures' branch names
   # explicitly rather than relying on the runner's `init.defaultBranch`
@@ -601,6 +614,9 @@ jobs:
   # and python3 (for JSON encoding in audit-agent-run-deaths-test.sh; already
   # on ubuntu-latest). audit-agent-run-deaths-test.sh's one test that uses
   # the real journalctl skips itself if journalctl is not on PATH.
+  # preflight-clippy-test.sh needs neither python3 nor a stub `gh`: it stubs
+  # `cargo`/`rustup` instead, and its own parity check reads this file with
+  # grep/sed, not a YAML parser.
   #
   # Deliberately no `paths:` filter, unlike the ticket's original wording of
   # "on push/PR touching scripts/**" — two reasons:
@@ -614,12 +630,12 @@ jobs:
   # Note that ci.yml uses no `paths` filters anywhere else today either — this
   # job isn't introducing an inconsistency, it's declining to introduce one.
   #
-  # All five suites run even if an earlier one fails, so one broken suite
+  # All six suites run even if an earlier one fails, so one broken suite
   # never masks the others — the loop below collects every failure and the
   # job fails at the end if any suite failed.
   # ---------------------------------------------------------------------------
   worktree-lifecycle-selftests:
-    name: Worktree Lifecycle Self-Tests
+    name: Worktree Lifecycle & Script Self-Tests
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -631,6 +647,7 @@ jobs:
             scripts/check-ticket-in-flight-test.sh
             scripts/mark-worktree-stranded-test.sh
             scripts/mark-branch-stranded-test.sh
+            scripts/preflight-clippy-test.sh
             scripts/append-review-log-test.sh
             scripts/audit-agent-run-deaths-test.sh
           )
