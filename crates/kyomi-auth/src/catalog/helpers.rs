@@ -2279,8 +2279,9 @@ mod tests {
 
     /// A fully-enumerated container that genuinely lost one table must still
     /// archive that table — the KYO-614 fix must not regress ordinary
-    /// deletions within a container that WAS enumerated (the
-    /// `nexata-dev`/`integration_tests` production precedent).
+    /// deletions within a container that WAS enumerated (observed against a
+    /// real production container, mirrored here by the `proj-1`/`dataset_a`
+    /// fixture below).
     #[tokio::test]
     async fn fully_enumerated_container_still_archives_a_genuinely_deleted_table() {
         let db = DbPool::connect("sqlite::memory:")
