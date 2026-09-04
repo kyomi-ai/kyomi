@@ -809,7 +809,7 @@ You pay your cloud provider directly for data processing:
 - **Snowflake**: Compute credits (Snowflake billing)
 - **Redshift/Databricks**: Cluster time (AWS/Databricks billing)
 
-Kyomi charges only for AI features—your data platform costs are separate.
+Kyomi charges a flat per-user subscription (AI included)—your data platform costs are separate.
 
 ---
 
