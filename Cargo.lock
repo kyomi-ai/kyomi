@@ -6348,6 +6348,7 @@ dependencies = [
  "candle-nn",
  "candle-transformers",
  "kyomi-core",
+ "kyomi-test-tracing",
  "memmap2",
  "safetensors",
  "serde",

@@ -17,5 +17,8 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
 
+[dev-dependencies]
+kyomi-test-tracing = { workspace = true }
+
 [lints]
 workspace = true

@@ -1329,7 +1329,7 @@ async fn generate_and_store_embeddings(
     // Collect texts for batch embedding
     let texts: Vec<&str> = entries.iter().map(|e| e.text.as_str()).collect();
 
-    let vectors = match embedding.embed_passages(&texts) {
+    let vectors = match embedding.embed_passages_chunked(&texts).await {
         Ok(vecs) => vecs,
         Err(e) => {
             return Err(kyomi_core::Error::Internal(format!(
