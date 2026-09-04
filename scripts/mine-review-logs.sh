@@ -51,6 +51,10 @@
 #       loud-failure path the whole script exists for: the caller MUST
 #       treat this as "standards mining was skipped" and report it, not
 #       swallow it and continue silently.
+#  42 — this script's own on-disk content is stale relative to origin/main
+#       AND KYOMI_STALE_TOOLING_STRICT=1 is set. See
+#       scripts/lib/stale-tooling-guard.sh (KYO-632) — by default this is a
+#       loud warning on stderr, not a failure.
 #
 # USAGE
 #   scripts/mine-review-logs.sh [days]
@@ -64,6 +68,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/canonical-root.sh
 source "${SCRIPT_DIR}/lib/canonical-root.sh"
+# shellcheck source=lib/stale-tooling-guard.sh
+source "${SCRIPT_DIR}/lib/stale-tooling-guard.sh"
+stale_tooling_guard "${BASH_SOURCE[0]}"
 
 days="${1:-7}"
 

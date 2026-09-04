@@ -367,6 +367,12 @@
 #       therefore be truncated). Treat exactly like exit 1: do not claim.
 #       --self never turns this into exit 0 — the FAILURES check still runs
 #       before the HITS check, unchanged.
+#  42 — this script's own on-disk content is stale relative to origin/main
+#       AND KYOMI_STALE_TOOLING_STRICT=1 is set. See
+#       scripts/lib/stale-tooling-guard.sh (KYO-632) — by default this is a
+#       loud warning on stderr, not a failure, precisely because a script
+#       this central to ticket claiming must not go from "silently wrong"
+#       to "blocks every run" as its own default.
 #
 # Pure bash + git + gh. No Rust toolchain, no jq binary — the one JSON
 # extraction needed (from `gh pr list`) uses gh's own built-in `--jq`, since
@@ -377,6 +383,10 @@
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/stale-tooling-guard.sh
+source "${SCRIPT_DIR}/lib/stale-tooling-guard.sh"
+stale_tooling_guard "${BASH_SOURCE[0]}"
 
 # How many PRs to ask `gh pr list` for. This MUST exceed the repo's total PR
 # count: `gh pr list` caps the listing at `--limit` (and defaults to 30), so

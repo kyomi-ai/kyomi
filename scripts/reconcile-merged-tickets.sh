@@ -269,11 +269,19 @@
 #      actually be in-window, so it is never silently skipped). Treat exactly
 #      like a real finding was missed — never trust stdout from a non-zero
 #      exit, and never treat 3 as "nothing to reconcile".
+#  42  this script's own on-disk content is stale relative to origin/main
+#      AND KYOMI_STALE_TOOLING_STRICT=1 is set. See
+#      scripts/lib/stale-tooling-guard.sh (KYO-632) — by default this is a
+#      loud warning on stderr, not a failure.
 # ------------------------------------------------------------------------------
 
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/stale-tooling-guard.sh
+source "${SCRIPT_DIR}/lib/stale-tooling-guard.sh"
+stale_tooling_guard "${BASH_SOURCE[0]}"
 
 LOOKBACK_HOURS_DEFAULT=336 # 14 days — see LOOKBACK WINDOW note above
 PR_LIST_LIMIT="${PR_LIST_LIMIT:-500}"

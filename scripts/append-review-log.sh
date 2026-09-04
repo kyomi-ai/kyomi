@@ -47,6 +47,10 @@
 #   2 — stdin was empty (or all-whitespace). Refuses to write a blank
 #       entry rather than silently appending an empty section — a caller
 #       that got here with nothing to say has a bug of its own.
+#  42 — this script's own on-disk content is stale relative to origin/main
+#       AND KYOMI_STALE_TOOLING_STRICT=1 is set. See
+#       scripts/lib/stale-tooling-guard.sh (KYO-632) — by default this is a
+#       loud warning on stderr, not a failure.
 #
 # USAGE
 #   scripts/append-review-log.sh <<'EOF'
@@ -68,6 +72,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/canonical-root.sh
 source "${SCRIPT_DIR}/lib/canonical-root.sh"
+# shellcheck source=lib/stale-tooling-guard.sh
+source "${SCRIPT_DIR}/lib/stale-tooling-guard.sh"
+stale_tooling_guard "${BASH_SOURCE[0]}"
 
 if [ "$#" -ne 0 ]; then
     echo "ERROR: no arguments expected — the review entry is read from stdin." >&2

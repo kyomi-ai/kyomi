@@ -123,6 +123,10 @@
 #      kill-stats could not be determined. Treat exactly like exit 1 — never
 #      like exit 0. This is deliberately the same fail-closed contract
 #      scripts/check-ticket-in-flight.sh uses for its own exit 3.
+#  42  this script's own on-disk content is stale relative to origin/main
+#      AND KYOMI_STALE_TOOLING_STRICT=1 is set. See
+#      scripts/lib/stale-tooling-guard.sh (KYO-632) — by default this is a
+#      loud warning on stderr, not a failure.
 #
 # Only Python's standard-library `json` module does any JSON parsing (no
 # `jq`/no third-party package — this repo already ships standalone `.py`
@@ -135,6 +139,10 @@
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/stale-tooling-guard.sh
+source "${SCRIPT_DIR}/lib/stale-tooling-guard.sh"
+stale_tooling_guard "${BASH_SOURCE[0]}"
 
 usage() {
     cat >&2 <<EOF

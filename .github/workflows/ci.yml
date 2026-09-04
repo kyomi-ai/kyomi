@@ -21,8 +21,10 @@
 #      self-test suites for the shell scripts that gate ticket claiming,
 #      stranded-worktree/branch recovery, and merged-PR-to-ticket
 #      reconciliation (KYO-578, KYO-617), plus (KYO-629) the
-#      preflight-clippy.sh/ci.yml flag-parity suite — the job hosts more than
-#      worktree-lifecycle scripts now, see its own header comment
+#      preflight-clippy.sh/ci.yml flag-parity suite and (KYO-632) the
+#      self-test for the stale-tooling-guard those scripts source — the
+#      job hosts more than worktree-lifecycle scripts now, see its own
+#      header comment
 #
 # A note on `timeout-minutes` (KYO-322): GitHub starts that clock when a
 # job is QUEUED, not when a runner picks it up, so a job that executes in
@@ -583,37 +585,44 @@ jobs:
         run: sccache --show-stats || true
 
   # ---------------------------------------------------------------------------
-  # Worktree lifecycle & script self-tests (KYO-578, KYO-617, KYO-629)
+  # Worktree lifecycle & script self-tests (KYO-578, KYO-617, KYO-629, KYO-632)
   #
   # scripts/check-ticket-in-flight.sh, scripts/mark-worktree-stranded.sh,
   # scripts/mark-branch-stranded.sh, scripts/append-review-log.sh,
   # scripts/audit-agent-run-deaths.sh, and scripts/reconcile-merged-tickets.sh
   # are the gates that decide whether a ticket may be claimed, whether a
   # stranded claim may be released, and whether a merged PR's ticket was
-  # actually reconciled to Done. scripts/preflight-clippy-test.sh (KYO-629,
-  # the newest of the seven) is different in kind: it is not a
-  # ticket-lifecycle gate at all. It asserts that scripts/preflight-clippy.sh's
-  # `cargo clippy` invocations stay byte-identical to the three `run: cargo
-  # clippy` steps in this file's own `clippy` job, so the pre-PR gate
-  # documented in /backlog-fast and /backlog cannot silently drift from what
-  # this file actually enforces. It rides in this job rather than starting a
-  # new one because it meets the same fast / hermetic / no-toolchain
-  # constraints described below — not because it shares the other six
-  # suites' ticket-lifecycle purpose. That is also why this job is named
-  # "Worktree Lifecycle & Script Self-Tests" below, rather than just
+  # actually reconciled to Done. scripts/preflight-clippy-test.sh (KYO-629)
+  # is different in kind: it is not a ticket-lifecycle gate at all. It
+  # asserts that scripts/preflight-clippy.sh's `cargo clippy` invocations stay
+  # byte-identical to the three `run: cargo clippy` steps in this file's
+  # own `clippy` job, so the pre-PR gate documented in /backlog-fast and
+  # /backlog cannot silently drift from what this file actually enforces.
+  # It rides in this job rather than starting a new one because it meets
+  # the same fast / hermetic / no-toolchain constraints described below —
+  # not because it shares the other six suites' ticket-lifecycle purpose.
+  # scripts/lib/stale-tooling-guard-test.sh (KYO-632, the newest of the
+  # eight) is also different in kind, and for the same reason: it is the
+  # self-test for scripts/lib/stale-tooling-guard.sh, the guard that six of
+  # these scripts — plus scripts/mine-review-logs.sh, which has no
+  # self-test suite of its own — now source so that a stale local copy of
+  # themselves is loud instead of silent. That is also why this job is
+  # named "Worktree Lifecycle & Script Self-Tests" below, rather than just
   # "Worktree Lifecycle Self-Tests".
   #
-  # Each suite carries its own self-test assertions (425 total, RECOUNTED LIVE
-  # on 2026-09-03 by actually running all seven suites — including
-  # preflight-clippy-test.sh, added that same day — and summing their own
-  # "Results: N passed" lines: check-ticket-in-flight-test.sh 119 +
-  # mark-worktree-stranded-test.sh 32 + mark-branch-stranded-test.sh 78 +
+  # Each suite carries its own self-test assertions (460
+  # total, RECOUNTED LIVE on 2026-09-03 by actually running all eight
+  # suites — including preflight-clippy-test.sh and
+  # stale-tooling-guard-test.sh, both added that same day — and summing
+  # their own "Results: N passed" lines: check-ticket-in-flight-test.sh 119
+  # + mark-worktree-stranded-test.sh 32 + mark-branch-stranded-test.sh 78 +
   # append-review-log-test.sh 11 + audit-agent-run-deaths-test.sh 43 +
-  # reconcile-merged-tickets-test.sh 99 + preflight-clippy-test.sh 43 = 425 —
-  # the figure this comment carried immediately before this recount (382) was
-  # itself a live recount correcting 287, which in turn rested on a stale 197
-  # that undercounted the then-five suites by 86 assertions. Note per KYO-609
-  # this tally is still
+  # reconcile-merged-tickets-test.sh 99 + preflight-clippy-test.sh 43 +
+  # stale-tooling-guard-test.sh 35 = 460 — the
+  # figure this comment carried immediately before this recount (425) was
+  # itself a live recount, as was the 382 before it, the 287 before that, and
+  # all of them ultimately corrections of a stale 197 that undercounted the
+  # then-five suites by 86 assertions. Note per KYO-609 this tally is still
   # hand-maintained and will re-rot on the next suite change; that is a known,
   # separately-filed gap, not something this recount or this job fixes — the
   # recount only makes today's number true, it does not make tomorrow's number
@@ -622,7 +631,7 @@ jobs:
   # — a load-bearing check that never runs in CI is a fail-open shape this
   # workflow has already been bitten by twice (KYO-511, KYO-529).
   #
-  # All seven suites are hermetic: they build their own throwaway git repos
+  # All eight suites are hermetic: they build their own throwaway git repos
   # and/or JSON fixture files (and, for four of them —
   # check-ticket-in-flight-test.sh, mark-worktree-stranded-test.sh,
   # mark-branch-stranded-test.sh, and reconcile-merged-tickets-test.sh — a
@@ -639,6 +648,8 @@ jobs:
   # needs neither `gh` nor python3: it stubs `cargo` and `rustup` on PATH
   # instead (the real Rust toolchain is never invoked), and its own parity
   # check reads this file with grep/sed, not a YAML parser.
+  # stale-tooling-guard-test.sh needs only bash + git, same as the others —
+  # no `gh` stub, no python3 either.
   #
   # Deliberately no `paths:` filter, unlike the ticket's original wording of
   # "on push/PR touching scripts/**" — two reasons:
@@ -652,7 +663,7 @@ jobs:
   # Note that ci.yml uses no `paths` filters anywhere else today either — this
   # job isn't introducing an inconsistency, it's declining to introduce one.
   #
-  # All seven suites run even if an earlier one fails, so one broken suite
+  # All eight suites run even if an earlier one fails, so one broken suite
   # never masks the others — the loop below collects every failure and the
   # job fails at the end if any suite failed.
   # ---------------------------------------------------------------------------
@@ -661,7 +672,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      # fetch-depth: 0 (KYO-632, same reason lint-policy above uses it):
+      # scripts/lib/stale-tooling-guard.sh — sourced by seven production
+      # scripts, six of which have a suite in the array below (the seventh,
+      # scripts/mine-review-logs.sh, has none of its own) — determines
+      # staleness by comparing the calling script's on-disk content
+      # against the LOCAL `origin/main` ref
+      # (`git show origin/main:<path>`, no `git fetch`). The default
+      # actions/checkout (fetch-depth: 1) fetches only the ref under test
+      # and never populates refs/remotes/origin/main at all, so without
+      # this the guard would land on its "cannot determine" path — loud,
+      # not silent, but the check the guard exists to perform would never
+      # actually run in CI. fetch-depth: 0 fetches every branch, which is
+      # what gives the guard a real origin/main to compare against here.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Run worktree lifecycle self-test suites
         run: |
@@ -673,6 +699,7 @@ jobs:
             scripts/audit-agent-run-deaths-test.sh
             scripts/reconcile-merged-tickets-test.sh
             scripts/preflight-clippy-test.sh
+            scripts/lib/stale-tooling-guard-test.sh
           )
           failed=()
           for suite in "${suites[@]}"; do
