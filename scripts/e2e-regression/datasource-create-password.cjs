@@ -25,14 +25,40 @@
  * Assertions use isVisible()/isEnabled(), never count(): count() matches
  * hidden DOM and would pass on a control the user cannot actually see.
  *
- * STATUS: KYO-428 (the previous blocker — create-mode Test & Discover
- * silently dropping non-default ports) is fixed as of 3ad087bc. Steps 4-7
- * (create, queryability, cleanup) have not yet been executed against a
- * build containing that fix, so this spec's first green run is still
- * outstanding. If Test & Discover does not report Connected, the run still
- * aborts deterministically before Create rather than attempting it against
- * an untested connection — see abortBanner() below, the screenshots, and
- * the printed HTTP >=400 list for the observed cause.
+ * STATUS (KYO-463, 2026-09-03, against origin/main d71b9efd built locally):
+ * steps 4-7 have now executed for the first time. KYO-428 (create-mode Test
+ * & Discover silently dropping non-default ports) is fixed as of 3ad087bc
+ * and is no longer the blocker.
+ *
+ * All 20 functional checks PASS, repeatably across five runs — including
+ * step 4 (Next disabled -> enabled), step 5 (Create) and step 6, the
+ * full-stack queryability check: `SELECT <marker>` against the created
+ * datasource returns the marker through credential resolution, a pooled
+ * connection, real execution, Arrow decode and results render.
+ *
+ * The spec still exits non-zero, on step 7 (cleanup) only, and that failure
+ * is a REAL APP BUG, not a spec defect — do not weaken the assertion to get
+ * a green exit code. After step 6 has run a query against the datasource,
+ * deleting it in that same page session dispatches delete_datasource with a
+ * correct id and then never receives a response (observed with 30s and 40s
+ * waits), and the row is never removed from datasource_configs. The same
+ * delete on the same datasource from a fresh browser session returns 200 in
+ * milliseconds and persists, and a variant run with step 6 skipped also
+ * returns 200 and persists — so executing the query is the trigger. Filed as
+ * KYO-644, which blocks KYO-463; the full evidence table is on that ticket.
+ * The recurring `get_catalog_tree` 500 in the HTTP >=400 list below is a
+ * separate, non-fatal defect, filed as KYO-645.
+ *
+ * One genuine spec defect WAS found and fixed here: the cleanup assertion
+ * used a document-wide `text=${dsName}` match, which also matched the app's
+ * own success toast (`"<name>" deleted`) and so reported a successful delete
+ * as a failure. It is now scoped to the list row. See the comment at that
+ * assertion.
+ *
+ * If Test & Discover does not report Connected, the run still aborts
+ * deterministically before Create rather than attempting it against an
+ * untested connection — see abortBanner() below, the screenshots, and the
+ * printed HTTP >=400 list for the observed cause.
  */
 const { chromium } = require('playwright');
 
@@ -320,7 +346,17 @@ async function selectByLabel(page, labelText, optionText) {
           if (await vis(confirmBtn)) {
             await confirmBtn.click({ timeout: 10000 });
             await page.waitForTimeout(2000);
-            const stillThere = await vis(page.locator(`text=${dsName}`).first());
+            // Scope this to the list row — the same locator used to find the
+            // row above — not a bare `text=${dsName}` over the whole document.
+            // On success the app fires a toast reading `"<name>" deleted`,
+            // which *contains* dsName, so a document-wide text match finds the
+            // confirmation of the delete and reports it as the delete having
+            // failed. Observed on the first green run (KYO-463): HTTP 200, row
+            // genuinely gone from both the list and the DB, and the only node
+            // matching dsName was `<p class="text-sm font-medium flex-1">`,
+            // the toast.
+            const stillThere = await vis(
+              page.locator('span.font-medium.truncate', { hasText: dsName }).first());
             if (stillThere) {
               cleanupFailed = true;
               console.log(`\n*** CLEANUP FAILED *** "${dsName}" still visible in the list after confirming delete.`);
