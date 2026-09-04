@@ -7,9 +7,9 @@
 //! return 403. Confirmed against the live API (KYO-619):
 //!
 //! ```text
-//! nexata-dev      (has access)  -> 200, "datasets" key PRESENT
-//! filemaker-1105  (no access)   -> 200, "datasets" key ABSENT
-//!                                  body: {"kind":"bigquery#datasetList","etag":"..."}
+//! project-with-access      (has access)  -> 200, "datasets" key PRESENT
+//! project-without-access   (no access)   -> 200, "datasets" key ABSENT
+//!                                           body: {"kind":"bigquery#datasetList","etag":"..."}
 //! ```
 //!
 //! Before this module existed, every one of the **five** call sites that
