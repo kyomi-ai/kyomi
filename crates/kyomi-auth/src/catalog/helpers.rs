@@ -19,94 +19,6 @@ use tracing::{debug, info, warn};
 use super::search_entries::{compute_schema_signature, create_search_entries};
 use super::types::ColumnEntry;
 
-// ─── Test-only tracing interest-cache race guard (KYO-616) ────────────────────
-//
-// `tracing`'s per-callsite `Interest` cache is process-global, not per-thread.
-// A callsite's cached interest is decided the FIRST time ANY thread executes
-// it: `DefaultCallsite::register()` runs exactly once per callsite (a
-// compare-exchange-guarded state machine), folding together every currently
-// *registered* `Dispatch` (i.e. every `Dispatch::new(..)`-backed subscriber
-// still alive anywhere in the process — `Dispatch::none()`, the true
-// no-subscriber fallback, is never one of them) via `Interest::and`. If that
-// registered set is empty at the exact moment of first execution — which
-// happens whenever the winning thread has no thread-local override and no
-// global default subscriber exists yet — the result is `Interest::never()`,
-// cached permanently. Every later attempt to observe that exact line, no
-// matter what subscriber it installs, silently sees nothing: `enabled()`/
-// `event()` are skipped entirely once a callsite is cached `never`.
-//
-// This module's tests deliberately exercise the SAME production `warn!`/
-// `info!`/`debug!` call sites both with (`kyomi_test_tracing::capture_tracing`)
-// and without a capturing subscriber (most of the pre-existing `archive_
-// missing_tables`/`check_container_coverage` tests only assert on return
-// values). Under `cargo test`'s default parallelism, a non-capturing test's
-// thread can win the once-only registration race for a call site an instant
-// before a capturing test reaches it, permanently caching `never` for the
-// rest of the process — independent of `tracing::callsite::
-// rebuild_interest_cache()`, which only re-resolves interest against
-// whatever is registered *at the moment it's called*: it cannot prevent a
-// DIFFERENT thread from winning a DIFFERENT call site's one-time race a
-// moment later (confirmed empirically: rebuild_interest_cache() alone still
-// flaked ~1-in-5 runs of the full `catalog::` suite).
-//
-// The fix that actually closes the race (rather than narrowing it): ensure a
-// permanent, always-interested `Dispatch` is registered before ANY thread
-// can possibly win a KYO-616 call site's one-time registration. Since a
-// registered `Dispatch`'s presence alone guarantees `Interest::and` never
-// folds down to `None`/`never` (folding one dispatcher's `Always` with
-// anything at all yields `Always` or `Sometimes`, never `Never`), installing
-// this ONE always-interested subscriber as the process's global default
-// (`tracing::subscriber::set_global_default`, guarded by `Once` so it only
-// ever installs once) makes `Interest::never()` structurally unreachable
-// for every callsite this test binary can ever touch, from that point on —
-// not just less likely.
-//
-// Called (guarded, so effectively free after the first call) from the top
-// of every production function in this crate that a KYO-616 log line was
-// added to — `archive_missing_tables`, `check_container_coverage`,
-// `log_run_enumeration_summary`, `log_container_table_summary` here, and
-// the BigQuery REST response-shape parsing in `indexers::bigquery_rest` —
-// rather than from each test body, so a new test can never reintroduce this
-// race by forgetting to opt in. `#[cfg(test)]`-gated end to end: compiled
-// out entirely, zero cost, in every non-test build.
-#[cfg(test)]
-pub(crate) mod test_tracing_race_guard {
-    static INSTALL: std::sync::Once = std::sync::Once::new();
-
-    /// A `Subscriber` that is unconditionally interested in every callsite
-    /// (the default, unoverridden `register_callsite`/`enabled` behavior)
-    /// and does nothing with what it's given. Never asserted on directly —
-    /// its only job is to exist, permanently, as *a* registered dispatcher,
-    /// so `Interest::and` always has something to fold against.
-    struct AlwaysInterestedNoop;
-
-    impl tracing::Subscriber for AlwaysInterestedNoop {
-        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
-        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
-        fn event(&self, _event: &tracing::Event<'_>) {}
-        fn enter(&self, _span: &tracing::span::Id) {}
-        fn exit(&self, _span: &tracing::span::Id) {}
-    }
-
-    /// Ensure the permanent always-interested global default subscriber
-    /// exists. Idempotent and cheap after the first call (`Once`'s fast
-    /// path is a single atomic load). `set_global_default` can only
-    /// succeed once per process; failure here means some other global
-    /// default already exists, which is just as effective at keeping the
-    /// registered-dispatcher set non-empty, so the error is deliberately
-    /// discarded rather than logged or panicked on.
-    pub(crate) fn ensure_installed() {
-        INSTALL.call_once(|| {
-            let _ = tracing::subscriber::set_global_default(AlwaysInterestedNoop);
-        });
-    }
-}
 use crate::embedding_persistence::{
     delete_embeddings_for_table, store_search_embeddings, SearchEntryInsert,
 };
@@ -352,9 +264,6 @@ pub async fn archive_missing_tables(
     seen_table_ids: &HashSet<String>,
     tables_indexed: usize,
 ) -> Result<Vec<String>> {
-    #[cfg(test)]
-    test_tracing_race_guard::ensure_installed();
-
     // Callers are responsible for only calling this when discovery succeeded.
     // An empty seen_table_ids with a successful discovery means the datasource
     // genuinely has no tables — archiving everything is correct in that case
@@ -807,9 +716,6 @@ pub async fn check_container_coverage(
     datasource_config_id: &str,
     enumerated_containers: &HashSet<ContainerKey>,
 ) -> Result<ContainerCoverage> {
-    #[cfg(test)]
-    test_tracing_race_guard::ensure_installed();
-
     #[derive(sqlx::FromRow)]
     struct ContainerRow {
         project_id: String,
@@ -966,9 +872,6 @@ pub fn log_run_enumeration_summary(
     containers_discovered: usize,
     enumerated_containers: &HashSet<ContainerKey>,
 ) {
-    #[cfg(test)]
-    test_tracing_race_guard::ensure_installed();
-
     info!(
         workspace_id,
         datasource_config_id,
@@ -993,9 +896,6 @@ pub fn log_container_table_summary(
     tables_cached: usize,
     tables_errored: usize,
 ) {
-    #[cfg(test)]
-    test_tracing_race_guard::ensure_installed();
-
     debug!(
         workspace_id,
         datasource_config_id,
@@ -1599,22 +1499,6 @@ pub fn fold_table_outcomes(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Thin wrapper around `kyomi_test_tracing::capture_tracing()`.
-    ///
-    /// The actual fix for the KYO-616 `tracing` interest-cache race (a
-    /// `rebuild_interest_cache()` call here alone was tried and confirmed
-    /// insufficient — it only re-resolves interest at the moment it's
-    /// called, and cannot stop a different, subscriber-less test's thread
-    /// from winning a call site's one-time registration race a moment
-    /// later) now lives at the source: `test_tracing_race_guard::
-    /// ensure_installed()`, called from the top of every production
-    /// function a KYO-616 log line was added to. See that module's doc
-    /// comment for the full mechanism. This wrapper exists only so call
-    /// sites read the same either way, regardless of which fix backs them.
-    fn capture_tracing_for_test() -> kyomi_test_tracing::TracingCapture {
-        kyomi_test_tracing::capture_tracing()
-    }
 
     // ── resolve_final_status (KYO-126) ───────────────────────────────────
 
@@ -2500,7 +2384,7 @@ mod tests {
 
     #[test]
     fn run_enumeration_summary_reports_discovered_vs_enumerated_and_names() {
-        let logs = capture_tracing_for_test();
+        let logs = kyomi_test_tracing::capture_tracing();
         let enumerated = HashSet::from([
             ("".to_string(), "public".to_string()),
             ("".to_string(), "analytics".to_string()),
@@ -2523,7 +2407,7 @@ mod tests {
 
     #[test]
     fn container_table_summary_reports_listed_cached_and_errored() {
-        let logs = capture_tracing_for_test();
+        let logs = kyomi_test_tracing::capture_tracing();
 
         log_container_table_summary("ws-1", "ds-1", "dataset", "proj-1.dataset_a", 5, 3, 2);
 
@@ -2591,7 +2475,7 @@ mod tests {
         )]));
         let seen_table_ids = HashSet::from(["proj-1.dataset_a.kept".to_string()]);
 
-        let logs = capture_tracing_for_test();
+        let logs = kyomi_test_tracing::capture_tracing();
         let archived = archive_missing_tables(&db, &workspace_id, &ds, &scope, &seen_table_ids, 1)
             .await
             .expect("archive_missing_tables");
@@ -2660,7 +2544,7 @@ mod tests {
             seed_container_scoped_fixture(sq, "archivelogwipe", &[("proj-1", "dataset_a", "t1")])
                 .await;
 
-        let logs = capture_tracing_for_test();
+        let logs = kyomi_test_tracing::capture_tracing();
         let _ = archive_missing_tables(
             &db,
             &workspace_id,
@@ -2713,7 +2597,7 @@ mod tests {
             seed_container_scoped_fixture(sq, "dispro34", &rows_ref).await
         };
 
-        let logs = capture_tracing_for_test();
+        let logs = kyomi_test_tracing::capture_tracing();
         let archived = archive_missing_tables(
             &db,
             &workspace_id,
@@ -2763,7 +2647,7 @@ mod tests {
             .await
         };
 
-        let logs = capture_tracing_for_test();
+        let logs = kyomi_test_tracing::capture_tracing();
         // 3 archived against 1 indexed — a 3x ratio, routine, well below
         // the 5x threshold.
         let archived = archive_missing_tables(
@@ -2802,7 +2686,7 @@ mod tests {
             seed_container_scoped_fixture(sq, "dispro0idx", &[("proj-1", "dataset_a", "t1")]).await
         };
 
-        let logs = capture_tracing_for_test();
+        let logs = kyomi_test_tracing::capture_tracing();
         let archived = archive_missing_tables(
             &db,
             &workspace_id,
@@ -2875,7 +2759,7 @@ mod tests {
         };
         let enumerated = HashSet::from([("proj-1".to_string(), "dataset_a".to_string())]);
 
-        let logs = capture_tracing_for_test();
+        let logs = kyomi_test_tracing::capture_tracing();
         let coverage = check_container_coverage(&db, &workspace_id, &ds, &enumerated)
             .await
             .expect("check_container_coverage");
@@ -2918,7 +2802,7 @@ mod tests {
             ("proj-1".to_string(), "dataset_b".to_string()),
         ]);
 
-        let logs = capture_tracing_for_test();
+        let logs = kyomi_test_tracing::capture_tracing();
         let coverage = check_container_coverage(&db, &workspace_id, &ds, &enumerated)
             .await
             .expect("check_container_coverage");

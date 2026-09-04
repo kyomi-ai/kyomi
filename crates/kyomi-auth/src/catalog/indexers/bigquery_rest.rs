@@ -123,11 +123,6 @@ pub(crate) fn parse_list_field<T>(
     extract: impl Fn(&Value) -> Option<T>,
     missing_key_hint: Option<&str>,
 ) -> Result<Vec<T>> {
-    // KYO-616: closes a `tracing` interest-cache race across parallel test
-    // threads — see the doc comment on `catalog::helpers::test_tracing_race_guard`.
-    #[cfg(test)]
-    crate::catalog::helpers::test_tracing_race_guard::ensure_installed();
-
     let Some(value) = body.get(key) else {
         // KYO-616: this is the exact production incident KYO-619 fixed —
         // log it as its own field-carrying line (not just the propagated
@@ -180,10 +175,6 @@ pub(crate) async fn fetch_bigquery_list_page(
     page_token: Option<String>,
     request_label: &str,
 ) -> Result<Value> {
-    // KYO-616: see `catalog::helpers::test_tracing_race_guard`'s doc comment.
-    #[cfg(test)]
-    crate::catalog::helpers::test_tracing_race_guard::ensure_installed();
-
     let mut query: Vec<(&str, String)> =
         vec![("maxResults", super::BIGQUERY_API_MAX_RESULTS.to_string())];
     if let Some(token) = page_token {
@@ -265,10 +256,6 @@ where
     F: FnMut(Option<String>) -> Fut,
     Fut: std::future::Future<Output = Result<Value>>,
 {
-    // KYO-616: see `catalog::helpers::test_tracing_race_guard`'s doc comment.
-    #[cfg(test)]
-    crate::catalog::helpers::test_tracing_race_guard::ensure_installed();
-
     let mut results = Vec::new();
     let mut page_token: Option<String> = None;
 
@@ -304,17 +291,6 @@ where
 mod tests {
     use super::*;
     use serde_json::json;
-
-    /// Thin wrapper around `kyomi_test_tracing::capture_tracing()` — the
-    /// actual KYO-616 interest-cache race fix now lives at the source, in
-    /// `parse_list_field`/`fetch_bigquery_list_page`/`paginate` themselves
-    /// via `catalog::helpers::test_tracing_race_guard::ensure_installed()`.
-    /// See that module's doc comment for the full mechanism, and why a
-    /// `rebuild_interest_cache()` call here alone was tried and confirmed
-    /// insufficient.
-    fn capture_tracing_for_test() -> kyomi_test_tracing::TracingCapture {
-        kyomi_test_tracing::capture_tracing()
-    }
 
     fn dataset_id(v: &Value) -> Option<String> {
         v.get("datasetReference")?
@@ -432,7 +408,7 @@ mod tests {
 
     #[test]
     fn absent_key_logs_warn_with_key_state_absent() {
-        let logs = capture_tracing_for_test();
+        let logs = kyomi_test_tracing::capture_tracing();
         let body = json!({"kind": "bigquery#datasetList"});
         let _ = parse_list_field(&body, "datasets", dataset_id, None);
 
@@ -445,7 +421,7 @@ mod tests {
 
     #[test]
     fn present_empty_key_logs_debug_with_key_state_and_zero_length() {
-        let logs = capture_tracing_for_test();
+        let logs = kyomi_test_tracing::capture_tracing();
         let body = json!({"kind": "bigquery#datasetList", "datasets": []});
         let _ = parse_list_field(&body, "datasets", dataset_id, None).unwrap();
 
@@ -466,7 +442,7 @@ mod tests {
 
     #[test]
     fn populated_key_logs_debug_with_the_real_array_length() {
-        let logs = capture_tracing_for_test();
+        let logs = kyomi_test_tracing::capture_tracing();
         let body = json!({
             "datasets": [
                 {"datasetReference": {"datasetId": "ds_a"}},
@@ -490,7 +466,7 @@ mod tests {
 
     #[tokio::test]
     async fn paginate_logs_next_page_token_presence_per_page() {
-        let logs = capture_tracing_for_test();
+        let logs = kyomi_test_tracing::capture_tracing();
         let pages = [
             json!({
                 "datasets": [{"datasetReference": {"datasetId": "ds_a"}}],
