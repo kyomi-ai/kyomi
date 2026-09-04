@@ -21,6 +21,17 @@ use tokio::sync::Notify;
 /// BGE query prefix — prepended to search queries for asymmetric retrieval.
 const BGE_QUERY_PREFIX: &str = "Represent this sentence for searching relevant passages: ";
 
+/// Maximum number of texts embedded in a single `spawn_blocking` call by
+/// [`EmbeddingService::embed_passages_chunked`].
+///
+/// `embed_texts` is a synchronous, CPU-bound Candle forward pass — cost
+/// scales with batch size, and an unbounded batch (538 columns in the
+/// KYO-644 reproduction) took ~34s. 64 keeps any single blocking-pool
+/// occupation short and bounds peak tensor memory, while still being large
+/// enough to amortize tokenizer/forward-pass overhead across a meaningful
+/// number of passages per chunk.
+const EMBED_BATCH_SIZE: usize = 64;
+
 // Embed the model files at compile time (downloaded by build.rs)
 const MODEL_SAFETENSORS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/model.safetensors"));
 const TOKENIZER_JSON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tokenizer.json"));
@@ -110,8 +121,69 @@ impl EmbeddingService {
     ///
     /// Passages are embedded as-is — no query prefix. Returns one `Vec<f32>`
     /// (384 dimensions) per input text.
+    ///
+    /// This is a **synchronous, CPU-bound call** (tokenize + one Candle BERT
+    /// forward pass, no yield points) — calling it directly from an async
+    /// context occupies whatever executor thread runs the call for the
+    /// entire batch. From async code embedding catalog-sized batches (tens
+    /// to thousands of passages), use [`embed_passages_chunked`] instead —
+    /// see its docs for why (KYO-644).
+    ///
+    /// [`embed_passages_chunked`]: Self::embed_passages_chunked
     pub fn embed_passages(&self, texts: &[&str]) -> kyomi_core::Result<Vec<Vec<f32>>> {
         self.embed_texts(texts)
+    }
+
+    /// Embed a batch of passages off the async runtime, in bounded chunks.
+    ///
+    /// [`embed_passages`](Self::embed_passages) is a synchronous, CPU-bound
+    /// Candle forward pass with no yield points. Called directly from async
+    /// code on an unbounded batch, it stalls whichever executor thread runs
+    /// it for as long as the whole batch takes — in production this was a
+    /// single 538-column batch that occupied the calling thread for ~34s,
+    /// which correlated with the entire HTTP server going unresponsive for
+    /// the same window (a bare `GET /api/health` blocked 34.4s and recovered
+    /// to 3ms the instant the embedding call returned). The exact mechanism
+    /// linking one occupied thread to whole-pool unresponsiveness was not
+    /// conclusively isolated (KYO-644: catalog indexing's post-indexing
+    /// embedding pass, called directly on a `tokio::spawn`ed task).
+    ///
+    /// This method fixes both halves of that defect:
+    /// - Each chunk's embedding work runs via `tokio::task::spawn_blocking`,
+    ///   so the calling task yields back to the runtime between chunks
+    ///   instead of monopolizing an executor thread for the whole batch.
+    /// - `texts` is split into groups of at most `EMBED_BATCH_SIZE`, so a
+    ///   single forward pass — and its CPU burst and peak tensor memory —
+    ///   is bounded regardless of how large the caller's batch is.
+    ///
+    /// A `spawn_blocking` panic is propagated as an `Err` rather than
+    /// discarded: the caller's batch is genuinely incomplete when this
+    /// returns an error, and losing that distinction would let a partial
+    /// embedding set look identical to a complete one.
+    pub async fn embed_passages_chunked(&self, texts: &[&str]) -> kyomi_core::Result<Vec<Vec<f32>>> {
+        let mut results = Vec::with_capacity(texts.len());
+        for (chunk_index, chunk) in texts.chunks(EMBED_BATCH_SIZE).enumerate() {
+            let svc = self.clone();
+            let owned: Vec<String> = chunk.iter().map(|s| s.to_string()).collect();
+            let chunk_result = tokio::task::spawn_blocking(move || {
+                let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+                svc.embed_passages(&refs)
+            })
+            .await
+            .map_err(|e| {
+                kyomi_core::Error::Internal(format!("embedding task panicked: {e}"))
+            })??;
+
+            tracing::debug!(
+                chunk_index,
+                chunk_size = chunk_result.len(),
+                total = texts.len(),
+                "embedded passage chunk off the async runtime"
+            );
+
+            results.extend(chunk_result);
+        }
+        Ok(results)
     }
 
     /// Embed a single passage. Convenience wrapper around [`embed_passages`].
@@ -452,5 +524,52 @@ mod tests {
         let svc = lazy.wait_ready().await.unwrap();
         let result = svc.embed_passage("test").unwrap();
         assert_eq!(result.len(), EmbeddingService::DIMENSIONS);
+    }
+}
+
+// ─── embed_passages_chunked bounding (KYO-644) ─────────────────────────────
+//
+// `embed_passages_chunked` is the fix for the runtime-starvation defect
+// described on its own doc comment: an unbounded, un-offloaded embedding
+// batch stalled the whole HTTP server for ~34s in production. This module
+// covers the "bounded batch size" half of that fix directly, at the source
+// — `crates/kyomi-knowledge/src/populate.rs`'s regression test covers the
+// "moved off the async runtime" half end-to-end, through the real catalog
+// population path.
+#[cfg(test)]
+mod chunking_tests {
+    use super::*;
+
+    /// `EMBED_BATCH_SIZE + 1` texts must produce exactly two `spawn_blocking`
+    /// chunks (`EMBED_BATCH_SIZE`, then the 1 remainder) rather than one
+    /// unbounded batch — the batch-size half of the KYO-644 fix. Every input
+    /// must still come back embedded, in order.
+    #[tokio::test]
+    async fn embed_passages_chunked_splits_into_bounded_batches() {
+        let svc = EmbeddingService::new().unwrap();
+        let n = EMBED_BATCH_SIZE + 1;
+        let texts: Vec<String> = (0..n).map(|i| format!("col_{i}")).collect();
+        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+
+        let logs = kyomi_test_tracing::capture_tracing();
+        let result = svc.embed_passages_chunked(&refs).await.unwrap();
+
+        assert_eq!(result.len(), n, "every input text must come back embedded exactly once");
+
+        let chunk_logs = logs.events_at(tracing::Level::DEBUG);
+        assert_eq!(
+            chunk_logs.len(),
+            2,
+            "{n} texts (EMBED_BATCH_SIZE + 1) must split into exactly two spawn_blocking \
+             chunks, not one unbounded batch — captured debug events: {chunk_logs:?}"
+        );
+        assert!(
+            chunk_logs[0].1.contains(&format!("chunk_size={EMBED_BATCH_SIZE}")),
+            "first chunk must be exactly EMBED_BATCH_SIZE ({EMBED_BATCH_SIZE}): {chunk_logs:?}"
+        );
+        assert!(
+            chunk_logs[1].1.contains("chunk_size=1"),
+            "second chunk must be exactly the 1-text remainder: {chunk_logs:?}"
+        );
     }
 }

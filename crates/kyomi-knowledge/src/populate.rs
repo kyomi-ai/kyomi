@@ -65,7 +65,7 @@ pub async fn populate_table_embeddings(
         .map(|r| kyomi_core::build_full_table_name(&r.project_id, &r.dataset_id, &r.table_id))
         .collect();
     let name_refs: Vec<&str> = full_names.iter().map(|s| s.as_str()).collect();
-    let name_embeddings = embed.embed_passages(&name_refs)?;
+    let name_embeddings = embed.embed_passages_chunked(&name_refs).await?;
 
     // Batch-embed descriptions for tables that have them
     let metadata_values: Vec<Option<JsonValue>> = rows
@@ -80,7 +80,7 @@ pub async fn populate_table_embeddings(
     let desc_embeddings_batch = if non_empty_descs.is_empty() {
         vec![]
     } else {
-        embed.embed_passages(&non_empty_descs)?
+        embed.embed_passages_chunked(&non_empty_descs).await?
     };
     let mut desc_embed_iter = desc_embeddings_batch.into_iter();
 
@@ -226,7 +226,7 @@ pub async fn populate_column_embeddings(
         .map(|c| format!("{}.{} ({})", c.table_full_name, c.name, c.data_type))
         .collect();
     let name_refs: Vec<&str> = name_texts.iter().map(|s| s.as_str()).collect();
-    let name_embeddings = embed.embed_passages(&name_refs)?;
+    let name_embeddings = embed.embed_passages_chunked(&name_refs).await?;
 
     // Batch-embed column descriptions where they exist
     let non_empty_descs: Vec<&str> = all_columns
@@ -236,7 +236,7 @@ pub async fn populate_column_embeddings(
     let desc_embeddings_batch = if non_empty_descs.is_empty() {
         vec![]
     } else {
-        embed.embed_passages(&non_empty_descs)?
+        embed.embed_passages_chunked(&non_empty_descs).await?
     };
     let mut desc_embed_iter = desc_embeddings_batch.into_iter();
 
@@ -540,5 +540,190 @@ mod tests {
         assert_eq!(extract_description_from_value(Some(&meta_none)), None);
 
         assert_eq!(extract_description_from_value(None), None);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Runtime-blocking regression test (KYO-644)
+// ---------------------------------------------------------------------------
+//
+// KYO-644: catalog indexing's post-indexing embedding pass called
+// `EmbeddingService::embed_passages` — a synchronous, CPU-bound Candle
+// forward pass with no yield points — directly from a `tokio::spawn`ed
+// async task. On a datasource with a realistic column count (538 in the
+// field reproduction) that single call occupied its executor thread for
+// ~34s. In production this correlated with total HTTP unresponsiveness for
+// the same window: a bare `GET /api/health` (no DB, no auth, nothing else
+// in its way) blocked 34.4s and recovered to 3ms the instant the embedding
+// call returned. The precise mechanism connecting one occupied thread to
+// whole-pool unresponsiveness on an 8-worker runtime was not conclusively
+// isolated — candidates included more concurrent blocking embed calls than
+// the CPU sample suggested, and tokio reactor/driver starvation — but this
+// fix removes the occupied-thread condition regardless of which mechanism
+// was responsible.
+//
+// The ticket's literal repro steps ("query a datasource, then delete it in
+// the same browser session") are NOT what this test drives — the query is
+// incidental, merely burning wall clock that happens to land the delete
+// inside the stall window, and reproducing it faithfully would need a live
+// server and a browser for only indirect evidence. This test drives the
+// actual invariant the fix establishes instead: background catalog
+// embedding work must not block the async runtime it shares with every
+// other request.
+#[cfg(test)]
+mod runtime_blocking_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    /// A loaded [`kyomi_embed::EmbeddingService`], cached process-wide so
+    /// the (measurably slow) real BERT model load happens at most once no
+    /// matter how many tests in this binary need it — same pattern as
+    /// `kyomi_agent::test_support::loaded_embedding`.
+    fn loaded_embedding() -> kyomi_embed::EmbeddingService {
+        static EMBED: std::sync::OnceLock<kyomi_embed::EmbeddingService> = std::sync::OnceLock::new();
+        EMBED
+            .get_or_init(|| kyomi_embed::EmbeddingService::new().expect("load embedding model for tests"))
+            .clone()
+    }
+
+    /// Seed a migrated in-memory SQLite pool with a user, workspace,
+    /// datasource config, and `num_tables` `datasource_table_cache` rows,
+    /// each with `cols_per_table` columns and no descriptions — so only the
+    /// column-*name* embedding batch runs, keeping the seeded embedding
+    /// work to exactly what this test needs to time.
+    async fn seed_datasource_with_columns(
+        db: &kyomi_core::DbPool,
+        workspace_id: &str,
+        datasource_config_id: &str,
+        num_tables: usize,
+        cols_per_table: usize,
+    ) {
+        let sq = match db {
+            kyomi_core::DbPool::Sqlite(pool) => pool,
+            kyomi_core::DbPool::Postgres(_) => unreachable!("test pool is always sqlite"),
+        };
+
+        sqlx::query("INSERT INTO users (user_id, email) VALUES ('user-a', 'a@test.local')")
+            .execute(sq)
+            .await
+            .expect("seed user");
+        sqlx::query(
+            "INSERT INTO workspaces (workspace_id, name, owner_user_id) VALUES ($1, 'Workspace', 'user-a')",
+        )
+        .bind(workspace_id)
+        .execute(sq)
+        .await
+        .expect("seed workspace");
+        sqlx::query(
+            "INSERT INTO datasource_configs (id, workspace_id, name, datasource_type, slug) \
+             VALUES ($1, $2, 'Test DS', 'postgres', 'test-ds')",
+        )
+        .bind(datasource_config_id)
+        .bind(workspace_id)
+        .execute(sq)
+        .await
+        .expect("seed datasource_configs");
+
+        for t in 0..num_tables {
+            let columns: Vec<JsonValue> = (0..cols_per_table)
+                .map(|c| serde_json::json!({"name": format!("col_{t}_{c}"), "type": "VARCHAR"}))
+                .collect();
+            let metadata = serde_json::json!({ "columns": columns }).to_string();
+            sqlx::query(
+                "INSERT INTO datasource_table_cache \
+                     (workspace_id, datasource_config_id, project_id, dataset_id, table_id, table_metadata) \
+                 VALUES ($1, $2, 'proj', 'dataset', $3, $4)",
+            )
+            .bind(workspace_id)
+            .bind(datasource_config_id)
+            .bind(format!("table_{t}"))
+            .bind(&metadata)
+            .execute(sq)
+            .await
+            .expect("seed datasource_table_cache");
+        }
+    }
+
+    /// Deliberately a **single**-worker runtime. On a multi-core box, a
+    /// task blocked on synchronous CPU-bound work does not starve a
+    /// *sibling* task the scheduler happens to run on a different worker
+    /// thread — verified empirically against tokio 1.x before writing this
+    /// test: a `worker_threads = 2` (or higher) runtime does not reproduce
+    /// the production failure at all once there are enough real cores to
+    /// run both tasks in parallel, because tokio dispatches unrelated
+    /// spawned tasks to idle worker threads independently.
+    ///
+    /// This is a test-detectability choice, not a claim about production's
+    /// mechanism: production ran an 8-worker pool, and the field evidence
+    /// showed only ~2.7 of 8 cores busy during the stall, yet the whole
+    /// server went unresponsive — so "every worker is equally busy" does
+    /// not explain what actually happened there (see KYO-644; the
+    /// mechanism was not conclusively isolated). A single-worker runtime
+    /// sidesteps needing to know that mechanism: with exactly one worker,
+    /// the pre-fix synchronous call is *guaranteed* to occupy the only
+    /// thread the heartbeat task also needs, which is what makes the block
+    /// reliably detectable here regardless of how production's actual
+    /// stall propagated.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn populate_column_embeddings_does_not_block_the_runtime() {
+        const NUM_TABLES: usize = 3;
+        const COLS_PER_TABLE: usize = 5;
+        const EXPECTED_COLUMNS: usize = NUM_TABLES * COLS_PER_TABLE;
+
+        let db = kyomi_core::db::DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite and run the full migration chain");
+        seed_datasource_with_columns(&db, "ws-1", "ds-1", NUM_TABLES, COLS_PER_TABLE).await;
+
+        let embed = loaded_embedding();
+
+        let worst_gap_ms = Arc::new(AtomicU64::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let heartbeat = tokio::spawn({
+            let worst_gap_ms = worst_gap_ms.clone();
+            let stop = stop.clone();
+            async move {
+                let mut last = Instant::now();
+                while !stop.load(Ordering::Relaxed) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    let now = Instant::now();
+                    worst_gap_ms.fetch_max(
+                        now.duration_since(last).as_millis() as u64,
+                        Ordering::Relaxed,
+                    );
+                    last = now;
+                }
+            }
+        });
+
+        // Mirrors production: `CatalogIndexingService::spawn_post_create`
+        // runs the embedding pass on its own `tokio::spawn`ed task, sharing
+        // the same worker pool every other request runs on.
+        let population = tokio::spawn({
+            let db = db.clone();
+            let embed = embed.clone();
+            async move { populate_column_embeddings(&db, &embed, "ws-1", "ds-1").await }
+        });
+
+        let result = population.await.expect("population task must not panic");
+
+        stop.store(true, Ordering::Relaxed);
+        heartbeat.await.expect("heartbeat task must not panic");
+
+        let count = result.expect("populate_column_embeddings must succeed");
+        assert_eq!(count, EXPECTED_COLUMNS, "must embed every seeded column exactly once");
+
+        let worst_gap_ms = worst_gap_ms.load(Ordering::Relaxed);
+        assert!(
+            worst_gap_ms < 500,
+            "background embedding work must not block the single-worker async runtime \
+             for more than 500ms between 10ms heartbeat ticks — observed worst gap \
+             {worst_gap_ms}ms. If this fails, embed_passages_chunked's spawn_blocking \
+             offload has regressed and the CPU-bound embedding forward pass is running \
+             directly on the tokio worker thread again (KYO-644)."
+        );
     }
 }
