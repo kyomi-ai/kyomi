@@ -13,6 +13,12 @@
 #   KYOMI_VERSION=2.0.0 curl -fsSL https://get.kyomi.ai | sh
 #
 # Requirements: Docker with Compose plugin, openssl, curl
+#
+# THIS FILE IS THE SINGLE SOURCE OF TRUTH for the installer (KYO-641). The
+# marketing site (kyomi-ai/kyomi-private, .github/workflows/deploy-marketing.yml)
+# is intended to copy this exact file to apps/marketing/public/install.sh at
+# deploy time, serving it at https://kyomi.ai/install.sh. That copy will be
+# generated and gitignored there — edit this file only, never the served copy.
 # =============================================================================
 set -e
 
@@ -34,12 +40,12 @@ fatal() { error "$1"; exit 1; }
 
 # Prompt with a default value. Usage: result=$(prompt "Question" "default")
 prompt() {
-    printf "\033[1m%s\033[0m" "$1"
+    printf "\033[1m%s\033[0m" "$1" > /dev/tty
     if [ -n "$2" ]; then
-        printf " [%s]" "$2"
+        printf " [%s]" "$2" > /dev/tty
     fi
-    printf ": "
-    read -r _answer
+    printf ": " > /dev/tty
+    read -r _answer < /dev/tty
     if [ -z "$_answer" ]; then
         echo "$2"
     else
@@ -57,6 +63,23 @@ random_alphanum() {
 # ---------------------------------------------------------------------------
 check_prerequisites() {
     info "Checking prerequisites..."
+
+    # prompt() reads and writes /dev/tty directly (so prompts survive
+    # `curl | sh`, where stdin is the script itself). Without a controlling
+    # terminal — e.g. `curl ... | sh < /dev/null`, a Docker build step, or
+    # headless CI — the first `read -r ... < /dev/tty` would otherwise abort
+    # with a raw "/dev/tty: No such device or address" from the shell instead
+    # of one of this script's own error messages. Check both directions here,
+    # before any prompt runs. The probe runs in a child `sh -c` rather than
+    # redirecting /dev/tty directly on this shell: under `set -e`, a failed
+    # `< /dev/tty` / `> /dev/tty` redirection aborts the whole script
+    # immediately with that same raw error — even as the condition of an
+    # `if` — which is the exact failure this guard exists to prevent.
+    # Confining the failing redirection to a child process's own exit status
+    # keeps it a normal, catchable command result instead.
+    if ! sh -c ': < /dev/tty' 2>/dev/null || ! sh -c ': > /dev/tty' 2>/dev/null; then
+        fatal "This installer requires an interactive terminal (no /dev/tty available). Run it directly in a terminal — it cannot run non-interactively (piped stdin, CI, or a container build step)."
+    fi
 
     if ! command -v docker >/dev/null 2>&1; then
         fatal "Docker is not installed. Please install Docker first: https://docs.docker.com/get-docker/"
@@ -111,47 +134,15 @@ handle_existing_install() {
 }
 
 # ---------------------------------------------------------------------------
-# Edition selection
-# ---------------------------------------------------------------------------
-choose_edition() {
-    echo ""
-    echo "============================================="
-    echo "  Which edition would you like to install?"
-    echo "============================================="
-    echo ""
-    echo "  [1] Community  (free, AGPL-3.0 license)"
-    echo "      Postgres + Kyomi. Everything you need to get started."
-    echo ""
-    echo "  [2] Enterprise (commercial license required)"
-    echo "      Adds Redis, Slack integration, and more."
-    echo ""
-    _edition=$(prompt "Select edition" "1")
-    case "$_edition" in
-        1) EDITION="community" ;;
-        2) EDITION="enterprise" ;;
-        *) fatal "Invalid selection. Please choose 1 or 2." ;;
-    esac
-
-    ok "Selected: $EDITION edition"
-}
-
-# ---------------------------------------------------------------------------
 # Download files
 # ---------------------------------------------------------------------------
 download_files() {
-    info "Downloading Kyomi $EDITION compose file..."
+    info "Downloading Kyomi compose file..."
 
     mkdir -p "$INSTALL_DIR"
 
-    COMPOSE_FILE="docker-compose.${EDITION}.yml"
-    if [ "$EDITION" = "community" ]; then
-        ENV_EXAMPLE=".env.example"
-    else
-        ENV_EXAMPLE=".env.enterprise.example"
-    fi
-
-    curl -fsSL "${GITHUB_RAW_BASE}/${COMPOSE_FILE}" -o "${INSTALL_DIR}/docker-compose.yml"
-    curl -fsSL "${GITHUB_RAW_BASE}/${ENV_EXAMPLE}" -o "${INSTALL_DIR}/.env.example"
+    curl -fsSL "${GITHUB_RAW_BASE}/docker-compose.community.yml" -o "${INSTALL_DIR}/docker-compose.yml"
+    curl -fsSL "${GITHUB_RAW_BASE}/.env.example" -o "${INSTALL_DIR}/.env.example"
     curl -fsSL "${GITHUB_RAW_BASE}/upgrade.sh" -o "${INSTALL_DIR}/upgrade.sh"
     chmod +x "${INSTALL_DIR}/upgrade.sh"
 
@@ -182,45 +173,42 @@ generate_secrets() {
 # LLM provider configuration
 # ---------------------------------------------------------------------------
 configure_llm() {
+    LLM_PROVIDER=""
+    LLM_API_KEY=""
+
     echo ""
     echo "============================================="
-    echo "  LLM Provider Configuration"
+    echo "  AI Configuration (optional)"
     echo "============================================="
     echo ""
-    echo "  Kyomi uses an LLM to power AI features."
+    echo "  Kyomi uses an LLM for AI features (chat, alerts, etc.)."
+    echo "  You can configure this now or later in Settings → AI."
+    echo ""
+    _setup=$(prompt "Configure AI now? (y/n)" "n")
+    case "$_setup" in
+        y|Y|yes|Yes|YES) ;;
+        *) ok "Skipping AI setup — configure later in Settings → AI"; return ;;
+    esac
+
     echo ""
     echo "  [1] Anthropic (Claude)"
     echo "  [2] OpenAI (GPT)"
     echo "  [3] Google Gemini"
-    echo "  [4] Other (OpenAI-compatible API)"
     echo ""
     _provider=$(prompt "Select provider" "1")
     case "$_provider" in
         1) LLM_PROVIDER="anthropic" ;;
         2) LLM_PROVIDER="openai" ;;
         3) LLM_PROVIDER="gemini" ;;
-        4) LLM_PROVIDER="openai" ;;
-        *) fatal "Invalid selection. Please choose 1-4." ;;
+        *) fatal "Invalid selection. Please choose 1-3." ;;
     esac
 
     echo ""
     LLM_API_KEY=$(prompt "Enter your API key" "")
     if [ -z "$LLM_API_KEY" ]; then
-        fatal "An API key is required. You can add it later by editing $INSTALL_DIR/.env"
-    fi
-
-    LLM_BASE_URL=""
-    LLM_MODEL=""
-    if [ "$_provider" = "4" ]; then
-        echo ""
-        LLM_BASE_URL=$(prompt "Enter the API base URL (e.g. http://host.docker.internal:11434/v1)" "")
-        if [ -z "$LLM_BASE_URL" ]; then
-            fatal "A base URL is required for OpenAI-compatible providers."
-        fi
-        LLM_MODEL=$(prompt "Enter the model name" "")
-        if [ -z "$LLM_MODEL" ]; then
-            fatal "A model name is required for OpenAI-compatible providers."
-        fi
+        warn "No API key entered — AI features will be disabled until configured in Settings → AI"
+        LLM_PROVIDER=""
+        return
     fi
 
     ok "LLM provider: $LLM_PROVIDER"
@@ -274,16 +262,14 @@ ENVHEADER
     printf 'JWT_SECRET_KEY=%s\n' "$JWT_SECRET_KEY" >> "$_envfile"
     printf 'ENCRYPTION_KEY=%s\n' "$ENCRYPTION_KEY" >> "$_envfile"
 
-    printf '\n# --- LLM Provider ---\n' >> "$_envfile"
-    printf 'LLM_PROVIDER=%s\n' "$LLM_PROVIDER" >> "$_envfile"
-    printf 'LLM_API_KEY=%s\n' "$LLM_API_KEY" >> "$_envfile"
-
-    # Append optional LLM fields only when set
-    if [ -n "$LLM_BASE_URL" ]; then
-        printf 'LLM_BASE_URL=%s\n' "$LLM_BASE_URL" >> "$_envfile"
-    fi
-    if [ -n "$LLM_MODEL" ]; then
-        printf 'LLM_MODEL=%s\n' "$LLM_MODEL" >> "$_envfile"
+    if [ -n "$LLM_PROVIDER" ]; then
+        printf '\n# --- LLM Provider ---\n' >> "$_envfile"
+        printf 'LLM_PROVIDER=%s\n' "$LLM_PROVIDER" >> "$_envfile"
+        printf 'LLM_API_KEY=%s\n' "$LLM_API_KEY" >> "$_envfile"
+    else
+        printf '\n# --- LLM Provider (configure in Settings → AI, or uncomment below) ---\n' >> "$_envfile"
+        printf '# LLM_PROVIDER=anthropic\n' >> "$_envfile"
+        printf '# LLM_API_KEY=your-api-key\n' >> "$_envfile"
     fi
 
     printf '\n# --- Application URL ---\n' >> "$_envfile"
@@ -294,7 +280,7 @@ ENVHEADER
 
 # --- Optional settings (uncomment to enable) ---
 # See .env.example for all available options including:
-#   SMTP, Web Push, Google OAuth, Slack (Enterprise only)
+#   SMTP, Web Push, Google OAuth
 ENVFOOTER
 
     # Restrict permissions — file contains secrets
@@ -349,11 +335,11 @@ print_success() {
 # ---------------------------------------------------------------------------
 main() {
     echo ""
-    echo "  _  __                   _ "
-    echo " | |/ /  _ _  _ ___  _ __ (_)"
-    echo " | ' < || | '_ \\ _ \\| '  \\| |"
-    echo " |_|\\_\\_, | .__/\\___/|_|_|_|_|"
-    echo "      |__/|_|"
+    echo "  _  __                    _ "
+    echo " | |/ /  _  _  ___  _ __ (_)"
+    echo " | ' /  | || |/ _ \\| '  \\| |"
+    echo " |_|\\_\\  \\_, |\\___/|_|_|_|_|"
+    echo "         |__/"
     echo ""
     echo "  The Data Intelligence Platform"
     echo ""
@@ -363,19 +349,23 @@ main() {
     if detect_existing; then
         handle_existing_install
 
-        # For updates: re-download compose file but preserve .env
-        # Detect edition from existing compose file
+        # download_files() below unconditionally fetches the Community compose
+        # file. Without this check, re-running install.sh against an existing
+        # Enterprise install would silently overwrite docker-compose.yml and
+        # downgrade it to Community — dropping redis, its depends_on entries,
+        # REDIS_URL and the Slack env vars — right before start_services()
+        # brings it up. Refuse instead; this installer only manages Community
+        # installs (KYO-641). Day-2 upgrades of an existing install (Community
+        # or Enterprise) go through upgrade.sh, which detects the edition and
+        # never rewrites docker-compose.yml.
         if grep -q "KYOMI_EDITION: enterprise" "$INSTALL_DIR/docker-compose.yml" 2>/dev/null; then
-            EDITION="enterprise"
-        else
-            EDITION="community"
+            fatal "Existing installation is Enterprise edition. This installer only manages Community installs, and continuing would downgrade your deployment. To upgrade an existing install, run: ./$INSTALL_DIR/upgrade.sh"
         fi
-        info "Detected $EDITION edition"
+
         download_files
         start_services
         print_success
     else
-        choose_edition
         download_files
         generate_secrets
         configure_llm
