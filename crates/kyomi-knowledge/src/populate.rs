@@ -140,14 +140,185 @@ pub async fn populate_table_embeddings(
 // Column embeddings
 // ---------------------------------------------------------------------------
 
-/// Populate column embeddings for all columns in a datasource's tables.
-/// Returns the number of columns processed.
+/// Outcome of a [`populate_column_embeddings`] run.
+///
+/// Deliberately not a bare `usize`: `embedded` alone cannot distinguish "every
+/// column got an embedding" from "some columns were silently dropped", which
+/// is exactly the KYO-658 bug (a run that wrote fewer rows than it read was
+/// reported as a plain success). A caller must look at `skipped` before
+/// treating this as a clean run — see
+/// `docs/standards/error-handling/empty-on-failure-must-not-look-like-a-real-result.md`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ColumnEmbeddingOutcome {
+    /// Columns whose embeddings were written.
+    pub embedded: usize,
+    /// Columns skipped because their `table_cache_id` no longer existed at
+    /// write time (see [`write_column_embeddings_with_fk_guard`]).
+    pub skipped: usize,
+}
+
+impl ColumnEmbeddingOutcome {
+    /// Total columns this run attempted to write (embedded + skipped).
+    pub fn attempted(&self) -> usize {
+        self.embedded + self.skipped
+    }
+
+    /// `None` if every attempted column embedding was written -- a genuinely
+    /// clean run. `Some(message)` otherwise, describing the shortfall in
+    /// terms a log line or a `CatalogIndexResult.errors` entry can use
+    /// verbatim.
+    ///
+    /// This is the single place that decides "was this run a clean
+    /// success" -- callers must go through it rather than treating `Ok(_)`
+    /// from [`populate_column_embeddings`] as proof nothing was lost (that
+    /// was KYO-658: a run that silently wrote fewer rows than it read was
+    /// reported as a plain success). Mirrors the pure
+    /// `resolve_public_index_result` pattern in
+    /// `kyomi_auth::catalog::indexers::bigquery_public`.
+    pub fn failure_message(&self) -> Option<String> {
+        if self.skipped == 0 {
+            return None;
+        }
+        Some(format!(
+            "{} of {} column embeddings were skipped -- their table_cache row no \
+             longer existed at write time (the datasource or table was likely \
+             deleted while embedding was in flight; see KYO-658)",
+            self.skipped,
+            self.attempted()
+        ))
+    }
+}
+
+/// One column ready to be written to `column_embeddings`, with its
+/// embeddings already computed.
+///
+/// Split out from the read-then-embed steps of [`populate_column_embeddings`]
+/// purely so a test can drive [`write_column_embeddings_with_fk_guard`]
+/// directly with a deliberately stale `table_cache_id`, without needing to
+/// force a real concurrent delete to land inside the (multi-second, per
+/// KYO-644) embedding call above it. Same reasoning as the
+/// `write_dashboard_summary_with_cas` split in `kyomi_agent::execution`
+/// (KYO-539).
+struct ColumnEmbeddingWrite {
+    table_cache_id: i32,
+    column_name: String,
+    data_type: String,
+    description: Option<String>,
+    name_embedding: Vec<f32>,
+    desc_embedding: Option<Vec<f32>>,
+}
+
+/// Write each column's embeddings, guarding against `table_cache_id` having
+/// vanished between when it was read (before the slow embedding call in
+/// [`populate_column_embeddings`]) and now.
+///
+/// In production this happens when a user deletes the datasource while
+/// embedding is in flight: `DELETE FROM datasource_configs` cascades through
+/// `fk_table_cache_datasource` to remove the `datasource_table_cache` row a
+/// queued column embedding is about to reference (KYO-658). That is a
+/// genuine, expected race — if the datasource is gone there is nothing to
+/// attach a column embedding to, so skipping that column is correct.
+///
+/// What must NOT happen is letting the resulting foreign-key violation
+/// propagate via `?`: that would abort the INSERT loop entirely, silently
+/// dropping every column still queued after the vanished one — including
+/// columns belonging to tables that were never touched. So each column's
+/// insert is issued independently and only a genuine foreign-key violation
+/// is caught and counted; every other database error still propagates as a
+/// real failure. Do not "simplify" this back to a bare `?` — that is the
+/// exact bug this function exists to close.
+async fn write_column_embeddings_with_fk_guard(
+    db: &DbPool,
+    workspace_id: &str,
+    columns: &[ColumnEmbeddingWrite],
+) -> kyomi_core::Result<ColumnEmbeddingOutcome> {
+    let mut outcome = ColumnEmbeddingOutcome::default();
+
+    for col in columns {
+        let insert_result: Result<(), sqlx::Error> = match db {
+            DbPool::Postgres(pg) => {
+                // Bind pgvector::Vector directly from f32 slices -- no byte round-trip.
+                let name_vec = pgvector::Vector::from(col.name_embedding.clone());
+                let desc_vec = col.desc_embedding.clone().map(pgvector::Vector::from);
+                sqlx::query(
+                    "INSERT INTO column_embeddings \
+                         (table_cache_id, workspace_id, column_name, data_type, description, \
+                          name_embedding, desc_embedding) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7) \
+                     ON CONFLICT (table_cache_id, column_name) DO UPDATE SET \
+                         data_type = EXCLUDED.data_type, \
+                         description = EXCLUDED.description, \
+                         name_embedding = EXCLUDED.name_embedding, \
+                         desc_embedding = EXCLUDED.desc_embedding",
+                )
+                .bind(col.table_cache_id)
+                .bind(workspace_id)
+                .bind(&col.column_name)
+                .bind(&col.data_type)
+                .bind(col.description.as_deref())
+                .bind(&name_vec)
+                .bind(&desc_vec)
+                .execute(pg)
+                .await
+                .map(|_| ())
+            }
+            DbPool::Sqlite(sq) => {
+                let name_bytes = embedding_to_bytes(&col.name_embedding);
+                let desc_bytes = col.desc_embedding.as_ref().map(|e| embedding_to_bytes(e));
+                sqlx::query(
+                    "INSERT INTO column_embeddings \
+                         (table_cache_id, workspace_id, column_name, data_type, description, \
+                          name_embedding, desc_embedding) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7) \
+                     ON CONFLICT (table_cache_id, column_name) DO UPDATE SET \
+                         data_type = EXCLUDED.data_type, \
+                         description = EXCLUDED.description, \
+                         name_embedding = EXCLUDED.name_embedding, \
+                         desc_embedding = EXCLUDED.desc_embedding",
+                )
+                .bind(col.table_cache_id)
+                .bind(workspace_id)
+                .bind(&col.column_name)
+                .bind(&col.data_type)
+                .bind(col.description.as_deref())
+                .bind(&name_bytes)
+                .bind(&desc_bytes)
+                .execute(sq)
+                .await
+                .map(|_| ())
+            }
+        };
+
+        match insert_result {
+            Ok(()) => outcome.embedded += 1,
+            Err(sqlx::Error::Database(db_err)) if db_err.is_foreign_key_violation() => {
+                outcome.skipped += 1;
+                tracing::debug!(
+                    workspace_id,
+                    table_cache_id = col.table_cache_id,
+                    column_name = %col.column_name,
+                    "column_embeddings insert skipped -- table_cache_id no longer exists \
+                     (datasource or table deleted while embedding was in flight, KYO-658)"
+                );
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    Ok(outcome)
+}
+
+/// Returns how many columns were embedded and how many were skipped because
+/// their table vanished mid-run (see [`write_column_embeddings_with_fk_guard`]).
+/// A non-zero `skipped` count means this run did NOT fully succeed even
+/// though it returns `Ok` — callers must check it rather than treating `Ok`
+/// alone as "everything was embedded".
 pub async fn populate_column_embeddings(
     db: &DbPool,
     embed: &EmbeddingService,
     workspace_id: &str,
     datasource_config_id: &str,
-) -> kyomi_core::Result<usize> {
+) -> kyomi_core::Result<ColumnEmbeddingOutcome> {
     let is_pg = db.is_postgres();
     let bool_false = kyomi_core::sql_compat::bool_false(is_pg);
     let table_sql = format!(
@@ -190,7 +361,7 @@ pub async fn populate_column_embeddings(
     }
 
     if all_columns.is_empty() {
-        return Ok(0);
+        return Ok(ColumnEmbeddingOutcome::default());
     }
 
     // Filter out columns that already have embeddings
@@ -217,7 +388,7 @@ pub async fn populate_column_embeddings(
     all_columns.retain(|c| !existing_set.contains(&(c.table_cache_id, c.name.as_str())));
 
     if all_columns.is_empty() {
-        return Ok(0);
+        return Ok(ColumnEmbeddingOutcome::default());
     }
 
     // Batch-embed column names with enriched text: "table_full_name.column_name (data_type)"
@@ -240,6 +411,11 @@ pub async fn populate_column_embeddings(
     };
     let mut desc_embed_iter = desc_embeddings_batch.into_iter();
 
+    // This point is where KYO-658's race window opens: the slow embedding
+    // calls above just ran (~34s for 538 columns, per KYO-644), and every
+    // `table_cache_id` captured in `all_columns` was read *before* them. By
+    // the time the writes below run, some of those rows may already be gone.
+    let mut writes = Vec::with_capacity(all_columns.len());
     for (i, col) in all_columns.iter().enumerate() {
         let desc_emb = if col.description.is_some() {
             Some(desc_embed_iter
@@ -248,58 +424,14 @@ pub async fn populate_column_embeddings(
         } else {
             None
         };
-
-        match db {
-            DbPool::Postgres(pg) => {
-                // Bind pgvector::Vector directly from f32 slices -- no byte round-trip.
-                let name_vec = pgvector::Vector::from(name_embeddings[i].clone());
-                let desc_vec = desc_emb.map(pgvector::Vector::from);
-                sqlx::query(
-                    "INSERT INTO column_embeddings \
-                         (table_cache_id, workspace_id, column_name, data_type, description, \
-                          name_embedding, desc_embedding) \
-                     VALUES ($1, $2, $3, $4, $5, $6, $7) \
-                     ON CONFLICT (table_cache_id, column_name) DO UPDATE SET \
-                         data_type = EXCLUDED.data_type, \
-                         description = EXCLUDED.description, \
-                         name_embedding = EXCLUDED.name_embedding, \
-                         desc_embedding = EXCLUDED.desc_embedding",
-                )
-                .bind(col.table_cache_id)
-                .bind(workspace_id)
-                .bind(&col.name)
-                .bind(&col.data_type)
-                .bind(col.description.as_deref())
-                .bind(&name_vec)
-                .bind(&desc_vec)
-                .execute(pg)
-                .await?;
-            }
-            DbPool::Sqlite(sq) => {
-                let name_bytes = embedding_to_bytes(&name_embeddings[i]);
-                let desc_bytes = desc_emb.map(|e| embedding_to_bytes(&e));
-                sqlx::query(
-                    "INSERT INTO column_embeddings \
-                         (table_cache_id, workspace_id, column_name, data_type, description, \
-                          name_embedding, desc_embedding) \
-                     VALUES ($1, $2, $3, $4, $5, $6, $7) \
-                     ON CONFLICT (table_cache_id, column_name) DO UPDATE SET \
-                         data_type = EXCLUDED.data_type, \
-                         description = EXCLUDED.description, \
-                         name_embedding = EXCLUDED.name_embedding, \
-                         desc_embedding = EXCLUDED.desc_embedding",
-                )
-                .bind(col.table_cache_id)
-                .bind(workspace_id)
-                .bind(&col.name)
-                .bind(&col.data_type)
-                .bind(col.description.as_deref())
-                .bind(&name_bytes)
-                .bind(&desc_bytes)
-                .execute(sq)
-                .await?;
-            }
-        }
+        writes.push(ColumnEmbeddingWrite {
+            table_cache_id: col.table_cache_id,
+            column_name: col.name.clone(),
+            data_type: col.data_type.clone(),
+            description: col.description.clone(),
+            name_embedding: name_embeddings[i].clone(),
+            desc_embedding: desc_emb,
+        });
     }
 
     debug_assert!(
@@ -307,9 +439,15 @@ pub async fn populate_column_embeddings(
         "BUG: column description embedding batch size mismatch"
     );
 
-    let count = all_columns.len();
-    tracing::info!(count, datasource_config_id, "Column embeddings populated");
-    Ok(count)
+    let outcome = write_column_embeddings_with_fk_guard(db, workspace_id, &writes).await?;
+
+    tracing::info!(
+        embedded = outcome.embedded,
+        skipped = outcome.skipped,
+        datasource_config_id,
+        "Column embeddings populated"
+    );
+    Ok(outcome)
 }
 
 // ---------------------------------------------------------------------------
@@ -401,10 +539,14 @@ pub async fn populate_workspace(
 
     let mut total_tables = 0usize;
     let mut total_columns = 0usize;
+    let mut total_columns_skipped = 0usize;
 
     for ds_row in &ds_rows {
         total_tables += populate_table_embeddings(db, embed, workspace_id, &ds_row.datasource_config_id).await?;
-        total_columns += populate_column_embeddings(db, embed, workspace_id, &ds_row.datasource_config_id).await?;
+        let outcome =
+            populate_column_embeddings(db, embed, workspace_id, &ds_row.datasource_config_id).await?;
+        total_columns += outcome.embedded;
+        total_columns_skipped += outcome.skipped;
     }
 
     // Populate learning embeddings
@@ -429,9 +571,23 @@ pub async fn populate_workspace(
         populate_learning_embedding(db, embed, &lr.learning_id).await?;
     }
 
+    if total_columns_skipped > 0 {
+        // See ColumnEmbeddingOutcome::failure_message -- this run did NOT
+        // fully succeed even though every step above returned `Ok`, and
+        // must not be reported at the same severity as a clean run.
+        tracing::error!(
+            workspace_id,
+            columns_embedded = total_columns,
+            columns_skipped = total_columns_skipped,
+            "Workspace population did not fully succeed -- some column embeddings \
+             were skipped because their table_cache row no longer existed (KYO-658)"
+        );
+    }
+
     tracing::info!(
         tables = total_tables,
         columns = total_columns,
+        columns_skipped = total_columns_skipped,
         learnings = learning_rows.len(),
         workspace_id,
         "Workspace population complete"
@@ -540,6 +696,204 @@ mod tests {
         assert_eq!(extract_description_from_value(Some(&meta_none)), None);
 
         assert_eq!(extract_description_from_value(None), None);
+    }
+
+    // -- ColumnEmbeddingOutcome::failure_message -- KYO-658 -------------------
+    //
+    // AC2: a run that fails to embed some or all columns must not be
+    // reported as a clean success. `failure_message` is the single place
+    // that decision gets made, so pin it directly with synthetic outcomes
+    // rather than needing a full DB-backed run for every case -- mirrors
+    // `resolve_public_index_result`'s tests in
+    // `kyomi_auth::catalog::indexers::bigquery_public`.
+
+    #[test]
+    fn column_embedding_outcome_with_any_skips_is_not_a_clean_success() {
+        let mostly_fine = ColumnEmbeddingOutcome { embedded: 537, skipped: 1 };
+        let message = mostly_fine
+            .failure_message()
+            .expect("even a single skipped column must produce a failure message");
+        assert!(message.contains('1'), "message must name the skip count: {message}");
+        assert!(message.contains("538"), "message must name the total attempted: {message}");
+
+        let total_loss = ColumnEmbeddingOutcome { embedded: 0, skipped: 12 };
+        assert!(total_loss.failure_message().is_some());
+    }
+
+    #[test]
+    fn column_embedding_outcome_with_zero_skips_is_a_clean_success() {
+        let clean = ColumnEmbeddingOutcome { embedded: 538, skipped: 0 };
+        assert_eq!(clean.failure_message(), None);
+
+        let nothing_to_do = ColumnEmbeddingOutcome::default();
+        assert_eq!(nothing_to_do.failure_message(), None);
+    }
+
+    // -- write_column_embeddings_with_fk_guard -- KYO-658 race fix ------------
+    //
+    // AC1: reproduces the reported FK violation. `datasource_table_cache`
+    // and `column_embeddings` migrations declare a real
+    // `ON DELETE CASCADE` foreign key (see
+    // `apps/server/migrations-sqlite/00008_embedding_columns.sql` and the
+    // Postgres equivalent), and this test pool runs with
+    // `PRAGMA foreign_keys=ON` (`kyomi_core::db::DbPool::connect`), so the
+    // violation below is the real constraint firing, not a simulation.
+    //
+    // A live concurrent-delete race is not forced here: per
+    // `docs/standards/testing/nondeterministic-verdict-is-a-failing-test.md`,
+    // interleaving a delete inside the embedding call would make the test's
+    // outcome depend on scheduler timing. Instead this seeds a
+    // `table_cache_id` that is already stale by the time the guarded insert
+    // runs -- the same technique `write_dashboard_summary_with_cas`'s own
+    // tests use for the equivalent seam in `kyomi_agent::execution`
+    // (KYO-539), and one of the two reproduction strategies the ticket
+    // sanctions. `write_column_embeddings_with_fk_guard` takes embeddings
+    // that are already computed, so no embedding model needs to load for
+    // this test -- the synthetic `Vec<f32>` below is plain data, not a
+    // stubbed embedding *service*.
+    async fn seed_workspace_and_table(
+        db: &DbPool,
+        workspace_id: &str,
+        datasource_config_id: &str,
+        table_id: &str,
+    ) -> i32 {
+        let sq = match db {
+            DbPool::Sqlite(pool) => pool,
+            DbPool::Postgres(_) => unreachable!("test pool is always sqlite"),
+        };
+        sqlx::query(
+            "INSERT OR IGNORE INTO users (user_id, email) VALUES ('user-a', 'a@test.local')",
+        )
+        .execute(sq)
+        .await
+        .expect("seed user");
+        sqlx::query(
+            "INSERT OR IGNORE INTO workspaces (workspace_id, name, owner_user_id) \
+             VALUES ($1, 'Workspace', 'user-a')",
+        )
+        .bind(workspace_id)
+        .execute(sq)
+        .await
+        .expect("seed workspace");
+        sqlx::query(
+            "INSERT INTO datasource_configs (id, workspace_id, name, datasource_type, slug) \
+             VALUES ($1, $2, $1, 'postgres', $1)",
+        )
+        .bind(datasource_config_id)
+        .bind(workspace_id)
+        .execute(sq)
+        .await
+        .expect("seed datasource_configs");
+        sqlx::query(
+            "INSERT INTO datasource_table_cache \
+                 (workspace_id, datasource_config_id, project_id, dataset_id, table_id, table_metadata) \
+             VALUES ($1, $2, 'proj', 'dataset', $3, '{}')",
+        )
+        .bind(workspace_id)
+        .bind(datasource_config_id)
+        .bind(table_id)
+        .execute(sq)
+        .await
+        .expect("seed datasource_table_cache");
+
+        sqlx::query_scalar::<_, i32>(
+            "SELECT id FROM datasource_table_cache \
+             WHERE datasource_config_id = $1 AND table_id = $2",
+        )
+        .bind(datasource_config_id)
+        .bind(table_id)
+        .fetch_one(sq)
+        .await
+        .expect("fetch seeded table_cache id")
+    }
+
+    fn fake_embedding() -> Vec<f32> {
+        vec![0.1_f32; 384]
+    }
+
+    #[tokio::test]
+    async fn write_column_embeddings_with_fk_guard_skips_a_vanished_table_and_counts_it() {
+        let db = kyomi_core::db::DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite and run the full migration chain");
+
+        let valid_id = seed_workspace_and_table(&db, "ws-1", "ds-valid", "table_valid").await;
+        let doomed_id = seed_workspace_and_table(&db, "ws-1", "ds-doomed", "table_doomed").await;
+
+        // Simulate KYO-658's race: the user deleted the doomed datasource
+        // (the real production trigger -- `DELETE FROM datasource_configs`,
+        // see `kyomi_auth::datasource_service::delete_datasource`) while
+        // this column's embedding was still being computed. The cascade
+        // has already removed `table_doomed`'s `datasource_table_cache`
+        // row by the time the write below runs, exactly as it would in
+        // production.
+        let sq = match &db {
+            DbPool::Sqlite(pool) => pool,
+            DbPool::Postgres(_) => unreachable!("test pool is always sqlite"),
+        };
+        sqlx::query("DELETE FROM datasource_configs WHERE id = 'ds-doomed'")
+            .execute(sq)
+            .await
+            .expect("delete the doomed datasource, cascading to its table_cache row");
+
+        let writes = vec![
+            ColumnEmbeddingWrite {
+                table_cache_id: valid_id,
+                column_name: "id".to_string(),
+                data_type: "INTEGER".to_string(),
+                description: None,
+                name_embedding: fake_embedding(),
+                desc_embedding: None,
+            },
+            ColumnEmbeddingWrite {
+                table_cache_id: doomed_id,
+                column_name: "id".to_string(),
+                data_type: "INTEGER".to_string(),
+                description: None,
+                name_embedding: fake_embedding(),
+                desc_embedding: None,
+            },
+        ];
+
+        let outcome = write_column_embeddings_with_fk_guard(&db, "ws-1", &writes)
+            .await
+            .expect(
+                "a vanished table_cache row must be skipped and counted, \
+                 not propagated as a hard error that aborts the whole batch",
+            );
+
+        assert_eq!(
+            outcome.embedded, 1,
+            "the still-valid table's column must still be written, even though it was \
+             queued in the same batch as the vanished one"
+        );
+        assert_eq!(
+            outcome.skipped, 1,
+            "the vanished table's column must be counted as skipped, not silently dropped"
+        );
+        assert!(
+            outcome.failure_message().is_some(),
+            "a run with a skip must not be reportable as a clean success"
+        );
+
+        let embedded_for_valid_table: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM column_embeddings WHERE table_cache_id = $1")
+                .bind(valid_id)
+                .fetch_one(sq)
+                .await
+                .expect("count rows for the valid table");
+        assert_eq!(embedded_for_valid_table, 1, "the valid column's embedding must actually be persisted");
+
+        let embedded_for_doomed_table: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM column_embeddings WHERE table_cache_id = $1")
+                .bind(doomed_id)
+                .fetch_one(sq)
+                .await
+                .expect("count rows for the doomed table");
+        assert_eq!(
+            embedded_for_doomed_table, 0,
+            "the doomed table's id is gone -- there is nothing valid to write a row against"
+        );
     }
 }
 
@@ -713,8 +1067,12 @@ mod runtime_blocking_tests {
         stop.store(true, Ordering::Relaxed);
         heartbeat.await.expect("heartbeat task must not panic");
 
-        let count = result.expect("populate_column_embeddings must succeed");
-        assert_eq!(count, EXPECTED_COLUMNS, "must embed every seeded column exactly once");
+        let outcome = result.expect("populate_column_embeddings must succeed");
+        assert_eq!(
+            outcome.embedded, EXPECTED_COLUMNS,
+            "must embed every seeded column exactly once"
+        );
+        assert_eq!(outcome.skipped, 0, "nothing raced here -- no column should be skipped");
 
         let worst_gap_ms = worst_gap_ms.load(Ordering::Relaxed);
         assert!(

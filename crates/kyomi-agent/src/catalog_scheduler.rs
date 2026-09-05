@@ -671,7 +671,7 @@ impl CatalogRefreshScheduler {
             .await
             {
                 Ok(table_count) => {
-                    if let Err(e) = kyomi_knowledge::populate::populate_column_embeddings(
+                    match kyomi_knowledge::populate::populate_column_embeddings(
                         &self.db,
                         embedding,
                         ws_id,
@@ -679,13 +679,30 @@ impl CatalogRefreshScheduler {
                     )
                     .await
                     {
-                        warn!(error = %e, "Public dataset column embedding population failed");
-                    } else {
-                        info!(tables = table_count, "Public dataset embeddings populated");
+                        Ok(outcome) => {
+                            info!(
+                                tables = table_count,
+                                columns_embedded = outcome.embedded,
+                                columns_skipped = outcome.skipped,
+                                "Public dataset embeddings populated"
+                            );
+                            // A non-zero skip means this run did NOT fully
+                            // succeed even though it returned `Ok` -- see
+                            // `ColumnEmbeddingOutcome::failure_message`
+                            // (KYO-658). This path has no `CatalogIndexResult`
+                            // of its own to fold the failure into, so a loud
+                            // log is the only channel available.
+                            if let Some(message) = outcome.failure_message() {
+                                error!(%message, "Public dataset column embedding population did not fully succeed");
+                            }
+                        }
+                        Err(e) => {
+                            error!(error = %e, "Public dataset column embedding population failed");
+                        }
                     }
                 }
                 Err(e) => {
-                    warn!(error = %e, "Public dataset table embedding population failed");
+                    error!(error = %e, "Public dataset table embedding population failed");
                 }
             }
         }
