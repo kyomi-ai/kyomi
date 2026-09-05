@@ -952,6 +952,347 @@ pub fn apply_container_coverage(
     }
 }
 
+// ─── Container liveness GC (KYO-622) ───────────────────────────────────────
+
+/// Consecutive *complete* enumerations (see [`reconcile_container_liveness`]'s
+/// `run_complete` parameter) a container must be absent from before its
+/// still-live cached rows are archived by the liveness GC.
+///
+/// `archive_missing_tables`'s KYO-614 scope check (`is_archive_candidate`) is
+/// deliberately permanent: a container that stops being enumerated never
+/// re-enters any run's scope set, so its rows stay `is_archived = false`
+/// forever unless something else closes the loop. This constant is that
+/// something else's threshold, chosen against the exact same asymmetry that
+/// motivates the KYO-614 check itself — preserving a genuinely-deleted
+/// table costs one stale row; archiving wrongly costs the customer their
+/// catalog with no error surfaced.
+///
+/// A single complete run being wrong would require the discovery layer
+/// itself to lie about having seen everything — exactly KYO-619's shape
+/// (confirmed BigQuery pagination/absent-vs-empty bug), now fixed, and not
+/// something this threshold should have to re-guard against on its own. `3`
+/// gives margin against an unknown-unknown of the same class — a second,
+/// undiscovered way a "complete" run's enumeration could still miss a live
+/// container — while bounding how stale a genuinely-live container's cache
+/// can get to roughly three refresh cycles, the same order of magnitude
+/// `can_refresh_now`'s rate limit already imposes between runs.
+const MISSED_COMPLETE_RUNS_BEFORE_ARCHIVE: i64 = 3;
+
+/// Outcome of one [`reconcile_container_liveness`] call.
+pub struct ContainerLivenessOutcome {
+    /// `(project_id, dataset_id)` pairs archived this call, for logging.
+    pub archived_containers: Vec<ContainerKey>,
+    /// `full_table_name`-formatted table ids archived this call — same
+    /// shape as [`archive_missing_tables`]'s own return value.
+    pub archived_tables: Vec<String>,
+}
+
+/// Reclaim `datasource_table_cache` rows belonging to a container that has
+/// genuinely stopped existing at the source.
+///
+/// `archive_missing_tables` never touches a row whose container wasn't
+/// enumerated THIS run — an un-enumerated container is an unknown, not a
+/// confirmed absence (KYO-614) — so without this function a container
+/// deleted at the source stays un-archived forever, permanently inflating
+/// [`check_container_coverage`]'s live-container denominator. This function
+/// is the separate mechanism, with its own independent evidence, that
+/// reclaims it — see `datasource_container_cache`'s migration for the full
+/// background.
+///
+/// `run_complete` MUST be `false` whenever the calling run produced ANY
+/// error (a denied container, a failed table listing, a partial discovery
+/// failure folded into an opaque error string). Neither `discover_all_containers`
+/// (`kyomi_agent::catalog::traits`, a flat `Result<Vec<String>>`) nor
+/// Connect's `CatalogResult` (per-container failures are opaque strings
+/// folded into `errors`, not attributable to a container) can say
+/// "enumeration succeeded for containers X and Y but not Z" — only "did
+/// this run's enumeration succeed as a whole". Whole-run completeness is
+/// therefore the only sound evidence available; this deliberately does NOT
+/// attempt to parse `errors` strings to attribute a failure to a specific
+/// container. Being conservative here is deliberate: a table-level error
+/// does not strictly mean a container was missed, but the archive-wrongly
+/// -vs-preserve-a-stale-row asymmetry means treating "maybe missed" as
+/// "definitely missed, for GC purposes" is the only safe default.
+///
+/// When `run_complete` is `false` this is a strict no-op — not even a
+/// `missed_runs` counter reset — and returns an empty outcome without
+/// touching the database at all. That is the load-bearing guarantee: a run
+/// that could not see a container can never advance it toward deletion, no
+/// matter how many incomplete runs pass.
+///
+/// When `run_complete` is `true`:
+/// 1. Every container in `enumerated_containers` is upserted with
+///    `last_seen_at = now`, `missed_runs = 0` — it was just seen, so any
+///    prior miss streak is void.
+/// 2. Every *live* container (distinct `(project_id, dataset_id)` over
+///    non-archived `datasource_table_cache` rows for this datasource) that
+///    is NOT in `enumerated_containers` has `missed_runs` incremented
+///    (starting at 1 if it has no liveness row yet).
+/// 3. Any container whose `missed_runs` has now reached
+///    [`MISSED_COMPLETE_RUNS_BEFORE_ARCHIVE`] has its still-live cache rows
+///    archived, and its liveness row deleted — a later reappearance starts
+///    clean rather than resuming a stale counter.
+/// 4. Liveness rows for containers with no live cache rows left at all are
+///    pruned — there is nothing left for them to protect, whether they were
+///    archived by this call, by [`archive_missing_tables`] itself, or by an
+///    [`ArchiveScope::EntireDatasource`] sweep.
+///
+/// Callers run this immediately before [`check_container_coverage`] at all
+/// three catalog-indexer call sites, so rows this call reclaims drop out of
+/// that function's live-container denominator in the same run they're
+/// reclaimed.
+///
+/// Never reuses [`is_disproportionate_archive`] or [`is_material_shortfall`]
+/// as a decision input — both are purely observational (see their own doc
+/// comments) and MUST NEVER gate control flow. This function's only decision
+/// threshold is [`MISSED_COMPLETE_RUNS_BEFORE_ARCHIVE`].
+pub async fn reconcile_container_liveness(
+    db: &DbPool,
+    workspace_id: &str,
+    datasource_config_id: &str,
+    enumerated_containers: &HashSet<ContainerKey>,
+    run_complete: bool,
+) -> Result<ContainerLivenessOutcome> {
+    if !run_complete {
+        // KYO-622's load-bearing guarantee — see the doc comment above. An
+        // incomplete run genuinely knows nothing about whether an absent
+        // container still exists, so it must behave as if it were never
+        // called at all: no upsert, no increment, no read.
+        return Ok(ContainerLivenessOutcome {
+            archived_containers: Vec::new(),
+            archived_tables: Vec::new(),
+        });
+    }
+
+    let is_pg = db.is_postgres();
+    let now_expr = kyomi_core::sql_compat::now(is_pg);
+
+    // Step 1: every enumerated container was just seen this (complete) run
+    // — reset its streak.
+    for (project_id, dataset_id) in enumerated_containers {
+        let sql = format!(
+            "INSERT INTO datasource_container_cache \
+                (workspace_id, datasource_config_id, project_id, dataset_id, last_seen_at, missed_runs, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, {now}, 0, {now}, {now}) \
+             ON CONFLICT (workspace_id, datasource_config_id, project_id, dataset_id) \
+             DO UPDATE SET last_seen_at = {now}, missed_runs = 0, updated_at = {now}",
+            now = now_expr,
+        );
+        kyomi_core::db_execute!(
+            db,
+            &sql,
+            workspace_id,
+            datasource_config_id,
+            project_id,
+            dataset_id
+        )
+        .map_err(|e| {
+            kyomi_core::Error::Internal(format!(
+                "failed to record container liveness for {project_id}.{dataset_id}: {e}"
+            ))
+        })?;
+    }
+
+    // Step 2: which currently-live containers were NOT enumerated this run
+    // — same "live" definition `check_container_coverage` uses, keyed by
+    // the same `(project_id, dataset_id)` tuple per `ContainerKey`'s doc
+    // comment.
+    #[derive(sqlx::FromRow)]
+    struct LiveContainerRow {
+        project_id: String,
+        dataset_id: String,
+    }
+
+    let live_rows = kyomi_core::db_fetch_all!(
+        db,
+        LiveContainerRow,
+        r#"
+        SELECT DISTINCT project_id, dataset_id
+        FROM datasource_table_cache
+        WHERE workspace_id = $1
+          AND datasource_config_id = $2
+          AND is_archived = false
+        "#,
+        workspace_id,
+        datasource_config_id
+    )
+    .map_err(|e| {
+        kyomi_core::Error::Internal(format!(
+            "failed to list live containers for liveness reconciliation: {e}"
+        ))
+    })?;
+
+    let missing: Vec<ContainerKey> = live_rows
+        .into_iter()
+        .map(|r| (r.project_id, r.dataset_id))
+        .filter(|key| !enumerated_containers.contains(key))
+        .collect();
+
+    let mut archived_containers = Vec::new();
+    let mut archived_tables = Vec::new();
+
+    for (project_id, dataset_id) in &missing {
+        let sql = format!(
+            "INSERT INTO datasource_container_cache \
+                (workspace_id, datasource_config_id, project_id, dataset_id, missed_runs, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, 1, {now}, {now}) \
+             ON CONFLICT (workspace_id, datasource_config_id, project_id, dataset_id) \
+             DO UPDATE SET missed_runs = datasource_container_cache.missed_runs + 1, updated_at = {now}",
+            now = now_expr,
+        );
+        kyomi_core::db_execute!(
+            db,
+            &sql,
+            workspace_id,
+            datasource_config_id,
+            project_id,
+            dataset_id
+        )
+        .map_err(|e| {
+            kyomi_core::Error::Internal(format!(
+                "failed to advance miss streak for container {project_id}.{dataset_id}: {e}"
+            ))
+        })?;
+
+        let missed_runs: i64 = kyomi_core::db_fetch_scalar!(
+            db,
+            i64,
+            "SELECT missed_runs FROM datasource_container_cache \
+             WHERE workspace_id = $1 AND datasource_config_id = $2 \
+               AND project_id = $3 AND dataset_id = $4",
+            workspace_id,
+            datasource_config_id,
+            project_id,
+            dataset_id
+        )
+        .map_err(|e| {
+            kyomi_core::Error::Internal(format!(
+                "failed to read back miss streak for container {project_id}.{dataset_id}: {e}"
+            ))
+        })?;
+
+        if missed_runs < MISSED_COMPLETE_RUNS_BEFORE_ARCHIVE {
+            continue;
+        }
+
+        // Step 3: this container has been absent from
+        // MISSED_COMPLETE_RUNS_BEFORE_ARCHIVE consecutive complete runs —
+        // reclaim its still-live rows. Fetch the table ids BEFORE archiving
+        // so the names this call reports match exactly what it archived.
+        #[derive(sqlx::FromRow)]
+        struct TableIdRow {
+            table_id: String,
+        }
+        let table_rows = kyomi_core::db_fetch_all!(
+            db,
+            TableIdRow,
+            "SELECT table_id FROM datasource_table_cache \
+             WHERE workspace_id = $1 AND datasource_config_id = $2 \
+               AND project_id = $3 AND dataset_id = $4 AND is_archived = false",
+            workspace_id,
+            datasource_config_id,
+            project_id,
+            dataset_id
+        )
+        .map_err(|e| {
+            kyomi_core::Error::Internal(format!(
+                "failed to list live tables for container {project_id}.{dataset_id} \
+                 before liveness-GC archive: {e}"
+            ))
+        })?;
+
+        let archive_sql = format!(
+            "UPDATE datasource_table_cache SET is_archived = true, updated_at = {now_expr} \
+             WHERE workspace_id = $1 AND datasource_config_id = $2 \
+               AND project_id = $3 AND dataset_id = $4 AND is_archived = false"
+        );
+        kyomi_core::db_execute!(
+            db,
+            &archive_sql,
+            workspace_id,
+            datasource_config_id,
+            project_id,
+            dataset_id
+        )
+        .map_err(|e| {
+            kyomi_core::Error::Internal(format!(
+                "failed to archive container {project_id}.{dataset_id} via liveness GC: {e}"
+            ))
+        })?;
+
+        // A returning reappearance must start clean, not resume a counter
+        // that would otherwise immediately re-trip the threshold.
+        let delete_sql = "DELETE FROM datasource_container_cache \
+             WHERE workspace_id = $1 AND datasource_config_id = $2 \
+               AND project_id = $3 AND dataset_id = $4";
+        kyomi_core::db_execute!(
+            db,
+            delete_sql,
+            workspace_id,
+            datasource_config_id,
+            project_id,
+            dataset_id
+        )
+        .map_err(|e| {
+            kyomi_core::Error::Internal(format!(
+                "failed to clear liveness row for archived container {project_id}.{dataset_id}: {e}"
+            ))
+        })?;
+
+        for row in table_rows {
+            archived_tables.push(kyomi_core::build_full_table_name(
+                project_id,
+                dataset_id,
+                &row.table_id,
+            ));
+        }
+        archived_containers.push((project_id.clone(), dataset_id.clone()));
+
+        warn!(
+            workspace_id,
+            datasource_config_id,
+            project_id,
+            dataset_id,
+            missed_runs,
+            "liveness GC archived a container absent from \
+             MISSED_COMPLETE_RUNS_BEFORE_ARCHIVE consecutive complete enumerations"
+        );
+    }
+
+    // Step 4: prune liveness rows for containers with no live cache rows
+    // left at all — nothing left for them to protect, whether they were
+    // just archived above, archived earlier by `archive_missing_tables`
+    // itself, or wiped by an `ArchiveScope::EntireDatasource` sweep.
+    let prune_sql = "DELETE FROM datasource_container_cache \
+         WHERE workspace_id = $1 AND datasource_config_id = $2 \
+           AND NOT EXISTS ( \
+             SELECT 1 FROM datasource_table_cache t \
+             WHERE t.workspace_id = datasource_container_cache.workspace_id \
+               AND t.datasource_config_id = datasource_container_cache.datasource_config_id \
+               AND t.project_id = datasource_container_cache.project_id \
+               AND t.dataset_id = datasource_container_cache.dataset_id \
+               AND t.is_archived = false \
+           )";
+    kyomi_core::db_execute!(db, prune_sql, workspace_id, datasource_config_id).map_err(|e| {
+        kyomi_core::Error::Internal(format!("failed to prune stale container-liveness rows: {e}"))
+    })?;
+
+    if !archived_containers.is_empty() {
+        info!(
+            workspace_id,
+            datasource_config_id,
+            archived_containers = archived_containers.len(),
+            archived_tables = archived_tables.len(),
+            "liveness GC reclaimed containers absent from repeated complete enumerations"
+        );
+    }
+
+    Ok(ContainerLivenessOutcome {
+        archived_containers,
+        archived_tables,
+    })
+}
+
 /// Update the datasource's last_catalog_refresh timestamp.
 pub async fn update_datasource_last_refresh(
     db: &DbPool,
@@ -3103,5 +3444,368 @@ mod tests {
         assert_eq!(status, "idle");
         assert_eq!(failure_reason, None);
         assert!(errors.is_empty());
+    }
+
+    // ── reconcile_container_liveness (KYO-622) ────────────────────────────
+    //
+    // Reuses `seed_container_scoped_fixture`/`archived_state` from the
+    // `archive_missing_tables` (KYO-614) section above.
+
+    /// Reads back `(missed_runs, last_seen_at IS NOT NULL)` for one
+    /// container's liveness row, or `None` if it has no liveness row at all
+    /// (either never seen/missed, or already pruned/deleted).
+    async fn read_liveness_row(
+        sq: &sqlx::SqlitePool,
+        datasource_config_id: &str,
+        project_id: &str,
+        dataset_id: &str,
+    ) -> Option<(i64, bool)> {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            missed_runs: i64,
+            last_seen_at: Option<String>,
+        }
+        let row: Option<Row> = sqlx::query_as(
+            "SELECT missed_runs, last_seen_at FROM datasource_container_cache \
+             WHERE datasource_config_id = ? AND project_id = ? AND dataset_id = ?",
+        )
+        .bind(datasource_config_id)
+        .bind(project_id)
+        .bind(dataset_id)
+        .fetch_optional(sq)
+        .await
+        .expect("read liveness row");
+        row.map(|r| (r.missed_runs, r.last_seen_at.is_some()))
+    }
+
+    /// **The most important test in this change (AC2).** A container that is
+    /// absent from `enumerated_containers` but whose run is *incomplete*
+    /// looks, from the archiver's point of view, exactly like a genuinely
+    /// deleted container — the only difference is the `run_complete` flag.
+    /// This asserts the flag is actually load-bearing: no matter how many
+    /// incomplete runs pass (looped well past the archive threshold), the
+    /// container's rows must never be archived, because an incomplete run
+    /// can never prove the container is actually gone.
+    #[tokio::test]
+    async fn an_unreachable_container_is_never_archived_however_many_incomplete_runs_pass() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let (workspace_id, ds) = {
+            let DbPool::Sqlite(sq) = &db else {
+                unreachable!("expected sqlite pool");
+            };
+            seed_container_scoped_fixture(sq, "unreachable", &[("proj-1", "dataset_a", "t1")])
+                .await
+        };
+
+        // Never enumerated, and every run that doesn't enumerate it is
+        // incomplete — this container is simply unreachable this run.
+        let enumerated = HashSet::new();
+
+        for i in 0..(MISSED_COMPLETE_RUNS_BEFORE_ARCHIVE * 3) {
+            let outcome =
+                reconcile_container_liveness(&db, &workspace_id, &ds, &enumerated, false)
+                    .await
+                    .unwrap_or_else(|e| panic!("reconcile_container_liveness (iteration {i}): {e}"));
+            assert!(
+                outcome.archived_containers.is_empty(),
+                "iteration {i}: an incomplete run must never archive anything"
+            );
+            assert!(outcome.archived_tables.is_empty());
+        }
+
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        assert!(
+            !archived_state(sq, &ds, "proj-1", "dataset_a", "t1").await,
+            "an unreachable container must never be archived, however many \
+             incomplete runs pass"
+        );
+    }
+
+    /// A `run_complete = false` call is a strict no-op, not merely one that
+    /// declines to archive — `missed_runs` itself must not move.
+    #[tokio::test]
+    async fn incomplete_run_leaves_missed_runs_unchanged() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let (workspace_id, ds) = {
+            let DbPool::Sqlite(sq) = &db else {
+                unreachable!("expected sqlite pool");
+            };
+            seed_container_scoped_fixture(sq, "noopstreak", &[("proj-1", "dataset_a", "t1")]).await
+        };
+        let enumerated = HashSet::new();
+
+        // One real complete miss establishes missed_runs = 1.
+        reconcile_container_liveness(&db, &workspace_id, &ds, &enumerated, true)
+            .await
+            .expect("reconcile (complete)");
+
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        assert_eq!(
+            read_liveness_row(sq, &ds, "proj-1", "dataset_a").await,
+            Some((1, false))
+        );
+
+        // Several incomplete runs must not advance it any further.
+        for _ in 0..5 {
+            reconcile_container_liveness(&db, &workspace_id, &ds, &enumerated, false)
+                .await
+                .expect("reconcile (incomplete)");
+        }
+
+        assert_eq!(
+            read_liveness_row(sq, &ds, "proj-1", "dataset_a").await,
+            Some((1, false)),
+            "an incomplete run must leave missed_runs exactly as a complete run left it"
+        );
+    }
+
+    /// A genuinely deleted container is archived, and only after EXACTLY
+    /// `MISSED_COMPLETE_RUNS_BEFORE_ARCHIVE` consecutive complete runs never
+    /// enumerated it — the boundary matters as much as the direction.
+    #[tokio::test]
+    async fn genuinely_deleted_container_archives_after_exactly_the_threshold() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let (workspace_id, ds) = {
+            let DbPool::Sqlite(sq) = &db else {
+                unreachable!("expected sqlite pool");
+            };
+            seed_container_scoped_fixture(sq, "boundary", &[("proj-1", "dataset_a", "t1")]).await
+        };
+        let enumerated = HashSet::new();
+
+        // MISSED_COMPLETE_RUNS_BEFORE_ARCHIVE - 1 complete misses: must not
+        // archive yet.
+        for i in 0..(MISSED_COMPLETE_RUNS_BEFORE_ARCHIVE - 1) {
+            let outcome = reconcile_container_liveness(&db, &workspace_id, &ds, &enumerated, true)
+                .await
+                .unwrap_or_else(|e| panic!("reconcile (miss {i}): {e}"));
+            assert!(
+                outcome.archived_containers.is_empty(),
+                "must not archive before reaching the threshold (miss {i})"
+            );
+        }
+        {
+            let DbPool::Sqlite(sq) = &db else {
+                unreachable!("expected sqlite pool");
+            };
+            assert!(
+                !archived_state(sq, &ds, "proj-1", "dataset_a", "t1").await,
+                "must still be unarchived at threshold - 1"
+            );
+            assert_eq!(
+                read_liveness_row(sq, &ds, "proj-1", "dataset_a").await,
+                Some((MISSED_COMPLETE_RUNS_BEFORE_ARCHIVE - 1, false))
+            );
+        }
+
+        // The Nth complete miss reaches the threshold and archives.
+        let outcome = reconcile_container_liveness(&db, &workspace_id, &ds, &enumerated, true)
+            .await
+            .expect("reconcile (threshold miss)");
+        assert_eq!(
+            outcome.archived_containers,
+            vec![("proj-1".to_string(), "dataset_a".to_string())]
+        );
+        assert_eq!(outcome.archived_tables, vec!["proj-1.dataset_a.t1".to_string()]);
+
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        assert!(archived_state(sq, &ds, "proj-1", "dataset_a", "t1").await);
+        assert_eq!(
+            read_liveness_row(sq, &ds, "proj-1", "dataset_a").await,
+            None,
+            "the liveness row must be deleted once its container is archived, \
+             so a later reappearance starts clean"
+        );
+    }
+
+    /// `missed_runs` resets to 0 the moment a container reappears — a gap
+    /// followed by a sighting must not leave any residue that a later gap
+    /// could build on.
+    #[tokio::test]
+    async fn missed_runs_resets_on_reappearance_and_does_not_accumulate_across_a_gap() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let (workspace_id, ds) = {
+            let DbPool::Sqlite(sq) = &db else {
+                unreachable!("expected sqlite pool");
+            };
+            seed_container_scoped_fixture(sq, "resetgap", &[("proj-1", "dataset_a", "t1")]).await
+        };
+        let absent = HashSet::new();
+        let present =
+            HashSet::from([("proj-1".to_string(), "dataset_a".to_string())]);
+
+        // Two complete misses.
+        for _ in 0..2 {
+            reconcile_container_liveness(&db, &workspace_id, &ds, &absent, true)
+                .await
+                .expect("reconcile (miss)");
+        }
+        {
+            let DbPool::Sqlite(sq) = &db else {
+                unreachable!("expected sqlite pool");
+            };
+            assert_eq!(
+                read_liveness_row(sq, &ds, "proj-1", "dataset_a").await,
+                Some((2, false))
+            );
+        }
+
+        // It reappears — streak must reset to 0.
+        reconcile_container_liveness(&db, &workspace_id, &ds, &present, true)
+            .await
+            .expect("reconcile (seen)");
+        {
+            let DbPool::Sqlite(sq) = &db else {
+                unreachable!("expected sqlite pool");
+            };
+            assert_eq!(
+                read_liveness_row(sq, &ds, "proj-1", "dataset_a").await,
+                Some((0, true)),
+                "reappearing must reset missed_runs to 0 and stamp last_seen_at"
+            );
+        }
+
+        // Two more misses after the gap — if the reset didn't really
+        // happen, this would already be at the threshold (2 + 2 = 4 >= 3).
+        // It must instead read as only 2.
+        for _ in 0..2 {
+            let outcome = reconcile_container_liveness(&db, &workspace_id, &ds, &absent, true)
+                .await
+                .expect("reconcile (miss after gap)");
+            assert!(
+                outcome.archived_containers.is_empty(),
+                "the reset must not let misses accumulate across the gap"
+            );
+        }
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        assert_eq!(
+            read_liveness_row(sq, &ds, "proj-1", "dataset_a").await,
+            Some((2, true)),
+            "missed_runs must reflect only the misses since the reappearance"
+        );
+        assert!(!archived_state(sq, &ds, "proj-1", "dataset_a", "t1").await);
+    }
+
+    /// Only the deleted container's rows are archived — a sibling container
+    /// in the same datasource that keeps being enumerated every run must be
+    /// completely untouched.
+    #[tokio::test]
+    async fn sibling_live_container_is_untouched_by_a_neighbors_archival() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let (workspace_id, ds) = {
+            let DbPool::Sqlite(sq) = &db else {
+                unreachable!("expected sqlite pool");
+            };
+            seed_container_scoped_fixture(
+                sq,
+                "sibling",
+                &[("proj-1", "dataset_deleted", "t1"), ("proj-1", "dataset_live", "t1")],
+            )
+            .await
+        };
+        let live_only = HashSet::from([("proj-1".to_string(), "dataset_live".to_string())]);
+
+        let mut last_outcome = None;
+        for _ in 0..MISSED_COMPLETE_RUNS_BEFORE_ARCHIVE {
+            last_outcome = Some(
+                reconcile_container_liveness(&db, &workspace_id, &ds, &live_only, true)
+                    .await
+                    .expect("reconcile"),
+            );
+        }
+        let outcome = last_outcome.expect("at least one run happened");
+
+        assert_eq!(
+            outcome.archived_containers,
+            vec![("proj-1".to_string(), "dataset_deleted".to_string())]
+        );
+        assert_eq!(outcome.archived_tables, vec!["proj-1.dataset_deleted.t1".to_string()]);
+
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        assert!(archived_state(sq, &ds, "proj-1", "dataset_deleted", "t1").await);
+        assert!(
+            !archived_state(sq, &ds, "proj-1", "dataset_live", "t1").await,
+            "the live sibling container must be completely untouched"
+        );
+        assert_eq!(
+            read_liveness_row(sq, &ds, "proj-1", "dataset_live").await,
+            Some((0, true)),
+            "the live container's own liveness row must reflect it being seen every run"
+        );
+    }
+
+    /// AC3 end to end: once the liveness GC archives a genuinely deleted
+    /// container, `check_container_coverage`'s live-container denominator
+    /// must drop to match — the whole point of running the GC before the
+    /// coverage check in the same run.
+    #[tokio::test]
+    async fn archiving_a_deleted_container_drops_the_live_count_check_container_coverage_uses() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let (workspace_id, ds) = {
+            let DbPool::Sqlite(sq) = &db else {
+                unreachable!("expected sqlite pool");
+            };
+            seed_container_scoped_fixture(
+                sq,
+                "ac3",
+                &[("proj-1", "dataset_a", "t1"), ("proj-1", "dataset_b", "t1")],
+            )
+            .await
+        };
+        let enumerated_b_only = HashSet::from([("proj-1".to_string(), "dataset_b".to_string())]);
+
+        // BEFORE the GC has ever run: both containers still count as live —
+        // dataset_a's row hasn't been reclaimed yet, so coverage sees 2.
+        let before = check_container_coverage(&db, &workspace_id, &ds, &enumerated_b_only)
+            .await
+            .expect("check_container_coverage (before)");
+        assert!(
+            before.warning.as_deref().is_some_and(|w| w.contains("1 of 2")),
+            "got: {:?}",
+            before.warning
+        );
+
+        // Run the GC enough complete times for dataset_a to cross the
+        // threshold and be reclaimed.
+        for _ in 0..MISSED_COMPLETE_RUNS_BEFORE_ARCHIVE {
+            reconcile_container_liveness(&db, &workspace_id, &ds, &enumerated_b_only, true)
+                .await
+                .expect("reconcile");
+        }
+
+        // AFTER: dataset_a's row is archived, so it drops out of coverage's
+        // live count entirely — full coverage with dataset_b alone.
+        let after = check_container_coverage(&db, &workspace_id, &ds, &enumerated_b_only)
+            .await
+            .expect("check_container_coverage (after)");
+        assert!(
+            after.warning.is_none(),
+            "the reclaimed container must drop out of the live-container count \
+             entirely, got: {:?}",
+            after.warning
+        );
+        assert!(!after.material);
     }
 }
