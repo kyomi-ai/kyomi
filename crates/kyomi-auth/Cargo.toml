@@ -63,6 +63,9 @@ kyomi-test-tracing = { workspace = true }
 # apps/server/Cargo.toml and kyomi-core's own self-dependency; see
 # crates/kyomi-core/src/test_db.rs's module docs. KYO-292.
 kyomi-core = { workspace = true, features = ["test-helpers"] }
+# HTTP-mocking harness for the BigQuery REST boundary (KYO-623) — no crate
+# in this workspace had one before; see the workspace Cargo.toml comment.
+wiremock = { workspace = true }
 
 [lints]
 workspace = true
