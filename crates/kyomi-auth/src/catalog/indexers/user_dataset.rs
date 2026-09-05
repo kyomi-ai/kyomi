@@ -25,8 +25,8 @@ use tracing::{info, warn};
 use crate::catalog::helpers::{
     apply_container_coverage, archive_missing_tables, cache_table, check_container_coverage,
     fold_table_outcomes, log_container_table_summary, log_run_enumeration_summary,
-    update_datasource_last_refresh, update_datasource_status, ArchiveScope, ContainerKey,
-    DatasetOutcome, IndexerContext, TableOutcome,
+    reconcile_container_liveness, update_datasource_last_refresh, update_datasource_status,
+    ArchiveScope, ContainerKey, DatasetOutcome, IndexerContext, TableOutcome,
 };
 use crate::catalog::types::{CatalogIndexResult, ColumnEntry};
 
@@ -208,6 +208,43 @@ impl UserDatasetIndexer {
         // (an empty `project_ids` returns `skipped(..)` above, before this
         // point) — always `Containers`, never `EntireDatasource`.
         let archive_scope = ArchiveScope::Containers(enumerated_datasets.clone());
+
+        // KYO-622: reclaim any dataset that has genuinely stopped existing
+        // at the source — see `reconcile_container_liveness`'s doc comment.
+        // Run immediately before `check_container_coverage` so reclaimed
+        // rows drop out of that function's live-container denominator in
+        // this same run. Unlike the SQL-template and Connect paths, this
+        // module has no "user deliberately emptied the scope" state at this
+        // layer (an empty `project_ids` returns `skipped(..)` above, before
+        // this point), so `ArchiveScope::EntireDatasource` is unreachable
+        // here and the liveness GC always runs.
+        //
+        // `run_complete` is deliberately conservative — see the SQL-template
+        // path for the identical reasoning: only a run whose `errors` is
+        // empty counts, even though a table-level error does not strictly
+        // mean a dataset's own listing was incomplete.
+        //
+        // `&& outcome.archive` is the same closure as the SQL-template and
+        // Connect paths: a run that enumerated zero datasets with zero errors
+        // is the "untrustworthy zero" `outcome.archive` already refuses to
+        // archive on. `errors.is_empty()` alone can't see that.
+        let run_complete = errors.is_empty() && outcome.archive;
+        if let Err(e) = reconcile_container_liveness(
+            db,
+            workspace_id,
+            datasource_config_id,
+            &enumerated_datasets,
+            run_complete,
+        )
+        .await
+        {
+            warn!(
+                workspace_id,
+                datasource_config_id,
+                error = %e,
+                "failed to reconcile container liveness — skipping the liveness GC for this run"
+            );
+        }
 
         // KYO-614: did this run enumerate enough of the datasource's
         // currently-live datasets to trust an "idle" status? See the
@@ -919,6 +956,54 @@ mod tests {
             "datasets that were listed fine and are genuinely empty must not report failed"
         );
         assert_eq!(run_outcome.failure_reason, None);
+    }
+
+    /// KYO-622: this module's counterpart to the SQL-template and Connect
+    /// paths' `three_reachable_empty_*_refreshes_do_not_archive_via_liveness_gc`
+    /// regression tests (`catalog::traits` and `catalog::indexers::connect`).
+    ///
+    /// Driving the real `UserDatasetIndexer::index_workspace_catalog` entry
+    /// point end-to-end for the same "reachable but empty" scenario is NOT
+    /// practical here, unlike the other two indexers: `SQLCatalogIndexer` is
+    /// an injectable trait (see `MockAlwaysEmptyIndexer` in
+    /// `catalog::traits`'s tests), but `index_project_datasets` calls the
+    /// real `https://bigquery.googleapis.com` REST API through a hardcoded
+    /// `reqwest::Client` with no seam to substitute a canned empty response.
+    /// This crate's `[dev-dependencies]` (`crates/kyomi-auth/Cargo.toml`)
+    /// carry no HTTP-mocking crate — the same gap `apply_container_coverage`'s
+    /// own doc comment in `catalog::helpers` already notes ("no
+    /// HTTP-mocking seam ... no such dependency exists in this crate").
+    /// Manufacturing the zero-errors precondition here would require either
+    /// a live call to Google's real API (non-deterministic, an external
+    /// dependency no unit test should have) or a new mocking
+    /// dependency/seam — both out of scope for this fix. Stated explicitly
+    /// rather than substituted silently.
+    ///
+    /// What this test instead pins is the one piece of the call site that
+    /// can regress independently of the HTTP layer: this module's
+    /// `resolve_run_outcome` wrapper — the exact function
+    /// `index_workspace_catalog` calls to produce `outcome` — must resolve
+    /// `archive: false` for the exact untrustworthy-zero shape the KYO-622
+    /// fix's `run_complete = errors.is_empty() && outcome.archive` depends
+    /// on: zero datasets listed, zero errors.
+    /// `accessible_but_genuinely_empty_resolves_to_idle` above already
+    /// exercises this exact input through `status`; this extends it to
+    /// `archive`, since `archive` — not `status` — is the field the
+    /// KYO-622 fix actually reads. This does NOT prove the call site's `&&`
+    /// itself hasn't regressed back to `errors.is_empty()` alone — only an
+    /// end-to-end test could show that — so it is a partial substitute, not
+    /// equivalent coverage to the other two indexers' tests.
+    #[test]
+    fn untrustworthy_zero_resolves_archive_false_for_liveness_gc_gate() {
+        let outcomes: Vec<(String, Result<DatasetOutcome>)> = Vec::new();
+        let (tables_indexed, errors) = fold_dataset_outcomes("proj-1", outcomes);
+
+        let run_outcome = resolve_run_outcome(false, tables_indexed, &errors);
+        assert!(
+            !run_outcome.archive,
+            "zero datasets listed with zero errors is the untrustworthy zero the KYO-622 \
+             liveness GC's run_complete gate must never treat as a complete run"
+        );
     }
 
     // `fold_table_outcomes` / `TableOutcome` / `DatasetOutcome` /
