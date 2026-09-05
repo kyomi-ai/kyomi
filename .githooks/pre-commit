@@ -1,7 +1,7 @@
 #!/bin/bash
 # Pre-commit hook: blocks lint suppressions, server_fn/REST divergence,
-# Leptos signal disposal-safety violations, and unreviewed commits. Clippy
-# runs in CI on PRs (not locally).
+# Leptos signal disposal-safety violations, real-world identifiers, and
+# unreviewed commits. Clippy runs in CI on PRs (not locally).
 
 set -e
 
@@ -75,6 +75,33 @@ if [ -n "$staged_disposal_files" ]; then
     echo "✅ disposal-safety lint clean."
 else
     echo "✅ disposal-safety lint skipped (no kyomi-ui src files staged)."
+fi
+
+# --- Check 2c: Real-world identifier lint (KYO-662) ---
+# Blocks customer/production identifiers (GCP service-account addresses,
+# non-allowlisted email domains, public IPv4 addresses, credential-shaped
+# tokens, and salted-hash-matched denylisted identifiers) from ever being
+# staged, in any tracked file. This is the fast local signal; CI's full-tree
+# and commit-message scans are the gate that actually matters, since
+# core.hooksPath is per-clone and cannot be committed. See
+# scripts/lint/check-real-identifiers.sh's own header for the full rule set.
+echo "🔍 Checking for real-world identifiers..."
+
+staged_files=$(git diff --cached --name-only --diff-filter=ACM || true)
+
+if [ -n "$staged_files" ]; then
+    # shellcheck disable=SC2086  # word-splitting is intentional here
+    if ! ./scripts/lint/check-real-identifiers.sh $staged_files; then
+        echo ""
+        echo "❌ Real-identifier lint failed — commit blocked."
+        echo "   Remove the flagged identifier, or (only for a deliberately"
+        echo "   fake test fixture) add a path exception to"
+        echo "   scripts/lint/real-identifiers-allow.txt."
+        exit 1
+    fi
+    echo "✅ Real-identifier lint clean."
+else
+    echo "✅ Real-identifier lint skipped (no files staged)."
 fi
 
 # --- Check 3: Verify code review signature ---
