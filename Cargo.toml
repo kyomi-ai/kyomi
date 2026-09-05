@@ -66,6 +66,12 @@ memmap2 = "0.9"
 # (distributed via trust-manager's SSL_CERT_FILE bundle).
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream"] }
 
+# HTTP mocking for dev-dependency use (KYO-623) — stands up a local HTTP
+# server so a crate whose code makes real `reqwest` calls to an external API
+# (e.g. kyomi-auth's BigQuery REST client) can be tested against real
+# request/response traffic without a network call to the real service.
+wiremock = "0.6"
+
 # WebAuthn (passkeys)
 webauthn-rs = { version = "=0.6.1-dev", features = ["danger-allow-state-serialisation", "conditional-ui"] }
 webauthn-rs-proto = "=0.6.1-dev"

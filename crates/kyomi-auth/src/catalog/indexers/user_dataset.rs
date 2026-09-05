@@ -120,6 +120,7 @@ impl UserDatasetIndexer {
                 db,
                 embedding,
                 ctx: &ctx,
+                base_url: BIGQUERY_API_BASE_URL,
                 access_token,
                 project_id,
                 max_tables_per_dataset,
@@ -404,6 +405,10 @@ struct IndexProjectParams<'a> {
     db: &'a DbPool,
     embedding: &'a EmbeddingService,
     ctx: &'a IndexerContext,
+    /// BigQuery REST API base URL (scheme + host, no trailing slash) — see
+    /// [`BIGQUERY_API_BASE_URL`]. Every real caller passes that constant;
+    /// tests pass a local mock server's URL instead.
+    base_url: &'a str,
     access_token: &'a str,
     project_id: &'a str,
     max_tables_per_dataset: Option<usize>,
@@ -421,6 +426,8 @@ struct IndexDatasetParams<'a> {
     db: &'a DbPool,
     embedding: &'a EmbeddingService,
     ctx: &'a IndexerContext,
+    /// BigQuery REST API base URL — see [`IndexProjectParams::base_url`].
+    base_url: &'a str,
     access_token: &'a str,
     project_id: &'a str,
     dataset_id: &'a str,
@@ -454,6 +461,7 @@ async fn index_project_datasets(
         db,
         embedding,
         ctx,
+        base_url,
         access_token,
         project_id,
         max_tables_per_dataset,
@@ -464,7 +472,7 @@ async fn index_project_datasets(
     // means no datasets are inserted into `enumerated_datasets` for this
     // project at all (KYO-614) — exactly right, since none of them were
     // enumerated.
-    let datasets = list_bigquery_datasets(client, access_token, project_id).await?;
+    let datasets = list_bigquery_datasets(client, base_url, access_token, project_id).await?;
     let datasets_discovered = datasets.len();
 
     let mut outcomes = Vec::with_capacity(datasets.len());
@@ -475,6 +483,7 @@ async fn index_project_datasets(
             db,
             embedding,
             ctx,
+            base_url,
             access_token,
             project_id,
             dataset_id,
@@ -563,6 +572,7 @@ async fn index_dataset_tables(
         db,
         embedding,
         ctx,
+        base_url,
         access_token,
         project_id,
         dataset_id,
@@ -570,7 +580,8 @@ async fn index_dataset_tables(
         seen_table_ids,
         enumerated_datasets,
     } = params;
-    let mut tables = list_bigquery_tables(client, access_token, project_id, dataset_id).await?;
+    let mut tables =
+        list_bigquery_tables(client, base_url, access_token, project_id, dataset_id).await?;
     // KYO-614: the table *listing* call above succeeded — this dataset was
     // genuinely enumerated this run, regardless of whether any individual
     // table's schema read or cache write also succeeds below. Recorded as
@@ -591,21 +602,27 @@ async fn index_dataset_tables(
         let full_table_id = format!("{project_id}.{dataset_id}.{table_id}");
 
         // Fetch table schema
-        let columns =
-            match get_bigquery_table_schema(client, access_token, project_id, dataset_id, table_id)
-                .await
-            {
-                Ok(c) => c,
-                Err(e) => {
-                    warn!(
-                        table = full_table_id,
-                        error = %e,
-                        "could not fetch schema, skipping"
-                    );
-                    outcomes.push((full_table_id, TableOutcome::SchemaUnreadable(format!("{e}"))));
-                    continue;
-                }
-            };
+        let columns = match get_bigquery_table_schema(
+            client,
+            base_url,
+            access_token,
+            project_id,
+            dataset_id,
+            table_id,
+        )
+        .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(
+                    table = full_table_id,
+                    error = %e,
+                    "could not fetch schema, skipping"
+                );
+                outcomes.push((full_table_id, TableOutcome::SchemaUnreadable(format!("{e}"))));
+                continue;
+            }
+        };
 
         let outcome = match cache_table(crate::catalog::helpers::CacheTableParams {
             db,
@@ -663,6 +680,21 @@ use super::bigquery_rest::{
     extract_column_entry, extract_dataset_id, extract_table_id, MISSING_LIST_KEY_HINT,
 };
 
+/// Production BigQuery REST API base URL.
+///
+/// Every real caller reaches these functions through
+/// [`IndexProjectParams::base_url`]/[`IndexDatasetParams::base_url`], both of
+/// which are populated from this constant in [`UserDatasetIndexer::index_workspace_catalog`] —
+/// so production requests resolve to exactly the same URLs as before this
+/// constant existed. It's threaded as a parameter, rather than hardcoded in
+/// each function below, so tests can point these functions at a local mock
+/// HTTP server instead: `kyomi-auth` has no HTTP-mocking dev-dependency
+/// before KYO-623, and a hardcoded host makes the three REST call sites
+/// (`list_bigquery_datasets`, `list_bigquery_tables`,
+/// `get_bigquery_table_schema`) untestable without a real network call to
+/// Google.
+pub(crate) const BIGQUERY_API_BASE_URL: &str = "https://bigquery.googleapis.com";
+
 /// List all dataset IDs in a BigQuery project.
 ///
 /// Paginates via `nextPageToken` (KYO-619) and errs, rather than silently
@@ -670,11 +702,11 @@ use super::bigquery_rest::{
 /// `bigquery_rest::parse_list_field` for why that distinction matters.
 pub async fn list_bigquery_datasets(
     client: &reqwest::Client,
+    base_url: &str,
     access_token: &str,
     project_id: &str,
 ) -> Result<Vec<String>> {
-    let url =
-        format!("https://bigquery.googleapis.com/bigquery/v2/projects/{project_id}/datasets");
+    let url = format!("{base_url}/bigquery/v2/projects/{project_id}/datasets");
 
     super::bigquery_rest::paginate(
         "datasets",
@@ -700,12 +732,13 @@ pub async fn list_bigquery_datasets(
 /// `bigquery_rest::parse_list_field` for why that distinction matters.
 pub async fn list_bigquery_tables(
     client: &reqwest::Client,
+    base_url: &str,
     access_token: &str,
     project_id: &str,
     dataset_id: &str,
 ) -> Result<Vec<String>> {
     let url = format!(
-        "https://bigquery.googleapis.com/bigquery/v2/projects/{project_id}/datasets/{dataset_id}/tables"
+        "{base_url}/bigquery/v2/projects/{project_id}/datasets/{dataset_id}/tables"
     );
 
     super::bigquery_rest::paginate(
@@ -734,13 +767,14 @@ pub async fn list_bigquery_tables(
 /// reporting zero columns (KYO-619).
 pub async fn get_bigquery_table_schema(
     client: &reqwest::Client,
+    base_url: &str,
     access_token: &str,
     project_id: &str,
     dataset_id: &str,
     table_id: &str,
 ) -> Result<Vec<ColumnEntry>> {
     let url = format!(
-        "https://bigquery.googleapis.com/bigquery/v2/projects/{project_id}/datasets/{dataset_id}/tables/{table_id}"
+        "{base_url}/bigquery/v2/projects/{project_id}/datasets/{dataset_id}/tables/{table_id}"
     );
 
     let resp = client
@@ -1439,6 +1473,652 @@ mod tests {
         assert!(
             coverage.material,
             "enumerating 0 of 2 live containers must be material"
+        );
+    }
+}
+
+// ─── HTTP boundary tests for the BigQuery REST client (KYO-623) ────────────
+//
+// `bigquery_rest.rs`'s own `mod tests` cover the *parsing* layer via an
+// injected fetcher closure — no HTTP, no `reqwest::Client`, no base URL.
+// These tests are the layer above that: real requests over the wire (via
+// `wiremock`, this crate's first HTTP-mocking dev-dependency — KYO-623) to
+// the three `pub` functions this file exposes
+// (`list_bigquery_datasets`/`list_bigquery_tables`/`get_bigquery_table_schema`),
+// proving the URL each one builds, the `Authorization` header each one
+// sends, and that a real `reqwest` round trip integrates correctly with the
+// parsing `bigquery_rest.rs` already covers — not re-testing that parsing
+// logic itself.
+//
+// `base_url` is threaded through `IndexProjectParams`/`IndexDatasetParams`
+// (see their doc comments) specifically so these tests never reach
+// `bigquery.googleapis.com` — every test here points at a local
+// `wiremock::MockServer` instead, so the suite runs fully offline.
+#[cfg(test)]
+mod http_boundary {
+    use super::*;
+    use serde_json::json;
+    use wiremock::matchers::{bearer_token, method, path, query_param, query_param_is_missing};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Seed the minimum `users`/`workspaces`/`datasource_configs` rows an
+    /// `IndexerContext` needs so `cache_table` (invoked by
+    /// `index_dataset_tables` for every listed table) can write a real row.
+    /// Mirrors `mod tests`'s own `seed_multi_project_fixture`, kept as a
+    /// separate (smaller) copy here rather than sharing it, since this
+    /// module only ever needs one container's worth of context, not the
+    /// multi-project fixture that module's `ArchiveScope` tests need.
+    async fn seed_ctx(sq: &sqlx::SqlitePool, suffix: &str) -> IndexerContext {
+        let user_id = format!("u-http-{suffix}");
+        let workspace_id = format!("ws-http-{suffix}");
+        let datasource_config_id = format!("ds-http-{suffix}");
+
+        sqlx::query("INSERT INTO users (user_id, email) VALUES (?, ?)")
+            .bind(&user_id)
+            .bind(format!("{user_id}@test.local"))
+            .execute(sq)
+            .await
+            .expect("insert user");
+        sqlx::query(
+            "INSERT INTO workspaces (workspace_id, name, owner_user_id) VALUES (?, 'WS', ?)",
+        )
+        .bind(&workspace_id)
+        .bind(&user_id)
+        .execute(sq)
+        .await
+        .expect("insert workspace");
+        sqlx::query(
+            "INSERT INTO datasource_configs (id, workspace_id, name, datasource_type, slug) \
+             VALUES (?, ?, 'DS', 'bigquery', ?)",
+        )
+        .bind(&datasource_config_id)
+        .bind(&workspace_id)
+        .bind(format!("ds-{suffix}"))
+        .execute(sq)
+        .await
+        .expect("insert datasource_config");
+
+        IndexerContext {
+            workspace_id,
+            datasource_config_id,
+            connection_config: serde_json::json!({}),
+            encryption_key: Arc::new([0u8; 32]),
+        }
+    }
+
+    // ── list_bigquery_datasets ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn datasets_populated_response_is_ok_with_entries_correct_path_and_bearer_token() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/bigquery/v2/projects/proj-1/datasets"))
+            .and(bearer_token("tok-123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "kind": "bigquery#datasetList",
+                "datasets": [
+                    {"datasetReference": {"datasetId": "ds_a"}},
+                    {"datasetReference": {"datasetId": "ds_b"}},
+                ],
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let result = list_bigquery_datasets(&client, &mock_server.uri(), "tok-123", "proj-1").await;
+
+        assert_eq!(result.unwrap(), vec!["ds_a".to_string(), "ds_b".to_string()]);
+
+        let requests = mock_server.received_requests().await.expect("request recording enabled");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].url.path(), "/bigquery/v2/projects/proj-1/datasets");
+        assert_eq!(
+            requests[0].headers.get("authorization").map(|v| v.to_str().unwrap()),
+            Some("Bearer tok-123"),
+            "the access token must be sent as a Bearer Authorization header"
+        );
+    }
+
+    /// The exact KYO-619 shape, proven at the real HTTP boundary this time
+    /// (`bigquery_rest.rs::datasets_key_absent_is_err` proves it at the
+    /// parsing layer): a 200 whose body never mentions "datasets" must not
+    /// be read as zero datasets.
+    #[tokio::test]
+    async fn datasets_200_with_missing_key_is_err_not_empty() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/bigquery/v2/projects/proj-1/datasets"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "kind": "bigquery#datasetList",
+                "etag": "1B2M2Y8AsgTpgAmY7PhCfg==",
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let result = list_bigquery_datasets(&client, &mock_server.uri(), "tok-123", "proj-1").await;
+
+        assert!(
+            result.is_err(),
+            "a real 200 response with the \"datasets\" key entirely absent must not be \
+             read as zero datasets — this is the exact KYO-619 production incident"
+        );
+    }
+
+    #[tokio::test]
+    async fn datasets_200_with_empty_array_is_ok_empty() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/bigquery/v2/projects/proj-1/datasets"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "kind": "bigquery#datasetList",
+                "datasets": [],
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let result = list_bigquery_datasets(&client, &mock_server.uri(), "tok-123", "proj-1").await;
+
+        assert_eq!(
+            result.unwrap(),
+            Vec::<String>::new(),
+            "a present-but-empty \"datasets\" array is a genuinely empty, accessible project"
+        );
+    }
+
+    #[tokio::test]
+    async fn datasets_401_is_err() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/bigquery/v2/projects/proj-1/datasets"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("invalid credentials"))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let err = list_bigquery_datasets(&client, &mock_server.uri(), "tok-123", "proj-1")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("401"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn datasets_403_is_err() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/bigquery/v2/projects/proj-1/datasets"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("permission denied"))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let err = list_bigquery_datasets(&client, &mock_server.uri(), "tok-123", "proj-1")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("403"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn datasets_malformed_non_json_body_is_err() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/bigquery/v2/projects/proj-1/datasets"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not valid json {"))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let result = list_bigquery_datasets(&client, &mock_server.uri(), "tok-123", "proj-1").await;
+        assert!(result.is_err(), "a non-JSON body must not be silently swallowed");
+    }
+
+    /// Drives a real two-page HTTP exchange end to end and proves the page
+    /// token the first page hands back is what actually gets sent on the
+    /// second request — `bigquery_rest.rs::multi_page_returns_every_entry_and_terminates`
+    /// proves the same loop against an in-memory fetcher closure; this
+    /// proves the real `reqwest` request carries the token as a query
+    /// parameter.
+    #[tokio::test]
+    async fn datasets_paginates_across_a_real_two_page_http_exchange() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/bigquery/v2/projects/proj-1/datasets"))
+            .and(query_param_is_missing("pageToken"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "datasets": [{"datasetReference": {"datasetId": "ds_a"}}],
+                "nextPageToken": "page-2",
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/bigquery/v2/projects/proj-1/datasets"))
+            .and(query_param("pageToken", "page-2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "datasets": [{"datasetReference": {"datasetId": "ds_b"}}],
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let result = list_bigquery_datasets(&client, &mock_server.uri(), "tok-123", "proj-1").await;
+
+        assert_eq!(result.unwrap(), vec!["ds_a".to_string(), "ds_b".to_string()]);
+
+        let requests = mock_server.received_requests().await.expect("request recording enabled");
+        assert_eq!(requests.len(), 2, "exactly two HTTP requests, one per page");
+        assert!(
+            requests[1].url.query_pairs().any(|(k, v)| k == "pageToken" && v == "page-2"),
+            "the second request must actually carry the token the first page returned"
+        );
+    }
+
+    // ── list_bigquery_tables ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn tables_populated_response_is_ok_with_entries_correct_path_and_bearer_token() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/bigquery/v2/projects/proj-1/datasets/ds_a/tables"))
+            .and(bearer_token("tok-123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "tables": [
+                    {"tableReference": {"tableId": "t1"}},
+                    {"tableReference": {"tableId": "t2"}},
+                ],
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let result =
+            list_bigquery_tables(&client, &mock_server.uri(), "tok-123", "proj-1", "ds_a").await;
+
+        assert_eq!(result.unwrap(), vec!["t1".to_string(), "t2".to_string()]);
+
+        let requests = mock_server.received_requests().await.expect("request recording enabled");
+        assert_eq!(requests[0].url.path(), "/bigquery/v2/projects/proj-1/datasets/ds_a/tables");
+    }
+
+    #[tokio::test]
+    async fn tables_200_with_missing_key_is_err_not_empty() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/bigquery/v2/projects/proj-1/datasets/ds_a/tables"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "kind": "bigquery#tableList",
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let result =
+            list_bigquery_tables(&client, &mock_server.uri(), "tok-123", "proj-1", "ds_a").await;
+        assert!(
+            result.is_err(),
+            "a real 200 response with the \"tables\" key entirely absent must not be \
+             read as zero tables"
+        );
+    }
+
+    #[tokio::test]
+    async fn tables_200_with_empty_array_is_ok_empty() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/bigquery/v2/projects/proj-1/datasets/ds_a/tables"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"tables": []})))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let result =
+            list_bigquery_tables(&client, &mock_server.uri(), "tok-123", "proj-1", "ds_a").await;
+        assert_eq!(result.unwrap(), Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn tables_401_is_err() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/bigquery/v2/projects/proj-1/datasets/ds_a/tables"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("invalid credentials"))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let err = list_bigquery_tables(&client, &mock_server.uri(), "tok-123", "proj-1", "ds_a")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("401"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn tables_403_is_err() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/bigquery/v2/projects/proj-1/datasets/ds_a/tables"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("permission denied"))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let err = list_bigquery_tables(&client, &mock_server.uri(), "tok-123", "proj-1", "ds_a")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("403"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn tables_malformed_non_json_body_is_err() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/bigquery/v2/projects/proj-1/datasets/ds_a/tables"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("<not json at all>"))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let result =
+            list_bigquery_tables(&client, &mock_server.uri(), "tok-123", "proj-1", "ds_a").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn tables_paginates_across_a_real_two_page_http_exchange() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/bigquery/v2/projects/proj-1/datasets/ds_a/tables"))
+            .and(query_param_is_missing("pageToken"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "tables": [{"tableReference": {"tableId": "t1"}}],
+                "nextPageToken": "page-2",
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/bigquery/v2/projects/proj-1/datasets/ds_a/tables"))
+            .and(query_param("pageToken", "page-2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "tables": [{"tableReference": {"tableId": "t2"}}],
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let result =
+            list_bigquery_tables(&client, &mock_server.uri(), "tok-123", "proj-1", "ds_a").await;
+
+        assert_eq!(result.unwrap(), vec!["t1".to_string(), "t2".to_string()]);
+        let requests = mock_server.received_requests().await.expect("request recording enabled");
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests[1].url.query_pairs().any(|(k, v)| k == "pageToken" && v == "page-2"),
+            "the second request must carry the token the first page returned"
+        );
+    }
+
+    // ── get_bigquery_table_schema ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn schema_populated_response_is_ok_with_entries_correct_path_and_bearer_token() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/bigquery/v2/projects/proj-1/datasets/ds_a/tables/t1"))
+            .and(bearer_token("tok-123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "schema": {
+                    "fields": [
+                        {"name": "id", "type": "INTEGER"},
+                        {"name": "name", "type": "STRING", "description": "the name"},
+                    ],
+                },
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let result =
+            get_bigquery_table_schema(&client, &mock_server.uri(), "tok-123", "proj-1", "ds_a", "t1")
+                .await
+                .unwrap();
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].name, "id");
+        assert_eq!(result[0].col_type.as_deref(), Some("INTEGER"));
+        assert_eq!(result[1].name, "name");
+        assert_eq!(result[1].description.as_deref(), Some("the name"));
+
+        let requests = mock_server.received_requests().await.expect("request recording enabled");
+        assert_eq!(
+            requests.len(),
+            1,
+            "tables.get is a single-resource read, not paginated — exactly one request"
+        );
+        assert_eq!(requests[0].url.path(), "/bigquery/v2/projects/proj-1/datasets/ds_a/tables/t1");
+    }
+
+    #[tokio::test]
+    async fn schema_200_with_schema_key_entirely_absent_is_err() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/bigquery/v2/projects/proj-1/datasets/ds_a/tables/t1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"kind": "bigquery#table"})))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let err =
+            get_bigquery_table_schema(&client, &mock_server.uri(), "tok-123", "proj-1", "ds_a", "t1")
+                .await
+                .unwrap_err();
+        assert!(err.to_string().contains("schema"), "got: {err}");
+    }
+
+    /// `schema` is present but `fields` is absent — routes through
+    /// `parse_list_field`'s absent-key branch with `missing_key_hint: None`
+    /// (unlike the two listing endpoints, which pass
+    /// `Some(MISSING_LIST_KEY_HINT)`): a preceding `tables.get` already
+    /// proved access, so the "likely no access" hint would mislead here.
+    #[tokio::test]
+    async fn schema_present_but_fields_key_absent_is_err_without_the_access_hint() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/bigquery/v2/projects/proj-1/datasets/ds_a/tables/t1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"schema": {}})))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let err =
+            get_bigquery_table_schema(&client, &mock_server.uri(), "tok-123", "proj-1", "ds_a", "t1")
+                .await
+                .unwrap_err();
+        assert!(err.to_string().contains("fields"), "got: {err}");
+        assert!(
+            !err.to_string().contains("access"),
+            "a missing \"fields\" key after a successful tables.get must not fabricate an \
+             access-denial hint, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn schema_present_but_fields_empty_is_ok_empty() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/bigquery/v2/projects/proj-1/datasets/ds_a/tables/t1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "schema": {"fields": []},
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let result =
+            get_bigquery_table_schema(&client, &mock_server.uri(), "tok-123", "proj-1", "ds_a", "t1")
+                .await
+                .unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn schema_401_is_err() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/bigquery/v2/projects/proj-1/datasets/ds_a/tables/t1"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("invalid credentials"))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let err =
+            get_bigquery_table_schema(&client, &mock_server.uri(), "tok-123", "proj-1", "ds_a", "t1")
+                .await
+                .unwrap_err();
+        assert!(err.to_string().contains("401"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn schema_403_is_err() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/bigquery/v2/projects/proj-1/datasets/ds_a/tables/t1"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("permission denied"))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let err =
+            get_bigquery_table_schema(&client, &mock_server.uri(), "tok-123", "proj-1", "ds_a", "t1")
+                .await
+                .unwrap_err();
+        assert!(err.to_string().contains("403"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn schema_malformed_non_json_body_is_err() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/bigquery/v2/projects/proj-1/datasets/ds_a/tables/t1"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{not json"))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let result =
+            get_bigquery_table_schema(&client, &mock_server.uri(), "tok-123", "proj-1", "ds_a", "t1")
+                .await;
+        assert!(result.is_err());
+    }
+
+    // ── KYO-614: enumerated_datasets accumulator (index_dataset_tables) ──
+
+    /// Headline KYO-614 acceptance: a successful table listing must record
+    /// `(project_id, dataset_id)` as enumerated, driven through
+    /// `index_dataset_tables` against a real mocked HTTP exchange and a real
+    /// in-memory DB + a real, non-stubbed `EmbeddingService` (KYO-623
+    /// explicitly forbids stubbing this to make the test green) — rather
+    /// than by re-deriving the accumulator's update in the test body.
+    #[tokio::test]
+    async fn kyo614_successful_table_listing_populates_enumerated_datasets() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/bigquery/v2/projects/proj-1/datasets/ds_a/tables"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "tables": [{"tableReference": {"tableId": "t1"}}],
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/bigquery/v2/projects/proj-1/datasets/ds_a/tables/t1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "schema": {"fields": [{"name": "id", "type": "INTEGER"}]},
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let db = DbPool::connect("sqlite::memory:").await.expect("connect in-memory sqlite");
+        let ctx = {
+            let DbPool::Sqlite(sq) = &db else { unreachable!("expected sqlite pool") };
+            seed_ctx(sq, "kyo614ok").await
+        };
+        let embedding = EmbeddingService::new().expect("load embedding model");
+        let client = reqwest::Client::new();
+        let mut seen_table_ids = HashSet::new();
+        let mut enumerated_datasets: HashSet<ContainerKey> = HashSet::new();
+
+        let result = index_dataset_tables(IndexDatasetParams {
+            client: &client,
+            db: &db,
+            embedding: &embedding,
+            ctx: &ctx,
+            base_url: &mock_server.uri(),
+            access_token: "tok-123",
+            project_id: "proj-1",
+            dataset_id: "ds_a",
+            max_tables: None,
+            seen_table_ids: &mut seen_table_ids,
+            enumerated_datasets: &mut enumerated_datasets,
+        })
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "the table listing succeeded, so index_dataset_tables must not error: {}",
+            result.err().map(|e| e.to_string()).unwrap_or_default()
+        );
+        assert!(
+            enumerated_datasets.contains(&("proj-1".to_string(), "ds_a".to_string())),
+            "a successful table listing must record (project_id, dataset_id) as enumerated"
+        );
+    }
+
+    /// Headline KYO-614 acceptance, negative half: a *failed* table listing
+    /// must not record the container as enumerated — the exact bug KYO-614
+    /// fixed, where a project that failed outright still let its
+    /// same-named-dataset sibling in another project get archived from.
+    #[tokio::test]
+    async fn kyo614_failed_table_listing_does_not_populate_enumerated_datasets() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/bigquery/v2/projects/proj-1/datasets/ds_a/tables"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("permission denied"))
+            .mount(&mock_server)
+            .await;
+
+        let db = DbPool::connect("sqlite::memory:").await.expect("connect in-memory sqlite");
+        let ctx = {
+            let DbPool::Sqlite(sq) = &db else { unreachable!("expected sqlite pool") };
+            seed_ctx(sq, "kyo614fail").await
+        };
+        let embedding = EmbeddingService::new().expect("load embedding model");
+        let client = reqwest::Client::new();
+        let mut seen_table_ids = HashSet::new();
+        let mut enumerated_datasets: HashSet<ContainerKey> = HashSet::new();
+
+        let result = index_dataset_tables(IndexDatasetParams {
+            client: &client,
+            db: &db,
+            embedding: &embedding,
+            ctx: &ctx,
+            base_url: &mock_server.uri(),
+            access_token: "tok-123",
+            project_id: "proj-1",
+            dataset_id: "ds_a",
+            max_tables: None,
+            seen_table_ids: &mut seen_table_ids,
+            enumerated_datasets: &mut enumerated_datasets,
+        })
+        .await;
+
+        assert!(result.is_err(), "the table listing failed, so index_dataset_tables must return Err");
+        assert!(
+            enumerated_datasets.is_empty(),
+            "a failed table listing must NOT record (project_id, dataset_id) as enumerated — \
+             this is the exact KYO-614 accumulator invariant"
         );
     }
 }
