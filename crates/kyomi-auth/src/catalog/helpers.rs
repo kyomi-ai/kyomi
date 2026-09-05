@@ -494,6 +494,79 @@ pub async fn update_datasource_status(
     Ok(())
 }
 
+/// Append one warning to the already-persisted catalog-refresh envelope,
+/// without disturbing the `status`, `error`, or `progress` that an earlier
+/// [`update_datasource_status`] call already wrote for this run (KYO-658
+/// follow-up: `populate_embeddings_after_indexing` runs after
+/// `index_catalog`'s own terminal status write, so a shortfall there must
+/// not clobber it).
+///
+/// A naive second `update_datasource_status(..., "completed", ...)` call
+/// from that later stage would be wrong on two counts: `"completed"` is not
+/// a value `catalog_refresh_status` ever holds — every call site in this
+/// module writes only `"running"` / `"idle"` / `"failed"`, matching the
+/// `CatalogRefreshStatus` enum (`kyomi_core::enums`) the UI decodes the
+/// column into — and it would silently overwrite a legitimate `"failed"`
+/// (e.g. the KYO-614 container-coverage shortfall) with a false idle-shaped
+/// status. So this reads the row back and re-writes the same
+/// status/error/progress, only extending `warnings`.
+///
+/// Read-modify-write, not transactional — but the concurrent-run guard
+/// (`index_started_within`) means nothing else is writing this datasource's
+/// status mid-run, so there is no writer to race in practice. If the
+/// datasource row is gone (deleted between the indexer's own write and this
+/// call), there is nothing to append to and this is a no-op.
+pub async fn append_catalog_status_warning(
+    db: &DbPool,
+    workspace_id: &str,
+    datasource_config_id: &str,
+    warning: &str,
+) -> Result<()> {
+    #[derive(sqlx::FromRow)]
+    struct StatusRow {
+        catalog_refresh_status: Option<String>,
+        catalog_refresh_progress: Option<Value>,
+    }
+
+    let row = kyomi_core::db_fetch_optional!(
+        db,
+        StatusRow,
+        "SELECT catalog_refresh_status, catalog_refresh_progress FROM datasource_configs \
+         WHERE id = $1 AND workspace_id = $2",
+        datasource_config_id,
+        workspace_id
+    )
+    .map_err(|e| {
+        kyomi_core::Error::Internal(format!("failed to read datasource status: {e}"))
+    })?;
+
+    let Some(row) = row else {
+        return Ok(());
+    };
+
+    let status = row.catalog_refresh_status.unwrap_or_else(|| "idle".to_string());
+    let envelope = row.catalog_refresh_progress.unwrap_or(Value::Null);
+    let error = envelope.get("error").and_then(Value::as_str).map(str::to_string);
+    let progress = envelope.get("progress").cloned().filter(|v| !v.is_null());
+    let mut warnings: Vec<String> = envelope
+        .get("warnings")
+        .and_then(Value::as_array)
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    warnings.push(warning.to_string());
+
+    update_datasource_status(
+        db,
+        workspace_id,
+        datasource_config_id,
+        &status,
+        progress,
+        error.as_deref(),
+        &warnings,
+    )
+    .await
+}
+
 /// Build the JSON envelope stored in `datasource_configs.catalog_refresh_progress`.
 ///
 /// Extracted from [`update_datasource_status`] so the shape — in particular,
@@ -1913,6 +1986,170 @@ mod tests {
         assert_eq!(reason_a, Some("connection timed out".to_string()));
         assert_eq!(status_b, "idle", "A's later failure must not clobber B's earlier success");
         assert_eq!(reason_b, None);
+    }
+
+    // ── append_catalog_status_warning (KYO-658 follow-up) ────────────────
+    //
+    // `populate_embeddings_after_indexing` (kyomi-agent) runs *after*
+    // `index_catalog`'s own terminal `update_datasource_status` write.
+    // Before this fix, a `Some(failure)` from it only ever reached
+    // `CatalogIndexResult.errors` -- a field no production caller reads on
+    // the "completed" branch -- so a real column-embedding shortfall was
+    // computed, logged, and otherwise invisible: the "third variant"
+    // `docs/standards/error-handling/one-outcome-one-report.md` warns
+    // about. These tests prove the fix the way that standard demands: that
+    // a reported failure actually lands in the *persisted* envelope
+    // `get_catalog_refresh_status` / the Settings page poll read, without
+    // disturbing the status/error the indexer's own write already made.
+
+    /// Reads back `(status, error, warnings)` for a single datasource --
+    /// the full slice of the envelope `append_catalog_status_warning` must
+    /// both preserve (`status`, `error`) and extend (`warnings`).
+    async fn read_datasource_envelope(
+        sq: &sqlx::SqlitePool,
+        datasource_config_id: &str,
+    ) -> (String, Option<String>, Vec<String>) {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            catalog_refresh_status: Option<String>,
+            catalog_refresh_progress: Option<String>,
+        }
+
+        let row: Row = sqlx::query_as(
+            "SELECT catalog_refresh_status, catalog_refresh_progress FROM datasource_configs WHERE id = ?",
+        )
+        .bind(datasource_config_id)
+        .fetch_one(sq)
+        .await
+        .expect("read datasource envelope");
+
+        let envelope: Option<Value> = row
+            .catalog_refresh_progress
+            .as_deref()
+            .and_then(|p| serde_json::from_str(p).ok());
+
+        let error = envelope
+            .as_ref()
+            .and_then(|v| v.get("error"))
+            .and_then(|e| e.as_str())
+            .map(str::to_string);
+        let warnings = envelope
+            .as_ref()
+            .and_then(|v| v.get("warnings"))
+            .and_then(|w| w.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .unwrap_or_default();
+
+        (
+            row.catalog_refresh_status.unwrap_or_else(|| "idle".to_string()),
+            error,
+            warnings,
+        )
+    }
+
+    /// A datasource that finished successfully (status `"idle"`) with one
+    /// pre-existing indexing-time warning must keep both that status and
+    /// that warning when a later column-embedding shortfall appends a
+    /// second one -- this is the exact KYO-658 follow-up wiring:
+    /// `populate_embeddings_after_indexing`'s `Some(failure)` must reach
+    /// this envelope, not just `CatalogIndexResult.errors`.
+    #[tokio::test]
+    async fn append_catalog_status_warning_preserves_idle_status_and_merges_warnings() {
+        let db = crate::test_support::test_pool().await;
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        let (workspace_id, ds_a, _ds_b) = seed_two_datasource_fixture(sq, "warn-idle").await;
+
+        update_datasource_status(
+            &db,
+            &workspace_id,
+            &ds_a,
+            "idle",
+            None,
+            None,
+            &["3 containers were not re-enumerated this run".to_string()],
+        )
+        .await
+        .expect("seed the indexer's own terminal write");
+
+        append_catalog_status_warning(
+            &db,
+            &workspace_id,
+            &ds_a,
+            "2 of 9 column embeddings were skipped -- their table_cache row no longer existed at write time",
+        )
+        .await
+        .expect("append column-embedding shortfall warning");
+
+        let (status, error, warnings) = read_datasource_envelope(sq, &ds_a).await;
+
+        assert_eq!(status, "idle", "must not overwrite the indexer's own terminal status");
+        assert_eq!(error, None);
+        assert_eq!(
+            warnings,
+            vec![
+                "3 containers were not re-enumerated this run".to_string(),
+                "2 of 9 column embeddings were skipped -- their table_cache row no longer existed at write time"
+                    .to_string(),
+            ],
+            "must extend the existing warnings, not replace them"
+        );
+    }
+
+    /// Companion covering the clobber the review specifically flagged: a
+    /// `"failed"` status (e.g. a KYO-614 container-coverage shortfall)
+    /// must survive a later column-embedding shortfall too -- a naive
+    /// `update_datasource_status(..., "completed", ...)` call from the
+    /// later stage would both invent a status value `catalog_refresh_status`
+    /// never holds (only `"running"`/`"idle"`/`"failed"` are ever written)
+    /// and silently flip a real failure to a false idle-flavoured one.
+    #[tokio::test]
+    async fn append_catalog_status_warning_preserves_failed_status_and_reason() {
+        let db = crate::test_support::test_pool().await;
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        let (workspace_id, ds_a, _ds_b) = seed_two_datasource_fixture(sq, "warn-failed").await;
+
+        update_datasource_status(
+            &db,
+            &workspace_id,
+            &ds_a,
+            "failed",
+            None,
+            Some("un-enumerated containers exceeded the coverage threshold"),
+            &[],
+        )
+        .await
+        .expect("seed the indexer's own terminal write");
+
+        append_catalog_status_warning(
+            &db,
+            &workspace_id,
+            &ds_a,
+            "1 of 4 column embeddings were skipped -- their table_cache row no longer existed at write time",
+        )
+        .await
+        .expect("append column-embedding shortfall warning");
+
+        let (status, error, warnings) = read_datasource_envelope(sq, &ds_a).await;
+
+        assert_eq!(
+            status, "failed",
+            "must not silently flip a real failure to idle/completed"
+        );
+        assert_eq!(
+            error,
+            Some("un-enumerated containers exceeded the coverage threshold".to_string())
+        );
+        assert_eq!(
+            warnings,
+            vec![
+                "1 of 4 column embeddings were skipped -- their table_cache row no longer existed at write time"
+                    .to_string()
+            ],
+        );
     }
 
     // ── fold_table_outcomes (KYO-324, moved from user_dataset.rs for KYO-365
