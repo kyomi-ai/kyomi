@@ -3,8 +3,10 @@
 # =============================================================================
 # Runs on every PR to main, including new pushes to existing PRs.
 # Seven jobs:
-#   1. lint-policy (fast, ~5s) — rejects new #[allow(...)] suppressions AND
-#      runs the server_fn/REST divergence linter across the full tree
+#   1. lint-policy (fast, ~5s) — rejects new #[allow(...)] suppressions,
+#      runs the server_fn/REST divergence linter across the full tree, and
+#      (KYO-662) blocks real-world identifiers in tracked files and the
+#      PR's own commit messages
 #   2. trivy-scan (~30s) — Trivy filesystem vulnerability scanner (HIGH/CRITICAL)
 #   3. cargo-audit (fast, ~15s) — RUSTSEC advisories against Cargo.lock
 #   4. schema-parity (fast — only compiles kyomi-core, not the workspace) —
@@ -105,6 +107,31 @@ jobs:
       # --------------------------------------------------------------------
       - name: Signal disposal safety lint
         run: ./scripts/lint/check-disposal-safety.sh
+
+      # --------------------------------------------------------------------
+      # Real-world identifier lint (KYO-662).
+      #
+      # A customer's real GCP project id and a real service-account
+      # identity reached this public repo's main across four merged PRs and
+      # needed a history rewrite. This is the gate: five blocking rules
+      # (GCP service-account addresses, non-allowlisted email domains,
+      # public IPv4 addresses, credential-shaped tokens, and a
+      # salted-hash-matched denylist for identifiers with no distinguishing
+      # shape at all) run over every tracked file here, and separately over
+      # this PR's own commit messages below. This is the gate that actually
+      # matters — core.hooksPath is per-clone and cannot be committed, so an
+      # agent or contributor working in a fresh worktree may have no git
+      # hooks installed at all.
+      #
+      # Pure bash + a single embedded Perl pass, no Rust toolchain required.
+      # --------------------------------------------------------------------
+      - name: Real-identifier lint (full tree)
+        run: ./scripts/lint/check-real-identifiers.sh
+
+      - name: Real-identifier lint (commit messages)
+        run: |
+          BASE="${{ github.event.pull_request.base.sha }}"
+          ./scripts/lint/check-real-identifiers.sh --messages "$BASE..HEAD"
 
       # --------------------------------------------------------------------
       # Git hooks guard (KYO-358).
@@ -585,7 +612,7 @@ jobs:
         run: sccache --show-stats || true
 
   # ---------------------------------------------------------------------------
-  # Worktree lifecycle & script self-tests (KYO-578, KYO-617, KYO-629, KYO-632)
+  # Worktree lifecycle & script self-tests (KYO-578, KYO-617, KYO-629, KYO-632, KYO-662)
   #
   # scripts/check-ticket-in-flight.sh, scripts/mark-worktree-stranded.sh,
   # scripts/mark-branch-stranded.sh, scripts/append-review-log.sh,
@@ -601,37 +628,48 @@ jobs:
   # It rides in this job rather than starting a new one because it meets
   # the same fast / hermetic / no-toolchain constraints described below —
   # not because it shares the other six suites' ticket-lifecycle purpose.
-  # scripts/lib/stale-tooling-guard-test.sh (KYO-632, the newest of the
-  # eight) is also different in kind, and for the same reason: it is the
-  # self-test for scripts/lib/stale-tooling-guard.sh, the guard that six of
-  # these scripts — plus scripts/mine-review-logs.sh, which has no
-  # self-test suite of its own — now source so that a stale local copy of
-  # themselves is loud instead of silent. That is also why this job is
-  # named "Worktree Lifecycle & Script Self-Tests" below, rather than just
-  # "Worktree Lifecycle Self-Tests".
+  # scripts/lib/stale-tooling-guard-test.sh (KYO-632) is also different in
+  # kind, and for the same reason: it is the self-test for
+  # scripts/lib/stale-tooling-guard.sh, the guard that six of these scripts
+  # — plus scripts/mine-review-logs.sh, which has no self-test suite of its
+  # own — now source so that a stale local copy of themselves is loud
+  # instead of silent. That is also why this job is named "Worktree
+  # Lifecycle & Script Self-Tests" below, rather than just "Worktree
+  # Lifecycle Self-Tests". scripts/lint/check-real-identifiers-test.sh
+  # (KYO-662) is different in kind again: it is the self-test for
+  # scripts/lint/check-real-identifiers.sh, the real-world-identifier lint
+  # — a lint-policy concern like scripts/lint/check-server-fns.sh and
+  # scripts/lint/check-disposal-safety.sh (see the `lint-policy` job above),
+  # not a ticket-lifecycle gate. It rides here for the same fast / hermetic
+  # / no-toolchain reasons as preflight-clippy-test.sh and
+  # stale-tooling-guard-test.sh before it — this job has hosted more than
+  # worktree-lifecycle scripts for a while now, see the two paragraphs just
+  # above.
   #
-  # Each suite carries its own self-test assertions (460
-  # total, RECOUNTED LIVE on 2026-09-03 by actually running all eight
-  # suites — including preflight-clippy-test.sh and
-  # stale-tooling-guard-test.sh, both added that same day — and summing
-  # their own "Results: N passed" lines: check-ticket-in-flight-test.sh 119
-  # + mark-worktree-stranded-test.sh 32 + mark-branch-stranded-test.sh 78 +
-  # append-review-log-test.sh 11 + audit-agent-run-deaths-test.sh 43 +
-  # reconcile-merged-tickets-test.sh 99 + preflight-clippy-test.sh 43 +
-  # stale-tooling-guard-test.sh 35 = 460 — the
-  # figure this comment carried immediately before this recount (425) was
-  # itself a live recount, as was the 382 before it, the 287 before that, and
-  # all of them ultimately corrections of a stale 197 that undercounted the
-  # then-five suites by 86 assertions. Note per KYO-609 this tally is still
-  # hand-maintained and will re-rot on the next suite change; that is a known,
-  # separately-filed gap, not something this recount or this job fixes — the
-  # recount only makes today's number true, it does not make tomorrow's number
-  # self-maintaining), but until this job existed none of the original scripts
-  # ran anywhere except when a human or agent remembered to invoke it by hand
-  # — a load-bearing check that never runs in CI is a fail-open shape this
-  # workflow has already been bitten by twice (KYO-511, KYO-529).
+  # Each suite carries its own self-test assertions (501
+  # total, RECOUNTED LIVE on 2026-09-05 by actually running all nine
+  # suites — including check-real-identifiers-test.sh, added that day — and
+  # summing their own "Results: N passed" lines (check-real-identifiers-test.sh's
+  # own summary line reads "N checks, N failed" instead, counted the same
+  # way): check-ticket-in-flight-test.sh 119 + mark-worktree-stranded-test.sh 32
+  # + mark-branch-stranded-test.sh 78 + append-review-log-test.sh 11 +
+  # audit-agent-run-deaths-test.sh 43 + reconcile-merged-tickets-test.sh 99 +
+  # preflight-clippy-test.sh 43 + stale-tooling-guard-test.sh 35 +
+  # check-real-identifiers-test.sh 41 = 501 — the figure this comment carried
+  # immediately before this recount (460, dated 2026-09-03) was itself a live
+  # recount, as was the 425 before it, the 382 before that, the 287 before
+  # that, and all of them ultimately corrections of a stale 197 that
+  # undercounted the then-five suites by 86 assertions. Note per KYO-609 this
+  # tally is still hand-maintained and will re-rot on the next suite change;
+  # that is a known, separately-filed gap, not something this recount or this
+  # job fixes — the recount only makes today's number true, it does not make
+  # tomorrow's number self-maintaining), but until this job existed none of
+  # the original scripts ran anywhere except when a human or agent remembered
+  # to invoke it by hand — a load-bearing check that never runs in CI is a
+  # fail-open shape this workflow has already been bitten by twice (KYO-511,
+  # KYO-529).
   #
-  # All eight suites are hermetic: they build their own throwaway git repos
+  # All nine suites are hermetic: they build their own throwaway git repos
   # and/or JSON fixture files (and, for four of them —
   # check-ticket-in-flight-test.sh, mark-worktree-stranded-test.sh,
   # mark-branch-stranded-test.sh, and reconcile-merged-tickets-test.sh — a
@@ -649,7 +687,10 @@ jobs:
   # instead (the real Rust toolchain is never invoked), and its own parity
   # check reads this file with grep/sed, not a YAML parser.
   # stale-tooling-guard-test.sh needs only bash + git, same as the others —
-  # no `gh` stub, no python3 either.
+  # no `gh` stub, no python3 either. check-real-identifiers-test.sh needs
+  # perl with core Digest::SHA (already on ubuntu-latest, no extra install
+  # step) to compute the salted SHA-256 hash for its throwaway denylist
+  # fixture — no other suite in this job needs perl.
   #
   # Deliberately no `paths:` filter, unlike the ticket's original wording of
   # "on push/PR touching scripts/**" — two reasons:
@@ -663,7 +704,7 @@ jobs:
   # Note that ci.yml uses no `paths` filters anywhere else today either — this
   # job isn't introducing an inconsistency, it's declining to introduce one.
   #
-  # All eight suites run even if an earlier one fails, so one broken suite
+  # All nine suites run even if an earlier one fails, so one broken suite
   # never masks the others — the loop below collects every failure and the
   # job fails at the end if any suite failed.
   # ---------------------------------------------------------------------------
@@ -700,6 +741,7 @@ jobs:
             scripts/reconcile-merged-tickets-test.sh
             scripts/preflight-clippy-test.sh
             scripts/lib/stale-tooling-guard-test.sh
+            scripts/lint/check-real-identifiers-test.sh
           )
           failed=()
           for suite in "${suites[@]}"; do

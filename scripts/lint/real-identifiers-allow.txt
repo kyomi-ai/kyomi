@@ -1,0 +1,49 @@
+# scripts/lint/real-identifiers-allow.txt — KYO-662
+#
+# Path exceptions for scripts/lint/check-real-identifiers.sh. Mirrors the
+# shape and spirit of trivy-secret.yaml's allow-rules, but kept as its own
+# file rather than a section of that one (binding decision in KYO-662: the
+# two configs stay separate) because this linter's rule ids are its own and
+# do not line up 1:1 with Trivy's secret-shape ids.
+#
+# Format: one entry per line, blank lines and `#`-prefixed lines ignored.
+#
+#     <rule-id>:<path-glob>:<justification>
+#
+# <path-glob> is matched, anchored at both ends, against the path exactly as
+# scanned — repo-relative in full-tree/CI mode, whatever form was passed on
+# the command line in pre-commit/explicit-path mode. `*` matches any run of
+# characters, `?` matches exactly one. <justification> must be non-empty.
+#
+# This file exists ONLY for files that deliberately contain fake,
+# structurally-real-looking material for tests — never for an actual
+# customer identifier. If a real identifier needs an exception, that is not
+# what this file is for: fix the source instead.
+#
+# No entry here needs a path glob wildcard today; every exception below is
+# an exact, single-file path.
+
+# GCP service-account test fixtures. Both already carry a trivy-secret.yaml
+# allow-rule (Trivy's own secret-shape scanner also matches these), cited
+# here by that rule's id so the two configs can be cross-checked by hand.
+gcp-service-account:crates/kyomi-agent/src/catalog_scheduler.rs:GCP service-account test fixture in catalog scheduler tests (trivy-secret.yaml id: gcp-test-fixture-catalog-scheduler)
+gcp-service-account:scripts/e2e-regression/bigquery-create-modal.cjs:Fabricated GCP service-account fixture for the BigQuery create-modal E2E spec (trivy-secret.yaml id: gcp-fixture-bigquery-create-modal-e2e-spec)
+
+# Synthetic Slack token fixtures. encryption.rs already carries a
+# trivy-secret.yaml allow-rule; alert.rs's fixture value is too
+# short/unrealistic to match Trivy's own stricter Slack-token shape, so it
+# has no corresponding trivy-secret.yaml entry — this linter's
+# xox[baprs]-... shape is intentionally looser and catches it anyway. (Not
+# quoting the literal fixture value in this justification, deliberately —
+# it would otherwise match this very rule, in this very file.)
+credential-token:crates/kyomi-auth/src/encryption.rs:Synthetic Slack token fixtures for encryption roundtrip tests (trivy-secret.yaml id: fake-slack-tokens-in-tests)
+credential-token:enterprise/kyomi-slack/src/alert.rs:Synthetic Slack token fixture used in alert-delivery tests
+
+# check-real-identifiers-test.sh's own fixtures are deliberately shaped to
+# match every rule below (that is how it proves each rule fires) — this is
+# the same self-referential-fixture situation as the two GCP files above,
+# just for this linter's own self-test instead of a production feature.
+gcp-service-account:scripts/lint/check-real-identifiers-test.sh:Deliberate gcp-service-account-shaped fixture used to prove the rule fires
+email-address:scripts/lint/check-real-identifiers-test.sh:Deliberate email-address-shaped fixture used to prove the rule fires
+public-ipv4:scripts/lint/check-real-identifiers-test.sh:Deliberate public-ipv4-shaped fixture used to prove the rule fires
+credential-token:scripts/lint/check-real-identifiers-test.sh:Deliberate credential-token-shaped fixture used to prove the rule fires
