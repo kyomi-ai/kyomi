@@ -256,8 +256,24 @@ pub async fn signup_start_service(
                 Ok(SignupStartServiceResult::VerificationRequired)
             }
         }
-        Some(_) => {
-            // Verified user — return VerificationRequired to prevent email enumeration
+        Some(user) => {
+            // Verified user — the HTTP response still has to be
+            // VerificationRequired, identical to the two arms above, to
+            // prevent email enumeration. But nothing was ever sent on this
+            // path, which is exactly the KYO-681 bug: silence, both to the
+            // user and to server logs. The mailbox is a channel only the
+            // account owner can read, so it's safe to be specific there —
+            // send a "you already have an account" notice instead of
+            // staying silent.
+            let user_name = user.name.clone().unwrap_or_default();
+            notify_existing_verified_account(ExistingAccountNoticeParams {
+                db,
+                email,
+                name: &user_name,
+                user_id: &user.user_id,
+                frontend_url,
+            })
+            .await?;
             Ok(SignupStartServiceResult::VerificationRequired)
         }
     }
@@ -402,17 +418,25 @@ async fn signup_smtp_less_existing_unverified(
     Ok(SignupStartServiceResult::AccountCreated(Box::new(sess)))
 }
 
-/// Which `EmailService` method `mint_and_send_verification_email` invokes.
+/// Which `EmailService` method `spawn_verification_email` invokes.
 ///
-/// Every variant's underlying method has the identical
-/// `(email: &str, name: &str, link: &str) -> bool` signature, so picking a
-/// variant is the only thing that needs to vary between callers — no other
-/// plumbing changes.
+/// Every variant except `ExistingAccount` has an underlying method with the
+/// identical `(email: &str, name: &str, link: &str) -> bool` signature, so
+/// picking a variant is the only thing that needs to vary between callers —
+/// no other plumbing changes. `ExistingAccount` is the one exception: its
+/// underlying method, `send_existing_account_notice`, also needs the
+/// account's active sign-in methods, so it carries that as data on the
+/// variant rather than forcing it through the three-argument shape the
+/// others share (KYO-681).
 enum VerificationEmailKind {
     /// `send_verification_email` — signup / resend-verification flows.
     Verification,
     /// `send_passkey_recovery` — passkey-only account, lost-authenticator flow.
     PasskeyRecovery,
+    /// `send_existing_account_notice` — an already-verified account attempted
+    /// signup again. Carries the account's active `user_auth_methods.auth_type`
+    /// values so the email can name how the owner signs in.
+    ExistingAccount { auth_methods: Vec<String> },
 }
 
 /// Parameters for `mint_and_send_verification_email`.
@@ -477,6 +501,59 @@ async fn mint_and_send_verification_email(
     );
     tracing::info!("Verification link ({token_type}) for {email}: {url} (user_id={user_id})");
     spawn_verification_email(email.to_string(), name.to_string(), url, email_kind);
+    Ok(())
+}
+
+/// Parameters for `notify_existing_verified_account`.
+struct ExistingAccountNoticeParams<'a> {
+    db: &'a DbPool,
+    email: &'a str,
+    name: &'a str,
+    user_id: &'a str,
+    frontend_url: &'a str,
+}
+
+/// Sibling of `mint_and_send_verification_email` for the "this email
+/// already belongs to a verified account" case (KYO-681).
+///
+/// Deliberately mints **no** token — there is nothing to verify — and sends
+/// a different email: a sign-in link plus the account's active auth
+/// methods, rather than a verification link. This is what lets the
+/// `Some(_)` (verified user) arms of `signup_start_service` and
+/// `passkey_signup_start_service` stop being a silent dead end while still
+/// returning the exact same `VerificationRequired` result the other two
+/// account states return.
+///
+/// The enumeration-resistance property those callers guard only constrains
+/// the *HTTP response* — it says nothing about the mailbox, which only the
+/// address owner can read. So the response stays generic while the email
+/// gets to be specific: it is the one channel safe to tell "you already
+/// have an account" to.
+async fn notify_existing_verified_account(
+    params: ExistingAccountNoticeParams<'_>,
+) -> kyomi_core::Result<()> {
+    let ExistingAccountNoticeParams { db, email, name, user_id, frontend_url } = params;
+
+    let auth_methods = crate::user_service::list_active_auth_types(db, user_id).await?;
+    let sign_in_url = format!("{}/login", frontend_url.trim_end_matches('/'));
+
+    // The equivalent of mint_and_send_verification_email's info log below —
+    // without it, this path (like the dead end it replaces) is invisible
+    // from server logs, which is exactly what made KYO-681 hard to diagnose.
+    tracing::info!(
+        email = %email,
+        user_id = %user_id,
+        auth_methods = ?auth_methods,
+        "Signup attempted for an already-registered, verified email — sending \
+         existing-account notice instead of a verification email"
+    );
+
+    spawn_verification_email(
+        email.to_string(),
+        name.to_string(),
+        sign_in_url,
+        VerificationEmailKind::ExistingAccount { auth_methods },
+    );
     Ok(())
 }
 
@@ -1995,10 +2072,23 @@ pub async fn passkey_signup_start_service(
                 Ok(PasskeySignupStartServiceResult::VerificationRequired)
             }
         }
-        Some(_) => {
-            // Verified user — mint nothing, send nothing. Returning the same
-            // VerificationRequired result as the two arms above is the whole
-            // point: see the security note on this function.
+        Some(user) => {
+            // Verified user — mint no "signup" token (see the security note
+            // on this function) and return the same VerificationRequired
+            // result as the two arms above. That used to mean sending
+            // nothing at all — the KYO-681 dead end. Instead, send a
+            // "you already have an account" notice to the mailbox, which is
+            // the one channel safe to be specific on; the HTTP response
+            // stays identical across all three account states.
+            let user_name = user.name.clone().unwrap_or_default();
+            notify_existing_verified_account(ExistingAccountNoticeParams {
+                db,
+                email,
+                name: &user_name,
+                user_id: &user.user_id,
+                frontend_url,
+            })
+            .await?;
             Ok(PasskeySignupStartServiceResult::VerificationRequired)
         }
     }
@@ -2583,6 +2673,11 @@ fn spawn_verification_email(
             }
             VerificationEmailKind::PasskeyRecovery => {
                 email_svc.send_passkey_recovery(&email, &name, &url).await
+            }
+            VerificationEmailKind::ExistingAccount { auth_methods } => {
+                email_svc
+                    .send_existing_account_notice(&email, &name, &url, &auth_methods)
+                    .await
             }
         };
         if sent {
@@ -3762,6 +3857,52 @@ mod tests {
         }
     }
 
+    /// Wiring test, passkey-flow sibling of
+    /// `signup_start_service_for_verified_user_logs_existing_account_notice`.
+    /// Both `signup_start_service` and `passkey_signup_start_service` got
+    /// their own copy of the KYO-681 fix — each needs its own regression
+    /// trap, since a `Some(user)` arm reverted in only one of them would
+    /// leave the other's test suite green.
+    #[tokio::test]
+    async fn passkey_signup_start_service_for_verified_user_logs_existing_account_notice() {
+        let db = test_pool().await;
+        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+        let email = "passkey-signup-verified-logged@example.com";
+
+        let user = crate::user_service::create_user(&db, email, Some("Existing User"), true)
+            .await
+            .expect("create verified user");
+        crate::user_service::upsert_auth_method(
+            &db,
+            &user.user_id,
+            "webauthn",
+            &serde_json::json!({"credential": "test-credential"}),
+        )
+        .await
+        .expect("seed webauthn auth method");
+
+        let logs = capture_tracing();
+
+        let result = passkey_signup_start_service(saas_start_params(&db, &kv, email))
+            .await
+            .expect("service call should not error");
+
+        assert!(matches!(
+            result,
+            PasskeySignupStartServiceResult::VerificationRequired
+        ));
+
+        let info_events = logs.events_at(Level::INFO);
+        assert!(
+            info_events
+                .iter()
+                .any(|(_, msg)| msg.contains("existing-account notice") && msg.contains(email)),
+            "verified-user passkey signup must log that an existing-account notice was sent \
+             instead of staying silent (KYO-681); captured: {:?}",
+            logs.events()
+        );
+    }
+
     // -----------------------------------------------------------------
     // passkey_recovery_start_service (KYO-285)
     // -----------------------------------------------------------------
@@ -3937,6 +4078,223 @@ mod tests {
         assert!(
             totp_after.is_some(),
             "passkey recovery must never remove the totp auth method (KYO-285)"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // signup_start_service (KYO-681)
+    // -----------------------------------------------------------------
+    //
+    // Password-signup counterparts of the passkey_signup_start_service tests
+    // above: KYO-681 fixed the verified-user arm of both services (it used
+    // to be a silent dead end — no email, no log line), and the fix must
+    // not weaken either service's account-enumeration guard or reintroduce
+    // token-minting on a path that has nothing to verify.
+
+    fn password_start_params<'a>(
+        db: &'a DbPool,
+        kv: &'a KVPool,
+        email: &'a str,
+        device: &'a DeviceInfo,
+    ) -> SignupStartParams<'a> {
+        SignupStartParams {
+            db,
+            kv,
+            jwt_secret: "test-secret",
+            email,
+            name: None,
+            password: Some("correct-horse-battery-staple"),
+            ip: "127.0.0.1",
+            device,
+            self_hosted: false,
+            smtp_configured: true,
+            frontend_url: "https://app.example.com",
+            slack_feedback_webhook_url: None,
+            support_email: "support@example.com",
+            config: None,
+        }
+    }
+
+    /// The response for a brand-new email, an existing-but-unverified email,
+    /// and an existing-verified email must be indistinguishable — otherwise
+    /// the endpoint is an account-enumeration oracle. Guards the security
+    /// property KYO-681's fix relies on: the verified-user arm may now send
+    /// an email, but the HTTP response it returns must stay identical to
+    /// the other two arms. Password-signup counterpart of
+    /// `passkey_signup_start_indistinguishable_across_account_states` above,
+    /// which previously had no sibling covering this flow.
+    #[tokio::test]
+    async fn signup_start_service_indistinguishable_across_account_states() {
+        let db = test_pool().await;
+        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+        let device = test_device();
+
+        let new_email = "signup-start-new@example.com";
+        let unverified_email = "signup-start-unverified@example.com";
+        let verified_email = "signup-start-verified@example.com";
+
+        crate::user_service::create_user(&db, unverified_email, None, false)
+            .await
+            .expect("create unverified user");
+        crate::user_service::create_user(&db, verified_email, Some("Verified User"), true)
+            .await
+            .expect("create verified user");
+
+        for email in [new_email, unverified_email, verified_email] {
+            let result = signup_start_service(password_start_params(&db, &kv, email, &device))
+                .await
+                .expect("service call should not error");
+
+            assert!(
+                matches!(result, SignupStartServiceResult::VerificationRequired),
+                "expected VerificationRequired for {email} — new/unverified/verified account \
+                 states must return the same result (email enumeration guard)"
+            );
+        }
+    }
+
+    /// A verified user's email must never mint a new "email_verification"
+    /// token when they attempt to sign up again — there is nothing to
+    /// verify. KYO-681 added an email on this path; it must go out through
+    /// `notify_existing_verified_account`, not `mint_and_send_verification_email`.
+    /// Password-signup counterpart of
+    /// `passkey_signup_start_mints_no_token_for_verified_user` above.
+    #[tokio::test]
+    async fn signup_start_service_mints_no_token_for_verified_user() {
+        let db = test_pool().await;
+        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+        let device = test_device();
+        let email = "signup-start-verified-notoken@example.com";
+
+        crate::user_service::create_user(&db, email, Some("Existing User"), true)
+            .await
+            .expect("create verified user");
+
+        assert_eq!(
+            count_tokens_of_type(&db, email, "email_verification").await,
+            0,
+            "sanity check: no verification tokens exist before the call"
+        );
+
+        let result = signup_start_service(password_start_params(&db, &kv, email, &device))
+            .await
+            .expect("service call should not error");
+
+        assert!(matches!(
+            result,
+            SignupStartServiceResult::VerificationRequired
+        ));
+        assert_eq!(
+            count_tokens_of_type(&db, email, "email_verification").await,
+            0,
+            "a verified account's email must never mint a new verification token (KYO-681)"
+        );
+    }
+
+    /// Wiring test for the fix itself. The other new tests in this section
+    /// prove the ingredients work in isolation (`list_active_auth_types`
+    /// returns the right rows; `build_existing_account_email` renders the
+    /// right content) — this one proves the verified-user arm actually
+    /// reaches them, which is the part of the bug that made KYO-681 a
+    /// silent dead end: reverting the fix (dropping the
+    /// `notify_existing_verified_account` call from the `Some(user)` arm)
+    /// makes this log line never fire and this test goes red, even though
+    /// the HTTP response and token-count assertions above stay green.
+    /// (Mutation-proven manually: reverting the arm to the pre-fix no-op
+    /// makes this test fail with `captured: []`, restored afterward.)
+    #[tokio::test]
+    async fn signup_start_service_for_verified_user_logs_existing_account_notice() {
+        let db = test_pool().await;
+        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+        let device = test_device();
+        let email = "signup-start-verified-logged@example.com";
+
+        let user = crate::user_service::create_user(&db, email, Some("Existing User"), true)
+            .await
+            .expect("create verified user");
+        crate::user_service::upsert_auth_method(
+            &db,
+            &user.user_id,
+            "password",
+            &serde_json::json!({"hash": "test-hash"}),
+        )
+        .await
+        .expect("seed password auth method");
+
+        let logs = capture_tracing();
+
+        let result = signup_start_service(password_start_params(&db, &kv, email, &device))
+            .await
+            .expect("service call should not error");
+
+        assert!(matches!(
+            result,
+            SignupStartServiceResult::VerificationRequired
+        ));
+
+        let info_events = logs.events_at(Level::INFO);
+        assert!(
+            info_events
+                .iter()
+                .any(|(_, msg)| msg.contains("existing-account notice") && msg.contains(email)),
+            "verified-user signup must log that an existing-account notice was sent \
+             instead of staying silent (KYO-681); captured: {:?}",
+            logs.events()
+        );
+    }
+
+    /// `notify_existing_verified_account` (both signup flows go through it)
+    /// reads the account's active auth methods via
+    /// `user_service::list_active_auth_types` to tell the owner how they can
+    /// sign in. Assert that query returns exactly the seeded, active
+    /// methods — not a hardcoded guess, and not methods that were removed.
+    #[tokio::test]
+    async fn list_active_auth_types_reflects_seeded_and_removed_methods() {
+        let db = test_pool().await;
+        let email = "signup-start-auth-methods@example.com";
+
+        let user = crate::user_service::create_user(&db, email, Some("Verified User"), true)
+            .await
+            .expect("create verified user");
+
+        crate::user_service::upsert_auth_method(
+            &db,
+            &user.user_id,
+            "password",
+            &serde_json::json!({"hash": "test-hash"}),
+        )
+        .await
+        .expect("seed password auth method");
+        crate::user_service::upsert_auth_method(
+            &db,
+            &user.user_id,
+            "google_oauth",
+            &serde_json::json!({"google_id": "test-google-id"}),
+        )
+        .await
+        .expect("seed google_oauth auth method");
+
+        let methods = crate::user_service::list_active_auth_types(&db, &user.user_id)
+            .await
+            .expect("list_active_auth_types should not error");
+        assert_eq!(
+            methods,
+            vec!["google_oauth".to_string(), "password".to_string()],
+            "must reflect exactly the seeded active auth methods"
+        );
+
+        crate::user_service::remove_auth_method(&db, &user.user_id, "google_oauth")
+            .await
+            .expect("remove google_oauth auth method");
+
+        let methods_after_removal =
+            crate::user_service::list_active_auth_types(&db, &user.user_id)
+                .await
+                .expect("list_active_auth_types should not error");
+        assert_eq!(
+            methods_after_removal,
+            vec!["password".to_string()],
+            "a removed (inactive) auth method must not be reported"
         );
     }
 

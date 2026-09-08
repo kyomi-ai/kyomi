@@ -1021,6 +1021,40 @@ You're receiving this because someone signed up for Kyomi with this email addres
             .await
     }
 
+    /// Notify the owner of an already-verified account that someone
+    /// (almost certainly them) just tried to sign up again with their
+    /// email.
+    ///
+    /// This is the one channel allowed to say "you already have an
+    /// account": `signup_start_service` and `passkey_signup_start_service`
+    /// return the identical `VerificationRequired` result for a new email,
+    /// an unverified email, and a verified email, to prevent email
+    /// enumeration — but that constrains the HTTP response only. Only the
+    /// mailbox owner can read this email, so it's safe to be specific here.
+    /// Lists the account's active sign-in methods (`auth_methods`, raw
+    /// `user_auth_methods.auth_type` values) so the recipient isn't left
+    /// guessing between Google, passkey, and password (KYO-681).
+    ///
+    /// Returns `true` if sent successfully.
+    pub async fn send_existing_account_notice(
+        &self,
+        email: &str,
+        name: &str,
+        sign_in_link: &str,
+        auth_methods: &[String],
+    ) -> bool {
+        let display_name = if name.is_empty() { "there" } else { name };
+        let (subject, html_body, text_body) = build_existing_account_email(
+            display_name,
+            sign_in_link,
+            auth_methods,
+            &self.frontend_url,
+        );
+
+        self.send_email(email, &subject, &html_body, Some(&text_body), None, &[])
+            .await
+    }
+
     /// Send a welcome email to a new newsletter subscriber.
     ///
     /// Returns `true` if sent successfully.
@@ -1299,6 +1333,207 @@ fn html_escape(s: &str) -> String {
         .replace('`', "&#96;")
 }
 
+/// Human-readable label for a `user_auth_methods.auth_type` value.
+///
+/// Unrecognized values pass through unchanged rather than being dropped —
+/// silently omitting an auth method from this list would tell the account
+/// owner they have fewer ways to sign in than they actually do.
+fn auth_method_label(auth_type: &str) -> &str {
+    match auth_type {
+        "password" => "Password",
+        "google_oauth" => "Google",
+        "webauthn" => "Passkey",
+        other => other,
+    }
+}
+
+/// Render `auth_types` (raw `user_auth_methods.auth_type` values, as
+/// returned by `list_active_auth_types`) into a human-readable list, e.g.
+/// `"Google"`, `"Google and Password"`, or `"Google, Password and Passkey"`.
+///
+/// An empty slice — an account somehow left with no active auth method —
+/// falls back to generic wording rather than rendering an empty list.
+fn humanize_auth_methods(auth_types: &[String]) -> String {
+    let labels: Vec<&str> = auth_types.iter().map(|t| auth_method_label(t)).collect();
+    match labels.split_last() {
+        None => "your existing sign-in method".to_string(),
+        Some((last, [])) => (*last).to_string(),
+        Some((last, init)) => format!("{} and {last}", init.join(", ")),
+    }
+}
+
+/// Pure content builder behind `send_existing_account_notice`, kept separate
+/// from `EmailService` so tests can assert on the rendered subject/body
+/// directly without needing SMTP configured (KYO-681).
+///
+/// Returns `(subject, html_body, text_body)`.
+fn build_existing_account_email(
+    display_name: &str,
+    sign_in_link: &str,
+    auth_methods: &[String],
+    frontend_url: &str,
+) -> (String, String, String) {
+    let subject = "You already have a Kyomi account".to_string();
+    let methods_list = humanize_auth_methods(auth_methods);
+
+    let html_body = format!(
+        r#"<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light dark">
+    <meta name="supported-color-schemes" content="light dark">
+    <style>
+        :root {{ color-scheme: light dark; }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            line-height: 1.6;
+            color: #1C1917;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #FAFAF8;
+        }}
+        .header {{
+            text-align: center;
+            margin-bottom: 16px;
+            padding: 16px 0;
+            border-bottom: 1px solid #E8E5DE;
+        }}
+        .logo-img {{
+            height: 48px;
+            width: auto;
+        }}
+        .content {{
+            padding: 20px 0;
+        }}
+        h1 {{
+            color: #1C1917;
+            font-size: 24px;
+            font-weight: 700;
+            margin-bottom: 16px;
+        }}
+        p {{
+            color: #6B6660;
+            font-size: 14px;
+            margin: 12px 0;
+        }}
+        .highlight {{
+            background-color: #fffbeb;
+            border-left: 4px solid #d97706;
+            padding: 16px;
+            margin: 24px 0;
+            border-radius: 0 8px 8px 0;
+        }}
+        .cta {{
+            text-align: center;
+            margin: 32px 0;
+        }}
+        .button {{
+            display: inline-block;
+            background-color: #d97706;
+            color: #ffffff !important;
+            padding: 14px 28px;
+            text-decoration: none;
+            border-radius: 8px;
+            font-weight: 600;
+            font-size: 14px;
+        }}
+        .footer {{
+            margin-top: 20px;
+            padding-top: 16px;
+            border-top: 1px solid #E8E5DE;
+            text-align: center;
+            color: #9C9790;
+            font-size: 12px;
+        }}
+        .footer a {{
+            color: #6B6660;
+            text-decoration: none;
+        }}
+        .footer a:hover {{
+            text-decoration: underline;
+        }}
+        @media (prefers-color-scheme: dark) {{
+            body {{ background-color: #12100F !important; color: #F5F3EF !important; }}
+            h1, h2, h3 {{ color: #F5F3EF !important; }}
+            p {{ color: #A8A29E !important; }}
+            .header {{ border-bottom-color: #2E2925 !important; }}
+            .highlight {{ background-color: #2C241E !important; }}
+            .feature {{ color: #A8A29E !important; }}
+            .footer {{ border-top-color: #2E2925 !important; color: #78716C !important; }}
+            .footer a {{ color: #A8A29E !important; }}
+        }}
+    </style>
+</head>
+<body style="background-color: #FAFAF8; color: #1C1917;">
+    <div class="header">
+        <a href="{frontend_url}" style="text-decoration: none;">
+            <img src="cid:kyomi_logo" alt="Kyomi" class="logo-img" style="height: 48px; width: auto;">
+        </a>
+    </div>
+    <div class="content">
+        <h1>You Already Have an Account</h1>
+
+        <p>Hi {display_name},</p>
+
+        <p>Someone (hopefully you) just tried to sign up for Kyomi with this email address, but you already have an account.</p>
+
+        <div class="highlight">
+            <strong>You can sign in with:</strong> {methods_list}
+        </div>
+
+        <div class="cta">
+            <a href="{sign_in_link}" class="button">Sign In</a>
+        </div>
+
+        <p>If this wasn't you, you can safely ignore this email — no changes have been made to your account.</p>
+
+        <p>Thanks,<br>The Kyomi Team</p>
+    </div>
+    <div class="footer">
+        <p style="margin: 0 0 8px 0;">
+            You're receiving this because someone attempted to sign up for Kyomi with this email address.
+        </p>
+        <p style="margin: 0;">
+            <a href="{frontend_url}" style="color: #d97706;">kyomi.ai</a>
+        </p>
+    </div>
+</body>
+</html>"#,
+        frontend_url = html_escape(frontend_url),
+        display_name = html_escape(display_name),
+        sign_in_link = html_escape(sign_in_link),
+        methods_list = html_escape(&methods_list),
+    );
+
+    let text_body = format!(
+        "\
+You Already Have an Account
+
+Hi {display_name},
+
+Someone (hopefully you) just tried to sign up for Kyomi with this email address, but you already have an account.
+
+You can sign in with: {methods_list}
+
+Sign in: {sign_in_link}
+
+If this wasn't you, you can safely ignore this email\u{2014}no changes have been made to your account.
+
+Thanks,
+The Kyomi Team
+
+---
+You're receiving this because someone attempted to sign up for Kyomi with this email address.
+{frontend_url}
+",
+    );
+
+    (subject, html_body, text_body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1341,6 +1576,89 @@ mod tests {
         assert_eq!(html_escape("a/b"), "a&#x2F;b");
         assert_eq!(html_escape("a`b"), "a&#96;b");
         assert_eq!(html_escape("safe text 123"), "safe text 123");
+    }
+
+    #[test]
+    fn humanize_auth_methods_single() {
+        assert_eq!(
+            humanize_auth_methods(&["password".to_string()]),
+            "Password"
+        );
+    }
+
+    #[test]
+    fn humanize_auth_methods_two() {
+        assert_eq!(
+            humanize_auth_methods(&["google_oauth".to_string(), "password".to_string()]),
+            "Google and Password"
+        );
+    }
+
+    #[test]
+    fn humanize_auth_methods_three() {
+        assert_eq!(
+            humanize_auth_methods(&[
+                "google_oauth".to_string(),
+                "password".to_string(),
+                "webauthn".to_string(),
+            ]),
+            "Google, Password and Passkey"
+        );
+    }
+
+    #[test]
+    fn humanize_auth_methods_unrecognized_type_passes_through() {
+        // A future auth_type this mapping doesn't know about must still be
+        // named, not silently dropped from the list.
+        assert_eq!(
+            humanize_auth_methods(&["sms".to_string()]),
+            "sms"
+        );
+    }
+
+    #[test]
+    fn humanize_auth_methods_empty_falls_back_to_generic_wording() {
+        let result = humanize_auth_methods(&[]);
+        assert!(!result.is_empty(), "must not render an empty list to the user");
+    }
+
+    /// KYO-681: the rendered email must name the sign-in URL and every one
+    /// of the account's auth methods — this is the content a returning user
+    /// depends on to get unstuck. Tests the pure builder directly (no SMTP
+    /// transport involved).
+    #[test]
+    fn build_existing_account_email_names_sign_in_url_and_auth_methods() {
+        let auth_methods = vec!["google_oauth".to_string(), "password".to_string()];
+        let (subject, html_body, text_body) = build_existing_account_email(
+            "Jane",
+            "https://app.example.com/login",
+            &auth_methods,
+            "https://app.example.com",
+        );
+
+        assert_eq!(subject, "You already have a Kyomi account");
+
+        // The HTML body html-escapes the link (per this file's html_escape,
+        // which also escapes `/`), so assert against the escaped form there
+        // and the raw form in the plain-text body.
+        assert!(
+            html_body.contains(&html_escape("https://app.example.com/login")),
+            "html body must contain the sign-in URL: {html_body}"
+        );
+        assert!(
+            text_body.contains("https://app.example.com/login"),
+            "text body must contain the sign-in URL: {text_body}"
+        );
+
+        for body in [&html_body, &text_body] {
+            assert!(body.contains("Google"), "body must name Google: {body}");
+            assert!(body.contains("Password"), "body must name Password: {body}");
+            assert!(body.contains("Jane"), "body must greet the account by name: {body}");
+        }
+
+        // The account's auth methods must not be misrepresented as a method
+        // it doesn't have.
+        assert!(!html_body.contains("Passkey"));
     }
 
     #[tokio::test]
