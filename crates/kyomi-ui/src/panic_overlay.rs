@@ -12,7 +12,9 @@
 //! the Tailwind JIT scanner runs at build time; ad-hoc classes injected after a
 //! panic would have no corresponding CSS rules.
 
-use crate::utils::feedback_context::{escape_json_string, extract_browser, extract_os};
+use crate::utils::feedback_context::{
+    escape_json_string, extract_browser, extract_os, get_console_errors,
+};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
@@ -396,14 +398,23 @@ fn build_panic_context(window: &web_sys::Window, panic_message: &str) -> String 
         .and_then(|v| v.as_f64())
         .unwrap_or(0.0) as u32;
 
+    // Pre-serialised JSON array from the console interceptor — interpolated
+    // unescaped, exactly as `collect_context()` does. Escaping it would
+    // double-encode the array into a JSON string (KYO-682). The panic hook in
+    // `main.rs` runs `console_error_panic_hook::hook(info)` before this
+    // overlay is built, so the panic's own stack has already been captured by
+    // the interceptor by the time a report is submitted.
+    let console_errors = get_console_errors();
+
     format!(
-        r#"{{"url":"{}","browser":"{}","os":"{}","screen_width":{},"screen_height":{},"panic_message":"{}","console_errors":[]}}"#,
+        r#"{{"url":"{}","browser":"{}","os":"{}","screen_width":{},"screen_height":{},"panic_message":"{}","console_errors":{}}}"#,
         escape_json_string(&url),
         escape_json_string(&browser),
         escape_json_string(&os),
         screen_width,
         screen_height,
         escape_json_string(panic_message),
+        console_errors,
     )
 }
 
