@@ -266,11 +266,24 @@ mod tests {
     /// The window bounding `build_panic_context`'s body. Both markers are
     /// `fn` signatures, which the regression this file guards cannot delete
     /// without also failing the assertions below.
+    ///
+    /// The end marker is anchored on the bare name `fn apply_report_success(`
+    /// — no `pub`/`async`/other qualifier — because qualifiers are churn, not
+    /// identity: KYO-722 broke exactly this way when `f3ac13dd` (KYO-686)
+    /// correctly made `submit_panic_report` synchronous for a reason
+    /// unrelated to what this guard checks, and the old
+    /// `"async fn submit_panic_report("` marker stopped matching, so
+    /// `extract_between` panicked with "end marker not found" instead of the
+    /// assertions below ever running. `apply_report_success` is used, not
+    /// `submit_panic_report`, because it is the function that immediately
+    /// follows `build_panic_context` in source order, so the slice is
+    /// exactly `build_panic_context`'s body with no ambiguity from
+    /// `submit_panic_report`'s own call site earlier in the file.
     fn build_panic_context_body() -> &'static str {
         extract_between(
             PANIC_OVERLAY_SRC,
             "fn build_panic_context(",
-            "async fn submit_panic_report(",
+            "fn apply_report_success(",
         )
     }
 
