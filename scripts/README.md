@@ -62,8 +62,8 @@ All scripts are organized by environment. **Every script is environment-specific
   autonomous worker claims a backlog ticket: *is anyone else already
   working on this?* (KYO-422, fixing the double-pickup of KYO-416 that
   produced conflicting PRs #367/#368). Checks remote branches
-  (`git ls-remote --heads`), pull requests (`gh pr list`, matched on
-  `headRefName` only — never PR body or title, see the script header for
+  (`git ls-remote --heads`), pull requests (`gh api --paginate`, matched on
+  the head ref only — never PR body or title, see the script header for
   why that was tried and reverted, KYO-471), local worktrees
   (`git worktree list`), and local branches (`git branch --list`). The
   last two exist because a worker whose run dies between `git commit` and
@@ -78,15 +78,19 @@ All scripts are organized by environment. **Every script is environment-specific
   ticket**; `1` — work in flight found, do not claim; `2` — usage error,
   including a malformed `KEY_RESTART_CUTOFF` (KYO-607); `3` — a check could
   not be completed (remote unreachable, `gh` missing
-  or failing, **or the PR listing came back at `--limit` and may therefore
-  be truncated**, or a PR row that did not split into four usable fields —
-  KYO-607) and must be treated exactly like `1`, never like `0` —
-  the script fails closed by design, since a false "clear" costs a full
-  duplicate implementation while a false "in flight" costs one skipped
-  cycle. The PR page size is the env-overridable `PR_LIST_LIMIT` (default
-  `500`, must exceed the repo's total PR count — it was 411 on 2026-08-24);
-  raising it is the fix when the truncation guard trips, and the guard is
-  why raising it is a deliberate act rather than a silently wrong answer.
+  or failing, **a pagination that stopped part-way through**, or a PR row
+  that did not split into four usable fields — KYO-607) and must be treated
+  exactly like `1`, never like `0` — the script fails closed by design,
+  since a false "clear" costs a full duplicate implementation while a false
+  "in flight" costs one skipped cycle. **The PR listing has no size ceiling
+  (KYO-703).** It paginates to completion, so there is no truncation
+  condition to detect and no limit to raise. Before KYO-703 the fetch was
+  `gh pr list --limit $PR_LIST_LIMIT` guarded by a "rows == limit" check;
+  when the repo reached exactly the default of 500 PRs that guard tripped on
+  every invocation and every backlog worker was blocked at the claim step,
+  reporting clean runs while claiming nothing. If pagination fails part-way,
+  `gh` emits the rows it already fetched *and* exits non-zero; the script
+  discards them and exits `3` rather than answering from a partial listing.
   **`--self <branch>` makes self-exclusion cwd-independent (KYO-593):** the
   script's default self-exclusion is derived from
   `git rev-parse --abbrev-ref HEAD` in the invoking shell's cwd, which is

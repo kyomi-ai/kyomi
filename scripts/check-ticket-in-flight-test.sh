@@ -22,6 +22,14 @@
 # the exact same fixture, so the fix — not an unrelated setup change — is
 # what flips the verdict.
 #
+# Tests 13-15 (KYO-703) cover the removal of the PR-listing ceiling. The old
+# `gh pr list --limit N` fetch treated a listing that came back at exactly N
+# rows as possibly truncated and exited 3; the repo reached exactly N=500 PRs
+# on 2026-09-09, so every ticket exited 3 and every backlog run reported a
+# clean pass while claiming nothing. Test 13 is that outage reproduced, test 14
+# proves the fix did not simply blind the PR check, and test 15 is the
+# fail-closed property that had to survive both.
+#
 # Tests 32-39 (KYO-607) cover recycled ticket keys: Trakkt's numbering
 # restarted in May 2026, so nine keys are shared between a retired ticket and
 # a current one, and the merged PR (plus its surviving remote branch) of the
@@ -103,11 +111,10 @@ gh_ok_prs_n() {
     # gh_ok_prs_n <count> [<extra row>...] — stage <count> filler PR rows, then
     # any extra rows given verbatim. Filler branches are jason/kyo-90<i>-filler,
     # which no ticket number any test asks about can match, so a row's only
-    # contribution is to the row COUNT — which is what the PR_LIST_LIMIT
-    # truncation guard keys off. Lets a test reach the limit in three rows
-    # instead of five hundred. Fillers are dated POST_RESTART_TS so they are
-    # never classified as pre-restart either; a filler must influence nothing
-    # but the count.
+    # contribution is to the row COUNT. Fillers are dated POST_RESTART_TS so
+    # they are never classified as pre-restart either; a filler must influence
+    # nothing but the count. Used by the KYO-703 tests to build a listing
+    # larger than the retired 500-row ceiling.
     local count="$1" i
     shift
     : >"$GH_STDOUT_FILE"
@@ -123,6 +130,21 @@ gh_ok_prs_n() {
 gh_fail() {
     : >"$GH_STDOUT_FILE"
     printf '%s\n' "$1" >"$GH_STDERR_FILE"
+    echo 1 >"$GH_EXIT_FILE"
+}
+gh_fail_partial() {
+    # gh_fail_partial <stderr line> <row>... — stage rows on stdout AND a
+    # non-zero exit, reproducing what `gh api --paginate` actually does when a
+    # page fails partway through: rows already fetched are on stdout, and the
+    # process THEN exits non-zero (KYO-703 — verified 2026-09-09 against a stub
+    # HTTP server serving one page with a rel="next" Link and a 500 on page 2).
+    # The rows staged here deliberately include a genuine match, so a script
+    # that read the partial output would report a verdict from an incomplete
+    # listing instead of failing closed.
+    local err="$1"
+    shift
+    printf '%s\n' "$@" >"$GH_STDOUT_FILE"
+    printf '%s\n' "$err" >"$GH_STDERR_FILE"
     echo 1 >"$GH_EXIT_FILE"
 }
 gh_ok_empty # default: no PRs, until a test says otherwise
@@ -353,7 +375,8 @@ clone_repo "$bare9" "$t9/workerB"
 gh_fail "gh: authentication required (stub failure)"
 run_check "$t9/workerB" 422
 assert_exit "a failing gh must exit 3, never 0" 3
-assert_contains "names the failing check" "gh pr list"
+assert_contains "names the failing check" "PR listing (gh api --paginate .../pulls)"
+assert_contains "reports the underlying gh error" "authentication required"
 gh_ok_empty
 echo
 
@@ -381,10 +404,6 @@ CHECK_OUTPUT="$out"
 assert_exit "no argument" 2
 run_check "$tmpdir" "not-a-ticket"
 assert_exit "unparseable ticket" 2
-PR_LIST_LIMIT="not-a-number" run_check "$tmpdir" 422
-assert_exit "non-numeric PR_LIST_LIMIT override" 2
-PR_LIST_LIMIT=0 run_check "$tmpdir" 422
-assert_exit "zero PR_LIST_LIMIT override" 2
 echo
 
 # ─── Test 12: input forms — KYO-422 / kyo-422 / 422 all identical ───────────
@@ -406,52 +425,85 @@ for form in KYO-422 kyo-422 422; do
 done
 echo
 
-# ─── Test 13: fail closed — a PR listing that may be truncated ──────────────
-# THE FAIL-CLOSED PROOF for `gh pr list --limit`. The script shipped with a
-# hardcoded --limit 200 against a repo that already had 411 PRs, so every
-# duplicate older than PR #212 was invisible and reported CLEAR — the KYO-511
-# fail-open species by another route. A bigger number alone would not have
-# caught it, so the guard is what is under test here: exactly PR_LIST_LIMIT
-# rows come back, NONE of them matching the ticket, so an implementation that
-# ignored the row count would confidently say "clear" (exit 0). It must say
-# "could not complete this check" (exit 3) instead.
-echo "-- Test 13: fail closed, PR listing at PR_LIST_LIMIT"
+# ─── Tests 13-15: the PR listing has NO ceiling (KYO-703) ───────────────────
+#
+# The check used to ask `gh pr list` for a fixed `--limit N` and treat a
+# listing that came back at exactly N rows as possibly truncated, exiting 3.
+# On 2026-09-09 the repo reached exactly 500 PRs, the default N, so `rows >= N`
+# was true on EVERY invocation: every ticket exited 3, and since exit 0 is the
+# only code that permits claiming, every backlog run reported a clean pass
+# while claiming nothing. The fetch is now `gh api --paginate`, which walks the
+# Link header to exhaustion, so there is no N and nothing to detect.
+#
+# These three pin the whole contract that replaced the guard, and they are
+# meant to be read together — 13 and 14 are the two verdicts that must survive
+# a listing bigger than the retired ceiling, and 15 is the fail-closed half
+# that must NOT be traded away to get them. Removing the ceiling by simply
+# ignoring `gh`'s exit status would pass 13 and 14 and fail 15.
+#
+# `PR_LIST_LIMIT` is gone with the guard; these tests set no environment at
+# all, which is the point — the real script must behave this way at its own
+# defaults, exactly as it does against the live repo.
+CEILINGLESS_ROWS=600 # > the retired 500-row default, and > any raise of it
+
+# ─── Test 13: a listing past the old ceiling, no match → CLEAR ──────────────
+# THE OUTAGE ITSELF, reproduced: a listing of more rows than the retired
+# ceiling, none of them matching the ticket. Under the row-count guard this
+# was exit 3 ("may be truncated") for every ticket on the board. It must be
+# exit 0 — and it must reach that verdict having actually read all the rows,
+# not by skipping the PR check.
+echo "-- Test 13: a listing past the retired ceiling with no match is CLEAR (KYO-703)"
 t13="$tmpdir/t13"
 mkdir -p "$t13"
 bare13="$(new_bare_remote "$t13/remote.git")"
 seed_main "$bare13"
 clone_repo "$bare13" "$t13/workerB"
-gh_ok_prs_n 3
-PR_LIST_LIMIT=3 run_check "$t13/workerB" 422
-assert_exit "a listing at the limit must exit 3, never 0" 3
-assert_contains "names the limit it hit" "PR_LIST_LIMIT of 3"
-assert_contains "tells the operator to raise it" "re-run with a higher PR_LIST_LIMIT"
+gh_ok_prs_n "$CEILINGLESS_ROWS"
+run_check "$t13/workerB" 422
+assert_exit "a $CEILINGLESS_ROWS-row listing with no match is CLEAR, not a failure" 0
+assert_not_contains "does not claim the listing may be truncated" "may be truncated"
+assert_not_contains "does not fail closed on listing size" "COULD NOT COMPLETE ALL CHECKS"
 echo
 
-# ─── Test 14: just under the limit, no match — the guard must not fire ──────
-echo "-- Test 14: just under PR_LIST_LIMIT, no match"
+# ─── Test 14: the same listing, with a match → IN FLIGHT ────────────────────
+# The other half, and the one that proves the outage was not "fixed" by
+# blinding the PR check: the match sits at the END of a listing longer than
+# the retired ceiling, so it is exactly the row a `--limit`-truncated fetch
+# would have dropped. It must still be found and named.
+echo "-- Test 14: a match past the retired ceiling is still found (KYO-703)"
 t14="$tmpdir/t14"
 mkdir -p "$t14"
 bare14="$(new_bare_remote "$t14/remote.git")"
 seed_main "$bare14"
 clone_repo "$bare14" "$t14/workerB"
-gh_ok_prs_n 2
-PR_LIST_LIMIT=3 run_check "$t14/workerB" 422
-assert_exit "a complete listing with no match is still CLEAR" 0
-assert_not_contains "does not claim truncation" "PR_LIST_LIMIT of 3"
+gh_ok_prs_n "$CEILINGLESS_ROWS" "$(pr_row 503 OPEN "$POST_RESTART_TS" jason/kyo-422-guard)"
+run_check "$t14/workerB" 422
+assert_exit "a match beyond the retired ceiling is IN FLIGHT" 1
+assert_contains "names the matching PR" "PR #503 (OPEN) branch jason/kyo-422-guard"
 echo
 
-# ─── Test 15: just under the limit, with a match — real verdict survives ────
-echo "-- Test 15: just under PR_LIST_LIMIT, with a match"
+# ─── Test 15: a pagination that dies partway still fails CLOSED ─────────────
+# THE FAIL-CLOSED REPLACEMENT for the truncation guard, and the reason removing
+# the ceiling is safe. `gh api --paginate` emits the pages it already fetched on
+# stdout and THEN exits non-zero when a later page fails (verified 2026-09-09
+# against a stub HTTP server serving a rel="next" Link and then a 500). Those
+# partial rows here include a genuine match, so this distinguishes the three
+# possible implementations: reading partial output would exit 1, ignoring gh's
+# exit status entirely would exit 0 once the match were dropped, and only
+# discarding the output and recording a FAILURE gives exit 3.
+echo "-- Test 15: a partial (failed) pagination exits 3 and its rows are not used (KYO-703)"
 t15="$tmpdir/t15"
 mkdir -p "$t15"
 bare15="$(new_bare_remote "$t15/remote.git")"
 seed_main "$bare15"
 clone_repo "$bare15" "$t15/workerB"
-gh_ok_prs_n 1 "$(pr_row 503 OPEN "$POST_RESTART_TS" jason/kyo-422-guard)"
-PR_LIST_LIMIT=3 run_check "$t15/workerB" 422
-assert_exit "a complete listing with a match is IN FLIGHT" 1
-assert_contains "names the matching PR" "PR #503 (OPEN) branch jason/kyo-422-guard"
+gh_fail_partial "gh: Internal Server Error (HTTP 500)" \
+    "$(pr_row 9001 MERGED "$POST_RESTART_TS" jason/kyo-903-filler)" \
+    "$(pr_row 503 OPEN "$POST_RESTART_TS" jason/kyo-422-guard)"
+run_check "$t15/workerB" 422
+assert_exit "a partial pagination is a check we could not complete" 3
+assert_contains "reports the underlying gh failure" "Internal Server Error"
+assert_not_contains "does not report a verdict from the partial rows" "PR #503"
 echo
 
 gh_ok_empty
@@ -955,10 +1007,10 @@ for bad in "not-a-timestamp" "2026-05-12" "2026-05-12T00:00:00+00:00" "2026-05-1
     KEY_RESTART_CUTOFF="$bad" run_check "$t37/workerB" 299
     assert_exit "KEY_RESTART_CUTOFF='$bad' is a usage error" 2
 done
-# An EXPLICITLY EMPTY override is not an error — it falls back to the built-in
-# default, the same `${VAR:-default}` semantics PR_LIST_LIMIT already has.
-# Pinned so the distinction between "unset/empty" and "set to nonsense" can't
-# be lost in a later refactor.
+# An EXPLICITLY EMPTY override is not an error — the `${VAR:-default}` capture
+# in the script falls back to the built-in default. Pinned so the distinction
+# between "unset/empty" and "set to nonsense" can't be lost in a later
+# refactor.
 KEY_RESTART_CUTOFF="" run_check "$t37/workerB" 299
 assert_exit "an empty KEY_RESTART_CUTOFF falls back to the default, not an error" 0
 echo
