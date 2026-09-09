@@ -4,8 +4,14 @@
 //!
 //! State machine with four views: Credentials, TwoFactor, Signup, CheckEmail.
 //! Uses `AuthLayout` for the shared two-panel layout, existing sub-components
-//! (`PasskeySignInButton`, `GoogleSignInButton`, `AuthDivider`), and server
+//! (`PasskeySignInButton`, `GoogleSignInSection`, `AuthDivider`), and server
 //! functions (`get_auth_config`, `login_with_password`).
+//!
+//! KYO-683 — `SignupView` is one email field and one button (plus Google
+//! sign-in, gated identically to `CredentialsView` via the shared
+//! `GoogleSignInSection`): no passkey option, no divider, no disabled state
+//! on the SaaS path. Passkey/password setup happens post-verification, on
+//! `/signup/complete` — see that page's module doc comment.
 
 use leptos::prelude::*;
 use phosphor_leptos::Icon;
@@ -13,15 +19,14 @@ use phosphor_leptos::Icon;
 use leptos_router::hooks::{use_navigate, use_query_map};
 
 use crate::components::{
-    Alert, AlertDescription, AlertTitle, AlertVariant, Button, ButtonSize, ButtonVariant,
-    Checkbox, Label, Spinner, INPUT_CLASS,
+    Alert, AlertDescription, AlertTitle, AlertVariant, Button, ButtonSize, ButtonVariant, Label,
+    Spinner, INPUT_CLASS,
 };
 use crate::pages::auth::auth_layout::AuthLayout;
-use crate::pages::auth::components::{AuthDivider, GoogleSignInButton, PasskeySignInButton};
+use crate::pages::auth::components::{AuthDivider, GoogleSignInSection, PasskeySignInButton};
 use crate::server_fns::auth::{
     get_auth_config, login_with_password, passkey_login_complete, passkey_login_start,
-    passkey_signup_start, resend_verification, signup_start, LoginResult,
-    PasskeySignupStartResult, SignupResult,
+    resend_verification, signup_start, LoginResult, SignupResult,
 };
 use crate::utils::beta_access;
 
@@ -225,24 +230,6 @@ pub fn LoginPage(
         },
     );
 
-    // ── Passkey signup action ───────────────────────────────────────────
-    // Unlike the login page's passkey handler, this never touches
-    // navigator.credentials — it only mints a signup token/email link, so
-    // it's a plain server call and can use Action (no !Send browser API
-    // involved). Input tuple: (email, name_opt). Returns (email, result) so
-    // the Effect can navigate to the CheckEmail view using the dispatch-time
-    // email, matching signup_action's pattern above.
-    let passkey_signup_action = Action::new(
-        move |(dispatched_email, name_opt): &(String, Option<String>)| {
-            let dispatched_email = dispatched_email.clone();
-            let name_opt = name_opt.clone();
-            async move {
-                let result = passkey_signup_start(dispatched_email.clone(), name_opt).await;
-                (dispatched_email, result)
-            }
-        },
-    );
-
     // ── Resend verification action ──────────────────────────────────────
     let resend_action = Action::new(move |ver_email: &String| {
         let ver_email = ver_email.clone();
@@ -328,45 +315,6 @@ pub fn LoginPage(
         }
     });
 
-    // ── Effect: react to passkey signup action result ────────────────────
-    // Mirrors the signup_action Effect above. TokenIssued (self-hosted
-    // SMTP-less) navigates straight to the WebAuthn-ceremony page instead
-    // of setting cookies — passkey signup has no one-step AccountCreated
-    // equivalent, see PasskeySignupStartResult's doc comment.
-    Effect::new(move |_| {
-        if let Some((dispatched_email, result)) = passkey_signup_action.value().get() {
-            match result {
-                Ok(PasskeySignupStartResult::TokenIssued { token }) => {
-                    #[cfg(target_arch = "wasm32")]
-                    if let Some(nav) = navigate.try_get_value() {
-                        nav(
-                            &format!("/auth/passkey-signup?token={token}"),
-                            Default::default(),
-                        );
-                    }
-                    let _ = &token; // suppress unused warning on SSR
-                }
-                Ok(PasskeySignupStartResult::VerificationRequired { message }) => {
-                    set_success_msg.set(Some(message));
-                    set_view_state.set(LoginView::CheckEmail {
-                        email: dispatched_email,
-                    });
-                }
-                Ok(PasskeySignupStartResult::Error { message }) => {
-                    set_error.set(Some(message));
-                }
-                Ok(PasskeySignupStartResult::RateLimited { .. }) => {
-                    set_error.set(Some(
-                        "Too many signup attempts. Please try again later.".to_string(),
-                    ));
-                }
-                Err(e) => {
-                    set_error.set(Some(format!("Server error: {}", e)));
-                }
-            }
-        }
-    });
-
     // ── Effect: react to resend verification action result ──────────────
     Effect::new(move |_| {
         if let Some(result) = resend_action.value().get() {
@@ -426,6 +374,20 @@ pub fn LoginPage(
             .and_then(|r| r.ok())
             .map(|c| c.self_hosted && !c.smtp_configured)
             .unwrap_or(false)
+    };
+
+    // How long the emailed verification link stays valid, in hours — read
+    // from the same `AuthConfig` the server populates from
+    // `constants().jwt.email_verification_expire_hours` (KYO-683), so the
+    // CheckEmailView copy below can't drift from what `token_service`
+    // actually enforces. Defaults to 24 (today's real value) while the
+    // resource is still loading, rather than showing nothing.
+    let verification_expire_hours = move || {
+        auth_config
+            .get()
+            .and_then(|r| r.ok())
+            .map(|c| c.email_verification_expire_hours)
+            .unwrap_or(24)
     };
 
     // ── Reactive title & subtitle ───────────────────────────────────────
@@ -682,34 +644,6 @@ pub fn LoginPage(
         }
     };
 
-    // ── Passkey signup click handler ────────────────────────────────────
-    // Uses whatever email/name are already in the signup form. Name is only
-    // ever populated in the self-hosted-no-smtp branch of SignupView (the
-    // SaaS form doesn't collect one) — passed through as `None` otherwise.
-    let on_passkey_signup_click = Callback::new(move |()| {
-        // Double-dispatch guard.
-        if passkey_signup_action.pending().get_untracked() {
-            return;
-        }
-
-        let current_email = signup_email.get_untracked();
-        if current_email.trim().is_empty() {
-            set_error.set(Some("Please enter your email address.".to_string()));
-            return;
-        }
-
-        set_error.set(None);
-
-        let current_name = signup_name.get_untracked();
-        let name_opt = if current_name.trim().is_empty() {
-            None
-        } else {
-            Some(current_name)
-        };
-
-        passkey_signup_action.dispatch((current_email, name_opt));
-    });
-
     // ── Resend verification handler ─────────────────────────────────────
     // Dispatches resend_action; the Effect above handles result state.
     let on_resend_verification = move |_| {
@@ -780,7 +714,6 @@ pub fn LoginPage(
                         }
                         LoginView::Signup => {
                             let signup_loading = Signal::derive(move || signup_action.pending().get());
-                            let passkey_signup_loading = Signal::derive(move || passkey_signup_action.pending().get());
                             view! {
                                 <SignupView
                                     signup_email=signup_email
@@ -795,9 +728,11 @@ pub fn LoginPage(
                                     is_self_hosted_no_smtp=is_self_hosted_no_smtp
                                     on_signup_submit=on_signup_submit
                                     set_view_state=set_view_state
-                                    show_passkey_section=show_passkey_section
-                                    passkey_signup_loading=passkey_signup_loading
-                                    on_passkey_signup_click=on_passkey_signup_click
+                                    show_google_section=show_google_section
+                                    google_loading=google_loading
+                                    google_access_confirmed=google_access_confirmed
+                                    set_google_access_confirmed=set_google_access_confirmed
+                                    on_google_click=on_google_click
                                 />
                             }.into_any()
                         }
@@ -810,6 +745,7 @@ pub fn LoginPage(
                                     set_error=set_error
                                     set_success_msg=set_success_msg
                                     set_signup_email=set_signup_email
+                                    verification_expire_hours=verification_expire_hours
                                 />
                             }.into_any()
                         }
@@ -877,82 +813,25 @@ fn CredentialsView(
                 <AuthDivider text="or"/>
             </Show>
 
-            // Google Sign In
+            // Google Sign In — the button plus the KYO-478/499 beta-access
+            // attestation notice, extracted into `GoogleSignInSection`
+            // (KYO-683 Phase 2) so `SignupView` below can offer the same
+            // gated notice without duplicating it. `disabled` still folds
+            // in this view's own passkey-loading mutual exclusion via
+            // `google_sign_in_disabled` — that rule is specific to
+            // CredentialsView (Signup has no passkey option to be mutually
+            // exclusive with) so it stays here rather than moving into the
+            // shared component.
             <Show when=show_google_section>
-                <div class="space-y-3">
-                    // KYO-499 — restores parity with the React original
-                    // (`AuthModeSelector.jsx` at `ee16f48a^`): one sentence
-                    // plus an inline beta-access request link, not a
-                    // heading + two explanatory paragraphs + a standalone
-                    // ButtonLink component (that shape shipped in KYO-478
-                    // without verifying against React and was rejected as
-                    // "a monstrosity" — see KYO-499). Sentence wording is
-                    // adjusted from the datasource modal's copy ("this
-                    // authentication method" doesn't apply pre-auth, where
-                    // there is no auth-mode dropdown — this notice is
-                    // specifically about the Google sign-in button it
-                    // accompanies);
-                    // the checkbox label, link text, and link target are
-                    // byte-identical to the datasource modal's notice
-                    // (KYO-499's requirement that the two surfaces not
-                    // drift again — see `utils::beta_access`'s tests).
-                    //
-                    // The link goes to the shared mailto constant in
-                    // `utils::beta_access` (see that module for the exact
-                    // target) — this pre-auth page has no `Layout` context,
-                    // so it could never have opened the in-app feedback
-                    // modal the datasource notice used to use; mailto is
-                    // the one target reachable from both surfaces, which is
-                    // why the datasource modal now uses it too instead of
-                    // the feedback modal (KYO-499). KYO-504 later removed
-                    // the feedback-modal wiring entirely, since this was
-                    // its only caller.
-                    //
-                    // This comment deliberately does not quote the exact
-                    // copy strings below — this file's own test module
-                    // scans this block for those literals, and an echo
-                    // here would let a regression in the real markup pass
-                    // unnoticed (verified by mutation during KYO-499
-                    // implementation).
-                    <GoogleSignInButton
-                        loading=Signal::derive(move || google_loading.get())
-                        disabled=Signal::derive(move || {
-                            google_sign_in_disabled(passkey_loading.get(), google_access_confirmed.get())
-                        })
-                        on_click=on_google_click
-                    />
-                    <Alert variant=AlertVariant::Warning>
-                        <Icon icon=phosphor_leptos::WARNING_CIRCLE attr:class="h-4 w-4" />
-                        <AlertDescription>
-                            <p class="mb-3">
-                                "Google sign-in requires beta access. "
-                                <a
-                                    href=beta_access::BETA_ACCESS_REQUEST_HREF
-                                    class="text-primary hover:underline font-medium"
-                                >
-                                    "Request beta access"
-                                </a>
-                            </p>
-                            <label class="flex items-center gap-2 cursor-pointer">
-                                <Checkbox
-                                    checked=Signal::derive(move || google_access_confirmed.get())
-                                    on_change=Callback::new(move |v: bool| {
-                                        // KYO-499 — persist to
-                                        // localStorage["hasBetaAccess"]
-                                        // alongside the in-memory signal; see
-                                        // `google_access_confirmed`'s doc
-                                        // comment.
-                                        beta_access::write_beta_access(v);
-                                        set_google_access_confirmed.set(v)
-                                    })
-                                />
-                                <span class="text-sm">
-                                    "I have beta access"
-                                </span>
-                            </label>
-                        </AlertDescription>
-                    </Alert>
-                </div>
+                <GoogleSignInSection
+                    loading=Signal::derive(move || google_loading.get())
+                    disabled=Signal::derive(move || {
+                        google_sign_in_disabled(passkey_loading.get(), google_access_confirmed.get())
+                    })
+                    google_access_confirmed=google_access_confirmed
+                    set_google_access_confirmed=set_google_access_confirmed
+                    on_click=on_google_click
+                />
             </Show>
 
             // Success / Error / Verification Alerts — placed above the form for a11y
@@ -1213,13 +1092,22 @@ fn SignupView(
     is_self_hosted_no_smtp: impl Fn() -> bool + Copy + Send + Sync + 'static,
     on_signup_submit: impl Fn(leptos::ev::SubmitEvent) + Copy + Send + Sync + 'static,
     set_view_state: WriteSignal<LoginView>,
-    show_passkey_section: impl Fn() -> bool + Copy + Send + Sync + 'static,
-    passkey_signup_loading: Signal<bool>,
-    on_passkey_signup_click: Callback<()>,
+    show_google_section: impl Fn() -> bool + Copy + Send + Sync + 'static,
+    google_loading: ReadSignal<bool>,
+    /// Shared with `CredentialsView` — same signal instance, same
+    /// `localStorage["hasBetaAccess"]` persistence (KYO-499/KYO-683).
+    google_access_confirmed: ReadSignal<bool>,
+    set_google_access_confirmed: WriteSignal<bool>,
+    on_google_click: Callback<()>,
 ) -> impl IntoView {
-    let passkey_signup_disabled =
-        Signal::derive(move || signup_email.get().trim().is_empty());
-
+    // KYO-683 — the signup page is one email field and one button on the
+    // SaaS path: no disabled state, so the button never reads as blocked.
+    // The email input's native required attribute and input type (see the
+    // markup below) handle empty/invalid submission; the in-flight state
+    // below is a spinner + label swap, not a disabled button. The
+    // self-hosted-no-SMTP path is a different flow (it collects name +
+    // password inline because there's no email round-trip) and keeps its
+    // own validation-driven disabled state.
     let signup_disabled = move || {
         if is_self_hosted_no_smtp() {
             signup_loading.get()
@@ -1227,30 +1115,30 @@ fn SignupView(
                 || signup_name.get().trim().is_empty()
                 || signup_password.get().len() < 8
         } else {
-            signup_loading.get() || signup_email.get().trim().is_empty()
+            false
         }
     };
 
     view! {
         <div class="space-y-5">
-            // Passkey Sign Up — same visual slot the passkey/Google buttons
-            // occupy on the Credentials view, gated by the same
-            // show_passkey_section condition (WebAuthn availability + the
-            // `passkeys` auth-config flag).
-            <Show when=show_passkey_section>
-                <div class="space-y-3">
-                    <PasskeySignInButton
-                        loading=passkey_signup_loading
-                        disabled=passkey_signup_disabled
-                        on_click=on_passkey_signup_click
-                        label="Sign up with Passkey"
-                        loading_label="Sending signup link..."
-                    />
-                </div>
-            </Show>
-
-            <Show when=show_passkey_section>
-                <AuthDivider text="or sign up with email"/>
+            // Google Sign Up — no passkey option here (KYO-683: the signup
+            // page is one email field and one button; passkey is offered as
+            // part of the post-verification credential-setup step instead,
+            // see `signup_complete.rs`). Shares `GoogleSignInSection` with
+            // CredentialsView so the beta-access notice can't drift between
+            // the two surfaces. Disabled only by the shared
+            // google_access_confirmed gate — no passkey-loading mutual
+            // exclusion to fold in here, unlike CredentialsView.
+            <Show when=show_google_section>
+                <GoogleSignInSection
+                    loading=Signal::derive(move || google_loading.get())
+                    disabled=Signal::derive(move || {
+                        google_sign_in_disabled(false, google_access_confirmed.get())
+                    })
+                    google_access_confirmed=google_access_confirmed
+                    set_google_access_confirmed=set_google_access_confirmed
+                    on_click=on_google_click
+                />
             </Show>
 
             <form on:submit=on_signup_submit class="space-y-5">
@@ -1345,7 +1233,7 @@ fn SignupView(
 
                 <Show when=move || !is_self_hosted_no_smtp()>
                     <p class="text-xs text-muted-foreground text-center">
-                        "We'll send you an email to verify your address, then you'll set up your password."
+                        "We'll send you an email to verify your address, then you'll secure your account with a passkey or password."
                     </p>
                 </Show>
 
@@ -1382,6 +1270,12 @@ fn CheckEmailView(
     set_error: WriteSignal<Option<String>>,
     set_success_msg: WriteSignal<Option<String>>,
     set_signup_email: WriteSignal<String>,
+    /// How long the emailed link stays valid, in hours — read from
+    /// `AuthConfig::email_verification_expire_hours` (KYO-683) rather than
+    /// hardcoded here a second time, so this copy can't drift from what
+    /// `token_service` actually enforces (`data/constants.toml`'s
+    /// `email_verification_expire_hours`, 24 today).
+    verification_expire_hours: impl Fn() -> i64 + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
     view! {
         <div class="text-center space-y-4">
@@ -1397,7 +1291,11 @@ fn CheckEmailView(
                 "Click the link in the email to complete your signup and set up your account."
             </p>
             <p class="text-sm text-muted-foreground">
-                "The link expires in 1 hour."
+                {move || {
+                    let hours = verification_expire_hours();
+                    let unit = if hours == 1 { "hour" } else { "hours" };
+                    format!("The link expires in {hours} {unit}.")
+                }}
             </p>
             <div class="pt-4">
                 <Button
@@ -1477,97 +1375,79 @@ mod tests {
         );
     }
 
-    // ── Wiring: notice + checkbox render inside show_google_section ─────
+    // ── Wiring: GoogleSignInSection renders inside show_google_section ───
 
-    /// The KYO-478/KYO-499 notice (Alert + inline "Request beta access"
-    /// link + confirmation checkbox) must render inside the
-    /// `<Show when=show_google_section>` block in `CredentialsView` — the
-    /// same block that renders `GoogleSignInButton` — so it can never
-    /// appear when Google sign-in itself isn't offered.
-    ///
-    /// Copy was rewritten in KYO-499 to restore parity with the React
-    /// original (`AuthModeSelector.jsx` at `ee16f48a^`) — the heading +
-    /// two explanatory paragraphs KYO-478 shipped diverged from React and
-    /// were rejected as "a monstrosity". The sentence itself is
-    /// deliberately NOT byte-identical to the datasource modal's — "this
-    /// authentication method" doesn't apply pre-auth, where there's no
-    /// auth-mode dropdown (see the sentence's own inline comment in the
-    /// view tree) — but the checkbox label, link text, and link target
-    /// ARE, and are pinned as such by `utils::beta_access`'s
-    /// `both_surfaces_*` tests rather than here.
+    /// The KYO-478/KYO-499 beta-access notice used to live inline inside
+    /// `CredentialsView`'s `<Show when=show_google_section>` block; KYO-683
+    /// Phase 2 extracted it (plus the button) into the shared
+    /// `GoogleSignInSection` component (`pages/auth/components/google_section.rs`,
+    /// which carries its own `notice_copy_and_checkbox_present` test for the
+    /// copy/link/checkbox content) so `SignupView` could offer Google
+    /// sign-in too without duplicating that markup. What stays this file's
+    /// job to guard is the *gating*: every `<GoogleSignInSection` call site
+    /// must sit inside a `<Show when=show_google_section>` block, in both
+    /// views, so Google sign-in (and the notice bundled with it) can never
+    /// render when the auth-config flag is off.
     #[test]
-    fn google_sign_in_checkbox_renders_inside_show_google_section_block() {
-        let google_block = extract_between(
-            SRC,
-            "<Show when=show_google_section>",
-            "</Show>",
-        );
-        assert!(
-            google_block.contains("requires beta access"),
-            "the show_google_section block must render the KYO-499 access notice \
-             sentence"
-        );
-        assert!(
-            google_block.contains("\"Request beta access\""),
-            "the notice must include a \"Request beta access\" link (KYO-499 copy)"
-        );
-        assert!(
-            google_block.contains("beta_access::BETA_ACCESS_REQUEST_HREF"),
-            "the \"Request beta access\" link must point at the shared \
-             utils::beta_access::BETA_ACCESS_REQUEST_HREF target (KYO-499), the same \
-             constant the datasource modal's equivalent notice uses — not an \
-             independently hardcoded mailto href that could silently diverge"
-        );
-        assert!(
-            google_block.contains("\"I have beta access\""),
-            "the notice must render the KYO-499 confirmation checkbox with the exact \
-             copy \"I have beta access\", matching the datasource modal's equivalent \
-             notice so both surfaces say the same thing"
-        );
-        assert!(
-            google_block.contains("<GoogleSignInButton"),
-            "sanity check on the extract_between bounds: the block must still contain \
-             the Google sign-in button itself"
+    fn google_sign_in_section_gated_by_show_google_section_in_both_views() {
+        let paired = "<Show when=show_google_section>\n                <GoogleSignInSection";
+        let count = production_src().matches(paired).count();
+        assert_eq!(
+            count, 2,
+            "expected <GoogleSignInSection to sit immediately inside a \
+             <Show when=show_google_section> block at exactly two call sites — \
+             CredentialsView and SignupView (KYO-683 added Google to the signup page) — \
+             found {count}. A GoogleSignInSection call site outside this exact pairing \
+             would render Google sign-in (and its beta-access notice) ungated."
         );
     }
 
     /// Negative-space companion: the passkey-only `<Show when=show_passkey_section>`
-    /// block, immediately above the Google block in `CredentialsView`, must
-    /// NOT gain this notice — passkey sign-in has no Google OAuth allowlist
-    /// to attest to.
+    /// block in `CredentialsView` must NOT render Google sign-in — passkey
+    /// sign-in has no Google OAuth allowlist to attest to. (SignupView no
+    /// longer has a passkey block at all as of KYO-683 — see
+    /// `google_sign_in_button_only_rendered_via_shared_section` below for
+    /// the count-based guard that a raw `GoogleSignInButton` or passkey
+    /// markup doesn't reappear in SignupView.)
     #[test]
-    fn google_sign_in_checkbox_does_not_leak_into_passkey_block() {
+    fn google_sign_in_section_does_not_leak_into_passkey_block() {
         let passkey_block = extract_between(
             SRC,
             "<Show when=show_passkey_section>",
             "<Show when=move || show_passkey_section() && show_google_section()>",
         );
         assert!(
-            !passkey_block.contains("requires beta access"),
-            "the KYO-478/499 notice must not leak into the passkey-only block"
-        );
-        assert!(
-            !passkey_block.contains("\"I have beta access\""),
-            "the KYO-499 checkbox must not leak into the passkey-only block"
+            !passkey_block.contains("<GoogleSignInSection"),
+            "the Google sign-in section must not leak into the passkey-only block"
         );
     }
 
-    // ── Wiring: GoogleSignInButton reads the predicate ───────────────────
+    // ── Wiring: GoogleSignInSection reads the predicate ───────────────────
 
-    /// The button's `disabled` prop must be derived from
-    /// `google_sign_in_disabled`, not a hand-rolled boolean expression that
-    /// could silently diverge from the tested truth table above.
+    /// Each `GoogleSignInSection` call site's `disabled` prop must be
+    /// derived from `google_sign_in_disabled`, not a hand-rolled boolean
+    /// expression that could silently diverge from the tested truth table
+    /// above. CredentialsView folds in its own passkey-loading mutual
+    /// exclusion; SignupView has no passkey option to exclude against, so
+    /// it pins `passkey_loading` to `false` rather than inventing a second
+    /// predicate.
     #[test]
-    fn google_sign_in_button_disabled_reads_the_predicate() {
-        let button_block = extract_between(
-            SRC,
-            "<GoogleSignInButton",
-            "on_click=on_google_click",
+    fn google_sign_in_section_disabled_reads_the_predicate_in_both_views() {
+        assert!(
+            production_src().contains(
+                "google_sign_in_disabled(passkey_loading.get(), google_access_confirmed.get())"
+            ),
+            "CredentialsView's GoogleSignInSection must derive `disabled` from \
+             google_sign_in_disabled with the live passkey_loading/google_access_confirmed \
+             signals"
         );
         assert!(
-            button_block.contains("google_sign_in_disabled(passkey_loading.get(), google_access_confirmed.get())"),
-            "GoogleSignInButton's disabled prop must call google_sign_in_disabled with \
-             the live passkey_loading/google_access_confirmed signals — found:\n{button_block}"
+            production_src().contains(
+                "google_sign_in_disabled(false, google_access_confirmed.get())"
+            ),
+            "SignupView's GoogleSignInSection must derive `disabled` from \
+             google_sign_in_disabled too (passkey_loading pinned to false), reusing the \
+             same tested predicate rather than a hand-rolled `!google_access_confirmed`"
         );
     }
 
@@ -1611,23 +1491,96 @@ mod tests {
         );
     }
 
-    // ── Negative space: SignupView has no Google button to gate ──────────
+    // ── GoogleSignInButton must only be reached through the shared section ──
 
-    /// `LoginView::Signup` renders `SignupView`, a completely separate
-    /// component from `CredentialsView` — it offers passkey signup only,
-    /// no Google button (confirmed by inspection: `GoogleSignInButton` has
-    /// exactly one call site in this file, inside `CredentialsView`). This
-    /// test pins that count so a future addition of Google sign-up is
-    /// forced to either reuse `CredentialsView`'s gate or add an
-    /// equivalent one, rather than silently shipping ungated.
+    /// `GoogleSignInButton` itself (the raw button, no notice) must never
+    /// be rendered directly by this file — only `GoogleSignInSection`
+    /// (`pages/auth/components/google_section.rs`) may call it, so the
+    /// KYO-478/499 beta-access notice can never be bypassed by a call site
+    /// that renders the button without the notice bundled alongside it.
+    /// Companion assertion: exactly two `GoogleSignInSection` call sites
+    /// exist (CredentialsView and SignupView, KYO-683) — both already
+    /// proven gated by `google_sign_in_section_gated_by_show_google_section_in_both_views`
+    /// above.
     #[test]
-    fn google_sign_in_button_has_exactly_one_call_site() {
-        let count = production_src().matches("<GoogleSignInButton").count();
+    fn google_sign_in_button_only_rendered_via_shared_section() {
+        let raw_button_count = production_src().matches("<GoogleSignInButton").count();
+        assert_eq!(
+            raw_button_count, 0,
+            "GoogleSignInButton must not be rendered directly in login.rs — it must only \
+             be used inside the shared GoogleSignInSection component, so the KYO-478/499 \
+             beta-access notice can never be bypassed. Found {raw_button_count} direct \
+             call site(s)."
+        );
+
+        let section_count = production_src().matches("<GoogleSignInSection").count();
+        assert_eq!(
+            section_count, 2,
+            "expected exactly two <GoogleSignInSection call sites — CredentialsView and \
+             SignupView (KYO-683 added Google to the signup page) — found {section_count}."
+        );
+    }
+
+    // ── KYO-683: SignupView is one email field, one button, no fork ──────
+
+    /// `SignupView`'s function body, isolated for the assertions below —
+    /// bounded by its own `fn SignupView(` start and the next component's
+    /// section-header comment, mirroring how `production_src()` isolates
+    /// this file from its own test module.
+    fn signup_view_src() -> &'static str {
+        extract_between(production_src(), "fn SignupView(", "// Check Email View")
+    }
+
+    /// KYO-683 acceptance criterion #1: the signup page renders exactly one
+    /// email `<input>` — no second email field hiding in a passkey/password
+    /// fork.
+    #[test]
+    fn signup_view_has_exactly_one_email_input() {
+        let count = signup_view_src().matches("type=\"email\"").count();
         assert_eq!(
             count, 1,
-            "expected exactly one <GoogleSignInButton call site (inside \
-             CredentialsView) — found {count}. If a second one was added (e.g. to \
-             SignupView), it must also be gated by the KYO-478 allowlist checkbox."
+            "SignupView must render exactly one type=\"email\" input — found {count}"
+        );
+    }
+
+    /// No passkey option on the signup page (moved to the post-verification
+    /// credential-setup step on `/signup/complete`, KYO-683).
+    #[test]
+    fn signup_view_has_no_passkey_button() {
+        assert!(
+            !signup_view_src().contains("PasskeySignInButton"),
+            "SignupView must not render PasskeySignInButton — passkey setup happens on \
+             /signup/complete after email verification, not on the signup page itself"
+        );
+    }
+
+    /// No divider on the signup page — KYO-683's spec is explicit ("No
+    /// passkey/password fork, no divider, no disabled state"), unlike
+    /// CredentialsView, which keeps its "or sign in with email" divider.
+    #[test]
+    fn signup_view_has_no_divider() {
+        assert!(
+            !signup_view_src().contains("<AuthDivider"),
+            "SignupView must not render any AuthDivider — KYO-683 removed the \
+             passkey/email fork this divider used to separate, and does not reintroduce \
+             one for Google/email"
+        );
+    }
+
+    /// The submit button must never render `disabled` on the SaaS path —
+    /// `signup_disabled`'s non-self-hosted-no-SMTP branch must be the
+    /// literal `false`, not "not loading and not empty" (native
+    /// `required`/`type="email"` already cover empty/invalid input; see
+    /// the predicate's own doc comment for why loading isn't disabled
+    /// either).
+    #[test]
+    fn signup_disabled_is_always_false_on_saas_path() {
+        let src = signup_view_src();
+        assert!(
+            src.contains("} else {\n            false\n        }"),
+            "signup_disabled's non-self-hosted-no-SMTP branch must be the literal \
+             `false` — a disabled predicate here means the signup button could render \
+             disabled on the SaaS path, which KYO-683 forbids. SignupView source:\n{src}"
         );
     }
 }

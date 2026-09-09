@@ -39,6 +39,12 @@ pub struct AuthConfig {
     pub password: bool,
     pub self_hosted: bool,
     pub smtp_configured: bool,
+    /// How long an emailed signup verification link stays valid, in hours.
+    /// Threaded from `kyomi_core::constants::get().jwt.email_verification_expire_hours`
+    /// (KYO-683 Phase 2) so the "Check Your Email" copy on `/signup` states
+    /// the real expiry instead of a second hardcoded number that can drift
+    /// from the value `token_service` actually enforces.
+    pub email_verification_expire_hours: i64,
 }
 
 /// Result of a login attempt.
@@ -96,6 +102,36 @@ pub enum SignupCompleteResult {
     /// Account created and authenticated successfully.
     Success { user_id: String },
     /// Error during signup completion.
+    Error { message: String },
+}
+
+/// Result of confirming signup by redeeming the emailed verification token
+/// (KYO-683 Phase 2 — the plain-email SaaS path's counterpart to
+/// `SignupCompleteResult` above, which `signup_complete` still serves for
+/// callers Phase 3 hasn't swept yet).
+///
+/// Cookies are set via `ResponseOptions` for the `Success` variant. Unlike
+/// `signup_complete`, no name/password is collected here — the account is
+/// created bare (`verified = true`, no credentials) and the client
+/// transitions to a follow-up credential-setup step (passkey and/or
+/// password) once authenticated.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum SignupVerifyResult {
+    /// Account created/verified and authenticated.
+    Success {
+        user_id: String,
+        /// Pre-existing display name, if any (set when `signup_verify_service`
+        /// signed into an already-verified row rather than creating a bare
+        /// one — see that function's doc comment). Empty for the common
+        /// case of a brand-new account, letting the credential-setup step
+        /// pre-fill the name field only when there's something to pre-fill.
+        name: String,
+    },
+    /// Error during signup verification — invalid/expired token, or terms
+    /// not accepted. Both surface as the same variant (unlike
+    /// `SignupCompleteResult`, which splits `InvalidToken` out at the
+    /// service layer) because the UI treats them identically: stay on the
+    /// confirm step and show the message inline.
     Error { message: String },
 }
 
@@ -221,6 +257,9 @@ pub async fn get_auth_config() -> Result<AuthConfig, ServerFnError> {
         password: ctx.config.password_auth_enabled,
         self_hosted: ctx.config.self_hosted,
         smtp_configured: ctx.config.smtp_configured(),
+        email_verification_expire_hours: kyomi_core::constants::get()
+            .jwt
+            .email_verification_expire_hours,
     })
 }
 
@@ -411,6 +450,72 @@ pub async fn signup_complete(
         SignupCompleteServiceResult::Error { message } => {
             Ok(SignupCompleteResult::Error { message })
         }
+    }
+}
+
+/// Confirm signup by redeeming the emailed verification token (KYO-683 Phase 2).
+///
+/// Public endpoint — no authentication required, but must be called via POST
+/// (this is a Leptos `#[server]` RPC, never a GET) — a corporate mail
+/// scanner that prefetches the emailed link performs a GET against the
+/// `/signup` frontend route, not this call, so prefetching can never burn
+/// the token. See `signup_verify_service`'s doc comment for the full
+/// rationale.
+///
+/// No name or password is collected here — the account is created bare
+/// (`verified = true`, no credentials) and the client is expected to follow
+/// up with a credential-setup step (passkey and/or password) now that it's
+/// authenticated.
+///
+/// Delegates all orchestration to `kyomi_auth::auth_service::signup_verify_service`.
+#[server(prefix = "/leptos-api")]
+pub async fn signup_verify(
+    token: String,
+    terms_accepted: bool,
+    marketing_consent: bool,
+) -> Result<SignupVerifyResult, ServerFnError> {
+    use kyomi_auth::auth_service::{signup_verify_service, SignupVerifyParams, SignupVerifyServiceResult};
+
+    let ctx = extract_context()?;
+    let headers: axum::http::HeaderMap = leptos_axum::extract()
+        .await
+        .map_err(|e| ServerFnError::new(format!("Failed to extract headers: {e}")))?;
+    let kv = ctx
+        .kv
+        .clone()
+        .ok_or_else(|| ServerFnError::new("KV store not available"))?;
+    let device = extract_device_info(&headers);
+
+    let result = signup_verify_service(SignupVerifyParams {
+        db: &ctx.db,
+        kv: &kv,
+        jwt_secret: &ctx.config.jwt_secret,
+        token: &token,
+        terms_accepted,
+        marketing_consent,
+        device: &device,
+        config: Some(&ctx.config),
+        slack_feedback_webhook_url: ctx.config.slack_feedback_webhook_url.as_deref(),
+        support_email: &ctx.config.support_email,
+    })
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "signup_verify_service error");
+        ServerFnError::new("Internal server error")
+    })?;
+
+    match result {
+        SignupVerifyServiceResult::Success(sess) => {
+            set_session_cookies(&sess);
+            Ok(SignupVerifyResult::Success {
+                user_id: sess.user.user_id.clone(),
+                name: sess.user.name.clone().unwrap_or_default(),
+            })
+        }
+        SignupVerifyServiceResult::InvalidToken => Ok(SignupVerifyResult::Error {
+            message: "Invalid or expired signup link. Please request a new one.".to_string(),
+        }),
+        SignupVerifyServiceResult::Error { message } => Ok(SignupVerifyResult::Error { message }),
     }
 }
 

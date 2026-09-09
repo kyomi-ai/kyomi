@@ -5,7 +5,10 @@
 //! Two surfaces gate a Google-account-allowlist-dependent action behind a
 //! "beta access" attestation checkbox: the BigQuery `kyomi_oauth` notice in
 //! `pages/settings/datasources.rs` and the pre-auth Google sign-in notice in
-//! `pages/auth/login.rs`. The React original
+//! `pages/auth/components/google_section.rs`'s `GoogleSignInSection` (KYO-683
+//! Phase 2 extracted this out of `pages/auth/login.rs`'s inline markup so
+//! both the login and signup pages could share it — see that component's
+//! doc comment). The React original
 //! (`AuthModeSelector.jsx` at `ee16f48a^`) persisted this checkbox to
 //! `localStorage["hasBetaAccess"]` — read on mount inside a `try`/`catch`
 //! that falls back to `false`, written on every change, and kept in sync
@@ -218,16 +221,23 @@ mod tests {
     // mutating the real checkbox span left `both_surfaces_use_the_same_checkbox_label`
     // passing because `datasources.rs` had a doc comment quoting the same
     // string; mutating the real `href` left
-    // `both_surfaces_link_to_the_same_shared_target` passing because
-    // `login.rs`'s own scoped test assertion (which necessarily quotes the
+    // `both_surfaces_link_to_the_same_shared_target` passing because the
+    // notice's own scoped test assertion (which necessarily quotes the
     // constant name) satisfied the whole-file scan regardless of what the
     // markup rendered. Scoping to the notice block — the same
     // `extract_between` pattern `pages/settings/datasources/tests/oauth.rs`
-    // and `pages/auth/login.rs`'s own test module already use — excludes
-    // both the test module and any comment outside the notice itself.
+    // and `pages/auth/components/google_section.rs`'s own test module
+    // already use — excludes both the test module and any comment outside
+    // the notice itself.
+    //
+    // KYO-683 Phase 2 moved the login-page half of this from an inline
+    // `<Show when=show_google_section>` block in `login.rs` into the
+    // shared `GoogleSignInSection` component in `google_section.rs` (so
+    // `SignupView` could reuse it too) — `google_section_notice_block()`
+    // below follows that move.
 
     const DATASOURCES_SRC: &str = include_str!("../pages/settings/datasources.rs");
-    const LOGIN_SRC: &str = include_str!("../pages/auth/login.rs");
+    const GOOGLE_SECTION_SRC: &str = include_str!("../pages/auth/components/google_section.rs");
 
     /// The datasource modal's kyomi_oauth notice block — same bounds
     /// `oauth.rs`'s own tests use, so this can only match the real
@@ -241,17 +251,19 @@ mod tests {
         )
     }
 
-    /// The login page's Google sign-in notice block — same bounds
-    /// `login.rs`'s own test module uses.
-    fn login_notice_block() -> &'static str {
-        extract_between(LOGIN_SRC, "<Show when=show_google_section>", "</Show>")
+    /// The `GoogleSignInSection` component body — same bounds
+    /// `google_section.rs`'s own test module uses. Shared by both
+    /// `CredentialsView` (login) and `SignupView` (signup) as of KYO-683
+    /// Phase 2, so pinning the copy here once covers both call sites.
+    fn google_section_notice_block() -> &'static str {
+        extract_between(GOOGLE_SECTION_SRC, "pub fn GoogleSignInSection(", "\n}\n\n// ")
     }
 
     #[test]
     fn both_surfaces_use_the_shared_beta_access_module() {
         for (name, block) in [
             ("pages/settings/datasources.rs", datasources_notice_block()),
-            ("pages/auth/login.rs", login_notice_block()),
+            ("pages/auth/components/google_section.rs", google_section_notice_block()),
         ] {
             assert!(
                 block.contains("beta_access::"),
@@ -267,7 +279,7 @@ mod tests {
     fn both_surfaces_use_the_same_checkbox_label() {
         for (name, block) in [
             ("pages/settings/datasources.rs", datasources_notice_block()),
-            ("pages/auth/login.rs", login_notice_block()),
+            ("pages/auth/components/google_section.rs", google_section_notice_block()),
         ] {
             assert!(
                 block.contains("\"I have beta access\""),
@@ -282,7 +294,7 @@ mod tests {
     fn both_surfaces_link_to_the_same_shared_target() {
         for (name, block) in [
             ("pages/settings/datasources.rs", datasources_notice_block()),
-            ("pages/auth/login.rs", login_notice_block()),
+            ("pages/auth/components/google_section.rs", google_section_notice_block()),
         ] {
             assert!(
                 block.contains("beta_access::BETA_ACCESS_REQUEST_HREF"),
@@ -298,7 +310,7 @@ mod tests {
     fn both_surfaces_use_the_same_link_text() {
         for (name, block) in [
             ("pages/settings/datasources.rs", datasources_notice_block()),
-            ("pages/auth/login.rs", login_notice_block()),
+            ("pages/auth/components/google_section.rs", google_section_notice_block()),
         ] {
             assert!(
                 block.contains("\"Request beta access\""),

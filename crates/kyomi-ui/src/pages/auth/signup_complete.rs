@@ -1,16 +1,40 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Signup completion page — matches `apps/frontend/src/pages/SignupComplete.jsx`.
+//! Signup completion page (KYO-683 Phase 2) — two steps after the emailed
+//! verification link.
 //!
 //! Route: `/signup/complete?token=xxx`
 //!
 //! Flow:
-//! 1. User clicks email link with signup token
-//! 2. User enters name, password, confirm password, accepts terms
-//! 3. Click "Create Account" -> verifies token, creates account with password, logs in
-//! 4. Redirect to /onboarding for datasource setup
+//! 1. **Confirm** (Step A) — the page loads from the emailed link. It does
+//!    NOT redeem the token on load: a GET must stay side-effect-free
+//!    because corporate mail scanners (Outlook/Defender, Proofpoint)
+//!    prefetch URLs found in email and would burn a single-use token before
+//!    the human ever clicks. The user ticks the terms/marketing checkboxes
+//!    and clicks "Verify Email", which POSTs `signup_verify` — the only
+//!    call that consumes the token. On success the account exists
+//!    (`verified = true`, no credentials yet) and the caller is signed in
+//!    (cookies set).
+//! 2. **CredentialSetup** (Step B) — now authenticated, the page collects a
+//!    name and offers a passkey and/or password. Presented as a step in
+//!    the flow, not an optional aside: there is no "Skip" button and no
+//!    "you can do this later" copy, because the ticket wants people to
+//!    actually set a credential up. Skipping by closing the tab is still
+//!    survivable — `/account/recover` already serves a verified account
+//!    with no credentials at all (`recovery_start_service`).
+//! 3. **Completing** — a brief branded pause (DESIGN.md's animated-logo
+//!    loading pattern) while the name is saved, then `nav("/onboarding")`.
 //!
-//! State machine: Form | Creating | Success | Error
+//! State machine: Confirm | CredentialSetup | Completing | Error.
+//!
+//! Reuses existing server fns rather than a second WebAuthn ceremony or a
+//! second password path: `security::set_password` (already generic over
+//! any authenticated user), `security::{start_passkey_registration,
+//! complete_passkey_registration}` (purpose `PASSKEY_ADD_DEVICE`, already
+//! generic), `profile::update_profile_name`, and the canonical
+//! `utils::webauthn::start_registration` browser bridge (the same one
+//! `login.rs`'s passkey sign-in and the recovery/passkey-signup completion
+//! pages use).
 
 use leptos::prelude::*;
 #[cfg(target_arch = "wasm32")]
@@ -18,10 +42,12 @@ use leptos_router::hooks::use_navigate;
 use phosphor_leptos::Icon;
 use crate::components::{
     Alert, AlertDescription, AlertVariant, Button, ButtonLink, ButtonSize, ButtonVariant, Checkbox,
-    Label, INPUT_CLASS,
+    Label, Spinner, INPUT_CLASS,
 };
 use crate::pages::auth::auth_layout::AuthLayout;
-use crate::server_fns::auth::{signup_complete, SignupCompleteResult};
+use crate::server_fns::auth::{signup_verify, SignupVerifyResult};
+use crate::server_fns::profile::update_profile_name;
+use crate::server_fns::security::set_password;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // View state machine
@@ -29,9 +55,14 @@ use crate::server_fns::auth::{signup_complete, SignupCompleteResult};
 
 #[derive(Clone, Debug, PartialEq)]
 enum PageState {
-    Form,
-    Creating,
-    Success,
+    /// Step A — token present, not yet redeemed.
+    Confirm,
+    /// Step B — account exists and is authenticated; offer passkey/password.
+    CredentialSetup,
+    /// Saving the name and about to navigate to onboarding.
+    Completing,
+    /// Terminal: no token at all in the URL, or the server rejected it as
+    /// invalid/expired. Both mean this link cannot be completed as-is.
     Error { message: String },
 }
 
@@ -42,24 +73,33 @@ enum PageState {
 #[component]
 pub fn SignupCompletePage() -> impl IntoView {
     // ── SPA navigation handle (wasm32 only — only used in wasm async context) ─
-    // Wrapped in StoredValue so it can be copied into FnMut closures (view! reactive closures).
     #[cfg(target_arch = "wasm32")]
     let navigate = StoredValue::new(use_navigate());
 
     // ── Extract token from URL query params ──────────────────────────────
-    let (token, _set_token) = signal(Option::<String>::None);
-    let (page_state, set_page_state) = signal(PageState::Form);
+    let (token, set_token) = signal(Option::<String>::None);
+    let (page_state, set_page_state) = signal(PageState::Confirm);
 
-    // ── Form signals ─────────────────────────────────────────────────────
-    let (name, set_name) = signal(String::new());
-    let (password, set_password) = signal(String::new());
-    let (confirm_password, set_confirm_password) = signal(String::new());
+    // ── Step A signals ───────────────────────────────────────────────────
     let (terms_accepted, set_terms_accepted) = signal(false);
     let (marketing_consent, set_marketing_consent) = signal(false);
-    let (error, set_error) = signal(Option::<String>::None);
+    let (confirm_error, set_confirm_error) = signal(Option::<String>::None);
+
+    // ── Step B signals ───────────────────────────────────────────────────
+    let (cred_name, set_cred_name) = signal(String::new());
+    let (cred_password, set_cred_password) = signal(String::new());
+    let (cred_confirm_password, set_cred_confirm_password) = signal(String::new());
+    let (passkey_added, set_passkey_added) = signal(false);
+    let (password_set, set_password_set) = signal(false);
+    let (passkey_loading, set_passkey_loading) = signal(false);
+    let (webauthn_available, set_webauthn_available) = signal(false);
+    let (credential_error, set_credential_error) = signal(Option::<String>::None);
 
     // ── Extract token on mount ───────────────────────────────────────────
-    // Token extraction is browser-only; SSR provides None.
+    // Token extraction is browser-only; SSR provides None. This page is
+    // never SSR-rendered (served as a CSR shell — see
+    // `apps/server/src/lib.rs`'s `/signup/complete` route), so the
+    // non-wasm32 arm below only matters for `cargo test --features ssr`.
     #[cfg(target_arch = "wasm32")]
     let initial_token: Option<String> = {
         web_sys::window().and_then(|w| {
@@ -73,10 +113,8 @@ pub fn SignupCompletePage() -> impl IntoView {
     #[cfg(not(target_arch = "wasm32"))]
     let initial_token: Option<String> = None;
 
-    // Set the token or transition to Error — runs on both targets so the
-    // compiler sees all PageState variants constructed.
     if let Some(t) = initial_token {
-        _set_token.set(Some(t));
+        set_token.set(Some(t));
     } else {
         set_page_state.set(PageState::Error {
             message: "Missing signup token. Please use the link from your email.".to_string(),
@@ -86,106 +124,201 @@ pub fn SignupCompletePage() -> impl IntoView {
     // ── Checkbox signals for the Checkbox component ──────────────────────
     let terms_signal = Signal::derive(move || terms_accepted.get());
     let marketing_signal = Signal::derive(move || marketing_consent.get());
+    let on_terms_change = Callback::new(move |val: bool| set_terms_accepted.set(val));
+    let on_marketing_change = Callback::new(move |val: bool| set_marketing_consent.set(val));
 
-    let on_terms_change = Callback::new(move |val: bool| {
-        set_terms_accepted.set(val);
+    // ── Check WebAuthn availability once at mount ────────────────────────
+    // `is_webauthn_available()` has a non-wasm stub returning `false`, so
+    // this is safe to call unconditionally rather than gating on
+    // target_arch — the browser-only work happens inside that function,
+    // not here.
+    leptos::task::spawn_local(async move {
+        let available = crate::utils::webauthn::is_webauthn_available().await;
+        set_webauthn_available.try_set(available);
     });
-    let on_marketing_change = Callback::new(move |val: bool| {
-        set_marketing_consent.set(val);
+
+    // ── Step A: verify action (the POST that redeems the token) ─────────
+    let verify_action: Action<(String, bool, bool), Result<SignupVerifyResult, ServerFnError>> =
+        Action::new(move |(tok, terms, marketing): &(String, bool, bool)| {
+            let tok = tok.clone();
+            let terms = *terms;
+            let marketing = *marketing;
+            async move { signup_verify(tok, terms, marketing).await }
+        });
+
+    Effect::new(move |_| {
+        if let Some(result) = verify_action.value().get() {
+            match result {
+                Ok(SignupVerifyResult::Success { name, .. }) => {
+                    // Pre-fill the name field only when the server had one
+                    // to give us — see `SignupVerifyResult::Success`'s doc
+                    // comment (the race case where an already-verified row
+                    // is signed into rather than created bare).
+                    if !name.is_empty() {
+                        set_cred_name.set(name);
+                    }
+                    set_confirm_error.set(None);
+                    set_page_state.set(PageState::CredentialSetup);
+                }
+                Ok(SignupVerifyResult::Error { message }) => {
+                    set_confirm_error.set(Some(message));
+                }
+                Err(e) => {
+                    set_confirm_error.set(Some(format!("Server error: {}", e)));
+                }
+            }
+        }
     });
 
-    // ── Form submit handler ──────────────────────────────────────────────
-    let on_submit = move |ev: leptos::ev::SubmitEvent| {
-        ev.prevent_default();
-
-        let current_name = name.get_untracked();
-        let current_password = password.get_untracked();
-        let current_confirm = confirm_password.get_untracked();
-        let current_terms = terms_accepted.get_untracked();
-        let current_marketing = marketing_consent.get_untracked();
-        let current_token = token.get_untracked();
-
-        // Client-side validation
-        if current_name.trim().is_empty() {
-            set_error.set(Some("Please enter your name.".to_string()));
+    let on_confirm_click = move |_: leptos::ev::MouseEvent| {
+        if verify_action.pending().get_untracked() {
             return;
         }
-        if current_password.is_empty() {
-            set_error.set(Some("Please enter a password.".to_string()));
-            return;
-        }
-        if current_password.len() < 8 {
-            set_error.set(Some(
-                "Password must be at least 8 characters.".to_string(),
-            ));
-            return;
-        }
-        if current_password != current_confirm {
-            set_error.set(Some("Passwords do not match.".to_string()));
-            return;
-        }
-        if !current_terms {
-            set_error.set(Some(
+        if !terms_accepted.get_untracked() {
+            set_confirm_error.set(Some(
                 "Please accept the Terms of Service and Privacy Policy.".to_string(),
             ));
             return;
         }
-
-        let Some(tok) = current_token else {
-            set_error.set(Some(
-                "Missing signup token. Please use the link from your email.".to_string(),
-            ));
+        let Some(tok) = token.get_untracked() else {
+            set_page_state.set(PageState::Error {
+                message: "Missing signup token. Please use the link from your email.".to_string(),
+            });
             return;
         };
+        set_confirm_error.set(None);
+        verify_action.dispatch((tok, true, marketing_consent.get_untracked()));
+    };
 
-        set_error.set(None);
-        set_page_state.set(PageState::Creating);
+    let confirm_disabled =
+        move || verify_action.pending().get() || !terms_accepted.get();
 
-        leptos::task::spawn_local(async move {
-            let result = signup_complete(
-                tok,
-                current_name.trim().to_string(),
-                current_password,
-                current_terms,
-                current_marketing,
-            )
-            .await;
+    // ── Step B: set-password action ──────────────────────────────────────
+    let set_password_action: Action<String, Result<String, ServerFnError>> =
+        Action::new(move |pw: &String| {
+            let pw = pw.clone();
+            async move { set_password(pw).await }
+        });
 
+    Effect::new(move |_| {
+        if let Some(result) = set_password_action.value().get() {
             match result {
-                Ok(SignupCompleteResult::Success { .. }) => {
-                    set_page_state.try_set(PageState::Success);
-
-                    // Navigate to onboarding after 1.5 seconds (keeps WASM in memory)
-                    #[cfg(target_arch = "wasm32")]
-                    {
-                        let Some(nav) = navigate.try_get_value() else { return };
-                        gloo_timers::future::TimeoutFuture::new(1500).await;
-                        nav("/onboarding", Default::default());
-                    }
+                Ok(_) => {
+                    set_password_set.set(true);
+                    set_credential_error.set(None);
+                    set_cred_password.set(String::new());
+                    set_cred_confirm_password.set(String::new());
                 }
-                Ok(SignupCompleteResult::Error { message }) => {
-                    set_error.try_set(Some(message));
-                    set_page_state.try_set(PageState::Form); // Allow retry
+                Err(e) => set_credential_error.set(Some(e.to_string())),
+            }
+        }
+    });
+
+    let on_set_password = move |_: leptos::ev::MouseEvent| {
+        if set_password_action.pending().get_untracked() {
+            return;
+        }
+        let pw = cred_password.get_untracked();
+        let confirm = cred_confirm_password.get_untracked();
+        if pw.len() < 8 {
+            set_credential_error.set(Some("Password must be at least 8 characters.".to_string()));
+            return;
+        }
+        if pw != confirm {
+            set_credential_error.set(Some("Passwords do not match.".to_string()));
+            return;
+        }
+        set_credential_error.set(None);
+        set_password_action.dispatch(pw);
+    };
+
+    // ── Step B: add-passkey handler ──────────────────────────────────────
+    // Cannot use Action: add_passkey_flow() drives navigator.credentials.create()
+    // via JsFuture — a !Send browser API. Signal writes after the await use
+    // try_set for deferred-write safety, matching the rest of this crate's
+    // WebAuthn call sites.
+    let on_add_passkey = move |_: leptos::ev::MouseEvent| {
+        if passkey_loading.get_untracked() {
+            return;
+        }
+        set_passkey_loading.set(true);
+        set_credential_error.set(None);
+        leptos::task::spawn_local(async move {
+            let result = add_passkey_flow().await;
+            set_passkey_loading.try_set(false);
+            match result {
+                Ok(()) => {
+                    set_passkey_added.try_set(true);
                 }
                 Err(e) => {
-                    set_error.try_set(Some(format!("Server error: {}", e)));
-                    set_page_state.try_set(PageState::Form); // Allow retry
+                    set_credential_error.try_set(Some(e));
                 }
             }
         });
     };
 
+    // ── Step B: continue action (save name, then navigate) ───────────────
+    let continue_action: Action<String, Result<(), ServerFnError>> =
+        Action::new(move |name: &String| {
+            let name = name.clone();
+            async move { update_profile_name(name).await }
+        });
+
+    Effect::new(move |_| {
+        if let Some(result) = continue_action.value().get() {
+            match result {
+                Ok(()) => {
+                    set_page_state.set(PageState::Completing);
+                    // gloo_timers::future::TimeoutFuture is browser-only —
+                    // mirrors passkey_signup_complete.rs's identical
+                    // post-success branded pause before navigating.
+                    #[cfg(target_arch = "wasm32")]
+                    leptos::task::spawn_local(async move {
+                        gloo_timers::future::TimeoutFuture::new(1200).await;
+                        if let Some(nav) = navigate.try_get_value() {
+                            nav("/onboarding", Default::default());
+                        }
+                    });
+                }
+                Err(e) => {
+                    set_credential_error.set(Some(format!("Failed to save your name: {}", e)));
+                }
+            }
+        }
+    });
+
+    let on_continue = move |_: leptos::ev::MouseEvent| {
+        if continue_action.pending().get_untracked() {
+            return;
+        }
+        let name = cred_name.get_untracked();
+        if name.trim().is_empty() {
+            set_credential_error.set(Some("Please enter your name.".to_string()));
+            return;
+        }
+        set_credential_error.set(None);
+        continue_action.dispatch(name.trim().to_string());
+    };
+
+    let continue_disabled = move || {
+        continue_action.pending().get()
+            || cred_name.get().trim().is_empty()
+            || !(passkey_added.get() || password_set.get())
+    };
+
     // ── Reactive title & subtitle ────────────────────────────────────────
     let title = Signal::derive(move || match page_state.get() {
-        PageState::Form => "Email Verified".to_string(),
-        PageState::Creating => "Creating Account".to_string(),
-        PageState::Success => "Account Created".to_string(),
+        PageState::Confirm => "Confirm Your Email".to_string(),
+        PageState::CredentialSetup => "Secure Your Account".to_string(),
+        PageState::Completing => "All Set".to_string(),
         PageState::Error { .. } => "Signup Link Invalid".to_string(),
     });
     let subtitle = Signal::derive(move || match page_state.get() {
-        PageState::Form => "Complete your account setup below.".to_string(),
-        PageState::Creating => "Setting things up — just a moment.".to_string(),
-        PageState::Success => "Welcome to Kyomi! Setting up your workspace...".to_string(),
+        PageState::Confirm => "Accept the terms to finish verifying your email.".to_string(),
+        PageState::CredentialSetup => {
+            "Add a passkey or password to finish setting up your account.".to_string()
+        }
+        PageState::Completing => "Setting up your workspace...".to_string(),
         PageState::Error { message } => message,
     });
 
@@ -193,125 +326,282 @@ pub fn SignupCompletePage() -> impl IntoView {
     view! {
         <AuthLayout title=title subtitle=subtitle>
             {move || {
-                let state = page_state.get();
-                match state {
+                match page_state.get() {
                     PageState::Error { .. } => error_view().into_any(),
-                    PageState::Success => success_view().into_any(),
-                    PageState::Creating => creating_view().into_any(),
-                    PageState::Form => view! {
+                    PageState::Completing => completing_view().into_any(),
+                    PageState::Confirm => view! {
                         <div>
                             <div class="text-center">
                                 <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 mx-auto mb-6">
-                                    <Icon icon=phosphor_leptos::CHECK attr:class="w-8 h-8 text-primary"/>
+                                    <Icon icon=phosphor_leptos::ENVELOPE_SIMPLE_OPEN attr:class="w-8 h-8 text-primary"/>
                                 </div>
                             </div>
-                            <form on:submit=on_submit class="space-y-6">
-                                    // Name input
-                                    <div class="space-y-2">
-                                        <Label html_for="name">"Full Name"</Label>
-                                        <input
-                                            id="name"
-                                            type="text"
-                                            autocomplete="name"
-                                            autofocus
-                                            class=INPUT_CLASS
-                                            placeholder="John Doe"
-                                            required
-                                            prop:value=move || name.get()
-                                            on:input=move |ev| set_name.set(event_target_value(&ev))
+                            <div class="space-y-6">
+                                <div class="space-y-3">
+                                    <label class="flex items-start space-x-3 cursor-pointer">
+                                        <Checkbox
+                                            checked=terms_signal
+                                            on_change=on_terms_change
+                                            class="mt-0.5"
                                         />
-                                    </div>
-
-                                    // Password input
-                                    <div class="space-y-2">
-                                        <Label html_for="password">"Password"</Label>
-                                        <input
-                                            id="password"
-                                            type="password"
-                                            autocomplete="new-password"
-                                            class=INPUT_CLASS
-                                            placeholder="At least 8 characters"
-                                            minlength="8"
-                                            required
-                                            prop:value=move || password.get()
-                                            on:input=move |ev| set_password.set(event_target_value(&ev))
+                                        <span class="text-sm text-foreground">
+                                            "I have read and agree to the "
+                                            <a
+                                                href="https://kyomi.ai/terms"
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                class="text-primary hover:underline"
+                                            >
+                                                "Terms of Service"
+                                            </a>
+                                            " and "
+                                            <a
+                                                href="https://kyomi.ai/privacy"
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                class="text-primary hover:underline"
+                                            >
+                                                "Privacy Policy"
+                                            </a>
+                                        </span>
+                                    </label>
+                                    <label class="flex items-start space-x-3 cursor-pointer">
+                                        <Checkbox
+                                            checked=marketing_signal
+                                            on_change=on_marketing_change
+                                            class="mt-0.5"
                                         />
-                                    </div>
+                                        <span class="text-sm text-muted-foreground">
+                                            "I agree to receive product updates and announcements from Kyomi. You can unsubscribe anytime."
+                                        </span>
+                                    </label>
+                                </div>
 
-                                    // Confirm password input
-                                    <div class="space-y-2">
-                                        <Label html_for="confirm-password">"Confirm Password"</Label>
-                                        <input
-                                            id="confirm-password"
-                                            type="password"
-                                            autocomplete="new-password"
-                                            class=INPUT_CLASS
-                                            placeholder="Re-enter your password"
-                                            minlength="8"
-                                            required
-                                            prop:value=move || confirm_password.get()
-                                            on:input=move |ev| set_confirm_password.set(event_target_value(&ev))
-                                        />
-                                    </div>
+                                <Show when=move || confirm_error.get().is_some()>
+                                    <Alert variant=AlertVariant::Error>
+                                        <AlertDescription>
+                                            {move || confirm_error.get().unwrap_or_default()}
+                                        </AlertDescription>
+                                    </Alert>
+                                </Show>
 
-                                    // Terms and consent
-                                    <div class="space-y-3">
-                                        <label class="flex items-start space-x-3 cursor-pointer">
-                                            <Checkbox
-                                                checked=terms_signal
-                                                on_change=on_terms_change
-                                                class="mt-0.5"
-                                            />
-                                            <span class="text-sm text-foreground">
-                                                "I have read and agree to the "
-                                                <a
-                                                    href="https://kyomi.ai/terms"
-                                                    target="_blank"
-                                                    rel="noopener noreferrer"
-                                                    class="text-primary hover:underline"
-                                                >
-                                                    "Terms of Service"
-                                                </a>
-                                                " and "
-                                                <a
-                                                    href="https://kyomi.ai/privacy"
-                                                    target="_blank"
-                                                    rel="noopener noreferrer"
-                                                    class="text-primary hover:underline"
-                                                >
-                                                    "Privacy Policy"
-                                                </a>
-                                            </span>
-                                        </label>
-
-                                        <label class="flex items-start space-x-3 cursor-pointer">
-                                            <Checkbox
-                                                checked=marketing_signal
-                                                on_change=on_marketing_change
-                                                class="mt-0.5"
-                                            />
-                                            <span class="text-sm text-muted-foreground">
-                                                "I agree to receive product updates and announcements from Kyomi. You can unsubscribe anytime."
-                                            </span>
-                                        </label>
-                                    </div>
-
-                                    // Error alert
-                                    {move || error.get().map(|msg| view! {
-                                        <Alert variant=AlertVariant::Error>
-                                            <AlertDescription>{msg}</AlertDescription>
-                                        </Alert>
-                                    })}
-
-                                <Button button_type="submit" size=ButtonSize::Lg class="w-full">
-                                    "Create Account"
+                                <Button
+                                    button_type="button"
+                                    size=ButtonSize::Lg
+                                    class="w-full"
+                                    on:click=on_confirm_click
+                                    disabled=Signal::derive(confirm_disabled)
+                                >
+                                    {move || {
+                                        if verify_action.pending().get() {
+                                            view! {
+                                                <div class="flex items-center justify-center space-x-2">
+                                                    <Spinner class="text-primary-foreground"/>
+                                                    <span>"Verifying..."</span>
+                                                </div>
+                                            }.into_any()
+                                        } else {
+                                            view! { <span>"Verify Email"</span> }.into_any()
+                                        }
+                                    }}
                                 </Button>
-                            </form>
+                            </div>
+                        </div>
+                    }.into_any(),
+                    PageState::CredentialSetup => view! {
+                        <div class="space-y-6">
+                            <div class="text-center">
+                                <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 mx-auto mb-2">
+                                    <Icon icon=phosphor_leptos::SHIELD_CHECK attr:class="w-8 h-8 text-primary"/>
+                                </div>
+                            </div>
+
+                            <div class="space-y-2">
+                                <Label html_for="cred-name">"Full Name"</Label>
+                                <input
+                                    id="cred-name"
+                                    type="text"
+                                    autocomplete="name"
+                                    autofocus
+                                    class=INPUT_CLASS
+                                    placeholder="John Doe"
+                                    required
+                                    prop:value=move || cred_name.get()
+                                    on:input=move |ev| set_cred_name.set(event_target_value(&ev))
+                                />
+                            </div>
+
+                            <Show when=move || credential_error.get().is_some()>
+                                <Alert variant=AlertVariant::Error>
+                                    <AlertDescription>
+                                        {move || credential_error.get().unwrap_or_default()}
+                                    </AlertDescription>
+                                </Alert>
+                            </Show>
+
+                            // Passkey — recommended.
+                            <div class="rounded-md border border-border p-4 space-y-3">
+                                <div class="flex items-center justify-between gap-3">
+                                    <div>
+                                        <p class="text-sm font-medium text-foreground">"Passkey"</p>
+                                        <p class="text-xs text-muted-foreground">
+                                            "Sign in with your device's biometrics — recommended."
+                                        </p>
+                                    </div>
+                                    <span class="text-xs font-medium text-primary bg-primary/10 px-2 py-0.5 rounded-full flex-shrink-0">
+                                        "Recommended"
+                                    </span>
+                                </div>
+                                <Show
+                                    when=move || passkey_added.get()
+                                    fallback=move || view! {
+                                        <Show
+                                            when=move || webauthn_available.get()
+                                            fallback=|| view! {
+                                                <p class="text-xs text-muted-foreground">
+                                                    "Passkeys aren't supported on this device or browser."
+                                                </p>
+                                            }
+                                        >
+                                            <Button
+                                                variant=ButtonVariant::Default
+                                                size=ButtonSize::Default
+                                                on:click=on_add_passkey
+                                                disabled=Signal::derive(move || passkey_loading.get())
+                                            >
+                                                <Icon icon=phosphor_leptos::KEY size="16px"/>
+                                                {move || if passkey_loading.get() { "Adding..." } else { "Add Passkey" }}
+                                            </Button>
+                                        </Show>
+                                    }.into_any()
+                                >
+                                    <p class="text-sm text-success-foreground flex items-center gap-1.5">
+                                        <Icon icon=phosphor_leptos::CHECK_CIRCLE attr:class="w-4 h-4"/>
+                                        "Passkey added"
+                                    </p>
+                                </Show>
+                            </div>
+
+                            // Password.
+                            <div class="rounded-md border border-border p-4 space-y-3">
+                                <p class="text-sm font-medium text-foreground">"Password"</p>
+                                <Show
+                                    when=move || password_set.get()
+                                    fallback=move || view! {
+                                        <div class="space-y-3">
+                                            <input
+                                                type="password"
+                                                autocomplete="new-password"
+                                                class=INPUT_CLASS
+                                                placeholder="At least 8 characters"
+                                                minlength="8"
+                                                prop:value=move || cred_password.get()
+                                                on:input=move |ev| set_cred_password.set(event_target_value(&ev))
+                                            />
+                                            <input
+                                                type="password"
+                                                autocomplete="new-password"
+                                                class=INPUT_CLASS
+                                                placeholder="Confirm password"
+                                                minlength="8"
+                                                prop:value=move || cred_confirm_password.get()
+                                                on:input=move |ev| set_cred_confirm_password.set(event_target_value(&ev))
+                                            />
+                                            <Button
+                                                variant=ButtonVariant::Outline
+                                                on:click=on_set_password
+                                                disabled=Signal::derive(move || set_password_action.pending().get())
+                                            >
+                                                {move || if set_password_action.pending().get() { "Setting..." } else { "Set Password" }}
+                                            </Button>
+                                        </div>
+                                    }.into_any()
+                                >
+                                    <p class="text-sm text-success-foreground flex items-center gap-1.5">
+                                        <Icon icon=phosphor_leptos::CHECK_CIRCLE attr:class="w-4 h-4"/>
+                                        "Password set"
+                                    </p>
+                                </Show>
+                            </div>
+
+                            <Button
+                                button_type="button"
+                                size=ButtonSize::Lg
+                                class="w-full"
+                                on:click=on_continue
+                                disabled=Signal::derive(continue_disabled)
+                            >
+                                {move || if continue_action.pending().get() { "Saving..." } else { "Continue" }}
+                            </Button>
                         </div>
                     }.into_any(),
                 }
             }}
         </AuthLayout>
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Step B WebAuthn orchestration
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Orchestrate the passkey-registration ceremony for the credential-setup
+/// step: mint a challenge via the authenticated `start_passkey_registration`
+/// server fn (KYO-683 Phase 1 — already generic over any authenticated
+/// user, purpose `PASSKEY_ADD_DEVICE`), drive `navigator.credentials.create()`
+/// through the canonical `utils::webauthn::start_registration` bridge — the
+/// same one `login.rs`'s passkey sign-in and the recovery/passkey-signup
+/// completion pages use, deliberately not a second hand-rolled WebAuthn
+/// ceremony — then verify via `complete_passkey_registration`. Device name
+/// is left for the server to auto-detect (empty string): this step already
+/// asks for a name and a password, so a third free-text field for a device
+/// label would add friction the "no skip, but no extra burden either"
+/// design deliberately avoids.
+async fn add_passkey_flow() -> Result<(), String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        Err("Passkey registration requires a browser".to_string())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        use crate::server_fns::security::{complete_passkey_registration, start_passkey_registration};
+
+        let options_json = start_passkey_registration(String::new())
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // start_passkey_registration returns `{"challenge_id": ..., "options": ccr}`
+        // — unwrap to the inner `options` before handing it to the canonical
+        // start_registration() bridge, which expects the raw creation options
+        // (or a `{"publicKey": ...}` wrapper), not this envelope.
+        let data: serde_json::Value = serde_json::from_str(&options_json)
+            .map_err(|e| format!("Parse registration options: {e}"))?;
+        let challenge_id = data["challenge_id"]
+            .as_str()
+            .ok_or("Missing challenge_id in registration response")?
+            .to_string();
+        let inner_options = serde_json::to_string(&data["options"])
+            .map_err(|e| format!("Serialize registration options: {e}"))?;
+
+        let credential_json = crate::utils::webauthn::start_registration(&inner_options).await?;
+        let credential_value: serde_json::Value = serde_json::from_str(&credential_json)
+            .map_err(|e| format!("Parse credential: {e}"))?;
+
+        // complete_passkey_registration expects the credential re-wrapped
+        // with the challenge_id — the counterpart envelope to the one
+        // start_passkey_registration sent.
+        let combined = serde_json::json!({
+            "challenge_id": challenge_id,
+            "credential": credential_value,
+        });
+        let combined_json = serde_json::to_string(&combined)
+            .map_err(|e| format!("Serialize credential envelope: {e}"))?;
+
+        complete_passkey_registration(combined_json)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -335,32 +625,161 @@ fn error_view() -> impl IntoView {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Success view
+// Completing view
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn success_view() -> impl IntoView {
-    view! {
-        <div class="space-y-4">
-            <div class="text-center">
-                <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-success/10 mx-auto mb-6">
-                    <Icon icon=phosphor_leptos::CHECK attr:class="w-8 h-8 text-success-foreground"/>
-                </div>
-            </div>
-            // Branded moment (auth page) — DESIGN.md Loading State Pattern
-            <img src="/kyomi_animated_logo.svg" alt="Processing" class="w-8 h-8 mx-auto"/>
-        </div>
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Creating view
-// ─────────────────────────────────────────────────────────────────────────────
-
-fn creating_view() -> impl IntoView {
+fn completing_view() -> impl IntoView {
     view! {
         <div class="text-center space-y-4">
             // Branded moment (auth page) — DESIGN.md Loading State Pattern
             <img src="/kyomi_animated_logo.svg" alt="Processing" class="w-12 h-12 mx-auto"/>
         </div>
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests (KYO-683 Phase 2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use crate::test_support::extract_between;
+
+    const SRC: &str = include_str!("signup_complete.rs");
+    const TEST_MOD_MARKER: &str = "#[cfg(test)]\nmod tests {";
+    fn production_src() -> &'static str {
+        SRC.split(TEST_MOD_MARKER)
+            .next()
+            .expect("TEST_MOD_MARKER must be found in SRC")
+    }
+
+    /// The GET that loads this page from the emailed link must never
+    /// redeem the token — only the Step A "Verify Email" click may. A mail
+    /// scanner (Outlook/Defender, Proofpoint) prefetches URLs found in
+    /// email; if `signup_verify` fired anywhere outside the click handler's
+    /// dispatch body, the scanner's GET would burn the single-use token
+    /// before the human ever saw the page. Pinning the call count to
+    /// exactly one is a cheap proxy for "only reachable from a click".
+    #[test]
+    fn signup_verify_is_only_called_from_the_confirm_click_handler() {
+        let count = production_src().matches("signup_verify(").count();
+        assert_eq!(
+            count, 1,
+            "signup_verify must be called exactly once — from verify_action's \
+             dispatch body — found {count} call site(s)"
+        );
+    }
+
+    /// Step A (Confirm) must not collect a password or a name — KYO-683
+    /// moved both into Step B (CredentialSetup), and Step A only redeems
+    /// the token plus the terms/marketing checkboxes.
+    #[test]
+    fn confirm_step_collects_no_credential_or_name_fields() {
+        let confirm_block = extract_between(
+            production_src(),
+            "PageState::Confirm => view! {",
+            "PageState::CredentialSetup => view! {",
+        );
+        assert!(
+            !confirm_block.contains("type=\"password\""),
+            "Step A (Confirm) must not collect a password — that belongs to Step B \
+             (CredentialSetup)"
+        );
+        assert!(
+            !confirm_block.contains("Full Name"),
+            "Step A (Confirm) must not collect a name — KYO-683 moved the name field \
+             to Step B (CredentialSetup)"
+        );
+    }
+
+    /// CredentialSetup must read as a mandatory step in the flow, not a
+    /// skippable aside — the ticket is explicit that passkey/password setup
+    /// must not read as skippable, because Kyomi wants people to actually
+    /// set one up. No "Skip" button, no "later" copy.
+    #[test]
+    fn credential_setup_has_no_skip_option() {
+        let block = extract_between(
+            production_src(),
+            "PageState::CredentialSetup => view! {",
+            "</AuthLayout>",
+        );
+        let lower = block.to_lowercase();
+        assert!(
+            !lower.contains("skip"),
+            "CredentialSetup must not offer a Skip option — KYO-683 presents \
+             passkey/password setup as a mandatory step in the flow, not an \
+             optional aside"
+        );
+        assert!(
+            !lower.contains("later"),
+            "CredentialSetup must not use \"you can do this later\"-style copy"
+        );
+    }
+
+    /// `continue_disabled` must require both a non-empty name AND at least
+    /// one credential (passkey or password) — without this, "Continue"
+    /// would let the step be skipped in practice even without an explicit
+    /// Skip button.
+    #[test]
+    fn continue_requires_name_and_at_least_one_credential() {
+        let src = production_src();
+        assert!(
+            src.contains("cred_name.get().trim().is_empty()"),
+            "continue_disabled must require a non-empty name"
+        );
+        assert!(
+            src.contains("!(passkey_added.get() || password_set.get())"),
+            "continue_disabled must require at least one of passkey_added / \
+             password_set — otherwise Continue would be reachable with zero \
+             credentials set, which is exactly the skip path KYO-683 forbids"
+        );
+    }
+
+    /// Both credentials must stay reachable after setting one — setting a
+    /// password must not hide the passkey option, and vice versa, so
+    /// "both" is actually achievable per the ticket's acceptance criteria.
+    #[test]
+    fn both_credentials_remain_reachable_independently() {
+        let src = production_src();
+        assert!(
+            src.contains("when=move || passkey_added.get()"),
+            "the passkey section must be gated on its own passkey_added signal, \
+             independent of password_set"
+        );
+        assert!(
+            src.contains("when=move || password_set.get()"),
+            "the password section must be gated on its own password_set signal, \
+             independent of passkey_added"
+        );
+    }
+
+    /// CredentialSetup must reuse the existing authenticated server fns —
+    /// not a second WebAuthn ceremony or a second password-hashing path.
+    #[test]
+    fn credential_setup_reuses_existing_server_fns() {
+        let src = production_src();
+        for needle in [
+            "start_passkey_registration(",
+            "complete_passkey_registration(",
+            "set_password(",
+            "update_profile_name(",
+        ] {
+            assert!(
+                src.contains(needle),
+                "CredentialSetup must call {needle} — reusing the existing \
+                 authenticated server fns rather than a second implementation"
+            );
+        }
+    }
+
+    /// The passkey option must be gated on WebAuthn availability, per the
+    /// ticket ("gate its availability on webauthn::is_webauthn_available()").
+    #[test]
+    fn passkey_option_gated_on_webauthn_availability() {
+        assert!(
+            production_src().contains("is_webauthn_available()"),
+            "the passkey section must check webauthn::is_webauthn_available() \
+             before offering the Add Passkey button"
+        );
     }
 }
