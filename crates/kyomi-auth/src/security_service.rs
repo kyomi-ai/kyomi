@@ -68,6 +68,40 @@ pub async fn change_password(
     Ok(())
 }
 
+/// Set a password for an authenticated user who does not yet have one.
+///
+/// Distinct from [`change_password`], which requires and verifies a current
+/// password — there is nothing to verify for an account that never had one,
+/// e.g. an OAuth-only user, or a KYO-683 account created straight off email
+/// verification with no credential yet. Distinct from
+/// `auth_service::recovery_set_password_service`, which additionally strips
+/// TOTP as part of "wrest back control of a compromised account" — wrong
+/// here, since an account with no password yet has no TOTP to strip either.
+///
+/// Callers must validate the minimum length before calling this function,
+/// same as [`change_password`].
+///
+/// Returns `Err` if the user already has a password — callers should route
+/// to [`change_password`] instead.
+pub async fn set_password(
+    pool: &DbPool,
+    user_id: &str,
+    new_password: &str,
+) -> kyomi_core::Result<()> {
+    let has_pw = crate::user_service::has_password(pool, user_id).await?;
+    if has_pw {
+        return Err(kyomi_core::Error::Internal(
+            "Password already set. Use change-password to update it.".into(),
+        ));
+    }
+
+    let hash = crate::password::hash_password(new_password)?;
+    let auth_data = serde_json::json!({"hash": hash});
+    crate::user_service::upsert_auth_method(pool, user_id, "password", &auth_data).await?;
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // TOTP 2FA
 // ---------------------------------------------------------------------------
@@ -559,5 +593,63 @@ mod tests {
                 "expected Error::Internal(\"Challenge does not match authenticated user\"), got {other:?}"
             ),
         }
+    }
+
+    // -----------------------------------------------------------------
+    // set_password (KYO-683)
+    // -----------------------------------------------------------------
+    //
+    // Extracted from what used to be inline logic in the `set_password`
+    // server_fn (`kyomi-ui/src/server_fns/security.rs`) so both that
+    // server_fn and the KYO-683 credential-setup step can share it,
+    // matching `change_password`'s existing service-layer shape.
+
+    #[tokio::test]
+    async fn set_password_succeeds_for_user_with_no_password() {
+        let pool = test_pool().await;
+        let user = crate::user_service::create_user(&pool, "set-pw@example.com", None, true)
+            .await
+            .expect("create user");
+
+        set_password(&pool, &user.user_id, "correct-horse-battery-staple")
+            .await
+            .expect("set_password should succeed for a user with no password");
+
+        let has_pw = crate::user_service::has_password(&pool, &user.user_id)
+            .await
+            .expect("query has_password");
+        assert!(has_pw, "password auth method must exist after set_password");
+    }
+
+    #[tokio::test]
+    async fn set_password_rejects_user_who_already_has_one() {
+        let pool = test_pool().await;
+        let user = crate::user_service::create_user(&pool, "set-pw-twice@example.com", None, true)
+            .await
+            .expect("create user");
+
+        set_password(&pool, &user.user_id, "first-password-123")
+            .await
+            .expect("first set_password should succeed");
+
+        let result = set_password(&pool, &user.user_id, "second-password-456").await;
+        assert!(
+            result.is_err(),
+            "set_password must reject a user who already has a password — \
+             change_password is the correct call for that"
+        );
+
+        // The original password must survive the rejected second attempt.
+        let stored = crate::user_service::get_auth_method(&pool, &user.user_id, "password")
+            .await
+            .expect("query auth method")
+            .expect("password auth method must still exist");
+        let hash = stored.auth_data["hash"].as_str().expect("hash field");
+        let matches_first = crate::password::verify_password("first-password-123", hash)
+            .expect("verify password");
+        assert!(
+            matches_first,
+            "the rejected second set_password call must not overwrite the first password"
+        );
     }
 }

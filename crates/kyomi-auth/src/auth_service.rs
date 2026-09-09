@@ -162,8 +162,6 @@ pub struct SignupStartParams<'a> {
     pub self_hosted: bool,
     pub smtp_configured: bool,
     pub frontend_url: &'a str,
-    pub slack_feedback_webhook_url: Option<&'a str>,
-    pub support_email: &'a str,
     pub config: Option<&'a kyomi_core::Config>,
 }
 
@@ -171,14 +169,17 @@ pub struct SignupStartParams<'a> {
 ///
 /// Two modes:
 /// - Self-hosted SMTP-less: creates user directly and returns a session.
-/// - SaaS: creates unverified user, sends verification email.
+/// - SaaS: mints a verification token and sends the email — writes no
+///   `users` row (KYO-683). The account is created only when the token is
+///   redeemed, in `signup_verify_service`, which is also where the
+///   admin-notification ping (`slack_feedback_webhook_url`/`support_email`,
+///   no longer needed here) fires.
 pub async fn signup_start_service(
     params: SignupStartParams<'_>,
 ) -> kyomi_core::Result<SignupStartServiceResult> {
     let SignupStartParams {
         db, kv, jwt_secret, email, name, password, ip, device,
-        self_hosted, smtp_configured, frontend_url, slack_feedback_webhook_url,
-        support_email, config,
+        self_hosted, smtp_configured, frontend_url, config,
     } = params;
     // Rate limit
     let rate = crate::rate_limiter::check_rate_limit(kv, ip, "signup", None).await?;
@@ -217,15 +218,31 @@ pub async fn signup_start_service(
                 .await?;
                 Ok(result)
             } else {
-                signup_saas_new_user(SaasNewUserParams {
+                // SaaS, brand-new email: mint the verification token and
+                // email the link, but write NO `users` row (KYO-683). A
+                // corporate mail scanner (Outlook/Defender, Proofpoint)
+                // prefetches links in the email it just scanned; if that
+                // GET-equivalent prefetch created the account, we'd be
+                // creating accounts nobody asked for. All token consumption
+                // in this codebase is already a POST-only `#[server]` RPC —
+                // `signup_verify_service` — so the account is created only
+                // when the real recipient clicks through and that POST
+                // fires, `verified = true` at that same moment. The
+                // `notify_signup` admin ping that used to fire here (inside
+                // `signup_saas_new_user`, still used below by the
+                // passkey-signup flow) moves with the account creation to
+                // `signup_verify_service` — there is no account yet at this
+                // point to notify anyone about.
+                mint_and_send_verification_email(MintVerificationEmailParams {
                     db,
                     email,
-                    name: None,
+                    name: "",
+                    user_id: None,
                     frontend_url,
                     token_type: "email_verification",
                     verification_path: "/signup/complete",
-                    slack_feedback_webhook_url,
-                    support_email,
+                    expire_hours: None,
+                    email_kind: VerificationEmailKind::Verification,
                 })
                 .await?;
                 Ok(SignupStartServiceResult::VerificationRequired)
@@ -239,13 +256,24 @@ pub async fn signup_start_service(
                 .await?;
                 Ok(result)
             } else {
-                // Resend verification email
+                // Resend verification email. This arm is NOT dead under
+                // KYO-683, even though the `None` arm above no longer
+                // writes a `users` row: `passkey_signup_start_service`'s
+                // own `None` arm (unchanged in this phase — see its
+                // module docs) still creates a `verified = false` row for
+                // a brand-new email, and that row is visible here too,
+                // since both services key off the same `users` table by
+                // email. So an email that started a passkey signup and
+                // never finished the WebAuthn ceremony, then tries this
+                // (password) signup flow for the same address, must still
+                // land here and get a fresh token — not be told a `None`
+                // arm no longer applies to it.
                 let user_name = user.name.clone().unwrap_or_default();
                 mint_and_send_verification_email(MintVerificationEmailParams {
                     db,
                     email,
                     name: &user_name,
-                    user_id: &user.user_id,
+                    user_id: Some(&user.user_id),
                     frontend_url,
                     token_type: "email_verification",
                     verification_path: "/signup/complete",
@@ -444,7 +472,12 @@ struct MintVerificationEmailParams<'a> {
     db: &'a DbPool,
     email: &'a str,
     name: &'a str,
-    user_id: &'a str,
+    /// `user_id` of the account this token was minted for — logging only,
+    /// never part of the mint/verify logic itself. `None` for the KYO-683
+    /// plain-email signup flow, where `signup_start_service` mints a token
+    /// for an address before any `users` row exists; the account isn't
+    /// created until the token is redeemed in `signup_verify_service`.
+    user_id: Option<&'a str>,
     frontend_url: &'a str,
     token_type: &'a str,
     verification_path: &'a str,
@@ -499,7 +532,10 @@ async fn mint_and_send_verification_email(
         "{}{verification_path}?token={raw_token}",
         frontend_url.trim_end_matches('/')
     );
-    tracing::info!("Verification link ({token_type}) for {email}: {url} (user_id={user_id})");
+    let user_id_display = user_id.unwrap_or("<pending — no account created yet>");
+    tracing::info!(
+        "Verification link ({token_type}) for {email}: {url} (user_id={user_id_display})"
+    );
     spawn_verification_email(email.to_string(), name.to_string(), url, email_kind);
     Ok(())
 }
@@ -601,7 +637,7 @@ async fn signup_saas_new_user(params: SaasNewUserParams<'_>) -> kyomi_core::Resu
         db,
         email,
         name: name.unwrap_or_default(),
-        user_id: &user.user_id,
+        user_id: Some(&user.user_id),
         frontend_url,
         token_type,
         verification_path,
@@ -737,6 +773,173 @@ pub async fn signup_complete_service(
 
     let sess = create_authenticated_session(db, kv, jwt_secret, &user, device).await?;
     Ok(SignupCompleteServiceResult::Success(Box::new(sess)))
+}
+
+// ---------------------------------------------------------------------------
+// Signup verify (KYO-683 — account is created only when the token is
+// redeemed, never at signup/start)
+// ---------------------------------------------------------------------------
+
+/// Outcome of `signup_verify_service`.
+pub enum SignupVerifyServiceResult {
+    /// Validation error (terms not accepted).
+    Error { message: String },
+    /// Invalid or expired signup token.
+    InvalidToken,
+    /// Account created (verified, no credentials yet) and authenticated —
+    /// server_fn should set cookies. A follow-up credential-setup step
+    /// (password and/or passkey) completes onboarding; skipping it is
+    /// survivable, the same way `recovery_start_service` already serves a
+    /// verified account with no credentials.
+    Success(Box<AuthenticatedSession>),
+}
+
+/// Parameters for `signup_verify_service`.
+pub struct SignupVerifyParams<'a> {
+    pub db: &'a DbPool,
+    pub kv: &'a KVPool,
+    pub jwt_secret: &'a str,
+    pub token: &'a str,
+    pub terms_accepted: bool,
+    pub marketing_consent: bool,
+    pub device: &'a DeviceInfo,
+    pub config: Option<&'a kyomi_core::Config>,
+    pub slack_feedback_webhook_url: Option<&'a str>,
+    pub support_email: &'a str,
+}
+
+/// Consume an `email_verification` token minted by `signup_start_service`
+/// and create the account (KYO-683).
+///
+/// This is the *only* place a `users` row is created for the plain-email
+/// SaaS signup flow — `signup_start_service`'s `None` arm mints the token
+/// and sends the email but never touches `users`. The account is created
+/// `verified = true` at the moment the token is redeemed, which is always a
+/// POST (this is a Leptos `#[server]` RPC): a corporate mail scanner that
+/// prefetches the emailed link performs a GET against the frontend page,
+/// not this call, so prefetching cannot create an account nobody asked for.
+///
+/// No password or passkey is collected here. The ticket's flow offers a
+/// credential-setup step (name + password and/or passkey) once the caller
+/// is authenticated — `security_service::set_password` and
+/// `security_service::start_passkey_registration` /
+/// `complete_passkey_registration` (already generic over any authenticated
+/// user, reused as-is). Skipping that step is survivable:
+/// `recovery_start_service` already serves a verified account with no
+/// credentials at all.
+pub async fn signup_verify_service(
+    params: SignupVerifyParams<'_>,
+) -> kyomi_core::Result<SignupVerifyServiceResult> {
+    let SignupVerifyParams {
+        db,
+        kv,
+        jwt_secret,
+        token,
+        terms_accepted,
+        marketing_consent,
+        device,
+        config,
+        slack_feedback_webhook_url,
+        support_email,
+    } = params;
+
+    if !terms_accepted {
+        return Ok(SignupVerifyServiceResult::Error {
+            message: "You must accept the Terms of Service and Privacy Policy to create an account."
+                .to_string(),
+        });
+    }
+
+    // Verify (and consume — single use) the email verification token.
+    let email =
+        crate::token_service::verify_verification_token(db, token, "email_verification").await?;
+    let Some(email) = email else {
+        return Ok(SignupVerifyServiceResult::InvalidToken);
+    };
+
+    // The token is now consumed, single-use. Double-submitting the same raw
+    // token a second time gets `None` above and returns `InvalidToken` —
+    // token_service's own single-use gate covers that case, nothing extra
+    // needed here.
+    //
+    // Separately: a `users` row for this email might already exist by the
+    // time we get here — a race with something else that wrote one after
+    // `signup_start_service` minted this token (a concurrent Google OAuth
+    // signup for the same address, or, still live in this phase, the
+    // separate `passkey_signup_start_service` flow, whose `None` arm still
+    // creates a `verified = false` row up front). Redeeming this token
+    // proves the caller controls the mailbox — the same assurance
+    // `/account/recover` runs on — so the right move is to sign them into
+    // the account that already exists, not to error out or create a second
+    // row for the same address. This function refuses to even get here
+    // unless `terms_accepted == true` (checked above), so the existing row
+    // gets its terms acceptance and marketing consent recorded too — but
+    // only if it is still `!verified`: an already-verified row belongs to a
+    // completed account, and silently rewriting that account's consent
+    // record from an unrelated request would be wrong. Deliberately does
+    // not touch the existing row's credentials or name either way: those
+    // belong to whichever flow actually created the row.
+    let user = match crate::user_service::get_user_by_email(db, &email).await? {
+        None => {
+            let user = crate::user_service::create_user(db, &email, None, true).await?;
+            record_terms_and_marketing_consent(db, &user.user_id, marketing_consent).await?;
+            crate::user_service::create_workspace_for_user(
+                db,
+                &user.user_id,
+                None,
+                &email,
+                config,
+            )
+            .await?;
+
+            // Admin notification (Slack + email) — fire-and-forget. Moved
+            // here from `signup_saas_new_user` (still used by the
+            // passkey-signup flow, which does create its row at start):
+            // under KYO-683 there is no account at signup/start to notify
+            // about, only at this point.
+            let notify_webhook = slack_feedback_webhook_url.map(|s| s.to_string());
+            let notify_support = support_email.to_string();
+            let notify_email = email.to_string();
+            let notify_user_id = user.user_id.clone();
+            tokio::spawn(async move {
+                crate::notifications::notify_signup(
+                    notify_webhook.as_deref(),
+                    &notify_support,
+                    &notify_email,
+                    "",
+                    &notify_user_id,
+                )
+                .await;
+            });
+
+            user
+        }
+        Some(existing) => {
+            tracing::info!(
+                email = %email,
+                user_id = %existing.user_id,
+                "signup_verify_service: a users row already existed for this verified \
+                 token's email (race) — signing into it instead of creating a duplicate account"
+            );
+            if !existing.verified {
+                crate::user_service::mark_user_verified(db, &email).await?;
+                record_terms_and_marketing_consent(db, &existing.user_id, marketing_consent)
+                    .await?;
+            }
+            ensure_user_has_workspace(db, &existing.user_id, None, &email, config).await?;
+            existing
+        }
+    };
+
+    // Re-fetch after updates.
+    let user = crate::user_service::get_user_by_email(db, &user.email)
+        .await?
+        .ok_or_else(|| {
+            kyomi_core::Error::Internal("User not found after signup verification".into())
+        })?;
+
+    let sess = create_authenticated_session(db, kv, jwt_secret, &user, device).await?;
+    Ok(SignupVerifyServiceResult::Success(Box::new(sess)))
 }
 
 // ---------------------------------------------------------------------------
@@ -905,6 +1108,33 @@ async fn ensure_user_has_workspace(
     if ws_ctx.is_none() {
         crate::user_service::create_workspace_for_user(db, user_id, user_name, email, config)
             .await?;
+    }
+    Ok(())
+}
+
+/// Record ToS/Privacy acceptance and (optionally) marketing consent for a
+/// newly-verified user. Shared by both arms of `signup_verify_service`'s
+/// user-lookup match: the fresh-account path and the race path where a
+/// `!verified` row already existed for the address.
+async fn record_terms_and_marketing_consent(
+    db: &DbPool,
+    user_id: &str,
+    marketing_consent: bool,
+) -> kyomi_core::Result<()> {
+    crate::user_service::update_terms_acceptance(
+        db,
+        user_id,
+        kyomi_core::TERMS_VERSION,
+        marketing_consent,
+    )
+    .await?;
+    if marketing_consent {
+        crate::user_service::update_extra_metadata(
+            db,
+            user_id,
+            &serde_json::json!({"marketing_consent": true}),
+        )
+        .await?;
     }
     Ok(())
 }
@@ -2061,7 +2291,7 @@ pub async fn passkey_signup_start_service(
                     db,
                     email,
                     name: &user_name,
-                    user_id: &user.user_id,
+                    user_id: Some(&user.user_id),
                     frontend_url,
                     token_type: "signup",
                     verification_path: "/auth/passkey-signup",
@@ -2462,41 +2692,62 @@ pub async fn update_passkey_after_auth_inner(
     }
 }
 
-/// Result of attempting to resend a verification email.
-pub struct ResendVerificationResult {
-    pub should_send: bool,
-    pub user_name: String,
-    pub raw_token: String,
-}
-
-/// Check rate limit, look up the unverified user, and create a verification
-/// token in one service call. Returns `None` if rate-limited, user not found,
-/// or user is already verified.
+/// Check rate limit, look up the unverified user, and — if eligible — mint a
+/// fresh `email_verification` token and send the verification email via the
+/// shared [`mint_and_send_verification_email`] helper.
+///
+/// Previously hand-rolled its own `{frontend_url}/verify-email?token=...`
+/// link and called `EmailService::send_verification_email` directly from
+/// the `resend_verification` server_fn, bypassing both the URL this token
+/// type's *other* two mint sites (`signup_start_service`,
+/// `passkey_recovery_start_service` for a different type) build and the
+/// `spawn_verification_email` dispatcher every other flow sends through
+/// (KYO-683). That meant a resent link landed on `/verify-email` — a page
+/// whose handler only calls `mark_user_verified` — while the original
+/// signup link landed on `/signup/complete`, which is meaningless once
+/// `/verify-email` has nothing to do (there is no unverified `users` row
+/// left for the plain-email flow to mark). Routing through the shared
+/// helper fixes both: same landing page as the original link, same
+/// dispatcher as every other verification email.
+///
+/// Returns `Ok(())` unconditionally, like the other signup/recovery start
+/// services — whether the account exists, is unverified, or is rate
+/// limited is silent to the caller (`resend_verification` is a public,
+/// unauthenticated endpoint; this also mirrors the account-enumeration
+/// defense the other signup flows apply).
 pub async fn resend_verification_service(
     db: &kyomi_core::DbPool,
     kv: &KVPool,
     ip: &str,
     email: &str,
-) -> kyomi_core::Result<Option<ResendVerificationResult>> {
+    frontend_url: &str,
+) -> kyomi_core::Result<()> {
     let rate = check_rate_limit(kv, ip, "register").await?;
     if !rate.allowed {
-        return Ok(None);
+        return Ok(());
     }
 
     let user = crate::user_service::get_user_by_email(db, email).await?;
-    let Some(user) = user else { return Ok(None) };
+    let Some(user) = user else { return Ok(()) };
     if user.verified {
-        return Ok(None);
+        return Ok(());
     }
 
-    let raw_token =
-        crate::token_service::create_verification_token(db, email, "email_verification").await?;
+    let user_name = user.name.clone().unwrap_or_default();
+    mint_and_send_verification_email(MintVerificationEmailParams {
+        db,
+        email,
+        name: &user_name,
+        user_id: Some(&user.user_id),
+        frontend_url,
+        token_type: "email_verification",
+        verification_path: "/signup/complete",
+        expire_hours: None,
+        email_kind: VerificationEmailKind::Verification,
+    })
+    .await?;
 
-    Ok(Some(ResendVerificationResult {
-        should_send: true,
-        user_name: user.name.unwrap_or_default(),
-        raw_token,
-    }))
+    Ok(())
 }
 
 /// Result of attempting to start account recovery.
@@ -2642,7 +2893,7 @@ pub async fn passkey_recovery_start_service(
             db,
             email,
             name: &user_name,
-            user_id: &user.user_id,
+            user_id: Some(&user.user_id),
             frontend_url,
             token_type: "passkey_recovery",
             verification_path: "/auth/recover-passkey/complete",
@@ -4109,8 +4360,6 @@ mod tests {
             self_hosted: false,
             smtp_configured: true,
             frontend_url: "https://app.example.com",
-            slack_feedback_webhook_url: None,
-            support_email: "support@example.com",
             config: None,
         }
     }
@@ -4240,6 +4489,376 @@ mod tests {
             "verified-user signup must log that an existing-account notice was sent \
              instead of staying silent (KYO-681); captured: {:?}",
             logs.events()
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // signup_start_service / signup_verify_service (KYO-683)
+    // -----------------------------------------------------------------
+    //
+    // The headline behavior change: `signup_start_service`'s SaaS `None`
+    // arm must create no `users` row (only mint a token and send an
+    // email), and the row is created — `verified = true` — only when
+    // `signup_verify_service` redeems that token.
+
+    async fn count_users_with_email(db: &DbPool, email: &str) -> i64 {
+        kyomi_core::db_fetch_scalar!(
+            db,
+            i64,
+            "SELECT COUNT(*) FROM users WHERE email = $1",
+            email
+        )
+        .expect("count users")
+    }
+
+    fn signup_verify_params<'a>(
+        db: &'a DbPool,
+        kv: &'a KVPool,
+        token: &'a str,
+        device: &'a DeviceInfo,
+    ) -> SignupVerifyParams<'a> {
+        SignupVerifyParams {
+            db,
+            kv,
+            jwt_secret: "test-secret",
+            token,
+            terms_accepted: true,
+            marketing_consent: false,
+            device,
+            config: None,
+            slack_feedback_webhook_url: None,
+            support_email: "support@example.com",
+        }
+    }
+
+    /// The ticket's headline acceptance criterion: starting a signup for a
+    /// brand-new email must create zero `users` rows and mint exactly one
+    /// `email_verification` token — not create-then-verify, as before.
+    #[tokio::test]
+    async fn signup_start_service_new_email_creates_no_user_row_and_mints_one_token() {
+        let db = test_pool().await;
+        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+        let device = test_device();
+        let email = "signup-start-no-row@example.com";
+
+        let result = signup_start_service(password_start_params(&db, &kv, email, &device))
+            .await
+            .expect("service call should not error");
+
+        assert!(matches!(
+            result,
+            SignupStartServiceResult::VerificationRequired
+        ));
+        assert_eq!(
+            count_users_with_email(&db, email).await,
+            0,
+            "signup_start_service must not write a users row for a brand-new email (KYO-683)"
+        );
+        assert_eq!(
+            count_tokens_of_type(&db, email, "email_verification").await,
+            1,
+            "signup_start_service must mint exactly one email_verification token"
+        );
+    }
+
+    /// Redeeming the token minted above creates the account, verified,
+    /// with a workspace and an authenticated session — and the account did
+    /// not exist before the call.
+    #[tokio::test]
+    async fn signup_verify_service_creates_verified_account_from_token() {
+        let db = test_pool().await;
+        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+        let device = test_device();
+        let email = "signup-verify-creates@example.com";
+
+        let token = mint_token(&db, email, "email_verification").await;
+        assert_eq!(count_users_with_email(&db, email).await, 0);
+
+        let result = signup_verify_service(signup_verify_params(&db, &kv, &token, &device))
+            .await
+            .expect("service call should not error");
+
+        let SignupVerifyServiceResult::Success(_session) = result else {
+            panic!("expected Success, got a non-Success result");
+        };
+
+        assert_eq!(
+            count_users_with_email(&db, email).await,
+            1,
+            "exactly one users row must exist after verification"
+        );
+        let user = crate::user_service::get_user_by_email(&db, email)
+            .await
+            .expect("query user")
+            .expect("user must exist after signup_verify_service");
+        assert!(
+            user.verified,
+            "account must be verified = true immediately on creation"
+        );
+
+        let ws_ctx = crate::user_service::get_user_workspace_context(&db, &user.user_id)
+            .await
+            .expect("query workspace context");
+        assert!(
+            ws_ctx.is_some(),
+            "account must have a workspace after verification"
+        );
+    }
+
+    /// `verify_verification_token` marks a token used on first redemption —
+    /// a second POST with the same raw token must be rejected, not create a
+    /// second account or silently re-succeed.
+    #[tokio::test]
+    async fn signup_verify_service_rejects_reused_token() {
+        let db = test_pool().await;
+        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+        let device = test_device();
+        let email = "signup-verify-reuse@example.com";
+
+        let token = mint_token(&db, email, "email_verification").await;
+
+        let first = signup_verify_service(signup_verify_params(&db, &kv, &token, &device))
+            .await
+            .expect("first call should not error");
+        assert!(matches!(first, SignupVerifyServiceResult::Success(_)));
+
+        let second = signup_verify_service(signup_verify_params(&db, &kv, &token, &device))
+            .await
+            .expect("second call should not error");
+        assert!(
+            matches!(second, SignupVerifyServiceResult::InvalidToken),
+            "a second redemption of the same token must be rejected"
+        );
+        assert_eq!(
+            count_users_with_email(&db, email).await,
+            1,
+            "a rejected double-submit must not create a second account"
+        );
+    }
+
+    /// A syntactically well-formed but never-minted token must be rejected,
+    /// same as an expired or already-used one.
+    #[tokio::test]
+    async fn signup_verify_service_rejects_invalid_token() {
+        let db = test_pool().await;
+        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+        let device = test_device();
+
+        let result = signup_verify_service(signup_verify_params(
+            &db,
+            &kv,
+            "not-a-real-token",
+            &device,
+        ))
+        .await
+        .expect("service call should not error");
+
+        assert!(matches!(result, SignupVerifyServiceResult::InvalidToken));
+    }
+
+    /// Terms must be accepted to complete verification — and, since the
+    /// rejection happens before the token is even checked, the token stays
+    /// valid for a subsequent call that does accept terms.
+    #[tokio::test]
+    async fn signup_verify_service_requires_terms_accepted() {
+        let db = test_pool().await;
+        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+        let device = test_device();
+        let email = "signup-verify-no-terms@example.com";
+
+        let token = mint_token(&db, email, "email_verification").await;
+
+        let mut params = signup_verify_params(&db, &kv, &token, &device);
+        params.terms_accepted = false;
+        let result = signup_verify_service(params)
+            .await
+            .expect("service call should not error");
+        assert!(matches!(result, SignupVerifyServiceResult::Error { .. }));
+        assert_eq!(
+            count_users_with_email(&db, email).await,
+            0,
+            "rejecting on terms must not create an account"
+        );
+
+        let result = signup_verify_service(signup_verify_params(&db, &kv, &token, &device))
+            .await
+            .expect("service call should not error");
+        assert!(
+            matches!(result, SignupVerifyServiceResult::Success(_)),
+            "the token must still be valid after a terms-rejected attempt"
+        );
+    }
+
+    /// Race: a `users` row for this email already exists by the time the
+    /// token is redeemed (e.g. a concurrent flow created it after
+    /// `signup_start_service` minted this token), and that row is already
+    /// `verified = true` — a completed account. `signup_verify_service`
+    /// must sign into the existing account rather than erroring or
+    /// creating a second row for the same address, and must not rewrite
+    /// that completed account's terms/marketing consent record: this
+    /// request's consent belongs to whatever flow actually created and
+    /// verified the row, not to this unrelated sign-in.
+    #[tokio::test]
+    async fn signup_verify_service_signs_into_existing_account_on_race() {
+        let db = test_pool().await;
+        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+        let device = test_device();
+        let email = "signup-verify-race@example.com";
+
+        // Simulate the race: a row for this email already exists —
+        // verified, with a workspace, distinguishable name/id from
+        // whatever signup_verify_service would have created — before the
+        // email_verification token (minted independently, as
+        // signup_start_service would for a *different* moment in time) is
+        // ever redeemed.
+        let existing = crate::user_service::create_user(&db, email, Some("Already Here"), true)
+            .await
+            .expect("seed existing user");
+        crate::user_service::create_workspace_for_user(&db, &existing.user_id, None, email, None)
+            .await
+            .expect("seed workspace");
+
+        let token = mint_token(&db, email, "email_verification").await;
+
+        let mut params = signup_verify_params(&db, &kv, &token, &device);
+        // Deliberately true: if the already-verified branch wrongly wrote
+        // consent, this is what would make it visible.
+        params.marketing_consent = true;
+        let result = signup_verify_service(params)
+            .await
+            .expect("service call should not error");
+
+        assert!(
+            matches!(result, SignupVerifyServiceResult::Success(_)),
+            "a race with an already-existing account must still succeed"
+        );
+        assert_eq!(
+            count_users_with_email(&db, email).await,
+            1,
+            "redeeming the token must not create a second row for the same email"
+        );
+        let user = crate::user_service::get_user_by_email(&db, email)
+            .await
+            .expect("query user")
+            .expect("user must still exist");
+        assert_eq!(
+            user.user_id, existing.user_id,
+            "must sign into the pre-existing account, not a newly minted one"
+        );
+        assert_eq!(
+            user.name.as_deref(),
+            Some("Already Here"),
+            "the pre-existing account's name must not be overwritten by the race path"
+        );
+        assert_eq!(
+            user.terms_accepted_version, None,
+            "an already-verified existing row's terms acceptance must not be rewritten by \
+             an unrelated sign-in (KYO-683 code review finding #3)"
+        );
+        assert!(
+            !user.marketing_consent,
+            "an already-verified existing row's marketing consent must not be rewritten by \
+             an unrelated sign-in, even though this request asked for it (KYO-683 code review \
+             finding #3)"
+        );
+    }
+
+    /// Race, unverified variant: a `users` row for this email already
+    /// exists but is still `verified = false` — e.g. `passkey_signup_start_service`
+    /// created it, the caller abandoned the WebAuthn ceremony, and they
+    /// come back through the plain-email flow instead. That earlier flow
+    /// never finished and never recorded terms/marketing consent — and
+    /// this function refuses to even reach this branch unless
+    /// `terms_accepted == true` was passed on *this* call — so this is the
+    /// only place that will ever record it for this row. Regression guard
+    /// for KYO-683 code review finding #3: before the fix, this branch
+    /// called only `mark_user_verified` + `ensure_user_has_workspace` and
+    /// silently dropped both terms acceptance and marketing consent.
+    #[tokio::test]
+    async fn signup_verify_service_records_consent_on_race_when_existing_row_unverified() {
+        let db = test_pool().await;
+        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+        let device = test_device();
+        let email = "signup-verify-race-unverified@example.com";
+
+        // Simulate passkey_signup_start_service's still-live `None` arm:
+        // a `verified = false` row with no terms/marketing consent
+        // recorded, and no workspace yet either.
+        let existing = crate::user_service::create_user(&db, email, None, false)
+            .await
+            .expect("seed existing unverified user");
+        assert_eq!(existing.terms_accepted_version, None, "sanity check: no terms recorded yet");
+        assert!(!existing.marketing_consent, "sanity check: no marketing consent recorded yet");
+
+        let token = mint_token(&db, email, "email_verification").await;
+
+        let mut params = signup_verify_params(&db, &kv, &token, &device);
+        params.marketing_consent = true;
+        let result = signup_verify_service(params)
+            .await
+            .expect("service call should not error");
+
+        assert!(
+            matches!(result, SignupVerifyServiceResult::Success(_)),
+            "a race with an existing unverified account must still succeed"
+        );
+        assert_eq!(
+            count_users_with_email(&db, email).await,
+            1,
+            "redeeming the token must not create a second row for the same email"
+        );
+        let user = crate::user_service::get_user_by_email(&db, email)
+            .await
+            .expect("query user")
+            .expect("user must still exist");
+        assert_eq!(
+            user.user_id, existing.user_id,
+            "must sign into the pre-existing account, not a newly minted one"
+        );
+        assert!(user.verified, "the existing row must be marked verified");
+        assert_eq!(
+            user.terms_accepted_version.as_deref(),
+            Some(kyomi_core::TERMS_VERSION),
+            "terms acceptance must be recorded on the branch that refused to proceed \
+             without terms_accepted == true (KYO-683 code review finding #3)"
+        );
+        assert!(
+            user.marketing_consent,
+            "marketing consent must be recorded too, not silently dropped \
+             (KYO-683 code review finding #3)"
+        );
+        let ws_ctx = crate::user_service::get_user_workspace_context(&db, &user.user_id)
+            .await
+            .expect("query workspace context");
+        assert!(
+            ws_ctx.is_some(),
+            "the previously workspace-less row must get a workspace via ensure_user_has_workspace"
+        );
+    }
+
+    /// `resend_verification_service` (KYO-683): routes through the shared
+    /// `mint_and_send_verification_email` helper rather than hand-rolling
+    /// its own token mint + URL + email send. Assert it still mints
+    /// exactly one token of the right type for an eligible (existing,
+    /// unverified) account.
+    #[tokio::test]
+    async fn resend_verification_service_mints_one_email_verification_token() {
+        let db = test_pool().await;
+        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+        let email = "resend-verification@example.com";
+
+        crate::user_service::create_user(&db, email, None, false)
+            .await
+            .expect("create unverified user");
+
+        resend_verification_service(&db, &kv, "127.0.0.1", email, "https://app.example.com")
+            .await
+            .expect("resend_verification_service should not error");
+
+        assert_eq!(
+            count_tokens_of_type(&db, email, "email_verification").await,
+            1,
+            "resend must mint exactly one email_verification token for an eligible account"
         );
     }
 

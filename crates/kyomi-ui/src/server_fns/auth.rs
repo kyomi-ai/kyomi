@@ -330,8 +330,6 @@ pub async fn signup_start(
         self_hosted: ctx.config.self_hosted,
         smtp_configured: ctx.config.smtp_configured(),
         frontend_url: &ctx.config.frontend_url,
-        slack_feedback_webhook_url: ctx.config.slack_feedback_webhook_url.as_deref(),
-        support_email: &ctx.config.support_email,
         config: Some(&ctx.config),
     })
     .await
@@ -589,33 +587,18 @@ pub async fn resend_verification(email: String) -> Result<(), ServerFnError> {
     let email = email.to_lowercase().trim().to_string();
     let ip = extract_client_ip(&headers);
 
-    let result = kyomi_auth::auth_service::resend_verification_service(
-        &ctx.db, &kv, &ip, &email,
+    kyomi_auth::auth_service::resend_verification_service(
+        &ctx.db,
+        &kv,
+        &ip,
+        &email,
+        &ctx.config.frontend_url,
     )
     .await
     .map_err(|e| {
         tracing::error!(error = %e, "resend_verification_service error");
         ServerFnError::new("Internal server error")
     })?;
-
-    if let Some(r) = result {
-        let verification_url = format!(
-            "{}/verify-email?token={}",
-            ctx.config.frontend_url.trim_end_matches('/'),
-            r.raw_token
-        );
-        tokio::spawn(async move {
-            let email_svc = kyomi_auth::email_service::EmailService::from_env();
-            let sent = email_svc
-                .send_verification_email(&email, &r.user_name, &verification_url)
-                .await;
-            if sent {
-                tracing::info!("Verification email sent to {email}");
-            } else {
-                tracing::warn!("Failed to send verification email to {email}");
-            }
-        });
-    }
 
     Ok(())
 }
