@@ -3,7 +3,8 @@
 # scripts/audit-agent-run-deaths.sh — detect autonomous runs that silently
 # discarded a sub-agent's work while still reporting success. (KYO-546)
 #
-# WHY THIS EXISTS
+# WHY THIS EXISTS (HISTORICAL — see the KYO-688 RE-TEST block below for
+# what is true on the CURRENT harness)
 #
 # Six consecutive `/backlog-fast` cron runs claimed KYO-468 and died 10-16
 # minutes later, always before pushing anything. Every one of them exited
@@ -14,26 +15,27 @@
 # independently confirmed zero OOM kills across the whole window. It was
 # never OOM and never a timeout.
 #
-# The actual cause: the orchestrator dispatched a sub-agent via the Agent
-# tool's `run_in_background` (which defaults to background), then ended its
-# own turn to "wait" for it. Under `claude -p` there is no turn after the
-# last one — the process exits at `end_turn` and takes every in-flight
-# background sub-agent down with it. The harness records this as
-# `subagent_stats.killed.system`, and reports the *parent* run as a success
+# What was observed, on the harness version(s) in use at the time: the
+# orchestrator dispatched a sub-agent via the Agent tool's
+# `run_in_background` (which defaulted to background), then ended its own
+# turn to "wait" for it. Under `claude -p` there was no turn after the last
+# one — the process exited at `end_turn` and took every in-flight background
+# sub-agent down with it. The harness recorded this as
+# `subagent_stats.killed.system`, and reported the *parent* run as a success
 # regardless, because the parent itself really did finish cleanly — it just
 # finished having thrown its own child's work away.
 #
-# Verified across every cron run record on this box: `killed.system > 0`
-# NEVER occurred on a run with `started_in_background == 0` — there is not
-# one counterexample. The converse does not hold, and that is the
-# interesting part: background alone is not always fatal. Several runs (e.g.
-# sessions fefb49bb, 249b739a, e5ec864a) started background sub-agents and
-# survived, because that particular sub-agent happened to finish before the
-# parent's own turn ended — a race, not a guarantee. The long, successful
-# KYO-468 sibling runs that actually opened a PR (46, 53, 56 turns) sidestep
-# the race entirely by using FOREGROUND sub-agents exclusively, and had zero
-# system kills. All six KYO-468 death attempts had `started_in_background
-# >= 1` and `killed.system >= 1`:
+# Verified across every cron run record on this box at the time:
+# `killed.system > 0` NEVER occurred on a run with `started_in_background ==
+# 0` — there was not one counterexample. The converse did not hold, and that
+# was the interesting part: background alone was not always fatal. Several
+# runs (e.g. sessions fefb49bb, 249b739a, e5ec864a) started background
+# sub-agents and survived, because that particular sub-agent happened to
+# finish before the parent's own turn ended — a race, not a guarantee. The
+# long, successful KYO-468 sibling runs that actually opened a PR (46, 53,
+# 56 turns) sidestepped the race entirely by using FOREGROUND sub-agents
+# exclusively, and had zero system kills. All six KYO-468 death attempts had
+# `started_in_background >= 1` and `killed.system >= 1`:
 #
 #   Attempt  Session   started_in_background  completed  killed.system
 #   1        976062a9  2                      1          1
@@ -43,9 +45,72 @@
 #   5        514d8a54  1                      0          1
 #   6        fb3edb6b  2                      2          1
 #
-# This script makes that failure detectable instead of invisible — it is the
-# audit half; the prevention half is the new standard at
-# docs/standards/agent-orchestration/no-background-subagents-under-headless-run.md.
+# This script makes that failure detectable instead of invisible if it
+# recurs — it is the audit half; the prevention half is the standard at
+# docs/standards/agent-orchestration/no-background-subagents-under-headless-run.md
+# (revisiting that standard in light of the re-test below is tracked
+# separately as KYO-692, not done here).
+#
+# KYO-688 RE-TEST (2026-09-09, harness Claude Code 2.1.258) — DID NOT
+# REPRODUCE
+#
+# The mechanism described above was re-tested live — not re-read from old
+# journal entries — using
+# scripts/repro-headless-subagent-survival.sh, against harness 2.1.258
+# (installed 2026-09-02 11:20 local), on this same box. Per
+# docs/standards/build-toolchain/a-tool-claim-needs-a-reproduction-not-a-citation.md,
+# this is a reproduction, not a citation of the paragraphs above.
+#
+# A cron-shaped `claude -p` run (same flags this script's own header
+# describes below, ANTHROPIC_API_KEY unset so the subscription login was
+# used) dispatched ONE background sub-agent running a ~150-second command,
+# then immediately ended its own turn without waiting. Measured process
+# wall-clock: 166 seconds — the harness RE-INVOKED the session and emitted a
+# SECOND `"type":"result"` object reporting the background agent's
+# completion. Final accounting: requested={background:1,foreground:0},
+# started_in_background=1, completed=1, failed=0,
+# killed={parent:0,user:0,system:0}. A matching foreground-dispatch run
+# (no `run_in_background` parameter at all) showed the tool call blocking
+# for the sub-agent's whole duration instead: started_in_background=0,
+# killed.system=0, duration_ms=167150 for the same ~150s task.
+#
+# Running THIS script itself over the post-upgrade window
+# (`audit-agent-run-deaths.sh "2026-09-02 12:00"`) found 64 cron runs, of
+# which 62 were assessable and 2 were INDETERMINATE (reason: "no final
+# result JSON found in this run's CMDOUT stream") — 2026-09-02 02:38:41Z and
+# 2026-09-03 18:17:00Z, both script=kyomi-backlog-cron.sh. Zero of the 62
+# assessable runs had `killed.system > 0`. This invocation's own bottom line
+# was `RESULT: COULD NOT COMPLETE`, exit 3 — the script fails closed and
+# will not certify a window as clean while any run in it is indeterminate.
+#
+# Over `"14 days ago"`: 102 cron runs found, of which 99 were assessable and
+# 3 were INDETERMINATE, same reason as above — 2026-08-30 18:17:00Z,
+# 2026-09-02 02:38:41Z, and 2026-09-03 18:17:00Z. Exactly one assessable run
+# had `killed.system > 0`: session fb3edb6b (2026-08-29 02:39:35Z,
+# started_in_background=2, completed=2, stop_reason=end_turn,
+# terminal_reason=completed) — one of the six KYO-468 death attempts in the
+# table above, which predates the 2.1.258 upgrade. This invocation's bottom
+# line was also `RESULT: COULD NOT COMPLETE`, exit 3.
+#
+# No indeterminate run recorded in either window is dated after 2026-09-03.
+#
+# Conclusion: every `killed.system > 0` run on record predates the 2.1.258
+# upgrade — among the runs this script COULD assess, the specific failure
+# mode it exists to detect did not recur. That is a narrower claim than "the
+# audit came back clean": the script itself did not exit clean for either
+# window, because it deliberately refuses to count an indeterminate run as a
+# clean one rather than guessing which way it would have gone. The mechanism
+# tested directly in scripts/repro-headless-subagent-survival.sh was real
+# when this script was written and appears to have been fixed upstream
+# since. This does NOT mean background dispatch under `claude -p` is now
+# unconditionally safe in every respect, and it does NOT mean either window
+# above is certified clean — only that no run this script could assess in
+# either one shows the mechanism recurring. Re-run
+# scripts/repro-headless-subagent-survival.sh after any future harness
+# upgrade rather than assuming either the historical account above or this
+# re-test still holds; this script (audit-agent-run-deaths.sh) remains the
+# right tool to check whether it has recurred in real cron history, and its
+# behaviour below is unchanged by this comment.
 #
 # WHAT IT READS AND WHY RECONSTRUCTION IS NEEDED, NOT OPTIONAL
 #
