@@ -125,6 +125,11 @@ async fn google_login(
         google_oauth::LOGIN_SCOPES,
         false, // don't force consent for login
         false, // no offline access
+        // KYO-700: must NOT request every previously granted scope back —
+        // otherwise a user who disconnected BigQuery (which revokes the
+        // grant at Google) would have it silently re-granted on their next
+        // plain sign-in.
+        false,
     );
 
     // Store state in Redis
@@ -516,6 +521,10 @@ async fn google_oauth_connect(
         google_oauth::BIGQUERY_SCOPES,
         true,  // force consent to get refresh token
         true,  // offline access for refresh token
+        // Keep existing behaviour: a user connecting a second BigQuery
+        // datasource (or reconnecting) should accumulate scopes rather than
+        // lose access to the first grant.
+        true,
     );
 
     tracing::info!(
@@ -591,48 +600,32 @@ async fn google_oauth_disconnect(
     State(state): State<AppState>,
     user: AuthUser,
 ) -> Result<Json<serde_json::Value>, kyomi_core::Error> {
-    let db_user = user_service::get_user_by_id(&state.db, &user.user_id)
-        .await?
-        .ok_or_else(|| kyomi_core::Error::NotFound("User not found".into()))?;
-
-    let existing_oauth = google_oauth::parse_oauth_data(
-        db_user.oauth_data.as_deref(),
+    // KYO-700: this used to duplicate `google_oauth_disconnect_service`'s
+    // logic inline (clear-tokens-only, no revocation at Google) — a second
+    // copy that would have needed the same revoke-before-clear fix applied
+    // twice. Delegating to the shared service means this route and the
+    // Leptos server_fn (`disconnect_google_oauth`) can no longer drift, and
+    // both now revoke the grant at Google before clearing local state. A
+    // revocation failure propagates as an `Err` here — the pre-existing
+    // `IntoResponse for kyomi_core::Error` impl turns that into a non-2xx
+    // response, so a REST caller sees that disconnect did not happen instead
+    // of a false "disconnected" response.
+    let result = google_oauth::google_oauth_disconnect_service(
+        &state.db,
+        &user.user_id,
         &state.encryption_key,
-    )?;
+    )
+    .await?;
 
-    // Check if connected
-    let has_tokens = existing_oauth
-        .as_ref()
-        .and_then(|o| o.google_oauth_tokens.as_ref())
-        .is_some();
-
-    if !has_tokens {
+    if result.already_disconnected {
         return Ok(Json(serde_json::json!({
             "already_disconnected": true,
         })));
     }
 
-    let disconnected_email = existing_oauth
-        .as_ref()
-        .and_then(|o| o.google_oauth_tokens.as_ref())
-        .and_then(|t| t.email.clone())
-        .unwrap_or_default();
-
-    // Clear oauth data (keep picture if available)
-    let cleared_oauth = OAuthData {
-        picture: existing_oauth.and_then(|o| o.picture),
-        ..Default::default()
-    };
-
-    let encrypted = google_oauth::build_oauth_data(&cleared_oauth, &state.encryption_key)?;
-    user_service::update_user_oauth_data(&state.db, &user.user_id, Some(&encrypted)).await?;
-
-    // Remove auth method
-    user_service::remove_auth_method(&state.db, &user.user_id, "google_oauth").await?;
-
     Ok(Json(serde_json::json!({
         "message": "Google account disconnected successfully",
-        "disconnected_account": disconnected_email,
+        "disconnected_account": result.disconnected_email.unwrap_or_default(),
         "bigquery_access": "disabled",
         "disconnected_at": chrono::Utc::now().to_rfc3339(),
     })))

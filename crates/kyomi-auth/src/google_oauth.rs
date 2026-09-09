@@ -18,6 +18,7 @@ pub const GOOGLE_TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
 pub const GOOGLE_USER_INFO_URI: &str = "https://www.googleapis.com/oauth2/v2/userinfo";
 pub const GOOGLE_PROJECTS_URI: &str =
     "https://cloudresourcemanager.googleapis.com/v1/projects";
+pub const GOOGLE_REVOKE_URI: &str = "https://oauth2.googleapis.com/revoke";
 
 // ---------------------------------------------------------------------------
 // Scopes
@@ -85,6 +86,17 @@ pub struct GoogleOAuthTokens {
 ///
 /// - `login` flow: minimal scopes, no offline access, optional consent prompt
 /// - `bigquery` flow: full scopes, offline access, forced consent
+///
+/// `include_granted_scopes` must be set per call site, not assumed `true`:
+/// Google's `include_granted_scopes=true` hands back **every** scope ever
+/// granted to this OAuth client for the user, not just the ones requested in
+/// this authorization. That's exactly what the `bigquery` connect flow wants
+/// (a user can connect BigQuery, then later re-consent to add another
+/// datasource without losing the first grant) — but it's the opposite of
+/// what the plain `login` flow wants: after a user disconnects BigQuery
+/// (KYO-700, `google_oauth_disconnect_service`, which revokes the grant at
+/// Google), the very next sign-in must not silently hand the BigQuery scopes
+/// back by requesting the union of everything the client was ever granted.
 pub fn build_authorization_url(
     client_id: &str,
     redirect_uri: &str,
@@ -92,6 +104,7 @@ pub fn build_authorization_url(
     scopes: &[&str],
     force_consent: bool,
     offline_access: bool,
+    include_granted_scopes: bool,
 ) -> String {
     let scope = scopes.join(" ");
 
@@ -101,8 +114,11 @@ pub fn build_authorization_url(
         .append_pair("redirect_uri", redirect_uri)
         .append_pair("response_type", "code")
         .append_pair("scope", &scope)
-        .append_pair("state", state)
-        .append_pair("include_granted_scopes", "true");
+        .append_pair("state", state);
+
+    if include_granted_scopes {
+        params.append_pair("include_granted_scopes", "true");
+    }
 
     if offline_access {
         params.append_pair("access_type", "offline");
@@ -234,6 +250,116 @@ pub fn is_token_expired(tokens: &GoogleOAuthTokens) -> bool {
 
     // No expiry info or unparseable — assume expired (safe default)
     true
+}
+
+// ---------------------------------------------------------------------------
+// Token revocation (KYO-700)
+// ---------------------------------------------------------------------------
+
+/// Outcome of asking Google to revoke a token via `GOOGLE_REVOKE_URI`.
+///
+/// Both variants mean the grant is gone at Google and it is safe for the
+/// caller to clear its own local copy of the tokens. They're kept distinct
+/// (rather than collapsed to `()`) so callers can log which case happened,
+/// and so tests can assert on the exact classification instead of just
+/// "did not error".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoogleRevokeOutcome {
+    /// Google confirmed the token was live and has now revoked it (and its
+    /// paired token — revoking either an access or refresh token revokes
+    /// the whole grant).
+    Revoked,
+    /// Google returned HTTP 400, meaning the token was already
+    /// invalid/expired. The grant is already gone, so this counts as
+    /// success rather than a failure to disconnect.
+    AlreadyInvalid,
+}
+
+/// Choose which stored token to send to `/revoke`.
+///
+/// Prefers the refresh token: it's the longer-lived credential, and the
+/// BigQuery connect flow always requests `access_type=offline`, so a
+/// refresh token is expected to be present. Falls back to the access token
+/// for any tokens obtained before that was true. Google's revoke endpoint
+/// accepts either kind and revoking either one revokes the whole grant, so
+/// this preference is about picking the more durable credential to send —
+/// not about one kind being able to revoke more than the other.
+fn select_revocation_token(tokens: &GoogleOAuthTokens) -> &str {
+    tokens
+        .refresh_token
+        .as_deref()
+        .unwrap_or(&tokens.access_token)
+}
+
+/// Map a `/revoke` response status to an outcome, or an error for anything
+/// that isn't a definite "the grant is gone" answer.
+///
+/// Split out as a pure function (no I/O) so the success/failure decision can
+/// be unit tested without a live call to Google — see `mod tests` below.
+fn classify_revoke_status(
+    status: reqwest::StatusCode,
+) -> kyomi_core::Result<GoogleRevokeOutcome> {
+    if status.is_success() {
+        Ok(GoogleRevokeOutcome::Revoked)
+    } else if status == reqwest::StatusCode::BAD_REQUEST {
+        // Google's documented shape for "this token is already
+        // invalid/expired" — the grant is already gone, so this is the
+        // desired end state, not a failure.
+        Ok(GoogleRevokeOutcome::AlreadyInvalid)
+    } else {
+        Err(kyomi_core::Error::Internal(format!(
+            "Google did not confirm the account was disconnected (revocation failed with \
+             status {status}). Your Google account is still connected — please try again."
+        )))
+    }
+}
+
+/// Revoke a Google OAuth grant at the given `/revoke` endpoint.
+///
+/// Internal seam so `mod tests` can point this at a local
+/// `wiremock::MockServer` and exercise the real HTTP path (status handling,
+/// transport failures) without ever reaching Google. Production code should
+/// call [`revoke_google_token`], not this directly.
+async fn revoke_google_token_at(
+    revoke_uri: &str,
+    tokens: &GoogleOAuthTokens,
+) -> kyomi_core::Result<GoogleRevokeOutcome> {
+    let token = select_revocation_token(tokens);
+    let client = crate::http_client()?;
+
+    let resp = client
+        .post(revoke_uri)
+        .form(&[("token", token)])
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| {
+            kyomi_core::Error::Internal(format!(
+                "Google did not confirm the account was disconnected (revocation request \
+                 failed: {e}). Your Google account is still connected — please try again."
+            ))
+        })?;
+
+    classify_revoke_status(resp.status())
+}
+
+/// Revoke a Google OAuth grant.
+///
+/// Calls `POST {GOOGLE_REVOKE_URI}` with the token chosen by
+/// [`select_revocation_token`]. A 400 response means the token was already
+/// invalid — that's treated as success, since the grant is already gone.
+///
+/// Any other failure (network error, timeout, non-400 status) is returned as
+/// an `Err`, and **the caller must not clear local state in that case**. If
+/// local state were cleared while revocation is unconfirmed, Kyomi would
+/// discard the only copy of the token it holds — the grant would stay live
+/// at Google, and Kyomi would have no way to ever revoke it again. Failing
+/// the disconnect instead keeps the token so the user can retry. See
+/// `google_oauth_disconnect_service`, the only caller.
+pub async fn revoke_google_token(
+    tokens: &GoogleOAuthTokens,
+) -> kyomi_core::Result<GoogleRevokeOutcome> {
+    revoke_google_token_at(GOOGLE_REVOKE_URI, tokens).await
 }
 
 // ---------------------------------------------------------------------------
@@ -530,11 +656,29 @@ pub use kyomi_types::GoogleOAuthDisconnectResult;
 
 /// Disconnect Google OAuth from a user account.
 ///
-/// Clears the stored tokens from the user's `oauth_data` and removes the
-/// `google_oauth` auth method entry.
+/// Revokes the grant with Google *before* touching local state, then clears the
+/// stored tokens from the user's `oauth_data` and removes the `google_oauth`
+/// auth method entry. If revocation is not confirmed, the disconnect fails and
+/// local state is left intact — see `google_oauth_disconnect_service_at` below
+/// for why that direction is the safe one.
 ///
-/// Mirrors the logic from `apps/server/src/routes/auth_google_oauth.rs::google_oauth_disconnect`.
+/// Both entrypoints delegate here: the Leptos `disconnect_google_oauth` server
+/// fn, and the REST route
+/// `apps/server/src/routes/auth_google_oauth.rs::google_oauth_disconnect`.
 pub async fn google_oauth_disconnect_service(
+    db: &kyomi_core::DbPool,
+    user_id: &str,
+    encryption_key: &[u8; 32],
+) -> kyomi_core::Result<GoogleOAuthDisconnectResult> {
+    google_oauth_disconnect_service_at(GOOGLE_REVOKE_URI, db, user_id, encryption_key).await
+}
+
+/// Test seam for [`google_oauth_disconnect_service`]: identical behavior
+/// with an injectable revoke endpoint, so `mod tests` below can point it at
+/// a local `wiremock::MockServer` and prove the fail-closed revocation
+/// policy end-to-end (DB state included) without ever reaching Google.
+async fn google_oauth_disconnect_service_at(
+    revoke_uri: &str,
     db: &kyomi_core::DbPool,
     user_id: &str,
     encryption_key: &[u8; 32],
@@ -545,23 +689,38 @@ pub async fn google_oauth_disconnect_service(
 
     let existing_oauth = parse_oauth_data(db_user.oauth_data.as_deref(), encryption_key)?;
 
-    let has_tokens = existing_oauth
+    let tokens = existing_oauth
         .as_ref()
-        .and_then(|o| o.google_oauth_tokens.as_ref())
-        .is_some();
+        .and_then(|o| o.google_oauth_tokens.as_ref());
 
-    if !has_tokens {
+    let Some(tokens) = tokens else {
         return Ok(GoogleOAuthDisconnectResult {
             success: true,
             already_disconnected: true,
             disconnected_email: None,
         });
+    };
+
+    // Revoke the grant at Google *before* clearing our only copy of the
+    // token. A failure here (network error, timeout, non-400 status) must
+    // abort the disconnect and leave local state untouched — see
+    // `revoke_google_token`'s doc comment for why clearing on an unconfirmed
+    // revocation would permanently strand the grant at Google.
+    match revoke_google_token_at(revoke_uri, tokens).await {
+        Ok(outcome) => {
+            tracing::info!(user_id = %user_id, outcome = ?outcome, "Google OAuth grant revoked");
+        }
+        Err(e) => {
+            tracing::warn!(
+                user_id = %user_id,
+                error = %e,
+                "Google OAuth revocation failed; disconnect aborted, local tokens preserved"
+            );
+            return Err(e);
+        }
     }
 
-    let disconnected_email = existing_oauth
-        .as_ref()
-        .and_then(|o| o.google_oauth_tokens.as_ref())
-        .and_then(|t| t.email.clone());
+    let disconnected_email = tokens.email.clone();
 
     // Clear OAuth tokens but keep picture
     let cleared_oauth = OAuthData {
@@ -685,4 +844,294 @@ pub async fn google_oauth_projects_service(
         projects,
         message: None,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{seed_user, sqlite_pool, test_key, test_pool};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn tokens_with(refresh: Option<&str>, access: &str) -> GoogleOAuthTokens {
+        GoogleOAuthTokens {
+            access_token: access.to_string(),
+            refresh_token: refresh.map(str::to_string),
+            token_type: "Bearer".to_string(),
+            scope: "https://www.googleapis.com/auth/bigquery.readonly".to_string(),
+            expires_in: Some(3600),
+            expires_at: None,
+            email: Some("user@example.com".to_string()),
+            name: None,
+        }
+    }
+
+    // ── select_revocation_token ─────────────────────────────────────────
+
+    #[test]
+    fn select_revocation_token_prefers_refresh_token() {
+        let tokens = tokens_with(Some("refresh-abc"), "access-xyz");
+        assert_eq!(select_revocation_token(&tokens), "refresh-abc");
+    }
+
+    #[test]
+    fn select_revocation_token_falls_back_to_access_token() {
+        let tokens = tokens_with(None, "access-xyz");
+        assert_eq!(select_revocation_token(&tokens), "access-xyz");
+    }
+
+    // ── classify_revoke_status ───────────────────────────────────────────
+
+    #[test]
+    fn classify_2xx_is_revoked() {
+        let outcome = classify_revoke_status(reqwest::StatusCode::OK).unwrap();
+        assert_eq!(outcome, GoogleRevokeOutcome::Revoked);
+    }
+
+    #[test]
+    fn classify_400_is_already_invalid_not_an_error() {
+        let outcome = classify_revoke_status(reqwest::StatusCode::BAD_REQUEST).unwrap();
+        assert_eq!(outcome, GoogleRevokeOutcome::AlreadyInvalid);
+    }
+
+    #[test]
+    fn classify_500_is_err() {
+        let result = classify_revoke_status(reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            result.is_err(),
+            "a 500 must not be treated as a successful revocation"
+        );
+    }
+
+    #[test]
+    fn classify_401_is_err_not_already_invalid() {
+        // A 401 means the caller isn't authorized to revoke — it does NOT
+        // mean the token itself is already invalid. Only 400 gets the
+        // "already gone" treatment; every other non-2xx status is a real
+        // failure that must block clearing local state.
+        let result = classify_revoke_status(reqwest::StatusCode::UNAUTHORIZED);
+        assert!(result.is_err());
+    }
+
+    // ── revoke_google_token_at — real HTTP boundary via wiremock ─────────
+
+    #[tokio::test]
+    async fn revoke_at_200_sends_the_preferred_token_and_returns_revoked() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/revoke"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&mock_server)
+            .await;
+
+        let tokens = tokens_with(Some("refresh-abc"), "access-xyz");
+        let revoke_uri = format!("{}/revoke", mock_server.uri());
+        let outcome = revoke_google_token_at(&revoke_uri, &tokens).await.unwrap();
+
+        assert_eq!(outcome, GoogleRevokeOutcome::Revoked);
+
+        let requests = mock_server
+            .received_requests()
+            .await
+            .expect("request recording enabled");
+        assert_eq!(requests.len(), 1);
+        let body = String::from_utf8(requests[0].body.clone()).unwrap();
+        assert!(
+            body.contains("refresh-abc"),
+            "must send the refresh token, not the access token, when both are present: {body}"
+        );
+        assert!(!body.contains("access-xyz"));
+    }
+
+    #[tokio::test]
+    async fn revoke_at_400_is_ok_already_invalid() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/revoke"))
+            .respond_with(ResponseTemplate::new(400))
+            .mount(&mock_server)
+            .await;
+
+        let tokens = tokens_with(None, "access-xyz");
+        let revoke_uri = format!("{}/revoke", mock_server.uri());
+        let outcome = revoke_google_token_at(&revoke_uri, &tokens).await.unwrap();
+
+        assert_eq!(outcome, GoogleRevokeOutcome::AlreadyInvalid);
+    }
+
+    #[tokio::test]
+    async fn revoke_at_500_is_err() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/revoke"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&mock_server)
+            .await;
+
+        let tokens = tokens_with(None, "access-xyz");
+        let revoke_uri = format!("{}/revoke", mock_server.uri());
+        let result = revoke_google_token_at(&revoke_uri, &tokens).await;
+
+        assert!(
+            result.is_err(),
+            "a 500 must fail closed, not be treated as revoked"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_at_transport_failure_is_err() {
+        // Nothing is listening on this address — a genuine connection
+        // failure, not a mocked status code. Proves the fail-closed policy
+        // covers transport errors, not just bad HTTP statuses.
+        let tokens = tokens_with(None, "access-xyz");
+        let result = revoke_google_token_at("http://127.0.0.1:1/revoke", &tokens).await;
+
+        assert!(
+            result.is_err(),
+            "a transport failure must fail closed exactly like a bad HTTP status"
+        );
+    }
+
+    // ── google_oauth_disconnect_service_at — DB state under each outcome ─
+
+    #[tokio::test]
+    async fn disconnect_clears_local_state_when_revocation_succeeds() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        seed_user(sq, "u1", "u1@example.com").await;
+        let key = test_key();
+
+        let data = OAuthData {
+            google_oauth_tokens: Some(tokens_with(Some("refresh-abc"), "access-xyz")),
+            ..Default::default()
+        };
+        let encrypted = build_oauth_data(&data, &key).unwrap();
+        crate::user_service::update_user_oauth_data(&db, "u1", Some(&encrypted))
+            .await
+            .unwrap();
+        crate::user_service::upsert_auth_method(&db, "u1", "google_oauth", &serde_json::json!({}))
+            .await
+            .unwrap();
+
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/revoke"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&mock_server)
+            .await;
+        let revoke_uri = format!("{}/revoke", mock_server.uri());
+
+        let result = google_oauth_disconnect_service_at(&revoke_uri, &db, "u1", &key)
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        assert!(!result.already_disconnected);
+
+        let db_user = crate::user_service::get_user_by_id(&db, "u1")
+            .await
+            .unwrap()
+            .unwrap();
+        let stored = parse_oauth_data(db_user.oauth_data.as_deref(), &key).unwrap();
+        assert!(
+            stored.and_then(|o| o.google_oauth_tokens).is_none(),
+            "tokens must be cleared once revocation is confirmed"
+        );
+
+        let auth_method = crate::user_service::get_auth_method(&db, "u1", "google_oauth")
+            .await
+            .unwrap();
+        assert!(
+            auth_method.is_none(),
+            "the google_oauth auth method must be deactivated"
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnect_preserves_local_state_when_revocation_fails() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        seed_user(sq, "u1", "u1@example.com").await;
+        let key = test_key();
+
+        let data = OAuthData {
+            google_oauth_tokens: Some(tokens_with(Some("refresh-abc"), "access-xyz")),
+            ..Default::default()
+        };
+        let encrypted = build_oauth_data(&data, &key).unwrap();
+        crate::user_service::update_user_oauth_data(&db, "u1", Some(&encrypted))
+            .await
+            .unwrap();
+        crate::user_service::upsert_auth_method(&db, "u1", "google_oauth", &serde_json::json!({}))
+            .await
+            .unwrap();
+
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/revoke"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&mock_server)
+            .await;
+        let revoke_uri = format!("{}/revoke", mock_server.uri());
+
+        let result = google_oauth_disconnect_service_at(&revoke_uri, &db, "u1", &key).await;
+
+        assert!(
+            result.is_err(),
+            "disconnect must fail when Google does not confirm revocation"
+        );
+
+        let db_user = crate::user_service::get_user_by_id(&db, "u1")
+            .await
+            .unwrap()
+            .unwrap();
+        let stored = parse_oauth_data(db_user.oauth_data.as_deref(), &key).unwrap();
+        assert!(
+            stored.and_then(|o| o.google_oauth_tokens).is_some(),
+            "tokens must be preserved when revocation could not be confirmed — otherwise \
+             Kyomi loses its only copy of the token and can never revoke the grant"
+        );
+
+        let auth_method = crate::user_service::get_auth_method(&db, "u1", "google_oauth")
+            .await
+            .unwrap();
+        assert!(
+            auth_method.is_some(),
+            "the google_oauth auth method must remain active when disconnect failed"
+        );
+    }
+
+    // ── build_authorization_url — include_granted_scopes is per-flow ────
+
+    #[test]
+    fn authorization_url_omits_include_granted_scopes_when_false() {
+        let url = build_authorization_url(
+            "client-id",
+            "https://example.com/cb",
+            "state",
+            LOGIN_SCOPES,
+            false,
+            false,
+            false,
+        );
+        assert!(!url.contains("include_granted_scopes"));
+    }
+
+    #[test]
+    fn authorization_url_includes_granted_scopes_when_true() {
+        let url = build_authorization_url(
+            "client-id",
+            "https://example.com/cb",
+            "state",
+            BIGQUERY_SCOPES,
+            true,
+            true,
+            true,
+        );
+        assert!(url.contains("include_granted_scopes=true"));
+    }
 }
