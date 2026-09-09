@@ -64,8 +64,7 @@ on — which is exactly why the mode-independent invariant at the top, not eithe
 is the thing to internalize. KYO-688 tracked resolving whether the old mechanism still
 applied; it is answered and shipped as PR #503, which also lands a tracked reproduction
 script, `scripts/repro-headless-subagent-survival.sh`, so this can be re-checked
-mechanically after any future harness upgrade instead of re-litigated from memory. That
-script is not on this branch — it ships with KYO-688/#503.
+mechanically after any future harness upgrade instead of re-litigated from memory.
 
 ## The KYO-468 history that motivated the rule
 

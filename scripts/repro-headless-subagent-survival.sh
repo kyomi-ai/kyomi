@@ -58,9 +58,9 @@
 # since. This script does not assert that background dispatch is now SAFE
 # under claude -p — it only reports that this one failure mode did not
 # trigger in these three runs. docs/standards/agent-orchestration/
-# no-background-subagents-under-headless-run.md is the standing policy and
-# is intentionally NOT touched by this script or by KYO-688; revisiting that
-# policy is KYO-692.
+# a-sub-agent-in-flight-must-not-outlive-its-turn.md is the standing
+# policy; neither this script nor KYO-688 touches it or asserts it is
+# obsolete — this script reports one failure mode's absence, nothing more.
 #
 # Re-run this after any harness upgrade. A result that matches the numbers
 # above is not guaranteed to keep matching — that is the entire reason this
