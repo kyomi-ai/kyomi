@@ -313,7 +313,16 @@ fn try_show_panic_recovery_overlay(panic_message: &str) -> Result<(), JsValue> {
     )?;
     report_btn.set_text_content(Some("Send Bug Report"));
 
-    // Bug report click handler — async fetch to the feedback server function
+    // Bug report click handler — fetch to the feedback server function.
+    //
+    // KYO-686: this deliberately does NOT use `spawn_local`/`.await`. A panic
+    // severe enough to show this overlay has already poisoned
+    // wasm-bindgen-futures' executor (its task queue leaves a `RefCell`
+    // borrowed when `panic = "abort"` aborts mid-poll), so any task queued on
+    // it afterward is polled by a broken queue — the report still arrives,
+    // just very slowly. Instead the fetch promise is driven directly with
+    // `Promise::then2`, which is scheduled on the browser's own JS microtask
+    // queue and never touches the Rust executor.
     let panic_msg_owned = panic_message.to_string();
     let report_btn_clone = report_btn.clone();
     let window_for_report = window.clone();
@@ -332,27 +341,48 @@ fn try_show_panic_recovery_overlay(panic_message: &str) -> Result<(), JsValue> {
             let _ = el.style().set_property("cursor", "default");
         }
 
-        wasm_bindgen_futures::spawn_local(async move {
-            let user_desc = textarea
-                .dyn_ref::<web_sys::HtmlTextAreaElement>()
-                .map(|t| t.value())
-                .unwrap_or_default();
-            match submit_panic_report(&win, &panic_msg, &user_desc).await {
-                Ok(()) => {
-                    btn.set_text_content(Some("Report Sent \u{2014} Thank you!"));
-                    btn.dyn_ref::<web_sys::HtmlElement>()
-                        .map(|el| el.style().set_property("opacity", "1").ok());
-                }
-                Err(_) => {
-                    let _ = btn.remove_attribute("disabled");
-                    btn.set_text_content(Some("Failed \u{2014} click to retry"));
-                    if let Some(el) = btn.dyn_ref::<web_sys::HtmlElement>() {
-                        let _ = el.style().set_property("opacity", "1");
-                        let _ = el.style().set_property("cursor", "pointer");
+        let user_desc = textarea
+            .dyn_ref::<web_sys::HtmlTextAreaElement>()
+            .map(|t| t.value())
+            .unwrap_or_default();
+
+        match submit_panic_report(&win, &panic_msg, &user_desc) {
+            Ok(promise) => {
+                let btn_fulfilled = btn.clone();
+                let on_fulfilled = Closure::<dyn FnMut(JsValue)>::new(move |value: JsValue| {
+                    let ok = value
+                        .dyn_into::<web_sys::Response>()
+                        .map(|response| response.ok())
+                        .unwrap_or(false);
+                    if ok {
+                        apply_report_success(&btn_fulfilled);
+                    } else {
+                        apply_report_failure(&btn_fulfilled);
                     }
-                }
+                });
+
+                let btn_rejected = btn.clone();
+                let on_rejected = Closure::<dyn FnMut(JsValue)>::new(move |_err: JsValue| {
+                    apply_report_failure(&btn_rejected);
+                });
+
+                let _ = promise.then2(&on_fulfilled, &on_rejected);
+
+                // `then2` only registers these closures with the browser; it
+                // does not keep them alive itself. `forget()` intentionally
+                // leaks them so they survive until the promise settles — a
+                // small, bounded leak that is correct here because the
+                // overlay's only further action is a page reload, which
+                // reclaims everything. Do not replace this with a drop /
+                // lifetime scheme: that would free the closures before the
+                // promise settles and turn this into a use-after-free.
+                on_fulfilled.forget();
+                on_rejected.forget();
             }
-        });
+            Err(_) => {
+                apply_report_failure(&btn);
+            }
+        }
     });
 
     report_btn
@@ -418,12 +448,44 @@ fn build_panic_context(window: &web_sys::Window, panic_message: &str) -> String 
     )
 }
 
-/// Submit the panic trace to the feedback server function.
+/// Apply the report button's success state: confirmation text, full opacity.
+fn apply_report_success(btn: &web_sys::Element) {
+    btn.set_text_content(Some("Report Sent \u{2014} Thank you!"));
+    if let Some(el) = btn.dyn_ref::<web_sys::HtmlElement>() {
+        let _ = el.style().set_property("opacity", "1");
+    }
+}
+
+/// Apply the report button's failure state: re-enabled, retry text, pointer
+/// cursor restored. Shared by the request-construction error path and both
+/// the "fetch rejected" and "fetch resolved but not ok" outcomes so all three
+/// failure surfaces stay in sync.
+fn apply_report_failure(btn: &web_sys::Element) {
+    let _ = btn.remove_attribute("disabled");
+    btn.set_text_content(Some("Failed \u{2014} click to retry"));
+    if let Some(el) = btn.dyn_ref::<web_sys::HtmlElement>() {
+        let _ = el.style().set_property("opacity", "1");
+        let _ = el.style().set_property("cursor", "pointer");
+    }
+}
+
+/// Build the fetch request for the panic report and return its promise
+/// un-awaited.
 ///
 /// Posts URL-encoded form data to `/leptos-api/submit_feedback`, matching
 /// exactly what the Leptos-generated client would send. The existing session
 /// cookie is still present in the browser so authentication still works.
-async fn submit_panic_report(window: &web_sys::Window, panic_message: &str, user_description: &str) -> Result<(), JsValue> {
+///
+/// This is deliberately synchronous. Awaiting the fetch here would require
+/// `wasm_bindgen_futures::JsFuture`, which polls on the same executor a panic
+/// severe enough to trigger this overlay has already poisoned. The caller
+/// drives the returned `Promise` with `Promise::then2` instead, which runs on
+/// the browser's own microtask queue.
+fn submit_panic_report(
+    window: &web_sys::Window,
+    panic_message: &str,
+    user_description: &str,
+) -> Result<js_sys::Promise, JsValue> {
     let context_json = build_panic_context(window, panic_message);
 
     // URL-encode all fields. We encode manually to avoid pulling in a URL
@@ -456,18 +518,7 @@ async fn submit_panic_report(window: &web_sys::Window, panic_message: &str, user
         &init,
     )?;
 
-    let response_promise = window.fetch_with_request(&request);
-    let response = wasm_bindgen_futures::JsFuture::from(response_promise).await?;
-    let response: web_sys::Response = response.dyn_into()?;
-
-    if response.ok() {
-        Ok(())
-    } else {
-        Err(JsValue::from_str(&format!(
-            "HTTP {}",
-            response.status()
-        )))
-    }
+    Ok(window.fetch_with_request(&request))
 }
 
 /// Minimal percent-encoder for URL form values.
