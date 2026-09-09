@@ -656,6 +656,14 @@ pub fn ChartBuilderModal(
     // can fire during the <Show> teardown cascade.
     let title_sig = Memo::new(move |_| ast.try_with(ast_get_title).unwrap_or_default());
     let datasource_slug_sig = Memo::new(move |_| ast.try_with(ast_get_datasource).unwrap_or_default());
+    // `Memo -> Signal` via `.into()` allocates a NEW arena node, owned by
+    // whatever Owner is current at the call site. Converting here — in
+    // ChartBuilder's own component body — makes this Signal ChartBuilder-owned,
+    // so it outlives any child subtree (e.g. the `<Select>` below) that reads
+    // it. Converting inline at the read site would instead tie its lifetime
+    // to that subtree's Owner, disposing it out from under any reader that
+    // survives the subtree's teardown (KYO-676).
+    let datasource_value: Signal<String> = datasource_slug_sig.into();
     let sql_sig = Memo::new(move |_| ast.try_with(ast_get_query).unwrap_or_default());
     let chart_type_sig = Memo::new(move |_| ast.try_with(ast_get_chart_type).unwrap_or_else(|| "bar".to_string()));
     let x_field_sig = Memo::new(move |_| ast.try_with(ast_get_x_field).unwrap_or_default());
@@ -985,20 +993,16 @@ pub fn ChartBuilderModal(
                                     // Database icon before dropdown
                                     <Icon icon=phosphor_leptos::DATABASE attr:class="w-4 h-4 text-muted-foreground flex-shrink-0" />
                                     <div class="w-full sm:w-[240px] min-w-0 sm:flex-shrink-0">
-                                        <Suspense fallback=move || view! {
-                                            <div class="text-sm text-muted-foreground">"Loading datasources..."</div>
-                                        }>
-                                            <Select
-                                                value=datasource_slug_sig.into()
-                                                options=datasource_options
-                                                on_change=move |slug: String| {
-                                                    mutate_ast(ast, yaml_text, yaml_parse_error, move |a| {
-                                                        ast_set_datasource(a, &slug);
-                                                    });
-                                                }
-                                                placeholder="Select a datasource..."
-                                            />
-                                        </Suspense>
+                                        <Select
+                                            value=datasource_value
+                                            options=datasource_options
+                                            on_change=move |slug: String| {
+                                                mutate_ast(ast, yaml_text, yaml_parse_error, move |a| {
+                                                    ast_set_datasource(a, &slug);
+                                                });
+                                            }
+                                            placeholder="Select a datasource..."
+                                        />
                                     </div>
                                     // Catalog toggle button (pill-style)
                                     <button
