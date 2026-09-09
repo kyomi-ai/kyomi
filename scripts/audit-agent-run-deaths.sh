@@ -47,9 +47,7 @@
 #
 # This script makes that failure detectable instead of invisible if it
 # recurs — it is the audit half; the prevention half is the standard at
-# docs/standards/agent-orchestration/no-background-subagents-under-headless-run.md
-# (revisiting that standard in light of the re-test below is tracked
-# separately as KYO-692, not done here).
+# docs/standards/agent-orchestration/a-sub-agent-in-flight-must-not-outlive-its-turn.md.
 #
 # KYO-688 RE-TEST (2026-09-09, harness Claude Code 2.1.258) — DID NOT
 # REPRODUCE
