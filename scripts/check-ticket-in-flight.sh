@@ -19,7 +19,8 @@
 # WHAT IT CHECKS (KYO-422, extended by KYO-471 — see below)
 #
 #   1. Remote branches   — `git ls-remote --heads <remote>`
-#   2. Pull requests     — `gh pr list`, matched on `headRefName` ONLY
+#   2. Pull requests     — `gh api --paginate .../pulls`, matched on the head
+#                          branch ref ONLY
 #   3. Local worktrees   — `git worktree list --porcelain`
 #   4. Local branches    — `git branch --list`
 #
@@ -52,8 +53,9 @@
 # "KYO-B" and "KYO-C" as deferred follow-ups in the same body. Searching
 # bodies for "Closes KYO-<N>" produced false "in flight" hits for KYO-411,
 # KYO-413, and KYO-406 — every one of them a merged PR that merely *listed*
-# that ticket as a deferral, never touched it. Branch name
-# (`headRefName`) is the reliable signal instead: a worker pushes
+# that ticket as a deferral, never touched it. The PR's head branch name
+# (`.head.ref` in the REST payload; `headRefName` in gh's own `--json`
+# vocabulary) is the reliable signal instead: a worker pushes
 # `jason/kyo-<NN>-<slug>` before it opens anything, and a branch name is not
 # reused across unrelated tickets the way a body's prose references are.
 #
@@ -84,32 +86,63 @@
 # `if var="$(cmd 2>stderr_file)"; then ... else ... fi` — the `if` inspects
 # that command's own exit status directly, with nothing downstream of it to
 # swallow it. Do not introduce a pipe into `wc -l`/`grep -c`/`head` on the
-# output of `git ls-remote` or `gh pr list` — that reintroduces KYO-511.
+# output of `git ls-remote` or `gh api` — that reintroduces KYO-511.
 #
-# A TRUNCATED LISTING IS ALSO A CHECK WE DID NOT COMPLETE (same rule)
+# THERE IS NO PR-LISTING CEILING ANY MORE — READ THIS BEFORE ADDING ONE BACK
+# (KYO-703)
 #
-# `gh pr list --limit N` silently returns at most N rows. This script shipped
-# with `--limit 200` while the repo already had 411 PRs, so it saw back only
-# as far as PR #212 and reported CLEAR for every duplicate older than that —
-# the identical fail-open species as KYO-511, reached by a different route.
-# The suite passed only by luck, because the PRs it asserts on (#367/#368)
-# happen to be recent.
+# `gh pr list --limit N` silently returns at most N rows, so this check used
+# to ask for a fixed N and then treat a listing that came back at exactly N
+# rows as possibly truncated — a check it could not complete — and exit 3.
+# That guard was correct about the risk and wrong as a design: N is a cliff,
+# and the corpus walks into it. It shipped at `--limit 200` against a repo
+# that already had 411 PRs (so it saw back only to PR #212 and reported CLEAR
+# for every older duplicate — the KYO-511 fail-open species by another
+# route), was raised to 500, and on 2026-09-09 the repo reached exactly 500
+# PRs. From that moment `rows >= limit` was true on EVERY invocation: the
+# script exited 3 for every ticket, and since exit 0 is the only code that
+# permits claiming, every backlog run reported a clean, uneventful pass while
+# doing nothing at all. Raising the number again just moves the cliff and
+# hides it until the next time.
 #
-# Raising the number on its own does not fix this; it moves the cliff to the
-# next round number and hides it again. So both halves are required, and both
-# are load-bearing:
+# The fix is to remove the ceiling rather than to raise it, so there is no
+# truncation condition left to detect:
 #
-#   1. the limit is a named, env-overridable constant, PR_LIST_LIMIT below;
-#   2. the number of rows actually returned is compared against it, and a
-#      listing that comes back with >= PR_LIST_LIMIT rows is treated as
-#      possibly truncated — i.e. the PR check could not be completed — and
-#      exits 3, the same as a `gh` that failed outright.
+#   `gh api --paginate 'repos/{owner}/{repo}/pulls?state=all&per_page=100'`
 #
-# Do not "fix" that back to a plain exit 0 on the theory that a full page is
-# a complete answer; it is exactly the case where it may not be. Raise
-# PR_LIST_LIMIT instead. The row count is accumulated inside the same loop
-# that already walks the one captured fetch — one `gh` call, and no pipe into
-# `wc -l`, per the rule above.
+# follows the REST Link header to exhaustion. A run that exits 0 has walked
+# the whole corpus by construction — there is no N for it to stop at — and a
+# run that cannot is a plain non-zero exit, already handled by the same
+# `if var="$(cmd)"` capture as every other command here. VERIFIED, not
+# assumed (2026-09-09, against a stub HTTP server serving one page with a
+# `rel="next"` Link and then a 500 on page 2): gh emits page 1's rows on
+# stdout and THEN exits 1. So a partial pagination is indistinguishable from
+# an outright failure to this script, which is exactly right — the `else`
+# branch records a FAILURE and never reads `pr_lines`. Do not "improve" that
+# by consuming partial output.
+#
+# WHY NOT A BOUNDED QUERY (the ticket's own first proposal). `gh pr list
+# --search "head:jason/kyo-<NN>"` is bounded and fast (~0.6s vs ~8s), and it
+# is a FAIL-OPEN narrowing of the match. Measured 2026-09-09 against this
+# repo: GitHub's `head:` qualifier is PREFIX-ANCHORED, not a substring match.
+# `head:jason/kyo-677` finds PR #498; `head:kyo-677` and
+# `head:kyo-677-leptos-debuginfo` both return zero rows, and `head:jason/k`
+# matches. So the search can only find branches that START with the string
+# given, while `matches_ticket` below deliberately matches `kyo-<NN>-`
+# ANYWHERE in the ref and assumes no `jason/` prefix. Hard-coding one
+# branch-naming convention into the fetch, where nothing else in this script
+# assumes one, narrows what the check can see — and it narrows it invisibly,
+# since every normally-named branch still resolves. That is the one direction
+# this script must never move.
+#
+# No PR in the current corpus would be missed by that narrowing: of 500 PR
+# head refs, the 39 that do not start with `jason/` (`fix/*`, `dependabot/*`,
+# …) contain no `kyo-<NN>-` key at all. The objection is that the fetch would
+# then be correct only for as long as that convention holds, enforced by
+# nothing, while `matches_ticket` deliberately assumes the opposite. Do not
+# reach for the `stranded/jason/kyo-*` refs as a counter-example either:
+# `mark-branch-stranded.sh` refuses to tombstone a branch that has a PR in
+# any state, so those refs are unreachable by any PR listing by construction.
 #
 # SELF-EXCLUSION (KYO-593 — READ THIS BEFORE "FIXING" IT BACK)
 #
@@ -330,7 +363,7 @@
 #
 # FAIL CLOSED IS UNCHANGED (KYO-511), IN BOTH DIRECTIONS:
 #
-#   - If `gh pr list` fails, RECYCLED_BRANCHES is empty, so every branch
+#   - If the PR listing fails, RECYCLED_BRANCHES is empty, so every branch
 #     match stays a HIT and the FAILURES check still forces exit 3. A broken
 #     PR listing can never launder a branch into "recycled".
 #   - A PR row whose createdAt is empty or is not a well-formed ISO-8601 Z
@@ -361,12 +394,12 @@
 #   2 — usage error (missing/unparseable ticket argument, unknown flag,
 #       --self given more than once, --self with no value, a --self value
 #       that does not match the ticket — see SELF-EXCLUSION above — or a
-#       malformed PR_LIST_LIMIT / KEY_RESTART_CUTOFF in the environment).
-#   3 — a check could not be completed (remote unreachable, `gh` missing or
-#       failing, or the PR listing came back at PR_LIST_LIMIT rows and may
-#       therefore be truncated). Treat exactly like exit 1: do not claim.
-#       --self never turns this into exit 0 — the FAILURES check still runs
-#       before the HITS check, unchanged.
+#       malformed KEY_RESTART_CUTOFF in the environment).
+#   3 — a check could not be completed (remote unreachable, `gh` missing,
+#       failing, or dying partway through paginating the PR listing, or a
+#       PR row that did not split into four usable fields). Treat exactly
+#       like exit 1: do not claim. --self never turns this into exit 0 —
+#       the FAILURES check still runs before the HITS check, unchanged.
 #  42 — this script's own on-disk content is stale relative to origin/main
 #       AND KYOMI_STALE_TOOLING_STRICT=1 is set. See
 #       scripts/lib/stale-tooling-guard.sh (KYO-632) — by default this is a
@@ -375,8 +408,8 @@
 #       to "blocks every run" as its own default.
 #
 # Pure bash + git + gh. No Rust toolchain, no jq binary — the one JSON
-# extraction needed (from `gh pr list`) uses gh's own built-in `--jq`, since
-# gh bundles its own jq evaluator and this script should not gain a
+# extraction needed (from the PR listing) uses gh's own built-in `--jq`,
+# since gh bundles its own jq evaluator and this script should not gain a
 # dependency the box might not have.
 # ------------------------------------------------------------------------------
 
@@ -387,21 +420,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/stale-tooling-guard.sh
 source "${SCRIPT_DIR}/lib/stale-tooling-guard.sh"
 stale_tooling_guard "${BASH_SOURCE[0]}"
-
-# How many PRs to ask `gh pr list` for. This MUST exceed the repo's total PR
-# count: `gh pr list` caps the listing at `--limit` (and defaults to 30), so
-# anything older than the newest N PRs is simply not looked at. Measured
-# 2026-08-24: `gh pr list --state all --limit 1000 --json number --jq 'length'`
-# returned 411, while the then-current `--limit 200` reached back only to PR
-# #212. The same trap is written up in `.claude/build-test.md` under "Before
-# Claiming a Ticket — check the remote, not just Trakkt".
-#
-# A big number alone is not the fix — see the truncation section of the header
-# above. It is env-overridable for two reasons: an operator hitting the guard
-# can raise it without editing this file, and the self-test drives it down to
-# a handful of rows so it can exercise the truncation path cheaply against a
-# stub `gh`.
-PR_LIST_LIMIT="${PR_LIST_LIMIT:-500}"
 
 # The instant Trakkt's ticket-key numbering restarted (KYO-607 — the full
 # evidence is in the RECYCLED TICKET KEYS section of the header above, read it
@@ -418,10 +436,9 @@ PR_LIST_LIMIT="${PR_LIST_LIMIT:-500}"
 # which would silently change meaning every day and eventually discard
 # genuine merged PRs for current tickets.
 #
-# Env-overridable for the same two reasons PR_LIST_LIMIT is: an operator can
-# probe a different boundary without editing this file, and the self-test
-# drives it to fixture-local values to exercise both sides of the comparison
-# cheaply.
+# Env-overridable for two reasons: an operator can probe a different boundary
+# without editing this file, and the self-test drives it to fixture-local
+# values to exercise both sides of the comparison cheaply.
 KEY_RESTART_CUTOFF="${KEY_RESTART_CUTOFF:-2026-05-12T00:00:00Z}"
 
 usage() {
@@ -436,9 +453,6 @@ Usage: $SCRIPT_NAME <TICKET> [--remote <name>] [--ignore-branch <name>]... [--se
                            against TICKET (must be given at most once)
 
 Environment:
-  PR_LIST_LIMIT            how many PRs to fetch (default: 500). Must exceed
-                           the repo's total PR count; a listing that comes
-                           back at this many rows may be truncated and exits 3.
   KEY_RESTART_CUTOFF       ISO-8601 Z instant (YYYY-MM-DDTHH:MM:SSZ) at which
                            Trakkt's ticket-key numbering restarted (default:
                            2026-05-12T00:00:00Z). PRs created before it belong
@@ -449,19 +463,11 @@ Exit codes:
   0  clear — nothing in flight (the only code that permits claiming)
   1  work in flight found — do not claim
   2  usage error (including --self given twice, with no value, or naming a
-     branch that doesn't match TICKET; or a malformed PR_LIST_LIMIT or
-     KEY_RESTART_CUTOFF)
-  3  a check could not be completed (including a possibly-truncated PR
-     listing) — treat like exit 1, do not claim
+     branch that doesn't match TICKET; or a malformed KEY_RESTART_CUTOFF)
+  3  a check could not be completed (including a PR listing that failed
+     partway through pagination) — treat like exit 1, do not claim
 EOF
 }
-
-case "$PR_LIST_LIMIT" in
-    '' | *[!0-9]* | 0)
-        echo "ERROR: PR_LIST_LIMIT must be a positive integer, got '$PR_LIST_LIMIT'" >&2
-        exit 2
-        ;;
-esac
 
 # is_iso8601_z <string> — true iff the string is EXACTLY the canonical shape
 # `gh` emits for createdAt: YYYY-MM-DDTHH:MM:SSZ, fixed width, UTC, no
@@ -481,8 +487,8 @@ is_iso8601_z() {
     return 1
 }
 
-# Validated here, beside PR_LIST_LIMIT's own validation and before any work,
-# so a typo'd override is a usage error (exit 2) rather than a value that
+# Validated here, before any work is done, so a typo'd override is a usage
+# error (exit 2) rather than a value that
 # silently classifies every PR as pre-restart or none of them. A cutoff that
 # is not of the canonical shape cannot be ordered against `gh`'s timestamps,
 # so there is no safe way to continue with one.
@@ -694,16 +700,29 @@ is_recycled_branch() {
     return 1
 }
 
-# ---- Check 2: pull requests (headRefName only — see KYO-471 note above) ---
+# ---- Check 2: pull requests (head branch ref only — see KYO-471 above) ---
 # RUNS FIRST, ahead of conceptual check 1 — see the WHAT IT CHECKS note in the
 # header. This is the only check that can see a creation date, so it is the
 # only one that can decide which branch names belong to the retired ticket-key
 # numbering (KYO-607); checks 1, 3 and 4 read that decision out of
 # RECYCLED_BRANCHES below, and so must run after it.
 #
-# Rows are counted in this same loop, over the SAME single captured fetch, so
-# the truncation guard below costs no second `gh` call and nothing is piped
-# into `wc -l` (see the KYO-511 note in the header).
+# THE FETCH IS `gh api --paginate`, NOT `gh pr list --limit N` (KYO-703 — read
+# the "THERE IS NO PR-LISTING CEILING ANY MORE" section of the header before
+# changing it back). `--paginate` follows the REST Link header to exhaustion,
+# so there is no row ceiling to hit and no truncation to detect; a pagination
+# that dies partway exits non-zero with only partial rows on stdout, which the
+# `if var="$(cmd)"` capture below routes to FAILURES without ever reading
+# `pr_lines` — verified against a stub server, see the header.
+#
+# THE ROW SHAPE IS DELIBERATELY UNCHANGED, so everything downstream of the
+# fetch — the four-field parse, the RECYCLED classification, the verdict text,
+# and the self-test's `pr_row` helper — is the same code it was under
+# `gh pr list`. REST reports a merged PR as `state: "closed"` with a non-null
+# `merged_at`, where `gh pr list --json state` reports `MERGED`, so the `--jq`
+# filter reconstructs gh's own three-valued OPEN/CLOSED/MERGED vocabulary.
+# Verified 2026-09-09: the two commands' output over all 500 PRs of this repo
+# is byte-identical after sorting.
 #
 # DO NOT SPLIT THIS WITH `IFS=$'\t' read` — READ THIS BEFORE "FIXING" IT BACK
 #
@@ -730,18 +749,16 @@ is_recycled_branch() {
 # same rule as a `gh` that failed outright, and the reason the collapsing bug
 # above could not have been silent under this parser either.
 gh_stderr_file="$(mktemp)"
-if pr_lines="$(gh pr list --state all --limit "$PR_LIST_LIMIT" --json number,state,createdAt,headRefName \
-    --jq '.[] | [.number, .state, .createdAt, .headRefName] | @tsv' 2>"$gh_stderr_file")"; then
-    pr_row_count=0
+if pr_lines="$(gh api --paginate 'repos/{owner}/{repo}/pulls?state=all&per_page=100' \
+    --jq '.[] | [.number, (if .merged_at then "MERGED" elif .state == "closed" then "CLOSED" else "OPEN" end), .created_at, .head.ref] | @tsv' 2>"$gh_stderr_file")"; then
     declare -a pr_fields=()
     while IFS= read -r pr_line; do
         # A zero-PR listing is the empty string, which a herestring still
         # feeds through as one empty line. That is not a row.
         [ -n "$pr_line" ] || continue
-        pr_row_count=$((pr_row_count + 1))
         readarray -t pr_fields <<<"${pr_line//$'\t'/$'\n'}"
         if [ "${#pr_fields[@]}" -ne 4 ] || [ -z "${pr_fields[3]}" ]; then
-            FAILURES+=("gh pr list: could not read row '$pr_line' as number/state/createdAt/headRefName — the PR check is incomplete, so no verdict can be given")
+            FAILURES+=("PR listing: could not read row '$pr_line' as number/state/createdAt/headRefName — the PR check is incomplete, so no verdict can be given")
             continue
         fi
         pr_number="${pr_fields[0]}"
@@ -762,11 +779,11 @@ if pr_lines="$(gh pr list --state all --limit "$PR_LIST_LIMIT" --json number,sta
             fi
         fi
     done <<<"$pr_lines"
-    if [ "$pr_row_count" -ge "$PR_LIST_LIMIT" ]; then
-        FAILURES+=("gh pr list: returned $pr_row_count rows, at the PR_LIST_LIMIT of $PR_LIST_LIMIT — the listing may be truncated, so any older PR went unchecked; re-run with a higher PR_LIST_LIMIT (e.g. PR_LIST_LIMIT=$((PR_LIST_LIMIT * 2)))")
-    fi
 else
-    FAILURES+=("gh pr list: $(cat "$gh_stderr_file")")
+    # Covers both an outright failure and a pagination that died partway
+    # through: gh exits non-zero for either, and any rows it had already
+    # emitted are in $pr_lines and are deliberately never read (KYO-703).
+    FAILURES+=("PR listing (gh api --paginate .../pulls): $(cat "$gh_stderr_file")")
 fi
 rm -f "$gh_stderr_file"
 
