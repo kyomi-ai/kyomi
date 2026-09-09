@@ -520,6 +520,35 @@ pub async fn has_totp_enabled(pool: &DbPool, user_id: &str) -> kyomi_core::Resul
     Ok(count > 0)
 }
 
+/// List the active auth method types for a user, e.g. `["google_oauth",
+/// "password"]`.
+///
+/// Used to tell the owner of an already-registered account which methods
+/// they can sign in with (KYO-681) — the account owner is entitled to know
+/// their own account has Google / passkey / password, even though the same
+/// information must never be inferable by anyone else from the signup
+/// endpoint's HTTP response.
+pub async fn list_active_auth_types(
+    pool: &DbPool,
+    user_id: &str,
+) -> kyomi_core::Result<Vec<String>> {
+    #[derive(Debug, sqlx::FromRow)]
+    struct AuthTypeRow {
+        auth_type: String,
+    }
+
+    let is_pg = pool.is_postgres();
+    let bt = sql_compat::bool_true(is_pg);
+    let sql = format!(
+        "SELECT auth_type FROM user_auth_methods \
+         WHERE user_id = $1 AND active = {bt} \
+         ORDER BY auth_type"
+    );
+    let rows = kyomi_core::db_fetch_all!(pool, AuthTypeRow, &sql, user_id)?;
+
+    Ok(rows.into_iter().map(|r| r.auth_type).collect())
+}
+
 /// Remove an auth method (set active = false).
 pub async fn remove_auth_method(
     pool: &DbPool,
