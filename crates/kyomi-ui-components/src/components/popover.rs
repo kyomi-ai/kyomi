@@ -456,7 +456,7 @@ pub fn Popover(
     let children_stored = StoredValue::new(children);
 
     view! {
-        <Show when=move || open.get()>
+        <Show when=move || open.try_get().unwrap_or(false)>
             {
                 let class = class.clone();
                 let style = style;
