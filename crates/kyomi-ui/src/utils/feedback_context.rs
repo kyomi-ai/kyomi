@@ -70,6 +70,24 @@ pub fn init() {
     init_interceptor();
 }
 
+/// Return the captured console errors as a **pre-serialised JSON array**.
+///
+/// Interpolate the result into hand-built JSON unescaped (`{}`), the way
+/// `collect_context` below does. Passing it through `escape_json_string`
+/// would double-encode the array into a JSON *string* whose contents happen
+/// to look like an array, which no consumer of `context::jsonb` can read
+/// back as a list (KYO-682).
+///
+/// The return value is always valid JSON, and never the empty string: the
+/// interceptor's `consoleErrors` buffer is initialised at the inline module's
+/// top level, so the module's own evaluation — not `init` — is what
+/// establishes it. Callers therefore need no empty/fallback guard, even on a
+/// page where `init` was never called; the worst case is `"[]"`.
+#[cfg(target_arch = "wasm32")]
+pub fn get_console_errors() -> String {
+    get_console_errors_js()
+}
+
 /// Collect the full context blob for a feedback submission.
 ///
 /// Returns a JSON string containing:
@@ -107,7 +125,7 @@ pub fn collect_context() -> String {
         .and_then(|v| v.as_f64())
         .unwrap_or(0.0) as u32;
 
-    let console_errors = get_console_errors_js();
+    let console_errors = get_console_errors();
 
     // Build JSON manually to avoid pulling in serde_json on the WASM side.
     // The values are either pre-serialised JSON arrays (from JS) or simple
@@ -221,4 +239,102 @@ pub fn escape_json_string(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    //! Source-level guards for KYO-682.
+    //!
+    //! `panic_overlay` is declared `#[cfg(target_arch = "wasm32")]` in
+    //! `lib.rs`, so `build_panic_context` is not in the host test binary at
+    //! all — a green host run is not weak evidence about it, it is no
+    //! evidence (see
+    //! `docs/standards/leptos-frontend-patterns/a-green-host-suite-says-nothing-about-wasm32-gated-code.md`).
+    //! What *can* be pinned from the host is the shape of the JSON it emits,
+    //! because that shape is a literal in the source. Same technique, and the
+    //! same reason, as the KYO-436 guards in `utils::oauth_popup`.
+    //!
+    //! The browser-side half of the criterion — panic on dev, submit from the
+    //! overlay, read the stack back out of `context::jsonb` — is covered by
+    //! the follow-up `needs-build` ticket, not from here.
+
+    use crate::test_support::extract_between;
+
+    const PANIC_OVERLAY_SRC: &str = include_str!("../panic_overlay.rs");
+    const SELF_SRC: &str = include_str!("feedback_context.rs");
+
+    /// The window bounding `build_panic_context`'s body. Both markers are
+    /// `fn` signatures, which the regression this file guards cannot delete
+    /// without also failing the assertions below.
+    fn build_panic_context_body() -> &'static str {
+        extract_between(
+            PANIC_OVERLAY_SRC,
+            "fn build_panic_context(",
+            "async fn submit_panic_report(",
+        )
+    }
+
+    /// The defect: `console_errors` was a literal `[]` baked into the format
+    /// string, so every panic report shipped an empty array on the one report
+    /// type that most needs the console.
+    #[test]
+    fn panic_context_interpolates_the_captured_console_errors() {
+        let body = build_panic_context_body();
+        assert!(
+            !body.contains(r#""console_errors":[]"#),
+            "build_panic_context hardcodes an empty console_errors array in its format \
+             string, so every panic report discards the console the interceptor already \
+             captured — including the panic's own stack (KYO-682)."
+        );
+        assert!(
+            body.contains(r#""console_errors":{}"#),
+            "build_panic_context must interpolate console_errors as a format substitution \
+             (KYO-682)."
+        );
+        assert!(
+            body.contains("get_console_errors()"),
+            "build_panic_context must source console_errors from \
+             feedback_context::get_console_errors(), the same getter collect_context uses, \
+             rather than capturing them a second way (KYO-682)."
+        );
+    }
+
+    /// `get_console_errors` returns a pre-serialised JSON array. Escaping it
+    /// would double-encode it into a JSON *string* that looks like an array —
+    /// the failure mode KYO-682 calls out by name, and one that reads as
+    /// fixed while remaining unusable to every consumer of `context::jsonb`.
+    #[test]
+    fn panic_context_does_not_escape_the_console_errors_array() {
+        let body = build_panic_context_body();
+        let escaped = body.matches("escape_json_string(").count();
+        assert_eq!(
+            escaped, 4,
+            "exactly four of build_panic_context's fields are plain strings needing \
+             escaping (url, browser, os, panic_message); found {escaped} calls. \
+             console_errors is already JSON and must be interpolated raw — running it \
+             through escape_json_string double-encodes the array into a string (KYO-682)."
+        );
+    }
+
+    /// The invariant that lets both `get_console_errors` and
+    /// `build_panic_context` skip an empty/fallback guard: `consoleErrors` is
+    /// initialised by the inline module's own evaluation, above and
+    /// independent of `initInterceptor`. Move that initialisation inside the
+    /// init function and `getConsoleErrors()` returns `undefined` on any page
+    /// that never called `init`, which is not JSON at all.
+    #[test]
+    fn console_error_buffer_is_initialised_at_module_scope() {
+        let preamble = extract_between(
+            SELF_SRC,
+            "const MAX_ERRORS = 10;",
+            "export function initInterceptor()",
+        );
+        assert!(
+            preamble.contains("let consoleErrors = [];"),
+            "consoleErrors must be initialised at the inline module's top level, before \
+             initInterceptor. Otherwise getConsoleErrors() can return undefined rather \
+             than the literal `[]`, and callers that interpolate it raw emit malformed \
+             JSON (KYO-682)."
+        );
+    }
 }
