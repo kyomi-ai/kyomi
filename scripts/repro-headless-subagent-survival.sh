@@ -68,7 +68,8 @@
 #
 # USAGE
 #
-#   repro-headless-subagent-survival.sh <schema|background|foreground> [--model MODEL]
+#   repro-headless-subagent-survival.sh <schema|background|foreground>
+#       [--model MODEL] [--from-file <path>]
 #
 #   schema      Ask a claude -p session to enumerate its own Agent tool's
 #               input schema property names, and report whether
@@ -83,10 +84,21 @@
 #               to check whether the Agent tool call blocks for the whole
 #               sub-agent duration (fact 3 above). Same cost as `background`.
 #
-#   --model MODEL   Model for both the parent -p session and the sub-agent it
-#                    dispatches (background/foreground modes). Default:
-#                    haiku — the question under test is harness behaviour,
-#                    not model quality, so use the cheapest model.
+#   --model MODEL      Model for both the parent -p session and the
+#                       sub-agent it dispatches (background/foreground
+#                       modes). Default: haiku — the question under test is
+#                       harness behaviour, not model quality, so use the
+#                       cheapest model. Ignored when --from-file is given.
+#   --from-file PATH   Skip invoking claude -p entirely and parse PATH as
+#                       the captured stream-json instead. PATH must contain
+#                       the same newline-delimited JSON claude -p
+#                       --output-format stream-json would have written.
+#                       Used by the self-test
+#                       (scripts/repro-headless-subagent-survival-test.sh)
+#                       so it never depends on a live claude -p run, a
+#                       subscription credential, or quota. MODE is still
+#                       required and still validated, but does not affect
+#                       parsing.
 #
 # OUTPUT
 #
@@ -110,9 +122,10 @@
 #
 # This script never pipes a status-bearing command into `wc -l`/`head`/
 # `grep -c` and discards its exit status. If the captured output cannot be
-# parsed as JSON at all, contains no "type":"result" object, or that object
-# has no subagent_stats, this script prints a clear error to stderr and
-# exits 3 — it never prints a zero-looking "clean" answer in that case. It
+# parsed as JSON at all, contains no "type":"result" object, that object
+# has no subagent_stats, or subagent_stats has no started_in_background
+# key, this script prints a clear error to stderr and exits 3 — it never
+# prints a zero-looking "clean" answer in any of those cases. It
 # does not hardcode a verdict about whether the observed behaviour is safe;
 # it reports what it measured, so the header above (not this script's exit
 # code) is where "did the KYO-546 mechanism reproduce" gets answered by a
@@ -124,11 +137,13 @@
 #      was found and printed. This is NOT a safety verdict — read the
 #      printed subagent_stats yourself.
 #   2  usage error (unknown mode, unknown flag, --model given without a
-#      value).
-#   3  could not complete: `claude` or `python3` missing from PATH, the
-#      `claude -p` invocation itself failed or timed out, or the captured
-#      output could not be parsed / had no result object / had no
-#      subagent_stats.
+#      value, or --from-file given without a value or pointing at an
+#      unreadable path).
+#   3  could not complete: `python3` missing from PATH; or, unless
+#      --from-file is given, `claude` missing from PATH or the `claude -p`
+#      invocation itself failing or timing out; or the captured output —
+#      live or from --from-file — could not be parsed / had no result
+#      object / had no subagent_stats.
 # ------------------------------------------------------------------------------
 
 set -euo pipefail
@@ -137,7 +152,7 @@ SCRIPT_NAME="$(basename "$0")"
 
 usage() {
     cat >&2 <<EOF
-Usage: $SCRIPT_NAME <schema|background|foreground> [--model MODEL]
+Usage: $SCRIPT_NAME <schema|background|foreground> [--model MODEL] [--from-file <path>]
 
   schema      Enumerate the Agent tool's input schema property names under
               claude -p (fact 1) — cheap, no sub-agent dispatched.
@@ -148,8 +163,18 @@ Usage: $SCRIPT_NAME <schema|background|foreground> [--model MODEL]
               all, to check whether the Agent tool call blocks for the
               sub-agent's whole duration (fact 3).
 
-  --model MODEL   model for the parent -p session and any sub-agent it
-                  dispatches (default: haiku)
+  --model MODEL     model for the parent -p session and any sub-agent it
+                    dispatches (default: haiku). Ignored when --from-file
+                    is given.
+  --from-file PATH  skip invoking claude -p entirely and parse PATH as the
+                    captured stream-json instead. PATH must contain the
+                    same newline-delimited JSON claude -p --output-format
+                    stream-json would have written. Used by the self-test
+                    (scripts/repro-headless-subagent-survival-test.sh) so
+                    it never depends on a live claude -p run, a
+                    subscription credential, or quota. MODE is still
+                    required and still validated, but does not affect
+                    parsing.
 
 Exit codes:
   0  a "type":"result" object with subagent_stats was found and printed
@@ -182,6 +207,7 @@ case "$MODE" in
 esac
 
 MODEL="haiku"
+FROM_FILE=""
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -191,6 +217,14 @@ while [ "$#" -gt 0 ]; do
                 exit 2
             fi
             MODEL="$2"
+            shift 2
+            ;;
+        --from-file)
+            if [ "$#" -lt 2 ]; then
+                echo "ERROR: --from-file requires a value" >&2
+                exit 2
+            fi
+            FROM_FILE="$2"
             shift 2
             ;;
         -h|--help)
@@ -205,87 +239,108 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-for tool in claude python3 timeout; do
-    if ! command -v "$tool" >/dev/null 2>&1; then
-        echo "ERROR: $tool is required and is not on PATH" >&2
-        exit 3
-    fi
-done
+if [ -n "$FROM_FILE" ] && { [ ! -f "$FROM_FILE" ] || [ ! -r "$FROM_FILE" ]; }; then
+    echo "ERROR: --from-file path does not exist or is not readable: $FROM_FILE" >&2
+    exit 2
+fi
 
-# ---- mirror ~/.local/bin/kyomi-backlog-cron.sh's environment EXACTLY ------
-# This has to reproduce the actual cron environment, not an interactive
-# approximation — the whole point of KYO-688 was that behaviour under
-# `claude -p` differs from an interactive session (see fact 1 above), so an
-# interactive repro would prove nothing about the cron worker.
-export HOME="/home/jason"
-export PATH="/home/jason/.cargo/bin:/home/jason/.local/bin:/usr/local/bin:/usr/bin:/bin"
-
-cd /home/jason/repos/kyomi || {
-    echo "ERROR: cannot cd to /home/jason/repos/kyomi (cron's own cwd)" >&2
-    exit 3
-}
-
-# shellcheck disable=SC1091
-set -a; source .env; set +a
-
-# .env sets ANTHROPIC_API_KEY for the Rust backend's AI features. Unset it
-# so the Claude CLI uses the subscription login: in Claude Code's auth
-# precedence ANTHROPIC_API_KEY outranks the stored subscription credential,
-# so leaving it set would silently bill the Console org at API rates instead
-# — this mirrors kyomi-backlog-cron.sh's own comment verbatim.
-unset ANTHROPIC_API_KEY
-
-# ---- build the prompt for the requested mode -------------------------------
-#
-# NOTE on the sub-agent's task command: a standalone `sleep N` in a Bash
-# tool call is BLOCKED by this harness ("Blocked: standalone sleep 60"), so
-# the dispatched sub-agent is instructed to run
-# `python3 -c "import time; time.sleep(150); print(1)"` instead. Do not
-# "simplify" this back to `sleep 150` — it will not run, and the repro will
-# silently stop exercising the race it exists to demonstrate.
-SLEEP_CMD='python3 -c "import time; time.sleep(150); print(1)"'
-
-case "$MODE" in
-    schema)
-        TIMEOUT_SECS=120
-        PROMPT="Describe your own Agent tool's input JSON Schema. Do NOT call any tool — answer only from the schema definition you were given for the Agent tool. List every top-level property name in its \"properties\" object, alphabetically sorted, comma-separated, on one line prefixed exactly with 'PROPERTIES: '. Then on its own line print exactly 'run_in_background present: YES' if run_in_background is literally one of those property names, or exactly 'run_in_background present: NO' if it is not. Print nothing else, then end your turn."
-        ;;
-    background)
-        TIMEOUT_SECS=600
-        PROMPT="Use the Agent tool to dispatch exactly ONE sub-agent. Set subagent_type to general-purpose, model to \"${MODEL}\", and run_in_background to true (explicitly true, not omitted). Its task must be EXACTLY this instruction, verbatim, with no shortening: 'Run this exact command with the Bash tool in the foreground and wait for it to finish, then report its stdout: ${SLEEP_CMD}'. As soon as the Agent tool call returns control to you, do not poll it, do not wait for it, do not call any other tool for any reason — immediately reply with the single word DISPATCHED and end your turn."
-        ;;
-    foreground)
-        TIMEOUT_SECS=600
-        PROMPT="Use the Agent tool to dispatch exactly ONE sub-agent. Set subagent_type to general-purpose and model to \"${MODEL}\". Do NOT include a run_in_background parameter in the tool call at all — omit it entirely, do not set it to false, just leave it out. Its task must be EXACTLY this instruction, verbatim, with no shortening: 'Run this exact command with the Bash tool in the foreground and wait for it to finish, then report its stdout: ${SLEEP_CMD}'. After the Agent tool call returns, report what the sub-agent said, then end your turn."
-        ;;
-esac
-
-RAW_FILE="/tmp/kyo688-repro-${MODE}-$(date +%Y%m%d-%H%M%S).log"
-
-echo "Running: claude -p (mode=$MODE, model=$MODEL) — raw stream-json captured to $RAW_FILE" >&2
-
-# </dev/null is required: without piped stdin, claude -p waits 3s for it and
-# logs a warning — same reason the cron wrapper redirects it.
-start_ts="$(date +%s)"
-claude_exit=0
-timeout "$TIMEOUT_SECS" claude -p "$PROMPT" \
-    --dangerously-skip-permissions \
-    --model "$MODEL" \
-    --no-session-persistence \
-    --verbose \
-    --output-format stream-json \
-    < /dev/null > "$RAW_FILE" 2>&1 || claude_exit=$?
-end_ts="$(date +%s)"
-wall_clock=$((end_ts - start_ts))
-
-if [ "$claude_exit" -ne 0 ]; then
-    echo "ERROR: claude -p exited $claude_exit (wall clock: ${wall_clock}s) — raw output follows" >&2
-    cat "$RAW_FILE" >&2
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "ERROR: python3 is required and is not on PATH" >&2
     exit 3
 fi
 
-echo "claude -p exited 0, wall clock: ${wall_clock}s — parsing $RAW_FILE" >&2
-echo >&2
+if [ -z "$FROM_FILE" ]; then
+    for tool in claude timeout; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            echo "ERROR: $tool is required and is not on PATH" >&2
+            exit 3
+        fi
+    done
+fi
+
+if [ -n "$FROM_FILE" ]; then
+    # ---- fixture path: skip claude -p entirely, parse PATH directly -------
+    RAW_FILE="$FROM_FILE"
+    wall_clock=0
+    echo "Skipping claude -p (mode=$MODE) — parsing captured stream-json from --from-file $RAW_FILE" >&2
+    echo >&2
+else
+    # ---- mirror ~/.local/bin/kyomi-backlog-cron.sh's environment EXACTLY --
+    # This has to reproduce the actual cron environment, not an interactive
+    # approximation — the whole point of KYO-688 was that behaviour under
+    # `claude -p` differs from an interactive session (see fact 1 above), so
+    # an interactive repro would prove nothing about the cron worker.
+    export HOME="/home/jason"
+    export PATH="/home/jason/.cargo/bin:/home/jason/.local/bin:/usr/local/bin:/usr/bin:/bin"
+
+    cd /home/jason/repos/kyomi || {
+        echo "ERROR: cannot cd to /home/jason/repos/kyomi (cron's own cwd)" >&2
+        exit 3
+    }
+
+    # shellcheck disable=SC1091
+    set -a; source .env; set +a
+
+    # .env sets ANTHROPIC_API_KEY for the Rust backend's AI features. Unset
+    # it so the Claude CLI uses the subscription login: in Claude Code's
+    # auth precedence ANTHROPIC_API_KEY outranks the stored subscription
+    # credential, so leaving it set would silently bill the Console org at
+    # API rates instead — this mirrors kyomi-backlog-cron.sh's own comment
+    # verbatim.
+    unset ANTHROPIC_API_KEY
+
+    # ---- build the prompt for the requested mode ---------------------------
+    #
+    # NOTE on the sub-agent's task command: a standalone `sleep N` in a Bash
+    # tool call is BLOCKED by this harness ("Blocked: standalone sleep 60"),
+    # so the dispatched sub-agent is instructed to run
+    # `python3 -c "import time; time.sleep(150); print(1)"` instead. Do not
+    # "simplify" this back to `sleep 150` — it will not run, and the repro
+    # will silently stop exercising the race it exists to demonstrate.
+    SLEEP_CMD='python3 -c "import time; time.sleep(150); print(1)"'
+
+    case "$MODE" in
+        schema)
+            TIMEOUT_SECS=120
+            PROMPT="Describe your own Agent tool's input JSON Schema. Do NOT call any tool — answer only from the schema definition you were given for the Agent tool. List every top-level property name in its \"properties\" object, alphabetically sorted, comma-separated, on one line prefixed exactly with 'PROPERTIES: '. Then on its own line print exactly 'run_in_background present: YES' if run_in_background is literally one of those property names, or exactly 'run_in_background present: NO' if it is not. Print nothing else, then end your turn."
+            ;;
+        background)
+            TIMEOUT_SECS=600
+            PROMPT="Use the Agent tool to dispatch exactly ONE sub-agent. Set subagent_type to general-purpose, model to \"${MODEL}\", and run_in_background to true (explicitly true, not omitted). Its task must be EXACTLY this instruction, verbatim, with no shortening: 'Run this exact command with the Bash tool in the foreground and wait for it to finish, then report its stdout: ${SLEEP_CMD}'. As soon as the Agent tool call returns control to you, do not poll it, do not wait for it, do not call any other tool for any reason — immediately reply with the single word DISPATCHED and end your turn."
+            ;;
+        foreground)
+            TIMEOUT_SECS=600
+            PROMPT="Use the Agent tool to dispatch exactly ONE sub-agent. Set subagent_type to general-purpose and model to \"${MODEL}\". Do NOT include a run_in_background parameter in the tool call at all — omit it entirely, do not set it to false, just leave it out. Its task must be EXACTLY this instruction, verbatim, with no shortening: 'Run this exact command with the Bash tool in the foreground and wait for it to finish, then report its stdout: ${SLEEP_CMD}'. After the Agent tool call returns, report what the sub-agent said, then end your turn."
+            ;;
+    esac
+
+    RAW_FILE="/tmp/kyo688-repro-${MODE}-$(date +%Y%m%d-%H%M%S).log"
+
+    echo "Running: claude -p (mode=$MODE, model=$MODEL) — raw stream-json captured to $RAW_FILE" >&2
+
+    # </dev/null is required: without piped stdin, claude -p waits 3s for it
+    # and logs a warning — same reason the cron wrapper redirects it.
+    start_ts="$(date +%s)"
+    claude_exit=0
+    timeout "$TIMEOUT_SECS" claude -p "$PROMPT" \
+        --dangerously-skip-permissions \
+        --model "$MODEL" \
+        --no-session-persistence \
+        --verbose \
+        --output-format stream-json \
+        < /dev/null > "$RAW_FILE" 2>&1 || claude_exit=$?
+    end_ts="$(date +%s)"
+    wall_clock=$((end_ts - start_ts))
+
+    if [ "$claude_exit" -ne 0 ]; then
+        echo "ERROR: claude -p exited $claude_exit (wall clock: ${wall_clock}s) — raw output follows" >&2
+        cat "$RAW_FILE" >&2
+        exit 3
+    fi
+
+    echo "claude -p exited 0, wall clock: ${wall_clock}s — parsing $RAW_FILE" >&2
+    echo >&2
+fi
 
 # ---- parse the captured stream-json for the LAST "type":"result" object ---
 if python3 - "$RAW_FILE" "$wall_clock" <<'PYEOF'
@@ -361,6 +416,18 @@ if not isinstance(stats, dict):
         "ERROR: the last \"type\":\"result\" object has no subagent_stats — "
         "cannot determine the sub-agent outcome. Deliberately NOT treated "
         "as \"0 sub-agents, all clean\" — see "
+        "docs/standards/error-handling/empty-on-failure-must-not-look-like-a-real-result.md.",
+        file=sys.stderr,
+    )
+    sys.exit(3)
+
+if "started_in_background" not in stats:
+    print(
+        "ERROR: the last \"type\":\"result\" object's subagent_stats has no "
+        "started_in_background key — cannot determine whether a sub-agent "
+        "was dispatched in the background, which is the entire fact this "
+        "script exists to measure. Deliberately NOT treated as \"0, none "
+        "were\" — see "
         "docs/standards/error-handling/empty-on-failure-must-not-look-like-a-real-result.md.",
         file=sys.stderr,
     )

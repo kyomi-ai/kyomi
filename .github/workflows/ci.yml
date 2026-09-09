@@ -669,8 +669,8 @@ jobs:
   # fail-open shape this workflow has already been bitten by twice (KYO-511,
   # KYO-529).
   #
-  # All nine suites are hermetic: they build their own throwaway git repos
-  # and/or JSON fixture files (and, for four of them —
+  # Every suite in the array below is hermetic: they build their own
+  # throwaway git repos and/or JSON fixture files (and, for four of them —
   # check-ticket-in-flight-test.sh, mark-worktree-stranded-test.sh,
   # mark-branch-stranded-test.sh, and reconcile-merged-tickets-test.sh — a
   # stub `gh` placed first on PATH) under mktemp -d, with `trap ... EXIT`
@@ -679,8 +679,11 @@ jobs:
   # ubuntu-latest, not `main`). None needs a Rust toolchain, a service
   # container, $HOME, or ~/.claude — only bash, git, and python3 (for JSON
   # encoding in audit-agent-run-deaths-test.sh and
-  # reconcile-merged-tickets-test.sh, and for reconcile-merged-tickets.sh's
-  # own embedded PR-body parser; python3 is already on ubuntu-latest).
+  # reconcile-merged-tickets-test.sh, for reconcile-merged-tickets.sh's own
+  # embedded PR-body parser, and for repro-headless-subagent-survival.sh's
+  # own JSON parsing of the stream-json fixtures that
+  # repro-headless-subagent-survival-test.sh feeds it via --from-file;
+  # python3 is already on ubuntu-latest).
   # audit-agent-run-deaths-test.sh's one test that uses the real journalctl
   # skips itself if journalctl is not on PATH. preflight-clippy-test.sh
   # needs neither `gh` nor python3: it stubs `cargo` and `rustup` on PATH
@@ -704,9 +707,9 @@ jobs:
   # Note that ci.yml uses no `paths` filters anywhere else today either — this
   # job isn't introducing an inconsistency, it's declining to introduce one.
   #
-  # All nine suites run even if an earlier one fails, so one broken suite
-  # never masks the others — the loop below collects every failure and the
-  # job fails at the end if any suite failed.
+  # Every suite in the array below runs even if an earlier one fails, so one
+  # broken suite never masks the others — the loop below collects every
+  # failure and the job fails at the end if any suite failed.
   # ---------------------------------------------------------------------------
   worktree-lifecycle-selftests:
     name: Worktree Lifecycle & Script Self-Tests
@@ -742,6 +745,7 @@ jobs:
             scripts/preflight-clippy-test.sh
             scripts/lib/stale-tooling-guard-test.sh
             scripts/lint/check-real-identifiers-test.sh
+            scripts/repro-headless-subagent-survival-test.sh
           )
           failed=()
           for suite in "${suites[@]}"; do
