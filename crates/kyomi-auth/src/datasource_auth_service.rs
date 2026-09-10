@@ -45,11 +45,17 @@ pub struct CredentialStatusResult {
 /// Looks up the `auth_mode` field from `connection_config` and returns the
 /// matching `AuthModeConfig` from the registry. Falls back to the default
 /// auth mode if not specified.
+///
+/// Returns `Ok(None)` if `ds_type` is not a known datasource type. Returns
+/// `Err` if `auth_mode` names a retired mode (KYO-704) — see
+/// [`datasource_registry::RETIRED_AUTH_MODES`].
 pub fn get_active_auth_mode<'a>(
     ds_type: &str,
     connection_config: &Value,
-) -> Option<&'a AuthModeConfig> {
-    let meta = datasource_registry::get_metadata_by_str(ds_type)?;
+) -> kyomi_core::Result<Option<&'a AuthModeConfig>> {
+    let Some(meta) = datasource_registry::get_metadata_by_str(ds_type) else {
+        return Ok(None);
+    };
     let config_map = value_to_hashmap(connection_config);
     meta.get_active_auth_mode(&config_map)
 }
@@ -65,6 +71,16 @@ pub fn get_active_auth_mode<'a>(
 /// - Users provide their own credentials
 /// - User's enabled/disabled preference is tracked in `UserDatasourceCredential.enabled`
 /// - Examples: `password`, `enterprise_oauth`, `token`
+///
+/// KYO-704: `kyomi_oauth` remains in the legacy-mode-id list below and in
+/// [`datasource_registry::DatasourceTypeMetadata::is_shared_auth`]'s own
+/// legacy check, deliberately, even though it was retired from BigQuery's
+/// `auth_modes`. This function only classifies credential *shape* — a
+/// `kyomi_oauth` row was, and still is, a workspace-wide credential in
+/// shape, so it stays shared here. Removing it would make a retired-mode
+/// row behave like *personal* auth (per-user preference tracking) instead,
+/// which is a second wrong answer, not a fix: the actionable error this
+/// ticket adds lives in `get_active_auth_mode`'s `Result`, not here.
 pub fn is_shared_auth(ds_type: &str, connection_config: &Value) -> bool {
     let meta = datasource_registry::get_metadata_by_str(ds_type);
     let config_map = value_to_hashmap(connection_config);
@@ -98,6 +114,41 @@ pub fn is_shared_auth(ds_type: &str, connection_config: &Value) -> bool {
 ///
 /// For `oauth_per_datasource` modes: checks the encrypted credential for OAuth
 /// tokens and their expiry.
+///
+/// A retired auth mode (KYO-704: `kyomi_oauth`) resolves to a distinct
+/// `credential_status` of `"retired_auth_mode"` rather than silently being
+/// treated as valid/shared or as an unrecognized-legacy row. This function's
+/// signature stays infallible — the named, actionable error for a retired
+/// row lives on `DatasourceTypeMetadata::get_active_auth_mode`'s `Err` (see
+/// that function's doc); this function surfaces it via a `tracing::warn!`
+/// here rather than propagating, so it isn't lost.
+///
+/// This function has four external call sites, and each reads
+/// `"retired_auth_mode"` on its own terms — this function guarantees only
+/// that the value is reported distinctly and by name, not that every caller
+/// fails closed on it uniformly:
+/// - `datasource_service::get_datasource_settings_detail`'s `cred_result`
+///   feeds `bigquery_oauth_status`'s catch-all arm, which denies BigQuery
+///   scopes for anything but `"valid"`/`"shared"` — so `"retired_auth_mode"`
+///   is denied there without needing to know the value's name.
+/// - `datasource_service::toggle_datasource_enabled`'s personal-auth branch
+///   (the non-shared arm of its `enabled` case) denies the same way. Its
+///   shared-auth arm does *not* consult this function for the retired
+///   check at all — `is_shared_auth` classifies a retired mode as shared by
+///   credential shape (deliberately; see its own doc), so that arm calls
+///   `get_active_auth_mode` directly and propagates its `Err`. See that
+///   function's doc.
+/// - `datasource_service::list_datasources_with_status`'s non-Connect
+///   branch reads `"retired_auth_mode"` explicitly to force `can_enable` to
+///   `false`. Its `has_credentials` gate alone (`"valid"`/`"shared"` only)
+///   is not sufficient for that: `can_enable` also falls back to
+///   `user_enabled`, which defaults to `true` when no preference row exists
+///   yet, independent of `credential_status` — so the explicit check is
+///   load-bearing, not redundant with `has_credentials`.
+/// - `onboarding_service`'s `needs_action_for` is the one allowlist (rather
+///   than denylist) consumer: `"retired_auth_mode"` had to be (and now is)
+///   added to it by name — a future new `credential_status` value is NOT
+///   automatically flagged there and needs the same treatment.
 pub fn check_credential_status(
     ds_type: &str,
     connection_config: &Value,
@@ -108,7 +159,22 @@ pub fn check_credential_status(
 
     // Get active auth mode from registry
     let meta = datasource_registry::get_metadata_by_str(ds_type);
-    let active_mode = meta.and_then(|m| m.get_active_auth_mode(&config_map));
+    let active_mode = match meta.map(|m| m.get_active_auth_mode(&config_map)) {
+        Some(Ok(mode)) => mode,
+        Some(Err(e)) => {
+            tracing::warn!(
+                ds_type,
+                error = %e,
+                "retired auth mode encountered while checking credential status"
+            );
+            return CredentialStatusResult {
+                credential_status: "retired_auth_mode".to_string(),
+                auth_method: "retired".to_string(),
+                oauth_provider: None,
+            };
+        }
+        None => None,
+    };
 
     let Some(mode) = active_mode else {
         // Unknown type or no auth modes — treat as password
@@ -120,28 +186,29 @@ pub fn check_credential_status(
 
 /// Check if a datasource requires Google OAuth authentication.
 ///
-/// Returns `true` if the active auth mode uses global Google OAuth
-/// (i.e., BigQuery kyomi_oauth).
+/// Returns `true` if the active auth mode uses global Google OAuth. As of
+/// KYO-704, no BigQuery auth mode does this anymore — `kyomi_oauth` (the
+/// only mode that ever set `oauth_global: true`) was retired and removed
+/// from the registry, so this now always returns `false`. It is kept (rather
+/// than deleted) because the registry-driven check below is still the
+/// correct shape for a future `oauth_global` mode, should one ever exist for
+/// another provider.
 pub fn requires_google_oauth(ds_type: &str, connection_config: &Value) -> bool {
-    let active_mode = get_active_auth_mode(ds_type, connection_config);
-
-    if let Some(mode) = active_mode {
-        return mode.requires_oauth()
-            && mode.oauth_provider.as_deref() == Some("google")
-            && mode.oauth_global;
+    match get_active_auth_mode(ds_type, connection_config) {
+        Ok(Some(mode)) => {
+            mode.requires_oauth()
+                && mode.oauth_provider.as_deref() == Some("google")
+                && mode.oauth_global
+        }
+        // Ok(None): unknown ds_type or no auth modes. Err: a retired mode
+        // (kyomi_oauth) — which must never re-trigger the Google OAuth flow
+        // it was removed to stop escalating. KYO-704: this replaces a
+        // legacy fallback that defaulted an unset `auth_mode` to
+        // "kyomi_oauth" — a null/absent `auth_mode` is now `service_account`
+        // (KYO-442), which never requires Google OAuth, so there is nothing
+        // left for a fallback to special-case.
+        Ok(None) | Err(_) => false,
     }
-
-    // Legacy fallback
-    if ds_type == "bigquery" {
-        let config_map = value_to_hashmap(connection_config);
-        let auth_mode = config_map
-            .get("auth_mode")
-            .and_then(|v| v.as_str())
-            .unwrap_or("kyomi_oauth");
-        return auth_mode == "kyomi_oauth";
-    }
-
-    false
 }
 
 /// Check if a user can access a datasource.
@@ -555,21 +622,35 @@ mod tests {
     // -- requires_google_oauth tests --
 
     #[test]
-    fn requires_google_oauth_bigquery_kyomi() {
+    fn not_requires_google_oauth_bigquery_retired_kyomi_oauth() {
+        // KYO-704: kyomi_oauth is retired — a row still naming it must NOT
+        // re-trigger the Google OAuth flow it was removed to stop
+        // escalating. This used to assert `true` ("Default BigQuery auth
+        // mode is kyomi_oauth"); that default no longer exists.
         let config = json!({"auth_mode": "kyomi_oauth"});
-        assert!(requires_google_oauth("bigquery", &config));
+        assert!(!requires_google_oauth("bigquery", &config));
     }
 
     #[test]
-    fn requires_google_oauth_bigquery_default() {
-        // Default BigQuery auth mode is kyomi_oauth
+    fn not_requires_google_oauth_bigquery_default() {
+        // KYO-442/KYO-704: default BigQuery auth mode is now
+        // service_account, which never requires Google OAuth.
         let config = json!({});
-        assert!(requires_google_oauth("bigquery", &config));
+        assert!(!requires_google_oauth("bigquery", &config));
     }
 
     #[test]
     fn not_requires_google_oauth_bigquery_service_account() {
         let config = json!({"auth_mode": "service_account"});
+        assert!(!requires_google_oauth("bigquery", &config));
+    }
+
+    #[test]
+    fn requires_google_oauth_bigquery_enterprise_oauth() {
+        // KYO-704 A3: enterprise_oauth is untouched by the kyomi_oauth
+        // retirement — it still requires *a* Google OAuth flow, just not
+        // the global/kyomi_oauth one (`oauth_global` stays false for it).
+        let config = json!({"auth_mode": "enterprise_oauth"});
         assert!(!requires_google_oauth("bigquery", &config));
     }
 
@@ -598,14 +679,29 @@ mod tests {
     }
 
     #[test]
-    fn credential_status_shared_bigquery_kyomi_oauth() {
+    fn credential_status_bigquery_retired_kyomi_oauth() {
+        // KYO-704: kyomi_oauth is retired and no longer resolves to an
+        // oauth_global AuthModeConfig at all — check_credential_status must
+        // report a distinct "retired_auth_mode" status, not the old
+        // "shared"/"oauth"/google-provider triple (which implied the row
+        // was a normal, working oauth_global credential).
         let key = test_key();
         let config = json!({"auth_mode": "kyomi_oauth"});
         let result = check_credential_status("bigquery", &config, None, &key);
-        // kyomi_oauth is treated as shared for credential_status endpoint
+        assert_eq!(result.credential_status, "retired_auth_mode");
+        assert_eq!(result.auth_method, "retired");
+        assert_eq!(result.oauth_provider, None);
+    }
+
+    #[test]
+    fn credential_status_bigquery_null_auth_mode_resolves_to_service_account() {
+        // KYO-442/KYO-704 acceptance criterion: a null/absent auth_mode
+        // resolves to service_account, not the retired kyomi_oauth default.
+        let key = test_key();
+        let config = json!({});
+        let result = check_credential_status("bigquery", &config, None, &key);
         assert_eq!(result.credential_status, "shared");
-        assert_eq!(result.auth_method, "oauth");
-        assert_eq!(result.oauth_provider.as_deref(), Some("google"));
+        assert_eq!(result.auth_method, "shared");
     }
 
     #[test]

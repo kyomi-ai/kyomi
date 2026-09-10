@@ -159,33 +159,6 @@ fn password_auth_mode(is_default: bool, supports_shared: bool) -> AuthModeConfig
     }
 }
 
-/// Create a global OAuth authentication mode (app-level OAuth, e.g., Kyomi's Google OAuth).
-fn global_oauth_auth_mode(oauth_provider: &str, is_default: bool) -> AuthModeConfig {
-    let provider_display = match oauth_provider {
-        "google" => "Google",
-        "microsoft" => "Microsoft",
-        "snowflake" => "Snowflake",
-        _ => oauth_provider,
-    };
-    AuthModeConfig {
-        mode_id: "kyomi_oauth".into(),
-        display_name: format!("{provider_display} OAuth (Kyomi)"),
-        description: format!(
-            "Sign in with your {provider_display} account using Kyomi's OAuth app"
-        ),
-        credential_type: "oauth_global".into(),
-        oauth_provider: Some(oauth_provider.into()),
-        oauth_global: true,
-        credential_scope: "global_oauth".into(),
-        preference_tracking: "preference".into(),
-        credential_fields: vec![],
-        sensitive_fields: vec![],
-        is_default,
-        supports_shared_credentials: false,
-        supports_headless_indexing: false,
-    }
-}
-
 /// Create an enterprise OAuth authentication mode (customer's OAuth client per datasource).
 fn enterprise_oauth_auth_mode(
     oauth_provider: &str,
@@ -313,6 +286,34 @@ fn token_auth_mode(
 }
 
 // ---------------------------------------------------------------------------
+// Retired auth modes (KYO-704)
+// ---------------------------------------------------------------------------
+
+/// Auth mode ids that have been removed from every type's `auth_modes` list,
+/// paired with the reason a resolution attempt must report.
+///
+/// A retired id can still show up in a stored `connection_config.auth_mode`
+/// — self-hosted installs, or a stale row nobody has re-saved since the mode
+/// was retired — so [`DatasourceTypeMetadata::get_active_auth_mode`] must
+/// tell that case apart from "unknown/typo" and from "absent" and fail
+/// loudly rather than silently falling through to the default auth mode.
+///
+/// `kyomi_oauth`: escalated the user's **sign-in** credential to
+/// account-wide Google Cloud project-listing scope, with nothing to
+/// de-escalate it afterward. Measured against production 2026-09-08: zero
+/// BigQuery datasources used it and zero queries ever ran through it — both
+/// live rows carry an explicit `service_account`. Removed from BigQuery's
+/// `auth_modes` and as its default (KYO-704 phase A); there is no automatic
+/// mapping from a `kyomi_oauth` row to a working configuration (it has no
+/// `service_account_json`), so the only correct response is to say so.
+pub const RETIRED_AUTH_MODES: &[(&str, &str)] = &[(
+    "kyomi_oauth",
+    "the 'Google OAuth (Kyomi)' auth mode has been retired and no longer \
+     resolves to a working configuration — reconfigure this datasource with \
+     a service account",
+)];
+
+// ---------------------------------------------------------------------------
 // DatasourceTypeMetadata
 // ---------------------------------------------------------------------------
 
@@ -421,23 +422,51 @@ impl DatasourceTypeMetadata {
     /// Get the active [`AuthModeConfig`] based on `connection_config`.
     ///
     /// Looks up `auth_mode` from the config map and returns the matching
-    /// `AuthModeConfig`. Falls back to the default if not specified.
+    /// `AuthModeConfig`. Falls back to the default (KYO-442: currently
+    /// `service_account` for BigQuery) if `auth_mode` is absent/null.
+    ///
+    /// Returns `Err` if `auth_mode` names a [`RETIRED_AUTH_MODES`] id — a
+    /// retired mode must never be confused with "unspecified" and silently
+    /// resolved to the default; see that constant's doc for why (KYO-704).
+    /// An `auth_mode` that names neither a live nor a retired mode (a typo,
+    /// or a type that genuinely has no such mode) still falls back to the
+    /// default, unchanged from before.
     pub fn get_active_auth_mode(
         &self,
         connection_config: &HashMap<String, serde_json::Value>,
-    ) -> Option<&AuthModeConfig> {
-        if let Some(serde_json::Value::String(mode_id)) = connection_config.get("auth_mode")
-            && let Some(mode) = self.get_auth_mode(mode_id)
-        {
-            return Some(mode);
+    ) -> crate::Result<Option<&AuthModeConfig>> {
+        if let Some(serde_json::Value::String(mode_id)) = connection_config.get("auth_mode") {
+            if let Some((_, reason)) =
+                RETIRED_AUTH_MODES.iter().find(|(id, _)| *id == mode_id.as_str())
+            {
+                return Err(crate::Error::BadRequest(format!(
+                    "datasource type '{}': {reason}",
+                    self.type_id
+                )));
+            }
+            if let Some(mode) = self.get_auth_mode(mode_id) {
+                return Ok(Some(mode));
+            }
         }
         // Fall back to default
-        self.get_default_auth_mode()
+        Ok(self.get_default_auth_mode())
     }
 
     /// Check if the active auth mode uses shared/workspace-level authentication.
     ///
     /// Shared auth means users don't provide individual credentials.
+    ///
+    /// This only classifies credential *shape* for preference-tracking
+    /// purposes — it does not enforce whether the mode is actually usable.
+    /// A retired mode (KYO-704: `kyomi_oauth`) is deliberately **not**
+    /// treated as an error here the way [`Self::get_active_auth_mode`]
+    /// treats it: `get_active_auth_mode`'s `Err` is where a retired row must
+    /// be reported, and this method must not mask that by failing here too,
+    /// nor by silently granting anything — it falls through to the same
+    /// legacy string check used when the type/mode is unrecognized, which
+    /// already lists `kyomi_oauth` as shared-auth-shaped (it was, and still
+    /// is, a workspace-wide credential in shape — that fact doesn't change
+    /// just because the mode was retired).
     pub fn is_shared_auth(
         &self,
         connection_config: &HashMap<String, serde_json::Value>,
@@ -447,8 +476,10 @@ impl DatasourceTypeMetadata {
             return true;
         }
 
-        // Get active auth mode and check its preference_tracking
-        if let Some(active_mode) = self.get_active_auth_mode(connection_config) {
+        // Get active auth mode and check its preference_tracking. A retired
+        // mode (Err) falls through to the legacy check below rather than
+        // propagating — see the doc comment above.
+        if let Ok(Some(active_mode)) = self.get_active_auth_mode(connection_config) {
             return active_mode.is_shared_auth();
         }
 
@@ -513,9 +544,8 @@ static BIGQUERY_META: LazyLock<DatasourceTypeMetadata> = LazyLock::new(|| Dataso
     requires_user_credentials: false,
     accepts_user_context: true,
     auth_modes: leak_auth_modes(vec![
-        global_oauth_auth_mode("google", true),
         enterprise_oauth_auth_mode("google", false, None, None),
-        service_account_auth_mode(false),
+        service_account_auth_mode(true),
     ]),
     catalog_container_label: "project",
     catalog_config_keys: &["catalog_projects", "include_public_datasets"],
@@ -1031,25 +1061,25 @@ mod tests {
     // --- BigQuery auth modes ---
 
     #[test]
-    fn bigquery_has_three_auth_modes() {
+    fn bigquery_has_two_auth_modes() {
+        // KYO-704 phase A: `kyomi_oauth` was removed from BigQuery's
+        // auth_modes entirely (not merely un-defaulted) — see
+        // `bigquery_kyomi_oauth_is_retired_and_not_in_auth_modes` below for
+        // the dedicated regression guard on that.
         let meta = get_metadata(&DatasourceType::BigQuery);
-        assert_eq!(meta.auth_modes.len(), 3);
-        assert_eq!(meta.auth_modes[0].mode_id, "kyomi_oauth");
-        assert_eq!(meta.auth_modes[0].credential_type, "oauth_global");
-        assert_eq!(meta.auth_modes[0].oauth_provider.as_deref(), Some("google"));
-        assert!(meta.auth_modes[0].oauth_global);
-        assert!(meta.auth_modes[0].is_default);
-        assert_eq!(meta.auth_modes[0].credential_scope, "global_oauth");
-        assert_eq!(meta.auth_modes[0].preference_tracking, "preference");
+        assert_eq!(meta.auth_modes.len(), 2);
 
-        assert_eq!(meta.auth_modes[1].mode_id, "enterprise_oauth");
-        assert_eq!(meta.auth_modes[1].credential_type, "oauth_per_datasource");
-        assert!(!meta.auth_modes[1].is_default);
+        assert_eq!(meta.auth_modes[0].mode_id, "enterprise_oauth");
+        assert_eq!(meta.auth_modes[0].credential_type, "oauth_per_datasource");
+        assert!(!meta.auth_modes[0].is_default);
 
-        assert_eq!(meta.auth_modes[2].mode_id, "service_account");
-        assert_eq!(meta.auth_modes[2].credential_type, "service_account");
-        assert_eq!(meta.auth_modes[2].credential_scope, "workspace");
-        assert_eq!(meta.auth_modes[2].preference_tracking, "preference");
+        assert_eq!(meta.auth_modes[1].mode_id, "service_account");
+        assert_eq!(meta.auth_modes[1].credential_type, "service_account");
+        assert_eq!(meta.auth_modes[1].credential_scope, "workspace");
+        assert_eq!(meta.auth_modes[1].preference_tracking, "preference");
+        // KYO-704: service_account is now BigQuery's default (was
+        // kyomi_oauth).
+        assert!(meta.auth_modes[1].is_default);
     }
 
     // --- PostgreSQL auth modes ---
@@ -1262,20 +1292,17 @@ mod tests {
     #[test]
     fn auth_mode_is_shared_auth() {
         let bq = get_metadata(&DatasourceType::BigQuery);
-        // kyomi_oauth has preference_tracking="preference" -> shared
-        assert!(bq.auth_modes[0].is_shared_auth());
         // enterprise_oauth has preference_tracking="credential" -> not shared
-        assert!(!bq.auth_modes[1].is_shared_auth());
+        assert!(!bq.auth_modes[0].is_shared_auth());
         // service_account has preference_tracking="preference" -> shared
-        assert!(bq.auth_modes[2].is_shared_auth());
+        assert!(bq.auth_modes[1].is_shared_auth());
     }
 
     #[test]
     fn auth_mode_requires_oauth() {
         let bq = get_metadata(&DatasourceType::BigQuery);
-        assert!(bq.auth_modes[0].requires_oauth()); // oauth_global
-        assert!(bq.auth_modes[1].requires_oauth()); // oauth_per_datasource
-        assert!(!bq.auth_modes[2].requires_oauth()); // service_account
+        assert!(bq.auth_modes[0].requires_oauth()); // enterprise_oauth, oauth_per_datasource
+        assert!(!bq.auth_modes[1].requires_oauth()); // service_account
 
         let pg = get_metadata(&DatasourceType::Postgres);
         assert!(!pg.auth_modes[0].requires_oauth()); // password
@@ -1287,8 +1314,8 @@ mod tests {
         assert!(pg.auth_modes[0].requires_user_credentials()); // password, user scope
 
         let bq = get_metadata(&DatasourceType::BigQuery);
-        assert!(!bq.auth_modes[0].requires_user_credentials()); // oauth_global, global_oauth scope
-        assert!(!bq.auth_modes[2].requires_user_credentials()); // service_account, workspace scope
+        assert!(bq.auth_modes[0].requires_user_credentials()); // enterprise_oauth, user scope
+        assert!(!bq.auth_modes[1].requires_user_credentials()); // service_account, workspace scope
     }
 
     // --- DatasourceTypeMetadata helper methods ---
@@ -1308,7 +1335,8 @@ mod tests {
         let bq = get_metadata(&DatasourceType::BigQuery);
         let default = bq.get_default_auth_mode();
         assert!(default.is_some());
-        assert_eq!(default.expect("should have default").mode_id, "kyomi_oauth");
+        // KYO-704: service_account replaced kyomi_oauth as BigQuery's default.
+        assert_eq!(default.expect("should have default").mode_id, "service_account");
 
         let pg = get_metadata(&DatasourceType::Postgres);
         let default = pg.get_default_auth_mode();
@@ -1325,13 +1353,96 @@ mod tests {
             "auth_mode".into(),
             serde_json::Value::String("service_account".into()),
         );
-        let active = bq.get_active_auth_mode(&config);
+        let active = bq.get_active_auth_mode(&config).expect("should resolve");
         assert_eq!(active.expect("should find mode").mode_id, "service_account");
 
-        // Falls back to default when auth_mode not specified
+        // KYO-442/KYO-704: a null/absent auth_mode falls back to the
+        // default, which is now service_account (was kyomi_oauth).
         let empty_config = HashMap::new();
-        let active = bq.get_active_auth_mode(&empty_config);
-        assert_eq!(active.expect("should fall back").mode_id, "kyomi_oauth");
+        let active = bq.get_active_auth_mode(&empty_config).expect("should resolve");
+        assert_eq!(active.expect("should fall back").mode_id, "service_account");
+    }
+
+    #[test]
+    fn get_active_auth_mode_errors_on_retired_kyomi_oauth() {
+        // KYO-704 acceptance criterion: a row that still names the retired
+        // `kyomi_oauth` mode must produce a named error, never silently
+        // resolve to the new default (service_account) or anything else.
+        let bq = get_metadata(&DatasourceType::BigQuery);
+
+        let mut config = HashMap::new();
+        config.insert(
+            "auth_mode".into(),
+            serde_json::Value::String("kyomi_oauth".into()),
+        );
+
+        let err = bq
+            .get_active_auth_mode(&config)
+            .expect_err("a retired auth mode must error, not resolve");
+        assert!(
+            err.user_message().contains("kyomi_oauth")
+                || err.user_message().contains("Google OAuth (Kyomi)"),
+            "error must name the retired mode: {}",
+            err.user_message()
+        );
+        assert!(
+            err.user_message().contains("service account"),
+            "error must tell the admin how to fix it: {}",
+            err.user_message()
+        );
+    }
+
+    #[test]
+    fn bigquery_kyomi_oauth_is_retired_and_not_in_auth_modes() {
+        // KYO-704: kyomi_oauth must be gone from the live auth_modes list,
+        // not merely un-defaulted.
+        let bq = get_metadata(&DatasourceType::BigQuery);
+        assert!(bq.get_auth_mode("kyomi_oauth").is_none());
+        assert!(!bq.get_auth_mode_ids().contains(&"kyomi_oauth"));
+        assert!(RETIRED_AUTH_MODES.iter().any(|(id, _)| *id == "kyomi_oauth"));
+    }
+
+    #[test]
+    fn enterprise_oauth_still_resolves_normally() {
+        // KYO-704 A3: enterprise_oauth is untouched by the kyomi_oauth
+        // retirement and must keep resolving exactly as before.
+        let bq = get_metadata(&DatasourceType::BigQuery);
+        let mut config = HashMap::new();
+        config.insert(
+            "auth_mode".into(),
+            serde_json::Value::String("enterprise_oauth".into()),
+        );
+        let active = bq
+            .get_active_auth_mode(&config)
+            .expect("enterprise_oauth is not retired")
+            .expect("enterprise_oauth is a known mode");
+        assert_eq!(active.mode_id, "enterprise_oauth");
+        assert!(active.requires_oauth());
+        assert!(!active.oauth_global);
+    }
+
+    #[test]
+    fn live_prod_row_shape_unaffected() {
+        // KYO-704: both live BigQuery datasources in production carry this
+        // exact shape (`{"auth_mode": "service_account", ...}`) — asserted
+        // against the shape, not against production itself.
+        let bq = get_metadata(&DatasourceType::BigQuery);
+        let mut config = HashMap::new();
+        config.insert(
+            "auth_mode".into(),
+            serde_json::Value::String("service_account".into()),
+        );
+        config.insert(
+            "billing_project".into(),
+            serde_json::Value::String("my-gcp-project".into()),
+        );
+
+        let active = bq
+            .get_active_auth_mode(&config)
+            .expect("service_account is not retired")
+            .expect("service_account is a known mode");
+        assert_eq!(active.mode_id, "service_account");
+        assert!(bq.is_shared_auth(&config));
     }
 
     #[test]
@@ -1461,7 +1572,7 @@ mod tests {
     fn get_auth_mode_ids_returns_all() {
         let bq = get_metadata(&DatasourceType::BigQuery);
         let ids = bq.get_auth_mode_ids();
-        assert_eq!(ids, vec!["kyomi_oauth", "enterprise_oauth", "service_account"]);
+        assert_eq!(ids, vec!["enterprise_oauth", "service_account"]);
 
         let sy = get_metadata(&DatasourceType::Synapse);
         let ids = sy.get_auth_mode_ids();
@@ -1490,7 +1601,7 @@ mod tests {
     #[test]
     fn connection_auth_mode_ids_match_expected_table() {
         let expected: &[(&str, &[&str])] = &[
-            ("bigquery", &["kyomi_oauth", "enterprise_oauth", "service_account"]),
+            ("bigquery", &["enterprise_oauth", "service_account"]),
             ("snowflake", &["password", "oauth", "keypair"]),
             ("databricks", &["token", "oauth"]),
             ("synapse", &["sql", "service_principal", "enterprise_oauth"]),
