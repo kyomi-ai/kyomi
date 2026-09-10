@@ -50,7 +50,7 @@
 # docs/standards/agent-orchestration/a-sub-agent-in-flight-must-not-outlive-its-turn.md.
 #
 # KYO-688 RE-TEST (2026-09-09, harness Claude Code 2.1.258) — DID NOT
-# REPRODUCE
+# REPRODUCE WITHIN A ~150s BOUND
 #
 # The mechanism described above was re-tested live — not re-read from old
 # journal entries — using
@@ -99,8 +99,11 @@
 # window, because it deliberately refuses to count an indeterminate run as a
 # clean one rather than guessing which way it would have gone. The mechanism
 # tested directly in scripts/repro-headless-subagent-survival.sh was real
-# when this script was written and appears to have been fixed upstream
-# since. This does NOT mean background dispatch under `claude -p` is now
+# when this script was written and did not reproduce within that script's
+# ~150-second bound — a bound, not an all-clear, since the harness still
+# documents a `-p` wait ceiling for background sub-agents and the six deaths
+# above all came 10-16 minutes in, well past anything that bound reaches.
+# This does NOT mean background dispatch under `claude -p` is now
 # unconditionally safe in every respect, and it does NOT mean either window
 # above is certified clean — only that no run this script could assess in
 # either one shows the mechanism recurring. Re-run

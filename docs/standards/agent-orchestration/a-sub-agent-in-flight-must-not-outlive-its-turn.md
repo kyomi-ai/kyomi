@@ -1,33 +1,55 @@
 # Never end a turn with a sub-agent in flight that nothing left in the turn will consume
 
 The durable rule is mode-independent, and it is worth stating before anything about
-`claude -p` or `run_in_background`, because those details have already changed once (see
-*What's changed since KYO-546*, below) and the rule needs to survive the next change too:
+`claude -p` or `run_in_background`, because those details are properties of a particular
+harness build rather than contracts (see *What has and hasn't changed since KYO-546*,
+below) and the rule needs to survive the next build too:
 **if you dispatch a sub-agent whose result this turn needs, do not end the turn until you
 have actually consumed that result.** "I'll check back when it returns" is not a plan, it
 is a bet on whatever the harness happens to do with an orphaned background task at the
 moment your process exits or your session goes idle — and that behavior is an
 implementation detail, not a contract.
 
-## `run_in_background` is mode-dependent, not a fixed switch
+## Whether the Agent tool schema offers `run_in_background` is gated, not fixed
 
-The Agent tool's own input schema is not the same in every session, and code copied from
-one mode into the other silently does the wrong thing:
+The Agent tool's own input schema is not the same in every session, and a snippet copied
+into a session that doesn't offer the parameter silently does nothing — read out of build
+2.1.267's own bundle rather than observed in a session, which is why no row below records
+it: on the gated branch the schema omits the field (`e.omit({run_in_background:!0})`) and
+strips unknown keys rather than rejecting them, so the value is dropped with no
+`InputValidationError`. The harness does not attribute that variation to session type — it
+attributes it to **either of two gates**. Its own field documentation for the requested-mode
+counters reads, verbatim in build 2.1.267: *"Spawns by the run_in_background value the model
+passed; all count as unset while the parameter is not offered (background tasks disabled, or
+the fork gate on)."*
 
-| Session type | `run_in_background` in the Agent tool schema | Effect of passing it |
-|---|---|---|
-| `claude -p` (headless/autonomous/cron) | Present (`description, isolation, model, prompt, run_in_background, subagent_type`) | Controls real scheduling — `false` blocks the tool call until the sub-agent finishes (measured, below) |
-| Interactive session | Absent (`description, isolation, model, prompt, subagent_type`) | Silently ignored — there is no parameter for the harness to read |
+Three things have actually been observed on this box, each recorded here with the harness
+build it was taken on. They stay listed as observations rather than being folded into a rule,
+because availability is keyed on those two gates rather than on session type — these three
+happen to sort by session type, but that is a correlation this box's configuration produces,
+not the mechanism the harness documents, so a rule keyed on session type would be keyed on
+the wrong thing:
 
-This is why the previous version of this rule's RIGHT example — pass
-`run_in_background: false` — cannot stand alone as "the fix": in an interactive session
-that field doesn't exist, so writing it accomplishes nothing, and an agent that copied the
-snippet there would believe it had forced foreground dispatch when it had done nothing at
-all. The field is only ever a lever under `claude -p`. The invariant above is what still
-holds in both places: don't end the turn before the result is in hand, whether or not a
-parameter exists to help you enforce that.
+| Date | Harness | Observed in | `run_in_background` in the Agent tool schema |
+|---|---|---|---|
+| 2026-09-09 | 2.1.258 | `claude -p` parent (`scripts/repro-headless-subagent-survival.sh schema`) | Present (`description, isolation, model, prompt, run_in_background, subagent_type`) |
+| 2026-09-09 | 2.1.258 | Interactive session, same harness build | Absent (`description, isolation, model, prompt, subagent_type`) |
+| 2026-09-11 | 2.1.267 | Sub-agent dispatched by a `claude -p` parent | Present |
 
-## What's changed since KYO-546
+Where the parameter *is* offered it controls real scheduling: on 2026-09-11, harness 2.1.267,
+a `claude -p` parent passed `run_in_background: false`, the call was accepted with no
+`InputValidationError`, and the Agent tool blocked for 418 seconds until the sub-agent
+returned.
+
+Two consequences. First, this is why the previous version of this rule's RIGHT example —
+pass `run_in_background: false` — cannot stand alone as "the fix": where the field is not
+offered, writing it accomplishes nothing, and an agent that copied the snippet there would
+believe it had forced foreground dispatch when it had done nothing at all. Second, do not
+infer the field's presence from the kind of session you think you are in; read the schema
+you were actually handed. The invariant above is what holds either way: don't end the turn
+before the result is in hand, whether or not a parameter exists to help you enforce that.
+
+## What has and hasn't changed since KYO-546
 
 KYO-546 (2026-08) found that under `claude -p`, a sub-agent left `started_in_background`
 when the parent hit `end_turn` was killed with the process — `subagent_stats.killed.system`
@@ -35,41 +57,55 @@ when the parent hit `end_turn` was killed with the process — `subagent_stats.k
 this rule exists, and the six-attempt table below (unchanged since KYO-546) is the evidence
 for it.
 
-**That specific kill mechanism is now historical — it does not reproduce on the current
-harness.** Reproduced 2026-09-09 on Claude Code 2.1.258 (installed 2026-09-02 11:20 local),
+**That kill mechanism did not reproduce within one measured bound — which is a bound, not an
+all-clear.** Re-tested 2026-09-09 on Claude Code 2.1.258 (installed 2026-09-02 11:20 local),
 Fedora Linux 7.0.9-204.fc44.x86_64, per the reproduction discipline in
 [a-tool-claim-needs-a-reproduction-not-a-citation.md](../build-toolchain/a-tool-claim-needs-a-reproduction-not-a-citation.md):
 
-1. Under `claude -p`, foreground dispatch genuinely blocks the tool call:
-   `requested={background:0,foreground:1}`, `started_in_background=0`, `completed=1`,
-   `killed.system=0`, `duration_ms=167150` for a ~150-second sub-agent task.
-2. Under `claude -p`, a background sub-agent now **survives** the parent's `end_turn`. The
-   parent ended its turn at 5.9s; the sub-agent process lived 166s, and the harness
-   re-invoked the session and emitted a second `"type":"result"` reporting the sub-agent's
-   completion. `requested={background:1,foreground:0}`, `started_in_background=1`,
-   `completed=1`, `killed={parent:0,user:0,system:0}`.
+1. Under `claude -p`, dispatching *without* a `run_in_background` parameter genuinely blocks
+   the tool call: `requested={background:0,foreground:1}`, `started_in_background=0`,
+   `completed=1`, `killed.system=0`, `duration_ms=167150` for a ~150-second sub-agent task.
+2. Under `claude -p`, a background sub-agent outlived the parent's `end_turn`. The parent
+   ended its turn at 5.9s; the sub-agent process lived 166s, and the harness re-invoked the
+   session and emitted a second `"type":"result"` reporting the sub-agent's completion.
+   `requested={background:1,foreground:0}`, `started_in_background=1`, `completed=1`,
+   `killed={parent:0,user:0,system:0}`.
 3. `scripts/audit-agent-run-deaths.sh` over the post-upgrade window found **zero** runs with
-   `killed.system > 0` across 64 cron runs. The one such run in the last 14 days —
-   `2026-08-29 02:39:35Z session=fb3edb6b`, a KYO-468 attempt — predates the upgrade (it is
-   attempt 6 in the table below). Both audit invocations still exited 3 /
-   `COULD NOT COMPLETE` rather than a clean pass: a few older runs in the window are
-   INDETERMINATE and the script fails closed on those rather than assuming they were fine,
-   so "zero kills found" is not the same claim as "a clean exit."
+   `killed.system > 0` among the **62 of 64** cron runs it could assess; the other 2 were
+   INDETERMINATE. The one such run in the last 14 days — `2026-08-29 02:39:35Z
+   session=fb3edb6b`, a KYO-468 attempt — predates the upgrade (it is attempt 6 in the table
+   below). Both audit invocations still exited 3 / `COULD NOT COMPLETE` rather than a clean
+   pass: the script fails closed on those INDETERMINATE runs rather than assuming they were
+   fine, so "zero kills found" is not the same claim as "a clean exit."
 
-In other words: the parameter that used to be silently fatal under `claude -p` (background,
-unblocked, turn ends, kill) is now silently *survived* (background, unblocked, turn ends,
-harness re-invokes anyway). That is a better outcome today, but it is still an
-implementation detail of the current harness build, not a guarantee this rule can be built
-on — which is exactly why the mode-independent invariant at the top, not either mechanism,
-is the thing to internalize. KYO-688 tracked resolving whether the old mechanism still
-applied; it is answered and shipped as PR #503, which also lands a tracked reproduction
-script, `scripts/repro-headless-subagent-survival.sh`, so this can be re-checked
-mechanically after any future harness upgrade instead of re-litigated from memory.
+**Read that as a bound.** What it establishes is narrow: a background sub-agent of about 150
+seconds, on harness 2.1.258, was not killed at its parent's `end_turn`. It does not establish
+that the KYO-546 failure class is gone, and two facts sit directly against reading it that
+way:
+
+- **The harness still documents the mechanism.** Build 2.1.267's own field documentation for
+  `subagent_stats.killed` reads, verbatim: *"system = by Claude Code itself (the
+  --max-budget-usd halt, the sweep of background subagents when an SDK or IDE client
+  interrupts, or -p giving up on a background subagent still running at its wait
+  ceiling)"*. The identical text is present in 2.1.245 and in 2.1.258 — the very build
+  measured above. A *wait ceiling* is current documented behaviour, not removed behaviour.
+- **The measurement is shorter than the failures were.** KYO-468's six deaths all occurred
+  10-16 minutes into their runs. A 166-second sample cannot probe a ceiling above 166
+  seconds, so it does not reach the durations that actually failed.
+
+So: a long-running background sub-agent is unmeasured here, not cleared — which is exactly
+why the mode-independent invariant at the top, not either mechanism, is the thing to
+internalize. KYO-688 tracked resolving whether the old mechanism still applied; it is
+answered for that bound and shipped as PR #503, which also lands a tracked reproduction
+script, `scripts/repro-headless-subagent-survival.sh`, so this can be re-checked mechanically
+after any future harness upgrade instead of re-litigated from memory. Note which build the
+numbers belong to: they were taken on 2.1.258, and this box has run 2.1.267 since 2026-09-10
+10:37, so they describe the build they name rather than whichever build is running now.
 
 ## The KYO-468 history that motivated the rule
 
-**KYO-468 (BigQuery "Discover Available" unreachable in create mode) died to the
-now-historical kill mechanism, six times in a row**, always 10-16 minutes in, always before
+**KYO-468 (BigQuery "Discover Available" unreachable in create mode) died to that kill
+mechanism, six times in a row**, always 10-16 minutes in, always before
 pushing anything. Every attempt's own final words, reconstructed from the journal, describe
 the orchestrator waiting on a background sub-agent it had no way to actually wait for —
 attempt 6's last message was *"Waiting on the implementer now. When it returns I'll run the
@@ -104,14 +140,15 @@ nothing was reading until KYO-546 added `scripts/audit-agent-run-deaths.sh` to r
 
 **Rule:** never dispatch a sub-agent whose result you need and then end your turn before
 that result is consumed — regardless of session type, and regardless of whether
-`run_in_background` exists to help you express it. Under `claude -p`, the concrete way to
-honor this today is foreground dispatch (`run_in_background: false`), because that is
-measured to block the tool call until completion. Interactively, honor it by discipline:
-don't tell the user "I'll check back" and end your turn — keep the turn open until you've
-read and used the sub-agent's report. If a genuinely fire-and-forget background dispatch is
-unavoidable, treat its result as something nothing in the current run depends on — not as
-something a later turn will "pick up," since neither a guaranteed later turn (`claude -p`)
-nor a documented delivery contract (either mode) can be relied on to make that true.
+`run_in_background` exists to help you express it. Where the schema you were handed offers
+`run_in_background`, the concrete way to honor this is foreground dispatch
+(`run_in_background: false`), because that is measured to block the tool call until
+completion. Where it doesn't, honor it by discipline: don't tell the user "I'll check back"
+and end your turn — keep the turn open until you've read and used the sub-agent's report.
+If a genuinely fire-and-forget background dispatch is unavoidable, treat its result as
+something nothing in the current run depends on — not as something a later turn will "pick
+up," since neither a guaranteed later turn (`claude -p`) nor a documented delivery contract
+(either mode) can be relied on to make that true.
 
 ```
 WRONG — orchestrator dispatches a sub-agent whose result this turn needs, then ends its
@@ -123,9 +160,8 @@ Agent({
     description: "Implement KYO-468",
     subagent_type: "feature-implementation-engineer",
     prompt: "...",
-    run_in_background: true,   // or simply omitted under claude -p — same default;
-                                // has no effect at all interactively, where the
-                                // parameter doesn't exist in the schema
+    run_in_background: true,   // where the schema does not offer this parameter, the
+                                // line has no effect at all — see the observations above
 })
 // "I'll report back when the implementer returns." <- there is no turn-scoped "when"
 // in either mode: under claude -p the process may simply exit; interactively the
@@ -138,17 +174,20 @@ Agent({
     description: "Implement KYO-468",
     subagent_type: "feature-implementation-engineer",
     prompt: "...",
-    run_in_background: false,   // claude -p only — forces the tool call to block;
-                                 // this key does not exist interactively, so it is
-                                 // not itself "the fix" there — see the table above
+    run_in_background: false,   // only where the schema offers it — measured to force
+                                 // the tool call to block; where it is not offered this
+                                 // key is not itself "the fix" — see the observations
 })
-// Measured under claude -p: the tool call does not return until the sub-agent
-// finishes, so there is nothing left "in flight" when this turn ends. Interactively,
-// achieve the same outcome by not ending the turn — i.e. not sending a final message
-// that implies completion — until this call has returned and its report is read.
+// Measured under claude -p on 2.1.267 with an explicit false: the tool call did not
+// return for 418 seconds, until the sub-agent had finished. On 2.1.258 the same
+// blocking was measured with the parameter omitted rather than set to false, so that
+// build's number is evidence about omission, not about this line. Either way nothing
+// is left "in flight" when the turn ends. Where the parameter is not offered, achieve
+// the same outcome by not ending the turn — i.e. not sending a final message that
+// implies completion — until this call has returned and its report is read.
 ```
 
 KYO-546 (this standard, plus the detection tooling), KYO-468 (the ticket that died six times
-before the cause was found), and KYO-688 (re-measured the mechanism against the current
-harness, found it superseded, and shipped the reproduction script this file now cites as
-landing with PR #503).
+before the cause was found), and KYO-688 (re-measured the mechanism on harness 2.1.258,
+established the bound recorded above, and shipped the reproduction script this file now
+cites as landing with PR #503).
