@@ -119,6 +119,47 @@ fn popup_monitor_cleanup_is_invoked_not_merely_dropped_on_teardown() {
     );
 }
 
+/// KYO-437: `ModalOAuthStatusPanel`'s "Not connected" and "Expired"
+/// branches must share exactly one `on:click=start_connect` handler
+/// rather than each wiring its own — this is what lets popup-monitor
+/// arming stay identical between the Connect and Reconnect buttons. A
+/// per-branch copy of the click wiring could drift (one branch arming
+/// the monitor, the other not), reintroducing the bug this ticket fixed:
+/// closing or abandoning the popup left `oauth_connecting` spinning
+/// forever, because nothing but a postMessage ever cleared it.
+///
+/// This assertion outlived `oauth_access_gating.rs`, the file it
+/// originally shipped in as one of three checks inside
+/// `modal_oauth_status_panel_gates_both_connect_and_reconnect_branches`.
+/// KYO-705 deleted that file — its other two checks (a
+/// `disabled=connect_blocked` count and a `connect_blocked.get_untracked()`
+/// guard count) were genuinely about the beta-access attestation KYO-705
+/// removed, but this click-wiring count was never about that gate at
+/// all, so it moved here instead of disappearing with the rest of the
+/// file.
+///
+/// Scoped to `ModalOAuthStatusPanel` itself (not a whole-file count) so
+/// an unrelated future `start_connect`-named handler elsewhere in this
+/// file can't make this assertion fail spuriously or pass vacuously.
+#[test]
+fn modal_oauth_status_panel_connect_and_reconnect_share_one_click_handler() {
+    let panel_fn = extract_between(
+        SRC,
+        "fn ModalOAuthStatusPanel(",
+        "\n// ─────────────────────────────────────────────────────────────────────────────\n// OAuth Status Re-fetch Hook",
+    );
+    let click_wiring_count = panel_fn.matches("on:click=start_connect").count();
+    assert_eq!(
+        click_wiring_count, 2,
+        "expected on:click=start_connect on exactly two buttons inside \
+         ModalOAuthStatusPanel (the \"Not connected\" Connect button and the \
+         \"Expired\" Reconnect button) — found {click_wiring_count}. Both branches \
+         must keep sharing the one handler (KYO-437) rather than each getting its \
+         own inline on:click body, which would let popup-monitor arming drift \
+         between them and reintroduce the spinner-forever bug."
+    );
+}
+
 /// `build_oauth_recovery_callback` must re-check OAuth status
 /// (`fetch_oauth_status_once`) *before* it can report a failure
 /// (`popup_monitor_outcome_message`) — this is the KYO-436 half of the
