@@ -238,8 +238,8 @@ enum ConfiguredProjectScope {
 
 /// Classify `connection_config["catalog_projects"]` into the three states
 /// above. Pure and synchronous so it's directly unit-testable without a
-/// network call, following the shape of `bq_kyomi_oauth_access_gate_satisfied`
-/// / `connection_step_satisfied_from` (`kyomi-ui/src/pages/settings/datasources.rs`).
+/// network call, following the shape of `connection_step_satisfied_from`
+/// (`kyomi-ui/src/pages/settings/datasources.rs`).
 fn classify_configured_project_scope(connection_config: &Value) -> ConfiguredProjectScope {
     match connection_config.get("catalog_projects") {
         None | Some(Value::Null) => ConfiguredProjectScope::DiscoverAll,

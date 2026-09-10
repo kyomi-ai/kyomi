@@ -10,7 +10,7 @@ use leptos::prelude::*;
 use phosphor_leptos::{Icon, IconWeight};
 use crate::components::{
     Alert, AlertDescription, AlertTitle, AlertVariant, Badge, BadgeVariant, Button, ButtonLink,
-    ButtonSize, ButtonVariant, Card, Checkbox, ConfirmDialog, EmptyState,
+    ButtonSize, ButtonVariant, Card, ConfirmDialog, EmptyState,
     Modal, ModalSize, Skeleton, Spinner, Switch, ToggleButton,
 };
 use crate::components::toast::toast_error;
@@ -37,7 +37,6 @@ use crate::server_fns::datasource_oauth::{
     disconnect_google_oauth, disconnect_datasource_oauth,
     get_google_oauth_projects,
 };
-use crate::utils::beta_access;
 use crate::utils::json::bigquery_include_public;
 use crate::utils::oauth_popup::{popup_monitor_outcome_message, PopupMonitorOutcome};
 use crate::utils::permissions::{use_analytics_access, use_permissions, AnalyticsAccess};
@@ -179,13 +178,10 @@ fn provider_label(ds_type: &str) -> &'static str {
 
 /// The `auth_mode` BigQuery is treated as when a caller passes `None` (a row
 /// or form whose `auth_mode` hasn't been set) — extracted into one constant
-/// so [`oauth_url_for_datasource`]'s URL choice and [`list_connect_action`]'s
-/// gate resolve a null `auth_mode` to the exact same effective mode. Before
-/// this existed, the two lived as separate `unwrap_or("kyomi_oauth")`
-/// literals; had `list_connect_action` used a different default, a
-/// `auth_mode: None` row would silently bypass the KYO-442 gate while still
-/// resolving to the gated Google URL underneath it (see `list_connect_action`
-/// for the full failure mode this prevents).
+/// so every caller resolving a null `auth_mode` (currently just
+/// [`oauth_url_for_datasource`]) agrees on the same effective mode, rather
+/// than each carrying its own separate `unwrap_or("kyomi_oauth")` literal
+/// that could silently drift from the others.
 const BIGQUERY_DEFAULT_AUTH_MODE: &str = "kyomi_oauth";
 
 /// Builds the OAuth connect URL for a given datasource type, slug, and auth mode.
@@ -222,112 +218,12 @@ fn oauth_url_for_datasource(ds_type: &str, slug: &str, auth_mode: Option<&str>) 
     }
 }
 
-/// The BigQuery kyomi_oauth **Save/Create** gate (KYO-408) — a pure
-/// predicate so it's directly unit-testable, unlike the `Signal::derive`
-/// closure in `DatasourceModal` that calls it. See `bq_kyomi_oauth_access_ok`'s
-/// doc comment at its call site for the full design rationale; in short:
-/// this is a UX nudge, not a security control, and is a no-op (always
-/// satisfied) for every provider/mode except BigQuery's kyomi_oauth.
-///
-/// Save/Create **only** — do not reuse this for the Connect/Reconnect
-/// button. See [`bq_kyomi_oauth_connect_allowed`] below for that gate and
-/// why it is a genuinely different predicate, not a copy of this one
-/// (KYO-477).
-///
-/// Returns `true` (gate satisfied, Save/Create enabled) when any of:
-/// - the datasource/mode isn't BigQuery kyomi_oauth at all
-/// - `oauth_connected` — a successful OAuth handshake for *this* linked
-///   account is itself proof that account was already allowlisted, so
-///   there's nothing left to confirm before saving a datasource that
-///   already has a working connection
-/// - `access_confirmed` — the user ticked the checkbox
-fn bq_kyomi_oauth_access_gate_satisfied(
-    ds_type: &str,
-    bq_auth_mode: &str,
-    oauth_connected: bool,
-    access_confirmed: bool,
-) -> bool {
-    !(ds_type == "bigquery" && bq_auth_mode == "kyomi_oauth") || oauth_connected || access_confirmed
-}
-
-/// The BigQuery kyomi_oauth **Connect/Reconnect** gate (KYO-477) — a pure
-/// predicate so it's directly unit-testable, in the same style and
-/// location as [`bq_kyomi_oauth_access_gate_satisfied`] above.
-///
-/// Deliberately a SEPARATE predicate from `bq_kyomi_oauth_access_gate_satisfied`,
-/// not a shared copy — this is not the anti-pattern `docs/CODING_STANDARDS.md`'s
-/// "propagate predicate changes to every copy" standard (KYO-423) warns
-/// about. That standard forbids letting the *same* predicate drift between
-/// call sites; these are two predicates that answer two different
-/// questions and were wrongly collapsed into one signal by KYO-427. Do
-/// not "fix" that back by reintroducing `oauth_connected` here.
-///
-/// The reason they must differ: `oauth_connected` for kyomi_oauth is an
-/// **account-level** signal (`OAuthStatusSource::GoogleAccount` — one
-/// Google link per Kyomi user, shared across every BigQuery kyomi_oauth
-/// datasource that user has, or ever will have). Once a user has linked
-/// Google to Kyomi even once, `oauth_connected` reads `true` forever,
-/// everywhere, regardless of which specific Google account or which
-/// specific datasource is in front of them right now. Folding it into
-/// the Connect gate (as `bq_kyomi_oauth_access_gate_satisfied` correctly
-/// does for Save/Create, where "this account already has a proven
-/// connection" is exactly the right question) turns Connect's gate into
-/// a permanent no-op for any such user — the checkbox stops meaning
-/// anything the moment they've linked Google once. That is the KYO-477
-/// defect: reported three times, "fixed" once already (KYO-427, PR #389,
-/// shipped in v2.6.5) by a green review and a test that only proved the
-/// Connect button *read a signal* — never that the signal computed the
-/// right answer. Connect must always require its own explicit,
-/// in-the-moment `access_confirmed`, independent of any account-level
-/// history.
-///
-/// Returns `true` (gate satisfied, Connect/Reconnect enabled) when
-/// either:
-/// - the datasource/mode isn't BigQuery kyomi_oauth at all
-/// - `access_confirmed` — the user ticked the checkbox
-fn bq_kyomi_oauth_connect_allowed(
-    ds_type: &str,
-    bq_auth_mode: &str,
-    access_confirmed: bool,
-) -> bool {
-    !(ds_type == "bigquery" && bq_auth_mode == "kyomi_oauth") || access_confirmed
-}
-
 /// The outcome of a click on the datasource **list**'s own Connect/Reconnect
 /// button (`DatasourceRow::on_oauth_click`) — KYO-442.
-///
-/// KYO-427/KYO-477 gated BigQuery kyomi_oauth's Connect button behind the
-/// KYO-408/KYO-499 beta-access attestation, but only inside
-/// `ModalOAuthStatusPanel` (the settings modal's Connection tab). The list's
-/// own Connect/Reconnect button calls the exact same [`oauth_url_for_datasource`]
-/// and hands the result straight to the OAuth popup with no gate and no
-/// notice anywhere on that surface — a user not on Kyomi's Google OAuth
-/// test-user allowlist gets a doomed round-trip to Google's `access_denied`
-/// with no prior explanation and no "Request beta access" link, because both
-/// live only in the modal.
-///
-/// Rather than duplicating the modal's notice/checkbox UI on the list
-/// surface, `OpenModal` routes the user into the settings modal instead —
-/// which already defaults its `active_tab` to `"connection"` on open
-/// (and resets it there every time it opens), landing the user exactly where
-/// the notice, checkbox, and "Request beta access" link live.
-///
-/// Folds [`bq_kyomi_oauth_connect_allowed`] (the gate) and
-/// [`oauth_url_for_datasource`] (the URL choice) into a single function
-/// precisely so the two cannot disagree — a click handler that calls them
-/// separately can drift if only one side is ever updated. See
-/// `bq_kyomi_oauth_connect_allowed`'s own doc comment for the KYO-477
-/// precedent of exactly that class of bug (a green review and a test that
-/// only proved a signal was *read*, never that it computed the right
-/// answer).
 #[derive(Debug, PartialEq)]
 enum ListConnectAction {
     /// Launch the OAuth popup at this URL — today's behaviour, unchanged.
     LaunchPopup(String),
-    /// Open the datasource modal instead of launching a popup, so the user
-    /// meets the allowlist notice, the attestation checkbox, and the
-    /// "Request beta access" link before any doomed round-trip to Google.
-    OpenModal,
     /// This datasource type has no OAuth connect endpoint at all
     /// (`oauth_url_for_datasource` returned an empty string).
     Unsupported,
@@ -335,26 +231,11 @@ enum ListConnectAction {
 
 /// Computes [`ListConnectAction`] for a list-row Connect/Reconnect click.
 ///
-/// `auth_mode` is passed through to [`oauth_url_for_datasource`] unchanged
-/// (so the URL half is byte-identical to before this function existed); the
-/// gate check instead reads `auth_mode.unwrap_or(BIGQUERY_DEFAULT_AUTH_MODE)`
-/// — the SAME default `oauth_url_for_datasource` resolves `None` to
-/// internally — so a row with `auth_mode: None` cannot resolve to two
-/// different effective modes on the two sides of this decision. Evaluating
-/// the gate against a different (or missing) default was the exact bypass
-/// KYO-442 exists to close: a null `auth_mode` would silently skip the
-/// attestation gate while still producing the gated Google URL underneath
-/// it.
-fn list_connect_action(
-    ds_type: &str,
-    slug: &str,
-    auth_mode: Option<&str>,
-    access_confirmed: bool,
-) -> ListConnectAction {
-    let effective_auth_mode = auth_mode.unwrap_or(BIGQUERY_DEFAULT_AUTH_MODE);
-    if !bq_kyomi_oauth_connect_allowed(ds_type, effective_auth_mode, access_confirmed) {
-        return ListConnectAction::OpenModal;
-    }
+/// A thin wrapper around [`oauth_url_for_datasource`] — kept as its own
+/// function (rather than inlined at the one call site) so the click
+/// handler dispatches on a `ListConnectAction` instead of branching on an
+/// empty-string sentinel itself.
+fn list_connect_action(ds_type: &str, slug: &str, auth_mode: Option<&str>) -> ListConnectAction {
     let url = oauth_url_for_datasource(ds_type, slug, auth_mode);
     if url.is_empty() {
         ListConnectAction::Unsupported
@@ -365,8 +246,7 @@ fn list_connect_action(
 
 /// Whether the create-mode Connection step is satisfied (KYO-404, extended
 /// KYO-411, generalized KYO-517) — a pure predicate so it's directly
-/// unit-testable, following the same shape as
-/// [`bq_kyomi_oauth_access_gate_satisfied`] above. Called from the
+/// unit-testable. Called from the
 /// `connection_step_satisfied` `Signal::derive` in `DatasourceModal`,
 /// which is the single source of truth read by the create-mode footer's
 /// `can_next` and by all three states of the Catalog tab pill (class,
@@ -1331,33 +1211,18 @@ fn DatasourceRow(
                 if is_connecting.get_untracked() || is_deleting.get_untracked() {
                     return;
                 }
-                // KYO-442: the whole gate-vs-URL decision is one pure call
-                // into `list_connect_action` (rather than an `if` sprinkled
-                // here and the predicate tested separately) so the gate and
-                // the URL it launches cannot disagree — see that function's
-                // doc comment. Read at click time, not captured earlier:
-                // `beta_access::read_beta_access()` reflects whatever the
-                // user last ticked in the modal's checkbox, which may have
-                // changed since this row mounted.
-                let access_confirmed = beta_access::read_beta_access();
+                // KYO-442: the URL choice is one pure call into
+                // `list_connect_action` rather than calling
+                // `oauth_url_for_datasource` directly here — keeps this
+                // click handler dispatching on a `ListConnectAction`
+                // instead of branching on an empty-string sentinel itself.
                 let action = list_connect_action(
                     &ds_type_clone,
                     &ds_slug_clone,
                     ds_auth_mode_clone.as_deref(),
-                    access_confirmed,
                 );
                 let url = match action {
                     ListConnectAction::LaunchPopup(url) => url,
-                    ListConnectAction::OpenModal => {
-                        // Send the user into the settings modal instead of
-                        // launching a popup — no spinner, no popup, no
-                        // `oauth_connecting` write. The modal opens on its
-                        // Connection tab, where the allowlist notice, the
-                        // attestation checkbox, and the "Request beta
-                        // access" link live.
-                        set_modal_datasource_id.set(Some(Some(ds_id_clone.clone())));
-                        return;
-                    }
                     ListConnectAction::Unsupported => {
                         toast_error("OAuth is not supported for this datasource type".to_string());
                         return;
@@ -2105,26 +1970,6 @@ pub fn DatasourceModal(
     let (cfg_oauth_client_secret, set_cfg_oauth_client_secret) = signal(String::new());
     let (cfg_service_account_json, set_cfg_service_account_json) = signal(String::new());
     let (service_account_email, set_service_account_email) = signal(String::new());
-    // KYO-408 — user has ticked the beta-access confirmation checkbox for
-    // the kyomi_oauth mode's Google-account allowlist (see the checkbox's
-    // own copy in the view tree below — deliberately not quoted here; this
-    // doc comment is scanned as part of the file by
-    // `utils::beta_access`'s whole-file structural tests, and an echoed
-    // copy string here would let a regression in the real markup pass
-    // unnoticed). Persisted to
-    // `localStorage["hasBetaAccess"]` via `utils::beta_access` (KYO-499),
-    // matching the React original — an earlier attempt (KYO-478) shipped
-    // this deliberately NOT persisted, on the reasoning that persistence
-    // would make the attestation "look real but be pre-satisfied"; that
-    // reasoning was wrong (this was never a security control — Google's
-    // allowlist is the actual enforcement) and React always persisted it.
-    // Re-read from storage every time the modal opens (`reset_form` in
-    // create mode, the edit-mode settings load below) rather than left
-    // untouched, so a value ticked on another tab/surface since this modal
-    // last opened is picked up. Deliberately separate from `bq_auth_mode` /
-    // `modal_oauth_connected` rather than folded into either — this is
-    // purely the user's self-report, not derived connection state.
-    let (bq_access_confirmed, set_bq_access_confirmed) = signal(beta_access::read_beta_access());
 
     // Snowflake-specific
     let (sf_auth_mode, set_sf_auth_mode) = signal("password".to_string());
@@ -2305,10 +2150,6 @@ pub fn DatasourceModal(
         set_cfg_oauth_client_secret.set(String::new());
         set_cfg_service_account_json.set(String::new());
         set_service_account_email.set(String::new());
-        // KYO-499 — re-read from localStorage rather than hardcoding false,
-        // so a value ticked on another tab/surface since this modal was
-        // last open is honored; see `bq_access_confirmed`'s own doc comment.
-        set_bq_access_confirmed.set(beta_access::read_beta_access());
         set_sf_auth_mode.set("password".to_string());
         set_db_auth_mode.set("token".to_string());
         set_synapse_auth_mode.set("sql".to_string());
@@ -2391,11 +2232,6 @@ pub fn DatasourceModal(
                 set_error_msg.set(None);
                 set_discovery_status.set("idle".to_string());
                 set_catalog_scope_touched.set(false);
-                // KYO-408/KYO-499 — re-read per modal-open, same as create
-                // mode's reset_form(); see bq_access_confirmed's own doc
-                // comment for why this reads localStorage rather than
-                // hardcoding false.
-                set_bq_access_confirmed.set(beta_access::read_beta_access());
 
                 leptos::task::spawn_local(async move {
                     match get_datasource_settings(ds_id).await {
@@ -3919,107 +3755,6 @@ pub fn DatasourceModal(
         )
     });
 
-    // ── BigQuery kyomi_oauth access-confirmation gates (KYO-408, KYO-477) ───
-    // Kyomi's shared Google OAuth app only accepts Google accounts a Kyomi
-    // admin has added as test users in the Cloud Console consent screen —
-    // Kyomi has no programmatic access to that list, so Google is the only
-    // enforcement layer. Neither gate below is a security control: there is
-    // nothing here for Kyomi to protect, and no dishonest tick bypasses
-    // anything Google wouldn't already stop. They exist purely so the user
-    // pauses long enough to request access before burning a doomed OAuth
-    // round-trip — see the notice + checkbox this reads, in
-    // `BigQueryAuthModeSection`'s kyomi_oauth `<Show>` block.
-    //
-    // Deliberately kept separate from `connection_step_satisfied` above:
-    // that signal answers "is the Connection tab done" and gates
-    // Next/the Catalog tab, matching the KYO-404 create-mode flow. Both
-    // gates below answer a narrower question — "has the user acknowledged
-    // the OAuth allowlist" — never tab navigation.
-    //
-    // TWO signals, not one shared between Save/Create and Connect/Reconnect.
-    // KYO-427 originally pointed Connect/Reconnect at the *same* signal
-    // Save/Create reads (reasoning: "Save/Create alone is unreachable in
-    // create mode until OAuth already succeeded, so it gated nothing where
-    // it mattered" — true, but the fix was wrong). KYO-477 is the fix to
-    // that fix: `oauth_connected` is an account-level signal for
-    // kyomi_oauth (one Google link per Kyomi user, shared across every
-    // BigQuery kyomi_oauth datasource forever), so OR-ing it into the
-    // Connect gate — as the shared signal did — makes Connect's gate a
-    // permanent no-op for anyone who has ever linked Google once,
-    // regardless of `access_confirmed`. Reported three times in
-    // production before this fix. Read each signal's own inline comment
-    // below before "simplifying" them back into one — that is exactly the
-    // regression KYO-477 exists to prevent, and this is NOT the KYO-423
-    // "duplicated predicate" anti-pattern: these two answer genuinely
-    // different questions (see `bq_kyomi_oauth_connect_allowed`'s doc
-    // comment for the full explanation).
-    //
-    // `bq_kyomi_oauth_access_ok` — gates Save/Create only (read directly by
-    // the footer buttons below, and NOT threaded into
-    // `BigQueryAuthModeSection`). Auto-satisfied once `modal_oauth_connected`
-    // is true: a successful OAuth handshake for *this* linked account IS
-    // proof that account was already allowlisted (Google would have
-    // refused it otherwise), so there is nothing left to confirm before
-    // saving a datasource that already has a working connection — this is
-    // also what keeps a returning, already-connected user from being
-    // nagged by the checkbox on every visit. (`bq_access_confirmed` is
-    // separately persisted to localStorage — see its own doc comment —
-    // but that persistence is orthogonal to this auto-satisfaction path:
-    // a user can reach "not nagged" either by a proven OAuth connection or
-    // by a remembered checkbox tick, and this predicate only needs the
-    // former.)
-    let bq_kyomi_oauth_access_ok: Signal<bool> = Signal::derive(move || {
-        bq_kyomi_oauth_access_gate_satisfied(
-            &ds_type.get(),
-            &bq_auth_mode.get(),
-            modal_oauth_connected.get(),
-            bq_access_confirmed.get(),
-        )
-    });
-
-    // `bq_kyomi_oauth_connect_ok` — gates the Connect/Reconnect button
-    // (`connect_blocked` on `ModalOAuthStatusPanel`, threaded into
-    // `BigQueryAuthModeSection` below) only. Deliberately does NOT read
-    // `modal_oauth_connected` — see `bq_kyomi_oauth_connect_allowed`'s doc
-    // comment for why folding that account-level signal in here would
-    // reintroduce KYO-477.
-    let bq_kyomi_oauth_connect_ok: Signal<bool> = Signal::derive(move || {
-        bq_kyomi_oauth_connect_allowed(
-            &ds_type.get(),
-            &bq_auth_mode.get(),
-            bq_access_confirmed.get(),
-        )
-    });
-
-    // KYO-499 — keep `bq_access_confirmed` in sync with
-    // `localStorage["hasBetaAccess"]` across tabs/surfaces: this modal's
-    // kyomi_oauth notice and the pre-auth Google sign-in notice in
-    // `pages/auth/login.rs` read/write the same key via `utils::beta_access`.
-    // Installed once here — `DatasourceModal` mounts once for the settings
-    // page's lifetime (visibility toggles via the `open` prop; it is never
-    // conditionally mounted/unmounted, see `reset_form`'s own doc context
-    // above) — mirroring the OAuth postMessage listener pattern earlier in
-    // this file (`install_oauth_listener`, `DatasourcesList`).
-    #[cfg(target_arch = "wasm32")]
-    {
-        use crate::utils::beta_access::install_beta_access_listener;
-        let cleanup = install_beta_access_listener(move |value| {
-            set_bq_access_confirmed.try_set(value);
-        });
-        // Box<dyn FnOnce()> is used so the inner cleanup can be called
-        // through Drop without requiring Send. SendWrapper makes the box
-        // Send+Sync for on_cleanup's bound while guaranteeing
-        // single-threaded access on WASM — same pattern as the OAuth
-        // postMessage listener's cleanup above.
-        let cleanup_cell = std::cell::Cell::new(Some(Box::new(cleanup) as Box<dyn FnOnce()>));
-        let cleanup_wrapper = send_wrapper::SendWrapper::new(cleanup_cell);
-        on_cleanup(move || {
-            if let Some(f) = cleanup_wrapper.take().take() {
-                f();
-            }
-        });
-    }
-
     // ── Datasource-type registry data (KYO-274) ─────────────────────────────
     // Which auth modes the four Authentication Mode selectors below offer —
     // and their labels/descriptions — is registry-owned
@@ -4099,13 +3834,7 @@ pub fn DatasourceModal(
                             </Button>
                             <Show when=move || !is_sample.get() && !is_connect.get()>
                                 <Button
-                                    // KYO-408: `bq_kyomi_oauth_access_ok` folds in the
-                                    // Save gate — a no-op for every non-BigQuery
-                                    // provider and every BigQuery mode other than
-                                    // kyomi_oauth (see its own doc comment above).
-                                    disabled=Signal::derive(move || {
-                                        is_saving || !bq_kyomi_oauth_access_ok.get()
-                                    })
+                                    disabled=is_saving
                                     on:click=move |_| do_save()
                                 >
                                     {move || {
@@ -4207,13 +3936,7 @@ pub fn DatasourceModal(
                             } else {
                                 view! {
                                     <Button
-                                        // KYO-408: does not gate "Next" above, only the
-                                        // final Create — matches the React reference
-                                        // (`DatasourceModal.jsx`'s requiresBetaAccess
-                                        // check lived on Create/Save only).
-                                        disabled=Signal::derive(move || {
-                                            is_saving || !bq_kyomi_oauth_access_ok.get()
-                                        })
+                                        disabled=is_saving
                                         on:click=move |_| do_save()
                                     >
                                         {move || if save_action.pending().get() { "Creating..." } else { "Create" }}
@@ -4774,9 +4497,6 @@ pub fn DatasourceModal(
                                             set_discovery_status=set_discovery_status
                                             test_pending=bq_test_pending
                                             on_validate=on_bq_validate
-                                            bq_access_confirmed=bq_access_confirmed
-                                            set_bq_access_confirmed=set_bq_access_confirmed
-                                            bq_kyomi_oauth_connect_ok=bq_kyomi_oauth_connect_ok
                                         />
                                     </Show>
 
@@ -5368,20 +5088,6 @@ fn ModalOAuthStatusPanel(
     /// connect button. Always false for `kyomi_oauth` (global OAuth,
     /// not per-datasource).
     cfg_missing: Signal<bool>,
-    /// Whether the Connect/Reconnect action is blocked by an unmet
-    /// precondition (KYO-427, corrected KYO-477). Defaults to `false` —
-    /// never blocked — so Snowflake, Databricks, Microsoft, and BigQuery
-    /// enterprise_oauth (the other four callers of this shared panel) are
-    /// unaffected. The one real caller, BigQuery kyomi_oauth, passes
-    /// `bq_kyomi_oauth_connect_ok` — the Connect-only gate, deliberately
-    /// NOT the same signal the footer's Save/Create gate reads
-    /// (`bq_kyomi_oauth_access_ok`). Folding Save/Create's account-level
-    /// `oauth_connected` allowance into this prop is the exact KYO-477
-    /// defect: see `bq_kyomi_oauth_connect_allowed`'s doc comment
-    /// (`pages/settings/datasources.rs`) for why the two must stay
-    /// separate predicates rather than a KYO-423-style shared copy.
-    #[prop(default = false.into())]
-    connect_blocked: Signal<bool>,
     /// Called when the user clicks "Disconnect".  Callers use an
     /// `Action` and pass a typed callback — this is a simple `Fn`
     /// because `Action` dispatch is synchronous and non-blocking.
@@ -5435,7 +5141,7 @@ fn ModalOAuthStatusPanel(
     // otherwise byte-for-byte the same click handler, differing only in
     // which state they're rendered from.
     let start_connect = move |_: leptos::ev::MouseEvent| {
-        if oauth_connecting.get_untracked() || connect_blocked.get_untracked() {
+        if oauth_connecting.get_untracked() {
             return;
         }
         set_oauth_connecting.set(true);
@@ -5539,7 +5245,6 @@ fn ModalOAuthStatusPanel(
                         <Button
                             variant=ButtonVariant::Outline
                             size=ButtonSize::Sm
-                            disabled=connect_blocked
                             on:click=start_connect
                         >
                             {move || if oauth_connecting.get() {
@@ -5569,7 +5274,6 @@ fn ModalOAuthStatusPanel(
                     <Button
                         variant=ButtonVariant::Outline
                         size=ButtonSize::Sm
-                        disabled=connect_blocked
                         on:click=start_connect
                     >
                         {move || if oauth_connecting.get() {
@@ -6250,23 +5954,6 @@ fn BigQueryAuthModeSection(
     /// (KYO-405). A `Callback` rather than the raw closure so this component
     /// doesn't need the parent's private `TestDiscoverInput` type.
     on_validate: Callback<()>,
-    /// KYO-408 — whether the user has ticked "I have requested access and
-    /// had it confirmed" for the kyomi_oauth Google-account allowlist.
-    /// Owned by the parent `DatasourceModal` (not local state) because the
-    /// footer's Save/Create gate (`bq_kyomi_oauth_access_ok`) reads it too.
-    bq_access_confirmed: ReadSignal<bool>,
-    /// Setter for the checkbox above.
-    set_bq_access_confirmed: WriteSignal<bool>,
-    /// KYO-477 — the Connect/Reconnect-only gate, deliberately NOT the
-    /// same signal as the footer's Save/Create gate
-    /// (`bq_kyomi_oauth_access_ok`, read directly by `DatasourceModal`'s
-    /// own footer buttons and never threaded down here). See
-    /// `bq_kyomi_oauth_connect_allowed`'s doc comment in
-    /// `bq_kyomi_oauth_connect_ok`'s definition (`DatasourceModal`) for
-    /// why these two must stay separate predicates rather than one
-    /// shared signal — folding Save/Create's `oauth_connected` allowance
-    /// in here is exactly the KYO-477 defect.
-    bq_kyomi_oauth_connect_ok: Signal<bool>,
 ) -> impl IntoView {
     // Parse service account email from JSON
     let handle_service_account_json = move |json_text: String| {
@@ -6417,85 +6104,6 @@ fn BigQueryAuthModeSection(
                     <p class="text-sm text-muted-foreground">
                         "Connect your Google account to access BigQuery projects."
                     </p>
-                    // KYO-408/KYO-477 — Kyomi has no programmatic access to
-                    // the Google Cloud Console's test-user allowlist for its
-                    // shared OAuth app; Google is the only thing that can let
-                    // a given account through or refuse it. This notice +
-                    // checkbox is NOT a security gate (there's nothing here
-                    // for Kyomi to protect, and no dishonest tick bypasses
-                    // anything Google wouldn't already stop) — it exists
-                    // purely so the user requests access *before* burning a
-                    // doomed OAuth round-trip. Hidden once connected: at that
-                    // point `ModalOAuthStatusPanel` below renders its
-                    // "Connected" branch (Disconnect only, no Connect button
-                    // to gate), and Save/Create's own gate
-                    // (`bq_kyomi_oauth_access_ok`'s doc comment above, in
-                    // `DatasourceModal`) auto-satisfies from the same
-                    // connected state — so there is nothing left for this
-                    // notice to ask for. The Connect gate
-                    // (`bq_kyomi_oauth_connect_ok`, read by the
-                    // `connect_blocked` prop below) does NOT auto-satisfy
-                    // from `oauth_connected` — see its own doc comment for
-                    // why — but that is moot here specifically because the
-                    // Connect button isn't reachable while connected either.
-                    // KYO-499 — restores parity with the React original
-                    // (`AuthModeSelector.jsx` at `ee16f48a^`): one sentence
-                    // plus an inline beta-access request link, not a
-                    // heading + two explanatory paragraphs + a standalone
-                    // Button component (that shape shipped in KYO-435/
-                    // KYO-477/KYO-478 without verifying against React and
-                    // was rejected as "a monstrosity" — see KYO-499). The link
-                    // goes to the shared mailto constant in `utils::beta_access`
-                    // (see that module for the exact target) — the same one
-                    // `pages/auth/login.rs`'s Google sign-in notice uses —
-                    // rather than the in-app `FeedbackModal` path this used
-                    // before, because the login page has no `Layout` context
-                    // to reach that modal and the two surfaces must use one
-                    // identical target (KYO-499's decision; React's own
-                    // target, `/beta-signup`, was never ported and stays out
-                    // of scope — see the ticket). KYO-504 later removed the
-                    // `FeedbackModal` access-request wiring entirely, since
-                    // this was its only caller.
-                    //
-                    // This comment deliberately does not quote the exact
-                    // copy strings below — `tests/oauth.rs`'s source-text
-                    // assertions for this block scan for those literals,
-                    // and an echo here would let a regression in the real
-                    // markup pass unnoticed (verified by mutation during
-                    // KYO-499 implementation).
-                    <Show when=move || !oauth_connected.get()>
-                        <Alert variant=AlertVariant::Warning>
-                            <Icon icon=phosphor_leptos::WARNING_CIRCLE attr:class="h-4 w-4" />
-                            <AlertDescription>
-                                <p class="mb-3">
-                                    "This authentication method requires beta access. "
-                                    <a
-                                        href=beta_access::BETA_ACCESS_REQUEST_HREF
-                                        class="text-primary hover:underline font-medium"
-                                    >
-                                        "Request beta access"
-                                    </a>
-                                </p>
-                                <label class="flex items-center gap-2 cursor-pointer">
-                                    <Checkbox
-                                        checked=Signal::derive(move || bq_access_confirmed.get())
-                                        on_change=Callback::new(move |v: bool| {
-                                            // KYO-499 — persist to
-                                            // localStorage["hasBetaAccess"]
-                                            // alongside the in-memory signal;
-                                            // see `bq_access_confirmed`'s doc
-                                            // comment.
-                                            beta_access::write_beta_access(v);
-                                            set_bq_access_confirmed.set(v)
-                                        })
-                                    />
-                                    <span class="text-sm">
-                                        "I have beta access"
-                                    </span>
-                                </label>
-                            </AlertDescription>
-                        </Alert>
-                    </Show>
                     // 4-state OAuth status panel — shown in create mode too:
                     // `kyomi_oauth_url` (/api/v1/auth/google-oauth/connect) is
                     // not slug-scoped, so it connects identically before or
@@ -6518,9 +6126,6 @@ fn BigQueryAuthModeSection(
                         // belong to a different auth mode (enterprise_oauth)
                         // entirely and are unrelated to this panel.
                         cfg_missing=Signal::stored(false)
-                        connect_blocked=Signal::derive(move || {
-                            !bq_kyomi_oauth_connect_ok.get()
-                        })
                         on_disconnect=on_google_disconnect
                         disconnect_pending=google_disconnect_pending
                         on_recover=on_oauth_recover

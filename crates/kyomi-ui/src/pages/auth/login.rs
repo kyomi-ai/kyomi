@@ -13,8 +13,8 @@ use phosphor_leptos::Icon;
 use leptos_router::hooks::{use_navigate, use_query_map};
 
 use crate::components::{
-    Alert, AlertDescription, AlertTitle, AlertVariant, Button, ButtonSize, ButtonVariant,
-    Checkbox, Label, Spinner, INPUT_CLASS,
+    Alert, AlertDescription, AlertTitle, AlertVariant, Button, ButtonSize, ButtonVariant, Label,
+    Spinner, INPUT_CLASS,
 };
 use crate::pages::auth::auth_layout::AuthLayout;
 use crate::pages::auth::components::{AuthDivider, GoogleSignInButton, PasskeySignInButton};
@@ -23,7 +23,6 @@ use crate::server_fns::auth::{
     passkey_signup_start, resend_verification, signup_start, LoginResult,
     PasskeySignupStartResult, SignupResult,
 };
-use crate::utils::beta_access;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Login subtitle rotation — editorial voice on the sign-in screen.
@@ -51,24 +50,6 @@ enum LoginView {
     TwoFactor { email: String },
     Signup,
     CheckEmail { email: String },
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Google sign-in allowlist gate (KYO-478)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Whether the "Continue with Google" button should be disabled — a pure
-/// predicate so the truth table is directly unit-testable rather than only
-/// reachable via a source-text check on the view tree, mirroring
-/// `bq_kyomi_oauth_connect_allowed` in `pages/settings/datasources.rs`
-/// (KYO-477's fix for the sibling BigQuery-linkage gate).
-///
-/// Returns `true` (disabled) when either passkey sign-in is already in
-/// flight (unchanged pre-existing behavior — the two providers are
-/// mutually exclusive while one is loading) or the allowlist checkbox
-/// hasn't been ticked (KYO-478).
-fn google_sign_in_disabled(passkey_loading: bool, access_confirmed: bool) -> bool {
-    passkey_loading || !access_confirmed
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -101,58 +82,6 @@ pub fn LoginPage(
     // ── Passkey / Google loading ────────────────────────────────────────
     let (passkey_loading, set_passkey_loading) = signal(false);
     let (google_loading, set_google_loading) = signal(false);
-
-    // ── Google OAuth allowlist attestation (KYO-478, copy/persistence
-    // restored to parity with React in KYO-499) ──────────────────────────
-    // Kyomi's Google OAuth app is in Testing mode: Google refuses any
-    // account a Kyomi admin hasn't explicitly added as a tester in the
-    // Cloud Console, both for sign-in here and for BigQuery linkage later
-    // (KYO-408 gates the latter in `pages/settings/datasources.rs`). This
-    // is the same UX nudge, not a security control — there is nothing here
-    // for Kyomi to protect, and no dishonest tick bypasses anything Google
-    // wouldn't already stop.
-    //
-    // Deliberately shown for every visitor, including ones who have signed
-    // in with Google here before — unlike the datasource modal's notice,
-    // there is no "already connected" account-level signal available
-    // pre-auth to hide this behind. It IS persisted to
-    // `localStorage["hasBetaAccess"]` via `utils::beta_access`, shared with
-    // the datasource modal's identical checkbox (KYO-499) — an earlier
-    // version of this comment argued persistence would make the
-    // attestation "look real but be invisibly pre-satisfied"; that was
-    // wrong. This was never a security control (see above), so a
-    // remembered tick isn't a bypass of anything, and the React original
-    // (`AuthModeSelector.jsx`) always persisted it. Remove this whole gate
-    // once Kyomi's OAuth app leaves Testing publishing status in the
-    // Google Cloud Console — at that point Google stops refusing
-    // un-allowlisted accounts and there is nothing left to attest to.
-    let (google_access_confirmed, set_google_access_confirmed) =
-        signal(beta_access::read_beta_access());
-
-    // KYO-499 — keep `google_access_confirmed` in sync with
-    // `localStorage["hasBetaAccess"]` across tabs/surfaces: this notice and
-    // the datasource modal's identical kyomi_oauth notice
-    // (`pages/settings/datasources.rs`) read/write the same key via
-    // `utils::beta_access`. Installed once at `LoginPage` mount — mirrors
-    // `install_beta_access_listener`'s use in `DatasourceModal`.
-    #[cfg(target_arch = "wasm32")]
-    {
-        use crate::utils::beta_access::install_beta_access_listener;
-        let cleanup = install_beta_access_listener(move |value| {
-            set_google_access_confirmed.try_set(value);
-        });
-        // Box<dyn FnOnce()> lets the cleanup run through Drop without
-        // requiring Send; SendWrapper makes the box Send+Sync for
-        // on_cleanup's bound while guaranteeing single-threaded access on
-        // WASM — same pattern `DatasourceModal` uses for this listener.
-        let cleanup_cell = std::cell::Cell::new(Some(Box::new(cleanup) as Box<dyn FnOnce()>));
-        let cleanup_wrapper = send_wrapper::SendWrapper::new(cleanup_cell);
-        on_cleanup(move || {
-            if let Some(f) = cleanup_wrapper.take().take() {
-                f();
-            }
-        });
-    }
 
     // ── Signup signals ──────────────────────────────────────────────────
     let (signup_email, set_signup_email) = signal(String::new());
@@ -467,15 +396,6 @@ pub fn LoginPage(
     // window.location().set_href() which are !Send browser APIs. Signal writes
     // inside the async block use try_set for deferred-write safety.
     let on_google_click = Callback::new(move |()| {
-        // KYO-478 — belt-and-suspenders alongside the button's `disabled`
-        // prop: `disabled` doesn't stop a synthetic/programmatic click, so
-        // the handler itself must also refuse to start the flow when the
-        // allowlist checkbox hasn't been ticked. Mirrors `start_connect`'s
-        // `connect_blocked.get_untracked()` guard in
-        // `pages/settings/datasources.rs` (KYO-427/KYO-477).
-        if !google_access_confirmed.get_untracked() {
-            return;
-        }
         set_google_loading.set(true);
         set_error.set(None);
 
@@ -749,8 +669,6 @@ pub fn LoginPage(
                                     show_google_section=show_google_section
                                     passkey_loading=passkey_loading
                                     google_loading=google_loading
-                                    google_access_confirmed=google_access_confirmed
-                                    set_google_access_confirmed=set_google_access_confirmed
                                     on_passkey_click=on_passkey_click
                                     on_google_click=on_google_click
                                     on_login_submit=on_login_submit
@@ -838,13 +756,6 @@ fn CredentialsView(
     show_google_section: impl Fn() -> bool + Copy + Send + Sync + 'static,
     passkey_loading: ReadSignal<bool>,
     google_loading: ReadSignal<bool>,
-    /// KYO-478 — whether the user has ticked "I have beta access" (KYO-499
-    /// copy) for Kyomi's Google OAuth app allowlist. Owned by the parent
-    /// `LoginPage` (not local state) because `on_google_click` there also
-    /// reads it for its own early-return guard.
-    google_access_confirmed: ReadSignal<bool>,
-    /// Setter for the checkbox above.
-    set_google_access_confirmed: WriteSignal<bool>,
     on_passkey_click: Callback<()>,
     on_google_click: Callback<()>,
     on_login_submit: impl Fn(leptos::ev::SubmitEvent) + Copy + Send + Sync + 'static,
@@ -880,78 +791,11 @@ fn CredentialsView(
             // Google Sign In
             <Show when=show_google_section>
                 <div class="space-y-3">
-                    // KYO-499 — restores parity with the React original
-                    // (`AuthModeSelector.jsx` at `ee16f48a^`): one sentence
-                    // plus an inline beta-access request link, not a
-                    // heading + two explanatory paragraphs + a standalone
-                    // ButtonLink component (that shape shipped in KYO-478
-                    // without verifying against React and was rejected as
-                    // "a monstrosity" — see KYO-499). Sentence wording is
-                    // adjusted from the datasource modal's copy ("this
-                    // authentication method" doesn't apply pre-auth, where
-                    // there is no auth-mode dropdown — this notice is
-                    // specifically about the Google sign-in button it
-                    // accompanies);
-                    // the checkbox label, link text, and link target are
-                    // byte-identical to the datasource modal's notice
-                    // (KYO-499's requirement that the two surfaces not
-                    // drift again — see `utils::beta_access`'s tests).
-                    //
-                    // The link goes to the shared mailto constant in
-                    // `utils::beta_access` (see that module for the exact
-                    // target) — this pre-auth page has no `Layout` context,
-                    // so it could never have opened the in-app feedback
-                    // modal the datasource notice used to use; mailto is
-                    // the one target reachable from both surfaces, which is
-                    // why the datasource modal now uses it too instead of
-                    // the feedback modal (KYO-499). KYO-504 later removed
-                    // the feedback-modal wiring entirely, since this was
-                    // its only caller.
-                    //
-                    // This comment deliberately does not quote the exact
-                    // copy strings below — this file's own test module
-                    // scans this block for those literals, and an echo
-                    // here would let a regression in the real markup pass
-                    // unnoticed (verified by mutation during KYO-499
-                    // implementation).
                     <GoogleSignInButton
                         loading=Signal::derive(move || google_loading.get())
-                        disabled=Signal::derive(move || {
-                            google_sign_in_disabled(passkey_loading.get(), google_access_confirmed.get())
-                        })
+                        disabled=Signal::derive(move || passkey_loading.get())
                         on_click=on_google_click
                     />
-                    <Alert variant=AlertVariant::Warning>
-                        <Icon icon=phosphor_leptos::WARNING_CIRCLE attr:class="h-4 w-4" />
-                        <AlertDescription>
-                            <p class="mb-3">
-                                "Google sign-in requires beta access. "
-                                <a
-                                    href=beta_access::BETA_ACCESS_REQUEST_HREF
-                                    class="text-primary hover:underline font-medium"
-                                >
-                                    "Request beta access"
-                                </a>
-                            </p>
-                            <label class="flex items-center gap-2 cursor-pointer">
-                                <Checkbox
-                                    checked=Signal::derive(move || google_access_confirmed.get())
-                                    on_change=Callback::new(move |v: bool| {
-                                        // KYO-499 — persist to
-                                        // localStorage["hasBetaAccess"]
-                                        // alongside the in-memory signal; see
-                                        // `google_access_confirmed`'s doc
-                                        // comment.
-                                        beta_access::write_beta_access(v);
-                                        set_google_access_confirmed.set(v)
-                                    })
-                                />
-                                <span class="text-sm">
-                                    "I have beta access"
-                                </span>
-                            </label>
-                        </AlertDescription>
-                    </Alert>
                 </div>
             </Show>
 
@@ -1417,12 +1261,11 @@ fn CheckEmailView(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Tests (KYO-478)
+// Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::test_support::extract_between;
 
     /// This file's own source, for source-text wiring assertions below —
@@ -1448,186 +1291,44 @@ mod tests {
             .expect("TEST_MOD_MARKER must be found in SRC")
     }
 
-    // ── `google_sign_in_disabled` — pure predicate truth table ──────────
+    // ── Wiring: GoogleSignInButton's disabled prop ───────────────────────
 
-    /// The KYO-478 gate exercised directly rather than via the view tree.
-    /// Covers: blocked when unconfirmed regardless of passkey state;
-    /// released only once confirmed AND passkey isn't loading; and the
-    /// pre-existing passkey-loading exclusion is preserved.
+    /// KYO-705 removed the KYO-478 Google-OAuth-allowlist attestation gate
+    /// (Kyomi's Google OAuth app left Testing publishing status, so the
+    /// confirmation checkbox had nothing left to attest to) — but the KYO-478
+    /// mutual-exclusion behavior it shared the predicate with must survive
+    /// the removal: Google sign-in stays disabled while a passkey sign-in
+    /// is in flight. Pins the `disabled` prop's expression directly rather
+    /// than via a now-deleted pure-predicate helper, so a future edit
+    /// can't silently drop the `passkey_loading` read.
     #[test]
-    fn google_sign_in_disabled_blocks_until_confirmed() {
-        assert!(
-            google_sign_in_disabled(false, false),
-            "must stay disabled while the allowlist checkbox is unticked, even with \
-             passkey sign-in idle"
-        );
-        assert!(
-            google_sign_in_disabled(true, false),
-            "must stay disabled when both unconfirmed AND passkey is loading"
-        );
-        assert!(
-            !google_sign_in_disabled(false, true),
-            "must enable once confirmed, with passkey sign-in idle"
-        );
-        assert!(
-            google_sign_in_disabled(true, true),
-            "must stay disabled while passkey sign-in is in flight, even once confirmed \
-             — this is the pre-existing mutual-exclusion behavior KYO-478 must not \
-             regress"
-        );
-    }
-
-    // ── Wiring: notice + checkbox render inside show_google_section ─────
-
-    /// The KYO-478/KYO-499 notice (Alert + inline "Request beta access"
-    /// link + confirmation checkbox) must render inside the
-    /// `<Show when=show_google_section>` block in `CredentialsView` — the
-    /// same block that renders `GoogleSignInButton` — so it can never
-    /// appear when Google sign-in itself isn't offered.
-    ///
-    /// Copy was rewritten in KYO-499 to restore parity with the React
-    /// original (`AuthModeSelector.jsx` at `ee16f48a^`) — the heading +
-    /// two explanatory paragraphs KYO-478 shipped diverged from React and
-    /// were rejected as "a monstrosity". The sentence itself is
-    /// deliberately NOT byte-identical to the datasource modal's — "this
-    /// authentication method" doesn't apply pre-auth, where there's no
-    /// auth-mode dropdown (see the sentence's own inline comment in the
-    /// view tree) — but the checkbox label, link text, and link target
-    /// ARE, and are pinned as such by `utils::beta_access`'s
-    /// `both_surfaces_*` tests rather than here.
-    #[test]
-    fn google_sign_in_checkbox_renders_inside_show_google_section_block() {
-        let google_block = extract_between(
-            SRC,
-            "<Show when=show_google_section>",
-            "</Show>",
-        );
-        assert!(
-            google_block.contains("requires beta access"),
-            "the show_google_section block must render the KYO-499 access notice \
-             sentence"
-        );
-        assert!(
-            google_block.contains("\"Request beta access\""),
-            "the notice must include a \"Request beta access\" link (KYO-499 copy)"
-        );
-        assert!(
-            google_block.contains("beta_access::BETA_ACCESS_REQUEST_HREF"),
-            "the \"Request beta access\" link must point at the shared \
-             utils::beta_access::BETA_ACCESS_REQUEST_HREF target (KYO-499), the same \
-             constant the datasource modal's equivalent notice uses — not an \
-             independently hardcoded mailto href that could silently diverge"
-        );
-        assert!(
-            google_block.contains("\"I have beta access\""),
-            "the notice must render the KYO-499 confirmation checkbox with the exact \
-             copy \"I have beta access\", matching the datasource modal's equivalent \
-             notice so both surfaces say the same thing"
-        );
-        assert!(
-            google_block.contains("<GoogleSignInButton"),
-            "sanity check on the extract_between bounds: the block must still contain \
-             the Google sign-in button itself"
-        );
-    }
-
-    /// Negative-space companion: the passkey-only `<Show when=show_passkey_section>`
-    /// block, immediately above the Google block in `CredentialsView`, must
-    /// NOT gain this notice — passkey sign-in has no Google OAuth allowlist
-    /// to attest to.
-    #[test]
-    fn google_sign_in_checkbox_does_not_leak_into_passkey_block() {
-        let passkey_block = extract_between(
-            SRC,
-            "<Show when=show_passkey_section>",
-            "<Show when=move || show_passkey_section() && show_google_section()>",
-        );
-        assert!(
-            !passkey_block.contains("requires beta access"),
-            "the KYO-478/499 notice must not leak into the passkey-only block"
-        );
-        assert!(
-            !passkey_block.contains("\"I have beta access\""),
-            "the KYO-499 checkbox must not leak into the passkey-only block"
-        );
-    }
-
-    // ── Wiring: GoogleSignInButton reads the predicate ───────────────────
-
-    /// The button's `disabled` prop must be derived from
-    /// `google_sign_in_disabled`, not a hand-rolled boolean expression that
-    /// could silently diverge from the tested truth table above.
-    #[test]
-    fn google_sign_in_button_disabled_reads_the_predicate() {
+    fn google_sign_in_button_disabled_derives_from_passkey_loading() {
         let button_block = extract_between(
             SRC,
             "<GoogleSignInButton",
             "on_click=on_google_click",
         );
         assert!(
-            button_block.contains("google_sign_in_disabled(passkey_loading.get(), google_access_confirmed.get())"),
-            "GoogleSignInButton's disabled prop must call google_sign_in_disabled with \
-             the live passkey_loading/google_access_confirmed signals — found:\n{button_block}"
+            button_block.contains("disabled=Signal::derive(move || passkey_loading.get())"),
+            "GoogleSignInButton's disabled prop must derive from passkey_loading alone \
+             — the KYO-478 mutual-exclusion behavior (Google sign-in disabled while a \
+             passkey sign-in is in flight) must not regress — found:\n{button_block}"
         );
     }
 
-    // ── Wiring: on_google_click early-returns when unconfirmed ───────────
-
-    /// `disabled` alone does not stop a synthetic/programmatic click, so
-    /// `on_google_click` must also refuse to start the OAuth flow when the
-    /// checkbox is unticked — mirroring `start_connect`'s
-    /// `connect_blocked.get_untracked()` guard in
-    /// `pages/settings/datasources.rs` (KYO-427/KYO-477).
-    #[test]
-    fn on_google_click_early_returns_when_not_confirmed() {
-        let handler_body = extract_between(
-            SRC,
-            "let on_google_click = Callback::new(move |()| {",
-            "leptos::task::spawn_local(async move {",
-        );
-        assert!(
-            handler_body.contains("google_access_confirmed.get_untracked()"),
-            "on_google_click must read google_access_confirmed.get_untracked() before \
-             starting the OAuth flow — found:\n{handler_body}"
-        );
-        assert!(
-            handler_body.contains("return;"),
-            "on_google_click must early-return when unconfirmed, not merely check the \
-             value — found:\n{handler_body}"
-        );
-        // The guard must gate entry — i.e. sit before set_google_loading.set(true)
-        // — not merely be present somewhere in the closure.
-        let guard_idx = handler_body
-            .find("google_access_confirmed.get_untracked()")
-            .expect("checked above");
-        let loading_idx = handler_body
-            .find("set_google_loading.set(true)")
-            .expect("set_google_loading.set(true) must appear in on_google_click");
-        assert!(
-            guard_idx < loading_idx,
-            "the google_access_confirmed.get_untracked() guard must appear BEFORE \
-             set_google_loading.set(true), so the flow never starts loading when \
-             unconfirmed"
-        );
-    }
-
-    // ── Negative space: SignupView has no Google button to gate ──────────
+    // ── Negative space: SignupView has no Google button ──────────────────
 
     /// `LoginView::Signup` renders `SignupView`, a completely separate
     /// component from `CredentialsView` — it offers passkey signup only,
     /// no Google button (confirmed by inspection: `GoogleSignInButton` has
-    /// exactly one call site in this file, inside `CredentialsView`). This
-    /// test pins that count so a future addition of Google sign-up is
-    /// forced to either reuse `CredentialsView`'s gate or add an
-    /// equivalent one, rather than silently shipping ungated.
+    /// exactly one call site in this file, inside `CredentialsView`).
     #[test]
     fn google_sign_in_button_has_exactly_one_call_site() {
         let count = production_src().matches("<GoogleSignInButton").count();
         assert_eq!(
             count, 1,
             "expected exactly one <GoogleSignInButton call site (inside \
-             CredentialsView) — found {count}. If a second one was added (e.g. to \
-             SignupView), it must also be gated by the KYO-478 allowlist checkbox."
+             CredentialsView) — found {count}."
         );
     }
 }

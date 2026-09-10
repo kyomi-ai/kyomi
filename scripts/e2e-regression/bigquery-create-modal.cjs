@@ -13,16 +13,18 @@
  * is tracked as KYO-604. Until then, treat a failure on any of these lines
  * as expected, not as a new regression:
  *
- *   - `text=Google account authorization required` (section A) — STALE.
- *     0 hits in `crates/`. Copy replaced by KYO-499 (PR #403, merged).
- *   - `button:has-text("Request access")` (sections A and D) — STALE.
- *     KYO-499 turned this into a `mailto:` link reading "Request beta
- *     access"; only comment hits remain in `crates/`.
- *   - `text=I have requested access and had it confirmed` (section A) —
- *     STALE. Survives only in a test comment at
- *     `crates/kyomi-ui/src/pages/settings/datasources/tests/oauth.rs:1101`
- *     noting this copy "was rejected". Live copy is now "I have beta
- *     access" (`crates/kyomi-ui/src/utils/beta_access.rs`).
+ *   - `text=Google account authorization required` (section A) — DEAD.
+ *     KYO-705 removed the entire KYO-408/KYO-499 Google-OAuth-allowlist
+ *     attestation notice and confirmation checkbox, once Kyomi's Google
+ *     OAuth app left Testing publishing status in the Google Cloud
+ *     Console (Google no longer refuses un-allowlisted accounts, so there
+ *     was nothing left to attest to). The module that owned the shared
+ *     copy/persistence for that notice is gone. The checks this spec ran
+ *     against that notice were replaced with absence checks — see
+ *     section A below.
+ *   - `button:has-text("Request access")` (section D only — the KYO-417
+ *     feedback-modal trigger, unrelated to the removed attestation
+ *     notice) — STALE.
  *   - `text=Request BigQuery Access` (section D, KYO-417) — WILL BECOME
  *     STALE. Passes today, but KYO-504's PR #457 is open and removes the
  *     access-request feedback type entirely.
@@ -110,12 +112,18 @@ async function pickAuthMode(page, label) {
 
     check('KYO-404 ★ "Connect BigQuery" button is VISIBLE in create mode',
       await vis(page, 'button:has-text("Connect BigQuery")'));
-    check('KYO-408 allowlist warning is visible',
-      await vis(page, 'text=Google account authorization required'));
-    check('KYO-408 "Request access" link is visible',
-      await vis(page, 'button:has-text("Request access")'));
-    check('KYO-408 self-attestation checkbox is visible',
-      await vis(page, 'text=I have requested access and had it confirmed'));
+    // KYO-705 removed the KYO-408/KYO-499 Google-OAuth-allowlist
+    // attestation notice and confirmation checkbox entirely — Kyomi's
+    // Google OAuth app left Testing publishing status, so there is
+    // nothing left to attest to, and no checkbox renders in this section
+    // any more. No selector-based check replaces the three removed here:
+    // this whole spec hasn't been run since KYO-602 (see the file header),
+    // so a hand-picked selector for "the notice is gone" would be no more
+    // trustworthy than the ones it replaces. Absence is left for the
+    // KYO-604 reconciliation pass / the next batch QA sweep to confirm in
+    // a real browser.
+    check('no checkbox renders in the kyomi_oauth Connection tab',
+      !(await vis(page, '[role="checkbox"]')));
 
     // Correct create-mode gate: Next needs a proven OAuth connection.
     const nextBtn = () => page.locator('button:has-text("Next")').last();

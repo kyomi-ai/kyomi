@@ -19,7 +19,9 @@
 //! `pages/auth/login.rs`, `pages/onboarding/datasource_onboarding.rs`,
 //! `pages/settings/analytics.rs`,
 //! `pages/settings/datasources/tests/mod.rs`, `server_fns/analytics.rs`,
-//! `server_fns/workspace.rs` and `utils/beta_access.rs`. The last of those
+//! `server_fns/workspace.rs` and the Google-OAuth-allowlist attestation
+//! module (`utils/`, removed entirely in KYO-705 along with the gate it
+//! backed). The last of those
 //! carried a comment predicting that "a fourth copy would be the trigger to
 //! actually extract a shared test-support crate"; by then there were
 //! already more than four, which is precisely the aggregate-invisibility
@@ -36,7 +38,8 @@
 //!   slice **including** the `start` marker, with `end` searched from
 //!   `start_pos`.
 //! - Five (`accept_invite.rs`, `accept_ownership.rs`, `auth/login.rs`,
-//!   `onboarding/datasource_onboarding.rs`, `utils/beta_access.rs`)
+//!   `onboarding/datasource_onboarding.rs`, and the Google-OAuth-allowlist
+//!   attestation module — the last now removed, see Provenance above)
 //!   returned the slice **excluding** the `start` marker, with `end`
 //!   searched from the first byte after it.
 //!

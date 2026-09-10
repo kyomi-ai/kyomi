@@ -53,7 +53,6 @@ mod auth_mode_sections;
 mod oauth_status_refetch;
 mod oauth_popup_recovery_modal;
 mod oauth_popup_recovery_list;
-mod oauth_access_gating;
 mod oauth_messaging;
 mod credential_state_reset;
 mod create_mode;
