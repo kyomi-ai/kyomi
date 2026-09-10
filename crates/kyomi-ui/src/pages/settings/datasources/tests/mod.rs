@@ -63,3 +63,4 @@ mod connection_test_badge;
 mod synapse_connection_config;
 mod synapse_tenant_id_credentials;
 mod list_connect_gate;
+mod retired_auth_mode_default;

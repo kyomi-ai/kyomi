@@ -34,16 +34,22 @@
 //!
 //! ## Auth Modes
 //!
-//! - **kyomi_oauth** (default) — user connected via Kyomi's Google OAuth.
-//!   Tokens are stored in the user's `oauth_data`. Refreshed via
-//!   `ensure_valid_google_token()`.
+//! - **service_account** (default, KYO-704) — GCP service account JSON in
+//!   `connection_config`. Token exchanged via
+//!   `exchange_service_account_jwt()`.
 //!
 //! - **enterprise_oauth** — workspace-level OAuth with per-datasource
 //!   client credentials in `connection_config`. Refreshed via
 //!   `ensure_valid_oauth_credentials()`.
 //!
-//! - **service_account** — GCP service account JSON in `connection_config`.
-//!   Token exchanged via `exchange_service_account_jwt()`.
+//! - **kyomi_oauth** (retired, KYO-704) — user connected via Kyomi's Google
+//!   OAuth. No longer selectable for a new or re-saved datasource, and no
+//!   longer the fallback for an absent `auth_mode`; a pre-KYO-704 row still
+//!   carrying this value falls into the catch-all branch below and keeps
+//!   indexing off whatever token that user already granted — this indexer
+//!   does not request any new scopes on its behalf. Tokens, where still
+//!   present, live in the user's `oauth_data` and are refreshed via
+//!   `ensure_valid_google_token()`.
 //!
 //! ### Token resolution failures (KYO-449)
 //!
@@ -92,11 +98,17 @@ impl CatalogIndexer for BigQueryIndexer {
         credentials: Option<&Value>,
         max_tables_per_dataset: Option<usize>,
     ) -> CatalogIndexResult {
+        // KYO-704: an absent `auth_mode` now resolves to `service_account`,
+        // matching the registry default
+        // (`DatasourceTypeMetadata::get_active_auth_mode`) now that
+        // `kyomi_oauth` is retired. An explicit `auth_mode: "kyomi_oauth"`
+        // on a pre-KYO-704 row is unaffected by this default and still
+        // falls into the catch-all branch below.
         let auth_mode = ctx
             .connection_config
             .get("auth_mode")
             .and_then(|v| v.as_str())
-            .unwrap_or("kyomi_oauth");
+            .unwrap_or("service_account");
 
         info!(
             workspace_id = ctx.workspace_id,
@@ -476,7 +488,9 @@ async fn resolve_enterprise_oauth_token(
         })
 }
 
-/// Resolve access token for `kyomi_oauth` auth mode (default).
+/// Resolve access token for `kyomi_oauth` auth mode (retired, KYO-704 —
+/// reached only for a pre-KYO-704 row that still names it explicitly, not
+/// as a default).
 ///
 /// The user connected via Kyomi's own Google OAuth flow. Tokens are stored
 /// in the user's `oauth_data` (encrypted on the `users` table). This
@@ -1059,9 +1073,12 @@ mod tests {
         );
     }
 
-    /// `kyomi_oauth` mode (the default, catch-all `_` arm): no
-    /// `user_email` is provided, so `resolve_kyomi_oauth_token` fails at
-    /// its very first check, before any DB query or network call.
+    /// `kyomi_oauth` mode (retired, KYO-704 — reached only via the
+    /// catch-all `_` arm, for a pre-KYO-704 row that still names it
+    /// explicitly; it is no longer the fallback for an absent
+    /// `auth_mode`): no `user_email` is provided, so
+    /// `resolve_kyomi_oauth_token` fails at its very first check, before
+    /// any DB query or network call.
     #[tokio::test]
     async fn kyomi_oauth_token_failure_writes_failed_status_with_actionable_reason() {
         let db = seeded_bq_db("ds-ko-fail", "ws-ko-fail").await;
@@ -1111,13 +1128,16 @@ mod tests {
     }
 
     #[test]
-    fn auth_mode_defaults_to_kyomi_oauth() {
+    fn auth_mode_defaults_to_service_account() {
+        // KYO-704: an absent `auth_mode` used to default to the now-retired
+        // `kyomi_oauth`; it now defaults to `service_account`, matching the
+        // registry default (`DatasourceTypeMetadata::get_active_auth_mode`).
         let config = serde_json::json!({});
         let auth_mode = config
             .get("auth_mode")
             .and_then(|v| v.as_str())
-            .unwrap_or("kyomi_oauth");
-        assert_eq!(auth_mode, "kyomi_oauth");
+            .unwrap_or("service_account");
+        assert_eq!(auth_mode, "service_account");
     }
 
     #[test]
@@ -1126,7 +1146,22 @@ mod tests {
         let auth_mode = config
             .get("auth_mode")
             .and_then(|v| v.as_str())
-            .unwrap_or("kyomi_oauth");
+            .unwrap_or("service_account");
         assert_eq!(auth_mode, "service_account");
+    }
+
+    #[test]
+    fn auth_mode_kyomi_oauth_is_not_the_default_but_still_resolves_explicitly() {
+        // KYO-704: a pre-KYO-704 row that still names the retired mode
+        // explicitly must keep resolving to that literal value here (this
+        // indexer's own catch-all `_` arm handles it, using whatever token
+        // that user already granted rather than requesting new scopes) —
+        // it must NOT be reinterpreted as the new default.
+        let config = serde_json::json!({"auth_mode": "kyomi_oauth"});
+        let auth_mode = config
+            .get("auth_mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("service_account");
+        assert_eq!(auth_mode, "kyomi_oauth");
     }
 }

@@ -110,6 +110,18 @@
  *     "connecting" flag); it isn't wired to any create-mode gate to assert.
  *
  * Assertions use isVisible()/isEnabled(), never count().
+ *
+ * KYO-704 (not yet reconciled against a real browser — same "needs a real
+ * browser to pick correct selectors" reasoning as bigquery-create-modal.cjs,
+ * KYO-602/KYO-604): Arm A above ("BigQuery + kyomi_oauth via
+ * GOOGLE_OAUTH_SUCCESS") assumed a freshly opened create-mode BigQuery
+ * datasource lands on the kyomi_oauth panel by default. KYO-704 retired
+ * kyomi_oauth and made service_account the create-mode default
+ * (`BIGQUERY_DEFAULT_AUTH_MODE`,
+ * crates/kyomi-ui/src/pages/settings/datasources.rs), so this arm now
+ * needs to explicitly select BigQuery's kyomi_oauth Authentication Mode
+ * before dispatching `GOOGLE_OAUTH_SUCCESS`, or be retargeted at
+ * enterprise_oauth/service_account instead. Not rewritten here.
  */
 const { chromium } = require('playwright');
 

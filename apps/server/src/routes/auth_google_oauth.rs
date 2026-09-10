@@ -493,48 +493,43 @@ async fn accept_terms(
 // GET /auth/google-oauth/connect (authenticated — BigQuery linking)
 // ---------------------------------------------------------------------------
 
-async fn google_oauth_connect(
-    State(state): State<AppState>,
-    user: AuthUser,
-) -> Result<impl IntoResponse, kyomi_core::Error> {
-    let (client_id, _) = get_oauth_credentials(&state)?;
+async fn google_oauth_connect(user: AuthUser) -> Result<(), kyomi_core::Error> {
+    // KYO-704: this endpoint used to redirect straight to Google requesting
+    // `google_oauth::BIGQUERY_SCOPES` with force-consent + offline access —
+    // the exact account-wide credential escalation the retired `kyomi_oauth`
+    // auth mode performed, and exactly what retiring it exists to stop.
+    //
+    // Audited every caller that used to reach this URL:
+    // - `oauth_url_for_datasource` / `get_oauth_connect_url` (the two places
+    //   that build this URL for the settings modal, the datasource list, and
+    //   the onboarding checklist) now only ever produce it for BigQuery's
+    //   `enterprise_oauth` mode, which is a different, slug-scoped endpoint —
+    //   neither can reach this handler for `service_account` (the new
+    //   default) or for an absent `auth_mode`.
+    // - The one caller that still can is a datasource whose *stored*
+    //   `connection_config.auth_mode` is still the now-retired `kyomi_oauth`
+    //   (a pre-KYO-704 row nobody has re-saved) — the settings modal's
+    //   legacy OAuth panel still renders for that row so the user can see
+    //   its state, and its Connect button still points here.
+    //
+    // For that last, genuinely-reachable case, redirecting to Google and
+    // granting the scopes anyway would be silently doing the exact thing
+    // this ticket exists to stop. Report the same named, actionable error
+    // `DatasourceTypeMetadata::get_active_auth_mode` already returns for
+    // that row everywhere else, instead of a silent redirect.
+    let (_, reason) = kyomi_core::datasource_registry::RETIRED_AUTH_MODES
+        .iter()
+        .find(|(id, _)| *id == "kyomi_oauth")
+        .expect("kyomi_oauth is a permanent entry in RETIRED_AUTH_MODES");
 
-    let csrf_state = redis_ops::generate_token();
-
-    let state_data = serde_json::json!({
-        "user_id": user.user_id,
-        "action": "link_account",
-        "workspace_id": user.workspace.workspace_id,
-        "timestamp": chrono::Utc::now().to_rfc3339(),
-    });
-    redis_ops::store_oauth_state(&state.kv, "google_link", &csrf_state, &state_data).await?;
-
-    let redirect_uri = format!(
-        "{}/auth/google/link-callback",
-        state.config.frontend_url.trim_end_matches('/')
-    );
-
-    let authorization_url = google_oauth::build_authorization_url(
-        &client_id,
-        &redirect_uri,
-        &csrf_state,
-        google_oauth::BIGQUERY_SCOPES,
-        true,  // force consent to get refresh token
-        true,  // offline access for refresh token
-        // Keep existing behaviour: a user connecting a second BigQuery
-        // datasource (or reconnecting) should accumulate scopes rather than
-        // lose access to the first grant.
-        true,
-    );
-
-    tracing::info!(
+    tracing::warn!(
         user_email = %user.email,
-        authorization_url = %authorization_url,
-        "Starting Google account linking (BigQuery OAuth) — redirecting to Google"
+        "Rejected Google account linking (BigQuery kyomi_oauth) — auth mode is retired"
     );
 
-    // 302 Found — matches Python's RedirectResponse(status_code=302)
-    Ok((axum::http::StatusCode::FOUND, [(axum::http::header::LOCATION, authorization_url)]))
+    Err(kyomi_core::Error::BadRequest(format!(
+        "datasource type 'bigquery': {reason}"
+    )))
 }
 
 // ---------------------------------------------------------------------------

@@ -35,6 +35,18 @@
  *     Unlike the other four, this one needed no browser to establish — a
  *     merged unit test proves it.
  *
+ *   - `check('KYO-404 Next is disabled for kyomi_oauth with no Google
+ *     connection', ...)` (section A) — WILL BECOME STALE. KYO-704 retired
+ *     BigQuery's `kyomi_oauth` auth mode and made `service_account` the
+ *     create-mode default (`BIGQUERY_DEFAULT_AUTH_MODE`,
+ *     `crates/kyomi-ui/src/pages/settings/datasources.rs`), so a freshly
+ *     opened create modal no longer lands on the kyomi_oauth panel by
+ *     default — this section needs to explicitly select an auth mode
+ *     before relying on kyomi_oauth-specific UI, or be retargeted at
+ *     `enterprise_oauth`/`service_account`. Not rewritten here — same
+ *     "needs a real browser" reasoning as the rest of this list; tracked
+ *     alongside KYO-604.
+ *
  * Still present on `main` and not affected: `Connect BigQuery`,
  * `Validate & Discover Projects`, `Billing Project`.
  */

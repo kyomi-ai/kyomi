@@ -172,11 +172,16 @@ async fn start_connect(
 
     // Validate BigQuery enterprise auth_mode
     if provider == OAuthProvider::BigqueryEnterprise {
+        // KYO-704: an absent auth_mode now resolves to "service_account",
+        // matching the registry default — this default only feeds the
+        // error message below (the `!= "enterprise_oauth"` check rejects
+        // an absent auth_mode either way), but that message is user-facing
+        // and must name what the datasource is actually configured for.
         let auth_mode = ds
             .connection_config
             .get("auth_mode")
             .and_then(|v| v.as_str())
-            .unwrap_or("kyomi_oauth");
+            .unwrap_or("service_account");
         if auth_mode != "enterprise_oauth" {
             return Err(kyomi_core::Error::BadRequest(format!(
                 "Datasource is configured for {auth_mode}, not enterprise_oauth"

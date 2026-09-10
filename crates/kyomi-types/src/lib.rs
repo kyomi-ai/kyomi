@@ -69,7 +69,9 @@ pub struct CredentialStatusItem {
     /// For OAuth providers: `"google"` | `"snowflake"` | `"microsoft"` | `"databricks"`
     pub oauth_provider: Option<String>,
     /// The `auth_mode` from the datasource `connection_config`.
-    /// For BigQuery: `"kyomi_oauth"` | `"enterprise_oauth"` | `"service_account"`
+    /// For BigQuery: `"service_account"` (default) | `"enterprise_oauth"` |
+    /// `"kyomi_oauth"` (retired, KYO-704 — only ever seen on a pre-KYO-704
+    /// row that still names it explicitly)
     pub auth_mode: Option<String>,
     /// True if the user needs to take action (missing or expired).
     pub needs_action: bool,

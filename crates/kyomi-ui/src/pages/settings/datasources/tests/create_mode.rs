@@ -602,11 +602,20 @@ fn every_registry_auth_mode_pair_has_a_create_next_route() {
     // enumeration), the "no unmapped pairs" assertion below would hold
     // trivially over an empty list and this test would report green
     // while checking nothing at all.
+    //
+    // KYO-704: was 17 pairs; BigQuery's `kyomi_oauth` was removed from
+    // `BIGQUERY_META.auth_modes` entirely (not just un-defaulted), so
+    // `all_metadata()` now enumerates 16. `expected_route_for` keeps its
+    // `("bigquery", "kyomi_oauth")` arm regardless — that pair simply
+    // never appears in `pairs` anymore, so `OAuthArmWritesTestResult`
+    // goes unused by this run rather than failing; the arm stays correct
+    // documentation of the still-present (if now unreachable-by-default)
+    // `GoogleSuccess` code path a pre-KYO-704 row can still exercise.
     assert!(
-        pairs.len() >= 17,
-        "sanity check: expected at least the 17 (type, mode) pairs known at the time \
-         this test was written, found {} — did all_metadata() change shape, or is the \
-         registry failing to enumerate?",
+        pairs.len() >= 16,
+        "sanity check: expected at least the 16 (type, mode) pairs known after KYO-704 \
+         retired BigQuery's kyomi_oauth auth mode, found {} — did all_metadata() change \
+         shape, or is the registry failing to enumerate?",
         pairs.len()
     );
 

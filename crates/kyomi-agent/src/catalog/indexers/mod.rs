@@ -13,9 +13,11 @@
 //!
 //! BigQuery uses a REST API for catalog indexing, not SQL. The
 //! [`BigQueryIndexer`] resolves an access token based on the configured
-//! `auth_mode` (kyomi_oauth, enterprise_oauth, or service_account) and
-//! delegates to `UserDatasetIndexer::index_workspace_catalog()` for the
-//! actual REST API work (list datasets → list tables → get schema → cache).
+//! `auth_mode` (`service_account` — the default since KYO-704 — or
+//! `enterprise_oauth`; `kyomi_oauth` is retired but still resolves for a
+//! pre-KYO-704 row that names it explicitly) and delegates to
+//! `UserDatasetIndexer::index_workspace_catalog()` for the actual REST API
+//! work (list datasets → list tables → get schema → cache).
 
 mod bigquery;
 mod clickhouse;
