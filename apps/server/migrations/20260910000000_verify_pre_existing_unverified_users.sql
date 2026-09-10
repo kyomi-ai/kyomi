@@ -1,0 +1,58 @@
+-- SPDX-License-Identifier: AGPL-3.0-or-later
+--
+-- KYO-683 phase 1 (database half): reconcile `users` rows left behind by
+-- the pre-fix signup flow.
+--
+-- Before this ticket, SaaS email signup wrote an unverified `users` row
+-- immediately, and only flipped `verified` to true once the address was
+-- confirmed. The other half of KYO-683 (already merged/staged separately)
+-- removes that: a `users` row is now created with `verified = true` only
+-- when the verification token is redeemed by a POST, so no new unverified
+-- row can be created going forward. This migration reconciles the rows the
+-- old flow already left behind.
+--
+-- An unverified row is permanently stranded under the new flow: it squats
+-- `users.email`'s UNIQUE index, so signing up again for that address can't
+-- take a clean path, and `recovery_start_service`
+-- (crates/kyomi-auth/src/auth_service.rs) refuses `/account/recover` for
+-- any `!verified` user, so the address can't self-heal that way either. On
+-- the dev database this was 19 of 24 rows; the production count has not
+-- been measured, and this migration is written so that it doesn't need to
+-- be.
+--
+-- The chosen fix is to force-verify every such row in place and delete
+-- nothing, which was picked over deleting the inert rows for three
+-- reasons:
+--
+-- 1. Force-verifying fully solves the stranding. `/account/recover` only
+--    requires the user to exist and be verified — a row with no
+--    credentials of its own is exactly the case recovery exists for. Once
+--    force-verified, the account becomes reachable again by whoever
+--    controls the mailbox (recovery still requires receiving mail at that
+--    address there), and by no one else, so no security property is
+--    weakened by this change.
+--
+-- 2. Deleting is not safely available. `users(user_id)` is referenced by
+--    28 declared foreign keys across 25 tables in this Postgres chain, and
+--    23 of those are declared `NO ACTION`, so a `DELETE FROM users` fails
+--    outright the moment any one of those 25 tables has a dependent row.
+--    Making deletion safe would additionally require proving every
+--    unverified row is inert across all 25 tables *and* every unenforced
+--    `_by` column that carries a user id with no `REFERENCES` behind it —
+--    e.g. `dashboards.updated_by` and `watch_executions.deleted_by` — where
+--    the schema and the compiler both stay silent if one is missed. See
+--    docs/standards/data-state-management/enumerate-every-referencing-table-before-an-irreversible-migration.md,
+--    mined from exactly that omission during this ticket's own review.
+--
+-- 3. This approach is count-independent, which is what makes the
+--    unmeasured production row count a non-blocker. An idempotent
+--    `UPDATE ... WHERE verified = false` is correct whether it touches
+--    zero rows or a hundred thousand; a delete-the-inert-rows variant would
+--    need a re-measured, re-verified production count before it could be
+--    trusted at all, which this migration doesn't need.
+--
+-- This is a data-only change: no column, index, or constraint is added,
+-- altered, or dropped, so it needs no entry in
+-- apps/server/schema-parity-allowlist.toml and does not affect
+-- crates/kyomi-core/tests/schema_parity.rs.
+UPDATE public.users SET verified = true, updated_at = now() WHERE verified = false;

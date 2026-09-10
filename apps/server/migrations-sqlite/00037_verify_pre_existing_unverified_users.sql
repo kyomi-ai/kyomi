@@ -1,0 +1,34 @@
+-- SPDX-License-Identifier: AGPL-3.0-or-later
+--
+-- See the Postgres counterpart
+-- (apps/server/migrations/20260910000000_verify_pre_existing_unverified_users.sql)
+-- for the full KYO-683 phase 1 background — this file repeats only the
+-- decision summary, since it applies identically to both dialects.
+--
+-- The pre-fix SaaS signup flow wrote an unverified `users` row before the
+-- address was confirmed; that flow has been removed elsewhere in this
+-- ticket, but the rows it already created are stranded: they squat
+-- `users.email`'s UNIQUE index (so re-signup can't take a clean path) and
+-- `recovery_start_service` refuses `/account/recover` for any `!verified`
+-- user (so recovery can't self-heal them either).
+--
+-- The fix is to force-verify every such row in place and delete nothing:
+--
+-- 1. Force-verifying fully solves the stranding — `/account/recover` only
+--    needs the user to exist and be verified, which is exactly the state a
+--    credential-less row needs to become reachable again by whoever
+--    controls the mailbox, and by no one else.
+-- 2. Deleting is not safely available: `users(user_id)` is referenced by
+--    26 declared foreign keys across 25 tables in this SQLite chain, plus
+--    unenforced `_by` columns with no `REFERENCES` at all (e.g.
+--    `dashboards.updated_by`, `watch_executions.deleted_by`) that nothing
+--    would catch an omission on. See
+--    docs/standards/data-state-management/enumerate-every-referencing-table-before-an-irreversible-migration.md.
+-- 3. An idempotent `UPDATE ... WHERE verified = 0` is correct at any row
+--    count, so the unmeasured production count doesn't gate it the way a
+--    delete-the-inert-rows variant would require re-measuring first.
+--
+-- Data-only: no column, index, or constraint changes, so this needs no
+-- apps/server/schema-parity-allowlist.toml entry and does not affect
+-- crates/kyomi-core/tests/schema_parity.rs.
+UPDATE users SET verified = 1, updated_at = datetime('now') WHERE verified = 0;

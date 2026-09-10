@@ -1,0 +1,9 @@
+# Enumerate every referencing table before an irreversible data migration
+
+A migration that deletes, reassigns, or nulls rows keyed to a retired identifier is only safe if you know every place that identifier is written. Declared foreign keys are the easy half: the database enforces them, so an omission surfaces as a constraint error rather than as silent corruption. The dangerous half is the **unenforced** references — `created_by`, `updated_by`, `deleted_by`, `installed_by`, `sent_by_user_id` columns that hold a user id with no `REFERENCES` clause behind them. Nothing in the schema, and no compiler, will tell you that you missed one.
+
+**Rule:** Before shipping an irreversible data migration, grep **every migration file in both dialects** — not just the baseline — for the referenced column shape (`user_id`, `%_by`, `%_user_id`), and enumerate the full set of referencing tables in the PR body. Then justify the chosen action against that list. If the list is large enough that "provably inert" cannot be demonstrated for every entry, that is evidence the destructive variant is the wrong design, not a gap to paper over: prefer the reversible action that needs no such proof.
+
+The tell is that the columns you miss are exactly the ones with no foreign key, because those are the ones nothing else in the system is checking on your behalf.
+
+Flagged on KYO-683 phase 1: a reconciliation migration for retired `users` rows was written against the declared foreign keys only, and omitted two live, unenforced `_by` columns. The omission was found only because the reviewer independently swept every migration file for every `_by`-shaped column rather than trusting the constraint list. Kyomi's `users(user_id)` has 28 declared foreign keys across 25 tables in Postgres, of which 23 are `NO ACTION` — so a `DELETE` fails the moment a row has any dependent, and the unenforced columns fail silently instead.

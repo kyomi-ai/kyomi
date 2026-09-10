@@ -64,28 +64,7 @@ pub async fn set_password(new_password: String) -> Result<String, ServerFnError>
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
 
-    // Validate password length
-    if new_password.len() < 8 {
-        return Err(ServerFnError::new(
-            "Password must be at least 8 characters",
-        ));
-    }
-
-    // Check user does NOT already have a password
-    let has_pw = kyomi_auth::user_service::has_password(&ctx.db, &auth.user_id)
-        .await
-        .into_sfn_core()?;
-    if has_pw {
-        return Err(ServerFnError::new(
-            "Password already set. Use change-password to update it.",
-        ));
-    }
-
-    // Hash and store
-    let hash = kyomi_auth::password::hash_password(&new_password)
-        .into_sfn_core()?;
-    let auth_data = serde_json::json!({"hash": hash});
-    kyomi_auth::user_service::upsert_auth_method(&ctx.db, &auth.user_id, "password", &auth_data)
+    kyomi_auth::security_service::set_password(&ctx.db, &auth.user_id, &new_password)
         .await
         .into_sfn_core()?;
 
