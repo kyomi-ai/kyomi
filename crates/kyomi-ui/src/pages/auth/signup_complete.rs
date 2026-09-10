@@ -32,9 +32,9 @@
 //! any authenticated user), `security::{start_passkey_registration,
 //! complete_passkey_registration}` (purpose `PASSKEY_ADD_DEVICE`, already
 //! generic), `profile::update_profile_name`, and the canonical
-//! `utils::webauthn::start_registration` browser bridge (the same one
-//! `login.rs`'s passkey sign-in and the recovery/passkey-signup completion
-//! pages use).
+//! `utils::webauthn::start_registration` browser bridge (the same
+//! registration bridge `passkey_recovery_complete.rs` uses for its own
+//! ceremony).
 
 use leptos::prelude::*;
 #[cfg(target_arch = "wasm32")]
@@ -122,8 +122,13 @@ pub fn SignupCompletePage() -> impl IntoView {
     }
 
     // ── Checkbox signals for the Checkbox component ──────────────────────
-    let terms_signal = Signal::derive(move || terms_accepted.get());
-    let marketing_signal = Signal::derive(move || marketing_consent.get());
+    // Page-owned derives: created in this page component body, so their own
+    // Owner is this page. Safe because their only reads are the `checked`
+    // props of the two `<Checkbox>` elements below, inside this same
+    // component's own view tree — a descendant scope of the same page
+    // Owner — so each derive and its reader are disposed together (KYO-548).
+    let terms_signal = Signal::derive(move || terms_accepted.get()); // lint-allow: disposal-safe=page-owned derive, only reader is the <Checkbox checked=...> prop in this page's own view tree (KYO-548)
+    let marketing_signal = Signal::derive(move || marketing_consent.get()); // lint-allow: disposal-safe=page-owned derive, only reader is the <Checkbox checked=...> prop in this page's own view tree (KYO-548)
     let on_terms_change = Callback::new(move |val: bool| set_terms_accepted.set(val));
     let on_marketing_change = Callback::new(move |val: bool| set_marketing_consent.set(val));
 
@@ -270,8 +275,9 @@ pub fn SignupCompletePage() -> impl IntoView {
                 Ok(()) => {
                     set_page_state.set(PageState::Completing);
                     // gloo_timers::future::TimeoutFuture is browser-only —
-                    // mirrors passkey_signup_complete.rs's identical
-                    // post-success branded pause before navigating.
+                    // a branded pause before navigating, same pattern used
+                    // elsewhere in this auth flow (e.g.
+                    // account_recovery_complete.rs's post-success transition).
                     #[cfg(target_arch = "wasm32")]
                     leptos::task::spawn_local(async move {
                         gloo_timers::future::TimeoutFuture::new(1200).await;
@@ -307,13 +313,21 @@ pub fn SignupCompletePage() -> impl IntoView {
     };
 
     // ── Reactive title & subtitle ────────────────────────────────────────
-    let title = Signal::derive(move || match page_state.get() {
+    // Page-owned derives: created in this page component body, so their own
+    // Owner is this page. Safe because their only reads are the `title=`/
+    // `subtitle=` props passed to `<AuthLayout>` below — `AuthLayout` is a
+    // plain child component invoked from this page's own `view!` call, not
+    // a persistent Layout-scoped wrapper (that role belongs only to the
+    // authenticated app shell's `<Layout>` in app.rs, which this auth page
+    // is not nested under), so its child scope is a descendant of this
+    // page's own Owner and disposes with it (KYO-548).
+    let title = Signal::derive(move || match page_state.get() { // lint-allow: disposal-safe=page-owned derive, only reader is <AuthLayout title=...>, a child scope of this page (KYO-548)
         PageState::Confirm => "Confirm Your Email".to_string(),
         PageState::CredentialSetup => "Secure Your Account".to_string(),
         PageState::Completing => "All Set".to_string(),
         PageState::Error { .. } => "Signup Link Invalid".to_string(),
     });
-    let subtitle = Signal::derive(move || match page_state.get() {
+    let subtitle = Signal::derive(move || match page_state.get() { // lint-allow: disposal-safe=page-owned derive, only reader is <AuthLayout subtitle=...>, a child scope of this page (KYO-548)
         PageState::Confirm => "Accept the terms to finish verifying your email.".to_string(),
         PageState::CredentialSetup => {
             "Add a passkey or password to finish setting up your account.".to_string()
@@ -463,11 +477,16 @@ pub fn SignupCompletePage() -> impl IntoView {
                                                 </p>
                                             }
                                         >
+                                            // Inline page-owned derive: created here, inside this
+                                            // page's own view!, with its only read being this
+                                            // same `disabled=` prop — reader and derive are the
+                                            // same expression, so they share this page's Owner
+                                            // and dispose together (KYO-548).
                                             <Button
                                                 variant=ButtonVariant::Default
                                                 size=ButtonSize::Default
                                                 on:click=on_add_passkey
-                                                disabled=Signal::derive(move || passkey_loading.get())
+                                                disabled=Signal::derive(move || passkey_loading.get()) // lint-allow: disposal-safe=inline page-owned derive, only reader is this same disabled= prop (KYO-548)
                                             >
                                                 <Icon icon=phosphor_leptos::KEY size="16px"/>
                                                 {move || if passkey_loading.get() { "Adding..." } else { "Add Passkey" }}
@@ -507,10 +526,14 @@ pub fn SignupCompletePage() -> impl IntoView {
                                                 prop:value=move || cred_confirm_password.get()
                                                 on:input=move |ev| set_cred_confirm_password.set(event_target_value(&ev))
                                             />
+                                            // Inline page-owned derive: same reasoning as the
+                                            // Add Passkey button's `disabled=` above — created
+                                            // and read in the same expression, both scoped to
+                                            // this page's own Owner (KYO-548).
                                             <Button
                                                 variant=ButtonVariant::Outline
                                                 on:click=on_set_password
-                                                disabled=Signal::derive(move || set_password_action.pending().get())
+                                                disabled=Signal::derive(move || set_password_action.pending().get()) // lint-allow: disposal-safe=inline page-owned derive, only reader is this same disabled= prop (KYO-548)
                                             >
                                                 {move || if set_password_action.pending().get() { "Setting..." } else { "Set Password" }}
                                             </Button>
@@ -550,13 +573,19 @@ pub fn SignupCompletePage() -> impl IntoView {
 /// server fn (KYO-683 Phase 1 — already generic over any authenticated
 /// user, purpose `PASSKEY_ADD_DEVICE`), drive `navigator.credentials.create()`
 /// through the canonical `utils::webauthn::start_registration` bridge — the
-/// same one `login.rs`'s passkey sign-in and the recovery/passkey-signup
-/// completion pages use, deliberately not a second hand-rolled WebAuthn
-/// ceremony — then verify via `complete_passkey_registration`. Device name
-/// is left for the server to auto-detect (empty string): this step already
-/// asks for a name and a password, so a third free-text field for a device
-/// label would add friction the "no skip, but no extra burden either"
-/// design deliberately avoids.
+/// same registration bridge `passkey_recovery_complete.rs` uses for its own
+/// ceremony (`login.rs`'s passkey sign-in is authentication, not
+/// registration, so it calls the sibling `start_authentication` bridge
+/// instead) — deliberately not a second hand-rolled WebAuthn ceremony —
+/// then verify via `complete_passkey_registration`. No device-name field is
+/// collected here (an empty string is sent): this step already asks for a
+/// name and a password, so a third free-text field for a device label would
+/// add friction the "no skip, but no extra burden either" design
+/// deliberately avoids. The empty string is not auto-detected into anything
+/// — `server_fns::security::start_passkey_registration` replaces a blank
+/// (or whitespace-only) name with the literal string `"Unknown Device"`
+/// before minting the challenge, same as every other caller of that server
+/// fn; this page has no code path that produces a more specific label.
 async fn add_passkey_flow() -> Result<(), String> {
     #[cfg(not(target_arch = "wasm32"))]
     {

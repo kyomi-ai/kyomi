@@ -359,12 +359,17 @@ mod submit_button_guard_tests {
         }
 
         // A floor, not an exact count: 11 `<form on:submit=` blocks existed
-        // under src/pages when this test was written. Hardcoding 11 would
-        // fail the next time anyone adds a form; 10 stays comfortably
-        // below that while still catching "the walk found nothing."
+        // under src/pages when this test was written, and the floor was set
+        // to 10 — comfortably below that while still catching "the walk
+        // found nothing." KYO-683 Phase 3 legitimately deleted one (the
+        // passkey-signup completion page's form, along with the rest of
+        // that now-superseded flow), dropping the real count to 9; the
+        // floor moves down with it, one below actual, same margin as
+        // before. Hardcoding the exact count would fail the next time
+        // anyone adds or removes a form for an unrelated reason.
         assert!(
-            checked_forms >= 10,
-            "expected to find at least 10 `<form on:submit=` blocks under src/pages, found \
+            checked_forms >= 8,
+            "expected to find at least 8 `<form on:submit=` blocks under src/pages, found \
              {checked_forms} — the directory walk or the `<form` scanner may be broken"
         );
     }

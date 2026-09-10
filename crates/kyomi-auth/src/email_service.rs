@@ -1026,8 +1026,9 @@ You're receiving this because someone signed up for Kyomi with this email addres
     /// email.
     ///
     /// This is the one channel allowed to say "you already have an
-    /// account": `signup_start_service` and `passkey_signup_start_service`
-    /// return the identical `VerificationRequired` result for a new email,
+    /// account": `signup_start_service` (and `resend_verification_service`,
+    /// which shares its decision via `send_signup_verification_email`)
+    /// returns the identical `VerificationRequired` result for a new email,
     /// an unverified email, and a verified email, to prevent email
     /// enumeration — but that constrains the HTTP response only. Only the
     /// mailbox owner can read this email, so it's safe to be specific here.

@@ -178,7 +178,6 @@ pub fn build_router(state: state::AppState, _extras: ServerExtras) -> Router {
         .route("/auth/google/callback", axum::routing::get(leptos_frontend::serve_leptos_shell))
         .route("/account/recover", axum::routing::get(leptos_frontend::serve_leptos_shell))
         .route("/account/recover/complete", axum::routing::get(leptos_frontend::serve_leptos_shell))
-        .route("/auth/passkey-signup", axum::routing::get(leptos_frontend::serve_leptos_shell))
         .route("/auth/recover-passkey", axum::routing::get(leptos_frontend::serve_leptos_shell))
         .route("/auth/recover-passkey/complete", axum::routing::get(leptos_frontend::serve_leptos_shell))
         // Billing portal return — public bounce page for SameSite=Strict cookie flow.

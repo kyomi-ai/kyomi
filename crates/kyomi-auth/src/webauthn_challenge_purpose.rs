@@ -27,10 +27,20 @@
 pub const PASSKEY_LOGIN: &str = "passkey_login";
 
 /// `purpose` for a passkey registration challenge minted as part of the
-/// email-verification-token-gated signup flow.
+/// (now-deleted) email-verification-token-gated passkey signup flow.
 ///
-/// Minted by `auth_service::passkey_signup_complete_service`.
-/// Consumed by `auth_service::passkey_register_complete_service`.
+/// No longer minted by anything: `auth_service::passkey_signup_complete_service`
+/// (the only mint site) and `auth_service::passkey_register_complete_service`
+/// (the only consumer, which required this exact purpose) were both deleted
+/// in KYO-683 Phase 3 once their entry point — the standalone "Sign up with
+/// Passkey" flow — was removed; passkeys are now registered post-signup via
+/// the authenticated add-device flow (`PASSKEY_ADD_DEVICE` below). The
+/// constant and value are kept, not reclaimed, purely as a defensive probe:
+/// tests for the still-live consumers (`passkey_login_complete_service`,
+/// `security_service::complete_passkey_registration`) assert they reject a
+/// challenge carrying this purpose, same as any other foreign one — see
+/// `login_complete_rejects_challenge_minted_for_signup` and
+/// `rejects_challenge_minted_for_signup`.
 pub const PASSKEY_SIGNUP: &str = "passkey_signup";
 
 /// `purpose` for a passkey registration challenge minted as part of the

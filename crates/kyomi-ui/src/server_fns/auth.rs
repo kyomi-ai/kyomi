@@ -7,7 +7,7 @@
 //! - `GET  /api/v1/auth/config`        -> `get_auth_config()`
 //! - `POST /api/v1/auth/login`         -> `login_with_password()`
 //! - `POST /auth/signup/start`         -> `signup_start()`
-//! - `POST /auth/signup/complete`      -> `signup_complete()`
+//! - `POST /auth/signup/verify`        -> `signup_verify()`
 //! - `POST /auth/google/callback`      -> `google_oauth_callback()`
 //! - `POST /auth/signup/resend`        -> `resend_verification()`
 //!
@@ -23,10 +23,10 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "ssr")]
 use super::{extract_context, IntoServerFnErrorCore};
 
-/// Generic "check your email" message shared by both signup-start flows
-/// (password and passkey). Deliberately identical regardless of whether the
-/// email is new, unverified, or already registered — see the enumeration-
-/// safety note on `signup_start_service` / `passkey_signup_start_service`.
+/// Generic "check your email" message for the signup-start flow.
+/// Deliberately identical regardless of whether the email is new,
+/// unverified, or already registered — see the enumeration-safety note on
+/// `signup_start_service`.
 #[cfg(feature = "ssr")]
 const SIGNUP_VERIFICATION_MESSAGE: &str =
     "If this email is not already registered, a verification link has been sent. Please check your inbox.";
@@ -94,27 +94,14 @@ pub enum SignupResult {
     RateLimited { retry_after_secs: u64 },
 }
 
-/// Result of completing signup (email verification token flow).
-///
-/// Cookies are set via `ResponseOptions` for the `Success` variant.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum SignupCompleteResult {
-    /// Account created and authenticated successfully.
-    Success { user_id: String },
-    /// Error during signup completion.
-    Error { message: String },
-}
-
 /// Result of confirming signup by redeeming the emailed verification token
-/// (KYO-683 Phase 2 — the plain-email SaaS path's counterpart to
-/// `SignupCompleteResult` above, which `signup_complete` still serves for
-/// callers Phase 3 hasn't swept yet).
+/// (KYO-683).
 ///
-/// Cookies are set via `ResponseOptions` for the `Success` variant. Unlike
-/// `signup_complete`, no name/password is collected here — the account is
-/// created bare (`verified = true`, no credentials) and the client
-/// transitions to a follow-up credential-setup step (passkey and/or
-/// password) once authenticated.
+/// Cookies are set via `ResponseOptions` for the `Success` variant. No
+/// name/password is collected here — the account is created bare
+/// (`verified = true`, no credentials) and the client transitions to a
+/// follow-up credential-setup step (passkey and/or password) once
+/// authenticated.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SignupVerifyResult {
     /// Account created/verified and authenticated.
@@ -128,10 +115,10 @@ pub enum SignupVerifyResult {
         name: String,
     },
     /// Error during signup verification — invalid/expired token, or terms
-    /// not accepted. Both surface as the same variant (unlike
-    /// `SignupCompleteResult`, which splits `InvalidToken` out at the
-    /// service layer) because the UI treats them identically: stay on the
-    /// confirm step and show the message inline.
+    /// not accepted. Both surface as the same variant, unlike
+    /// `SignupVerifyServiceResult` at the service layer (which splits
+    /// `InvalidToken` out), because the UI treats them identically: stay on
+    /// the confirm step and show the message inline.
     Error { message: String },
 }
 
@@ -394,66 +381,7 @@ pub async fn signup_start(
     }
 }
 
-/// Complete the signup flow after email verification.
-///
-/// Public endpoint — no authentication required.
-///
-/// Delegates all orchestration to `kyomi_auth::auth_service::signup_complete_service`.
-#[server(prefix = "/leptos-api")]
-pub async fn signup_complete(
-    token: String,
-    name: String,
-    password: String,
-    terms_accepted: bool,
-    marketing_consent: bool,
-) -> Result<SignupCompleteResult, ServerFnError> {
-    use kyomi_auth::auth_service::{signup_complete_service, SignupCompleteServiceResult};
-
-    let ctx = extract_context()?;
-    let headers: axum::http::HeaderMap = leptos_axum::extract()
-        .await
-        .map_err(|e| ServerFnError::new(format!("Failed to extract headers: {e}")))?;
-    let kv = ctx
-        .kv
-        .clone()
-        .ok_or_else(|| ServerFnError::new("KV store not available"))?;
-    let device = extract_device_info(&headers);
-
-    let result = signup_complete_service(kyomi_auth::auth_service::SignupCompleteParams {
-        db: &ctx.db,
-        kv: &kv,
-        jwt_secret: &ctx.config.jwt_secret,
-        token: &token,
-        name: &name,
-        password: &password,
-        terms_accepted,
-        marketing_consent,
-        device: &device,
-        config: Some(&ctx.config),
-    })
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "signup_complete_service error");
-        ServerFnError::new("Internal server error")
-    })?;
-
-    match result {
-        SignupCompleteServiceResult::Success(sess) => {
-            set_session_cookies(&sess);
-            Ok(SignupCompleteResult::Success {
-                user_id: sess.user.user_id,
-            })
-        }
-        SignupCompleteServiceResult::InvalidToken => Ok(SignupCompleteResult::Error {
-            message: "Invalid or expired signup link. Please request a new one.".to_string(),
-        }),
-        SignupCompleteServiceResult::Error { message } => {
-            Ok(SignupCompleteResult::Error { message })
-        }
-    }
-}
-
-/// Confirm signup by redeeming the emailed verification token (KYO-683 Phase 2).
+/// Confirm signup by redeeming the emailed verification token (KYO-683).
 ///
 /// Public endpoint — no authentication required, but must be called via POST
 /// (this is a Leptos `#[server]` RPC, never a GET) — a corporate mail
@@ -709,55 +637,6 @@ pub async fn resend_verification(email: String) -> Result<(), ServerFnError> {
 }
 
 // ---------------------------------------------------------------------------
-// Email Verification
-// ---------------------------------------------------------------------------
-
-/// Result of verifying an email address from a link in the verification email.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum VerifyEmailResult {
-    Success { email: String },
-    InvalidToken,
-    Error { message: String },
-}
-
-/// Verify an email address using the raw token from the verification link.
-///
-/// Public endpoint — no authentication required.
-///
-/// Checks the token against bcrypt hashes in `verification_tokens`, marks it
-/// used, and marks the user's email as verified via `mark_user_verified`.
-#[server(prefix = "/leptos-api")]
-pub async fn verify_email(token: String) -> Result<VerifyEmailResult, ServerFnError> {
-    let ctx = extract_context()?;
-
-    let email = kyomi_auth::token_service::verify_verification_token(
-        &ctx.db,
-        &token,
-        "email_verification",
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "verify_verification_token error");
-        // user_message() (KYO-448) — Display would leak the variant tag.
-        ServerFnError::new(e.user_message())
-    })?;
-
-    let Some(email) = email else {
-        return Ok(VerifyEmailResult::InvalidToken);
-    };
-
-    kyomi_auth::user_service::mark_user_verified(&ctx.db, &email)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "mark_user_verified error");
-            // user_message() (KYO-448) — Display would leak the variant tag.
-            ServerFnError::new(e.user_message())
-        })?;
-
-    Ok(VerifyEmailResult::Success { email })
-}
-
-// ---------------------------------------------------------------------------
 // Account Recovery
 // ---------------------------------------------------------------------------
 
@@ -1005,17 +884,6 @@ pub struct PasskeyLoginStartResult {
     pub request_challenge: String,
 }
 
-/// Result of starting a passkey registration challenge.
-///
-/// Contains the challenge_id (to correlate start/complete) and the serialized
-/// `PublicKeyCredentialCreationOptions` for the browser.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PasskeyRegisterStartResult {
-    pub challenge_id: String,
-    /// JSON string of PublicKeyCredentialCreationOptions for `navigator.credentials.create()`.
-    pub creation_challenge: String,
-}
-
 /// Start passkey login — generate a WebAuthn assertion challenge.
 ///
 /// Public endpoint — no authentication required.
@@ -1138,58 +1006,6 @@ pub async fn passkey_login_complete(
     }
 }
 
-/// Complete passkey *signup* — verify the browser credential and store it.
-///
-/// Public endpoint — no authentication required.
-///
-/// Signup only (KYO-284) — `passkey_register_complete_service` rejects a
-/// recovery-purpose challenge. Recovery completion uses the dedicated
-/// `passkey_recovery_complete` server fn below, which additionally
-/// requires the `recovery_session` cookie.
-///
-/// Delegates all orchestration to `kyomi_auth::auth_service::passkey_register_complete_service`.
-#[server(prefix = "/leptos-api")]
-pub async fn passkey_register_complete(
-    challenge_id: String,
-    credential_json: String,
-) -> Result<LoginResult, ServerFnError> {
-    let ctx = extract_context()?;
-    let webauthn = ctx
-        .webauthn
-        .as_ref()
-        .ok_or_else(|| ServerFnError::new("WebAuthn not configured"))?;
-    let kv = ctx
-        .kv
-        .clone()
-        .ok_or_else(|| ServerFnError::new("KV store not available"))?;
-    let headers: axum::http::HeaderMap = leptos_axum::extract()
-        .await
-        .map_err(|e| ServerFnError::new(format!("Failed to extract headers: {e}")))?;
-    let device = extract_device_info(&headers);
-
-    let sess = kyomi_auth::auth_service::passkey_register_complete_service(
-        &ctx.db,
-        &kv,
-        &ctx.config.jwt_secret,
-        webauthn,
-        &challenge_id,
-        &credential_json,
-        &device,
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "passkey_register_complete_service error");
-        ServerFnError::new("Internal server error")
-    })?;
-
-    set_session_cookies(&sess);
-    Ok(LoginResult::Success {
-        user_id: sess.user.user_id,
-        email: sess.user.email,
-        name: sess.user.name.unwrap_or_default(),
-    })
-}
-
 /// Result of verifying a passkey recovery token.
 ///
 /// On success, returns the WebAuthn challenge for creating a new passkey,
@@ -1205,150 +1021,6 @@ pub enum PasskeyRecoveryVerifyResult {
     Error {
         message: String,
     },
-}
-
-/// Result of starting the passkey signup flow.
-///
-/// Mirrors `SignupResult`, with one structural difference: passkey signup
-/// always needs a second step (the WebAuthn ceremony on
-/// `/auth/passkey-signup`), so the self-hosted SMTP-less case can't set
-/// session cookies and redirect home the way `SignupResult::AccountCreated`
-/// does for password signup. `TokenIssued` hands the raw token back instead,
-/// so the client can navigate to `/auth/passkey-signup?token=...` to
-/// complete the ceremony.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum PasskeySignupStartResult {
-    /// SaaS / SMTP-configured flow: verification email sent — or, for an
-    /// already-verified account, deliberately not sent (see
-    /// `passkey_signup_start_service`'s enumeration-safety note). Identical
-    /// across all three account states.
-    VerificationRequired { message: String },
-    /// Self-hosted SMTP-less flow: no email was sent. The client should
-    /// navigate to `/auth/passkey-signup?token={token}` to complete the
-    /// WebAuthn ceremony.
-    TokenIssued { token: String },
-    /// Error during signup (e.g. registration closed).
-    Error { message: String },
-    /// Rate limited.
-    RateLimited { retry_after_secs: u64 },
-}
-
-/// Start the passkey signup flow.
-///
-/// Public endpoint — no authentication required. Mints a `"signup"`
-/// verification token (the REST route `POST /api/v1/auth/passkeys/register/start`
-/// did the same before it was deleted in KYO-286 — nothing in the Leptos UI
-/// ever called it) and either emails a link to `/auth/passkey-signup` or, in
-/// the self-hosted SMTP-less case, returns the raw token directly.
-///
-/// Delegates all orchestration to
-/// `kyomi_auth::auth_service::passkey_signup_start_service`.
-#[server(prefix = "/leptos-api")]
-pub async fn passkey_signup_start(
-    email: String,
-    name: Option<String>,
-) -> Result<PasskeySignupStartResult, ServerFnError> {
-    use kyomi_auth::auth_service::{passkey_signup_start_service, PasskeySignupStartServiceResult};
-
-    let ctx = extract_context()?;
-    let headers: axum::http::HeaderMap = leptos_axum::extract()
-        .await
-        .map_err(|e| ServerFnError::new(format!("Failed to extract headers: {e}")))?;
-    let kv = ctx
-        .kv
-        .clone()
-        .ok_or_else(|| ServerFnError::new("KV store not available"))?;
-
-    let email = email.to_lowercase();
-    let email = email.trim();
-    let ip = extract_client_ip(&headers);
-    let name = name.as_deref().map(str::trim).filter(|n| !n.is_empty());
-
-    let result =
-        passkey_signup_start_service(kyomi_auth::auth_service::PasskeySignupStartParams {
-            db: &ctx.db,
-            kv: &kv,
-            email,
-            name,
-            ip: &ip,
-            self_hosted: ctx.config.self_hosted,
-            smtp_configured: ctx.config.smtp_configured(),
-            frontend_url: &ctx.config.frontend_url,
-            slack_feedback_webhook_url: ctx.config.slack_feedback_webhook_url.as_deref(),
-            support_email: &ctx.config.support_email,
-        })
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "passkey_signup_start_service error");
-            ServerFnError::new("Internal server error")
-        })?;
-
-    match result {
-        PasskeySignupStartServiceResult::TokenIssued { token } => {
-            Ok(PasskeySignupStartResult::TokenIssued { token })
-        }
-        PasskeySignupStartServiceResult::VerificationRequired => {
-            Ok(PasskeySignupStartResult::VerificationRequired {
-                message: SIGNUP_VERIFICATION_MESSAGE.to_string(),
-            })
-        }
-        PasskeySignupStartServiceResult::RateLimited { retry_after_secs } => {
-            Ok(PasskeySignupStartResult::RateLimited { retry_after_secs })
-        }
-        PasskeySignupStartServiceResult::Error { message } => {
-            Ok(PasskeySignupStartResult::Error { message })
-        }
-    }
-}
-
-/// Verify a passkey signup token and generate a WebAuthn registration challenge.
-///
-/// Public endpoint — no authentication required.
-/// Mirrors `POST /auth/passkeys/signup/complete` from the React backend.
-///
-/// Delegates all orchestration to `kyomi_auth::auth_service::passkey_signup_complete_service`.
-#[server(prefix = "/leptos-api")]
-pub async fn passkey_signup_complete(
-    token: String,
-    name: String,
-    terms_accepted: bool,
-    marketing_consent: bool,
-) -> Result<PasskeyRegisterStartResult, ServerFnError> {
-    let ctx = extract_context()?;
-    let webauthn = ctx
-        .webauthn
-        .as_ref()
-        .ok_or_else(|| ServerFnError::new("WebAuthn not configured"))?;
-    let kv = ctx
-        .kv
-        .clone()
-        .ok_or_else(|| ServerFnError::new("KV store not available"))?;
-
-    let result = kyomi_auth::auth_service::passkey_signup_complete_service(
-        kyomi_auth::auth_service::PasskeySignupCompleteParams {
-            db: &ctx.db,
-            kv: &kv,
-            webauthn,
-            token: &token,
-            name: &name,
-            terms_accepted,
-            marketing_consent,
-            config: Some(&ctx.config),
-        },
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "passkey_signup_complete_service error");
-        ServerFnError::new("Internal server error")
-    })?;
-
-    match result {
-        Ok((challenge_id, creation_challenge)) => Ok(PasskeyRegisterStartResult {
-            challenge_id,
-            creation_challenge,
-        }),
-        Err(message) => Err(ServerFnError::new(message)),
-    }
 }
 
 /// Verify a passkey recovery token and generate a WebAuthn registration challenge.

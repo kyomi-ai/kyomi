@@ -7,13 +7,13 @@ A green test proves nothing on its own. It may assert a condition that holds eit
 ```bash
 # 1. Break the exact line the assertion depends on
 $ # edit auth_service.rs: "signup" -> "email_verification" (the pre-fix value)
-$ cargo test -p kyomi-auth --locked --lib passkey_signup_verify_only_accepts_its_own_token_type
+$ cargo test -p kyomi-auth --locked --lib signup_verify_only_accepts_its_own_token_type
 #   → MUST fail, with the cross-flow acceptance the ticket describes
 
 # 2. Restore and prove no drift from your own testing
 $ cp .backup/auth_service.rs crates/kyomi-auth/src/auth_service.rs
 $ git diff --cached --stat        # identical to before the mutation
-$ cargo test -p kyomi-auth --locked --lib passkey_signup_verify_only_accepts_its_own_token_type
+$ cargo test -p kyomi-auth --locked --lib signup_verify_only_accepts_its_own_token_type
 ```
 
 Applied in almost every review in the 2026-08-01 → 2026-08-07 window, and load-bearing in several: KYO-256 mutated both auto-heal branches to echo the bogus session id back, and confirmed each `assert_ne!` duly failed with `Some(x)` on both sides rather than passing vacuously; KYO-263 mutated both guard conditions to show the fail-closed branch was covered by a real assertion rather than only by prose; KYO-222 cycle 2 re-ran the implementer's `#[serde(rename)]` mutation rather than trusting the claim; KYO-281 and KYO-282 each reverted the shipped fix to reproduce the exact panic; KYO-259 broke a matrix expression to prove `actionlint` catches it. Each of those reviews also re-confirmed the staged diff byte-for-byte after restoring.
