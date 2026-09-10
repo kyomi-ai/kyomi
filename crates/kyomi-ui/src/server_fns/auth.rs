@@ -8,6 +8,7 @@
 //! - `POST /api/v1/auth/login`         -> `login_with_password()`
 //! - `POST /auth/signup/start`         -> `signup_start()`
 //! - `POST /auth/signup/complete`      -> `signup_complete()`
+//! - `POST /auth/signup/verify`        -> `signup_verify()`
 //! - `POST /auth/google/callback`      -> `google_oauth_callback()`
 //! - `POST /auth/signup/resend`        -> `resend_verification()`
 //!
@@ -86,6 +87,20 @@ pub enum SignupResult {
     Error { message: String },
     /// Rate limited.
     RateLimited { retry_after_secs: u64 },
+}
+
+/// Result of redeeming a signup verification token by POST (KYO-683 phase 1).
+///
+/// Cookies are set via `ResponseOptions` for the `Success` variant. Mirrors
+/// `SignupVerifyServiceResult` the way `SignupCompleteResult` mirrors
+/// `SignupCompleteServiceResult` — `InvalidToken` is folded into `Error`
+/// rather than getting its own variant, same as that sibling.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum SignupVerifyResult {
+    /// Account established and authenticated successfully.
+    Success { user_id: String },
+    /// Error during token redemption (validation failure or invalid/expired token).
+    Error { message: String },
 }
 
 /// Result of completing signup (email verification token flow).
@@ -330,8 +345,6 @@ pub async fn signup_start(
         self_hosted: ctx.config.self_hosted,
         smtp_configured: ctx.config.smtp_configured(),
         frontend_url: &ctx.config.frontend_url,
-        slack_feedback_webhook_url: ctx.config.slack_feedback_webhook_url.as_deref(),
-        support_email: &ctx.config.support_email,
         config: Some(&ctx.config),
     })
     .await
@@ -393,6 +406,8 @@ pub async fn signup_complete(
         marketing_consent,
         device: &device,
         config: Some(&ctx.config),
+        slack_feedback_webhook_url: ctx.config.slack_feedback_webhook_url.as_deref(),
+        support_email: &ctx.config.support_email,
     })
     .await
     .map_err(|e| {
@@ -412,6 +427,72 @@ pub async fn signup_complete(
         }),
         SignupCompleteServiceResult::Error { message } => {
             Ok(SignupCompleteResult::Error { message })
+        }
+    }
+}
+
+/// Redeem an `"email_verification"` token by POST, establishing the account
+/// (KYO-683 phase 1).
+///
+/// Public endpoint — no authentication required.
+///
+/// This is phase 1's POST-not-GET redemption contract: Leptos `#[server]`
+/// functions are POST-only by construction (no GET encoding is configured
+/// here), so a mail scanner's automated GET-prefetch of the emailed
+/// verification link can never reach this handler, consume the token, or
+/// create the account. KYO-728 will wire the "Confirm" button that calls it.
+///
+/// Delegates all orchestration to `kyomi_auth::auth_service::signup_verify_service`.
+#[server(prefix = "/leptos-api")]
+pub async fn signup_verify(
+    token: String,
+    name: Option<String>,
+    terms_accepted: bool,
+    marketing_consent: bool,
+) -> Result<SignupVerifyResult, ServerFnError> {
+    use kyomi_auth::auth_service::{signup_verify_service, SignupVerifyServiceResult};
+
+    let ctx = extract_context()?;
+    let headers: axum::http::HeaderMap = leptos_axum::extract()
+        .await
+        .map_err(|e| ServerFnError::new(format!("Failed to extract headers: {e}")))?;
+    let kv = ctx
+        .kv
+        .clone()
+        .ok_or_else(|| ServerFnError::new("KV store not available"))?;
+    let device = extract_device_info(&headers);
+
+    let result = signup_verify_service(kyomi_auth::auth_service::SignupVerifyParams {
+        db: &ctx.db,
+        kv: &kv,
+        jwt_secret: &ctx.config.jwt_secret,
+        token: &token,
+        name: name.as_deref(),
+        terms_accepted,
+        marketing_consent,
+        device: &device,
+        config: Some(&ctx.config),
+        slack_feedback_webhook_url: ctx.config.slack_feedback_webhook_url.as_deref(),
+        support_email: &ctx.config.support_email,
+    })
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "signup_verify_service error");
+        ServerFnError::new("Internal server error")
+    })?;
+
+    match result {
+        SignupVerifyServiceResult::Success(sess) => {
+            set_session_cookies(&sess);
+            Ok(SignupVerifyResult::Success {
+                user_id: sess.user.user_id,
+            })
+        }
+        SignupVerifyServiceResult::InvalidToken => Ok(SignupVerifyResult::Error {
+            message: "Invalid or expired signup link. Please request a new one.".to_string(),
+        }),
+        SignupVerifyServiceResult::Error { message } => {
+            Ok(SignupVerifyResult::Error { message })
         }
     }
 }
@@ -589,33 +670,15 @@ pub async fn resend_verification(email: String) -> Result<(), ServerFnError> {
     let email = email.to_lowercase().trim().to_string();
     let ip = extract_client_ip(&headers);
 
-    let result = kyomi_auth::auth_service::resend_verification_service(
-        &ctx.db, &kv, &ip, &email,
+    kyomi_auth::auth_service::resend_verification_service(
+        &ctx.db,
+        &kv,
+        &ctx.config.frontend_url,
+        &ip,
+        &email,
     )
     .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "resend_verification_service error");
-        ServerFnError::new("Internal server error")
-    })?;
-
-    if let Some(r) = result {
-        let verification_url = format!(
-            "{}/verify-email?token={}",
-            ctx.config.frontend_url.trim_end_matches('/'),
-            r.raw_token
-        );
-        tokio::spawn(async move {
-            let email_svc = kyomi_auth::email_service::EmailService::from_env();
-            let sent = email_svc
-                .send_verification_email(&email, &r.user_name, &verification_url)
-                .await;
-            if sent {
-                tracing::info!("Verification email sent to {email}");
-            } else {
-                tracing::warn!("Failed to send verification email to {email}");
-            }
-        });
-    }
+    .into_sfn_core()?;
 
     Ok(())
 }
@@ -1186,8 +1249,6 @@ pub async fn passkey_signup_start(
             self_hosted: ctx.config.self_hosted,
             smtp_configured: ctx.config.smtp_configured(),
             frontend_url: &ctx.config.frontend_url,
-            slack_feedback_webhook_url: ctx.config.slack_feedback_webhook_url.as_deref(),
-            support_email: &ctx.config.support_email,
         })
         .await
         .map_err(|e| {
@@ -1246,6 +1307,8 @@ pub async fn passkey_signup_complete(
             terms_accepted,
             marketing_consent,
             config: Some(&ctx.config),
+            slack_feedback_webhook_url: ctx.config.slack_feedback_webhook_url.as_deref(),
+            support_email: &ctx.config.support_email,
         },
     )
     .await
