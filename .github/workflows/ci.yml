@@ -653,37 +653,61 @@ jobs:
   # 2026-09 27-run silent outage this ticket exists to make loud) cannot
   # slip past `tee`'s always-zero exit status again. Not a ticket-lifecycle
   # gate either; rides here for the same fast / hermetic / no-toolchain
-  # reasons as the three suites just named.
+  # reasons as the three suites just named. scripts/sign-review-test.sh
+  # (KYO-712) is different in kind again: it is the self-test for
+  # scripts/sign-review.sh, the code-review approval signer — a
+  # review-integrity concern, not a ticket-lifecycle gate. It rides here
+  # for the same fast / hermetic / no-toolchain reasons as the others in
+  # this paragraph. scripts/pre-commit-hook-test.sh (KYO-712 Part E) is
+  # sign-review-test.sh's own sibling and closes a gap that suite's SCOPE
+  # comment disclosed from the day it shipped: it never exercised
+  # .githooks/pre-commit's Check 2 / Check 2b narrowed-index blocking or
+  # Check 3's signature verification, only scripts/sign-review.sh
+  # directly. That exact gap is where this ticket's own two 🔴 review
+  # findings lived (the unstaged/untracked scan only running when nothing
+  # matching its pattern was staged, and a forgeable plain-text
+  # ALLOW-UNSTAGED acknowledgement), undetected by any suite in this job
+  # until a code review caught them by hand. This suite installs a copy of
+  # the real hook (production Ed25519 public key swapped for a throwaway
+  # one generated fresh per run) via `core.hooksPath` in a throwaway repo,
+  # stubs the three lint scripts the hook shells out to, and drives it
+  # through real `git commit` invocations — the same review-integrity
+  # concern as sign-review-test.sh, one layer down.
   #
-  # Each suite carries its own self-test assertions (592
-  # total, RECOUNTED LIVE on 2026-09-11 by actually running all eleven
-  # suites — including check-agent-run-result-test.sh, added that day — and
-  # summing their own "Results: N passed" lines (check-real-identifiers-test.sh's
-  # own summary line reads "N checks, N failed" instead, counted the same
-  # way): check-ticket-in-flight-test.sh 119 + mark-worktree-stranded-test.sh 32
-  # + mark-branch-stranded-test.sh 78 + append-review-log-test.sh 11 +
+  # Each suite carries its own self-test assertions (652
+  # total, RECOUNTED LIVE on 2026-09-11 (KYO-712 rework) by actually
+  # running all thirteen suites and summing their own "Results: N passed"
+  # lines (check-real-identifiers-test.sh's own summary line reads "N
+  # checks, N failed" instead, counted the same way):
+  # check-ticket-in-flight-test.sh 119 + mark-worktree-stranded-test.sh 32 +
+  # mark-branch-stranded-test.sh 78 + append-review-log-test.sh 11 +
   # audit-agent-run-deaths-test.sh 43 + reconcile-merged-tickets-test.sh 99 +
   # preflight-clippy-test.sh 43 + stale-tooling-guard-test.sh 35 +
-  # check-real-identifiers-test.sh 41 + repro-headless-subagent-survival-test.sh 20
-  # + check-agent-run-result-test.sh 71 = 592 — the previous figure this
-  # comment carried (501, dated 2026-09-05) was itself already stale the day
-  # it was written: it summed only nine of the ten suites the array actually
-  # ran at the time, silently missing repro-headless-subagent-survival-test.sh's
-  # 20 (that suite's own tools/hermeticity are described further below in
-  # this same comment block, so it was not forgotten, just left out of the
-  # sum) — a second, independent instance of the exact KYO-609 drift this
-  # tally already carries a standing warning about, not a one-off. The true count
-  # for those original nine suites at recount time was therefore 521, not
-  # 501; this recount corrects both that miss and adds the new suite in the
-  # same pass, rather than compounding the error forward. As before, this
-  # was a live recount, as was the 460 before it, the 425 before that, the
-  # 382 before that, the 287 before that, and all of them ultimately
-  # corrections of a stale 197 that undercounted the then-five suites by
-  # 86 assertions. Note per KYO-609 this tally is still hand-maintained and
-  # will re-rot on the next suite change (as it just did, twice over — once
-  # by omission, once by simple staleness); that is a known,
-  # separately-filed gap, not something this recount or this job fixes —
-  # the recount only makes today's number true, it does not make
+  # check-real-identifiers-test.sh 41 +
+  # repro-headless-subagent-survival-test.sh 20 +
+  # check-agent-run-result-test.sh 71 + sign-review-test.sh 37 +
+  # pre-commit-hook-test.sh 23
+  # = 652. This recount folds in every suite the array below runs,
+  # including repro-headless-subagent-survival-test.sh — every recount
+  # before this one had either included it (origin/main's most recent,
+  # 592) or explicitly disclosed omitting it (this branch's most recent,
+  # 561); that disclosure no longer applies, it is included below like
+  # every other suite. The two figures this comment carried immediately
+  # before this recount — 592 (origin/main, dated 2026-09-11, eleven
+  # suites) and 561 (this branch, dated 2026-09-11, ten suites plus the
+  # two KYO-712 additions) — were each independent live recounts of
+  # partially-overlapping suite sets that diverged after a shared 501/521
+  # base (KYO-712's own chain read 526, then 536, then 561 from that base;
+  # KYO-710's chain read 521 corrected, then 592); this recount is the
+  # first to run all thirteen suites the merged array now contains in one
+  # pass, superseding both. As before, this was a live recount, as was the
+  # 460 before the shared base, the 425 before that, the 382 before that,
+  # the 287 before that, and all of them ultimately corrections of a stale
+  # 197 that undercounted the then-five suites by 86 assertions. Note per
+  # KYO-609 this tally is still hand-maintained and will re-rot on the
+  # next suite change; that is a known, separately-filed gap, not
+  # something this recount or this job fixes — the recount only makes
+  # today's number true, it does not make
   # tomorrow's number self-maintaining), but until this job existed none of
   # the original scripts ran anywhere except when a human or agent remembered
   # to invoke it by hand — a load-bearing check that never runs in CI is a
@@ -726,7 +750,18 @@ jobs:
   # bin directory of symlinks to the real python3/git/coreutils and points
   # PATH at ONLY that directory, so it can prove `notify-send` is genuinely
   # absent (not just unlikely to be found) without touching the runner's
-  # real PATH for every other test in the file.
+  # real PATH for every other test in the file. sign-review-test.sh and
+  # pre-commit-hook-test.sh both need `openssl` (already on ubuntu-latest,
+  # no extra install step): sign-review-test.sh to generate a throwaway
+  # Ed25519 keypair and verify the signatures scripts/sign-review.sh
+  # produces, pre-commit-hook-test.sh to generate its own throwaway
+  # keypair (substituted into the copied hook in place of the production
+  # public key) and to call the real scripts/sign-review.sh with it. No
+  # other suite in this job needs it. pre-commit-hook-test.sh also reads
+  # origin/main:scripts/sign-review.sh (Test 6, the backward-compatibility
+  # case) via `git show`, not `git fetch`, riding the same fetch-depth: 0
+  # checkout below that stale-tooling-guard-test.sh's guard already needs
+  # a populated `origin/main` for.
   #
   # Deliberately no `paths:` filter, unlike the ticket's original wording of
   # "on push/PR touching scripts/**" — two reasons:
@@ -762,6 +797,11 @@ jobs:
       # not silent, but the check the guard exists to perform would never
       # actually run in CI. fetch-depth: 0 fetches every branch, which is
       # what gives the guard a real origin/main to compare against here.
+      # scripts/pre-commit-hook-test.sh (KYO-712 Part E) rides the same
+      # fetch: its Test 6 reads origin/main:scripts/sign-review.sh (also
+      # via `git show`, never `git fetch`) to prove a 2-line approval
+      # written by the pre-KYO-712 signer still verifies under the fixed
+      # hook — that ref would be just as absent without this.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -780,6 +820,8 @@ jobs:
             scripts/lint/check-real-identifiers-test.sh
             scripts/repro-headless-subagent-survival-test.sh
             scripts/check-agent-run-result-test.sh
+            scripts/sign-review-test.sh
+            scripts/pre-commit-hook-test.sh
           )
           failed=()
           for suite in "${suites[@]}"; do
