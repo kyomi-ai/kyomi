@@ -612,7 +612,7 @@ jobs:
         run: sccache --show-stats || true
 
   # ---------------------------------------------------------------------------
-  # Worktree lifecycle & script self-tests (KYO-578, KYO-617, KYO-629, KYO-632, KYO-662)
+  # Worktree lifecycle & script self-tests (KYO-578, KYO-617, KYO-629, KYO-632, KYO-662, KYO-710)
   #
   # scripts/check-ticket-in-flight.sh, scripts/mark-worktree-stranded.sh,
   # scripts/mark-branch-stranded.sh, scripts/append-review-log.sh,
@@ -644,25 +644,46 @@ jobs:
   # / no-toolchain reasons as preflight-clippy-test.sh and
   # stale-tooling-guard-test.sh before it — this job has hosted more than
   # worktree-lifecycle scripts for a while now, see the two paragraphs just
-  # above.
+  # above. scripts/check-agent-run-result-test.sh (KYO-710) is different in
+  # kind for the same reason again: it is the self-test for
+  # scripts/check-agent-run-result.sh, the per-run success/failure gate the
+  # three kyomi-*-cron.sh wrappers (outside this repo, under
+  # ~/.local/bin/) now call after every `claude -p` invocation, so a
+  # success-shaped failure (is_error:true with subtype:"success" — the
+  # 2026-09 27-run silent outage this ticket exists to make loud) cannot
+  # slip past `tee`'s always-zero exit status again. Not a ticket-lifecycle
+  # gate either; rides here for the same fast / hermetic / no-toolchain
+  # reasons as the three suites just named.
   #
-  # Each suite carries its own self-test assertions (501
-  # total, RECOUNTED LIVE on 2026-09-05 by actually running all nine
-  # suites — including check-real-identifiers-test.sh, added that day — and
+  # Each suite carries its own self-test assertions (592
+  # total, RECOUNTED LIVE on 2026-09-11 by actually running all eleven
+  # suites — including check-agent-run-result-test.sh, added that day — and
   # summing their own "Results: N passed" lines (check-real-identifiers-test.sh's
   # own summary line reads "N checks, N failed" instead, counted the same
   # way): check-ticket-in-flight-test.sh 119 + mark-worktree-stranded-test.sh 32
   # + mark-branch-stranded-test.sh 78 + append-review-log-test.sh 11 +
   # audit-agent-run-deaths-test.sh 43 + reconcile-merged-tickets-test.sh 99 +
   # preflight-clippy-test.sh 43 + stale-tooling-guard-test.sh 35 +
-  # check-real-identifiers-test.sh 41 = 501 — the figure this comment carried
-  # immediately before this recount (460, dated 2026-09-03) was itself a live
-  # recount, as was the 425 before it, the 382 before that, the 287 before
-  # that, and all of them ultimately corrections of a stale 197 that
-  # undercounted the then-five suites by 86 assertions. Note per KYO-609 this
-  # tally is still hand-maintained and will re-rot on the next suite change;
-  # that is a known, separately-filed gap, not something this recount or this
-  # job fixes — the recount only makes today's number true, it does not make
+  # check-real-identifiers-test.sh 41 + repro-headless-subagent-survival-test.sh 20
+  # + check-agent-run-result-test.sh 71 = 592 — the previous figure this
+  # comment carried (501, dated 2026-09-05) was itself already stale the day
+  # it was written: it summed only nine of the ten suites the array actually
+  # ran at the time, silently missing repro-headless-subagent-survival-test.sh's
+  # 20 (that suite's own tools/hermeticity are described further below in
+  # this same comment block, so it was not forgotten, just left out of the
+  # sum) — a second, independent instance of the exact KYO-609 drift this
+  # tally already carries a standing warning about, not a one-off. The true count
+  # for those original nine suites at recount time was therefore 521, not
+  # 501; this recount corrects both that miss and adds the new suite in the
+  # same pass, rather than compounding the error forward. As before, this
+  # was a live recount, as was the 460 before it, the 425 before that, the
+  # 382 before that, the 287 before that, and all of them ultimately
+  # corrections of a stale 197 that undercounted the then-five suites by
+  # 86 assertions. Note per KYO-609 this tally is still hand-maintained and
+  # will re-rot on the next suite change (as it just did, twice over — once
+  # by omission, once by simple staleness); that is a known,
+  # separately-filed gap, not something this recount or this job fixes —
+  # the recount only makes today's number true, it does not make
   # tomorrow's number self-maintaining), but until this job existed none of
   # the original scripts ran anywhere except when a human or agent remembered
   # to invoke it by hand — a load-bearing check that never runs in CI is a
@@ -680,10 +701,16 @@ jobs:
   # container, $HOME, or ~/.claude — only bash, git, and python3 (for JSON
   # encoding in audit-agent-run-deaths-test.sh and
   # reconcile-merged-tickets-test.sh, for reconcile-merged-tickets.sh's own
-  # embedded PR-body parser, and for repro-headless-subagent-survival.sh's
-  # own JSON parsing of the stream-json fixtures that
-  # repro-headless-subagent-survival-test.sh feeds it via --from-file;
-  # python3 is already on ubuntu-latest).
+  # embedded PR-body parser, for repro-headless-subagent-survival.sh's own
+  # JSON parsing of the stream-json fixtures that
+  # repro-headless-subagent-survival-test.sh feeds it via --from-file, and
+  # for check-agent-run-result-test.sh's fixture encoding plus
+  # check-agent-run-result.sh's own embedded stream-json parser, which reads
+  # its `--log` file exactly the way audit-agent-run-deaths.sh reads its
+  # reconstructed journal stream — no `--state-dir` ever points outside
+  # this suite's own mktemp -d, so it never touches
+  # ${XDG_STATE_HOME:-$HOME/.local/state}/kyomi/ for real; python3 is
+  # already on ubuntu-latest).
   # audit-agent-run-deaths-test.sh's one test that uses the real journalctl
   # skips itself if journalctl is not on PATH. preflight-clippy-test.sh
   # needs neither `gh` nor python3: it stubs `cargo` and `rustup` on PATH
@@ -694,6 +721,12 @@ jobs:
   # perl with core Digest::SHA (already on ubuntu-latest, no extra install
   # step) to compute the salted SHA-256 hash for its throwaway denylist
   # fixture — no other suite in this job needs perl.
+  # check-agent-run-result-test.sh needs no `gh` stub either, but has its
+  # own PATH-stubbing case for a different tool: one test builds a minimal
+  # bin directory of symlinks to the real python3/git/coreutils and points
+  # PATH at ONLY that directory, so it can prove `notify-send` is genuinely
+  # absent (not just unlikely to be found) without touching the runner's
+  # real PATH for every other test in the file.
   #
   # Deliberately no `paths:` filter, unlike the ticket's original wording of
   # "on push/PR touching scripts/**" — two reasons:
@@ -746,6 +779,7 @@ jobs:
             scripts/lib/stale-tooling-guard-test.sh
             scripts/lint/check-real-identifiers-test.sh
             scripts/repro-headless-subagent-survival-test.sh
+            scripts/check-agent-run-result-test.sh
           )
           failed=()
           for suite in "${suites[@]}"; do
