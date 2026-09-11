@@ -178,21 +178,35 @@ fn provider_label(ds_type: &str) -> &'static str {
 
 /// The `auth_mode` BigQuery is treated as when a caller passes `None` (a row
 /// or form whose `auth_mode` hasn't been set) — extracted into one constant
-/// so every caller resolving a null `auth_mode` (currently just
-/// [`oauth_url_for_datasource`]) agrees on the same effective mode, rather
-/// than each carrying its own separate `unwrap_or("kyomi_oauth")` literal
-/// that could silently drift from the others.
-const BIGQUERY_DEFAULT_AUTH_MODE: &str = "kyomi_oauth";
+/// so every caller resolving a null `auth_mode` — the URL choice in
+/// [`oauth_url_for_datasource`] and the OAuth-status source lookup in
+/// `DatasourceModal`'s refetch closure — agrees on the same effective mode,
+/// rather than each carrying its own separate `unwrap_or(...)` literal that
+/// could silently drift from the others.
+///
+/// KYO-704: `"service_account"`, matching the registry default
+/// (`service_account_auth_mode(true)` in
+/// `kyomi_core::datasource_registry::BIGQUERY_META`) now that `kyomi_oauth`
+/// has been retired. A row with `auth_mode: None` — genuinely unset, not a
+/// retired value stored on disk — must resolve to the same effective mode
+/// everywhere this constant is used, the same way it always has; only the
+/// value itself changed.
+const BIGQUERY_DEFAULT_AUTH_MODE: &str = "service_account";
 
 /// Builds the OAuth connect URL for a given datasource type, slug, and auth mode.
 ///
 /// Returns an empty string for types that do not have a server-side OAuth
 /// connect endpoint (i.e. non-OAuth datasource types).
 ///
-/// BigQuery has two OAuth flows depending on `auth_mode`:
+/// BigQuery has exactly one OAuth flow, gated on `auth_mode`:
 /// - `"enterprise_oauth"` → bigquery-enterprise endpoint (slug-scoped)
-/// - anything else (default: [`BIGQUERY_DEFAULT_AUTH_MODE`]) → shared Google
-///   OAuth endpoint
+/// - anything else (default: [`BIGQUERY_DEFAULT_AUTH_MODE`], i.e.
+///   `"service_account"`) → empty string. `service_account` has no OAuth
+///   flow at all, and the retired `kyomi_oauth` flow no longer grants
+///   credentials either (KYO-704) — a `kyomi_oauth` value can still appear
+///   here for a pre-KYO-704 row nobody has re-saved, and it must resolve to
+///   [`ListConnectAction::Unsupported`] the same as any other non-OAuth
+///   mode rather than to the now-retired Google endpoint.
 fn oauth_url_for_datasource(ds_type: &str, slug: &str, auth_mode: Option<&str>) -> String {
     match ds_type {
         "bigquery" => match auth_mode.unwrap_or(BIGQUERY_DEFAULT_AUTH_MODE) {
@@ -201,7 +215,7 @@ fn oauth_url_for_datasource(ds_type: &str, slug: &str, auth_mode: Option<&str>) 
                     "/api/v1/auth/oauth/bigquery-enterprise/connect?datasource_slug={slug}"
                 )
             }
-            _ => "/api/v1/auth/google-oauth/connect".to_string(),
+            _ => String::new(),
         },
         "snowflake" => {
             format!("/api/v1/auth/oauth/snowflake/connect?datasource_slug={slug}")
@@ -1965,7 +1979,10 @@ pub fn DatasourceModal(
     let (cfg_ssh_passphrase, set_cfg_ssh_passphrase) = signal(String::new());
 
     // BigQuery-specific
-    let (bq_auth_mode, set_bq_auth_mode) = signal("kyomi_oauth".to_string());
+    // KYO-704: defaults to "service_account", matching
+    // `BIGQUERY_DEFAULT_AUTH_MODE` / the registry default now that
+    // `kyomi_oauth` is retired.
+    let (bq_auth_mode, set_bq_auth_mode) = signal("service_account".to_string());
     let (cfg_oauth_client_id, set_cfg_oauth_client_id) = signal(String::new());
     let (cfg_oauth_client_secret, set_cfg_oauth_client_secret) = signal(String::new());
     let (cfg_service_account_json, set_cfg_service_account_json) = signal(String::new());
@@ -2145,7 +2162,9 @@ pub fn DatasourceModal(
         set_cfg_ssh_key_mode.set("generate".to_string());
         set_cfg_ssh_private_key_input.set(String::new());
         set_cfg_ssh_passphrase.set(String::new());
-        set_bq_auth_mode.set("kyomi_oauth".to_string());
+        // KYO-704: reset to "service_account", matching the signal's own
+        // default above — kyomi_oauth is retired.
+        set_bq_auth_mode.set("service_account".to_string());
         set_cfg_oauth_client_id.set(String::new());
         set_cfg_oauth_client_secret.set(String::new());
         set_cfg_service_account_json.set(String::new());
@@ -2493,32 +2512,59 @@ pub fn DatasourceModal(
                                 let (new_connected, new_email, new_expired) =
                                     match ds_type_for_fetch.as_str() {
                                         "bigquery" => {
+                                            // KYO-704: was a hand-rolled
+                                            // `if mode == "enterprise_oauth"`
+                                            // check with a `kyomi_oauth`
+                                            // fallback default and an
+                                            // `else` that assumed every
+                                            // other mode was account-level
+                                            // Google OAuth. That stopped
+                                            // being true the moment
+                                            // `service_account` became the
+                                            // registry default — a
+                                            // `service_account` row has no
+                                            // OAuth status at all, and the
+                                            // literal default here would
+                                            // have silently drifted from
+                                            // `BIGQUERY_DEFAULT_AUTH_MODE`.
+                                            // Routes through the same
+                                            // `bigquery_oauth_source`
+                                            // mapping `use_oauth_status_refetch`
+                                            // already uses, so this can't
+                                            // disagree with it again.
                                             let mode = auth_mode_for_fetch
                                                 .as_deref()
-                                                .unwrap_or("kyomi_oauth");
-                                            if mode == "enterprise_oauth" {
-                                                match get_datasource_oauth_status(
-                                                    "bigquery-enterprise".to_string(),
-                                                    slug_for_fetch,
-                                                )
-                                                .await
-                                                {
-                                                    Ok(s) => (
-                                                        s.connected,
-                                                        s.provider_email,
-                                                        s.token_expired,
-                                                    ),
-                                                    Err(_) => return,
+                                                .unwrap_or(BIGQUERY_DEFAULT_AUTH_MODE);
+                                            match bigquery_oauth_source(mode) {
+                                                Some(OAuthStatusSource::Datasource(key)) => {
+                                                    match get_datasource_oauth_status(
+                                                        key.to_string(),
+                                                        slug_for_fetch,
+                                                    )
+                                                    .await
+                                                    {
+                                                        Ok(s) => (
+                                                            s.connected,
+                                                            s.provider_email,
+                                                            s.token_expired,
+                                                        ),
+                                                        Err(_) => return,
+                                                    }
                                                 }
-                                            } else {
-                                                match get_google_oauth_status().await {
-                                                    Ok(s) => (
-                                                        s.connected,
-                                                        s.google_email,
-                                                        s.token_expired,
-                                                    ),
-                                                    Err(_) => return,
+                                                Some(OAuthStatusSource::GoogleAccount) => {
+                                                    match get_google_oauth_status().await {
+                                                        Ok(s) => (
+                                                            s.connected,
+                                                            s.google_email,
+                                                            s.token_expired,
+                                                        ),
+                                                        Err(_) => return,
+                                                    }
                                                 }
+                                                // service_account (or any
+                                                // future non-OAuth mode)
+                                                // has no status to fetch.
+                                                None => return,
                                             }
                                         }
                                         "snowflake" => {

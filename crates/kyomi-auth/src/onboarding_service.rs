@@ -277,6 +277,24 @@ pub async fn get_onboarding_state(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+/// Whether a credential status must flag its datasource for admin attention
+/// on the onboarding checklist.
+///
+/// Extracted to a pure function so it's unit-testable without a `DbPool` or
+/// a full `DatasourceConfig`, mirroring `bigquery_oauth_status` /
+/// `service_account_email_from` in `datasource_service.rs`.
+///
+/// KYO-704: `"retired_auth_mode"` (a datasource whose `auth_mode` names a
+/// retired mode, e.g. BigQuery's `kyomi_oauth`) must flag here too — it is
+/// not covered by a catch-all, it's an explicit allowlist, so a new
+/// `credential_status` value is silently invisible to onboarding unless
+/// listed here.
+fn needs_action_for(credential_status: &str) -> bool {
+    credential_status == "missing"
+        || credential_status == "expired"
+        || credential_status == "retired_auth_mode"
+}
+
 fn build_credential_status(
     datasources: &[DatasourceConfig],
     creds_by_ds: &std::collections::HashMap<&str, &UserDatasourceCredential>,
@@ -306,8 +324,7 @@ fn build_credential_status(
                 )
             };
 
-            let needs_action =
-                result.credential_status == "missing" || result.credential_status == "expired";
+            let needs_action = needs_action_for(&result.credential_status);
 
             let auth_mode = connection_config
                 .get("auth_mode")
@@ -327,4 +344,40 @@ fn build_credential_status(
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- needs_action_for tests (KYO-704) --
+
+    #[test]
+    fn needs_action_for_retired_auth_mode_is_true() {
+        // KYO-704: a datasource whose auth_mode names a retired mode (e.g.
+        // BigQuery's kyomi_oauth) must be flagged for admin attention, not
+        // silently dropped because "retired_auth_mode" isn't "missing" or
+        // "expired".
+        assert!(needs_action_for("retired_auth_mode"));
+    }
+
+    #[test]
+    fn needs_action_for_missing_is_true() {
+        assert!(needs_action_for("missing"));
+    }
+
+    #[test]
+    fn needs_action_for_expired_is_true() {
+        assert!(needs_action_for("expired"));
+    }
+
+    #[test]
+    fn needs_action_for_valid_is_false() {
+        assert!(!needs_action_for("valid"));
+    }
+
+    #[test]
+    fn needs_action_for_shared_is_false() {
+        assert!(!needs_action_for("shared"));
+    }
 }

@@ -326,10 +326,23 @@ pub async fn resolve_credentials(
     if is_shared {
         // Shared auth: credentials live in connection_config.
         // The factory's resolve_shared_credentials() will extract them.
+        // `service_account` (the registry default since KYO-704) and
+        // `enterprise_oauth` are both handled that way, below.
         //
-        // Special case: BigQuery kyomi_oauth needs the user's Google OAuth token
-        // from users.oauth_data (not from datasource credentials). Use centralized
-        // token resolution which handles expiry checking and refresh.
+        // Special case: BigQuery `kyomi_oauth` needs the user's Google OAuth
+        // token from users.oauth_data (not from datasource credentials).
+        // KYO-704: `kyomi_oauth` is retired and no longer selectable for a
+        // new or re-saved datasource — this branch only still fires for a
+        // pre-KYO-704 row whose stored `auth_mode` literally names it.
+        // `ensure_valid_google_token` below refreshes whatever token that
+        // user already granted; it does not request any new scopes, so
+        // this deliberately isn't gated the same way the connect/enable
+        // paths now are (KYO-704 phase A, KYO-739).
+        //
+        // Deliberately NOT `.unwrap_or(BIGQUERY_DEFAULT_AUTH_MODE)` —
+        // an absent `auth_mode` must never match `"kyomi_oauth"` here
+        // regardless of what the registry default is, so the empty-string
+        // sentinel stays correct on its own.
         let auth_mode = ds
             .connection_config
             .get("auth_mode")

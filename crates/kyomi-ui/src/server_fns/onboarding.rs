@@ -273,10 +273,13 @@ pub async fn get_oauth_connect_url(
     //
     // Datasource slugs are URL-safe by construction (alphanumeric + hyphens),
     // so no percent-encoding is needed for the query parameter.
+    // KYO-704: `kyomi_oauth` is retired and no longer has a working OAuth
+    // connect flow — service_account (the new default for an absent/empty
+    // `auth_mode`) has no OAuth flow at all, and a stored `kyomi_oauth` row
+    // must not silently keep routing to the now-retired Google endpoint
+    // either. Both cases fall through to the generic `_` arm below, which
+    // already returns a clear, correctly-worded error rather than a URL.
     let url = match (datasource_type.as_str(), auth_mode.as_str()) {
-        ("bigquery", "kyomi_oauth") | ("bigquery", "") => {
-            "/api/v1/auth/google-oauth/connect".to_string()
-        }
         ("bigquery", "enterprise_oauth") => {
             let slug = datasource_slug
                 .ok_or_else(|| ServerFnError::new("datasource_slug required for enterprise OAuth"))?;
