@@ -125,6 +125,13 @@ async fn serve() {
         .await
         .expect("failed to connect to database");
 
+    // Migration schema drift (KYO-716): `connect()` above just ran `.run()`
+    // to completion, so drift is zero by definition at this instant — the
+    // `Default` seed here is truthful, not a placeholder. The periodic watch
+    // task started further down keeps it that way as the schema and this
+    // process's own lifetime diverge afterwards.
+    let schema_drift = kyomi_server::schema_drift::SchemaDriftStatus::default();
+
     // Post-SQL-migration hook: convert knowledge-file folders to collections,
     // then drop the old knowledge_files table. Idempotent — no-op if already done.
     kyomi_knowledge::unify::migrate_folders_to_collections(&db)
@@ -377,6 +384,7 @@ async fn serve() {
         connect_token,
         connect_registry,
         platforms,
+        schema_drift: schema_drift.clone(),
     };
 
     // Shared cancellation token for graceful shutdown of all background tasks
@@ -556,6 +564,62 @@ async fn serve() {
             tracing::info!("Sync log pruning task stopped");
         });
         tracing::info!("Sync log pruning started (startup + 24h interval, 30-day retention)");
+    }
+
+    // Migration drift watch — every 15 minutes (KYO-716).
+    //
+    // `DbPool::connect` above already checks for drift once, before running
+    // migrations — but that boot-time check can never catch the case that
+    // actually matters here: a process that connected *before* newer
+    // migrations existed. Right after `connect()` succeeds, drift is zero
+    // by definition (it just ran every migration it knows about), so only a
+    // repeating check — not another boot-time one — can later notice the
+    // schema moving ahead of this already-running process. That's the
+    // incident this ticket exists for: an 18-day-old process on
+    // dev.kyomi.ai whose pool was still open, invisible until the next
+    // restart failed outright.
+    {
+        const MIGRATION_DRIFT_CHECK_INTERVAL: std::time::Duration =
+            std::time::Duration::from_secs(15 * 60);
+
+        let db = state.db.clone();
+        let schema_drift = state.schema_drift.clone();
+        let shutdown = shutdown_token.child_token();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(MIGRATION_DRIFT_CHECK_INTERVAL);
+            // The immediate first tick is consumed rather than acted on —
+            // `schema_drift` was already seeded truthfully in `serve()`
+            // right after `connect()`'s own fresh check, so re-checking
+            // again this instant would be redundant.
+            interval.tick().await;
+            loop {
+                tokio::select! {
+                    _ = shutdown.cancelled() => break,
+                    _ = interval.tick() => {
+                        match kyomi_core::db::detect_migration_drift(&db).await {
+                            Ok(drift) if !drift.is_empty() => {
+                                tracing::warn!(
+                                    missing_versions = ?drift.missing_versions,
+                                    "database schema has migrations this binary does not embed \
+                                     — a restart of this process will fail until a newer binary \
+                                     is deployed"
+                                );
+                                schema_drift.set(drift.missing_versions);
+                            }
+                            Ok(_) => schema_drift.set(Vec::new()),
+                            Err(e) => {
+                                tracing::warn!(error = %e, "migration drift check failed");
+                            }
+                        }
+                    }
+                }
+            }
+            tracing::info!("Migration drift watch stopped");
+        });
+        tracing::info!(
+            interval_minutes = MIGRATION_DRIFT_CHECK_INTERVAL.as_secs() / 60,
+            "Migration drift watch started"
+        );
     }
 
     // Leptos server functions self-register with the Axum server_fn registry

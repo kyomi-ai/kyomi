@@ -333,6 +333,12 @@ async fn start_server(
         connect_token: None,
         connect_registry: connect_registry.clone(),
         platforms: platforms.clone(),
+        // No periodic re-check here (KYO-716 only wires that into
+        // apps/server/src/main.rs) — `Default` is still truthful at this
+        // instant: `db` above just finished `DbPool::connect`, which always
+        // migrates before returning successfully, so drift is zero here by
+        // construction.
+        schema_drift: kyomi_server::schema_drift::SchemaDriftStatus::default(),
     };
 
     let shutdown_token = CancellationToken::new();

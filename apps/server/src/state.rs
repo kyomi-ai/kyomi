@@ -15,6 +15,7 @@ use kyomi_core::platform::PlatformRegistry;
 
 use crate::cancel_registry::CancelRegistry;
 use crate::connect::registry::ConnectRegistry;
+use crate::schema_drift::SchemaDriftStatus;
 
 /// Application-wide shared state.
 ///
@@ -61,6 +62,11 @@ pub struct AppState {
     /// Registry of messaging platform implementations (Slack, Teams, etc.).
     /// Immutable after startup — populated during `AppState` construction.
     pub platforms: std::sync::Arc<PlatformRegistry>,
+    /// Most recently observed migration-drift status, published by the
+    /// periodic background check in `main.rs` and read by `/api/health`
+    /// without ever querying the database itself. See
+    /// `crate::schema_drift` and KYO-716.
+    pub schema_drift: SchemaDriftStatus,
 }
 
 // Allow extracting AuthState from AppState for the auth middleware.
