@@ -524,6 +524,98 @@ fn ast_set_series(ast: &mut Value, series: &[SeriesEntry]) {
     vis_map.insert(Value::String("rows".to_string()), Value::Sequence(rows));
 }
 
+// ─── Keyboard shortcut: ⌘K opens the catalog sidebar ────────────────────────
+
+/// Sets up a document-level `keydown` listener for Cmd/Ctrl+K that toggles the
+/// modal's own catalog sidebar (`catalog_open`).
+///
+/// `SqlCodeEditor` (`pages/sql_editor/code_editor.rs:485`) always shows the
+/// "press ⌘K to browse the catalog" placeholder, but only the SQL editor
+/// *page* installs a shortcut that makes it do anything
+/// (`pages/sql_editor/mod.rs:390-400`) — inside this modal the shortcut
+/// previously did nothing (KYO-725). Mirrors that page handler's shape:
+/// document-level listener, `Closure` kept alive via `SendWrapper` and
+/// removed in `on_cleanup` rather than leaked with `.forget()` — same
+/// established pattern as `code_editor.rs`'s `use_run_shortcut`.
+///
+/// **Registered in the CAPTURE phase, not bubble — this is load-bearing.**
+/// `ChartBuilderModal` is reachable from two places: `results_container.rs:429`
+/// mounts it as an overlay directly inside `SqlEditorPage`, and that page
+/// installs its own unconditional bubble-phase `document` ⌘K listener
+/// (`pages/sql_editor/mod.rs:393-400`) that toggles `state.active_right_tab`
+/// with no guard for an overlay being open. Two bubble-phase listeners on the
+/// same `document` target both fire for one keypress — the page's handler
+/// would silently flip its own sidebar tab underneath the modal every time
+/// this one opens the catalog. Capture-phase listeners on a target run before
+/// bubble-phase ones regardless of registration order, so this handler runs
+/// first and calls `stop_propagation()` once it decides to act, which keeps
+/// the page's listener from ever seeing the event. Only the keys this handler
+/// actually handles are stopped — everything else passes through untouched.
+/// Same nesting trap as the `EditorHandle` context collision fixed in #509.
+///
+/// `open` is checked at keydown time (not read reactively) so a modal that
+/// stays mounted-but-closed doesn't steal ⌘K from the SQL editor page it can
+/// be rendered alongside.
+#[cfg(target_arch = "wasm32")]
+fn use_catalog_shortcut(
+    open: Signal<bool>,
+    catalog_open: ReadSignal<bool>,
+    set_catalog_open: WriteSignal<bool>,
+) {
+    use wasm_bindgen::closure::Closure;
+    use wasm_bindgen::JsCast;
+
+    Effect::new(move |_| {
+        let Some(window) = web_sys::window() else { return };
+        let Some(document) = window.document() else { return };
+
+        let closure = Closure::wrap(Box::new(move |ev: web_sys::KeyboardEvent| {
+            if !open.get_untracked() {
+                return;
+            }
+            let is_meta = ev.meta_key() || ev.ctrl_key();
+            if is_meta && ev.key().eq_ignore_ascii_case("k") {
+                // Stop the page's own bubble-phase ⌘K listener
+                // (pages/sql_editor/mod.rs:393-400) from also firing for this
+                // keypress — see the capture-phase note on this fn's doc
+                // comment. Only stopped for the key this handler actually
+                // handles; every other keydown passes through untouched.
+                ev.prevent_default();
+                ev.stop_propagation();
+                let is_open = catalog_open.try_get_untracked().unwrap_or(false);
+                set_catalog_open.try_set(!is_open);
+            }
+        }) as Box<dyn FnMut(web_sys::KeyboardEvent)>);
+
+        // `use_capture = true` — see the capture-phase note on this fn's doc
+        // comment. The matching `remove_event_listener_with_callback_and_bool`
+        // below must pass the same `true`; a bubble-phase removal call would
+        // silently fail to remove a capture-phase listener, leaking it across
+        // every modal open/close cycle.
+        let _ = document.add_event_listener_with_callback_and_bool(
+            "keydown",
+            closure.as_ref().unchecked_ref(),
+            true,
+        );
+
+        // Move the Closure into the cleanup callback so it stays alive as long as
+        // the listener exists, and is properly dropped when the component unmounts
+        // (instead of closure.forget(), which permanently leaks memory).
+        // SendWrapper is required because Closure is !Send but on_cleanup needs Send+Sync.
+        let document_clone = document.clone();
+        let closure_ref = closure.as_ref().unchecked_ref::<js_sys::Function>().clone();
+        let closure_wrapper = send_wrapper::SendWrapper::new(closure);
+        on_cleanup(move || {
+            let _ = document_clone.remove_event_listener_with_callback_and_bool(
+                "keydown",
+                &closure_ref,
+                true,
+            );
+            drop(closure_wrapper);
+        });
+    });
+}
+
 // ─── Component ──────────────────────────────────────────────────────────────
 
 /// Chart Builder Modal — create or edit a ChartML chart.
@@ -683,6 +775,28 @@ pub fn ChartBuilderModal(
         if slug.is_empty() { None } else { Some(slug) }
     });
     let sql_sig = Memo::new(move |_| ast.try_with(ast_get_query).unwrap_or_default());
+    // The footer is a `ChildrenFn` invoked inside `Modal`'s `<Show>` children
+    // context, so a signal read directly in that closure's body (not inside
+    // its own nested `move ||`) subscribes THAT context — re-running the
+    // entire modal subtree and remounting both code editors when it fires.
+    // Reading `sql_sig` there directly rebuilt the editors on every keystroke
+    // (KYO-725), but only once a datasource was selected, because the
+    // no-datasource branch short-circuits before `sql_sig` is ever read.
+    //
+    // This `Memo` only reduces HOW OFTEN that would fire (once, when the
+    // disabled boolean actually flips) — it does not by itself fix WHERE it
+    // is read. `footer_view` reads `save_disabled` inside the `disabled`
+    // attribute's own `move ||` closure, not here in the component body, so
+    // the subscription is scoped to that one attribute instead of the
+    // Show's children context. See `footer_view` below for why that
+    // placement is what actually matters.
+    let save_disabled = Memo::new(move |_| {
+        if datasource_slug_sig.try_get().unwrap_or_default().is_empty() {
+            false // inline chart — no SQL required
+        } else {
+            sql_sig.try_get().unwrap_or_default().trim().is_empty() // remote chart — SQL is required
+        }
+    });
     let chart_type_sig = Memo::new(move |_| ast.try_with(ast_get_chart_type).unwrap_or_else(|| "bar".to_string()));
     let x_field_sig = Memo::new(move |_| ast.try_with(ast_get_x_field).unwrap_or_default());
     let orientation_sig = Memo::new(move |_| ast.try_with(ast_get_orientation).unwrap_or_default());
@@ -792,15 +906,21 @@ pub fn ChartBuilderModal(
         let insert_class = insert_class_clone.clone();
 
         // Disable insert: inline charts are always saveable, but remote charts
-        // (datasource selected) require SQL to be useful.
-        // Use try_get so this ChildrenFn gracefully handles disposal — it can
-        // be called by Modal during the <Show> teardown cascade.
-        let is_disabled = if datasource_slug_sig.try_get().unwrap_or_default().is_empty() {
-            false // inline chart — no SQL required
-        } else {
-            sql_sig.try_get().unwrap_or_default().trim().is_empty() // remote chart — SQL is required
-        };
-
+        // (datasource selected) require SQL to be useful. This whole closure
+        // body — everything up to the `view!` call — runs inside `Modal`'s
+        // `<Show>` children context (`crates/kyomi-ui-components/src/
+        // components/modal.rs:229`), so reading a signal directly HERE (not
+        // inside a nested `move ||`) subscribes that context, and firing it
+        // rebuilds the entire modal subtree, remounting both code editors.
+        // `save_disabled` flipping empty->non-empty on the first SQL
+        // keystroke did exactly that (KYO-725) even though the Memo only
+        // fires once — the bug is the READ'S SCOPE, not how often it fires.
+        // `disabled` below reads `save_disabled` inside its own `move ||`
+        // instead, so only that one attribute updates — the same leaf-closure
+        // shape already used correctly by the Title/X-Axis inputs'
+        // `prop:value=move || title_sig.get()` / `x_field_sig.get()`.
+        // Use try_get so that leaf closure gracefully handles disposal — it
+        // can be called by Modal during the <Show> teardown cascade.
         view! {
             <button
                 class=cancel_class
@@ -811,7 +931,7 @@ pub fn ChartBuilderModal(
             <button
                 class=insert_class
                 on:click=move |_| handle_insert.run(())
-                disabled=is_disabled
+                disabled=move || save_disabled.try_get().unwrap_or(false)
             >
                 {insert_label}
             </button>
@@ -863,6 +983,12 @@ pub fn ChartBuilderModal(
     let (catalog_search, set_catalog_search) = signal(String::new());
     let (catalog_refresh_trigger, set_catalog_refresh_trigger) = signal(0u32);
     let catalog_sidebar_width = RwSignal::new(320.0_f64);
+
+    // ⌘K toggles the catalog sidebar while this modal is open (KYO-725) —
+    // `SqlCodeEditor`'s placeholder advertises the shortcut but nothing wired
+    // it up inside the modal.
+    #[cfg(target_arch = "wasm32")]
+    use_catalog_shortcut(open, catalog_open, set_catalog_open);
 
     // ── Query execution state ─────────────────────────────────────────
     let (query_running, set_query_running) = signal(false);
