@@ -6001,9 +6001,9 @@ dependencies = [
 
 [[package]]
 name = "kode-leptos"
-version = "0.5.4"
+version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "398b2e3205db01c92f14ff14b1e4244cd89a5322156491e3adb14bc82e8f1f76"
+checksum = "278ee072799d54f10c2e7d9e5aa741e4997b84652d4c30535fb1166a9c5ad2c7"
 dependencies = [
  "arborium",
  "arborium-theme",
