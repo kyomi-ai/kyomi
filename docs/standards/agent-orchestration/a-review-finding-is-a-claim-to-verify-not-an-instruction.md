@@ -113,7 +113,7 @@ The verification habit itself is
 turned around and pointed at the review report.
 
 The other rule in this section,
-[no-background-subagents-under-headless-run.md](no-background-subagents-under-headless-run.md),
+[a-sub-agent-in-flight-must-not-outlive-its-turn.md](a-sub-agent-in-flight-must-not-outlive-its-turn.md),
 governs how a sub-agent is dispatched; this one governs what its report is worth when it comes
 back.
 

@@ -29,8 +29,15 @@
 #      "run_in_background present: YES". The SAME property is ABSENT from
 #      the schema in an INTERACTIVE session on the identical harness version
 #      (`description, isolation, model, prompt, subagent_type`) — so the
-#      parameter's availability is mode-dependent, not universally present
-#      or universally absent.
+#      parameter is not universally present or universally absent. The
+#      harness keys availability on configuration gates, not on session
+#      mode: its own field doc for the requested-mode counters, identical
+#      in 2.1.258 and 2.1.267, reads "all count as unset while the
+#      parameter is not offered (background tasks disabled, or the fork
+#      gate on)". Mode happened to correlate with those two gates on this
+#      box. Read the schema you were handed rather than inferring from
+#      session type. See docs/standards/agent-orchestration/
+#      a-sub-agent-in-flight-must-not-outlive-its-turn.md.
 #
 #   2. `background` — a sub-agent dispatched with `run_in_background: true`
 #      SURVIVES the parent's `end_turn` under `claude -p`. Cron-shaped run
@@ -54,13 +61,18 @@
 # sub-agent silently killed by the parent's end_turn, reported in
 # subagent_stats.killed.system) did NOT reproduce on harness 2.1.258. It was
 # real when scripts/audit-agent-run-deaths.sh was written (KYO-546, harness
-# versions predating this one) and appears to have been fixed upstream
-# since. This script does not assert that background dispatch is now SAFE
+# versions predating this one). What these runs establish is a BOUND, not
+# an all-clear: the harness still documents a `-p` wait ceiling for
+# background sub-agents (2.1.267's own subagent_stats.killed field text,
+# identical in 2.1.245 and in 2.1.258, names "-p giving up on a background
+# subagent still running at its wait ceiling"), and a ~150-second sub-agent
+# is far shorter than the 10-16 minute KYO-468 deaths that motivated the
+# audit. This script does not assert that background dispatch is now SAFE
 # under claude -p — it only reports that this one failure mode did not
 # trigger in these three runs. docs/standards/agent-orchestration/
-# no-background-subagents-under-headless-run.md is the standing policy and
-# is intentionally NOT touched by this script or by KYO-688; revisiting that
-# policy is KYO-692.
+# a-sub-agent-in-flight-must-not-outlive-its-turn.md is the standing
+# policy; neither this script nor KYO-688 touches it or asserts it is
+# obsolete — this script reports one failure mode's absence, nothing more.
 #
 # Re-run this after any harness upgrade. A result that matches the numbers
 # above is not guaranteed to keep matching — that is the entire reason this
@@ -267,9 +279,10 @@ if [ -n "$FROM_FILE" ]; then
 else
     # ---- mirror ~/.local/bin/kyomi-backlog-cron.sh's environment EXACTLY --
     # This has to reproduce the actual cron environment, not an interactive
-    # approximation — the whole point of KYO-688 was that behaviour under
-    # `claude -p` differs from an interactive session (see fact 1 above), so
-    # an interactive repro would prove nothing about the cron worker.
+    # approximation — a `claude -p` run and an interactive session on the
+    # identical build were handed different Agent tool schemas (fact 1
+    # above), and what a run is handed follows its configuration, so only
+    # the cron worker's own environment can say anything about it.
     export HOME="/home/jason"
     export PATH="/home/jason/.cargo/bin:/home/jason/.local/bin:/usr/local/bin:/usr/bin:/bin"
 

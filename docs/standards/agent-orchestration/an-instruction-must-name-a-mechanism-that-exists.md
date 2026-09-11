@@ -58,10 +58,9 @@ Mined from two instances, both in the KYO-687 review (`docs/review-logs/2026-09-
   defect, reintroduced inside the document correcting it, and caught only by review.
 
 Nearest siblings, and how this differs.
-[no-background-subagents-under-headless-run.md](no-background-subagents-under-headless-run.md)
-is the specific rule that instantiated this failure; as of this writing it still carries the
-defective form, and KYO-692 owns correcting it. This file is the general shape, not that
-incident.
+[a-sub-agent-in-flight-must-not-outlive-its-turn.md](a-sub-agent-in-flight-must-not-outlive-its-turn.md)
+is the specific rule that instantiated this failure; its defective form was corrected in the
+same change that renamed it (KYO-692). This file is the general shape, not that incident.
 [../comments-documentation/no-guarantee-stronger-than-code-enforces.md](../comments-documentation/no-guarantee-stronger-than-code-enforces.md)
 is about a *comment* claiming more than real code provides — there the mechanism exists and the
 claim overreaches; here the named thing is absent entirely.
