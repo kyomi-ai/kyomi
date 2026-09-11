@@ -178,10 +178,11 @@ fn provider_label(ds_type: &str) -> &'static str {
 
 /// The `auth_mode` BigQuery is treated as when a caller passes `None` (a row
 /// or form whose `auth_mode` hasn't been set) — extracted into one constant
-/// so every caller resolving a null `auth_mode` (currently just
-/// [`oauth_url_for_datasource`]) agrees on the same effective mode, rather
-/// than each carrying its own separate `unwrap_or(...)` literal that could
-/// silently drift from the others.
+/// so every caller resolving a null `auth_mode` — the URL choice in
+/// [`oauth_url_for_datasource`] and the OAuth-status source lookup in
+/// `DatasourceModal`'s refetch closure — agrees on the same effective mode,
+/// rather than each carrying its own separate `unwrap_or(...)` literal that
+/// could silently drift from the others.
 ///
 /// KYO-704: `"service_account"`, matching the registry default
 /// (`service_account_auth_mode(true)` in
