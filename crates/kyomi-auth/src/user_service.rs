@@ -549,12 +549,85 @@ pub async fn list_active_auth_types(
     Ok(rows.into_iter().map(|r| r.auth_type).collect())
 }
 
+/// Auth types that can, on their own, complete a sign-in.
+///
+/// `totp` is deliberately excluded: it is a second factor that must always
+/// be paired with one of these three, and can never authenticate a user by
+/// itself. This list — not "every row in `user_auth_methods`" — is what
+/// [`remove_auth_method`]'s last-method guard counts against, so a user who
+/// still holds an active `totp` row is not treated as having a way to sign
+/// in, and a user who holds only `totp` is never blocked from removing it.
+///
+/// Adding a fifth auth type means deciding which side of this line it falls
+/// on: can it complete a login unaided (add it here), or is it a factor
+/// like `totp` that only ever supplements one of these (leave it out).
+const SIGN_IN_AUTH_TYPES: [&str; 3] = ["password", "webauthn", "google_oauth"];
+
+/// Count of a user's active sign-in-capable auth methods — active rows in
+/// `user_auth_methods` whose `auth_type` is in [`SIGN_IN_AUTH_TYPES`].
+/// Inactive rows and non-sign-in types (`totp`) are never counted.
+async fn count_active_sign_in_methods(pool: &DbPool, user_id: &str) -> kyomi_core::Result<i64> {
+    let is_pg = pool.is_postgres();
+    let bt = sql_compat::bool_true(is_pg);
+    let type_list = SIGN_IN_AUTH_TYPES
+        .iter()
+        .map(|t| format!("'{t}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT COUNT(*) as count FROM user_auth_methods \
+         WHERE user_id = $1 AND active = {bt} AND auth_type IN ({type_list})"
+    );
+    let count: i64 = kyomi_core::db_fetch_scalar!(pool, i64, &sql, user_id)?;
+    Ok(count)
+}
+
+/// Refuse a removal that would leave a user with no active sign-in-capable
+/// auth method (KYO-701).
+///
+/// A no-op for any `auth_type` outside [`SIGN_IN_AUTH_TYPES`] (e.g. `totp`)
+/// — removing a second factor never strands anyone, so it's never blocked.
+/// For a sign-in-capable type, refuses when the user has at most one active
+/// sign-in method left (i.e. the one about to be removed).
+///
+/// Shared by [`remove_auth_method`] and
+/// `google_oauth::google_oauth_disconnect_service_at`'s pre-revocation
+/// check, which must reach the identical decision *before* it revokes the
+/// grant at Google — see that function's doc comment for why the order
+/// matters. Both call sites route through this one predicate so the two
+/// can never drift (KYO-701).
+pub(crate) async fn guard_last_sign_in_method(
+    pool: &DbPool,
+    user_id: &str,
+    auth_type: &str,
+) -> kyomi_core::Result<()> {
+    if !SIGN_IN_AUTH_TYPES.contains(&auth_type) {
+        return Ok(());
+    }
+    let active_sign_in_methods = count_active_sign_in_methods(pool, user_id).await?;
+    if active_sign_in_methods <= 1 {
+        return Err(kyomi_core::Error::Conflict(
+            "This is your only way to sign in — add a password or a passkey under \
+             Settings → Security before removing it."
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Remove an auth method (set active = false).
+///
+/// Refuses to remove a user's last active sign-in-capable auth method (see
+/// [`guard_last_sign_in_method`]) — otherwise a user who, say, signed up
+/// with Google and never added a password or passkey could deactivate their
+/// only way in and be locked out with no warning (KYO-701).
 pub async fn remove_auth_method(
     pool: &DbPool,
     user_id: &str,
     auth_type: &str,
 ) -> kyomi_core::Result<bool> {
+    guard_last_sign_in_method(pool, user_id, auth_type).await?;
+
     let is_pg = pool.is_postgres();
     let bf = sql_compat::bool_false(is_pg);
     let bt = sql_compat::bool_true(is_pg);
@@ -1147,5 +1220,162 @@ mod tests {
         // If `style` is present but isn't a string, we should ignore it.
         let v = json!({"style": 42});
         assert_eq!(extract_palette_style(&v), None);
+    }
+}
+
+/// `remove_auth_method`'s last-sign-in-method guard (KYO-701).
+///
+/// Exercises [`guard_last_sign_in_method`] through the public
+/// `remove_auth_method` entry point rather than calling the private helper
+/// directly, so these tests keep pinning the same contract callers rely on.
+#[cfg(test)]
+mod remove_auth_method_tests {
+    use super::*;
+    use crate::test_support::{seed_user, sqlite_pool, test_pool};
+
+    /// Insert a `user_auth_methods` row with an explicit `active` flag,
+    /// bypassing `upsert_auth_method` (which always sets `active = true` on
+    /// insert and on conflict) — needed to seed the inactive-sibling case.
+    async fn seed_auth_method(
+        sq: &sqlx::SqlitePool,
+        user_id: &str,
+        auth_type: &str,
+        active: bool,
+    ) {
+        sqlx::query(
+            "INSERT INTO user_auth_methods (user_id, auth_type, auth_data, active) \
+             VALUES ($1, $2, '{}', $3)",
+        )
+        .bind(user_id)
+        .bind(auth_type)
+        .bind(active)
+        .execute(sq)
+        .await
+        .expect("seed auth method");
+    }
+
+    #[tokio::test]
+    async fn removing_the_only_sign_in_method_is_refused_and_leaves_it_active() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        seed_user(sq, "u1", "u1@example.com").await;
+        upsert_auth_method(&db, "u1", "google_oauth", &serde_json::json!({}))
+            .await
+            .unwrap();
+
+        let result = remove_auth_method(&db, "u1", "google_oauth").await;
+
+        assert!(
+            matches!(result, Err(kyomi_core::Error::Conflict(_))),
+            "removing the only sign-in method must be refused with Conflict, got {result:?}"
+        );
+
+        let still_active = get_auth_method(&db, "u1", "google_oauth").await.unwrap();
+        assert!(
+            still_active.is_some(),
+            "the row must remain active after a refused removal"
+        );
+    }
+
+    #[tokio::test]
+    async fn removing_google_oauth_with_a_password_present_succeeds() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        seed_user(sq, "u1", "u1@example.com").await;
+        upsert_auth_method(&db, "u1", "google_oauth", &serde_json::json!({}))
+            .await
+            .unwrap();
+        upsert_auth_method(&db, "u1", "password", &serde_json::json!({"hash": "x"}))
+            .await
+            .unwrap();
+
+        let result = remove_auth_method(&db, "u1", "google_oauth").await;
+
+        assert!(result.unwrap(), "removal must succeed when a password also exists");
+    }
+
+    #[tokio::test]
+    async fn removing_google_oauth_with_a_passkey_present_succeeds() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        seed_user(sq, "u1", "u1@example.com").await;
+        upsert_auth_method(&db, "u1", "google_oauth", &serde_json::json!({}))
+            .await
+            .unwrap();
+        upsert_auth_method(&db, "u1", "webauthn", &serde_json::json!({"credentials": {}}))
+            .await
+            .unwrap();
+
+        let result = remove_auth_method(&db, "u1", "google_oauth").await;
+
+        assert!(result.unwrap(), "removal must succeed when a passkey also exists");
+    }
+
+    #[tokio::test]
+    async fn removing_totp_as_the_only_active_row_is_not_blocked() {
+        // Proves the sign-in-type distinction is load-bearing: totp is the
+        // only active row here, but it isn't a sign-in method, so removing
+        // it must never be refused.
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        seed_user(sq, "u1", "u1@example.com").await;
+        upsert_auth_method(&db, "u1", "totp", &serde_json::json!({"secret": "x"}))
+            .await
+            .unwrap();
+
+        let result = remove_auth_method(&db, "u1", "totp").await;
+
+        assert!(
+            result.unwrap(),
+            "totp is a second factor, not a sign-in method, and must never be blocked"
+        );
+    }
+
+    #[tokio::test]
+    async fn removing_google_oauth_with_only_totp_present_is_refused() {
+        // The case a naive "count every active row" guard gets wrong:
+        // google_oauth + totp is 2 active rows, but totp alone can never
+        // authenticate this user, so removing google_oauth must still be
+        // refused.
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        seed_user(sq, "u1", "u1@example.com").await;
+        upsert_auth_method(&db, "u1", "google_oauth", &serde_json::json!({}))
+            .await
+            .unwrap();
+        upsert_auth_method(&db, "u1", "totp", &serde_json::json!({"secret": "x"}))
+            .await
+            .unwrap();
+
+        let result = remove_auth_method(&db, "u1", "google_oauth").await;
+
+        assert!(
+            matches!(result, Err(kyomi_core::Error::Conflict(_))),
+            "totp cannot sign the user in on its own, so google_oauth is still the last \
+             sign-in method; got {result:?}"
+        );
+
+        let still_active = get_auth_method(&db, "u1", "google_oauth").await.unwrap();
+        assert!(still_active.is_some());
+    }
+
+    #[tokio::test]
+    async fn an_inactive_sibling_row_does_not_count_toward_the_total() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        seed_user(sq, "u1", "u1@example.com").await;
+        upsert_auth_method(&db, "u1", "google_oauth", &serde_json::json!({}))
+            .await
+            .unwrap();
+        // A previously-removed password method: present in the table, but
+        // inactive, so it must not save google_oauth from being "the last".
+        seed_auth_method(sq, "u1", "password", false).await;
+
+        let result = remove_auth_method(&db, "u1", "google_oauth").await;
+
+        assert!(
+            matches!(result, Err(kyomi_core::Error::Conflict(_))),
+            "an inactive sibling row must not count as a sign-in method; got {result:?}"
+        );
     }
 }

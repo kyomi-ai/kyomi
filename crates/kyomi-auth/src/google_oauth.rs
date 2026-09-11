@@ -701,6 +701,18 @@ async fn google_oauth_disconnect_service_at(
         });
     };
 
+    // Refuse *before* revoking anything if disconnecting would strand the
+    // user with no way to sign in (KYO-701) — reuses the exact predicate
+    // `remove_auth_method` enforces below, so the two can never disagree.
+    // This has to run before `revoke_google_token_at`: that call revokes the
+    // grant at Google and `update_user_oauth_data` below clears our only
+    // copy of the tokens, both irreversible. If the guard only fired inside
+    // `remove_auth_method`, a blocked disconnect would still have revoked
+    // the grant and wiped the local tokens before telling the user no —
+    // locking them out anyway, just with extra, unrecoverable damage done
+    // first.
+    crate::user_service::guard_last_sign_in_method(db, user_id, "google_oauth").await?;
+
     // Revoke the grant at Google *before* clearing our only copy of the
     // token. A failure here (network error, timeout, non-400 status) must
     // abort the disconnect and leave local state untouched — see
@@ -1016,6 +1028,13 @@ mod tests {
         crate::user_service::upsert_auth_method(&db, "u1", "google_oauth", &serde_json::json!({}))
             .await
             .unwrap();
+        // KYO-701: also give this user a password, so disconnecting Google
+        // doesn't strand them — this test is about the revocation/clear
+        // path, not the last-sign-in-method guard (covered separately by
+        // `disconnect_refuses_and_never_calls_google_when_it_is_the_only_sign_in_method`).
+        crate::user_service::upsert_auth_method(&db, "u1", "password", &serde_json::json!({"hash": "x"}))
+            .await
+            .unwrap();
 
         let mock_server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -1069,6 +1088,13 @@ mod tests {
         crate::user_service::upsert_auth_method(&db, "u1", "google_oauth", &serde_json::json!({}))
             .await
             .unwrap();
+        // KYO-701: also give this user a password, so the KYO-701 guard
+        // doesn't intercept the call before it ever reaches Google — this
+        // test is specifically about the revocation-failure path, proven
+        // below by asserting the mock server actually received the request.
+        crate::user_service::upsert_auth_method(&db, "u1", "password", &serde_json::json!({"hash": "x"}))
+            .await
+            .unwrap();
 
         let mock_server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -1083,6 +1109,16 @@ mod tests {
         assert!(
             result.is_err(),
             "disconnect must fail when Google does not confirm revocation"
+        );
+
+        let requests = mock_server
+            .received_requests()
+            .await
+            .expect("request recording enabled");
+        assert_eq!(
+            requests.len(),
+            1,
+            "this test must exercise the revocation-failure path, not the KYO-701 guard"
         );
 
         let db_user = crate::user_service::get_user_by_id(&db, "u1")
@@ -1103,6 +1139,97 @@ mod tests {
             auth_method.is_some(),
             "the google_oauth auth method must remain active when disconnect failed"
         );
+    }
+
+    #[tokio::test]
+    async fn disconnect_refuses_and_never_calls_google_when_it_is_the_only_sign_in_method() {
+        // KYO-701: google_oauth is this user's only sign-in method (no
+        // password, no passkey). The pre-check must refuse before
+        // `revoke_google_token_at` ever runs — proven here by asserting the
+        // mock server received zero requests, not just by the Err return —
+        // and must leave both the stored tokens and the auth method row
+        // untouched, exactly like the revocation-failure case above.
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        seed_user(sq, "u1", "u1@example.com").await;
+        let key = test_key();
+
+        let data = OAuthData {
+            google_oauth_tokens: Some(tokens_with(Some("refresh-abc"), "access-xyz")),
+            ..Default::default()
+        };
+        let encrypted = build_oauth_data(&data, &key).unwrap();
+        crate::user_service::update_user_oauth_data(&db, "u1", Some(&encrypted))
+            .await
+            .unwrap();
+        crate::user_service::upsert_auth_method(&db, "u1", "google_oauth", &serde_json::json!({}))
+            .await
+            .unwrap();
+
+        // Would respond 200 (a confirmed revocation) if ever called — the
+        // point of this test is that it must not be called at all.
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/revoke"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&mock_server)
+            .await;
+        let revoke_uri = format!("{}/revoke", mock_server.uri());
+
+        let result = google_oauth_disconnect_service_at(&revoke_uri, &db, "u1", &key).await;
+
+        assert!(
+            matches!(result, Err(kyomi_core::Error::Conflict(_))),
+            "disconnect must be refused with Conflict when google_oauth is the only sign-in \
+             method, got {result:?}"
+        );
+
+        let requests = mock_server
+            .received_requests()
+            .await
+            .expect("request recording enabled");
+        assert!(
+            requests.is_empty(),
+            "the pre-check must run before any call to Google — revoking a grant the user was \
+             just told 'no' about is irreversible"
+        );
+
+        let db_user = crate::user_service::get_user_by_id(&db, "u1")
+            .await
+            .unwrap()
+            .unwrap();
+        let stored = parse_oauth_data(db_user.oauth_data.as_deref(), &key).unwrap();
+        assert!(
+            stored.and_then(|o| o.google_oauth_tokens).is_some(),
+            "tokens must be untouched when the pre-check refuses the disconnect"
+        );
+
+        let auth_method = crate::user_service::get_auth_method(&db, "u1", "google_oauth")
+            .await
+            .unwrap();
+        assert!(
+            auth_method.is_some(),
+            "the google_oauth auth method must remain active when the pre-check refuses"
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnect_still_reports_already_disconnected_when_no_tokens_stored() {
+        // The pre-check must not disturb the existing already_disconnected
+        // early return: a user with no stored Google tokens at all (e.g.
+        // disconnect was already completed, or never connected) still gets
+        // that response rather than being routed into the guard.
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        seed_user(sq, "u1", "u1@example.com").await;
+        let key = test_key();
+
+        let result = google_oauth_disconnect_service_at(GOOGLE_REVOKE_URI, &db, "u1", &key)
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        assert!(result.already_disconnected);
     }
 
     // ── build_authorization_url — include_granted_scopes is per-flow ────
