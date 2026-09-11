@@ -2,6 +2,29 @@
 # Pre-commit hook: blocks lint suppressions, server_fn/REST divergence,
 # Leptos signal disposal-safety violations, real-world identifiers, and
 # unreviewed commits. Clippy runs in CI on PRs (not locally).
+#
+# KYO-712: Checks 2 and 2b also block when their trigger paths were staged
+# for review but have since become unstaged, OR were staged as a new file
+# and have since become untracked (Part A/B — a newly added file that gets
+# unstaged is `??`, not "modified", so a bare `git diff --name-only` check
+# is blind to it) — see the comment above
+# review_approval_allow_unstaged_reason() and unstaged_or_untracked_matching(),
+# and scripts/sign-review.sh's own header, for the KYO-676 incident this
+# closes. This scan runs unconditionally in both checks, independent of
+# whether anything matching the same pattern is also staged — see the
+# review-log finding this fixed (2026-09-11): it used to live only in the
+# `else` branch of "is anything staged", so a single staged trigger-pattern
+# file made the hook skip scanning for unstaged/untracked siblings of that
+# same pattern entirely, reproducing the KYO-676 blind spot outright.
+#
+# KYO-712 Part C/D: the `ALLOW-UNSTAGED:<reason>` acknowledgement (an
+# optional third line in .review-approval) is cryptographically bound to
+# the signature, not read as trusted plain text. See
+# review_approval_signature_valid() below and scripts/sign-review.sh's own
+# header for why: an unsigned line 3 could otherwise be hand-appended to
+# any validly-signed approval by anyone with local filesystem write access,
+# with no key required, and the hook would report a narrowing as
+# "acknowledged at signing" when it never was.
 
 set -e
 
@@ -28,10 +51,159 @@ fi
 
 echo "✅ No new lint suppressions."
 
+# --- Shared signature verification (KYO-712 Part C/D) ---
+#
+# The public key used to verify every code-review approval. Defined here
+# (rather than down at Check 3, where it used to live) because
+# review_approval_signature_valid() is also called from Checks 2 and 2b via
+# review_approval_allow_unstaged_reason(), both of which run before Check 3.
+REVIEW_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEApRtsZODQxaUNP383HB/iqLHSlrf92Fe3UB43Bc2TaG0=
+-----END PUBLIC KEY-----"
+
+# Verifies .review-approval's Ed25519 signature against REVIEW_PUBLIC_KEY.
+# This is the ONLY place in this hook that calls `openssl pkeyutl -verify`
+# on a review approval — Check 3 and review_approval_allow_unstaged_reason()
+# both call this instead of reimplementing the check, so the two call sites
+# cannot drift apart (docs/standards/code-organization/propagate-predicate-
+# changes-to-every-copy.md).
+#
+# When .review-approval has no line 3, the signature must cover line 1 (the
+# diff hash) alone — exactly the pre-KYO-712-Part-C format, which is what
+# keeps this compatible with approval files written by an older copy of
+# scripts/sign-review.sh. When line 3 (`ALLOW-UNSTAGED:<reason>`) is
+# present, the signature must instead cover "<line 1>\n<line 3>" — the same
+# combined value scripts/sign-review.sh signs when --allow-unstaged is
+# used. A line 3 that was hand-appended to an otherwise validly-signed
+# approval (no line 3 at signing time) therefore fails this verification:
+# the recorded signature was only ever produced over line 1 alone.
+#
+# Does NOT check whether line 1 matches the current staged diff — callers
+# that need that (both call sites do) check it themselves, since "is this
+# signature authentic" and "is it for the diff in front of us right now"
+# are different questions with different failure messages.
+#
+# Returns 0 if .review-approval exists and its signature verifies, 1
+# otherwise.
+review_approval_signature_valid() {
+    [ -f .review-approval ] || return 1
+
+    local hash sig line3 signed_value
+    hash="$(sed -n '1p' .review-approval)"
+    sig="$(sed -n '2p' .review-approval)"
+    line3="$(sed -n '3p' .review-approval)"
+
+    if [ -n "$line3" ]; then
+        signed_value="$(printf '%s\n%s' "$hash" "$line3")"
+    else
+        signed_value="$hash"
+    fi
+
+    local pub_file sig_file val_file verified
+    pub_file="$(mktemp)"
+    sig_file="$(mktemp)"
+    val_file="$(mktemp)"
+    verified=1
+
+    echo "$REVIEW_PUBLIC_KEY" > "$pub_file"
+    printf '%s' "$signed_value" > "$val_file"
+
+    # -rawin is REQUIRED: `pkeyutl -verify` for an Ed25519 key fails outright
+    # on OpenSSL 3.0.x (Ubuntu 24.04 — what ubuntu-latest is at the time of
+    # writing) without it, and only starts working flagless on OpenSSL 3.2+.
+    # scripts/sign-review.sh signs with -rawin for the same reason; the two
+    # must match. Signatures are byte-identical with or without the flag, so
+    # this changes no verification outcome on hosts where the flagless form
+    # already works — see scripts/sign-review.sh's own comment on this line
+    # for the measured version matrix. Do not drop this as "redundant".
+    if echo "$sig" | base64 -d > "$sig_file" 2>/dev/null \
+        && openssl pkeyutl -verify -rawin -pubin -inkey "$pub_file" -in "$val_file" -sigfile "$sig_file" >/dev/null 2>&1; then
+        verified=0
+    fi
+
+    rm -f "$pub_file" "$sig_file" "$val_file"
+    return "$verified"
+}
+
+# --- Helper for Checks 2 and 2b (KYO-712) ---
+#
+# scripts/sign-review.sh refuses to sign when a tracked file has unstaged
+# modifications, UNLESS the reviewer explicitly passed --allow-unstaged
+# "<reason>" — in which case it records that acknowledgement as an optional
+# third line in .review-approval (`ALLOW-UNSTAGED:<reason>`), signed
+# together with the diff hash (see review_approval_signature_valid()
+# above). This reads that line back, but only honours it if:
+#   1. line 1's hash still matches the *current* staged diff — an
+#      acknowledgement recorded against a diff that has since changed
+#      proves nothing about the diff in front of us now; and
+#   2. the approval's signature verifies (Part C/D) — an unsigned or
+#      forged line 3 must not be treated as reviewer intent.
+review_approval_allow_unstaged_reason() {
+    [ -f .review-approval ] || return 0
+    local approved_hash current_hash
+    approved_hash="$(sed -n '1p' .review-approval)"
+    current_hash="$(git diff --cached | sha256sum | awk '{print $1}')"
+    [ "$approved_hash" = "$current_hash" ] || return 0
+    review_approval_signature_valid || return 0
+    sed -n '3p' .review-approval | sed -n 's/^ALLOW-UNSTAGED://p'
+}
+
+# Union of unstaged-modified tracked files and untracked (non-ignored) new
+# files matching <pattern> (KYO-712 Part A/B parity): a newly added file
+# that gets unstaged becomes untracked (`??`), not "modified", so
+# `git diff --name-only` alone misses it — the same gap
+# scripts/sign-review.sh's own guard closes. --exclude-standard is
+# load-bearing for the same reason it is there: without it this would also
+# match .review-approval itself, docs/review-logs/, target/, etc., and flag
+# them as unreviewed changes on every commit.
+#
+# Fails closed (exit 1) if either underlying `git` command fails, rather
+# than swallowing the error and reporting an empty (falsely reassuring)
+# result — matching scripts/sign-review.sh's own handling of these same two
+# commands (docs/standards/error-handling/empty-on-failure-must-not-look-
+# like-a-real-result.md). This runs inside a command substitution at every
+# call site (`x="$(unstaged_or_untracked_matching ...)"`), so `exit 1` here
+# ends the subshell; because that assignment form is not exempted from
+# `set -e`, the parent hook aborts too, with this function's own stderr
+# message as the explanation (verified: `x="$(f)"` where `f` calls `exit 1`
+# under `set -e` propagates to the caller's exit status).
+unstaged_or_untracked_matching() {
+    local pattern="$1"
+    local diff_file untracked_file
+    diff_file="$(mktemp)"
+    untracked_file="$(mktemp)"
+
+    if ! git diff --name-only > "$diff_file"; then
+        rm -f "$diff_file" "$untracked_file"
+        echo "" >&2
+        echo "❌ 'git diff --name-only' failed — cannot verify whether any" >&2
+        echo "   unstaged files match pattern: $pattern" >&2
+        echo "   Refusing to report a false 'nothing unstaged' result." >&2
+        exit 1
+    fi
+
+    if ! git ls-files --others --exclude-standard > "$untracked_file"; then
+        rm -f "$diff_file" "$untracked_file"
+        echo "" >&2
+        echo "❌ 'git ls-files --others --exclude-standard' failed — cannot verify" >&2
+        echo "   whether any untracked files match pattern: $pattern" >&2
+        echo "   Refusing to report a false 'nothing untracked' result." >&2
+        exit 1
+    fi
+
+    cat "$diff_file" "$untracked_file" | grep "$pattern" | sort -u
+    rm -f "$diff_file" "$untracked_file"
+    return 0
+}
+
 # --- Check 2: server_fn / REST divergence lint (KYO-122) ---
 # Runs before clippy because it is orders of magnitude faster (< 200ms)
-# and catches the class of bugs that triggered KYO-115. Only fires when
-# staged changes touch `crates/kyomi-ui/src/server_fns/*.rs`.
+# and catches the class of bugs that triggered KYO-115. Lints the staged
+# set whenever staged changes touch `crates/kyomi-ui/src/server_fns/*.rs`,
+# AND, independently and unconditionally (KYO-712 — see this file's header
+# for why "independently" matters), scans for unstaged/untracked files
+# matching the same pattern so a narrowed index can never hide behind a
+# staged sibling.
 echo "🔍 Checking server_fn / REST divergence..."
 
 staged_server_fns=$(git diff --cached --name-only --diff-filter=ACM \
@@ -47,15 +219,56 @@ if [ -n "$staged_server_fns" ]; then
         exit 1
     fi
     echo "✅ server_fn lint clean."
-else
-    echo "✅ server_fn lint skipped (no server_fns files staged)."
+fi
+
+# KYO-712: a skip is only a real skip if none of this lint's trigger paths
+# are part of the change this commit leaves behind. This scan always runs,
+# regardless of whether staged_server_fns above was empty — a staged
+# trigger-pattern file must never shadow an unstaged/untracked sibling of
+# the same pattern (that was the bug: this scan used to live only in the
+# `else` branch above, so it never ran once anything matching the pattern
+# was staged). If one IS unstaged OR untracked (Part A/B: a newly added
+# file that gets unstaged shows up as untracked, not "modified" — git diff
+# --name-only alone would miss it), either it was consciously narrowed out
+# at signing time (--allow-unstaged, acknowledged below) or the index was
+# narrowed after signing (the KYO-676 shape) — either way, printing a plain
+# ✅ here would hide exactly the thing a human caught by hand in KYO-676.
+unstaged_server_fns="$(unstaged_or_untracked_matching '^crates/kyomi-ui/src/server_fns/.*\.rs$')"
+if [ -n "$unstaged_server_fns" ]; then
+    allow_reason="$(review_approval_allow_unstaged_reason)"
+    if [ -n "$allow_reason" ]; then
+        echo "⚠️  server_fn lint skipped for unstaged/untracked files — acknowledged at signing:"
+        echo "   Reason: $allow_reason"
+        echo "$unstaged_server_fns" | sed 's/^/   /'
+    else
+        echo ""
+        echo "❌ server_fn lint would apply to files this commit leaves behind — commit blocked."
+        echo "   These server_fns files have unstaged modifications or were never staged"
+        echo "   (untracked, new) and are NOT part of the staged diff that was reviewed"
+        echo "   and signed:"
+        echo "$unstaged_server_fns" | sed 's/^/     /'
+        echo ""
+        echo "   This is the KYO-676 failure mode: an approval whose signature still"
+        echo "   matches the staged diff, on an index narrowed since it was reviewed."
+        echo "   Fix: git add these files and get a fresh review, or have the reviewer"
+        echo "   re-run scripts/sign-review.sh with --allow-unstaged \"<reason>\" if the"
+        echo "   narrowing is deliberate and was actually reviewed as such."
+        echo "   (git commit --no-verify is not a sanctioned override — it skips every"
+        echo "   other check in this hook, not just this one.)"
+        exit 1
+    fi
+elif [ -z "$staged_server_fns" ]; then
+    echo "✅ server_fn lint skipped (no server_fns files staged, unstaged, or untracked)."
 fi
 
 # --- Check 2b: Leptos signal disposal-safety lint ---
 # Runs before clippy for the same reason as Check 2 (pure bash+awk, ~200ms).
-# Only fires when staged changes touch `crates/kyomi-ui/src/**/*.rs`. This
-# is Rule A only (bare .set()/.update() in spawn_local/deferred contexts) —
-# the only blocking rule; Rule B is advisory and does not affect exit status.
+# Lints the staged set whenever staged changes touch
+# `crates/kyomi-ui/src/**/*.rs` (Rule A only — bare .set()/.update() in
+# spawn_local/deferred contexts, the only blocking rule; Rule B is advisory
+# and does not affect exit status), AND, independently and unconditionally
+# (KYO-712, same reasoning as Check 2 above), scans for unstaged/untracked
+# files matching the same pattern.
 echo "🔍 Checking Leptos signal disposal safety..."
 
 staged_disposal_files=$(git diff --cached --name-only --diff-filter=ACM \
@@ -73,8 +286,41 @@ if [ -n "$staged_disposal_files" ]; then
         exit 1
     fi
     echo "✅ disposal-safety lint clean."
-else
-    echo "✅ disposal-safety lint skipped (no kyomi-ui src files staged)."
+fi
+
+# KYO-712: same reasoning as Check 2 above — a skip is only trustworthy
+# when none of this lint's trigger paths are part of what the commit is
+# dropping from the index, whether that means unstaged (modified, tracked)
+# or untracked (a new file that was unstaged, Part A/B), and this scan
+# always runs regardless of whether staged_disposal_files above was empty.
+# This is the exact check whose false "✅ ... skipped" line was what let
+# the KYO-676 commit through — its whole purpose was disposal safety.
+unstaged_disposal_files="$(unstaged_or_untracked_matching '^crates/kyomi-ui/src/.*\.rs$')"
+if [ -n "$unstaged_disposal_files" ]; then
+    allow_reason="$(review_approval_allow_unstaged_reason)"
+    if [ -n "$allow_reason" ]; then
+        echo "⚠️  disposal-safety lint skipped for unstaged/untracked files — acknowledged at signing:"
+        echo "   Reason: $allow_reason"
+        echo "$unstaged_disposal_files" | sed 's/^/   /'
+    else
+        echo ""
+        echo "❌ disposal-safety lint would apply to files this commit leaves behind — commit blocked."
+        echo "   These crates/kyomi-ui/src/*.rs files have unstaged modifications or were"
+        echo "   never staged (untracked, new) and are NOT part of the staged diff that"
+        echo "   was reviewed and signed:"
+        echo "$unstaged_disposal_files" | sed 's/^/     /'
+        echo ""
+        echo "   This is the KYO-676 failure mode: an approval whose signature still"
+        echo "   matches the staged diff, on an index narrowed since it was reviewed."
+        echo "   Fix: git add these files and get a fresh review, or have the reviewer"
+        echo "   re-run scripts/sign-review.sh with --allow-unstaged \"<reason>\" if the"
+        echo "   narrowing is deliberate and was actually reviewed as such."
+        echo "   (git commit --no-verify is not a sanctioned override — it skips every"
+        echo "   other check in this hook, not just this one.)"
+        exit 1
+    fi
+elif [ -z "$staged_disposal_files" ]; then
+    echo "✅ disposal-safety lint skipped (no kyomi-ui src files staged, unstaged, or untracked)."
 fi
 
 # --- Check 2c: Real-world identifier lint (KYO-662) ---
@@ -107,10 +353,6 @@ fi
 # --- Check 3: Verify code review signature ---
 echo "🔍 Verifying code review approval..."
 
-REVIEW_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEApRtsZODQxaUNP383HB/iqLHSlrf92Fe3UB43Bc2TaG0=
------END PUBLIC KEY-----"
-
 DIFF_HASH=$(git diff --cached | sha256sum | awk '{print $1}')
 
 if [ ! -f .review-approval ]; then
@@ -121,7 +363,6 @@ if [ ! -f .review-approval ]; then
 fi
 
 APPROVED_HASH=$(sed -n '1p' .review-approval)
-SIGNATURE=$(sed -n '2p' .review-approval)
 
 if [ "$DIFF_HASH" != "$APPROVED_HASH" ]; then
     echo ""
@@ -132,16 +373,7 @@ if [ "$DIFF_HASH" != "$APPROVED_HASH" ]; then
     exit 1
 fi
 
-PUB_FILE=$(mktemp)
-SIG_FILE=$(mktemp)
-HASH_FILE=$(mktemp)
-trap 'rm -f "$PUB_FILE" "$SIG_FILE" "$HASH_FILE"' EXIT
-
-echo "$REVIEW_PUBLIC_KEY" > "$PUB_FILE"
-echo -n "$DIFF_HASH" > "$HASH_FILE"
-echo "$SIGNATURE" | base64 -d > "$SIG_FILE"
-
-if ! openssl pkeyutl -verify -pubin -inkey "$PUB_FILE" -in "$HASH_FILE" -sigfile "$SIG_FILE" >/dev/null 2>&1; then
+if ! review_approval_signature_valid; then
     echo ""
     echo "❌ Code review signature is INVALID — commit blocked."
     echo "   The approval file may have been tampered with."
