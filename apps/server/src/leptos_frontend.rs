@@ -140,22 +140,37 @@ pub async fn serve(headers: HeaderMap, uri: axum::http::Uri) -> Response {
     // SPA fallback: serve the Leptos shell for any unmatched page request.
     // Protected routes require an auth cookie — redirect to /login without one.
     // Public routes (auth pages, trial, welcome, unsubscribe, onboarding) pass through.
-    let is_public = matches!(
-        path,
-        "login" | "welcome" | "unsubscribe" | "onboarding" | "setup"
-        | "billing/return"
-    ) || path.starts_with("signup/")
-        || path.starts_with("auth/")
-        || path.starts_with("account/")
-        || path.starts_with("verify");
-
-    if !is_public
+    if !is_public_route(path)
         && let Some(redirect) = check_auth_cookie_or_redirect(&headers, Some(&uri))
     {
         return redirect;
     }
 
     serve_leptos_shell().await
+}
+
+/// Whether `path` (already stripped of its leading `/` — see [`serve`]) is a
+/// public page route: one that must render without an auth cookie.
+///
+/// `path` is matched, never a full URL, so `starts_with` prefixes below only
+/// ever match the route segment itself (e.g. `"signup/complete"`), not a
+/// query string or fragment.
+///
+/// KYO-728: `"login"` was listed here but bare `"signup"` was not — only the
+/// `"signup/"` *prefix* was, which matches `"signup/complete"` but not the
+/// signup page's own route. An unauthenticated hard load of `/signup`
+/// therefore failed this check and bounced through
+/// `check_auth_cookie_or_redirect` to `/login`, even though `/signup` is
+/// exactly as public as `/login`.
+fn is_public_route(path: &str) -> bool {
+    matches!(
+        path,
+        "login" | "signup" | "welcome" | "unsubscribe" | "onboarding" | "setup"
+        | "billing/return"
+    ) || path.starts_with("signup/")
+        || path.starts_with("auth/")
+        || path.starts_with("account/")
+        || path.starts_with("verify")
 }
 
 /// Files that should never be cached (always revalidated by the browser).
@@ -427,4 +442,61 @@ fn mime_from_path(path: &str) -> HeaderValue {
         _ => "application/octet-stream",
     };
     HeaderValue::from_static(mime)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_public_route;
+
+    /// KYO-728: `/signup` (no trailing segment) is the signup page's own
+    /// route and must be public, exactly like `/login`. Before the fix,
+    /// only the `"signup/"` *prefix* was listed, which matched
+    /// `"signup/complete"` but not bare `"signup"` — so an unauthenticated
+    /// hard load of `/signup` fell through to `check_auth_cookie_or_redirect`
+    /// and bounced to `/login`.
+    #[test]
+    fn bare_signup_route_is_public() {
+        assert!(is_public_route("signup"));
+    }
+
+    /// The `"signup/"` prefix match (e.g. the post-verification landing
+    /// page) must keep working alongside the bare-route fix above.
+    #[test]
+    fn signup_subpaths_are_public() {
+        assert!(is_public_route("signup/complete"));
+    }
+
+    /// `"login"` is the reference case this rule is modeled on — pinned so
+    /// a future refactor of the `matches!` list can't drop it.
+    #[test]
+    fn login_route_is_public() {
+        assert!(is_public_route("login"));
+    }
+
+    /// Other listed public routes and prefixes stay public.
+    #[test]
+    fn other_documented_public_routes_are_public() {
+        for path in [
+            "welcome",
+            "unsubscribe",
+            "onboarding",
+            "setup",
+            "billing/return",
+            "auth/google/callback",
+            "account/recover",
+            "verify",
+            "verify/email",
+        ] {
+            assert!(is_public_route(path), "{path} should be public");
+        }
+    }
+
+    /// A protected app route must stay gated — this fix must not have
+    /// widened the allowlist beyond signup.
+    #[test]
+    fn protected_routes_stay_protected() {
+        for path in ["dashboards", "settings/profile", "", "signupwhatever"] {
+            assert!(!is_public_route(path), "{path} should not be public");
+        }
+    }
 }
