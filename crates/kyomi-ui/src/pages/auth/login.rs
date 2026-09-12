@@ -4,8 +4,17 @@
 //!
 //! State machine with four views: Credentials, TwoFactor, Signup, CheckEmail.
 //! Uses `AuthLayout` for the shared two-panel layout, existing sub-components
-//! (`PasskeySignInButton`, `GoogleSignInButton`, `AuthDivider`), and server
+//! (`PasskeySignInButton`, `GoogleSignInSection`, `AuthDivider`), and server
 //! functions (`get_auth_config`, `login_with_password`).
+//!
+//! KYO-728 phase A collapsed the signup view's passkey-vs-email fork —
+//! both paths sent the same verification email to the same address and
+//! created the same row, so `SignupView` now offers a single email field
+//! plus Google sign-in: no passkey button, no divider between the two,
+//! and no primary action ever disabled with nothing on screen explaining
+//! why. `CredentialsView` keeps its own passkey/Google/divider layout —
+//! it still has two sign-in paths to separate visually, which is what
+//! `AuthDivider` is for; `SignupView` no longer does.
 
 use leptos::prelude::*;
 use phosphor_leptos::Icon;
@@ -17,11 +26,10 @@ use crate::components::{
     Spinner, INPUT_CLASS,
 };
 use crate::pages::auth::auth_layout::AuthLayout;
-use crate::pages::auth::components::{AuthDivider, GoogleSignInButton, PasskeySignInButton};
+use crate::pages::auth::components::{AuthDivider, GoogleSignInSection, PasskeySignInButton};
 use crate::server_fns::auth::{
     get_auth_config, login_with_password, passkey_login_complete, passkey_login_start,
-    passkey_signup_start, resend_verification, signup_start, LoginResult,
-    PasskeySignupStartResult, SignupResult,
+    resend_verification, signup_start, LoginResult, SignupResult,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -154,24 +162,6 @@ pub fn LoginPage(
         },
     );
 
-    // ── Passkey signup action ───────────────────────────────────────────
-    // Unlike the login page's passkey handler, this never touches
-    // navigator.credentials — it only mints a signup token/email link, so
-    // it's a plain server call and can use Action (no !Send browser API
-    // involved). Input tuple: (email, name_opt). Returns (email, result) so
-    // the Effect can navigate to the CheckEmail view using the dispatch-time
-    // email, matching signup_action's pattern above.
-    let passkey_signup_action = Action::new(
-        move |(dispatched_email, name_opt): &(String, Option<String>)| {
-            let dispatched_email = dispatched_email.clone();
-            let name_opt = name_opt.clone();
-            async move {
-                let result = passkey_signup_start(dispatched_email.clone(), name_opt).await;
-                (dispatched_email, result)
-            }
-        },
-    );
-
     // ── Resend verification action ──────────────────────────────────────
     let resend_action = Action::new(move |ver_email: &String| {
         let ver_email = ver_email.clone();
@@ -246,45 +236,6 @@ pub fn LoginPage(
                     set_error.set(Some(message));
                 }
                 Ok(SignupResult::RateLimited { .. }) => {
-                    set_error.set(Some(
-                        "Too many signup attempts. Please try again later.".to_string(),
-                    ));
-                }
-                Err(e) => {
-                    set_error.set(Some(format!("Server error: {}", e)));
-                }
-            }
-        }
-    });
-
-    // ── Effect: react to passkey signup action result ────────────────────
-    // Mirrors the signup_action Effect above. TokenIssued (self-hosted
-    // SMTP-less) navigates straight to the WebAuthn-ceremony page instead
-    // of setting cookies — passkey signup has no one-step AccountCreated
-    // equivalent, see PasskeySignupStartResult's doc comment.
-    Effect::new(move |_| {
-        if let Some((dispatched_email, result)) = passkey_signup_action.value().get() {
-            match result {
-                Ok(PasskeySignupStartResult::TokenIssued { token }) => {
-                    #[cfg(target_arch = "wasm32")]
-                    if let Some(nav) = navigate.try_get_value() {
-                        nav(
-                            &format!("/auth/passkey-signup?token={token}"),
-                            Default::default(),
-                        );
-                    }
-                    let _ = &token; // suppress unused warning on SSR
-                }
-                Ok(PasskeySignupStartResult::VerificationRequired { message }) => {
-                    set_success_msg.set(Some(message));
-                    set_view_state.set(LoginView::CheckEmail {
-                        email: dispatched_email,
-                    });
-                }
-                Ok(PasskeySignupStartResult::Error { message }) => {
-                    set_error.set(Some(message));
-                }
-                Ok(PasskeySignupStartResult::RateLimited { .. }) => {
                     set_error.set(Some(
                         "Too many signup attempts. Please try again later.".to_string(),
                     ));
@@ -602,34 +553,6 @@ pub fn LoginPage(
         }
     };
 
-    // ── Passkey signup click handler ────────────────────────────────────
-    // Uses whatever email/name are already in the signup form. Name is only
-    // ever populated in the self-hosted-no-smtp branch of SignupView (the
-    // SaaS form doesn't collect one) — passed through as `None` otherwise.
-    let on_passkey_signup_click = Callback::new(move |()| {
-        // Double-dispatch guard.
-        if passkey_signup_action.pending().get_untracked() {
-            return;
-        }
-
-        let current_email = signup_email.get_untracked();
-        if current_email.trim().is_empty() {
-            set_error.set(Some("Please enter your email address.".to_string()));
-            return;
-        }
-
-        set_error.set(None);
-
-        let current_name = signup_name.get_untracked();
-        let name_opt = if current_name.trim().is_empty() {
-            None
-        } else {
-            Some(current_name)
-        };
-
-        passkey_signup_action.dispatch((current_email, name_opt));
-    });
-
     // ── Resend verification handler ─────────────────────────────────────
     // Dispatches resend_action; the Effect above handles result state.
     let on_resend_verification = move |_| {
@@ -698,7 +621,6 @@ pub fn LoginPage(
                         }
                         LoginView::Signup => {
                             let signup_loading = Signal::derive(move || signup_action.pending().get());
-                            let passkey_signup_loading = Signal::derive(move || passkey_signup_action.pending().get());
                             view! {
                                 <SignupView
                                     signup_email=signup_email
@@ -713,9 +635,9 @@ pub fn LoginPage(
                                     is_self_hosted_no_smtp=is_self_hosted_no_smtp
                                     on_signup_submit=on_signup_submit
                                     set_view_state=set_view_state
-                                    show_passkey_section=show_passkey_section
-                                    passkey_signup_loading=passkey_signup_loading
-                                    on_passkey_signup_click=on_passkey_signup_click
+                                    show_google_section=show_google_section
+                                    google_loading=google_loading
+                                    on_google_click=on_google_click
                                 />
                             }.into_any()
                         }
@@ -789,15 +711,12 @@ fn CredentialsView(
             </Show>
 
             // Google Sign In
-            <Show when=show_google_section>
-                <div class="space-y-3">
-                    <GoogleSignInButton
-                        loading=Signal::derive(move || google_loading.get())
-                        disabled=Signal::derive(move || passkey_loading.get())
-                        on_click=on_google_click
-                    />
-                </div>
-            </Show>
+            <GoogleSignInSection
+                show=show_google_section
+                loading=Signal::derive(move || google_loading.get())
+                disabled=Signal::derive(move || passkey_loading.get())
+                on_click=on_google_click
+            />
 
             // Success / Error / Verification Alerts — placed above the form for a11y
             // (screen readers encounter them before the email field)
@@ -1057,45 +976,35 @@ fn SignupView(
     is_self_hosted_no_smtp: impl Fn() -> bool + Copy + Send + Sync + 'static,
     on_signup_submit: impl Fn(leptos::ev::SubmitEvent) + Copy + Send + Sync + 'static,
     set_view_state: WriteSignal<LoginView>,
-    show_passkey_section: impl Fn() -> bool + Copy + Send + Sync + 'static,
-    passkey_signup_loading: Signal<bool>,
-    on_passkey_signup_click: Callback<()>,
+    show_google_section: impl Fn() -> bool + Copy + Send + Sync + 'static,
+    google_loading: ReadSignal<bool>,
+    on_google_click: Callback<()>,
 ) -> impl IntoView {
-    let passkey_signup_disabled =
-        Signal::derive(move || signup_email.get().trim().is_empty());
-
-    let signup_disabled = move || {
-        if is_self_hosted_no_smtp() {
-            signup_loading.get()
-                || signup_email.get().trim().is_empty()
-                || signup_name.get().trim().is_empty()
-                || signup_password.get().len() < 8
-        } else {
-            signup_loading.get() || signup_email.get().trim().is_empty()
-        }
-    };
+    // KYO-728: the submit button is never disabled on field emptiness —
+    // `on_signup_submit` already validates every field (email here, plus
+    // name/password in the self-hosted-no-smtp branch) and reports via
+    // `set_error`, matching the pattern `signup_complete.rs` uses. A button
+    // disabled with nothing on screen explaining why is what this ticket
+    // removed the old passkey button for; loading alone still disables it,
+    // to prevent a double-submit while the request is in flight.
+    let signup_disabled = move || signup_loading.get();
 
     view! {
         <div class="space-y-5">
-            // Passkey Sign Up — same visual slot the passkey/Google buttons
-            // occupy on the Credentials view, gated by the same
-            // show_passkey_section condition (WebAuthn availability + the
-            // `passkeys` auth-config flag).
-            <Show when=show_passkey_section>
-                <div class="space-y-3">
-                    <PasskeySignInButton
-                        loading=passkey_signup_loading
-                        disabled=passkey_signup_disabled
-                        on_click=on_passkey_signup_click
-                        label="Sign up with Passkey"
-                        loading_label="Sending signup link..."
-                    />
-                </div>
-            </Show>
-
-            <Show when=show_passkey_section>
-                <AuthDivider text="or sign up with email"/>
-            </Show>
+            // Google Sign Up — the same shared section CredentialsView renders
+            // for sign-in, wired to the same google_loading signal and
+            // on_google_click handler defined once in LoginPage (KYO-728
+            // removed the passkey-vs-email fork this view used to have;
+            // Google is the only alternative to plain email signup left).
+            // No divider below it — KYO-728's acceptance criterion is a
+            // single email input and submit button plus Google sign-in,
+            // with no separator; `space-y-5` on the wrapping div already
+            // supplies the gap to the form below.
+            <GoogleSignInSection
+                show=show_google_section
+                loading=Signal::derive(move || google_loading.get())
+                on_click=on_google_click
+            />
 
             <form on:submit=on_signup_submit class="space-y-5">
                 <div class="space-y-2">
@@ -1240,8 +1149,16 @@ fn CheckEmailView(
             <p class="text-muted-foreground">
                 "Click the link in the email to complete your signup and set up your account."
             </p>
+            // The verification token this links to is minted with `None` for
+            // `expire_hours`, which resolves to `jwt.email_verification_expire_hours`
+            // in data/constants.toml (24, as of this writing) — see
+            // `create_verification_token_with_expiry` in
+            // crates/kyomi-auth/src/token_service.rs. This page runs client-side
+            // and can't read that constant directly (kyomi-core is an ssr-only
+            // dependency here), so the hours are spelled out below; update this
+            // string if the constant changes.
             <p class="text-sm text-muted-foreground">
-                "The link expires in 1 hour."
+                "The link expires in 24 hours."
             </p>
             <div class="pt-4">
                 <Button
@@ -1291,43 +1208,79 @@ mod tests {
             .expect("TEST_MOD_MARKER must be found in SRC")
     }
 
-    // ── Wiring: GoogleSignInButton's disabled prop ───────────────────────
+    // ── Wiring: GoogleSignInSection's disabled prop (CredentialsView) ────
 
     /// KYO-705 removed the KYO-478 Google-OAuth-allowlist attestation gate
     /// (Kyomi's Google OAuth app left Testing publishing status, so the
     /// confirmation checkbox had nothing left to attest to) — but the KYO-478
     /// mutual-exclusion behavior it shared the predicate with must survive
     /// the removal: Google sign-in stays disabled while a passkey sign-in
-    /// is in flight. Pins the `disabled` prop's expression directly rather
-    /// than via a now-deleted pure-predicate helper, so a future edit
-    /// can't silently drop the `passkey_loading` read.
+    /// is in flight. KYO-728 moved the button behind the shared
+    /// `GoogleSignInSection`; this pins the `disabled` prop's expression at
+    /// its `CredentialsView` call site directly, so a future edit can't
+    /// silently drop the `passkey_loading` read. `CredentialsView` is
+    /// extracted first (bounded by the next component, `TwoFactorView`) so
+    /// the match can't land on `SignupView`'s call site instead — that one
+    /// has no `disabled` prop at all, since signup has no competing
+    /// passkey flow to mutually exclude against.
     #[test]
-    fn google_sign_in_button_disabled_derives_from_passkey_loading() {
-        let button_block = extract_between(
-            SRC,
-            "<GoogleSignInButton",
+    fn google_sign_in_section_disabled_derives_from_passkey_loading_in_credentials_view() {
+        let credentials_view = extract_between(SRC, "fn CredentialsView", "fn TwoFactorView");
+        let section_block = extract_between(
+            credentials_view,
+            "<GoogleSignInSection",
             "on_click=on_google_click",
         );
         assert!(
-            button_block.contains("disabled=Signal::derive(move || passkey_loading.get())"),
-            "GoogleSignInButton's disabled prop must derive from passkey_loading alone \
-             — the KYO-478 mutual-exclusion behavior (Google sign-in disabled while a \
-             passkey sign-in is in flight) must not regress — found:\n{button_block}"
+            section_block.contains("disabled=Signal::derive(move || passkey_loading.get())"),
+            "CredentialsView's GoogleSignInSection disabled prop must derive from \
+             passkey_loading alone — the KYO-478 mutual-exclusion behavior (Google \
+             sign-in disabled while a passkey sign-in is in flight) must not regress \
+             — found:\n{section_block}"
         );
     }
 
-    // ── Negative space: SignupView has no Google button ──────────────────
+    // ── Wiring: GoogleSignInSection renders in both auth views ───────────
 
-    /// `LoginView::Signup` renders `SignupView`, a completely separate
-    /// component from `CredentialsView` — it offers passkey signup only,
-    /// no Google button (confirmed by inspection: `GoogleSignInButton` has
-    /// exactly one call site in this file, inside `CredentialsView`).
+    /// KYO-728 removed `SignupView`'s passkey-vs-email fork and gave it
+    /// Google sign-in instead, sharing the same `GoogleSignInSection`
+    /// `CredentialsView` already used — so this file now has two call
+    /// sites for it, one per view, rather than the single
+    /// `CredentialsView`-only call site from before that ticket.
     #[test]
-    fn google_sign_in_button_has_exactly_one_call_site() {
-        let count = production_src().matches("<GoogleSignInButton").count();
+    fn google_sign_in_section_renders_in_both_credentials_and_signup_views() {
+        let src = production_src();
+        let count = src.matches("<GoogleSignInSection").count();
+        assert_eq!(
+            count, 2,
+            "expected exactly two <GoogleSignInSection call sites \
+             (CredentialsView and SignupView) — found {count}."
+        );
+
+        let credentials_view = extract_between(src, "fn CredentialsView", "fn TwoFactorView");
+        assert!(
+            credentials_view.contains("<GoogleSignInSection"),
+            "CredentialsView must render GoogleSignInSection"
+        );
+
+        let signup_view = extract_between(src, "fn SignupView", "fn CheckEmailView");
+        assert!(
+            signup_view.contains("<GoogleSignInSection"),
+            "SignupView must render GoogleSignInSection"
+        );
+    }
+
+    // ── Negative space: SignupView has no passkey button ──────────────────
+
+    /// KYO-728 removed the passkey-vs-email fork from signup, so
+    /// `PasskeySignInButton` has exactly one call site left in this file —
+    /// `CredentialsView`'s "Sign in with Passkey" button.
+    #[test]
+    fn passkey_sign_in_button_has_exactly_one_call_site() {
+        let count = production_src().matches("<PasskeySignInButton").count();
         assert_eq!(
             count, 1,
-            "expected exactly one <GoogleSignInButton call site (inside \
+            "expected exactly one <PasskeySignInButton call site (inside \
              CredentialsView) — found {count}."
         );
     }
