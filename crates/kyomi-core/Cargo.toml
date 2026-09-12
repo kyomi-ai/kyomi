@@ -39,6 +39,7 @@ test-helpers = ["dep:sha2", "dep:hex"]
 tokio = { version = "1", features = ["test-util"] }
 sha2 = { workspace = true }
 hex = { workspace = true }
+kyomi-test-tracing = { workspace = true }
 # Self dev-dependency: activates our own `test-helpers` feature so this
 # crate's own integration tests (crates/kyomi-core/tests/*.rs) can call
 # `kyomi_core::test_db`, which is gated `cfg(any(test, feature =

@@ -10,6 +10,7 @@ pub mod health;
 pub mod leptos_frontend;
 pub mod middleware;
 pub mod routes;
+pub mod schema_drift;
 pub mod state;
 
 use std::net::SocketAddr;
