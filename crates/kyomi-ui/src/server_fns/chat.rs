@@ -1211,6 +1211,11 @@ fn session_detail_to_session_detail(
     }
 }
 
+// KYO-498: end-to-end regression coverage for the new-session live-insert
+// path — see the module doc comment for the full context.
+#[cfg(all(test, feature = "ssr"))]
+mod new_session_live_insert_tests;
+
 #[cfg(all(test, feature = "ssr"))]
 mod tests {
     //! `share_session` / `unshare_session` run inside `extract_auth()` /
