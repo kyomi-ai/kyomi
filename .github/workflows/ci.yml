@@ -99,11 +99,20 @@ jobs:
       # --------------------------------------------------------------------
       # Signal disposal safety lint (introduced by PR #34).
       #
-      # Blocks bare .set()/.update() inside spawn_local/deferred contexts
-      # (must use .try_set()/.try_update() to avoid WASM panics when
-      # signals are disposed during page navigation).
+      # Rule A blocks bare .set()/.update() inside spawn_local/deferred
+      # contexts (must use .try_set()/.try_update() to avoid WASM panics
+      # when signals are disposed during page navigation). Rule B (KYO-679)
+      # blocks bare .get() inside Signal::derive/Memo::new that is NOT
+      # already recorded in scripts/lint/disposal-safety-baseline.txt (or
+      # exceeds its recorded occurrence count) — a ratchet over the 388
+      # pre-existing advisory sites, not a full gate on all of them; see
+      # the script's own header NOTE. This full-tree run is also the one
+      # that enforces the baseline may only shrink (a stale entry here is
+      # a failure naming --update-baseline) — the pre-commit hook's
+      # file-scoped runs deliberately do not enforce that half.
       #
-      # Pure bash + awk, no Rust toolchain required (~200ms).
+      # Pure bash + awk (+ a single batched `perl -MDigest::SHA` process for
+      # Rule B's baseline hashing), no Rust toolchain required (~200ms).
       # --------------------------------------------------------------------
       - name: Signal disposal safety lint
         run: ./scripts/lint/check-disposal-safety.sh
@@ -612,7 +621,7 @@ jobs:
         run: sccache --show-stats || true
 
   # ---------------------------------------------------------------------------
-  # Worktree lifecycle & script self-tests (KYO-578, KYO-617, KYO-629, KYO-632, KYO-662, KYO-710)
+  # Worktree lifecycle & script self-tests (KYO-578, KYO-617, KYO-629, KYO-632, KYO-662, KYO-679, KYO-710)
   #
   # scripts/check-ticket-in-flight.sh, scripts/mark-worktree-stranded.sh,
   # scripts/mark-branch-stranded.sh, scripts/append-review-log.sh,
@@ -644,7 +653,17 @@ jobs:
   # / no-toolchain reasons as preflight-clippy-test.sh and
   # stale-tooling-guard-test.sh before it — this job has hosted more than
   # worktree-lifecycle scripts for a while now, see the two paragraphs just
-  # above. scripts/check-agent-run-result-test.sh (KYO-710) is different in
+  # above. scripts/lint/check-disposal-safety-test.sh (KYO-679) is the same
+  # shape again: it is the self-test for check-disposal-safety.sh's Rule B
+  # baseline ratchet (the lint itself already runs in the `lint-policy` job
+  # above; this is its self-test, same relationship as
+  # check-real-identifiers-test.sh to check-real-identifiers.sh) — a
+  # lint-policy concern, not a ticket-lifecycle gate, riding here for the
+  # same fast / hermetic / no-toolchain reasons. Like
+  # check-real-identifiers-test.sh, it needs perl with core Digest::SHA — to
+  # hash Rule B findings for baseline comparison, the same "many short
+  # strings, one process" reason, not a coincidence.
+  # scripts/check-agent-run-result-test.sh (KYO-710) is different in
   # kind for the same reason again: it is the self-test for
   # scripts/check-agent-run-result.sh, the per-run success/failure gate the
   # three kyomi-*-cron.sh wrappers (outside this repo, under
@@ -708,7 +727,11 @@ jobs:
   # next suite change; that is a known, separately-filed gap, not
   # something this recount or this job fixes — the recount only makes
   # today's number true, it does not make
-  # tomorrow's number self-maintaining), but until this job existed none of
+  # tomorrow's number self-maintaining. KYO-679 is exactly that predicted
+  # rot: it adds a fourteenth suite,
+  # scripts/lint/check-disposal-safety-test.sh, to the array below without
+  # redoing this live recount — per KYO-609 that is the known, accepted gap,
+  # not a new one), but until this job existed none of
   # the original scripts ran anywhere except when a human or agent remembered
   # to invoke it by hand — a load-bearing check that never runs in CI is a
   # fail-open shape this workflow has already been bitten by twice (KYO-511,
@@ -744,7 +767,10 @@ jobs:
   # no `gh` stub, no python3 either. check-real-identifiers-test.sh needs
   # perl with core Digest::SHA (already on ubuntu-latest, no extra install
   # step) to compute the salted SHA-256 hash for its throwaway denylist
-  # fixture — no other suite in this job needs perl.
+  # fixture. check-disposal-safety-test.sh (KYO-679) needs the same
+  # perl+Digest::SHA for the same reason, one layer down: it exercises
+  # check-disposal-safety.sh's own baseline hashing, not a hash the test
+  # script computes itself.
   # check-agent-run-result-test.sh needs no `gh` stub either, but has its
   # own PATH-stubbing case for a different tool: one test builds a minimal
   # bin directory of symlinks to the real python3/git/coreutils and points
@@ -818,6 +844,7 @@ jobs:
             scripts/preflight-clippy-test.sh
             scripts/lib/stale-tooling-guard-test.sh
             scripts/lint/check-real-identifiers-test.sh
+            scripts/lint/check-disposal-safety-test.sh
             scripts/repro-headless-subagent-survival-test.sh
             scripts/check-agent-run-result-test.sh
             scripts/sign-review-test.sh
