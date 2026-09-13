@@ -126,6 +126,13 @@ pub struct AgentExecutionConfig {
     /// interpreted as "not an admin", so leaving it empty for a real user
     /// produces a false denial, not a safe default.
     pub workspace_roles: Vec<WorkspaceRole>,
+    /// The single document (dashboard or knowledge file) this execution is
+    /// scoped to, if any. Threaded into
+    /// [`crate::tools::ToolContext::document_id`] — see that field's doc
+    /// comment for the enforcement it drives. Only the dashboard and
+    /// knowledge copilot call sites populate this; chat, MCP, Slack, and
+    /// watch execution leave it `None` (KYO-536).
+    pub document_id: Option<String>,
 }
 
 impl Default for AgentExecutionConfig {
@@ -161,6 +168,7 @@ impl Default for AgentExecutionConfig {
             // Test/placeholder default only — see field doc. Production call
             // sites must pass the attributed user's real workspace roles.
             workspace_roles: Vec::new(),
+            document_id: None,
         }
     }
 }
@@ -254,6 +262,7 @@ fn build_tool_context(config: &AgentExecutionConfig, env: &AgentExecutionEnv<'_>
         connect_registry: env.connect_registry.clone(),
         platforms: env.platforms.clone(),
         user_display_name: config.user_display_name.clone(),
+        document_id: config.document_id.clone(),
     }
 }
 
@@ -1690,9 +1699,11 @@ mod tests {
             user_display_name: "Test User".to_string(),
             context_window: 200_000,
             workspace_roles: vec![WorkspaceRole::WorkspaceAdmin],
+            document_id: Some("dashboard-abc".into()),
         };
 
         assert_eq!(config.session_id, "sess-123");
+        assert_eq!(config.document_id.as_deref(), Some("dashboard-abc"));
         assert_eq!(config.model_name.as_deref(), Some("claude-haiku-4-5-20251001"));
         assert!(config.is_shared_conversation);
         assert_eq!(config.context_type, "copilot");
@@ -1968,6 +1979,26 @@ mod tests {
         let ctx = test_tool_context_for_roles(vec![]).await;
         assert!(!ctx.is_workspace_admin());
         assert!(ctx.workspace_roles.is_empty());
+    }
+
+    /// KYO-536: chat, MCP, Slack, and watch execution must never be scoped
+    /// to a single document — only the dashboard/knowledge copilot call
+    /// sites populate `AgentExecutionConfig::document_id`. Every other
+    /// production caller goes through `AgentExecutionConfig::default()`
+    /// (directly, or via `..Default::default()`), so pinning the default
+    /// here is sufficient to cover all of them.
+    #[test]
+    fn agent_execution_config_default_has_no_document_scope() {
+        assert_eq!(AgentExecutionConfig::default().document_id, None);
+    }
+
+    #[tokio::test]
+    async fn build_tool_context_default_config_has_no_document_scope() {
+        let ctx = test_tool_context_for_roles(vec![]).await;
+        assert_eq!(
+            ctx.document_id, None,
+            "chat/MCP/Slack/watch execution must not be scoped to a document"
+        );
     }
 
     // -- Contract: build_agent_config mirrors execution guards onto AgentConfig

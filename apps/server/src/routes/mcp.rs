@@ -743,6 +743,8 @@ fn build_tool_context(
         connect_registry: Some(state.connect_registry.clone()),
         platforms: state.platforms.clone(),
         user_display_name,
+        // MCP calls are not scoped to a single open document.
+        document_id: None,
     }
 }
 
@@ -876,10 +878,14 @@ mod tests {
             "render_chart should be in MCP tools"
         );
 
-        // update_dashboard (copilot-only) should NOT be included
+        // update_chart (copilot-only) should NOT be included. Was
+        // update_dashboard before KYO-536 deleted that tool entirely — the
+        // dashboard copilot now writes through the shared, non-copilot-only
+        // `modify_dashboard`, so `update_chart` is the example that still
+        // exercises "MCP excludes copilot-only tools" going forward.
         assert!(
-            !names.contains(&"update_dashboard"),
-            "update_dashboard should not be in MCP tools"
+            !names.contains(&"update_chart"),
+            "update_chart should not be in MCP tools"
         );
     }
 

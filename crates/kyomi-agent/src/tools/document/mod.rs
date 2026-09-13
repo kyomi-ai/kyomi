@@ -192,6 +192,13 @@ pub(crate) struct ApplyUpdateParams<'a> {
     pub content: Option<&'a str>,
     pub change_summary: Option<&'a str>,
     pub expected_content_hash: Option<&'a str>,
+    /// [`ToolContext::document_id`](crate::tools::ToolContext::document_id)
+    /// of the caller, if any — the single document a dashboard/knowledge
+    /// copilot is scoped to. Every caller must pass this through explicitly
+    /// (there is no default), so a future call site cannot simply forget
+    /// the check by omission (KYO-536): see [`apply_update`]'s enforcement
+    /// at the top of its body.
+    pub document_scope: Option<&'a str>,
 }
 
 /// Outcome of [`apply_update`] — the three cases every pre-KYO-538 caller
@@ -201,6 +208,36 @@ pub(crate) enum ApplyUpdateOutcome {
     Updated,
     NotFound,
     Conflict(String),
+}
+
+/// A dashboard/knowledge copilot scoped to one open document
+/// (`scope`, i.e. `ToolContext::document_id`) must not act on a *different*
+/// document — deletion is a write like any other, and the read/edit tools
+/// it shares this scope with. `target_dashboard_id` is the already-resolved
+/// row id the caller is about to act on (post
+/// `resolve_document`/`find_document_by_title` for locator-based callers),
+/// not a raw user-supplied locator. `scope` is `None` for every non-copilot
+/// caller (chat/MCP/Slack/watch), which always passes.
+///
+/// [`apply_update`] calls this itself, so every "replace a document's
+/// content" tool inherits it automatically; [`DocumentDeleteTool`]'s delete
+/// path calls it directly since deletion doesn't go through `apply_update`.
+/// No copilot is actually granted a delete tool today (KYO-536), but the
+/// guard is here anyway so a future one that is would inherit it rather
+/// than needing its own copy.
+pub(crate) fn enforce_document_scope(
+    scope: Option<&str>,
+    target_dashboard_id: &str,
+) -> kyomi_core::Result<()> {
+    if let Some(scope) = scope
+        && scope != target_dashboard_id
+    {
+        return Err(kyomi_core::Error::Forbidden(format!(
+            "This copilot is scoped to a single open document and cannot act on a \
+             different one (requested {target_dashboard_id}, scoped to {scope})"
+        )));
+    }
+    Ok(())
 }
 
 /// Shared tail of every "replace a document's content" tool: call
@@ -226,6 +263,15 @@ pub(crate) enum ApplyUpdateOutcome {
 pub(crate) async fn apply_update(
     params: ApplyUpdateParams<'_>,
 ) -> kyomi_core::Result<ApplyUpdateOutcome> {
+    // KYO-536: a prompt-injected or model-confused write to some other
+    // document id must fail here, before `update_dashboard` is ever called
+    // — not merely be discouraged in the tool's prompt text. This is the
+    // single choke point every "replace a document's content" tool goes
+    // through, so a future document-mutating tool inherits the guard
+    // automatically rather than needing its own copy. See
+    // `enforce_document_scope`.
+    enforce_document_scope(params.document_scope, params.dashboard_id)?;
+
     match kyomi_auth::dashboard_service::update_dashboard(
         kyomi_auth::dashboard_service::UpdateDashboardParams {
             db: params.db,

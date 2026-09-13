@@ -1853,6 +1853,9 @@ async fn run_slack_query(
         user_display_name: "Kyomi Slack".to_string(),
         context_window: 0,
         workspace_roles: user_roles,
+        // Slack execution has no single open document — see
+        // `ToolContext::document_id`.
+        document_id: None,
     };
 
     let result = kyomi_agent::execution::execute_agent_chat(

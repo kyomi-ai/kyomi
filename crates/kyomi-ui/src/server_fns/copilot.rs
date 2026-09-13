@@ -80,6 +80,15 @@ pub async fn create_copilot_session(
 /// - Watch copilot: the watch config JSON (prefixed with `[Watch Configuration]`)
 ///
 /// The component is responsible for prefixing content appropriately.
+///
+/// `document_id` is the id of the dashboard/knowledge document the
+/// dashboard or knowledge copilot is open against (`None` for chart/watch
+/// copilots, which have no such document). It is threaded through to
+/// [`kyomi_agent::tools::ToolContext::document_id`], which every
+/// document-mutating tool call is checked against server-side (KYO-536) —
+/// this is an additional restriction layered on top of each tool's own
+/// ownership checks, not a substitute for them, so a client sending an
+/// id it doesn't actually have access to gains nothing.
 #[server(prefix = "/leptos-api")]
 pub async fn send_copilot_message(
     session_id: String,
@@ -88,6 +97,7 @@ pub async fn send_copilot_message(
     content: Option<String>,
     timezone: Option<String>,
     current_time_user_tz: Option<String>,
+    document_id: Option<String>,
 ) -> Result<CopilotResponse, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -196,6 +206,7 @@ pub async fn send_copilot_message(
         user_display_name: ac.auth.name.clone().unwrap_or_else(|| ac.auth.email.clone()),
         context_window: 0,
         workspace_roles: ac.auth.workspace.workspace_roles.clone(),
+        document_id,
     };
 
     cancel_registry.register(&ac.auth.user_id, &session_id, cancel_token.clone());

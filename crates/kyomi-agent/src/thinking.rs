@@ -43,7 +43,6 @@ pub const TOOL_FRIENDLY_NAMES: &[(&str, &str)] = &[
     ("create_dashboard", "Creating dashboard"),
     ("modify_dashboard", "Updating dashboard"),
     ("delete_dashboard", "Deleting dashboard"),
-    ("update_dashboard", "Updating dashboard"),
     // Charts
     ("get_chartml_spec", "Looking up ChartML spec"),
     ("validate_chartml", "Validating ChartML"),

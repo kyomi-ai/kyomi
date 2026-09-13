@@ -1329,6 +1329,9 @@ async fn execute_watch_inner(
         user_display_name: "Kyomi Watch".to_string(),
         context_window: 0,
         workspace_roles: creator_workspace_roles.clone(),
+        // Watch execution has no single open document — see
+        // `ToolContext::document_id`.
+        document_id: None,
     };
 
     let lazy_embedding = kyomi_embed::LazyEmbedding::loaded(embedding.clone());
@@ -1439,6 +1442,7 @@ async fn execute_watch_inner(
                         user_display_name: "Kyomi Watch".to_string(),
                         context_window: 0,
                         workspace_roles: creator_workspace_roles.clone(),
+                        document_id: None,
                     };
 
                     let lazy_embedding_retry = kyomi_embed::LazyEmbedding::loaded(embedding.clone());
