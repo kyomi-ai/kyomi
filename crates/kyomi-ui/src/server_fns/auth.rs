@@ -832,10 +832,15 @@ pub async fn recovery_start(email: String) -> Result<(), ServerFnError> {
 /// a `"passkey_recovery"` token (15-minute expiry) and sends
 /// `send_passkey_recovery` rather than the account recovery email.
 ///
-/// Always returns `Ok(())` to prevent email enumeration — same
-/// enumeration-safety contract as `recovery_start`. Rate-limits on the
-/// `passkey_recovery` bucket and delegates token minting + email dispatch to
-/// `passkey_recovery_start_service`.
+/// Enumeration-resistant: whether the account exists, is unverified, or
+/// token minting failed are all indistinguishable to the caller — every one
+/// of those cases returns `Ok(())` with no email sent (see
+/// `kyomi_auth::auth_service::passkey_recovery_start_service`). The two
+/// exceptions that do return `Err` are rate-limiting (on the
+/// `passkey_recovery` bucket) and the self-hosted SMTP-not-configured
+/// precondition above, both of which fire before any account lookup and so
+/// leak nothing about a specific email. Delegates token minting + email
+/// dispatch to `passkey_recovery_start_service`.
 #[server(prefix = "/leptos-api")]
 pub async fn passkey_recovery_start(email: String) -> Result<(), ServerFnError> {
     let ctx = extract_context()?;
