@@ -17,6 +17,14 @@ fn main() {
     #[cfg(target_arch = "wasm32")]
     kyomi_ui::wasm_logging::install();
 
+    // KYO-698: install the feedback console-error interceptor before the
+    // panic hook, so a panic's own `console.error` output is captured.
+    // Ordering relative to `wasm_logging::install()` above is immaterial —
+    // `web_sys::console::error_1` resolves `console.error` at call time, not
+    // at install time, so nothing here depends on which one ran first.
+    #[cfg(target_arch = "wasm32")]
+    kyomi_ui::utils::feedback_context::init();
+
     #[cfg(target_arch = "wasm32")]
     std::panic::set_hook(Box::new(|info| {
         console_error_panic_hook::hook(info);
