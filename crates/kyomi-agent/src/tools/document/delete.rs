@@ -6,7 +6,7 @@ use async_trait::async_trait;
 
 use kyomi_auth::websocket::helpers as ws_helpers;
 
-use crate::tools::document::DocType;
+use crate::tools::document::{enforce_document_scope, DocType};
 use crate::tools::{AgentTool, ToolContext};
 use crate::types::ToolAnnotations;
 
@@ -77,6 +77,12 @@ impl DocumentDeleteTool {
                     "Missing required parameter 'dashboard_id'".into(),
                 )
             })?;
+
+        // KYO-536: no copilot is granted this tool today, but deletion is a
+        // write like any other — a copilot scoped to one open document
+        // must not be able to delete a *different* one either. See
+        // `enforce_document_scope`.
+        enforce_document_scope(ctx.document_id.as_deref(), dashboard_id)?;
 
         match kyomi_auth::dashboard_service::delete_dashboard(
             &ctx.db,

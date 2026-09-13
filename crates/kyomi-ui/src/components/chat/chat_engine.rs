@@ -55,6 +55,24 @@ pub enum SessionMode {
     },
 }
 
+/// A hook invoked immediately before a copilot message is dispatched to the
+/// server, so the caller can commit any pending buffer first — the copilot
+/// always edits the *saved* document, never an unsaved one (KYO-536).
+/// Returns `true` to proceed with sending, `false` to abort (e.g. the save
+/// itself failed) — [`ChatEngine::send`] surfaces `false` as its own send
+/// error via the existing error banner rather than silently dispatching a
+/// copilot message on top of a failed save.
+///
+/// `Arc<dyn .. + Send + Sync>` and a `Send` future, not `Rc`/no bound: this
+/// value lives on [`ChatEngine`], which is captured by `leptos::prelude::
+/// Callback` closures (`Callback::new` requires `Fn(In) -> Out + Send +
+/// Sync + 'static` unconditionally, for SSR compatibility, even though the
+/// client itself is single-threaded WASM) — so every field `ChatEngine`
+/// carries must satisfy that bound too.
+pub type BeforeSendHook = std::sync::Arc<
+    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>> + Send + Sync,
+>;
+
 // ─── Config ────────────────────────────────────────────────────────────────
 
 /// Configuration for creating a `ChatEngine`.
@@ -72,6 +90,15 @@ pub struct ChatEngineConfig {
     pub context_content: Option<Signal<String>>,
     /// Label for context prefix ("Dashboard Content", "Chart Content", etc.).
     pub context_label: Option<String>,
+    /// Id of the dashboard/knowledge document this copilot session is open
+    /// against, if any. Threaded through to `send_copilot_message`, and
+    /// from there to `ToolContext::document_id` — see that field's doc
+    /// comment. `None` for copilot types with no single open document
+    /// (chart builder, watch).
+    pub document_id: Option<String>,
+    /// See [`BeforeSendHook`]. `None` for copilot types with nothing to
+    /// autosave (chart builder, watch).
+    pub before_send: Option<BeforeSendHook>,
 }
 
 // ─── SendRequest ───────────────────────────────────────────────────────────
@@ -113,6 +140,8 @@ pub struct ChatEngine {
     context_type: StoredValue<Option<String>>,
     context_content: Option<Signal<String>>,
     context_label: StoredValue<Option<String>>,
+    document_id: Option<String>,
+    before_send: Option<BeforeSendHook>,
 }
 
 impl ChatEngine {
@@ -131,6 +160,8 @@ impl ChatEngine {
         let context_type = StoredValue::new(config.context_type);
         let context_content = config.context_content;
         let context_label = StoredValue::new(config.context_label);
+        let document_id = config.document_id;
+        let before_send = config.before_send;
 
         // ── Session lifecycle ──────────────────────────────────────────
         match &config.session_mode {
@@ -254,6 +285,8 @@ impl ChatEngine {
             context_type,
             context_content,
             context_label,
+            document_id,
+            before_send,
         }
     }
 
@@ -312,11 +345,29 @@ impl ChatEngine {
             Some(time_context)
         };
 
+        let document_id = self.document_id.clone();
+        let before_send = self.before_send.clone();
+
         // For ephemeral mode, send via copilot server function.
         // The context_type for the server call comes from config.context_type,
         // which matches the session creation context_type.
         let ctx_type_for_send = ctx_type.unwrap_or_default();
         leptos::task::spawn_local(async move {
+            // KYO-536: commit any pending buffer before the copilot ever
+            // touches the document, so it always edits the saved content —
+            // never a race against an unsaved local edit. A hook that
+            // reports failure aborts the send entirely rather than
+            // dispatching a copilot message against a document that may
+            // not reflect what the user is looking at.
+            if let Some(hook) = before_send
+                && !(hook)().await
+            {
+                if chat_state_err.state().try_get_untracked().is_some() {
+                    chat_state_err.set_error("Failed to save before sending — please try again.");
+                }
+                return;
+            }
+
             if let Err(e) = send_copilot_message(
                 sid,
                 message,
@@ -324,6 +375,7 @@ impl ChatEngine {
                 context_prefix,
                 timezone,
                 time_ctx,
+                document_id,
             )
             .await
             {

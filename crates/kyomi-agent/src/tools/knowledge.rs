@@ -637,6 +637,7 @@ impl AgentTool for WriteDocumentTool {
                 content: Some(content),
                 change_summary: None,
                 expected_content_hash: content_hash,
+                document_scope: ctx.document_id.as_deref(),
             })
             .await?;
 
@@ -682,6 +683,21 @@ impl AgentTool for WriteDocumentTool {
                 .to_string()),
             }
         } else {
+            // KYO-536: a document-scoped copilot (knowledge_copilot) edits
+            // the document it was opened against — it does not manage the
+            // document set. `create_dashboard` itself is withheld from the
+            // copilot's tool subset for the same reason (see
+            // `crate::copilot::tools_for_context`); this covers the second
+            // path to the same effect, `write_knowledge_file`'s implicit
+            // create-on-no-match branch, which the copilot *does* retain
+            // for full-content replacement of the open document.
+            if let Some(scope) = ctx.document_id.as_deref() {
+                return Err(kyomi_core::Error::Forbidden(format!(
+                    "This copilot is scoped to a single open document (id {scope}) and \
+                     cannot create a new one (no existing document titled '{title}')"
+                )));
+            }
+
             // Create new document
             let dashboard_id = kyomi_auth::dashboard_service::create_dashboard(
                 &ctx.db,
@@ -1204,6 +1220,43 @@ mod tests {
         assert_eq!(doc.content, "v1", "a rejected CAS write must not apply");
     }
 
+    /// A knowledge copilot scoped to one open document must not be able to
+    /// create a brand-new document via `write_knowledge_file`'s implicit
+    /// create-on-no-match branch — it edits the open document, it does not
+    /// manage the document set (mirrors why `create_dashboard` itself is
+    /// withheld from the copilot's tool subset).
+    #[tokio::test]
+    async fn write_knowledge_file_copilot_scope_refuses_creating_new_document() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let open_id = kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Open Doc", "open content", DocType::Knowledge, None,
+        )
+        .await
+        .expect("seed open doc");
+        let count_before = kyomi_auth::dashboard_service::get_document_count(&db, "ws-1", None, "user-a")
+            .await
+            .expect("count before");
+
+        let mut ctx = build_ctx(db);
+        ctx.embedding = loaded_embedding();
+        ctx.document_id = Some(open_id);
+
+        let err = WriteDocumentTool
+            .execute(
+                serde_json::json!({"path": "Totally New Document", "content": "sneaked in"}),
+                &ctx,
+            )
+            .await
+            .expect_err("creating a new document while scoped to a single open one must be refused");
+        assert!(matches!(err, kyomi_core::Error::Forbidden(_)), "got: {err:?}");
+
+        let count_after = kyomi_auth::dashboard_service::get_document_count(&ctx.db, "ws-1", None, "user-a")
+            .await
+            .expect("count after");
+        assert_eq!(count_after, count_before, "no new document row may have been created");
+    }
+
     // ---------------------------------------------------------------------
     // ReadDocumentTool — KYO-537 characterization tests.
     // ---------------------------------------------------------------------
@@ -1465,6 +1518,152 @@ mod tests {
             .expect("lookup")
             .expect("document exists");
         assert_eq!(doc.content, "alpha BETA gamma");
+    }
+
+    // -- KYO-536: edit_knowledge_file as a document-scoped copilot tool -----
+
+    /// A targeted edit's tool-call payload (`old_text` + `new_text`) is
+    /// proportional to the size of the change, not the size of the
+    /// document — unlike `write_knowledge_file`/`modify_dashboard`, which
+    /// require the model to resend the complete content on every call.
+    /// This is the property that makes `edit_knowledge_file` the right
+    /// default tool for the knowledge copilot's small edits.
+    #[tokio::test]
+    async fn edit_knowledge_file_targeted_edit_payload_proportional_to_edit_not_document() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let filler = "This paragraph exists only to pad the document out to a realistic \
+                       size so the edit payload can be measured against it. "
+            .repeat(50);
+        let old_text = "the quarterly revenue figure";
+        let new_text = "the quarterly revenue figure (restated)";
+        let content = format!("{filler}\n\nSee {old_text} in the table below.\n{filler}");
+        kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Runbook", &content, DocType::Knowledge, None,
+        )
+        .await
+        .expect("seed doc");
+        let mut ctx = build_ctx(db);
+        ctx.embedding = loaded_embedding();
+        ctx.document_id = Some(
+            find_document_by_title(&ctx.db, "ws-1", "user-a", "Runbook")
+                .await
+                .expect("lookup")
+                .expect("document exists")
+                .dashboard_id,
+        );
+
+        let payload_size = old_text.len() + new_text.len();
+        assert!(
+            payload_size * 20 < content.len(),
+            "test setup: the edit payload ({payload_size} bytes) must be tiny relative to \
+             the document ({} bytes) for this test to mean anything",
+            content.len()
+        );
+
+        let result = EditDocumentTool
+            .execute(
+                serde_json::json!({"path": "Runbook", "old_text": old_text, "new_text": new_text}),
+                &ctx,
+            )
+            .await
+            .expect("execute");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+        assert_eq!(parsed["success"], serde_json::json!(true), "{result}");
+
+        // The tool call itself only ever carried `path` + `old_text` +
+        // `new_text` (payload_size bytes) — nowhere near the full document.
+        assert!(
+            payload_size * 20 < content.len(),
+            "the arguments this tool call required stayed proportional to the edit"
+        );
+    }
+
+    /// Untouched ChartML (or any other) content outside the replaced span
+    /// must come through byte-for-byte identical — `edit_knowledge_file`
+    /// does a single `str::replacen`, never a full-content rewrite, so nothing
+    /// else in the document can be reworded, reformatted, or reflowed.
+    #[tokio::test]
+    async fn edit_knowledge_file_leaves_untouched_chartml_block_byte_identical() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let chartml_block = "```chartml\ntype: bar\ndata:\n  datasource: sales\n  query: |\n    SELECT region, SUM(amount) FROM orders GROUP BY region\n```";
+        let content = format!(
+            "# Regional Notes\n\nThe west region underperformed this quarter.\n\n{chartml_block}\n\nEnd of notes."
+        );
+        kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Runbook", &content, DocType::Knowledge, None,
+        )
+        .await
+        .expect("seed doc");
+        let mut ctx = build_ctx(db);
+        ctx.embedding = loaded_embedding();
+
+        let result = EditDocumentTool
+            .execute(
+                serde_json::json!({
+                    "path": "Runbook",
+                    "old_text": "The west region underperformed this quarter.",
+                    "new_text": "The west region beat forecast this quarter.",
+                }),
+                &ctx,
+            )
+            .await
+            .expect("execute");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+        assert_eq!(parsed["success"], serde_json::json!(true), "{result}");
+
+        let doc = find_document_by_title(&ctx.db, "ws-1", "user-a", "Runbook")
+            .await
+            .expect("lookup")
+            .expect("document exists");
+        assert!(
+            doc.content.contains(chartml_block),
+            "the ChartML block must survive byte-for-byte unchanged: {}",
+            doc.content
+        );
+        assert!(doc.content.contains("beat forecast"), "the edited span must reflect the new text");
+        assert!(!doc.content.contains("underperformed"), "the old text must be gone");
+    }
+
+    /// A copilot scoped to one open knowledge document must not be able to
+    /// edit a different document, even though `edit_knowledge_file`
+    /// resolves its target by title/path rather than a raw id — the
+    /// enforcement in `document::apply_update` runs against the *resolved*
+    /// document id, after `resolve_document` turns the title into one.
+    #[tokio::test]
+    async fn edit_knowledge_file_copilot_scope_refuses_other_document() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let open_id = kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Open Doc", "open content", DocType::Knowledge, None,
+        )
+        .await
+        .expect("seed open doc");
+        kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Other Doc", "other content here", DocType::Knowledge, None,
+        )
+        .await
+        .expect("seed other doc");
+
+        let mut ctx = build_ctx(db);
+        ctx.embedding = loaded_embedding();
+        ctx.document_id = Some(open_id);
+
+        let err = EditDocumentTool
+            .execute(
+                serde_json::json!({"path": "Other Doc", "old_text": "other content", "new_text": "hijacked"}),
+                &ctx,
+            )
+            .await
+            .expect_err("an edit resolving to a document outside the copilot's scope must be refused");
+        assert!(matches!(err, kyomi_core::Error::Forbidden(_)), "got: {err:?}");
+
+        let other = find_document_by_title(&ctx.db, "ws-1", "user-a", "Other Doc")
+            .await
+            .expect("lookup")
+            .expect("document exists");
+        assert_eq!(other.content, "other content here", "the out-of-scope document must be untouched");
     }
 
     // NOTE (ticket item 5, CAS presence): unlike `write_knowledge_file`,

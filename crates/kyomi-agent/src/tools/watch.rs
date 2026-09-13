@@ -1219,6 +1219,7 @@ mod tests {
                 connect_registry: None,
                 platforms: std::sync::Arc::new(kyomi_core::platform::PlatformRegistry::new()),
                 user_display_name: "User A".to_string(),
+                document_id: None,
             }
         }
 
@@ -1340,6 +1341,7 @@ mod tests {
                 connect_registry: None,
                 platforms: Arc::new(kyomi_core::platform::PlatformRegistry::new()),
                 user_display_name: "User A".to_string(),
+                document_id: None,
             }
         }
 

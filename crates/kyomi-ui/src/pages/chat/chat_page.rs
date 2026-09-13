@@ -415,6 +415,9 @@ pub fn ChatPage() -> impl IntoView {
         on_custom_ws_event: None,
         context_content: None,
         context_label: None,
+        // Main chat is not scoped to a single document and never autosaves.
+        document_id: None,
+        before_send: None,
     });
 
     // Convenience aliases for engine-owned state used throughout the component.

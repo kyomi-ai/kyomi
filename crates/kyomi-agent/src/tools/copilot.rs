@@ -1,10 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Copilot tools — push dashboard and chart updates via WebSocket.
+//! Copilot tools — push chart and watch-draft updates via WebSocket.
 //!
-//! These tools are used by dashboard and chart copilots to send real-time
+//! These tools are used by the chart and watch copilots to send real-time
 //! content updates to the frontend. They are only available in copilot mode
 //! (`is_copilot_only() -> true`).
+//!
+//! The dashboard copilot's equivalent, `UpdateDashboardCopilotTool`, was
+//! deleted in KYO-536 — it had no document identity and could only push a
+//! WebSocket draft the user then saved by hand. The dashboard and knowledge
+//! copilots now write directly through the real, DB-mutating document tools
+//! (`crate::tools::dashboard::ModifyDashboardTool`,
+//! `crate::tools::document::DocumentEditTool`,
+//! `crate::tools::knowledge::WriteDocumentTool`), scoped to the open
+//! document via `ToolContext::document_id`.
 
 use async_trait::async_trait;
 use kyomi_core::{MessageType, WebSocketMessage};
@@ -38,96 +47,6 @@ fn validation_failure_result(headline: &str, e: &kyomi_core::Error) -> String {
         "message": format!("{headline}\n{error_message}"),
     })
     .to_string()
-}
-
-// ---------------------------------------------------------------------------
-// UpdateDashboardCopilotTool
-// ---------------------------------------------------------------------------
-
-/// Push dashboard content updates to the frontend via WebSocket.
-pub struct UpdateDashboardCopilotTool;
-
-#[async_trait]
-impl AgentTool for UpdateDashboardCopilotTool {
-    fn name(&self) -> &str {
-        "update_dashboard"
-    }
-
-    fn description(&self) -> &str {
-        "Update the dashboard content. Use this to apply changes to the \
-         dashboard the user is editing. You MUST provide the COMPLETE updated \
-         markdown content and a brief summary of changes."
-    }
-
-    fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "content": {
-                    "type": "string",
-                    "description": "The complete updated dashboard markdown content"
-                },
-                "summary": {
-                    "type": "string",
-                    "description": "Brief explanation of what was changed"
-                }
-            },
-            "required": ["content", "summary"]
-        })
-    }
-
-    fn is_copilot_only(&self) -> bool {
-        true
-    }
-
-    fn annotations(&self) -> Option<ToolAnnotations> {
-        Some(ToolAnnotations {
-            read_only_hint: Some(false),
-            ..Default::default()
-        })
-    }
-
-    async fn execute(
-        &self,
-        args: serde_json::Value,
-        ctx: &ToolContext,
-    ) -> kyomi_core::Result<String> {
-        let content = args
-            .get("content")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                kyomi_core::Error::BadRequest(
-                    "Missing required parameter 'content'".into(),
-                )
-            })?;
-        let summary = args
-            .get("summary")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                kyomi_core::Error::BadRequest(
-                    "Missing required parameter 'summary'".into(),
-                )
-            })?;
-
-        let mut msg = WebSocketMessage::new(MessageType::DashboardUpdate)
-            .with_data(serde_json::json!({
-                "content": content,
-                "summary": summary,
-                "context_type": "dashboard_copilot",
-            }));
-
-        if let Some(ref sid) = ctx.session_id {
-            msg = msg.with_session(sid);
-        }
-
-        ctx.ws_manager.send_to_user(&ctx.user_id, msg).await;
-
-        Ok(serde_json::json!({
-            "success": true,
-            "message": "Dashboard content sent to user",
-        })
-        .to_string())
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -429,41 +348,6 @@ mod tests {
 
     use crate::test_support::{build_ctx, seed_user_and_workspace, test_pool};
 
-    // -- UpdateDashboardCopilotTool ------------------------------------------
-
-    #[test]
-    fn update_dashboard_copilot_name() {
-        assert_eq!(UpdateDashboardCopilotTool.name(), "update_dashboard");
-    }
-
-    #[test]
-    fn update_dashboard_copilot_description_not_empty() {
-        assert!(!UpdateDashboardCopilotTool.description().is_empty());
-    }
-
-    #[test]
-    fn update_dashboard_copilot_is_copilot_only() {
-        assert!(UpdateDashboardCopilotTool.is_copilot_only());
-    }
-
-    #[test]
-    fn update_dashboard_copilot_schema_requires_content_and_summary() {
-        let schema = UpdateDashboardCopilotTool.parameters_schema();
-        let required = schema["required"].as_array().expect("required is array");
-        assert!(required.contains(&serde_json::json!("content")));
-        assert!(required.contains(&serde_json::json!("summary")));
-        assert_eq!(required.len(), 2);
-    }
-
-    #[test]
-    fn update_dashboard_copilot_annotations_not_read_only() {
-        let ann = UpdateDashboardCopilotTool
-            .annotations()
-            .expect("has annotations");
-        assert_eq!(ann.read_only_hint, Some(false));
-        assert!(ann.destructive_hint.is_none());
-    }
-
     // -- UpdateChartCopilotTool ----------------------------------------------
 
     #[test]
@@ -634,105 +518,21 @@ mod tests {
     // =========================================================================
     // KYO-537 characterization tests — execute() behavior.
     // =========================================================================
-
-    // -- UpdateDashboardCopilotTool ------------------------------------------
-
-    /// KYO-537 named pin (ticket item 3): the missing-`content` branch
-    /// (`copilot.rs` ~100).
-    #[tokio::test]
-    async fn update_dashboard_copilot_missing_content_is_bad_request() {
-        let ctx = build_ctx(test_pool().await);
-        let err = UpdateDashboardCopilotTool
-            .execute(serde_json::json!({"summary": "a change"}), &ctx)
-            .await
-            .expect_err("content is required");
-        assert!(matches!(err, kyomi_core::Error::BadRequest(_)), "got: {err:?}");
-    }
-
-    /// KYO-537 named pin (ticket item 3): the missing-`summary` branch
-    /// (`copilot.rs` ~108).
-    #[tokio::test]
-    async fn update_dashboard_copilot_missing_summary_is_bad_request() {
-        let ctx = build_ctx(test_pool().await);
-        let err = UpdateDashboardCopilotTool
-            .execute(serde_json::json!({"content": "# New content"}), &ctx)
-            .await
-            .expect_err("summary is required");
-        assert!(matches!(err, kyomi_core::Error::BadRequest(_)), "got: {err:?}");
-    }
-
-    /// KYO-537 named pin (ticket item 6 — "sink"): `update_dashboard`
-    /// (the copilot tool) writes NOTHING to the database and only ever
-    /// emits a WebSocket message. This is the property most easily lost
-    /// when this tool is folded into the DB-writing dashboard tools in a
-    /// later stage.
-    ///
-    /// KYO-536 is expected to deliberately invalidate this test by making
-    /// the copilot write directly — that is correct behavior to pin today
-    /// and let KYO-536 flip on purpose, not something to weaken in advance.
-    #[tokio::test]
-    async fn update_dashboard_copilot_writes_nothing_to_db_only_sends_websocket() {
-        let db = test_pool().await;
-        seed_user_and_workspace(&db).await;
-        let dashboard_id = kyomi_auth::dashboard_service::create_dashboard(
-            &db, "user-a", "ws-1", "Untouched", "original content", kyomi_core::models::DocType::Dashboard, None,
-        )
-        .await
-        .expect("seed dashboard");
-
-        let manager = WebSocketManager::new(None, db.clone());
-        let (_conn, mut rx) = manager.connect("user-a").expect("connect user-a");
-        rx.try_recv().expect("heartbeat");
-
-        let mut ctx = build_ctx(db);
-        ctx.ws_manager = manager;
-        ctx.session_id = Some("sess-1".to_string());
-
-        let result = UpdateDashboardCopilotTool
-            .execute(
-                serde_json::json!({
-                    "content": "# Completely different content",
-                    "summary": "Rewrote the intro",
-                }),
-                &ctx,
-            )
-            .await
-            .expect("execute");
-        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
-
-        assert_eq!(
-            parsed,
-            serde_json::json!({"success": true, "message": "Dashboard content sent to user"}),
-            "{result}"
-        );
-
-        let msg = rx.try_recv().expect("dashboard_update broadcast");
-        assert!(msg.contains("\"type\":\"dashboard_update\""), "{msg}");
-        assert!(msg.contains("\"session_id\":\"sess-1\""), "{msg}");
-        assert!(msg.contains("Completely different content"), "{msg}");
-        assert!(msg.contains("\"context_type\":\"dashboard_copilot\""), "{msg}");
-        assert!(
-            rx.try_recv().is_err(),
-            "no second message (e.g. a sync_action) should ever be sent — this tool has no DB write to sync"
-        );
-
-        // The DB row this tool's message *describes* must be byte-for-byte
-        // unchanged — this tool never reaches ctx.db at all.
-        let dash = kyomi_auth::dashboard_service::get_dashboard(&ctx.db, &dashboard_id, "ws-1", "user-a")
-            .await
-            .expect("lookup")
-            .expect("exists");
-        assert_eq!(dash.content, "original content", "update_dashboard (copilot) must not write to the DB");
-        assert_eq!(dash.title, "Untouched");
-
-        // get_document_count (not get_dashboard_count, which filters to
-        // doc_type='dashboard' only) — a leaked write of *any* doc_type,
-        // knowledge included, must be caught here too.
-        let count = kyomi_auth::dashboard_service::get_document_count(&ctx.db, "ws-1", None, "user-a")
-            .await
-            .expect("count");
-        assert_eq!(count, 1, "no new document row of any doc_type may have been created either");
-    }
+    //
+    // The `UpdateDashboardCopilotTool` pins that used to live here
+    // (`update_dashboard_copilot_missing_content_is_bad_request`,
+    // `update_dashboard_copilot_missing_summary_is_bad_request`, and —
+    // named explicitly by KYO-537 as the one pin this ticket was expected
+    // to flip — `update_dashboard_copilot_writes_nothing_to_db_only_sends_websocket`)
+    // are gone along with the tool itself (KYO-536). The dashboard copilot
+    // now writes through the real `modify_dashboard` tool; its "persists to
+    // the DB and creates a version row" and "refuses to write outside its
+    // scoped document" replacements live in `tools/dashboard.rs` next to
+    // `ModifyDashboardTool`'s other characterization tests
+    // (`modify_dashboard_copilot_scoped_write_persists_and_versions` and
+    // `modify_dashboard_copilot_scope_refuses_other_document`). The
+    // equivalent for the knowledge copilot's targeted edit lives in
+    // `tools/document/edit.rs`.
 
     // -- UpdateChartCopilotTool ------------------------------------------------
 

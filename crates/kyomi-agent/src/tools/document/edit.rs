@@ -135,6 +135,7 @@ impl DocumentEditTool {
             content: Some(&new_content),
             change_summary: None,
             expected_content_hash: content_hash,
+            document_scope: ctx.document_id.as_deref(),
         })
         .await?;
 
