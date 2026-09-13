@@ -15,7 +15,7 @@ pub mod websocket_client;
 
 pub use agent_message_body::AgentMessageBody;
 pub use agent_thinking::AgentThinking;
-pub use chat_engine::{ChatEngine, ChatEngineConfig, SessionMode};
+pub use chat_engine::{BeforeSendHook, ChatEngine, ChatEngineConfig, SessionMode};
 pub use chat_input::ChatInput;
 pub use chat_state::{ChatState, ChatStateMachine};
 pub use copilot_chat::CopilotChat;

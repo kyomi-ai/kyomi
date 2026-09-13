@@ -45,8 +45,13 @@ use crate::types::{Tool, ToolAnnotations};
 // ---------------------------------------------------------------------------
 
 /// Tools only available in copilot mode (embedded in dashboards).
-pub const COPILOT_ONLY_TOOLS: &[&str] =
-    &["update_dashboard", "update_chart", "update_watch_draft", "preview_watch"];
+///
+/// `update_dashboard` (a WebSocket-only draft push, no document identity) is
+/// gone as of KYO-536 — the dashboard and knowledge copilots now write
+/// directly through the real document tools (`modify_dashboard`,
+/// `edit_knowledge_file`, `write_knowledge_file`), which are shared with
+/// chat/MCP and are therefore not copilot-only.
+pub const COPILOT_ONLY_TOOLS: &[&str] = &["update_chart", "update_watch_draft", "preview_watch"];
 
 /// Tools only exposed via MCP.
 pub const MCP_ONLY_TOOLS: &[&str] = &[
@@ -138,6 +143,23 @@ pub struct ToolContext {
     /// Display name for the current user (name or email fallback).
     /// Used for WebSocket event attribution (e.g., "changed_by_name" in dashboard updates).
     pub user_display_name: String,
+    /// The single document (dashboard *or* knowledge file — both are
+    /// `dashboards` rows, see [`kyomi_core::models::DocType`]) this
+    /// execution is scoped to, if any.
+    ///
+    /// Set only for dashboard/knowledge copilot executions, which are
+    /// opened against exactly one document and must never be able to write
+    /// a different one (KYO-536). `None` for chat, MCP, Slack, and watch
+    /// execution — those have no single open document and are unaffected.
+    ///
+    /// This is an *additional* restriction layered on top of each tool's
+    /// own ownership/visibility checks, never a replacement for them: a
+    /// document-scoped write is enforced centrally in
+    /// [`document::apply_update`](crate::tools::document) via
+    /// `ApplyUpdateParams::document_scope`, so no future document-mutating
+    /// tool can forget the check by simply not calling it — extending
+    /// `ApplyUpdateParams` requires every caller to decide what to pass.
+    pub document_id: Option<String>,
 }
 
 impl ToolContext {
@@ -468,13 +490,16 @@ pub fn create_default_registry() -> ToolRegistry {
     // Forecast tools
     registry.register(Arc::new(forecast::ForecastDataTool));
 
-    // Copilot tools — draft/broadcast variants used by dashboard, chart, and
-    // watch copilots. Dashboard and chart have no DB-mutating equivalent, so
-    // their copilot tools own the `update_dashboard` / `update_chart` names.
-    // Watch DOES have a DB-mutating `UpdateWatchTool` (registered above) used
-    // by MCP and chat, so the copilot variant uses a distinct name
-    // (`update_watch_draft`) and coexists with it in the registry.
-    registry.register(Arc::new(copilot::UpdateDashboardCopilotTool));
+    // Copilot tools — draft/broadcast variants used by chart and watch
+    // copilots. Chart has no DB-mutating equivalent, so its copilot tool
+    // owns the `update_chart` name. Watch DOES have a DB-mutating
+    // `UpdateWatchTool` (registered above) used by MCP and chat, so the
+    // copilot variant uses a distinct name (`update_watch_draft`) and
+    // coexists with it in the registry. The dashboard copilot's equivalent,
+    // `UpdateDashboardCopilotTool`, was deleted in KYO-536 — the dashboard
+    // and knowledge copilots now write through the real document tools
+    // above (`modify_dashboard`, `document::DocumentEditTool`,
+    // `knowledge::WriteDocumentTool`) instead of a copilot-only draft push.
     registry.register(Arc::new(copilot::UpdateChartCopilotTool));
     registry.register(Arc::new(copilot::UpdateWatchCopilotTool));
 
@@ -714,7 +739,7 @@ mod tests {
         let registry = create_default_registry();
         let filter = ToolFilter::default();
         let tools = registry.get_tools(&filter);
-        assert_eq!(tools.len(), 36);
+        assert_eq!(tools.len(), 35);
 
         // Verify all expected tools are registered
         let expected = [
@@ -736,7 +761,6 @@ mod tests {
             "create_dashboard",
             "modify_dashboard",
             "delete_dashboard",
-            "update_dashboard",
             "update_chart",
             "create_watch",
             "preview_watch",
@@ -777,13 +801,16 @@ mod tests {
     #[test]
     fn constants_are_defined() {
         // Verify constants exist and have expected values.
-        assert!(COPILOT_ONLY_TOOLS.contains(&"update_dashboard"));
         assert!(COPILOT_ONLY_TOOLS.contains(&"update_chart"));
         assert!(COPILOT_ONLY_TOOLS.contains(&"update_watch_draft"));
         assert!(COPILOT_ONLY_TOOLS.contains(&"preview_watch"));
         // The real DB-mutating update_watch must NOT be copilot-only — chat
         // and MCP agents rely on it for actual watch persistence.
         assert!(!COPILOT_ONLY_TOOLS.contains(&"update_watch"));
+        // update_dashboard was deleted in KYO-536 — the dashboard copilot
+        // now writes through the shared `modify_dashboard` tool, which is
+        // not copilot-only.
+        assert!(!COPILOT_ONLY_TOOLS.contains(&"update_dashboard"));
         assert!(MCP_ONLY_TOOLS.contains(&"render_chart"));
         assert!(WATCH_TOOLS.contains(&"browse_catalog"));
         assert!(WATCH_TOOLS.contains(&"list_knowledge_files"));
@@ -827,8 +854,8 @@ mod contract_tests {
         let tools = registry.get_tools(&ToolFilter::default());
         assert_eq!(
             tools.len(),
-            36,
-            "Expected 36 tools, got {}. Names: {:?}",
+            35,
+            "Expected 35 tools, got {}. Names: {:?}",
             tools.len(),
             tools.iter().map(|t| t.name()).collect::<Vec<_>>()
         );
@@ -855,7 +882,6 @@ mod contract_tests {
             "create_dashboard",
             "modify_dashboard",
             "delete_dashboard",
-            "update_dashboard",
             "update_chart",
             "create_watch",
             "preview_watch",
@@ -1084,7 +1110,6 @@ mod contract_tests {
             "create_dashboard",
             "modify_dashboard",
             "delete_dashboard",
-            "update_dashboard",
             "update_chart",
             "create_watch",
             "update_watch",
@@ -1220,8 +1245,8 @@ mod contract_tests {
             );
         }
 
-        // Chat context should exclude 4 copilot + 5 MCP = 9 tools
-        assert_eq!(tools.len(), 36 - 9);
+        // Chat context should exclude 3 copilot + 5 MCP = 8 tools
+        assert_eq!(tools.len(), 35 - 8);
     }
 
     #[test]
@@ -1248,7 +1273,7 @@ mod contract_tests {
                 "Copilot filter should not include MCP tool '{mcp_name}'"
             );
         }
-        assert_eq!(tools.len(), 36 - 5); // Only MCP excluded
+        assert_eq!(tools.len(), 35 - 5); // Only MCP excluded
     }
 
     #[test]
@@ -1274,7 +1299,7 @@ mod contract_tests {
                 "MCP filter should not include copilot tool '{copilot_name}'"
             );
         }
-        assert_eq!(tools.len(), 36 - 4); // Only copilot excluded
+        assert_eq!(tools.len(), 35 - 3); // Only copilot excluded
 
         // Regression guard for KYO-15: the real DB-mutating `update_watch`
         // must stay visible to MCP, and the draft-only copilot variant must
@@ -1364,7 +1389,7 @@ mod contract_tests {
         let filter = ToolFilter::default();
         let definitions = registry.get_tool_definitions(&filter);
 
-        assert_eq!(definitions.len(), 36);
+        assert_eq!(definitions.len(), 35);
         for def in &definitions {
             assert!(!def.name.is_empty(), "Tool definition has empty name");
             assert!(

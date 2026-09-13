@@ -30,6 +30,7 @@ use leptos::prelude::*;
 use phosphor_leptos::Icon;
 use leptos_router::hooks::use_params_map;
 
+use crate::components::chat::BeforeSendHook;
 use crate::components::dashboard::{
     ChartBuilderModal, ChartInfoModal, CopilotSidebar, HistoryPanel,
     InsertDashboardLinkModal, MarkdownRenderer,
@@ -1279,30 +1280,75 @@ fn DashboardEditorInner(
                 }}
 
                 // Copilot sidebar (only for existing dashboards)
+                //
+                // The copilot writes the open document directly and the
+                // write is saved (KYO-536) — the sync/version-history path
+                // every other save goes through, not a draft the sidebar
+                // pushes into the buffer via a bespoke WebSocket event.
                 {move || {
                     current_dashboard_id.get().map(|did| {
                         let on_copilot_close = Callback::new(move |()| {
                             set_copilot_open.set(false);
-                        });
-                        let on_apply_content = Callback::new(move |content: String| {
-                            // Cancel pending debounce to prevent stale preview overwrite
-                            #[cfg(target_arch = "wasm32")]
-                            debounce_handle.update_value(|h| { drop(h.take()); });
-                            set_editor_content.set(content.clone());
-                            set_preview_content.set(content);
                         });
                         let context_name = if is_knowledge.get() {
                             "document".to_string()
                         } else {
                             "dashboard".to_string()
                         };
+
+                        // KYO-536: commit any unsaved edit before the copilot
+                        // ever reads or writes this document, so it always
+                        // acts on the saved content — never races an
+                        // in-flight local edit. Reuses the exact save call
+                        // `trigger_save` makes; `current_dashboard_id` is
+                        // always `Some` here (this sidebar only renders for
+                        // an existing dashboard), so there is no "create"
+                        // branch to consider.
+                        let before_send_did = did.clone();
+                        let before_send: BeforeSendHook = std::sync::Arc::new(move || {
+                            let did = before_send_did.clone();
+                            if !has_unsaved_changes.get_untracked() {
+                                return Box::pin(async { true }) as std::pin::Pin<
+                                    Box<dyn std::future::Future<Output = bool> + Send>,
+                                >;
+                            }
+                            let current_title = title.get_untracked();
+                            let current_content = editor_content.get_untracked();
+                            Box::pin(async move {
+                                match update_dashboard(
+                                    did,
+                                    Some(current_title.clone()),
+                                    Some(current_content.clone()),
+                                    None,
+                                )
+                                .await
+                                {
+                                    Ok(()) => {
+                                        set_original_title.set(current_title);
+                                        set_original_content.set(current_content);
+                                        set_save_success.set(true);
+                                        #[cfg(target_arch = "wasm32")]
+                                        gloo_timers::callback::Timeout::new(2000, move || {
+                                            set_save_success.try_set(false);
+                                        })
+                                        .forget();
+                                        true
+                                    }
+                                    Err(e) => {
+                                        set_save_error.set(Some(e.to_string()));
+                                        false
+                                    }
+                                }
+                            })
+                        });
+
                         view! {
                             <CopilotSidebar
                                 dashboard_id=did
                                 dashboard_content=Signal::derive(move || editor_content.get())
                                 open=Signal::derive(move || copilot_open.get())
                                 on_close=on_copilot_close
-                                on_apply_content=on_apply_content
+                                before_send=before_send
                                 context_name=context_name
                             />
                         }

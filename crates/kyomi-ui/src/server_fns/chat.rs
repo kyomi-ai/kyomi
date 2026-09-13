@@ -644,6 +644,8 @@ pub async fn send_chat_message(
         user_display_name: ac.auth.name.clone().unwrap_or_else(|| ac.auth.email.clone()),
         context_window: 0,
         workspace_roles: ac.auth.workspace.workspace_roles.clone(),
+        // Main chat has no single open document — see `ToolContext::document_id`.
+        document_id: None,
     };
 
     // Register cancel token so WebSocket cancel_request can stop this task.

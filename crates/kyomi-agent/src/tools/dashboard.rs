@@ -540,6 +540,7 @@ impl AgentTool for ModifyDashboardTool {
             content,
             change_summary,
             expected_content_hash: existing.as_ref().and_then(|d| d.content_hash.as_deref()),
+            document_scope: ctx.document_id.as_deref(),
         })
         .await
         {
@@ -1388,6 +1389,7 @@ mod tests {
             content: Some("v3, from a writer holding the stale v1 hash"),
             change_summary: None,
             expected_content_hash: Some("0000000000000000-not-the-real-hash"),
+            document_scope: None,
         })
         .await
         .expect("apply_update");
@@ -1455,6 +1457,116 @@ mod tests {
         assert!(msg1.contains("\"action\":\"updated\""), "{msg1}");
         let msg2 = rx.try_recv().expect("sync_action broadcast");
         assert!(msg2.contains("sync_action"), "{msg2}");
+    }
+
+    // -- ModifyDashboardTool via a document-scoped copilot (KYO-536) --------
+    //
+    // These two replace the `UpdateDashboardCopilotTool` KYO-537 pins that
+    // used to live in `tools/copilot.rs` — see the note left there. The
+    // dashboard copilot now writes through this real tool, scoped to the
+    // open document via `ToolContext::document_id`.
+
+    /// KYO-536 deliberately flips KYO-537's
+    /// `update_dashboard_copilot_writes_nothing_to_db_only_sends_websocket`
+    /// pin: a copilot edit now persists to the database (and, since every
+    /// `update_dashboard` call creates a version row first, produces a
+    /// version too) rather than only ever pushing a WebSocket draft.
+    #[tokio::test]
+    async fn modify_dashboard_copilot_scoped_write_persists_and_versions() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let dashboard_id = kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Original", "v1", kyomi_core::models::DocType::Dashboard, None,
+        )
+        .await
+        .expect("seed dashboard");
+
+        let mut ctx = build_ctx(db);
+        // The copilot is scoped to the document it was opened against —
+        // here, the same dashboard being edited.
+        ctx.document_id = Some(dashboard_id.clone());
+
+        let versions_before = kyomi_auth::dashboard_service::get_version_count(&ctx.db, &dashboard_id)
+            .await
+            .expect("version count before");
+
+        let result = ModifyDashboardTool
+            .execute(
+                serde_json::json!({
+                    "dashboard_id": dashboard_id,
+                    "content": "v2, written by the copilot",
+                }),
+                &ctx,
+            )
+            .await
+            .expect("a scoped write to the open document must succeed");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+        assert_eq!(parsed["success"], serde_json::json!(true), "{result}");
+
+        let dash = kyomi_auth::dashboard_service::get_dashboard(&ctx.db, &dashboard_id, "ws-1", "user-a")
+            .await
+            .expect("lookup")
+            .expect("exists");
+        assert_eq!(dash.content, "v2, written by the copilot", "the write must be saved, not draft-only");
+
+        let versions_after = kyomi_auth::dashboard_service::get_version_count(&ctx.db, &dashboard_id)
+            .await
+            .expect("version count after");
+        assert_eq!(
+            versions_after,
+            versions_before + 1,
+            "a copilot edit must create a version row like any other update_dashboard call"
+        );
+    }
+
+    /// A copilot scoped to one open document must not be able to write a
+    /// different document, even if the model is confused (or manipulated
+    /// via prompt injection in the content it read) into naming one.
+    #[tokio::test]
+    async fn modify_dashboard_copilot_scope_refuses_other_document() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let open_id = kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Open Document", "open content", kyomi_core::models::DocType::Dashboard, None,
+        )
+        .await
+        .expect("seed open dashboard");
+        let other_id = kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Other Document", "other content", kyomi_core::models::DocType::Dashboard, None,
+        )
+        .await
+        .expect("seed other dashboard");
+
+        let mut ctx = build_ctx(db);
+        ctx.document_id = Some(open_id.clone());
+
+        // ModifyDashboardTool converts `apply_update`'s `Err(Forbidden)` into
+        // a structured `Ok` result — same treatment it already gives an
+        // ownership-forbidden write — rather than a raw `Err`.
+        let result = ModifyDashboardTool
+            .execute(
+                serde_json::json!({
+                    "dashboard_id": other_id,
+                    "content": "hijacked content",
+                }),
+                &ctx,
+            )
+            .await
+            .expect("a scope violation is a structured result, not an Err");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+        assert!(
+            parsed["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("scoped to a single open document"),
+            "{result}"
+        );
+
+        let other = kyomi_auth::dashboard_service::get_dashboard(&ctx.db, &other_id, "ws-1", "user-a")
+            .await
+            .expect("lookup")
+            .expect("exists");
+        assert_eq!(other.content, "other content", "the out-of-scope document must be untouched");
     }
 
     // -- DeleteDashboardTool --------------------------------------------------
@@ -1549,5 +1661,39 @@ mod tests {
             .await
             .expect("lookup");
         assert!(gone.is_none(), "the dashboard row must actually be gone");
+    }
+
+    /// KYO-536 defense-in-depth: no copilot is granted `delete_dashboard`
+    /// today, but deletion is a write like any other — a copilot scoped to
+    /// one open document must not be able to delete a *different* one
+    /// either, so a future tool grant doesn't silently reopen this hole.
+    #[tokio::test]
+    async fn delete_dashboard_copilot_scope_refuses_other_document() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let open_id = kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Open", "open content", kyomi_core::models::DocType::Dashboard, None,
+        )
+        .await
+        .expect("seed open dashboard");
+        let other_id = kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Other", "other content", kyomi_core::models::DocType::Dashboard, None,
+        )
+        .await
+        .expect("seed other dashboard");
+
+        let mut ctx = build_ctx(db);
+        ctx.document_id = Some(open_id);
+
+        let err = DeleteDashboardTool
+            .execute(serde_json::json!({"dashboard_id": other_id}), &ctx)
+            .await
+            .expect_err("a delete outside the copilot's scope must be refused");
+        assert!(matches!(err, kyomi_core::Error::Forbidden(_)), "got: {err:?}");
+
+        let still_there = kyomi_auth::dashboard_service::get_dashboard(&ctx.db, &other_id, "ws-1", "user-a")
+            .await
+            .expect("lookup");
+        assert!(still_there.is_some(), "the out-of-scope document must not be deleted");
     }
 }
