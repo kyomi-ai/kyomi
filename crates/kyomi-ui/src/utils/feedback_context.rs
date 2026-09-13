@@ -262,6 +262,8 @@ mod tests {
 
     const PANIC_OVERLAY_SRC: &str = include_str!("../panic_overlay.rs");
     const SELF_SRC: &str = include_str!("feedback_context.rs");
+    const MAIN_SRC: &str = include_str!("../main.rs");
+    const LAYOUT_SRC: &str = include_str!("../components/layout.rs");
 
     /// The window bounding `build_panic_context`'s body. Both markers are
     /// `fn` signatures, which the regression this file guards cannot delete
@@ -348,6 +350,63 @@ mod tests {
              initInterceptor. Otherwise getConsoleErrors() can return undefined rather \
              than the literal `[]`, and callers that interpolate it raw emit malformed \
              JSON (KYO-682)."
+        );
+    }
+
+    // Source-level guards for KYO-698.
+    //
+    // `init()` used to be called from `Layout`'s component body, under a
+    // comment claiming it ran "once at WASM startup before any errors could
+    // occur." A component body executes at render time, not at startup, so
+    // any panic before `Layout` renders — notably a hydration panic, the
+    // exact class the panic recovery overlay exists for — submitted a
+    // feedback report with an empty `console_errors` array. `init()` now
+    // installs from `main.rs`, before the panic hook, and `Layout` no
+    // longer calls it at all. These guards are host-side source-text
+    // checks, for the same reason as the ones above: the call is
+    // `#[cfg(target_arch = "wasm32")]`-gated, so a host test can pin only
+    // the shape of the source, not exercise the call.
+
+    /// The window from `fn main()`'s opening brace up to (not including)
+    /// where the panic hook is installed. Both markers are structural — the
+    /// function signature and the `std::panic::set_hook` call itself — so a
+    /// regression that reorders or drops the interceptor install cannot
+    /// also remove either marker without failing to compile.
+    fn main_before_panic_hook() -> &'static str {
+        extract_between(MAIN_SRC, "fn main() {", "std::panic::set_hook(")
+    }
+
+    #[test]
+    fn feedback_context_init_runs_before_the_panic_hook_is_installed() {
+        let before_hook = main_before_panic_hook();
+        assert!(
+            before_hook.contains("feedback_context::init()"),
+            "feedback_context::init() must run before std::panic::set_hook in main.rs, \
+             so a panic's own console.error output is captured by the interceptor. \
+             Otherwise a panic report's console_errors array misses the panic's own \
+             stack trace (KYO-698)."
+        );
+    }
+
+    #[test]
+    fn feedback_context_init_has_exactly_one_call_site_in_main() {
+        let calls = MAIN_SRC.matches("feedback_context::init()").count();
+        assert_eq!(
+            calls, 1,
+            "main.rs must install the feedback console-error interceptor exactly once; \
+             found {calls} call sites (KYO-698)."
+        );
+    }
+
+    #[test]
+    fn layout_no_longer_installs_the_feedback_interceptor() {
+        assert!(
+            !LAYOUT_SRC.contains("feedback_context::init()"),
+            "feedback_context::init() must not be called from Layout's component body. \
+             A component body executes at render time, not at WASM startup, so a panic \
+             before Layout renders — notably a hydration panic — would submit a feedback \
+             report with an empty console_errors array. main.rs is the single install \
+             site (KYO-698)."
         );
     }
 }

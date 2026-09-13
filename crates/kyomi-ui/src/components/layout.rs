@@ -311,11 +311,6 @@ pub fn Layout(children: ChildrenFn) -> impl IntoView {
         });
     }
 
-    // Initialize feedback context collector (console.error interception).
-    // Must run once at WASM startup before any errors could occur.
-    #[cfg(target_arch = "wasm32")]
-    crate::utils::feedback_context::init();
-
     // Detect mobile on mount + resize
     #[cfg(target_arch = "wasm32")]
     {
