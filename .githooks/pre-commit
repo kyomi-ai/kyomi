@@ -264,9 +264,13 @@ fi
 # --- Check 2b: Leptos signal disposal-safety lint ---
 # Runs before clippy for the same reason as Check 2 (pure bash+awk, ~200ms).
 # Lints the staged set whenever staged changes touch
-# `crates/kyomi-ui/src/**/*.rs` (Rule A only — bare .set()/.update() in
-# spawn_local/deferred contexts, the only blocking rule; Rule B is advisory
-# and does not affect exit status), AND, independently and unconditionally
+# `crates/kyomi-ui/src/**/*.rs` — Rule A (bare .set()/.update() in
+# spawn_local/deferred contexts) always blocks; Rule B (bare .get() in
+# Signal::derive/Memo::new) blocks only on findings NOT already recorded in
+# scripts/lint/disposal-safety-baseline.txt, or that exceed their recorded
+# occurrence count there (KYO-679's ratchet — see that script's own header
+# NOTE for the full design and why file-scoped runs like this one never fail
+# on a *shrinking* baseline) — AND, independently and unconditionally
 # (KYO-712, same reasoning as Check 2 above), scans for unstaged/untracked
 # files matching the same pattern.
 echo "🔍 Checking Leptos signal disposal safety..."
@@ -279,10 +283,13 @@ if [ -n "$staged_disposal_files" ]; then
     if ! ./scripts/lint/check-disposal-safety.sh $staged_disposal_files; then
         echo ""
         echo "❌ disposal-safety lint failed — commit blocked."
-        echo "   Fix the reported violations (use .try_set()/.try_update()) or"
+        echo "   Fix the reported violations (use .try_set()/.try_update()/.try_get()) or"
         echo "   add a justified escape-hatch comment: // lint-allow: disposal-safe=<why>"
         echo "   (justification needs >= 5 characters). See scripts/lint/check-disposal-safety.sh"
         echo "   header for details."
+        echo "   A Rule B 'ERROR:B ... not covered by ... baseline' means a NEW,"
+        echo "   blocking site — fix it the same way, or if it's a deliberate, reviewed"
+        echo "   addition, regenerate the baseline: ./scripts/lint/check-disposal-safety.sh --update-baseline"
         exit 1
     fi
     echo "✅ disposal-safety lint clean."
