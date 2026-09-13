@@ -2694,12 +2694,21 @@ async fn lookup_recovery_user(
 /// the account exists, is unverified, or token minting failed are all
 /// indistinguishable from the caller's perspective.
 ///
-/// Rate limiting is the one exception: the server_fn wrapper
-/// (`passkey_recovery_start` in `kyomi-ui`) does propagate that `Err`. What
-/// makes the *observed* outcome uniform is the UI — `RecoveryRequestCard`
-/// discards the result and transitions to "Check Your Email" unconditionally.
-/// If you ever surface errors from that call site, the enumeration resistance
-/// has to be re-established here rather than relied on there.
+/// This enumeration resistance has never depended on what the UI does with
+/// the result: every account-dependent outcome (no such user, unverified,
+/// token-mint failure) is folded into `Ok(())` right here, and rate
+/// limiting — the only `Err` this function itself returns — is checked
+/// before any account lookup runs, so it leaks nothing about a specific
+/// email either. That is where the property lives.
+///
+/// `RecoveryRequestCard` in `kyomi-ui` surfaces this function's `Err` to the
+/// user (KYO-684) instead of discarding it. That is safe precisely because
+/// of the above: the only `Err`s that reach the card are this rate limit
+/// and the server_fn wrapper's own config/infra preconditions (e.g.
+/// self-hosted-without-SMTP), both of which also fire before any account
+/// lookup. If a future change ever makes an `Err` path out of *this*
+/// function depend on account state, the enumeration resistance breaks
+/// here — regardless of what the UI does with the result.
 pub async fn passkey_recovery_start_service(
     db: &kyomi_core::DbPool,
     kv: &KVPool,
@@ -5110,5 +5119,153 @@ mod tests {
             "expected an error log describing the token-creation failure; captured: {:?}",
             logs.events()
         );
+    }
+
+    // -----------------------------------------------------------------
+    // KYO-684: `RecoveryRequestCard` stops discarding the server's result,
+    // so the two `Err` paths below (rate limiting) are no longer swallowed
+    // client-side. These tests pin the enumeration-safety property that
+    // makes surfacing them safe — no `Err` here is reachable from an
+    // account lookup — and the shape of the message the client now sees.
+    // -----------------------------------------------------------------
+
+    /// AC3: the client-visible classification — `Ok` vs `Err` — must be
+    /// identical whether or not an account exists. `recovery_start_service`
+    /// folds "no account", "unverified account", and "token-mint failure"
+    /// all into `Ok(None)`; a verified account is `Ok(Some(_))`. Both are
+    /// `Ok`, so `recovery_start`'s caller (the now-error-surfacing
+    /// `RecoveryRequestCard`) takes the identical `Ok` branch regardless of
+    /// account state. Mirrors
+    /// `passkey_recovery_start_indistinguishable_across_account_states`
+    /// above for the account/password recovery path, and additionally pins
+    /// which account states produce `Some` vs `None`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn recovery_start_service_classification_is_ok_for_all_account_states() {
+        let db = test_pool().await;
+        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+
+        let unknown_email = "recovery-start-classification-unknown@example.com";
+        let unverified_email = "recovery-start-classification-unverified@example.com";
+        let verified_email = "recovery-start-classification-verified@example.com";
+
+        crate::user_service::create_user(&db, unverified_email, Some("Unverified User"), false)
+            .await
+            .expect("create unverified user");
+        crate::user_service::create_user(&db, verified_email, Some("Verified User"), true)
+            .await
+            .expect("create verified user");
+
+        for (email, expect_some) in [
+            (unknown_email, false),
+            (unverified_email, false),
+            (verified_email, true),
+        ] {
+            let result = recovery_start_service(&db, &kv, "127.0.0.1", email)
+                .await
+                .unwrap_or_else(|e| {
+                    panic!("expected Ok for {email} (enumeration guard), got Err: {e}")
+                });
+
+            assert_eq!(
+                result.is_some(),
+                expect_some,
+                "unexpected Some/None for {email} (RecoveryStartResult has no Debug impl \
+                 to print the value directly)"
+            );
+        }
+    }
+
+    /// The one `Err` `recovery_start_service` returns: rate limiting,
+    /// checked before any account lookup so it leaks nothing about a
+    /// specific email. KYO-684 makes `RecoveryRequestCard` surface this
+    /// `Err` to the user instead of silently discarding it — this pins the
+    /// message shape (and that a retry-after seconds count is embedded in
+    /// it) that now reaches the client.
+    #[tokio::test(flavor = "current_thread")]
+    async fn recovery_start_service_rate_limited_returns_err_with_retry_after_seconds() {
+        let db = test_pool().await;
+        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+        let ip = "203.0.113.5";
+        let email = "recovery-start-rate-limited@example.com";
+
+        // data/constants.toml: [rate_limits.register] ip_capacity = 5 —
+        // exhaust it so the next call is denied.
+        for i in 0..5 {
+            recovery_start_service(&db, &kv, ip, email)
+                .await
+                .unwrap_or_else(|e| panic!("call {i} should be within the rate limit, got Err: {e}"));
+        }
+
+        // `.expect_err()` needs `Option<RecoveryStartResult>: Debug` for its
+        // panic message on an unexpected `Ok`, which that type doesn't
+        // implement — match directly instead, splitting the `Ok`/`Err` check
+        // from the error-variant check so the inner match only ever needs
+        // `kyomi_core::Error: Debug`, never the `Ok` payload's.
+        let sixth_call = recovery_start_service(&db, &kv, ip, email).await;
+
+        let Err(err) = sixth_call else {
+            panic!(
+                "the 6th call within the register bucket's ip_capacity window must be \
+                 rate limited, got Ok"
+            );
+        };
+
+        match err {
+            kyomi_core::Error::BadRequest(msg) => {
+                assert!(
+                    msg.contains("Rate limited") && msg.contains("Try again in"),
+                    "expected a retry-after message, got: {msg}"
+                );
+                assert!(
+                    msg.chars().any(|c| c.is_ascii_digit()),
+                    "expected the retry-after seconds count embedded in the message; got: {msg}"
+                );
+            }
+            other => panic!("expected Error::BadRequest for rate limiting, got: {other:?}"),
+        }
+    }
+
+    /// The one `Err` `passkey_recovery_start_service` returns: rate
+    /// limiting on the `passkey_recovery` bucket (mapped to the `login`
+    /// bucket config in `rate_limiter.rs`), checked before any account
+    /// lookup. Same KYO-684 motivation as the account-recovery rate-limit
+    /// test above — this pins the `TooManyRequests` shape (message plus a
+    /// nonzero `retry_after_secs`) that now reaches the client.
+    #[tokio::test(flavor = "current_thread")]
+    async fn passkey_recovery_start_service_rate_limited_returns_err_with_retry_after_seconds() {
+        let db = test_pool().await;
+        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+        let ip = "203.0.113.6";
+        let email = "passkey-recovery-rate-limited@example.com";
+        let frontend_url = "https://app.example.com";
+
+        // rate_limiter.rs maps "passkey_recovery" -> the "login" bucket
+        // config; data/constants.toml: [rate_limits.login] ip_capacity = 10
+        // — exhaust it so the next call is denied.
+        for i in 0..10 {
+            passkey_recovery_start_service(&db, &kv, ip, email, frontend_url)
+                .await
+                .unwrap_or_else(|e| panic!("call {i} should be within the rate limit, got Err: {e}"));
+        }
+
+        let err = passkey_recovery_start_service(&db, &kv, ip, email, frontend_url)
+            .await
+            .expect_err(
+                "the 11th call within the login bucket's ip_capacity window must be rate limited",
+            );
+
+        match err {
+            kyomi_core::Error::TooManyRequests(msg, retry_after_secs) => {
+                assert!(
+                    msg.contains("Rate limited") && msg.contains("Try again in"),
+                    "expected a retry-after message, got: {msg}"
+                );
+                assert!(
+                    retry_after_secs > 0,
+                    "expected a nonzero retry-after seconds count, got {retry_after_secs}"
+                );
+            }
+            other => panic!("expected Error::TooManyRequests for rate limiting, got: {other:?}"),
+        }
     }
 }
