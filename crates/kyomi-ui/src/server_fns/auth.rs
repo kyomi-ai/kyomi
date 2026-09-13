@@ -804,14 +804,19 @@ pub async fn recovery_start(email: String) -> Result<(), ServerFnError> {
         let email_clone = email.to_string();
         tokio::spawn(async move {
             let email_svc = kyomi_auth::email_service::EmailService::from_env();
-            let sent = email_svc
+            let result = email_svc
                 .send_account_recovery(&email_clone, &r.user_name, &recovery_url)
                 .await;
-            if sent {
-                tracing::info!("Account recovery email sent to {email_clone}");
-            } else {
-                tracing::warn!("Failed to send account recovery email to {email_clone}");
-                tracing::info!("ACCOUNT RECOVERY LINK for {email_clone}: {recovery_url}");
+            match result {
+                Ok(()) => tracing::info!("Account recovery email sent to {email_clone}"),
+                Err(e) => {
+                    tracing::error!(
+                        recipient = %email_clone,
+                        error = %e,
+                        "Failed to send account recovery email"
+                    );
+                    tracing::info!("ACCOUNT RECOVERY LINK for {email_clone}: {recovery_url}");
+                }
             }
         });
     }

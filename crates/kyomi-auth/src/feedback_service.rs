@@ -1114,7 +1114,7 @@ async fn send_feedback_email_notification(
         feedback_id = html_escape(feedback_id),
     );
 
-    let sent = email_svc
+    let result = email_svc
         .send_email(
             support_email,
             &subject,
@@ -1125,10 +1125,22 @@ async fn send_feedback_email_notification(
         )
         .await;
 
-    if sent {
-        tracing::info!(feedback_id = %feedback_id, "Feedback email notification sent to {support_email}");
-    } else {
-        tracing::warn!(feedback_id = %feedback_id, "Failed to send feedback email notification");
+    match result {
+        Ok(()) => {
+            tracing::info!(feedback_id = %feedback_id, "Feedback email notification sent to {support_email}");
+        }
+        // `error`, not `warn`: this is the level `send_email` itself used to
+        // emit for every failure but the unconfigured one, and losing it
+        // would quietly drop feedback delivery out of ERROR-level alerting
+        // (KYO-697).
+        Err(e) => {
+            tracing::error!(
+                feedback_id = %feedback_id,
+                recipient = %support_email,
+                error = %e,
+                "Failed to send feedback email notification"
+            );
+        }
     }
 }
 

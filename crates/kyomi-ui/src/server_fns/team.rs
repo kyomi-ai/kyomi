@@ -255,7 +255,7 @@ pub async fn invite_member(email: String, role: String) -> Result<(), ServerFnEr
     let invite_id = invitation_id.clone();
     tokio::spawn(async move {
         let email_svc = kyomi_auth::email_service::EmailService::from_env();
-        let sent = email_svc
+        let result = email_svc
             .send_workspace_invitation(
                 &invite_email,
                 &workspace_name,
@@ -264,10 +264,14 @@ pub async fn invite_member(email: String, role: String) -> Result<(), ServerFnEr
                 &invite_id,
             )
             .await;
-        if sent {
-            tracing::info!("Invitation email sent to {invite_email}");
-        } else {
-            tracing::warn!("Failed to send invitation email to {invite_email}");
+        match result {
+            Ok(()) => tracing::info!("Invitation email sent to {invite_email}"),
+            Err(e) => tracing::error!(
+                recipient = %invite_email,
+                invitation_id = %invite_id,
+                error = %e,
+                "Failed to send invitation email"
+            ),
         }
     });
 

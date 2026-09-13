@@ -190,11 +190,13 @@ async fn subscribe_email(
         let email_clone = email.clone();
         tokio::spawn(async move {
             let email_svc = kyomi_auth::email_service::EmailService::from_env();
-            let sent = email_svc.send_subscription_welcome(&email_clone).await;
-            if sent {
-                tracing::info!("📧 Welcome email sent to {email_clone}");
-            } else {
-                tracing::warn!("⚠️ Failed to send welcome email to {email_clone}");
+            match email_svc.send_subscription_welcome(&email_clone).await {
+                Ok(()) => tracing::info!("📧 Welcome email sent to {email_clone}"),
+                Err(e) => tracing::error!(
+                    recipient = %email_clone,
+                    error = %e,
+                    "⚠️ Failed to send welcome email"
+                ),
             }
         });
     }

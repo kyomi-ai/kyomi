@@ -131,13 +131,21 @@ async fn send_signup_email(support_email: &str, email: &str, name: &str, user_id
         ("User ID", user_id),
     ];
 
-    let sent = email_svc
+    let result = email_svc
         .send_admin_notification(support_email, &subject, &sections, Some(email))
         .await;
 
-    if sent {
-        tracing::info!(user_id = %user_id, "Signup email notification sent to {support_email}");
-    } else {
-        tracing::warn!(user_id = %user_id, "Failed to send signup email notification");
+    match result {
+        Ok(()) => {
+            tracing::info!(user_id = %user_id, "Signup email notification sent to {support_email}");
+        }
+        Err(e) => {
+            tracing::error!(
+                user_id = %user_id,
+                recipient = %support_email,
+                error = %e,
+                "Failed to send signup email notification"
+            );
+        }
     }
 }
