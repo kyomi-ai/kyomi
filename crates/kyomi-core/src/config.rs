@@ -52,6 +52,100 @@ impl KyomiMode {
     }
 }
 
+/// The three SMTP environment variables, in the order an operator sets them.
+///
+/// One list, so [`SmtpSettings::classify`]'s presence check and every
+/// diagnostic derived from it can never name a different set of variables.
+static SMTP_ENV_VARS: [&str; 3] = ["SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD"];
+
+/// Completeness of the SMTP settings — the single definition of "can this
+/// deployment send mail?".
+///
+/// The mailer (`kyomi_auth::email_service::EmailService`) is the authoritative
+/// reader: it is the thing that actually opens the SMTP connection, and it
+/// authenticates with lettre's `Credentials::new(user, password)` before it can
+/// submit a message. All three of host, user and password are therefore
+/// required — a host/user pair with no password cannot deliver anything,
+/// however much the rest of the app would like to believe otherwise.
+///
+/// [`Config::smtp_configured`] and `EmailService::is_configured()` both route
+/// through this type, and neither may re-spell the conjunction. They had
+/// drifted (KYO-685): the config flag required two variables and the mailer
+/// three, so an install with `SMTP_HOST` and `SMTP_USER` set but
+/// `SMTP_PASSWORD` unset reported `smtp_configured = true` while the mailer
+/// refused to send. Self-hosted signup took the SaaS "we emailed you a
+/// verification link" branch instead of `signup_smtp_less_new_user` and no
+/// account could be created at all — with nothing said at boot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SmtpSettings {
+    /// Host, user and password are all present: mail can be sent.
+    Complete,
+    /// None of the three is set. A supported deployment, not an error — a
+    /// self-hosted install with no mail server runs the SMTP-less signup and
+    /// recovery paths.
+    Absent,
+    /// Some are set and some are not. Always operator error; `missing` names
+    /// the variables still needed, in [`SMTP_ENV_VARS`] order.
+    Incomplete { missing: Vec<&'static str> },
+}
+
+impl SmtpSettings {
+    /// Classify the three SMTP parts by presence.
+    ///
+    /// Pure: takes the values rather than reading the environment, so both
+    /// readers — and their tests — can share it without mutating process env.
+    pub fn classify(host: Option<&str>, user: Option<&str>, password: Option<&str>) -> Self {
+        let missing: Vec<&'static str> = SMTP_ENV_VARS
+            .iter()
+            .zip([host.is_some(), user.is_some(), password.is_some()])
+            .filter_map(|(name, present)| (!present).then_some(*name))
+            .collect();
+
+        if missing.is_empty() {
+            Self::Complete
+        } else if missing.len() == SMTP_ENV_VARS.len() {
+            Self::Absent
+        } else {
+            Self::Incomplete { missing }
+        }
+    }
+
+    /// Whether mail can be sent — the predicate [`Config::smtp_configured`]
+    /// and `EmailService::is_configured()` share.
+    pub fn can_send(&self) -> bool {
+        matches!(self, Self::Complete)
+    }
+
+    /// The environment variables that still need setting: empty when
+    /// [`Complete`](Self::Complete), all three when [`Absent`](Self::Absent).
+    pub fn missing_vars(&self) -> &[&'static str] {
+        match self {
+            Self::Complete => &[],
+            Self::Absent => &SMTP_ENV_VARS,
+            Self::Incomplete { missing } => missing,
+        }
+    }
+
+    /// The boot-time diagnostic an operator must see, or `None` when there is
+    /// nothing unambiguous to report.
+    ///
+    /// Only a *partial* configuration warrants this: all three set works, none
+    /// set is a deliberate choice, but some-but-not-all is always a mistake —
+    /// and it is otherwise invisible until a user fails to sign up.
+    pub fn startup_warning(&self) -> Option<String> {
+        match self {
+            Self::Complete | Self::Absent => None,
+            Self::Incomplete { missing } => Some(format!(
+                "SMTP is only partially configured: {} not set. Email sending stays \
+                 disabled, so verification, recovery, invitation and alert emails will \
+                 not be delivered. Set the missing variable(s), or unset the SMTP \
+                 variables entirely to run without email.",
+                missing.join(", ")
+            )),
+        }
+    }
+}
+
 /// Central application configuration.
 ///
 /// Mirrors the Python `KyomiAPIConfig` — loaded from environment variables.
@@ -93,8 +187,14 @@ pub struct Config {
     pub mode: KyomiMode,
 
     /// Whether SMTP is configured at startup time.
-    /// True when both `SMTP_HOST` and `SMTP_USER` env vars are set.
-    /// Matches `EmailService::is_configured()` logic.
+    ///
+    /// True only when all three of `SMTP_HOST`, `SMTP_USER` and
+    /// `SMTP_PASSWORD` are set: the mailer authenticates before it can submit
+    /// a message, so two of the three is not enough to send anything.
+    ///
+    /// Computed by [`SmtpSettings::classify`] — the same predicate
+    /// `EmailService::is_configured()` calls — so this flag cannot disagree
+    /// with the mailer about whether mail can be sent (KYO-685).
     pub smtp_configured: bool,
 
     // ── Auth Methods ─────────────────────────────────────────────────────
@@ -323,6 +423,22 @@ impl Config {
             }
         };
 
+        // One classification of the SMTP settings, used for both the boot
+        // diagnostic and the `smtp_configured` flag every downstream reader
+        // consumes. This is the only startup-path read of these three
+        // variables, so the warning fires exactly once per process (KYO-685);
+        // the mailer's own per-construction warning in
+        // `EmailService::from_env` reports the same classification at the
+        // moment an email is actually skipped.
+        let smtp = SmtpSettings::classify(
+            env::var("SMTP_HOST").ok().as_deref(),
+            env::var("SMTP_USER").ok().as_deref(),
+            env::var("SMTP_PASSWORD").ok().as_deref(),
+        );
+        if let Some(warning) = smtp.startup_warning() {
+            tracing::warn!("{warning}");
+        }
+
         Self {
             database_url: required_env("DATABASE_URL"),
             redis_url: env::var("REDIS_URL").ok(),
@@ -343,7 +459,7 @@ impl Config {
             self_hosted: mode.self_hosted(),
             edition: mode.edition(),
             mode,
-            smtp_configured: env::var("SMTP_HOST").is_ok() && env::var("SMTP_USER").is_ok(),
+            smtp_configured: smtp.can_send(),
             passkeys_enabled: env::var("PASSKEYS_ENABLED")
                 .unwrap_or_else(|_| "true".into())
                 .parse()
@@ -517,3 +633,6 @@ impl Config {
 fn required_env(key: &str) -> String {
     env::var(key).unwrap_or_else(|_| panic!("{key} environment variable is required"))
 }
+
+#[cfg(test)]
+mod tests;

@@ -12,6 +12,7 @@
 //! Graceful degradation: if SMTP is not configured, `send_email` logs a warning
 //! and returns `false` — it never fails the calling operation.
 
+use kyomi_core::config::SmtpSettings;
 use lettre::{
     message::{header::ContentType, Attachment, Body, Mailbox, MultiPart, SinglePart},
     transport::smtp::authentication::Credentials,
@@ -60,11 +61,16 @@ impl EmailService {
             .trim_end_matches('/')
             .to_string();
 
-        let configured = smtp_host.is_some() && smtp_user.is_some() && smtp_password.is_some();
-        if !configured {
+        let settings = SmtpSettings::classify(
+            smtp_host.as_deref(),
+            smtp_user.as_deref(),
+            smtp_password.as_deref(),
+        );
+        if !settings.can_send() {
             tracing::warn!(
-                "SMTP not configured. Email sending will be disabled. \
-                 Set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD in .env"
+                missing = %settings.missing_vars().join(", "),
+                "SMTP not configured. Email sending will be disabled. Set the missing \
+                 variables in .env"
             );
         }
 
@@ -79,9 +85,24 @@ impl EmailService {
         }
     }
 
-    /// Check if SMTP is configured (all required env vars are set).
+    /// Check if SMTP is configured (host, user and password are all set).
+    ///
+    /// This service is the authoritative reader of that rule — it is what
+    /// actually opens the SMTP connection — but the rule itself lives in
+    /// [`SmtpSettings`] so `Config::smtp_configured` decides identically
+    /// (KYO-685). Do not re-spell the conjunction here.
+    ///
+    /// A password is required, not optional: [`Self::send_email`] authenticates
+    /// with `Credentials::new(user, password)` before it can submit a message,
+    /// so relaxing this would only move the failure later — to a user who has
+    /// already been told an email is on its way.
     pub fn is_configured(&self) -> bool {
-        self.smtp_host.is_some() && self.smtp_user.is_some() && self.smtp_password.is_some()
+        SmtpSettings::classify(
+            self.smtp_host.as_deref(),
+            self.smtp_user.as_deref(),
+            self.smtp_password.as_deref(),
+        )
+        .can_send()
     }
 
     /// Send an email via SMTP.
@@ -1538,34 +1559,142 @@ You're receiving this because someone attempted to sign up for Kyomi with this e
 mod tests {
     use super::*;
 
+    /// This file's own source, for the guard test pinning that
+    /// `is_configured()` has no private copy of the SMTP rule (KYO-423).
+    const SRC: &str = include_str!("email_service.rs");
+
+    /// Start of this test module — the end of production code in [`SRC`].
+    /// `SRC` is `include_str!`-ed from this same file, so the guard test below
+    /// has to search a slice rather than the whole file: both literals it
+    /// counts also appear in this module, which would inflate its production
+    /// tallies by the tests' own mentions of them.
+    ///
+    /// This declaration is not itself a second occurrence of the marker,
+    /// tempting as that reading is — on disk the newline here is the
+    /// two-character escape `\n`, whereas the needle holds one real newline, so
+    /// the needle does not match the line that defines it. It occurs in the
+    /// file exactly once, at the real declaration above. Were a test ever to
+    /// spell the marker with a true newline (a raw string, say), the slice
+    /// would still be right, because `find` matches leftmost and the real
+    /// declaration necessarily comes first.
+    const MOD_TESTS_MARKER: &str = "#[cfg(test)]\nmod tests {";
+
+    /// The production half of [`SRC`], with this test module excluded.
+    fn production_src() -> &'static str {
+        let end = SRC
+            .find(MOD_TESTS_MARKER)
+            .expect("email_service.rs must contain its `#[cfg(test)] mod tests` declaration");
+        &SRC[..end]
+    }
+
+    /// An `EmailService` with the three SMTP parts set as given and everything
+    /// else at its `from_env` default. Present so the presence-combination
+    /// tests below don't each repeat the seven-field literal.
+    fn service(
+        smtp_host: Option<&str>,
+        smtp_user: Option<&str>,
+        smtp_password: Option<&str>,
+    ) -> EmailService {
+        EmailService {
+            smtp_host: smtp_host.map(str::to_string),
+            smtp_port: 587,
+            smtp_user: smtp_user.map(str::to_string),
+            smtp_password: smtp_password.map(str::to_string),
+            from_email: "noreply@kyomi.ai".to_string(),
+            from_name: "Kyomi".to_string(),
+            frontend_url: "https://app.kyomi.ai".to_string(),
+        }
+    }
+
     #[test]
     fn email_service_not_configured_by_default() {
         // Without SMTP env vars, service should report not configured.
         // This test is safe because CI/dev environments don't set SMTP vars.
-        let service = EmailService {
-            smtp_host: None,
-            smtp_port: 587,
-            smtp_user: None,
-            smtp_password: None,
-            from_email: "noreply@kyomi.ai".to_string(),
-            from_name: "Kyomi".to_string(),
-            frontend_url: "https://app.kyomi.ai".to_string(),
-        };
-        assert!(!service.is_configured());
+        assert!(!service(None, None, None).is_configured());
     }
 
     #[test]
     fn email_service_configured_when_all_vars_set() {
-        let service = EmailService {
-            smtp_host: Some("smtp.example.com".to_string()),
-            smtp_port: 587,
-            smtp_user: Some("user@example.com".to_string()),
-            smtp_password: Some("password".to_string()),
-            from_email: "noreply@kyomi.ai".to_string(),
-            from_name: "Kyomi".to_string(),
-            frontend_url: "https://app.kyomi.ai".to_string(),
-        };
+        let service = service(
+            Some("smtp.example.com"),
+            Some("user@example.com"),
+            Some("password"),
+        );
         assert!(service.is_configured());
+    }
+
+    /// The KYO-685 case: `SMTP_HOST` and `SMTP_USER` set, `SMTP_PASSWORD`
+    /// forgotten. `Config::smtp_configured` used to say `true` here while this
+    /// service said `false`, so a self-hosted install took the SaaS
+    /// "verification email sent" signup branch and could not create an account
+    /// at all. Both sides now read the same predicate, so they agree.
+    #[test]
+    fn host_and_user_without_password_is_not_configured_and_matches_the_config_flag() {
+        let host = Some("smtp.example.com");
+        let user = Some("user@example.com");
+
+        // The value `Config::from_env` stores in `smtp_configured` for this
+        // environment, computed through the shared predicate rather than by
+        // mutating process env (`set_var` is `unsafe` and races parallel tests).
+        let config_flag = SmtpSettings::classify(host, user, None).can_send();
+
+        assert!(
+            !config_flag,
+            "host + user with no password cannot send mail, so the config flag must be false"
+        );
+        assert_eq!(
+            service(host, user, None).is_configured(),
+            config_flag,
+            "EmailService::is_configured() and Config::smtp_configured must never disagree \
+             about whether mail can be sent (KYO-685)"
+        );
+    }
+
+    #[test]
+    fn is_configured_agrees_with_the_config_flag_for_every_presence_combination() {
+        for bits in 0..8u8 {
+            let host = (bits & 0b100 != 0).then_some("smtp.example.com");
+            let user = (bits & 0b010 != 0).then_some("user@example.com");
+            let password = (bits & 0b001 != 0).then_some("password");
+
+            let config_flag = SmtpSettings::classify(host, user, password).can_send();
+            assert_eq!(
+                service(host, user, password).is_configured(),
+                config_flag,
+                "the mailer and the config flag must decide identically for \
+                 host={host:?} user={user:?} password={password:?} (KYO-685)"
+            );
+            assert_eq!(
+                config_flag,
+                host.is_some() && user.is_some() && password.is_some(),
+                "all three parts are required for host={host:?} user={user:?} \
+                 password={password:?}"
+            );
+        }
+    }
+
+    /// KYO-423: two copies of a predicate drift. Neither `is_configured()` nor
+    /// `from_env` may keep its own spelling of "host and user and password" —
+    /// that is how this rule came to disagree with `Config::smtp_configured`
+    /// in the first place.
+    #[test]
+    fn no_second_copy_of_the_smtp_conjunction_in_production_code() {
+        let production = production_src();
+
+        assert_eq!(
+            production.matches("smtp_password.is_some()").count(),
+            0,
+            "the SMTP conjunction must be spelled once, in \
+             kyomi_core::config::SmtpSettings::classify — found an inline copy in \
+             email_service.rs's production code (KYO-685/KYO-423)"
+        );
+        assert_eq!(
+            production.matches("SmtpSettings::classify(").count(),
+            2,
+            "exactly two call sites route through the shared predicate: from_env (for its \
+             startup warning) and is_configured — a missing one means a hand-rolled copy \
+             came back (KYO-685)"
+        );
     }
 
     #[test]

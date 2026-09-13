@@ -4247,6 +4247,81 @@ mod tests {
         }
     }
 
+    /// KYO-685 acceptance criterion 2: a self-hosted instance whose operator
+    /// set `SMTP_HOST` and `SMTP_USER` but forgot `SMTP_PASSWORD` must take
+    /// the SMTP-less signup path and actually create the account.
+    ///
+    /// Before the fix, `Config::smtp_configured` needed only two of the three
+    /// variables, so it reported `true` for exactly this environment,
+    /// `smtp_less_self_hosted` was false, and signup went down the SaaS
+    /// branch — leaving the operator waiting for a verification email the
+    /// mailer had already refused to send, with no account ever created.
+    ///
+    /// The flag is computed here through the same shared predicate
+    /// `Config::from_env` uses, rather than by mutating process env
+    /// (`set_var` is `unsafe` in edition 2024 and races parallel tests).
+    #[tokio::test]
+    async fn smtp_less_self_hosted_signup_creates_the_account_when_the_password_is_missing() {
+        let db = test_pool().await;
+        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+        let device = test_device();
+        let email = "smtp-less-first-operator@example.com";
+
+        let smtp_configured = kyomi_core::config::SmtpSettings::classify(
+            Some("smtp.example.com"),
+            Some("mailer@example.com"),
+            None,
+        )
+        .can_send();
+        assert!(
+            !smtp_configured,
+            "SMTP_HOST + SMTP_USER with no SMTP_PASSWORD cannot send mail, so the config \
+             flag this signup branches on must be false (KYO-685)"
+        );
+
+        let result = signup_start_service(SignupStartParams {
+            db: &db,
+            kv: &kv,
+            jwt_secret: "test-secret",
+            email,
+            name: Some("First Operator"),
+            password: Some("correct-horse-battery-staple"),
+            ip: "127.0.0.1",
+            device: &device,
+            self_hosted: true,
+            smtp_configured,
+            frontend_url: "http://localhost:3000",
+            config: None,
+        })
+        .await
+        .expect("service call should not error");
+
+        match result {
+            SignupStartServiceResult::AccountCreated(_) => {}
+            SignupStartServiceResult::VerificationRequired => panic!(
+                "signup took the SaaS verification-email branch on a self-hosted instance \
+                 whose mailer cannot send — this is the KYO-685 failure: the email is never \
+                 delivered and no account is ever created"
+            ),
+            SignupStartServiceResult::RateLimited { retry_after_secs } => {
+                panic!("unexpectedly rate limited for {retry_after_secs}s")
+            }
+            SignupStartServiceResult::Error { message } => {
+                panic!("SMTP-less signup rejected the first account: {message}")
+            }
+        }
+
+        let user = crate::user_service::get_user_by_email(&db, email)
+            .await
+            .expect("lookup user")
+            .expect("the SMTP-less signup path must have created a users row");
+        assert!(
+            user.verified,
+            "an SMTP-less signup has no email to verify with, so the account must be \
+             created already verified — otherwise the operator can never log in"
+        );
+    }
+
     /// A verified user's email must never mint a new "email_verification"
     /// token when they attempt to sign up again — there is nothing to
     /// verify. KYO-681 added an email on this path; it must go out through
