@@ -16,20 +16,7 @@
 //! doesn't over-delete from the shared block by mistake.
 
 use super::super::SYNAPSE_SERVER_CONFIG_KEY;
-use super::{extract_between, SRC};
-
-/// The full body of `build_connection_config`, scoped away from every
-/// other `"synapse" => {` / `"sqlserver" => {` match arm in the file (the
-/// edit-mode load-back, `build_credentials`, the connection-field view
-/// fragments, the OAuth-status-fetch match, ...) so the narrower
-/// `extract_between` calls below can't false-match one of those instead.
-fn build_connection_config_body() -> &'static str {
-    extract_between(
-        SRC,
-        "let build_connection_config = move || -> serde_json::Value {",
-        "// ── Build credentials JSON",
-    )
-}
+use super::{build_connection_config_body, extract_between, SRC};
 
 // ── KYO-516: the write side must use SYNAPSE_SERVER_CONFIG_KEY, not "host" ──
 

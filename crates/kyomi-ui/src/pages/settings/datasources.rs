@@ -2750,11 +2750,22 @@ pub fn DatasourceModal(
                 if !cfg_role.get_untracked().is_empty() {
                     map.insert("role".to_string(), serde_json::json!(cfg_role.get_untracked()));
                 }
-                if !cfg_oauth_client_id.get_untracked().is_empty() {
-                    map.insert("oauth_client_id".to_string(), serde_json::json!(cfg_oauth_client_id.get_untracked()));
-                }
-                if !cfg_oauth_client_secret.get_untracked().is_empty() {
-                    map.insert("oauth_client_secret".to_string(), serde_json::json!(cfg_oauth_client_secret.get_untracked()));
+                // KYO-702: oauth_client_id/oauth_client_secret belong to the
+                // "oauth" auth mode only — writing them unconditionally left
+                // a leftover client secret in connection_config after
+                // switching to "password" or "keypair". The server-side
+                // strip_inactive_auth_mode_fields (kyomi-auth
+                // credential_service.rs) is the actual guarantee — this
+                // gate only keeps a fresh save from writing the stale value
+                // back out in the first place. Mirrors the Databricks arm's
+                // `db_auth_mode.get_untracked() == "oauth"` gate below.
+                if sf_auth_mode.get_untracked() == "oauth" {
+                    if !cfg_oauth_client_id.get_untracked().is_empty() {
+                        map.insert("oauth_client_id".to_string(), serde_json::json!(cfg_oauth_client_id.get_untracked()));
+                    }
+                    if !cfg_oauth_client_secret.get_untracked().is_empty() {
+                        map.insert("oauth_client_secret".to_string(), serde_json::json!(cfg_oauth_client_secret.get_untracked()));
+                    }
                 }
             }
             "databricks" => {
@@ -2825,13 +2836,26 @@ pub fn DatasourceModal(
             "bigquery" => {
                 let bq_mode = bq_auth_mode.get_untracked();
                 map.insert("auth_mode".to_string(), serde_json::json!(bq_mode));
-                if !cfg_oauth_client_id.get_untracked().is_empty() {
-                    map.insert("oauth_client_id".to_string(), serde_json::json!(cfg_oauth_client_id.get_untracked()));
+                // KYO-702: oauth_client_id/oauth_client_secret and
+                // service_account_json used to be written unconditionally,
+                // so switching auth mode left the previous mode's field(s)
+                // sitting in connection_config — a masked placeholder at
+                // best, a real secret at worst. The server-side
+                // strip_inactive_auth_mode_fields (kyomi-auth
+                // credential_service.rs) is the actual guarantee (this
+                // registry data isn't compiled into the WASM build at all);
+                // this gate only keeps a fresh save from re-submitting the
+                // stale value. Mirrors the Databricks/Synapse arms' existing
+                // auth-mode gates above.
+                if bq_mode == "enterprise_oauth" {
+                    if !cfg_oauth_client_id.get_untracked().is_empty() {
+                        map.insert("oauth_client_id".to_string(), serde_json::json!(cfg_oauth_client_id.get_untracked()));
+                    }
+                    if !cfg_oauth_client_secret.get_untracked().is_empty() {
+                        map.insert("oauth_client_secret".to_string(), serde_json::json!(cfg_oauth_client_secret.get_untracked()));
+                    }
                 }
-                if !cfg_oauth_client_secret.get_untracked().is_empty() {
-                    map.insert("oauth_client_secret".to_string(), serde_json::json!(cfg_oauth_client_secret.get_untracked()));
-                }
-                if !cfg_service_account_json.get_untracked().is_empty() {
+                if bq_mode == "service_account" && !cfg_service_account_json.get_untracked().is_empty() {
                     map.insert("service_account_json".to_string(), serde_json::json!(cfg_service_account_json.get_untracked()));
                 }
                 // A service account is shared by the whole workspace, so its
