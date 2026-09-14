@@ -8,7 +8,11 @@
 //! [`COMMON_SENSITIVE`] fields are additionally encrypted at rest in
 //! `connection_config` (see [`finalize_connection_config_secrets`]) and must
 //! be decrypted before use by a datasource driver (see
-//! [`decrypt_connection_config_secrets`]).
+//! [`decrypt_connection_config_secrets`]). A datasource type's own
+//! `sensitive_connection_config_fields` (e.g. BigQuery's
+//! `service_account_json`) are masked and restored the same way but are
+//! **not** encrypted at rest — see [`finalize_connection_config_secrets`]'s
+//! doc for why.
 //!
 //! For encrypting/decrypting arbitrary credential JSON (e.g. per-user
 //! `user_datasource_credentials.credentials`) use `encryption::encrypt_json` /
@@ -57,9 +61,16 @@ pub fn mask_credentials(credentials: &Value, ds_type: &str) -> Value {
 /// Mask sensitive connection config fields for API responses.
 ///
 /// Looks up the datasource type in the registry for type-specific sensitive
-/// fields. Also always masks every [`COMMON_SENSITIVE`] field (currently
-/// `shared_password`, `ssh_private_key`, `ssh_passphrase`) regardless of
-/// type, as these are common sensitive fields across all datasource types.
+/// fields (`DatasourceTypeMetadata::sensitive_connection_config_fields`, e.g.
+/// BigQuery's/Synapse's `oauth_client_secret`, BigQuery's
+/// `service_account_json`). Also always masks every [`COMMON_SENSITIVE`]
+/// field (currently `shared_password`, `ssh_private_key`, `ssh_passphrase`)
+/// regardless of type, as these are common sensitive fields across all
+/// datasource types.
+///
+/// This is the read-side counterpart of [`finalize_connection_config_secrets`],
+/// which restores a masked or omitted field of either kind from the stored
+/// config on write — see that function's doc for the full three-way rule.
 ///
 /// If the type is unknown or the config is not an object, the value is returned
 /// unchanged.
@@ -106,8 +117,9 @@ pub fn mask_connection_config(config: &Value, ds_type: &str) -> Value {
 }
 
 /// Restore masked/omitted sensitive `connection_config` fields from the
-/// stored config, and encrypt any freshly-provided plaintext secret, before
-/// a `connection_config` is written to the database.
+/// stored config, and encrypt any freshly-provided plaintext
+/// [`COMMON_SENSITIVE`] secret, before a `connection_config` is written to
+/// the database.
 ///
 /// This is the write-side counterpart to [`mask_connection_config`]. Sensitive
 /// fields are never sent to the client in real form — they come back either
@@ -117,29 +129,56 @@ pub fn mask_connection_config(config: &Value, ds_type: &str) -> Value {
 /// secret with the placeholder or silently drop it — and a plaintext value
 /// typed by the user would be written to the database unencrypted.
 ///
-/// For each field in [`COMMON_SENSITIVE`], one of three things happens:
+/// Two field sets go through this, by the same three-way rule below but with
+/// different encryption treatment:
+///
+/// - [`COMMON_SENSITIVE`] — type-independent. A freshly-provided plaintext
+///   value is encrypted with `key` before it is stored.
+/// - `ds_type`'s own `sensitive_connection_config_fields` (from the
+///   datasource type registry — e.g. BigQuery's/Synapse's
+///   `oauth_client_secret`, BigQuery's `service_account_json`) — restoring
+///   one of these is additionally gated on auth-mode ownership (KYO-780; see
+///   the dedicated comment on that loop below), and a freshly-provided value
+///   is passed through **unencrypted** (ditto).
+///
+/// For each field in one of the two sets above, one of three things happens:
 ///
 /// - `incoming[field]` is explicit JSON `null` — this is an **explicit clear**
 ///   (e.g. disabling an SSH tunnel drops its stored key). The field is
 ///   *removed* from `incoming` entirely; it is never restored from `existing`.
 /// - `incoming[field]` is missing, or equal to [`MASKED_VALUE`] — this is the
 ///   normal edit case where the UI never resupplies a secret it only ever
-///   received masked. `incoming[field]` is overwritten with the *already
-///   encrypted* value from `existing` verbatim — it is never re-encrypted.
-///   If `existing` is `None` (create) or has no stored value, the field is
-///   left absent.
+///   received masked. `incoming[field]` is overwritten with the value from
+///   `existing` verbatim (already ciphertext, for a [`COMMON_SENSITIVE`]
+///   field) — it is never re-encrypted. If `existing` is `None` (create) or
+///   has no stored value, the field is left absent. A type-specific field
+///   owned by an inactive auth mode, or one whose ownership can't be
+///   resolved at all, is never restored this way (KYO-780) — see below.
 /// - `incoming[field]` holds a real, non-empty string — this is fresh
-///   plaintext supplied by the client. It is encrypted with `key` before
-///   being written into `incoming`. Any other real (non-string or empty
-///   string) value passes through unchanged.
+///   plaintext supplied by the client. A [`COMMON_SENSITIVE`] field is
+///   encrypted with `key` before being written into `incoming`; a
+///   type-specific field passes through unchanged (see below for why). Any
+///   other real (non-string or empty string) value passes through unchanged.
 ///
 /// No-ops if `incoming` is not a JSON object.
 pub fn finalize_connection_config_secrets(
     incoming: &mut Value,
     existing: Option<&Value>,
+    ds_type: &str,
     key: &[u8; 32],
 ) -> kyomi_core::Result<()> {
     let existing_obj = existing.and_then(Value::as_object);
+
+    // Resolve the active auth mode from `incoming` itself, before taking a
+    // mutable borrow below. `strip_inactive_auth_mode_fields` runs
+    // immediately before this function at both call sites
+    // (`datasource_service::create_datasource`/`update_datasource`) and
+    // resolves the active mode the same way, against the same `incoming`
+    // value — the type-specific loop below must agree with that resolution,
+    // or a field the strip step correctly removed would come right back here.
+    let active_auth_mode = crate::datasource_auth_service::get_active_auth_mode(ds_type, incoming);
+    let meta = datasource_registry::get_metadata_by_str(ds_type);
+
     let Some(incoming_obj) = incoming.as_object_mut() else {
         return Ok(());
     };
@@ -217,6 +256,113 @@ pub fn finalize_connection_config_secrets(
         {
             let encrypted = crate::encryption::encrypt(s, key)?;
             incoming_obj.insert(field.to_string(), Value::String(encrypted));
+        }
+    }
+
+    // `ds_type`'s own type-specific sensitive connection_config fields
+    // (KYO-780) — e.g. BigQuery's/Synapse's `oauth_client_secret`,
+    // BigQuery's `service_account_json`. These are masked on read by
+    // `mask_connection_config` exactly like `COMMON_SENSITIVE`, but until
+    // this fix had no restore counterpart here at all: a masked or omitted
+    // type-specific field was written to the database literally, silently
+    // destroying the real stored secret (BigQuery/Snowflake/Databricks'
+    // `oauth_client_secret`) or dropping it outright when the UI never
+    // loaded it back (BigQuery's `service_account_json`).
+    if let Some(meta) = meta {
+        let type_specific_fields = meta.sensitive_connection_config_fields;
+
+        if !type_specific_fields.is_empty() {
+            // Restoring a type-specific field from `existing` is gated on it
+            // being owned by the auth mode active in `incoming` — see
+            // `AuthModeConfig::connection_config_fields`, the same ownership
+            // data `strip_inactive_auth_mode_fields` (KYO-702, which always
+            // runs immediately before this function) uses to *remove* an
+            // inactive mode's fields. Without this gate, a naive
+            // "missing/masked -> restore from existing" rule can't tell "the
+            // UI never re-sent this secret" (must restore) apart from "this
+            // secret belongs to the mode the client just switched away
+            // from, and the strip step just removed it on purpose" (must
+            // stay gone) — restoring unconditionally would silently revert
+            // KYO-702 for every auth-mode switch.
+            //
+            // When the active auth mode can't be resolved at all —
+            // `incoming.auth_mode` names a
+            // [`datasource_registry::RETIRED_AUTH_MODES`] id, or any other
+            // lookup failure — the conservative choice is to restore *none*
+            // of the type-specific fields: resurrecting a secret whose
+            // ownership nobody could verify is a worse outcome than leaving
+            // the field unset, and the caller can always resupply it
+            // explicitly. A `ds_type` with no auth modes at all resolves to
+            // `Ok(None)` rather than an error (mirroring
+            // `strip_inactive_auth_mode_fields`'s own `Ok(None)` no-op) —
+            // there is no ownership data to restrict against, so
+            // restoration proceeds unfiltered for that type.
+            let restorable: std::collections::HashSet<&str> = match active_auth_mode {
+                Ok(Some(mode)) => {
+                    let inactive: std::collections::HashSet<&str> = meta
+                        .inactive_auth_mode_connection_config_fields(&mode.mode_id)
+                        .into_iter()
+                        .collect();
+                    type_specific_fields
+                        .iter()
+                        .copied()
+                        .filter(|f| !inactive.contains(f))
+                        .collect()
+                }
+                Ok(None) => type_specific_fields.iter().copied().collect(),
+                Err(_) => std::collections::HashSet::new(),
+            };
+
+            for &field in type_specific_fields {
+                let is_masked_or_absent = match incoming_obj.get(field) {
+                    Some(Value::Null) => {
+                        incoming_obj.remove(field);
+                        continue;
+                    }
+                    None => true,
+                    Some(Value::String(s)) => s == MASKED_VALUE,
+                    Some(_) => false,
+                };
+
+                if is_masked_or_absent {
+                    if restorable.contains(field) {
+                        match existing_obj.and_then(|eo| eo.get(field)) {
+                            Some(Value::String(existing_val)) if !existing_val.is_empty() => {
+                                incoming_obj
+                                    .insert(field.to_string(), Value::String(existing_val.clone()));
+                            }
+                            // Nothing to restore — e.g. `existing` is `None`
+                            // on create, or the field was never set. Same
+                            // rule as COMMON_SENSITIVE above: never leave
+                            // `MASKED_VALUE` sitting in the stored config.
+                            _ => {
+                                incoming_obj.remove(field);
+                            }
+                        }
+                    } else {
+                        // Owned by an inactive auth mode, or the active mode
+                        // couldn't be resolved — never resurrect it.
+                        incoming_obj.remove(field);
+                    }
+                    continue;
+                }
+
+                // A real, non-masked, non-empty value was provided — fresh
+                // input from the client. Deliberately NOT encrypted, unlike
+                // the COMMON_SENSITIVE loop above: these two fields are read
+                // raw from `connection_config` by consumers that do not go
+                // through `decrypt_connection_config_secrets` —
+                // `ProviderConfig::from_connection_config`
+                // (`datasource_oauth.rs`) in this workspace, and in the
+                // sibling `kyomi-connect` repo (consumed via crates.io, so
+                // it cannot be changed by this change) `oauth_refresh.rs`
+                // and `providers/bigquery.rs`. Encrypting on write without
+                // every one of those consumers decrypting first would break
+                // OAuth authentication outright — a worse regression than
+                // the data-loss bug this function exists to fix. This is a
+                // deliberate, recorded limitation; KYO-786 carries the full
+                // consumer audit and tracks closing it.
+            }
         }
     }
 
@@ -664,10 +810,13 @@ mod tests {
     }
 
     #[test]
-    fn mask_connection_config_snowflake_no_type_specific_sensitive() {
-        // Snowflake has no type-specific sensitive_connection_config_fields
-        // (matches Python source). Common fields (shared_password, ssh_private_key)
-        // are still masked.
+    fn mask_connection_config_snowflake_masks_oauth_client_secret() {
+        // KYO-780: Snowflake's "oauth" mode writes a real oauth_client_secret
+        // into connection_config (kyomi-ui's build_connection_config), so it
+        // must be masked like BigQuery's/Synapse's — the registry previously
+        // omitted it from Snowflake's sensitive_connection_config_fields,
+        // which meant this field came back in cleartext in every settings
+        // response.
         let config = json!({
             "account": "xy12345.us-east-1",
             "oauth_client_secret": "snow-secret",
@@ -676,8 +825,7 @@ mod tests {
 
         let masked = mask_connection_config(&config, "snowflake");
         assert_eq!(masked["account"], "xy12345.us-east-1");
-        // oauth_client_secret is NOT in Snowflake's type-specific fields
-        assert_eq!(masked["oauth_client_secret"], "snow-secret");
+        assert_eq!(masked["oauth_client_secret"], MASKED_VALUE);
         // shared_password is always masked via COMMON_SENSITIVE
         assert_eq!(masked["shared_password"], MASKED_VALUE);
     }
@@ -788,7 +936,7 @@ mod tests {
             "shared_password": MASKED_VALUE
         });
 
-        finalize_connection_config_secrets(&mut incoming, Some(&existing), &key).unwrap();
+        finalize_connection_config_secrets(&mut incoming, Some(&existing), "postgres", &key).unwrap();
 
         // Restored verbatim — NOT re-encrypted (still the exact stored ciphertext).
         assert_eq!(incoming["ssh_private_key"], existing["ssh_private_key"]);
@@ -805,7 +953,7 @@ mod tests {
         let new_plaintext = "-----BEGIN OPENSSH PRIVATE KEY-----\nnew-key\n-----END OPENSSH PRIVATE KEY-----";
         let mut incoming = json!({ "ssh_private_key": new_plaintext });
 
-        finalize_connection_config_secrets(&mut incoming, Some(&existing), &key).unwrap();
+        finalize_connection_config_secrets(&mut incoming, Some(&existing), "postgres", &key).unwrap();
 
         // The freshly-provided value must be encrypted, not passed through
         // as plaintext, and must NOT be replaced with the old stored value.
@@ -832,7 +980,7 @@ mod tests {
             "ssh_private_key": Value::Null
         });
 
-        finalize_connection_config_secrets(&mut incoming, Some(&existing), &key).unwrap();
+        finalize_connection_config_secrets(&mut incoming, Some(&existing), "postgres", &key).unwrap();
 
         // The field must be absent from the result, not restored from existing.
         assert!(
@@ -854,7 +1002,7 @@ mod tests {
             "port": 5433
         });
 
-        finalize_connection_config_secrets(&mut incoming, Some(&existing), &key).unwrap();
+        finalize_connection_config_secrets(&mut incoming, Some(&existing), "postgres", &key).unwrap();
 
         // Non-sensitive fields pass through untouched.
         assert_eq!(incoming["host"], "new-host.example.com");
@@ -876,7 +1024,7 @@ mod tests {
 
         // `existing = None` is the create-mode case — there is nothing to
         // restore from, but a freshly-provided secret must still be encrypted.
-        finalize_connection_config_secrets(&mut incoming, None, &key).unwrap();
+        finalize_connection_config_secrets(&mut incoming, None, "postgres", &key).unwrap();
 
         let stored = incoming["shared_password"].as_str().unwrap();
         assert!(looks_encrypted(stored));
@@ -889,8 +1037,289 @@ mod tests {
 
         // Masked placeholder with nothing to restore from (existing = None).
         let mut incoming = json!({ "shared_password": MASKED_VALUE });
-        finalize_connection_config_secrets(&mut incoming, None, &key).unwrap();
+        finalize_connection_config_secrets(&mut incoming, None, "postgres", &key).unwrap();
         assert!(incoming.get("shared_password").is_none());
+    }
+
+    // -- finalize_connection_config_secrets: type-specific sensitive fields (KYO-780) --
+
+    #[test]
+    fn finalize_bigquery_enterprise_oauth_masked_client_secret_restored_from_existing() {
+        // Bug A: the edit modal pre-fills from the masked settings response,
+        // so a save that doesn't touch the OAuth client secret field
+        // resubmits the literal placeholder. Before KYO-780 that placeholder
+        // was persisted over the real secret.
+        let key = test_key();
+        let existing = json!({
+            "auth_mode": "enterprise_oauth",
+            "oauth_client_id": "client-id",
+            "oauth_client_secret": "real-oauth-secret"
+        });
+        let mut incoming = json!({
+            "auth_mode": "enterprise_oauth",
+            "oauth_client_id": "client-id",
+            "oauth_client_secret": MASKED_VALUE
+        });
+
+        finalize_connection_config_secrets(&mut incoming, Some(&existing), "bigquery", &key).unwrap();
+
+        assert_eq!(incoming["oauth_client_secret"], existing["oauth_client_secret"]);
+    }
+
+    #[test]
+    fn finalize_bigquery_service_account_json_absent_restored_from_existing() {
+        // Bug B: the edit modal never loads service_account_json back at
+        // all, so a save that doesn't re-upload the key file omits the
+        // field entirely (not masked). Before KYO-780 that omission dropped
+        // the real key from the stored config outright.
+        let key = test_key();
+        let existing = json!({
+            "auth_mode": "service_account",
+            "service_account_json": "{\"type\":\"service_account\",\"client_email\":\"a@b.iam\"}"
+        });
+        let mut incoming = json!({ "auth_mode": "service_account" });
+
+        finalize_connection_config_secrets(&mut incoming, Some(&existing), "bigquery", &key).unwrap();
+
+        assert_eq!(incoming["service_account_json"], existing["service_account_json"]);
+    }
+
+    #[test]
+    fn finalize_type_specific_oauth_client_secret_fresh_value_replaces_old_one() {
+        let key = test_key();
+        let existing = json!({
+            "auth_mode": "enterprise_oauth",
+            "oauth_client_secret": "old-secret"
+        });
+        let mut incoming = json!({
+            "auth_mode": "enterprise_oauth",
+            "oauth_client_secret": "brand-new-secret"
+        });
+
+        finalize_connection_config_secrets(&mut incoming, Some(&existing), "bigquery", &key).unwrap();
+
+        assert_eq!(incoming["oauth_client_secret"], "brand-new-secret");
+    }
+
+    #[test]
+    fn finalize_type_specific_service_account_json_fresh_value_replaces_old_one() {
+        let key = test_key();
+        let existing = json!({
+            "auth_mode": "service_account",
+            "service_account_json": "{\"type\":\"service_account\",\"client_email\":\"old@b.iam\"}"
+        });
+        let mut incoming = json!({
+            "auth_mode": "service_account",
+            "service_account_json": "{\"type\":\"service_account\",\"client_email\":\"new@b.iam\"}"
+        });
+
+        finalize_connection_config_secrets(&mut incoming, Some(&existing), "bigquery", &key).unwrap();
+
+        assert_eq!(
+            incoming["service_account_json"],
+            "{\"type\":\"service_account\",\"client_email\":\"new@b.iam\"}"
+        );
+    }
+
+    #[test]
+    fn finalize_type_specific_field_explicit_null_clears_instead_of_restoring() {
+        let key = test_key();
+        let existing = json!({
+            "auth_mode": "service_account",
+            "service_account_json": "{\"type\":\"service_account\"}"
+        });
+        let mut incoming = json!({
+            "auth_mode": "service_account",
+            "service_account_json": Value::Null
+        });
+
+        finalize_connection_config_secrets(&mut incoming, Some(&existing), "bigquery", &key).unwrap();
+
+        assert!(
+            incoming.get("service_account_json").is_none(),
+            "explicit null must clear the field, not restore the old value"
+        );
+    }
+
+    #[test]
+    fn finalize_type_specific_field_on_create_with_masked_value_leaves_field_absent() {
+        let key = test_key();
+        let mut incoming = json!({
+            "auth_mode": "enterprise_oauth",
+            "oauth_client_secret": MASKED_VALUE
+        });
+
+        // `existing = None` is the create-mode case — there is nothing to
+        // restore from, so the placeholder must never be persisted literally.
+        finalize_connection_config_secrets(&mut incoming, None, "bigquery", &key).unwrap();
+
+        assert!(incoming.get("oauth_client_secret").is_none());
+    }
+
+    #[test]
+    fn finalize_switching_bigquery_auth_mode_does_not_resurrect_the_inactive_modes_masked_secret(
+    ) {
+        // The KYO-702 x KYO-780 interaction: a save that switches auth mode
+        // AND round-trips a masked placeholder for the mode it's leaving, in
+        // the same call. strip_inactive_auth_mode_fields removes the
+        // now-inactive mode's field; finalize_connection_config_secrets must
+        // not put it back — even though `existing` genuinely holds a real
+        // value for it — while still restoring the now-active mode's own
+        // masked field.
+        let key = test_key();
+        let existing = json!({
+            "auth_mode": "enterprise_oauth",
+            "oauth_client_id": "old-client-id",
+            "oauth_client_secret": "real-oauth-secret",
+            // A leftover from an earlier save under service_account,
+            // predating a later switch to enterprise_oauth — proves
+            // service_account_json isn't restored merely because it's
+            // present in `existing`, but because it's owned by the mode
+            // this save is switching *to*.
+            "service_account_json": "{\"type\":\"service_account\",\"client_email\":\"real@b.iam\"}"
+        });
+
+        // The form switches back to service_account and round-trips the
+        // masked placeholder for both fields.
+        let mut incoming = json!({
+            "auth_mode": "service_account",
+            "oauth_client_id": "old-client-id",
+            "oauth_client_secret": MASKED_VALUE,
+            "service_account_json": MASKED_VALUE
+        });
+
+        strip_inactive_auth_mode_fields(&mut incoming, "bigquery");
+        assert!(
+            incoming.get("oauth_client_id").is_none(),
+            "sanity: strip must have removed the now-inactive enterprise_oauth field"
+        );
+        assert!(
+            incoming.get("oauth_client_secret").is_none(),
+            "sanity: strip must have removed the now-inactive enterprise_oauth field"
+        );
+
+        finalize_connection_config_secrets(&mut incoming, Some(&existing), "bigquery", &key).unwrap();
+
+        assert!(
+            incoming.get("oauth_client_secret").is_none(),
+            "oauth_client_secret belongs to the now-inactive enterprise_oauth mode — \
+             must not be resurrected from `existing` even though a real value is there"
+        );
+        assert_eq!(
+            incoming["service_account_json"], existing["service_account_json"],
+            "service_account_json belongs to the now-active service_account mode — \
+             its masked placeholder must be restored to the real stored value"
+        );
+    }
+
+    #[test]
+    fn finalize_snowflake_oauth_masked_client_secret_restored_from_existing() {
+        let key = test_key();
+        let existing = json!({
+            "account": "xy12345.us-east-1",
+            "auth_mode": "oauth",
+            "oauth_client_id": "client-id",
+            "oauth_client_secret": "real-snowflake-secret"
+        });
+        let mut incoming = json!({
+            "account": "xy12345.us-east-1",
+            "auth_mode": "oauth",
+            "oauth_client_id": "client-id",
+            "oauth_client_secret": MASKED_VALUE
+        });
+
+        finalize_connection_config_secrets(&mut incoming, Some(&existing), "snowflake", &key).unwrap();
+
+        assert_eq!(incoming["oauth_client_secret"], existing["oauth_client_secret"]);
+    }
+
+    #[test]
+    fn finalize_databricks_oauth_masked_client_secret_restored_from_existing() {
+        let key = test_key();
+        let existing = json!({
+            "auth_mode": "oauth",
+            "oauth_client_id": "client-id",
+            "oauth_client_secret": "real-databricks-secret"
+        });
+        let mut incoming = json!({
+            "auth_mode": "oauth",
+            "oauth_client_id": "client-id",
+            "oauth_client_secret": MASKED_VALUE
+        });
+
+        finalize_connection_config_secrets(&mut incoming, Some(&existing), "databricks", &key).unwrap();
+
+        assert_eq!(incoming["oauth_client_secret"], existing["oauth_client_secret"]);
+    }
+
+    #[test]
+    fn finalize_synapse_enterprise_oauth_masked_client_secret_restored_from_existing() {
+        let key = test_key();
+        let existing = json!({
+            "auth_mode": "enterprise_oauth",
+            "oauth_client_id": "client-id",
+            "oauth_client_secret": "real-synapse-secret"
+        });
+        let mut incoming = json!({
+            "auth_mode": "enterprise_oauth",
+            "oauth_client_id": "client-id",
+            "oauth_client_secret": MASKED_VALUE
+        });
+
+        finalize_connection_config_secrets(&mut incoming, Some(&existing), "synapse", &key).unwrap();
+
+        assert_eq!(incoming["oauth_client_secret"], existing["oauth_client_secret"]);
+    }
+
+    #[test]
+    fn finalize_type_with_no_type_specific_sensitive_fields_is_unaffected() {
+        // postgres has an empty sensitive_connection_config_fields list — a
+        // field with the same name another type treats as sensitive
+        // (oauth_client_secret) is not a registered secret for postgres at
+        // all, so finalize must leave it exactly as submitted either way.
+        let key = test_key();
+        let existing = json!({ "host": "old-host", "oauth_client_secret": "irrelevant-for-postgres" });
+        let mut incoming = json!({ "host": "new-host", "oauth_client_secret": MASKED_VALUE });
+
+        finalize_connection_config_secrets(&mut incoming, Some(&existing), "postgres", &key).unwrap();
+
+        assert_eq!(
+            incoming["oauth_client_secret"], MASKED_VALUE,
+            "postgres has no type-specific sensitive fields — this field is untouched"
+        );
+    }
+
+    #[test]
+    fn finalize_retired_bigquery_auth_mode_does_not_restore_type_specific_fields() {
+        // KYO-704: kyomi_oauth is retired, so get_active_auth_mode returns
+        // Err for it. finalize_connection_config_secrets's conservative
+        // choice (KYO-780) is to restore none of the type-specific fields
+        // in that case — there is no way to verify which of them the
+        // unresolvable active mode actually owns, and resurrecting a secret
+        // nobody could verify ownership of is a worse outcome than leaving
+        // it unset.
+        let key = test_key();
+        let existing = json!({
+            "auth_mode": "kyomi_oauth",
+            "oauth_client_secret": "real-oauth-secret",
+            "service_account_json": "{\"type\":\"service_account\"}"
+        });
+        let mut incoming = json!({
+            "auth_mode": "kyomi_oauth",
+            "oauth_client_secret": MASKED_VALUE,
+            "service_account_json": MASKED_VALUE
+        });
+
+        finalize_connection_config_secrets(&mut incoming, Some(&existing), "bigquery", &key).unwrap();
+
+        assert!(
+            incoming.get("oauth_client_secret").is_none(),
+            "active auth mode is unresolvable (retired) — must not restore, not even leave the placeholder"
+        );
+        assert!(
+            incoming.get("service_account_json").is_none(),
+            "active auth mode is unresolvable (retired) — must not restore, not even leave the placeholder"
+        );
     }
 
     // -- strip_inactive_auth_mode_fields (KYO-702) ---
@@ -945,19 +1374,29 @@ mod tests {
     }
 
     #[test]
-    fn strip_leaves_active_modes_own_fields_untouched_regardless_of_value() {
+    fn strip_leaves_active_modes_own_fields_untouched_and_finalize_restores_the_real_secret() {
         // AC3 regression guard: a save that does NOT change auth mode must
         // never have the active mode's own connection_config fields
         // stripped — neither a real secret nor the masked placeholder the
         // form round-trips back. This uses shared_password/COMMON_SENSITIVE
         // to prove finalize_connection_config_secrets's masked-restore
-        // mechanism still runs untouched by this function, and separately
-        // asserts the active mode's own oauth_client_secret survives too.
+        // mechanism still runs untouched by this function, and — as of
+        // KYO-780 — separately proves the active mode's own
+        // oauth_client_secret is restored to its real stored value too, not
+        // just left holding the placeholder. Before KYO-780,
+        // finalize_connection_config_secrets had no restore path for
+        // type-specific fields at all, so the masked placeholder submitted
+        // by the form was persisted literally over the real secret — see
+        // `an-expected-value-read-off-the-current-behaviour-guards-the-defect.md`,
+        // which names this exact test's prior, wrong assertion.
         let key = test_key();
         let existing = json!({
             "auth_mode": "enterprise_oauth",
             "oauth_client_id": "client-id",
-            "oauth_client_secret": encryption::encrypt("real-secret", &key).unwrap(),
+            // Deliberately plaintext, not `encryption::encrypt(..)` — item 4
+            // of KYO-780 is that type-specific fields are never encrypted at
+            // rest, so a real stored value for one is plaintext.
+            "oauth_client_secret": "real-oauth-secret",
             "shared_password": encryption::encrypt("real-shared-pass", &key).unwrap()
         });
 
@@ -977,18 +1416,18 @@ mod tests {
         // restore from `existing`.
         assert_eq!(incoming["oauth_client_secret"], MASKED_VALUE);
 
-        finalize_connection_config_secrets(&mut incoming, Some(&existing), &key).unwrap();
+        finalize_connection_config_secrets(&mut incoming, Some(&existing), "bigquery", &key).unwrap();
 
         // shared_password (a COMMON_SENSITIVE field) is restored verbatim
         // by finalize_connection_config_secrets, proving that mechanism is
         // untouched by the new strip step.
         assert_eq!(incoming["shared_password"], existing["shared_password"]);
-        // oauth_client_secret is NOT a COMMON_SENSITIVE field, so
-        // finalize_connection_config_secrets never touches it — it must
-        // still hold the client's submitted value (the masked placeholder,
-        // in this test) because strip_inactive_auth_mode_fields correctly
-        // left the active mode's own field alone.
-        assert_eq!(incoming["oauth_client_secret"], MASKED_VALUE);
+        // oauth_client_secret belongs to the active enterprise_oauth mode,
+        // so finalize_connection_config_secrets's type-specific restore path
+        // (KYO-780) must overwrite the masked placeholder with the real
+        // stored secret — anything else, including the placeholder itself,
+        // is the credential being destroyed.
+        assert_eq!(incoming["oauth_client_secret"], existing["oauth_client_secret"]);
     }
 
     #[test]
@@ -1066,7 +1505,7 @@ mod tests {
             "ssh_private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\nreal-key\n-----END OPENSSH PRIVATE KEY-----",
             "shared_password": "real-shared-pass"
         });
-        finalize_connection_config_secrets(&mut config, None, &key).unwrap();
+        finalize_connection_config_secrets(&mut config, None, "postgres", &key).unwrap();
 
         // Sanity: the finalized config really is ciphertext now.
         assert!(looks_encrypted(config["ssh_private_key"].as_str().unwrap()));
@@ -1249,7 +1688,7 @@ mod tests {
             "ssh_enabled": true,
             "ssh_private_key": pem
         });
-        finalize_connection_config_secrets(&mut connection_config, None, &key).unwrap();
+        finalize_connection_config_secrets(&mut connection_config, None, "postgres", &key).unwrap();
 
         // What's "persisted" is ciphertext, not the PEM.
         let stored = connection_config["ssh_private_key"].as_str().unwrap();
@@ -1267,7 +1706,7 @@ mod tests {
     fn decrypt_provider_secrets_decrypts_both_config_and_credentials() {
         let key = test_key();
         let mut connection_config = json!({ "host": "db.example.com", "shared_password": "s3cr3t" });
-        finalize_connection_config_secrets(&mut connection_config, None, &key).unwrap();
+        finalize_connection_config_secrets(&mut connection_config, None, "postgres", &key).unwrap();
 
         let creds = json!({ "username": "alice", "password": "hunter2" });
         let encrypted_creds = encryption::encrypt_json(&creds, &key).unwrap();
@@ -1317,7 +1756,7 @@ mod tests {
             "indexing_credentials": ic
         });
 
-        finalize_connection_config_secrets(&mut incoming, None, &key).unwrap();
+        finalize_connection_config_secrets(&mut incoming, None, "postgres", &key).unwrap();
 
         let stored = incoming["indexing_credentials"].as_str().unwrap();
         assert!(
@@ -1362,7 +1801,7 @@ mod tests {
                 "password": "pw"
             }
         });
-        finalize_connection_config_secrets(&mut config, None, &key).unwrap();
+        finalize_connection_config_secrets(&mut config, None, "bigquery", &key).unwrap();
 
         let masked = mask_connection_config(&config, "bigquery");
         assert_eq!(masked["indexing_credentials"], MASKED_VALUE);
@@ -1382,7 +1821,7 @@ mod tests {
         });
 
         // First finalize — encrypts the object.
-        finalize_connection_config_secrets(&mut config, None, &key).unwrap();
+        finalize_connection_config_secrets(&mut config, None, "bigquery", &key).unwrap();
         let first_encrypted = config["indexing_credentials"].as_str().unwrap().to_string();
 
         // Mask it (simulates API response to client).
@@ -1393,7 +1832,7 @@ mod tests {
         // (simulates client resubmitting without changes).
         let existing = config.clone();
         let mut incoming = masked.clone();
-        finalize_connection_config_secrets(&mut incoming, Some(&existing), &key).unwrap();
+        finalize_connection_config_secrets(&mut incoming, Some(&existing), "bigquery", &key).unwrap();
 
         assert_eq!(
             incoming["indexing_credentials"].as_str().unwrap(),
@@ -1414,7 +1853,7 @@ mod tests {
             "indexing_credentials": ic.clone()
         });
 
-        finalize_connection_config_secrets(&mut config, None, &key).unwrap();
+        finalize_connection_config_secrets(&mut config, None, "bigquery", &key).unwrap();
 
         let decrypted = decrypt_connection_config_secrets(&config, &key).unwrap();
         assert_eq!(decrypted["indexing_credentials"], ic);
@@ -1438,7 +1877,7 @@ mod tests {
             "indexing_credentials": Value::Null
         });
 
-        finalize_connection_config_secrets(&mut incoming, Some(&existing), &key).unwrap();
+        finalize_connection_config_secrets(&mut incoming, Some(&existing), "bigquery", &key).unwrap();
 
         assert!(
             incoming.get("indexing_credentials").is_none(),
