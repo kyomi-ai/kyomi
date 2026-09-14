@@ -254,10 +254,19 @@ pub fn finalize_connection_config_secrets(
 /// - `Ok(None)`: `ds_type` is unknown, or the type has no auth modes at all.
 ///   There is nothing in the registry to strip against.
 /// - `Err(_)`: `config`'s `auth_mode` names a [`datasource_registry::RETIRED_AUTH_MODES`]
-///   id (KYO-704's `kyomi_oauth`). Reporting that is `get_active_auth_mode`'s
-///   job, at whichever caller needs to reject the write outright — silently
-///   stripping fields for a row this function cannot resolve would be a
-///   second, uncoordinated guess about what "active" means for it.
+///   id (KYO-704's `kyomi_oauth`). Silently stripping fields for a row this
+///   function cannot resolve would be a second, uncoordinated guess about
+///   what "active" means for it.
+///
+///   Be clear about what that leaves: **no caller in the create/update chain
+///   currently rejects a retired-mode write.** Neither `create_datasource`
+///   nor `update_datasource`, nor the `create_datasource_modal` /
+///   `update_datasource_settings` server fns above them, calls
+///   `get_active_auth_mode` for validation, so a client submitting
+///   `auth_mode: "kyomi_oauth"` is stored as-is with nothing stripped. That
+///   is not a regression — nothing was stripped anywhere before KYO-702 —
+///   and rejecting it is KYO-704's scope, not this function's. Do not read
+///   this branch as "some caller handles it"; it does not yet.
 ///
 /// Removes keys outright rather than setting them to JSON `null` — nothing
 /// downstream treats a literal `null` in `connection_config` as "absent"
