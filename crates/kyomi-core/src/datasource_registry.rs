@@ -88,10 +88,37 @@ pub struct AuthModeConfig {
 
     // === Field Configuration ===
     /// Credential field names required from users (e.g., `["username", "password"]`).
+    ///
+    /// **Not the same thing as [`Self::connection_config_fields`] below** —
+    /// this list is *per-user credential* fields (`username`, `password`,
+    /// `oauth_token`, ...), stored in `UserDatasourceCredential.credentials`
+    /// or `user_datasource_credentials.credentials`, scoped to the
+    /// requesting user. It is never written to the workspace-level
+    /// `connection_config` JSON blob on `datasource_configs`. KYO-702's
+    /// root cause was exactly this confusion: a ticket assumed this field
+    /// already tracked `connection_config` ownership, and it never did.
     pub credential_fields: Vec<String>,
 
     /// Fields to mask in API responses (e.g., `["password"]`).
     pub sensitive_fields: Vec<String>,
+
+    /// `connection_config` keys this auth mode owns — i.e. the keys
+    /// `build_connection_config` (kyomi-ui) writes only when this mode is
+    /// active, and that a switch to a *different* mode must not leave
+    /// behind (KYO-702).
+    ///
+    /// **Distinct from [`Self::credential_fields`] above**: this is
+    /// workspace-level `connection_config` on `datasource_configs`, not a
+    /// per-user credential. A field can appear in neither, either, or (if
+    /// two modes both write it, e.g. Synapse's `tenant_id`) more than one
+    /// mode's list — this list only needs to name fields that are
+    /// mode-*exclusive*, since [`DatasourceTypeMetadata::inactive_auth_mode_connection_config_fields`]
+    /// keeps a field owned by two modes whenever either is active.
+    ///
+    /// Empty for every auth mode whose credentials live entirely in the
+    /// per-user `credentials` map or nowhere at all (`password`, `token`,
+    /// `keypair`, `none`, Synapse's `service_principal`).
+    pub connection_config_fields: Vec<String>,
 
     // === Flags ===
     /// `true` if this is the default auth mode for the datasource.
@@ -153,6 +180,7 @@ fn password_auth_mode(is_default: bool, supports_shared: bool) -> AuthModeConfig
         preference_tracking: "credential".into(),
         credential_fields: vec!["username".into(), "password".into()],
         sensitive_fields: vec!["password".into()],
+        connection_config_fields: vec![],
         is_default,
         supports_shared_credentials: supports_shared,
         supports_headless_indexing: true,
@@ -189,6 +217,12 @@ fn enterprise_oauth_auth_mode(
         preference_tracking: "credential".into(),
         credential_fields: vec!["oauth_token".into()],
         sensitive_fields: vec!["oauth_token".into()],
+        // Both factories write into the same connection_config keys —
+        // build_connection_config (kyomi-ui) gates its "oauth_client_id"/
+        // "oauth_client_secret" writes on this exact mode_id for every
+        // caller of either factory (BigQuery/Synapse's "enterprise_oauth",
+        // Snowflake/Databricks' "oauth").
+        connection_config_fields: vec!["oauth_client_id".into(), "oauth_client_secret".into()],
         is_default,
         supports_shared_credentials: false,
         supports_headless_indexing: false,
@@ -229,6 +263,12 @@ fn oauth_auth_mode(
         preference_tracking: "credential".into(),
         credential_fields: vec!["oauth_token".into()],
         sensitive_fields: vec!["oauth_token".into()],
+        // Both factories write into the same connection_config keys —
+        // build_connection_config (kyomi-ui) gates its "oauth_client_id"/
+        // "oauth_client_secret" writes on this exact mode_id for every
+        // caller of either factory (BigQuery/Synapse's "enterprise_oauth",
+        // Snowflake/Databricks' "oauth").
+        connection_config_fields: vec!["oauth_client_id".into(), "oauth_client_secret".into()],
         is_default,
         supports_shared_credentials: false,
         supports_headless_indexing: false,
@@ -254,6 +294,12 @@ fn service_account_auth_mode(is_default: bool) -> AuthModeConfig {
         preference_tracking: "preference".into(),
         credential_fields: vec![],
         sensitive_fields: vec![],
+        // BigQuery is this factory's only caller today (verified via
+        // `grep -n "service_account_auth_mode(" crates/kyomi-core/src/datasource_registry.rs`)
+        // and its driver-facing key is genuinely "service_account_json" —
+        // see build_connection_config's "bigquery" arm
+        // (kyomi-ui/src/pages/settings/datasources.rs).
+        connection_config_fields: vec!["service_account_json".into()],
         is_default,
         supports_shared_credentials: true,
         supports_headless_indexing: true,
@@ -279,6 +325,7 @@ fn token_auth_mode(
         preference_tracking: "credential".into(),
         credential_fields: vec![token_field.into()],
         sensitive_fields: vec![token_field.into()],
+        connection_config_fields: vec![],
         is_default,
         supports_shared_credentials: supports_shared,
         supports_headless_indexing: true,
@@ -506,6 +553,40 @@ impl DatasourceTypeMetadata {
     pub fn indexing_auth_modes(&self) -> impl Iterator<Item = &AuthModeConfig> {
         self.auth_modes.iter().filter(|m| m.supports_headless_indexing)
     }
+
+    /// `connection_config` keys that belong to some *other* auth mode of
+    /// this type and must not survive under `active_mode_id` (KYO-702).
+    ///
+    /// This is the union of every mode's [`AuthModeConfig::connection_config_fields`],
+    /// minus whatever `active_mode_id` itself owns. The subtraction is why a
+    /// field owned by two modes (there are none today, but the method must
+    /// stay correct if one is ever added) is kept whenever either mode is
+    /// active, rather than being stripped out from under the mode using it.
+    ///
+    /// `active_mode_id` naming an unknown mode (a typo, or a type with no
+    /// auth modes at all) is treated as "owns nothing" — the full union is
+    /// returned as inactive. Callers that need retired-mode or
+    /// absent-`auth_mode` handling should resolve the active mode via
+    /// [`Self::get_active_auth_mode`] first and decide separately what to do
+    /// with its `Err`/`None` — this method only answers "given this mode id,
+    /// what does every other mode own," and intentionally does not duplicate
+    /// that resolution logic.
+    ///
+    /// Result order is deterministic (sorted) but otherwise unspecified.
+    pub fn inactive_auth_mode_connection_config_fields(&self, active_mode_id: &str) -> Vec<&str> {
+        let owned_by_active: std::collections::BTreeSet<&str> = self
+            .get_auth_mode(active_mode_id)
+            .map(|m| m.connection_config_fields.iter().map(String::as_str).collect())
+            .unwrap_or_default();
+
+        let all_owned: std::collections::BTreeSet<&str> = self
+            .auth_modes
+            .iter()
+            .flat_map(|m| m.connection_config_fields.iter().map(String::as_str))
+            .collect();
+
+        all_owned.difference(&owned_by_active).copied().collect()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -649,6 +730,11 @@ static SNOWFLAKE_META: LazyLock<DatasourceTypeMetadata> =
                 // both are sensitive.
                 credential_fields: vec!["username".into(), "password".into(), "private_key".into()],
                 sensitive_fields: vec!["password".into(), "private_key".into()],
+                // Keypair auth's credentials live entirely in the per-user
+                // `credentials` map above (username/password/private_key) —
+                // nothing is written into workspace-level `connection_config`
+                // for this mode.
+                connection_config_fields: vec![],
                 is_default: false,
                 // The "Shared credentials (all users)" toggle
                 // (`ProviderCredentialsFields`, `datasources.rs:5908-5920`)
@@ -852,6 +938,7 @@ static SYNAPSE_META: LazyLock<DatasourceTypeMetadata> =
                 preference_tracking: "credential".into(),
                 credential_fields: vec!["username".into(), "password".into()],
                 sensitive_fields: vec!["password".into()],
+                connection_config_fields: vec![],
                 is_default: true,
                 supports_shared_credentials: true,
                 supports_headless_indexing: true,
@@ -879,6 +966,17 @@ static SYNAPSE_META: LazyLock<DatasourceTypeMetadata> =
                     "client_secret".into(),
                 ],
                 sensitive_fields: vec!["client_secret".into()],
+                // client_id/client_secret for this mode live in the
+                // per-user `credentials` map (`cred_sp_client_id`/
+                // `cred_sp_client_secret` — datasources.rs's
+                // build_credentials "service_principal" arm), not
+                // connection_config. `tenant_id` IS also written to
+                // connection_config, but unconditionally for every Synapse
+                // auth mode (build_connection_config's "synapse" arm writes
+                // it outside the `syn_mode == "enterprise_oauth"` gate) —
+                // so it is never mode-exclusive and does not belong here;
+                // see `inactive_auth_mode_connection_config_fields`'s doc.
+                connection_config_fields: vec![],
                 is_default: false,
                 supports_shared_credentials: true,
                 supports_headless_indexing: true,
@@ -940,6 +1038,7 @@ static FLAREDB_META: LazyLock<DatasourceTypeMetadata> =
                 preference_tracking: "preference".into(),
                 credential_fields: vec![],
                 sensitive_fields: vec![],
+                connection_config_fields: vec![],
                 is_default: true,
                 supports_shared_credentials: false,
                 supports_headless_indexing: false,
@@ -1614,6 +1713,86 @@ mod tests {
             assert_eq!(
                 &actual, expected_ids,
                 "connection auth mode ids mismatch for {type_id}"
+            );
+        }
+    }
+
+    // --- inactive_auth_mode_connection_config_fields (KYO-702) ---
+
+    #[test]
+    fn bigquery_service_account_active_strips_oauth_pair() {
+        let bq = get_metadata(&DatasourceType::BigQuery);
+        let inactive = bq.inactive_auth_mode_connection_config_fields("service_account");
+        assert_eq!(inactive, vec!["oauth_client_id", "oauth_client_secret"]);
+    }
+
+    #[test]
+    fn bigquery_enterprise_oauth_active_strips_service_account_json() {
+        let bq = get_metadata(&DatasourceType::BigQuery);
+        let inactive = bq.inactive_auth_mode_connection_config_fields("enterprise_oauth");
+        assert_eq!(inactive, vec!["service_account_json"]);
+    }
+
+    #[test]
+    fn active_modes_own_fields_are_never_returned_as_inactive() {
+        // A field owned by the active mode must never appear in its own
+        // "inactive" set, for every mode of every type — not just the two
+        // BigQuery cases above.
+        for (type_id, meta) in all_metadata() {
+            for mode in meta.auth_modes {
+                let inactive = meta.inactive_auth_mode_connection_config_fields(&mode.mode_id);
+                for owned in &mode.connection_config_fields {
+                    assert!(
+                        !inactive.contains(&owned.as_str()),
+                        "{type_id}'s '{}' mode owns '{owned}', but it was returned as \
+                         inactive while '{}' was the active mode",
+                        mode.mode_id,
+                        mode.mode_id
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn snowflake_password_active_strips_oauth_pair_keeps_nothing_else() {
+        // Snowflake has no service-account-style mode, so switching away
+        // from "oauth" to "password" or "keypair" must strip exactly the
+        // oauth_client_id/oauth_client_secret pair and nothing else.
+        let sf = get_metadata(&DatasourceType::Snowflake);
+        assert_eq!(
+            sf.inactive_auth_mode_connection_config_fields("password"),
+            vec!["oauth_client_id", "oauth_client_secret"]
+        );
+        assert_eq!(
+            sf.inactive_auth_mode_connection_config_fields("keypair"),
+            vec!["oauth_client_id", "oauth_client_secret"]
+        );
+        assert!(sf
+            .inactive_auth_mode_connection_config_fields("oauth")
+            .is_empty());
+    }
+
+    #[test]
+    fn unknown_active_mode_id_treats_everything_as_inactive() {
+        // A typo'd or absent-resolution mode id owns nothing, so the full
+        // union is reported inactive rather than panicking or guessing.
+        let bq = get_metadata(&DatasourceType::BigQuery);
+        let inactive = bq.inactive_auth_mode_connection_config_fields("not_a_real_mode");
+        assert_eq!(inactive, vec!["oauth_client_id", "oauth_client_secret", "service_account_json"]);
+    }
+
+    #[test]
+    fn types_with_no_connection_config_fields_never_strip_anything() {
+        // Postgres/MySQL/etc. auth modes never write connection_config
+        // fields at all, so the inactive set must always be empty
+        // regardless of which mode id is passed.
+        for type_id in ["postgres", "mysql", "clickhouse", "redshift", "sqlserver"] {
+            let meta = get_metadata_by_str(type_id)
+                .unwrap_or_else(|| panic!("unknown datasource type {type_id}"));
+            assert!(
+                meta.inactive_auth_mode_connection_config_fields("password").is_empty(),
+                "{type_id} should have no connection_config-owning auth modes"
             );
         }
     }

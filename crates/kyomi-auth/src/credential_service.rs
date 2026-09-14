@@ -223,6 +223,73 @@ pub fn finalize_connection_config_secrets(
     Ok(())
 }
 
+/// Remove `connection_config` keys owned by an auth mode other than the one
+/// active in `config` itself (KYO-702).
+///
+/// A datasource's `connection_config` is a wholesale replace on write (see
+/// [`finalize_connection_config_secrets`]'s doc), but `build_connection_config`
+/// (`kyomi-ui`) can only omit a field the client-side gating knows to omit —
+/// it cannot see what an *earlier* save under a different auth mode already
+/// persisted. Switching BigQuery from `enterprise_oauth` to `service_account`
+/// (or Snowflake from `oauth` to `password`) therefore used to leave the
+/// previous mode's `oauth_client_id`/`oauth_client_secret` (or
+/// `service_account_json`) sitting in the stored config — a masked
+/// placeholder at best, a real secret at worst, for a mode that is no
+/// longer active and whose UI no longer shows or round-trips that field.
+///
+/// This is the authoritative fix: `kyomi-core` (and therefore the registry
+/// this reads, [`datasource_registry::DatasourceTypeMetadata::inactive_auth_mode_connection_config_fields`])
+/// is an `ssr`-only dependency of `kyomi-ui` and is not compiled into the
+/// WASM hydrate build, so the same enforcement cannot live client-side —
+/// it must run here, on every write, where it cannot be bypassed by any
+/// client. `build_connection_config`'s per-arm auth-mode gating (BigQuery,
+/// Snowflake) is a defense-in-depth UX nicety, not the guarantee.
+///
+/// Resolves the active mode via [`crate::datasource_auth_service::get_active_auth_mode`]
+/// — the same `Value`-shaped entry point every other read path uses — rather
+/// than duplicating its `Value` → `HashMap` conversion or its retired-mode
+/// handling here. Deliberately strips **nothing** in two cases, rather than
+/// guessing which mode is "really" active:
+///
+/// - `Ok(None)`: `ds_type` is unknown, or the type has no auth modes at all.
+///   There is nothing in the registry to strip against.
+/// - `Err(_)`: `config`'s `auth_mode` names a [`datasource_registry::RETIRED_AUTH_MODES`]
+///   id (KYO-704's `kyomi_oauth`). Reporting that is `get_active_auth_mode`'s
+///   job, at whichever caller needs to reject the write outright — silently
+///   stripping fields for a row this function cannot resolve would be a
+///   second, uncoordinated guess about what "active" means for it.
+///
+/// Removes keys outright rather than setting them to JSON `null` — nothing
+/// downstream treats a literal `null` in `connection_config` as "absent"
+/// (see [`finalize_connection_config_secrets`]'s `COMMON_SENSITIVE` loop,
+/// which is the only code that currently interprets an explicit `null`, and
+/// only for its own three fields), so a `null` here would simply become the
+/// new stored corruption.
+///
+/// No-ops if `config` is not a JSON object.
+pub fn strip_inactive_auth_mode_fields(config: &mut Value, ds_type: &str) {
+    let Some(meta) = datasource_registry::get_metadata_by_str(ds_type) else {
+        return;
+    };
+
+    let active_mode = match crate::datasource_auth_service::get_active_auth_mode(ds_type, config) {
+        Ok(Some(mode)) => mode,
+        Ok(None) => return,
+        Err(_) => return,
+    };
+
+    let inactive_fields = meta.inactive_auth_mode_connection_config_fields(&active_mode.mode_id);
+    if inactive_fields.is_empty() {
+        return;
+    }
+
+    if let Some(obj) = config.as_object_mut() {
+        for field in inactive_fields {
+            obj.remove(field);
+        }
+    }
+}
+
 /// Heuristic check for whether `s` looks like ciphertext produced by
 /// [`crate::encryption::encrypt`] (base64url of `version_byte + nonce + tag +
 /// ciphertext`, version `0x02`).
@@ -815,6 +882,151 @@ mod tests {
         let mut incoming = json!({ "shared_password": MASKED_VALUE });
         finalize_connection_config_secrets(&mut incoming, None, &key).unwrap();
         assert!(incoming.get("shared_password").is_none());
+    }
+
+    // -- strip_inactive_auth_mode_fields (KYO-702) ---
+
+    #[test]
+    fn strip_removes_oauth_pair_when_bigquery_switches_to_service_account() {
+        // The exact leak KYO-702 describes: a BigQuery row that was
+        // previously enterprise_oauth still carries oauth_client_id/
+        // oauth_client_secret after the client switches it to
+        // service_account and submits service_account_json instead.
+        let mut config = json!({
+            "auth_mode": "service_account",
+            "service_account_json": "{\"type\":\"service_account\"}",
+            "oauth_client_id": "leftover-client-id",
+            "oauth_client_secret": MASKED_VALUE
+        });
+
+        strip_inactive_auth_mode_fields(&mut config, "bigquery");
+
+        assert!(
+            config.get("oauth_client_id").is_none(),
+            "oauth_client_id belongs to enterprise_oauth, not the active service_account mode"
+        );
+        assert!(
+            config.get("oauth_client_secret").is_none(),
+            "oauth_client_secret belongs to enterprise_oauth, not the active service_account mode"
+        );
+        assert_eq!(config["service_account_json"], "{\"type\":\"service_account\"}");
+        assert_eq!(config["auth_mode"], "service_account");
+    }
+
+    #[test]
+    fn strip_removes_service_account_json_when_bigquery_switches_to_enterprise_oauth() {
+        // The mirror-image switch: enterprise_oauth is now active, so a
+        // leftover service_account_json from a prior service_account save
+        // must be removed rather than sitting in connection_config forever.
+        let mut config = json!({
+            "auth_mode": "enterprise_oauth",
+            "oauth_client_id": "new-client-id",
+            "oauth_client_secret": "new-client-secret",
+            "service_account_json": "{\"type\":\"service_account\"}"
+        });
+
+        strip_inactive_auth_mode_fields(&mut config, "bigquery");
+
+        assert!(
+            config.get("service_account_json").is_none(),
+            "service_account_json belongs to service_account, not the active enterprise_oauth mode"
+        );
+        assert_eq!(config["oauth_client_id"], "new-client-id");
+        assert_eq!(config["oauth_client_secret"], "new-client-secret");
+    }
+
+    #[test]
+    fn strip_leaves_active_modes_own_fields_untouched_regardless_of_value() {
+        // AC3 regression guard: a save that does NOT change auth mode must
+        // never have the active mode's own connection_config fields
+        // stripped — neither a real secret nor the masked placeholder the
+        // form round-trips back. This uses shared_password/COMMON_SENSITIVE
+        // to prove finalize_connection_config_secrets's masked-restore
+        // mechanism still runs untouched by this function, and separately
+        // asserts the active mode's own oauth_client_secret survives too.
+        let key = test_key();
+        let existing = json!({
+            "auth_mode": "enterprise_oauth",
+            "oauth_client_id": "client-id",
+            "oauth_client_secret": encryption::encrypt("real-secret", &key).unwrap(),
+            "shared_password": encryption::encrypt("real-shared-pass", &key).unwrap()
+        });
+
+        // The form round-trips the masked placeholder for both secrets, and
+        // does not change auth_mode.
+        let mut incoming = json!({
+            "auth_mode": "enterprise_oauth",
+            "oauth_client_id": "client-id",
+            "oauth_client_secret": MASKED_VALUE,
+            "shared_password": MASKED_VALUE
+        });
+
+        strip_inactive_auth_mode_fields(&mut incoming, "bigquery");
+        // strip_inactive_auth_mode_fields must not have removed
+        // oauth_client_secret — it belongs to the still-active
+        // enterprise_oauth mode — so finalize still has a masked value to
+        // restore from `existing`.
+        assert_eq!(incoming["oauth_client_secret"], MASKED_VALUE);
+
+        finalize_connection_config_secrets(&mut incoming, Some(&existing), &key).unwrap();
+
+        // shared_password (a COMMON_SENSITIVE field) is restored verbatim
+        // by finalize_connection_config_secrets, proving that mechanism is
+        // untouched by the new strip step.
+        assert_eq!(incoming["shared_password"], existing["shared_password"]);
+        // oauth_client_secret is NOT a COMMON_SENSITIVE field, so
+        // finalize_connection_config_secrets never touches it — it must
+        // still hold the client's submitted value (the masked placeholder,
+        // in this test) because strip_inactive_auth_mode_fields correctly
+        // left the active mode's own field alone.
+        assert_eq!(incoming["oauth_client_secret"], MASKED_VALUE);
+    }
+
+    #[test]
+    fn strip_no_ops_on_retired_auth_mode() {
+        // KYO-704: kyomi_oauth is retired. get_active_auth_mode returns Err
+        // for it, and strip_inactive_auth_mode_fields must strip nothing
+        // rather than guess — the write path's own error handling (via
+        // get_active_auth_mode, called separately where a retired row must
+        // be rejected) is where that case belongs.
+        let mut config = json!({
+            "auth_mode": "kyomi_oauth",
+            "oauth_client_id": "client-id",
+            "oauth_client_secret": "secret",
+            "service_account_json": "{}"
+        });
+
+        strip_inactive_auth_mode_fields(&mut config, "bigquery");
+
+        assert_eq!(config["oauth_client_id"], "client-id");
+        assert_eq!(config["oauth_client_secret"], "secret");
+        assert_eq!(config["service_account_json"], "{}");
+    }
+
+    #[test]
+    fn strip_no_ops_on_unknown_datasource_type() {
+        let mut config = json!({
+            "auth_mode": "service_account",
+            "oauth_client_id": "client-id"
+        });
+
+        strip_inactive_auth_mode_fields(&mut config, "not_a_real_type");
+
+        assert_eq!(config["oauth_client_id"], "client-id");
+    }
+
+    #[test]
+    fn strip_removes_oauth_pair_when_snowflake_switches_off_oauth() {
+        let mut config = json!({
+            "auth_mode": "password",
+            "oauth_client_id": "leftover-id",
+            "oauth_client_secret": "leftover-secret"
+        });
+
+        strip_inactive_auth_mode_fields(&mut config, "snowflake");
+
+        assert!(config.get("oauth_client_id").is_none());
+        assert!(config.get("oauth_client_secret").is_none());
     }
 
     // -- looks_encrypted / decrypt_connection_config_secrets ---

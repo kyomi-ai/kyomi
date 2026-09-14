@@ -372,6 +372,16 @@ pub async fn create_datasource(
         encryption_key,
     } = params;
 
+    // KYO-702: strip any connection_config field owned by an auth mode
+    // other than the one this config's own `auth_mode` names, before
+    // finalize_connection_config_secrets runs. On create there is no prior
+    // stored config to have leaked from, but the client can still submit a
+    // connection_config assembled from stale form state (e.g. a copy/paste
+    // or a race between two in-flight auth-mode switches in the same
+    // session) — enforcing this here as well as on update keeps both write
+    // paths identical rather than trusting create's freshness.
+    credential_service::strip_inactive_auth_mode_fields(&mut connection_config, ds_type);
+
     credential_service::finalize_connection_config_secrets(
         &mut connection_config,
         None,
@@ -524,6 +534,20 @@ pub async fn update_datasource(
     // before being persisted.
     let final_config = match connection_config {
         Some(mut cfg) => {
+            // KYO-702: strip any connection_config field owned by an auth
+            // mode other than the one *this* update's `auth_mode` names,
+            // before finalize_connection_config_secrets runs. This is the
+            // case the bug lived in: switching BigQuery from
+            // enterprise_oauth to service_account (or back) previously left
+            // the old mode's oauth_client_id/oauth_client_secret or
+            // service_account_json sitting in `existing.connection_config`
+            // forever, because build_connection_config's wholesale replace
+            // only omits fields the *client* knows to omit — it cannot see
+            // what an earlier save under a different mode persisted.
+            credential_service::strip_inactive_auth_mode_fields(
+                &mut cfg,
+                existing.datasource_type.as_ref(),
+            );
             credential_service::finalize_connection_config_secrets(
                 &mut cfg,
                 Some(&existing.connection_config),
