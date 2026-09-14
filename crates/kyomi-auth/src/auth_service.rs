@@ -330,7 +330,8 @@ async fn signup_smtp_less_new_user(
 /// Which `EmailService` method `spawn_verification_email` invokes.
 ///
 /// Every variant except `ExistingAccount` has an underlying method with the
-/// identical `(email: &str, name: &str, link: &str) -> bool` signature, so
+/// identical `(email: &str, name: &str, link: &str) ->
+/// Result<(), EmailSendError>` signature, so
 /// picking a variant is the only thing that needs to vary between callers —
 /// no other plumbing changes. `ExistingAccount` is the one exception: its
 /// underlying method, `send_existing_account_notice`, also needs the
@@ -2752,7 +2753,95 @@ pub async fn passkey_recovery_start_service(
     Ok(())
 }
 
+/// `tracing` target for the fire-and-forget verification-email task.
+///
+/// Stable and greppable on purpose (KYO-697): this task runs after the HTTP
+/// response has already told the user to check their mailbox, so the log is
+/// the *only* place a failed send is ever visible. Filtering on this target
+/// alone gives an operator every signup/recovery mail outcome without
+/// having to know which `send_*` method was involved.
+const VERIFICATION_EMAIL_TARGET: &str = "kyomi::auth::verification_email";
+
+impl VerificationEmailKind {
+    /// Stable label for the structured `email_kind` log field — the
+    /// discriminant an operator filters on to tell a failed signup
+    /// verification from a failed passkey recovery.
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Verification => "verification",
+            Self::PasskeyRecovery => "passkey_recovery",
+            Self::ExistingAccount { .. } => "existing_account",
+        }
+    }
+}
+
+/// Send the email named by `kind`, returning the typed failure rather than
+/// reporting it.
+///
+/// Split out of [`spawn_verification_email`] so this path has a direct
+/// unit-test seam (KYO-697). The send is fire-and-forget by design — the
+/// signup response must not block on it, and must not vary with it — which
+/// previously meant the only way to observe a failure at all was to scrape
+/// the log output of a task nobody awaits.
+async fn send_verification_email_of_kind(
+    email_svc: &crate::email_service::EmailService,
+    email: &str,
+    name: &str,
+    url: &str,
+    kind: &VerificationEmailKind,
+) -> Result<(), crate::email_service::EmailSendError> {
+    match kind {
+        VerificationEmailKind::Verification => {
+            email_svc.send_verification_email(email, name, url).await
+        }
+        VerificationEmailKind::PasskeyRecovery => {
+            email_svc.send_passkey_recovery(email, name, url).await
+        }
+        VerificationEmailKind::ExistingAccount { auth_methods } => {
+            email_svc
+                .send_existing_account_notice(email, name, url, auth_methods)
+                .await
+        }
+    }
+}
+
+/// Report the outcome of a verification-email send.
+///
+/// A failure is logged at `error` — not `warn` — because by the time this
+/// runs the user has already been shown "check your email" and has no way
+/// to learn otherwise; the operator's log is the only channel left, and the
+/// message that never arrived is the front door of the product.
+///
+/// Separate from [`send_verification_email_of_kind`] so both halves —
+/// "the failure is returned" and "the failure is reported" — are
+/// independently assertable.
+fn report_verification_email_outcome(
+    kind: &VerificationEmailKind,
+    email: &str,
+    result: &Result<(), crate::email_service::EmailSendError>,
+) {
+    match result {
+        Ok(()) => tracing::info!(
+            target: VERIFICATION_EMAIL_TARGET,
+            email_kind = kind.as_str(),
+            recipient = %email,
+            "Verification email sent"
+        ),
+        Err(e) => tracing::error!(
+            target: VERIFICATION_EMAIL_TARGET,
+            email_kind = kind.as_str(),
+            recipient = %email,
+            error = %e,
+            "Failed to send verification email"
+        ),
+    }
+}
+
 /// Send a verification email in a background task (fire-and-forget).
+///
+/// Stays `tokio::spawn`-based deliberately: the signup and recovery
+/// responses must not block on SMTP, and must stay byte-identical across
+/// account states regardless of what the mail server does.
 fn spawn_verification_email(
     email: String,
     name: String,
@@ -2761,24 +2850,9 @@ fn spawn_verification_email(
 ) {
     tokio::spawn(async move {
         let email_svc = crate::email_service::EmailService::from_env();
-        let sent = match kind {
-            VerificationEmailKind::Verification => {
-                email_svc.send_verification_email(&email, &name, &url).await
-            }
-            VerificationEmailKind::PasskeyRecovery => {
-                email_svc.send_passkey_recovery(&email, &name, &url).await
-            }
-            VerificationEmailKind::ExistingAccount { auth_methods } => {
-                email_svc
-                    .send_existing_account_notice(&email, &name, &url, &auth_methods)
-                    .await
-            }
-        };
-        if sent {
-            tracing::info!("Verification email sent to {email}");
-        } else {
-            tracing::warn!("Failed to send verification email to {email}");
-        }
+        let result =
+            send_verification_email_of_kind(&email_svc, &email, &name, &url, &kind).await;
+        report_verification_email_outcome(&kind, &email, &result);
     });
 }
 
@@ -5342,5 +5416,125 @@ mod tests {
             }
             other => panic!("expected Error::TooManyRequests for rate limiting, got: {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Verification-email failure reporting (KYO-697)
+    // -----------------------------------------------------------------
+
+    /// The whole point of the ticket: a send failure must arrive at the
+    /// caller as a *named reason*, not as a bare "it didn't work".
+    ///
+    /// Runs against a genuinely unconfigured `EmailService` — the
+    /// self-hosted "SMTP was never set up" state — so the real
+    /// `send_verification_email` -> `send_email` path executes and fails
+    /// where it actually fails. Every `VerificationEmailKind` is covered,
+    /// because each one dispatches to a different `EmailService` method and
+    /// a future variant that swallowed its error would otherwise ship
+    /// unnoticed.
+    #[tokio::test]
+    async fn verification_email_failure_is_returned_for_every_kind() {
+        let svc = crate::email_service::EmailService::unconfigured_for_tests();
+
+        for kind in [
+            VerificationEmailKind::Verification,
+            VerificationEmailKind::PasskeyRecovery,
+            VerificationEmailKind::ExistingAccount {
+                auth_methods: vec!["password".to_string()],
+            },
+        ] {
+            let err = send_verification_email_of_kind(
+                &svc,
+                "user@example.com",
+                "Jane",
+                "https://app.example.com/signup/complete?token=abc",
+                &kind,
+            )
+            .await
+            .expect_err("an unconfigured SMTP service must not report a send as successful");
+
+            assert!(
+                matches!(err, crate::email_service::EmailSendError::NotConfigured),
+                "{}: expected the NotConfigured reason to survive, got {err:?}",
+                kind.as_str()
+            );
+        }
+    }
+
+    /// Returning the reason is only half of it — before KYO-697 the failure
+    /// was reachable by nobody, because the response had already said
+    /// "check your email". Assert the outcome is actually *reported*, at
+    /// `error` level, naming the reason, the recipient and which email it
+    /// was, so an operator can act on one log line.
+    #[tokio::test]
+    async fn verification_email_failure_is_reported_with_its_reason() {
+        let logs = capture_tracing();
+        let svc = crate::email_service::EmailService::unconfigured_for_tests();
+        let kind = VerificationEmailKind::Verification;
+
+        let result = send_verification_email_of_kind(
+            &svc,
+            "user@example.com",
+            "Jane",
+            "https://app.example.com/signup/complete?token=abc",
+            &kind,
+        )
+        .await;
+        report_verification_email_outcome(&kind, "user@example.com", &result);
+
+        let errors = logs.events_at(Level::ERROR);
+        assert_eq!(
+            errors.len(),
+            1,
+            "exactly one error must be reported for one failed send, got: {errors:?}"
+        );
+        let (_, rendered) = &errors[0];
+        assert!(
+            rendered.contains("Failed to send verification email"),
+            "the message operators grep for must be present: {rendered}"
+        );
+        assert!(
+            rendered.contains("SMTP_HOST"),
+            "the reason must be in the log line, not collapsed away: {rendered}"
+        );
+        // Pin the structured `email_kind` field, not the bare word
+        // "verification" — the static message already contains that, so a
+        // substring check on it passes for every `VerificationEmailKind`
+        // and asserts nothing. This is the dead-assertion shape
+        // `docs/standards/testing/contains-after-assert-eq-is-dead.md`
+        // warns about.
+        assert!(
+            rendered.contains(r#"email_kind="verification""#),
+            "the log must say which email failed: {rendered}"
+        );
+        assert!(
+            rendered.contains("user@example.com"),
+            "the log must say who it was for: {rendered}"
+        );
+    }
+
+    /// The negative half: a successful send must not report an error, so
+    /// the assertion above cannot pass on an unconditional log. Exercised
+    /// through `report_verification_email_outcome` directly because a
+    /// successful send needs a live SMTP server.
+    #[test]
+    fn verification_email_success_reports_no_error() {
+        let logs = capture_tracing();
+        report_verification_email_outcome(
+            &VerificationEmailKind::PasskeyRecovery,
+            "user@example.com",
+            &Ok(()),
+        );
+
+        assert!(
+            logs.events_at(Level::ERROR).is_empty(),
+            "a successful send must not be reported as a failure: {:?}",
+            logs.events_at(Level::ERROR)
+        );
+        assert!(
+            logs.has_message_containing(Level::INFO, "Verification email sent"),
+            "a successful send must still be reported: {:?}",
+            logs.events()
+        );
     }
 }

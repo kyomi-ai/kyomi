@@ -330,11 +330,22 @@ async fn send_watch_alert_emails(
             params.mode,
         );
 
-        if email_service
+        match email_service
             .send_email(email, &subject, &html_body, None, None, &chart_images)
             .await
         {
-            any_success = true;
+            Ok(()) => any_success = true,
+            // Per-recipient, because one bad address among several must not
+            // read as "the alert was not delivered". Reported here because
+            // `send_email` returns its reason rather than logging it
+            // (KYO-697), and this loop previously discarded the outcome.
+            Err(e) => tracing::error!(
+                recipient = %email,
+                watch_name = %params.watch_name,
+                execution_id = %params.execution_id,
+                error = %e,
+                "Failed to send watch alert email"
+            ),
         }
     }
 

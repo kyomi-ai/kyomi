@@ -1154,8 +1154,25 @@ pub async fn initiate_transfer(
 
         tokio::spawn(async move {
             let svc = crate::email_service::EmailService::from_env();
-            svc.send_ownership_transfer(&to_email, &ws_name, &f_name, &to_name, "initiated").await;
-            svc.send_ownership_transfer(&f_email, &ws_name, &f_name, &to_name, "confirmation").await;
+            // Both sends were previously discarded outright, so a failure
+            // left no trace at all once `send_email` stopped logging its
+            // own (KYO-697). Each is reported independently: the recipient
+            // can be unreachable while the outgoing owner is not.
+            for (recipient, variant) in
+                [(&to_email, "initiated"), (&f_email, "confirmation")]
+            {
+                if let Err(e) = svc
+                    .send_ownership_transfer(recipient, &ws_name, &f_name, &to_name, variant)
+                    .await
+                {
+                    tracing::error!(
+                        recipient = %recipient,
+                        variant = %variant,
+                        error = %e,
+                        "Failed to send ownership transfer email"
+                    );
+                }
+            }
         });
     }
 

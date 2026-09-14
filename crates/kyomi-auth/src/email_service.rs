@@ -9,8 +9,16 @@
 //! - `SMTP_FROM_EMAIL` (default: `noreply@kyomi.ai`)
 //! - `SMTP_FROM_NAME` (default: `Kyomi`)
 //!
-//! Graceful degradation: if SMTP is not configured, `send_email` logs a warning
-//! and returns `false` — it never fails the calling operation.
+//! Graceful degradation: if SMTP is not configured, `send_email` returns
+//! [`EmailSendError::NotConfigured`] rather than sending. No send path ever
+//! fails the calling operation — the caller decides what an undeliverable
+//! email means for it — but the *reason* now survives the call boundary
+//! instead of being collapsed into a bare `false` (KYO-697).
+//!
+//! Failures are returned, not logged here: every caller has context this
+//! module does not (which feedback row, which signup, which watch alert),
+//! so each one owns the diagnostic for its own send. See
+//! [`EmailService::send_email`].
 
 use kyomi_core::config::SmtpSettings;
 use lettre::{
@@ -25,6 +33,115 @@ static LOGO_BYTES: &[u8] =
 
 /// Content-ID used in `<img src="cid:kyomi_logo">`.
 const LOGO_CID: &str = "kyomi_logo";
+
+/// Whether a failed SMTP send is worth attempting again, as classified by
+/// `lettre` itself.
+///
+/// This is the same distinction [`EmailService::send_email`]'s retry
+/// classifier already makes (`is_transient() || is_timeout()`); carrying it
+/// on the error means an operator reading a single log line can tell "the
+/// mail server deferred us and we gave up after the configured retries"
+/// from "the mail server rejected this address outright", which are
+/// different problems with different fixes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmtpFailureKind {
+    /// A 4xx deferral, a timeout, or a dropped connection. Already retried
+    /// with backoff before this error was produced; a later attempt may
+    /// still succeed.
+    Transient,
+    /// A 5xx hard rejection or an authentication failure. Not retried —
+    /// every attempt produces the same result until the address or the
+    /// SMTP configuration changes.
+    Permanent,
+}
+
+impl std::fmt::Display for SmtpFailureKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transient => f.write_str("transient"),
+            Self::Permanent => f.write_str("permanent"),
+        }
+    }
+}
+
+/// Why an email could not be sent.
+///
+/// Replaces the `bool` every `send_*` method used to return (KYO-697). That
+/// `bool` mapped six materially different failures onto one value, so the
+/// fire-and-forget callers that log it could only ever say *that* a send
+/// failed, never *why* — leaving "SMTP was never configured on this
+/// instance" indistinguishable from "the recipient's mail server rejected
+/// the address" in the one place an operator looks.
+#[derive(Debug, thiserror::Error)]
+pub enum EmailSendError {
+    /// `SMTP_HOST`, `SMTP_USER` or `SMTP_PASSWORD` is unset, so there is no
+    /// server to send through. The dominant case on a self-hosted install.
+    #[error(
+        "SMTP is not configured — set SMTP_HOST, SMTP_PORT, SMTP_USER and \
+         SMTP_PASSWORD; no email was sent"
+    )]
+    NotConfigured,
+
+    /// `SMTP_FROM_NAME`/`SMTP_FROM_EMAIL` do not form a parseable mailbox.
+    /// Affects every email this instance sends, not just this one.
+    #[error("invalid From address {address:?}: {source}")]
+    InvalidFromAddress {
+        address: String,
+        #[source]
+        source: lettre::address::AddressError,
+    },
+
+    /// The recipient address is not a parseable mailbox — the one failure
+    /// here that is specific to a single recipient.
+    #[error("invalid To address {address:?}: {source}")]
+    InvalidToAddress {
+        address: String,
+        #[source]
+        source: lettre::address::AddressError,
+    },
+
+    /// The MIME message could not be assembled from the rendered bodies
+    /// and inline images.
+    #[error("could not build the email message: {source}")]
+    MessageBuild {
+        #[source]
+        source: lettre::error::Error,
+    },
+
+    /// The SMTP transport could not be constructed — a bad hostname or a
+    /// TLS setup failure. Never retried: it cannot succeed on a later
+    /// attempt with the same configuration.
+    #[error("could not create the SMTP transport for {host:?}: {source}")]
+    TransportSetup {
+        host: String,
+        #[source]
+        source: lettre::transport::smtp::Error,
+    },
+
+    /// The message reached the transport and the server refused it, or the
+    /// connection failed. `kind` preserves the transient/permanent
+    /// classification the retry loop already computed.
+    #[error("SMTP send failed ({kind}): {source}")]
+    Send {
+        kind: SmtpFailureKind,
+        #[source]
+        source: lettre::transport::smtp::Error,
+    },
+}
+
+/// The single definition of "worth retrying" for an SMTP error.
+///
+/// Used both by [`EmailService::send_email`]'s retry classifier and by the
+/// [`SmtpFailureKind`] recorded on the error it ultimately returns, so the
+/// decision the retry loop made and the classification the operator reads
+/// cannot drift apart.
+fn classify_smtp_error(e: &lettre::transport::smtp::Error) -> SmtpFailureKind {
+    if e.is_transient() || e.is_timeout() {
+        SmtpFailureKind::Transient
+    } else {
+        SmtpFailureKind::Permanent
+    }
+}
 
 /// SMTP email service.
 ///
@@ -105,10 +222,41 @@ impl EmailService {
         .can_send()
     }
 
+    /// A real, fully-constructed `EmailService` with no SMTP credentials —
+    /// the self-hosted "SMTP was never set up" state.
+    ///
+    /// Not a mock: every send through it runs the genuine
+    /// [`send_email`](Self::send_email) body and fails where that body
+    /// actually fails. It exists because the only other way to obtain an
+    /// unconfigured service is [`from_env`](Self::from_env), which would
+    /// make a test's verdict depend on whether the machine running it
+    /// happens to have `SMTP_*` exported. Crate-visible so
+    /// `auth_service`'s tests can reach the verification-email path
+    /// (KYO-697).
+    #[cfg(test)]
+    pub(crate) fn unconfigured_for_tests() -> Self {
+        Self {
+            smtp_host: None,
+            smtp_port: 587,
+            smtp_user: None,
+            smtp_password: None,
+            from_email: "noreply@kyomi.ai".to_string(),
+            from_name: "Kyomi".to_string(),
+            frontend_url: "https://app.kyomi.ai".to_string(),
+        }
+    }
+
     /// Send an email via SMTP.
     ///
-    /// Returns `true` if the email was sent successfully, `false` otherwise.
-    /// Never panics or returns an error — logs warnings on failure.
+    /// Returns `Ok(())` once the server has accepted the message, or the
+    /// [`EmailSendError`] explaining why it did not (KYO-697). Never panics.
+    ///
+    /// **The caller owns the failure diagnostic.** This method deliberately
+    /// does not log its own failures: it knows only the recipient and the
+    /// subject, while the caller knows which user action produced the send
+    /// and is already the place that decides whether an undeliverable email
+    /// changes anything. Logging in both places would report one outcome
+    /// twice; every call site in this workspace logs the returned error.
     ///
     /// `reply_to` sets the Reply-To header so recipients can reply directly
     /// to the relevant person (e.g., the user who submitted feedback).
@@ -124,46 +272,35 @@ impl EmailService {
         text_body: Option<&str>,
         reply_to: Option<&str>,
         images: &[(String, Vec<u8>)],
-    ) -> bool {
-        if !self.is_configured() {
-            tracing::warn!(
-                to = %to_email,
-                "SMTP not configured. Skipping email."
-            );
-            return false;
-        }
-
+    ) -> Result<(), EmailSendError> {
+        // This destructuring *is* the `is_configured()` predicate — the
+        // three fields it requires are exactly the three that method tests —
+        // so there is one check rather than a check plus an unreachable
+        // "missing despite is_configured()" arm behind it.
         let (Some(smtp_host), Some(smtp_user), Some(smtp_password)) = (
             self.smtp_host.as_deref(),
             self.smtp_user.as_deref(),
             self.smtp_password.as_deref(),
         ) else {
-            tracing::error!("SMTP config missing despite is_configured() check");
-            return false;
+            return Err(EmailSendError::NotConfigured);
         };
 
         // Build the From mailbox
-        let from_mailbox: Mailbox = match format!("{} <{}>", self.from_name, self.from_email).parse()
-        {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::error!(
-                    "Failed to parse From address '{}': {}",
-                    self.from_email,
-                    e
-                );
-                return false;
-            }
-        };
+        let from_mailbox: Mailbox = format!("{} <{}>", self.from_name, self.from_email)
+            .parse()
+            .map_err(|source| EmailSendError::InvalidFromAddress {
+                address: self.from_email.clone(),
+                source,
+            })?;
 
         // Build the To mailbox
-        let to_mailbox: Mailbox = match to_email.parse() {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::error!("Failed to parse To address '{}': {}", to_email, e);
-                return false;
-            }
-        };
+        let to_mailbox: Mailbox =
+            to_email
+                .parse()
+                .map_err(|source| EmailSendError::InvalidToAddress {
+                    address: to_email.to_string(),
+                    source,
+                })?;
 
         // Build multipart/alternative message (text + html)
         let alternative = if let Some(text) = text_body {
@@ -220,13 +357,9 @@ impl EmailService {
             }
         }
 
-        let message = match builder.multipart(related) {
-            Ok(msg) => msg,
-            Err(e) => {
-                tracing::error!(to = %to_email, "Failed to build email message: {}", e);
-                return false;
-            }
-        };
+        let message = builder
+            .multipart(related)
+            .map_err(|source| EmailSendError::MessageBuild { source })?;
 
         let creds = Credentials::new(smtp_user.to_string(), smtp_password.to_string());
 
@@ -242,13 +375,10 @@ impl EmailService {
             })
         };
 
-        let mailer = match mailer_result {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::error!(to = %to_email, "Failed to create SMTP transport: {}", e);
-                return false;
-            }
-        };
+        let mailer = mailer_result.map_err(|source| EmailSendError::TransportSetup {
+            host: smtp_host.to_string(),
+            source,
+        })?;
 
         // Retry transient SMTP errors (4xx SMTP codes — transient deferrals —
         // network timeouts, connection drops). Permanent errors (5xx SMTP codes
@@ -261,7 +391,7 @@ impl EmailService {
                 async move { mailer.send(message).await }
             },
             |e: &lettre::transport::smtp::Error| {
-                e.is_transient() || e.is_timeout()
+                classify_smtp_error(e) == SmtpFailureKind::Transient
             },
         )
         .await;
@@ -269,18 +399,18 @@ impl EmailService {
         match send_result {
             Ok(_) => {
                 tracing::info!(to = %to_email, subject = %subject, "Email sent successfully");
-                true
+                Ok(())
             }
-            Err(e) => {
-                tracing::error!(to = %to_email, "Failed to send email: {}", e);
-                false
-            }
+            Err(source) => Err(EmailSendError::Send {
+                kind: classify_smtp_error(&source),
+                source,
+            }),
         }
     }
 
     /// Send a workspace invitation email.
     ///
-    /// Returns `true` if sent successfully.
+    /// Returns `Ok(())` if sent successfully, or the reason it was not.
     pub async fn send_workspace_invitation(
         &self,
         email: &str,
@@ -288,7 +418,7 @@ impl EmailService {
         inviter_name: &str,
         role: &str,
         invitation_id: &str,
-    ) -> bool {
+    ) -> Result<(), EmailSendError> {
         let role_display = if role == "admin" {
             "an Admin"
         } else {
@@ -502,7 +632,7 @@ Unsubscribe: {frontend_url}/unsubscribe?email={email}
         from_name: &str,
         to_name: &str,
         variant: &str,
-    ) -> bool {
+    ) -> Result<(), EmailSendError> {
         let (subject, heading, body_text) = if variant == "initiated" {
             (
                 format!("You've been offered ownership of {workspace_name}"),
@@ -558,13 +688,13 @@ Unsubscribe: {frontend_url}/unsubscribe?email={email}
 
     /// Send a passkey recovery email.
     ///
-    /// Returns `true` if sent successfully.
+    /// Returns `Ok(())` if sent successfully, or the reason it was not.
     pub async fn send_passkey_recovery(
         &self,
         email: &str,
         name: &str,
         recovery_link: &str,
-    ) -> bool {
+    ) -> Result<(), EmailSendError> {
         let display_name = if name.is_empty() { "there" } else { name };
         let frontend_url = &self.frontend_url;
         let subject = "Recover your Kyomi account";
@@ -720,13 +850,13 @@ You're receiving this email because you requested account recovery for Kyomi.
 
     /// Send an account recovery email.
     ///
-    /// Returns `true` if sent successfully.
+    /// Returns `Ok(())` if sent successfully, or the reason it was not.
     pub async fn send_account_recovery(
         &self,
         email: &str,
         name: &str,
         recovery_link: &str,
-    ) -> bool {
+    ) -> Result<(), EmailSendError> {
         let display_name = if name.is_empty() { "there" } else { name };
         let frontend_url = &self.frontend_url;
         let subject = "Recover your Kyomi account";
@@ -882,13 +1012,13 @@ You're receiving this email because you requested account recovery for Kyomi.
 
     /// Send a verification email for account signup.
     ///
-    /// Returns `true` if sent successfully.
+    /// Returns `Ok(())` if sent successfully, or the reason it was not.
     pub async fn send_verification_email(
         &self,
         email: &str,
         name: &str,
         verification_link: &str,
-    ) -> bool {
+    ) -> Result<(), EmailSendError> {
         let display_name = if name.is_empty() { "there" } else { name };
         let frontend_url = &self.frontend_url;
         let subject = "Verify your Kyomi account";
@@ -1056,14 +1186,14 @@ You're receiving this because someone signed up for Kyomi with this email addres
     /// `user_auth_methods.auth_type` values) so the recipient isn't left
     /// guessing between Google, passkey, and password (KYO-681).
     ///
-    /// Returns `true` if sent successfully.
+    /// Returns `Ok(())` if sent successfully, or the reason it was not.
     pub async fn send_existing_account_notice(
         &self,
         email: &str,
         name: &str,
         sign_in_link: &str,
         auth_methods: &[String],
-    ) -> bool {
+    ) -> Result<(), EmailSendError> {
         let display_name = if name.is_empty() { "there" } else { name };
         let (subject, html_body, text_body) = build_existing_account_email(
             display_name,
@@ -1078,11 +1208,11 @@ You're receiving this because someone signed up for Kyomi with this email addres
 
     /// Send a welcome email to a new newsletter subscriber.
     ///
-    /// Returns `true` if sent successfully.
+    /// Returns `Ok(())` if sent successfully, or the reason it was not.
     pub async fn send_subscription_welcome(
         &self,
         email: &str,
-    ) -> bool {
+    ) -> Result<(), EmailSendError> {
         let frontend_url = &self.frontend_url;
         let subject = "Welcome to Kyomi!";
 
@@ -1241,7 +1371,7 @@ Unsubscribe: {frontend_url}/unsubscribe?email={email}
         subject: &str,
         sections: &[(& str, &str)],
         reply_to: Option<&str>,
-    ) -> bool {
+    ) -> Result<(), EmailSendError> {
         let frontend_url = &self.frontend_url;
 
         // Build HTML sections
@@ -1790,37 +1920,38 @@ mod tests {
         assert!(!html_body.contains("Passkey"));
     }
 
+    /// KYO-697: the failure must arrive as the *named* reason, not as an
+    /// undifferentiated "it didn't work". A caller (or an operator reading
+    /// the log line that caller emits) has to be able to tell "this
+    /// instance has no SMTP set up" from "the mail server rejected the
+    /// address", because those are different problems with different fixes.
     #[tokio::test]
-    async fn send_email_returns_false_when_not_configured() {
-        let service = EmailService {
-            smtp_host: None,
-            smtp_port: 587,
-            smtp_user: None,
-            smtp_password: None,
-            from_email: "noreply@kyomi.ai".to_string(),
-            from_name: "Kyomi".to_string(),
-            frontend_url: "https://app.kyomi.ai".to_string(),
-        };
+    async fn send_email_returns_not_configured_error_when_smtp_is_absent() {
+        let service = EmailService::unconfigured_for_tests();
 
-        let result = service
+        let err = service
             .send_email("test@example.com", "Test", "<p>Hi</p>", None, None, &[])
-            .await;
-        assert!(!result);
+            .await
+            .expect_err("an unconfigured service must not report a successful send");
+
+        assert!(
+            matches!(err, EmailSendError::NotConfigured),
+            "expected NotConfigured, got {err:?}"
+        );
+        // The rendered form is what reaches an operator, so pin that it
+        // names the missing configuration rather than being generic.
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("SMTP_HOST") && rendered.contains("not configured"),
+            "error must name what is missing: {rendered}"
+        );
     }
 
     #[tokio::test]
-    async fn send_workspace_invitation_returns_false_when_not_configured() {
-        let service = EmailService {
-            smtp_host: None,
-            smtp_port: 587,
-            smtp_user: None,
-            smtp_password: None,
-            from_email: "noreply@kyomi.ai".to_string(),
-            from_name: "Kyomi".to_string(),
-            frontend_url: "https://app.kyomi.ai".to_string(),
-        };
+    async fn send_workspace_invitation_propagates_not_configured_error() {
+        let service = EmailService::unconfigured_for_tests();
 
-        let result = service
+        let err = service
             .send_workspace_invitation(
                 "test@example.com",
                 "My Workspace",
@@ -1828,7 +1959,26 @@ mod tests {
                 "admin",
                 "inv-test123",
             )
-            .await;
-        assert!(!result);
+            .await
+            .expect_err("an unconfigured service must not report a successful send");
+
+        assert!(
+            matches!(err, EmailSendError::NotConfigured),
+            "the template method must pass send_email's reason through \
+             unchanged, got {err:?}"
+        );
+    }
+
+    /// The transient/permanent split is the one piece of send-failure
+    /// detail an operator acts on differently, so pin that it survives into
+    /// the rendered message rather than only existing as an enum variant.
+    #[test]
+    fn send_failure_renders_its_transient_permanent_classification() {
+        for (kind, expected) in [
+            (SmtpFailureKind::Transient, "transient"),
+            (SmtpFailureKind::Permanent, "permanent"),
+        ] {
+            assert_eq!(kind.to_string(), expected);
+        }
     }
 }

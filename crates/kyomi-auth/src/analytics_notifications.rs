@@ -6,7 +6,7 @@
 //! email alerts to workspace admins.
 
 use sqlx::PgPool;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::email_service::EmailService;
 
@@ -123,8 +123,15 @@ async fn dispatch_inner(
         ];
 
         for (admin_email, _admin_name) in &admins {
-            if !email.send_admin_notification(admin_email, &subject, &sections, None).await {
-                warn!(email = %admin_email, "Failed to send analytics notification email");
+            if let Err(e) = email
+                .send_admin_notification(admin_email, &subject, &sections, None)
+                .await
+            {
+                error!(
+                    email = %admin_email,
+                    error = %e,
+                    "Failed to send analytics notification email"
+                );
             }
         }
 
