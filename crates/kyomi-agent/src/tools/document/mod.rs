@@ -50,6 +50,7 @@ pub use read::DocumentReadTool;
 
 use kyomi_core::models::Dashboard;
 pub(crate) use kyomi_core::models::DocType;
+use kyomi_embed::EmbeddingService;
 
 // ---------------------------------------------------------------------------
 // resolve / find-by-title
@@ -192,6 +193,14 @@ pub(crate) struct ApplyUpdateParams<'a> {
     pub content: Option<&'a str>,
     pub change_summary: Option<&'a str>,
     pub expected_content_hash: Option<&'a str>,
+    /// KYO-541: the shared chunk-refresh step below needs a resolved
+    /// embedding service to call `rechunk_document`, regardless of which
+    /// doc-type family called in. Every caller resolves this via
+    /// `ctx.embedding.wait_ready().await?` before constructing this struct
+    /// — the same call every pre-KYO-541 caller already made for its own
+    /// (now-removed) rechunk step, except `modify_dashboard`, which did not
+    /// rechunk at all and now must.
+    pub embed: &'a EmbeddingService,
     /// [`ToolContext::document_id`](crate::tools::ToolContext::document_id)
     /// of the caller, if any — the single document a dashboard/knowledge
     /// copilot is scoped to. Every caller must pass this through explicitly
@@ -243,15 +252,33 @@ pub(crate) fn enforce_document_scope(
 /// Shared tail of every "replace a document's content" tool: call
 /// `dashboard_service::update_dashboard` and classify the result.
 ///
-/// NOTE: `embed` is always `None` here, matching all three pre-KYO-538 call
-/// sites exactly — every caller performs its own embedding refresh
-/// afterward, by its own doc_type-specific policy. `write_knowledge_file`
-/// and `edit_knowledge_file` rechunk synchronously immediately after this
-/// call succeeds; `modify_dashboard` instead spawns a background embedding
-/// job (and only conditionally, when substantial content was supplied).
-/// KYO-541 is expected to unify embedding-refresh timing; preserved as-is
-/// here, and each caller keeps its own post-update step rather than this
-/// function attempting to own both policies.
+/// NOTE (KYO-541 resolved policy — this function now owns chunk refresh):
+/// `UpdateDashboardParams.embed` is always passed as `None` to
+/// `update_dashboard` here, which means that function's own
+/// `spawn_rechunk_document` fire-and-forget path never fires from this call
+/// site. That is deliberate, not an oversight — this function does the
+/// chunk refresh itself, synchronously, immediately below (see the
+/// `rechunk_document` call after a successful update). Passing `Some`
+/// instead would *additionally* spawn a second, redundant rechunk in the
+/// background on every write.
+///
+/// The refresh is synchronous rather than backgrounded for the same reason
+/// KYO-539 made `generate_dashboard_summary` read-then-write instead of
+/// fire-and-forget: `rechunk_document` writes chunks derived from a content
+/// snapshot, so two racing writers' background jobs could land the older
+/// snapshot's chunks last, leaving `knowledge_chunks` reflecting a stale
+/// version of the document even though the row itself has the newer
+/// content. Awaiting here makes chunk order follow write order, and it
+/// makes a chunking failure visible in the tool's own result instead of
+/// vanishing into a detached task.
+///
+/// Before KYO-541, every caller performed its own embedding refresh
+/// afterward, by its own doc_type-specific policy: `write_knowledge_file`
+/// and `edit_knowledge_file` rechunked synchronously immediately after this
+/// call succeeded; `modify_dashboard` never rechunked knowledge_chunks at
+/// all — the real bug this ticket fixes, since `search_knowledge_chunks`
+/// reads `knowledge_chunks` for both doc types whenever a caller omits
+/// `doc_type` (the normal case).
 ///
 /// NOTE: CAS (`expected_content_hash`) is caller-supplied and not enforced
 /// by this function itself — it is simply threaded through to
@@ -287,7 +314,26 @@ pub(crate) async fn apply_update(
     )
     .await
     {
-        Ok(true) => Ok(ApplyUpdateOutcome::Updated),
+        Ok(true) => {
+            // Chunks are derived from content, so there is nothing to
+            // refresh when only the title changed (`params.content` is
+            // `None`). When content did change, refresh unconditionally —
+            // for both `DocType::Knowledge` and `DocType::Dashboard`; see
+            // the module-level `NOTE` above for why this happens here,
+            // synchronously, rather than in each caller or via
+            // `update_dashboard`'s own background path.
+            if let Some(content) = params.content {
+                kyomi_auth::dashboard_service::rechunk_document(
+                    params.db,
+                    params.embed,
+                    params.dashboard_id,
+                    content,
+                    params.workspace_id,
+                )
+                .await?;
+            }
+            Ok(ApplyUpdateOutcome::Updated)
+        }
         Ok(false) => Ok(ApplyUpdateOutcome::NotFound),
         Err(kyomi_core::Error::Conflict(msg)) => Ok(ApplyUpdateOutcome::Conflict(msg)),
         Err(e) => Err(e),

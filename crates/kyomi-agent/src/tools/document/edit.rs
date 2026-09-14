@@ -136,17 +136,14 @@ impl DocumentEditTool {
             change_summary: None,
             expected_content_hash: content_hash,
             document_scope: ctx.document_id.as_deref(),
+            embed,
         })
         .await?;
 
         match outcome {
             ApplyUpdateOutcome::Updated => {
-                // Rechunk after edit
-                kyomi_auth::dashboard_service::rechunk_document(
-                    &ctx.db, embed, &doc.dashboard_id, &new_content, &ctx.workspace_id,
-                )
-                .await?;
-
+                // KYO-541: `apply_update` rechunks itself now — see its
+                // doc comment in `tools/document/mod.rs`.
                 ws_helpers::broadcast_dashboard_sync(
                     &ctx.db, &ctx.ws_manager, &doc.dashboard_id, &ctx.workspace_id,
                     kyomi_types::sync::SyncActionType::Update,

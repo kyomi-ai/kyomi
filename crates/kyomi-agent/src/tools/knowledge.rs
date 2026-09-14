@@ -638,21 +638,14 @@ impl AgentTool for WriteDocumentTool {
                 change_summary: None,
                 expected_content_hash: content_hash,
                 document_scope: ctx.document_id.as_deref(),
+                embed,
             })
             .await?;
 
             match outcome {
                 ApplyUpdateOutcome::Updated => {
-                    // Rechunk after update
-                    kyomi_auth::dashboard_service::rechunk_document(
-                        &ctx.db,
-                        embed,
-                        &doc.dashboard_id,
-                        content,
-                        &ctx.workspace_id,
-                    )
-                    .await?;
-
+                    // KYO-541: `apply_update` rechunks itself now — see its
+                    // doc comment in `tools/document/mod.rs`.
                     ws_helpers::broadcast_dashboard_sync(
                         &ctx.db, &ctx.ws_manager, &doc.dashboard_id, &ctx.workspace_id,
                         kyomi_types::sync::SyncActionType::Update,
@@ -1518,6 +1511,93 @@ mod tests {
             .expect("lookup")
             .expect("document exists");
         assert_eq!(doc.content, "alpha BETA gamma");
+    }
+
+    /// KYO-541 regression guard: `edit_knowledge_file` already rechunked
+    /// before this ticket, via its own explicit `rechunk_document` call in
+    /// `tools/document/edit.rs` — now removed, since `apply_update`
+    /// (`tools/document/mod.rs`) does it for every caller. This pins that
+    /// the move didn't break knowledge-typed refresh: `execute()` must
+    /// hand back a document whose `knowledge_chunks` row already reflects
+    /// the new content, through the unified path rather than the removed
+    /// per-caller one.
+    ///
+    /// Single-dispatch — deliberately NOT claimed in this test's name,
+    /// because nothing here measures it — is enforced by
+    /// `apply_update` passing `embed: None` to
+    /// `dashboard_service::update_dashboard`, which is what keeps
+    /// `update_dashboard`'s own `spawn_rechunk_document` background path
+    /// from *also* firing (see the `NOTE` on `apply_update`) — confirmed by
+    /// reading that both call sites remain as described, not by a runtime
+    /// assertion here: `rechunk_document` deletes its document's chunks
+    /// before re-inserting, so a second sequential call converges to
+    /// identical rows rather than duplicating them, and forcing a genuine
+    /// concurrent race between the synchronous call and a hypothetical
+    /// background one would be a nondeterministic test outcome, which
+    /// `docs/standards/testing/nondeterministic-verdict-is-a-failing-test.md`
+    /// rules out. What this test asserts is the one thing state-inspection
+    /// after `execute()` returns actually can prove: the refreshed content
+    /// is correct and present.
+    #[tokio::test]
+    async fn edit_knowledge_file_refreshes_knowledge_chunks_via_unified_path() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Runbook", "stale pre-edit content", DocType::Knowledge, None,
+        )
+        .await
+        .expect("seed doc");
+        let doc = find_document_by_title(&db, "ws-1", "user-a", "Runbook")
+            .await
+            .expect("lookup")
+            .expect("document exists");
+
+        // Seed a chunk row reflecting the pre-edit content, the same way
+        // `modify_dashboard_refreshes_knowledge_chunks_for_dashboard_doc_type`
+        // does for the dashboard-doc_type case in `tools/dashboard.rs`.
+        let embedding = loaded_embedding();
+        let embed = embedding.wait_ready().await.expect("loaded_embedding is pre-loaded");
+        kyomi_auth::dashboard_service::rechunk_document(
+            &db, embed, &doc.dashboard_id, "stale pre-edit content", "ws-1",
+        )
+        .await
+        .expect("seed stale chunk");
+
+        let mut ctx = build_ctx(db);
+        ctx.embedding = loaded_embedding();
+
+        let result = EditDocumentTool
+            .execute(
+                serde_json::json!({
+                    "path": "Runbook",
+                    "old_text": "stale pre-edit content",
+                    "new_text": "fresh post-edit content, via edit_knowledge_file",
+                }),
+                &ctx,
+            )
+            .await
+            .expect("execute");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+        assert_eq!(parsed["success"], serde_json::json!(true), "{result}");
+
+        let sq = match &ctx.db {
+            kyomi_core::DbPool::Sqlite(sq) => sq,
+            kyomi_core::DbPool::Postgres(_) => unreachable!("test pool is always sqlite"),
+        };
+        let chunk_contents: Vec<String> = sqlx::query_scalar(
+            "SELECT content FROM knowledge_chunks WHERE dashboard_id = ? ORDER BY chunk_index",
+        )
+        .bind(&doc.dashboard_id)
+        .fetch_all(sq)
+        .await
+        .expect("read back knowledge_chunks");
+
+        assert_eq!(
+            chunk_contents,
+            vec!["fresh post-edit content, via edit_knowledge_file".to_string()],
+            "edit_knowledge_file must refresh knowledge_chunks to the new content via the \
+             unified apply_update path: {chunk_contents:?}"
+        );
     }
 
     // -- KYO-536: edit_knowledge_file as a document-scoped copilot tool -----
