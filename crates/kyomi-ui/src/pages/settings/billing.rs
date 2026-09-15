@@ -491,13 +491,19 @@ pub fn BillingPage() -> impl IntoView {
                             })}
                         </Transition>
 
-                        // Confirm Dialog
+                        // Confirm Dialog — pass the signals through so
+                        // `ConfirmDialog` re-reads them reactively when it
+                        // opens (KYO-726). The click handlers below set
+                        // these signals right before flipping `dialog_open`,
+                        // so `.get_untracked()` here would freeze the
+                        // title/message/confirm_text/destructive at the
+                        // defaults they held at initial render.
                         <ConfirmDialog
                             open=Signal::from(dialog_open)
-                            title=dialog_title.get_untracked()
-                            message=dialog_message.get_untracked()
-                            confirm_text=dialog_confirm_text.get_untracked()
-                            destructive=dialog_destructive.get_untracked()
+                            title=dialog_title
+                            message=dialog_message
+                            confirm_text=dialog_confirm_text
+                            destructive=dialog_destructive
                             on_confirm=on_confirm
                             on_cancel=on_cancel_dialog
                         />
