@@ -385,6 +385,7 @@ pub async fn create_datasource(
     credential_service::finalize_connection_config_secrets(
         &mut connection_config,
         None,
+        ds_type,
         encryption_key,
     )?;
 
@@ -551,6 +552,7 @@ pub async fn update_datasource(
             credential_service::finalize_connection_config_secrets(
                 &mut cfg,
                 Some(&existing.connection_config),
+                existing.datasource_type.as_ref(),
                 encryption_key,
             )?;
             cfg

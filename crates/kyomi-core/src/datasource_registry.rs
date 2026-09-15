@@ -388,7 +388,15 @@ pub struct DatasourceTypeMetadata {
     pub sensitive_credential_fields: &'static [&'static str],
 
     /// Connection config fields that must be masked in API responses
-    /// (e.g., `["oauth_client_secret", "service_account_json"]`).
+    /// (e.g., `["oauth_client_secret", "service_account_json"]`) **and**
+    /// restored from the stored config on write when the client's submission
+    /// still carries that mask or omits the field (KYO-780) — these fields
+    /// are a read/write pair, not read-only. See
+    /// `kyomi_auth::credential_service::mask_connection_config` (the read
+    /// side) and `finalize_connection_config_secrets` (the write side,
+    /// which further gates *restoring* one of these fields on it being
+    /// owned by the auth mode active in the write, via
+    /// [`DatasourceTypeMetadata::inactive_auth_mode_connection_config_fields`]).
     ///
     /// Note: `shared_password`, `ssh_private_key`, and `ssh_passphrase` are
     /// always masked (and encrypted at rest) regardless of this list — see
@@ -669,7 +677,13 @@ static CLICKHOUSE_META: LazyLock<DatasourceTypeMetadata> =
 // "password". Key-pair mode's own PEM `private_key` field (see the `keypair`
 // AuthModeConfig below) is just as sensitive and is masked here too — see
 // KYO-330.
-// No sensitive_connection_config_fields
+//
+// sensitive_connection_config_fields: ["oauth_client_secret"] (KYO-780). This
+// mirrors what `oauth_auth_mode`'s own `connection_config_fields` already
+// declared this mode owns — this list had simply never been kept in sync,
+// which left the real client secret being returned in cleartext by every
+// settings read for a Snowflake datasource in OAuth mode. Matches BigQuery's
+// and Synapse's `enterprise_oauth` handling of the same field.
 static SNOWFLAKE_META: LazyLock<DatasourceTypeMetadata> =
     LazyLock::new(|| DatasourceTypeMetadata {
         type_id: "snowflake",
@@ -682,7 +696,7 @@ static SNOWFLAKE_META: LazyLock<DatasourceTypeMetadata> =
         // fields at the per-mode level).
         credential_fields: &["username", "password", "private_key"],
         sensitive_credential_fields: &["password", "private_key"],
-        sensitive_connection_config_fields: &[],
+        sensitive_connection_config_fields: &["oauth_client_secret"],
         requires_user_credentials: true,
         accepts_user_context: false,
         auth_modes: leak_auth_modes(vec![
@@ -760,7 +774,11 @@ static SNOWFLAKE_META: LazyLock<DatasourceTypeMetadata> =
 // Python: apps/backend-python/src/api/datasources/databricks/__init__.py
 // credential_fields: ["access_token"]
 // sensitive_credential_fields: ["access_token"]
-// No sensitive_connection_config_fields (defaults to [])
+//
+// sensitive_connection_config_fields: ["oauth_client_secret"] (KYO-780) — see
+// the identical note on Snowflake above; `oauth_auth_mode`'s
+// `connection_config_fields` already declared this mode owns the field, this
+// list had simply never been kept in sync.
 static DATABRICKS_META: LazyLock<DatasourceTypeMetadata> =
     LazyLock::new(|| DatasourceTypeMetadata {
         type_id: "databricks",
@@ -769,7 +787,7 @@ static DATABRICKS_META: LazyLock<DatasourceTypeMetadata> =
         default_port: Some(443),
         credential_fields: &["access_token"],
         sensitive_credential_fields: &["access_token"],
-        sensitive_connection_config_fields: &[],
+        sensitive_connection_config_fields: &["oauth_client_secret"],
         requires_user_credentials: true,
         accepts_user_context: false,
         auth_modes: leak_auth_modes(vec![
@@ -1317,17 +1335,22 @@ mod tests {
         let rs = get_metadata(&DatasourceType::Redshift);
         assert_eq!(rs.sensitive_credential_fields, &["password"]);
 
-        // Databricks — only access_token is sensitive (matches Python source)
+        // Databricks — access_token is the sensitive credential field; its
+        // "oauth" mode's own oauth_client_secret is sensitive config (KYO-780
+        // — this list had never been kept in sync with `oauth_auth_mode`'s
+        // `connection_config_fields`, which already declared ownership).
         let db = get_metadata(&DatasourceType::Databricks);
         assert_eq!(db.sensitive_credential_fields, &["access_token"]);
-        assert!(db.sensitive_connection_config_fields.is_empty());
+        assert_eq!(db.sensitive_connection_config_fields, &["oauth_client_secret"]);
 
         // Snowflake — password (password auth mode) and private_key
-        // (key-pair auth mode, KYO-330) are both sensitive; the Python
-        // source predates key-pair auth and only had "password".
+        // (key-pair auth mode, KYO-330) are both sensitive credential
+        // fields; the Python source predates key-pair auth and only had
+        // "password". Its "oauth" mode's own oauth_client_secret is
+        // sensitive config, same KYO-780 fix as Databricks above.
         let sf = get_metadata(&DatasourceType::Snowflake);
         assert_eq!(sf.sensitive_credential_fields, &["password", "private_key"]);
-        assert!(sf.sensitive_connection_config_fields.is_empty());
+        assert_eq!(sf.sensitive_connection_config_fields, &["oauth_client_secret"]);
 
         // Synapse — multiple sensitive fields
         let sy = get_metadata(&DatasourceType::Synapse);

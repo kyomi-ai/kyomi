@@ -1470,7 +1470,7 @@ mod tests {
         });
 
         // 2. Encrypt on write (simulate what finalize_connection_config_secrets does)
-        finalize_connection_config_secrets(&mut config, None, &key)
+        finalize_connection_config_secrets(&mut config, None, "redshift", &key)
             .expect("finalize should succeed");
 
         // After encryption, indexing_credentials should be an encrypted string, not an object
