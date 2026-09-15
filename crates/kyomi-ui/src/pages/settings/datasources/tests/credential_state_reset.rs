@@ -76,9 +76,12 @@ fn datasource_disconnect_success_resets_test_result_and_discovery_status() {
         "// ── SSH tunnel keypair generation",
     );
     assert!(
-        arm.contains("Account disconnected"),
+        arm.contains("datasource_disconnect_message(result.revocation)"),
         "sanity check on the extraction bounds: this must be the \
-         datasource_disconnect_action Effect"
+         datasource_disconnect_action Effect. KYO-714 moved the literal \
+         \"Account disconnected\" out of this arm and into \
+         `datasource_disconnect_message`, so the toast call is now what \
+         identifies it"
     );
     assert!(
         arm.contains("set_test_result.set(None);"),

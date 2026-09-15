@@ -78,6 +78,42 @@ fn credential_status_indicates_connected(status: &str) -> bool {
     !matches!(status, "missing" | "expired")
 }
 
+/// The success-toast wording for a per-datasource OAuth disconnect, given
+/// what actually happened to the grant at the provider (KYO-714).
+///
+/// Before this existed the toast said "Account disconnected" unconditionally.
+/// For Snowflake, Databricks and Microsoft Enterprise that was false: Kyomi
+/// deleted its stored credential and the grant stayed live at the provider,
+/// because none of those three exposes a revocation endpoint Kyomi can call
+/// (see `kyomi_auth::datasource_oauth::OAuthProvider::revocation_capability`).
+/// Only the `NotSupported` outcome gets the longer wording; the other three
+/// really do leave nothing behind at the provider, so the original sentence
+/// stays true for them and is kept verbatim.
+///
+/// Which outcomes those are is *not* decided here: it comes from
+/// `DatasourceOAuthRevocationOutcome::grant_cleared_at_provider`, shared with
+/// the REST disconnect route's `message` so the two surfaces cannot disagree
+/// about whether access was actually revoked.
+///
+/// `cfg`-gated to `wasm32`-or-`test` for the same reason as
+/// `credential_status_indicates_connected` above: its only production caller
+/// is inside a `#[cfg(target_arch = "wasm32")]` block (`toast_success` exists
+/// only there), so a native `--features ssr` build has no reachable caller —
+/// this keeps it unit-testable on the host without carrying dead code into
+/// that build.
+#[cfg(any(target_arch = "wasm32", test))]
+fn datasource_disconnect_message(
+    outcome: crate::server_fns::datasource_oauth::DatasourceOAuthRevocationOutcome,
+) -> &'static str {
+    if outcome.grant_cleared_at_provider() {
+        "Account disconnected"
+    } else {
+        "Stored credentials removed. This provider does not let Kyomi revoke the \
+         connection for you — to fully revoke access, remove Kyomi from your \
+         account settings with that provider."
+    }
+}
+
 /// Generate a slug from a datasource name — matches React `generateSlug`.
 fn generate_slug(name: &str) -> String {
     name.to_lowercase()
@@ -3373,7 +3409,7 @@ pub fn DatasourceModal(
     Effect::new(move |_| {
         if let Some(result) = datasource_disconnect_action.value().get() {
             match result {
-                Ok(_) => {
+                Ok(result) => {
                     set_modal_oauth_connected.set(false);
                     set_modal_oauth_email.set(None);
                     set_modal_oauth_expired.set(false);
@@ -3389,8 +3425,20 @@ pub fn DatasourceModal(
                     // fix on `google_disconnect_action` above.
                     set_test_result.set(None);
                     set_discovery_status.set("idle".to_string());
+                    // KYO-714 — the toast must not claim more than happened.
+                    // Three of the four providers expose no revocation
+                    // endpoint Kyomi can call, so for those the grant is
+                    // still live and the user has to finish the job in the
+                    // provider's own settings; `datasource_disconnect_message`
+                    // is what decides which of those two sentences is true.
                     #[cfg(target_arch = "wasm32")]
-                    toast_success("Account disconnected");
+                    toast_success(datasource_disconnect_message(result.revocation));
+                    // The outcome is only read on the wasm target (that is
+                    // where `toast_success` exists); consume it here so
+                    // host-target (SSR) builds don't warn it's unused —
+                    // same pattern as `datasource_oauth_callback.rs`.
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let _ = result;
                 }
                 Err(e) => {
                     toast_error(format!("Failed to disconnect: {e}"));

@@ -50,6 +50,30 @@ pub fn routes() -> Router<AppState> {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// The `message` for a successful per-datasource OAuth disconnect.
+///
+/// Derived from what actually happened to the grant rather than hardcoded:
+/// for a provider Kyomi cannot revoke at, "disconnected successfully" claims
+/// something that did not happen (KYO-714). This is the REST twin of the
+/// settings page's `datasource_disconnect_message` toast; both branch on
+/// `DatasourceOAuthRevocationOutcome::grant_cleared_at_provider`, so neither
+/// surface can drift into over-claiming on its own.
+fn disconnect_message(
+    provider: OAuthProvider,
+    revocation: datasource_oauth::DatasourceOAuthRevocationOutcome,
+) -> String {
+    if revocation.grant_cleared_at_provider() {
+        format!("{} account disconnected successfully", provider.as_str())
+    } else {
+        format!(
+            "Stored {} credentials removed. This provider does not let Kyomi revoke the \
+             connection for you — to fully revoke access, remove Kyomi from your account \
+             settings with that provider.",
+            provider.as_str()
+        )
+    }
+}
+
 /// Parse and validate the provider path parameter.
 fn parse_provider(provider: &str) -> Result<OAuthProvider, kyomi_core::Error> {
     OAuthProvider::parse(provider).ok_or_else(|| {
@@ -315,36 +339,39 @@ async fn disconnect(
         kyomi_core::Error::BadRequest("No workspace context".into())
     })?;
 
-    // Find the datasource
-    let ds_id = load_datasource_id(&state.db, datasource_slug, workspace_id).await?;
-
-    // Delete the user's credentials for this datasource
-    let result = kyomi_core::db_execute!(
+    // KYO-714: this handler used to inline the datasource lookup and a blind
+    // `DELETE`, duplicating the service. That duplication is why the service
+    // could not be fixed alone — revoking at the provider here would have had
+    // to be written twice, and the two copies would drift. The service is now
+    // the single implementation; both response shapes below are unchanged
+    // apart from the added `revocation` key. The `tracing::info!` this
+    // handler used to emit moved into the service with it, and now carries
+    // the revocation outcome as well.
+    let result = datasource_oauth::datasource_oauth_disconnect_service(
         &state.db,
-        "DELETE FROM user_datasource_credentials WHERE user_id = $1 AND datasource_config_id = $2",
         &user.user_id,
-        &ds_id
+        workspace_id,
+        provider,
+        datasource_slug,
+        &state.encryption_key,
     )
-    .map_err(|e| kyomi_core::Error::Internal(format!("DB error: {e}")))?;
+    .await?;
 
-    if result.rows_affected() == 0 {
+    if result.already_disconnected {
         return Ok(Json(serde_json::json!({
             "message": format!("No {} account connected", provider.as_str()),
             "already_disconnected": true,
         })));
     }
 
-    tracing::info!(
-        provider = provider.as_str(),
-        datasource_slug = datasource_slug,
-        user_id = %user.user_id,
-        "Disconnected OAuth credentials"
-    );
-
     Ok(Json(serde_json::json!({
-        "message": format!("{} account disconnected successfully", provider.as_str()),
+        "message": disconnect_message(provider, result.revocation),
         "provider": provider.as_str(),
         "disconnected_at": chrono::Utc::now().to_rfc3339(),
+        // What happened to the grant at the provider, as distinct from
+        // Kyomi's stored copy of it — see
+        // `kyomi_types::DatasourceOAuthRevocationOutcome`.
+        "revocation": result.revocation,
     })))
 }
 
@@ -446,4 +473,56 @@ async fn status(
         "connect_url": format!("/api/v1/auth/oauth/{}/connect", provider.as_str()),
         "disconnect_url": format!("/api/v1/auth/oauth/{}/disconnect", provider.as_str()),
     })))
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datasource_oauth::DatasourceOAuthRevocationOutcome as Outcome;
+
+    /// The REST half of KYO-714's honesty requirement. The Leptos settings
+    /// page does not consume this route, but `GET /{provider}/status`
+    /// advertises `disconnect_url` to API clients, so the wording is reachable
+    /// and was over-claiming in exactly the way the toast used to.
+    #[test]
+    fn not_supported_does_not_claim_the_account_was_disconnected() {
+        let message = disconnect_message(OAuthProvider::Snowflake, Outcome::NotSupported);
+
+        assert!(
+            !message.contains("disconnected successfully"),
+            "the grant is still live at Snowflake, so this must not report a \
+             successful disconnect: {message}"
+        );
+        assert!(
+            message.contains("revoke"),
+            "the caller must be told the grant is still live and needs revoking \
+             at the provider: {message}"
+        );
+        assert!(
+            message.contains("account settings"),
+            "the caller must be told where to finish revoking: {message}"
+        );
+    }
+
+    /// The three outcomes that really do clear the grant keep the original
+    /// sentence — this must not degrade the honest case into a hedge.
+    #[test]
+    fn cleared_outcomes_keep_the_original_wording() {
+        for outcome in [
+            Outcome::Revoked,
+            Outcome::AlreadyInvalid,
+            Outcome::NoStoredToken,
+        ] {
+            assert_eq!(
+                disconnect_message(OAuthProvider::BigqueryEnterprise, outcome),
+                "bigquery-enterprise account disconnected successfully",
+                "{outcome:?} leaves nothing live at the provider, so the plain \
+                 wording is true and must be kept"
+            );
+        }
+    }
 }
