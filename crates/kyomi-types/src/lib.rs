@@ -7,7 +7,8 @@ pub mod sync;
 pub mod text;
 pub mod websocket;
 pub use datasource_contracts::{
-    DatasourceOAuthDisconnectResult, DatasourceOAuthStatus, GeneratedSshKey,
+    DatasourceOAuthDisconnectResult, DatasourceOAuthRevocationOutcome, DatasourceOAuthStatus,
+    GeneratedSshKey,
     GoogleOAuthDisconnectResult, GoogleOAuthProjectsResult, GoogleOAuthStatus, GoogleProject,
 };
 pub use feedback::FEEDBACK_TYPE_VALUES;
