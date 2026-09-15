@@ -15,6 +15,10 @@
 //! - `/leptos/*` → serves WASM, JS, and CSS assets
 //! - Fallback → serves index.html (SPA routing) or static assets
 
+use std::sync::Arc;
+#[cfg(debug_assertions)]
+use std::sync::RwLock;
+#[cfg(not(debug_assertions))]
 use std::sync::OnceLock;
 
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
@@ -325,33 +329,95 @@ struct TemplateParts {
     suffix: String,
 }
 
-static TEMPLATE_PARTS: OnceLock<Option<TemplateParts>> = OnceLock::new();
+/// Split a Trunk-built `index.html` shell into an SSR prefix/suffix pair.
+///
+/// Pure parsing — no I/O, no caching — so it can be unit-tested directly.
+/// Search for `<body` after `</head>` to avoid false matches inside CSS
+/// comments or style blocks that contain the string "<body".
+fn split_template(html: &str) -> Option<TemplateParts> {
+    let head_end = html.find("</head>")?;
+    let body_start = head_end + html[head_end..].find("<body")?;
+    let body_tag_end = html[body_start..].find('>')? + body_start + 1;
 
-fn get_template_parts() -> Option<&'static TemplateParts> {
+    let body_tag = &html[body_start..body_tag_end];
+    let modified_body_tag = body_tag.replacen("<body", "<body data-ssr", 1);
+
+    let prefix = format!(
+        "{}{}",
+        &html[..body_start],
+        modified_body_tag,
+    );
+    let suffix = "\n</body>\n</html>".to_string();
+
+    Some(TemplateParts { prefix, suffix })
+}
+
+/// Dev-mode cache for the SSR template split, keyed on the embedded shell's
+/// content hash.
+///
+/// Gated on `debug_assertions` — the exact condition under which
+/// `rust-embed` reads `LeptosAssets` from disk instead of baking them into
+/// the binary (this crate does not enable the `debug-embed` feature; see
+/// `apps/server/Cargo.toml`). Under `dev-server`, a `trunk build` rewrites
+/// `dist/index.html` — with a new content-hashed WASM filename — without
+/// the server process restarting. A one-shot cache would keep serving the
+/// pre-build split forever, handing the browser a `<script>` tag for a
+/// bundle that no longer exists (KYO-717). Re-splitting only on a hash
+/// change keeps the common case (repeated requests between builds) cheap:
+/// a read-lock hit returns the cached `Arc` without re-parsing.
+#[cfg(debug_assertions)]
+static TEMPLATE_CACHE: RwLock<Option<(Vec<u8>, Arc<TemplateParts>)>> = RwLock::new(None);
+
+/// Look up (or refresh) the cached split for `html`'s content `hash`.
+///
+/// Factored out from [`get_template_parts`] so the invalidation logic can
+/// be exercised directly in tests, without going through `rust-embed`.
+#[cfg(debug_assertions)]
+fn cached_split(hash: &[u8], html: &str) -> Option<Arc<TemplateParts>> {
+    if let Some((cached_hash, parts)) = TEMPLATE_CACHE
+        .read()
+        .expect("template cache lock poisoned")
+        .as_ref()
+        && cached_hash.as_slice() == hash
+    {
+        return Some(Arc::clone(parts));
+    }
+
+    let mut cache = TEMPLATE_CACHE.write().expect("template cache lock poisoned");
+    // Re-check under the write lock: another request may have raced us and
+    // already refreshed the cache for this exact hash.
+    if let Some((cached_hash, parts)) = cache.as_ref()
+        && cached_hash.as_slice() == hash
+    {
+        return Some(Arc::clone(parts));
+    }
+
+    let parts = Arc::new(split_template(html)?);
+    *cache = Some((hash.to_vec(), Arc::clone(&parts)));
+    Some(parts)
+}
+
+#[cfg(debug_assertions)]
+fn get_template_parts() -> Option<Arc<TemplateParts>> {
+    let file = LeptosAssets::get("index.html")?;
+    let hash = file.metadata.sha256_hash();
+    let html = String::from_utf8_lossy(&file.data);
+    cached_split(&hash, &html)
+}
+
+/// Release build: assets are embedded in the binary and cannot change at
+/// runtime, so re-checking a content hash on every request would be pure
+/// waste. Keep the original one-shot `OnceLock` behaviour exactly as-is.
+#[cfg(not(debug_assertions))]
+fn get_template_parts() -> Option<Arc<TemplateParts>> {
+    static TEMPLATE_PARTS: OnceLock<Option<Arc<TemplateParts>>> = OnceLock::new();
     TEMPLATE_PARTS
         .get_or_init(|| {
             let file = LeptosAssets::get("index.html")?;
             let html = String::from_utf8_lossy(&file.data);
-
-            // Search for <body after </head> to avoid false matches inside
-            // CSS comments or style blocks that contain the string "<body".
-            let head_end = html.find("</head>")?;
-            let body_start = head_end + html[head_end..].find("<body")?;
-            let body_tag_end = html[body_start..].find('>')? + body_start + 1;
-
-            let body_tag = &html[body_start..body_tag_end];
-            let modified_body_tag = body_tag.replacen("<body", "<body data-ssr", 1);
-
-            let prefix = format!(
-                "{}{}",
-                &html[..body_start],
-                modified_body_tag,
-            );
-            let suffix = "\n</body>\n</html>".to_string();
-
-            Some(TemplateParts { prefix, suffix })
+            split_template(&html).map(Arc::new)
         })
-        .as_ref()
+        .clone()
 }
 
 /// Build an axum handler that SSR-renders the login page.
@@ -447,6 +513,9 @@ fn mime_from_path(path: &str) -> HeaderValue {
 #[cfg(test)]
 mod tests {
     use super::is_public_route;
+    use super::split_template;
+    #[cfg(debug_assertions)]
+    use super::cached_split;
 
     /// KYO-728: `/signup` (no trailing segment) is the signup page's own
     /// route and must be public, exactly like `/login`. Before the fix,
@@ -498,5 +567,103 @@ mod tests {
         for path in ["dashboards", "settings/profile", "", "signupwhatever"] {
             assert!(!is_public_route(path), "{path} should not be public");
         }
+    }
+
+    // ─── split_template ─────────────────────────────────────────────
+
+    /// The `<body>` tag gets `data-ssr` injected, and the html is split
+    /// into a prefix ending right after the (modified) opening body tag
+    /// and a fixed suffix that closes `</body></html>`.
+    #[test]
+    fn split_template_injects_data_ssr_and_splits_body() {
+        let html = "<html><head><title>Kyomi</title></head><body id=\"app\">STALE</body></html>";
+        let parts = split_template(html).expect("well-formed shell must parse");
+
+        assert!(
+            parts.prefix.ends_with("<body data-ssr id=\"app\">"),
+            "prefix should end with the body tag carrying data-ssr: {:?}",
+            parts.prefix
+        );
+        assert_eq!(parts.prefix, "<html><head><title>Kyomi</title></head><body data-ssr id=\"app\">");
+        assert_eq!(parts.suffix, "\n</body>\n</html>");
+    }
+
+    /// KYO-717 / documented SSR rule (see `CLAUDE.md`): the string `<body`
+    /// can appear inside a CSS comment or selector before `</head>`, and
+    /// must not be mistaken for the real opening body tag. Parsing must
+    /// resume searching for `<body` from `</head>` onward.
+    #[test]
+    fn split_template_ignores_body_string_before_head_close() {
+        let html = "<html><head><!-- <body fake --></head><body id=\"app\"></body></html>";
+        let parts = split_template(html).expect("well-formed shell must parse");
+
+        assert!(
+            parts.prefix.ends_with("<body data-ssr id=\"app\">"),
+            "must inject data-ssr into the real body tag after </head>: {:?}",
+            parts.prefix
+        );
+        assert!(
+            !parts.prefix.contains("<body data-ssr fake"),
+            "must not treat the <body occurrence before </head> as the body tag: {:?}",
+            parts.prefix
+        );
+    }
+
+    /// No `</head>` at all — malformed shell, must not panic.
+    #[test]
+    fn split_template_returns_none_without_head_close() {
+        assert!(split_template("<html><body id=\"app\"></body></html>").is_none());
+    }
+
+    /// `</head>` present but no `<body` anywhere after it — malformed shell.
+    #[test]
+    fn split_template_returns_none_without_body_tag() {
+        assert!(split_template("<html><head></head></html>").is_none());
+    }
+
+    // ─── dev-mode cache invalidation (KYO-717) ──────────────────────
+
+    /// The bug this ticket fixes: a stale cached split kept pointing the
+    /// browser at a WASM filename `trunk build` had already replaced.
+    ///
+    /// This single test owns the process-global `TEMPLATE_CACHE` for its
+    /// whole body so it stays deterministic under `cargo test`'s default
+    /// parallel test execution — no other test in this module touches
+    /// `cached_split`.
+    ///
+    /// Against the old one-shot `OnceLock` implementation (ignoring the
+    /// hash entirely and returning whatever was parsed first), the second
+    /// half of this test — the hash-B assertions — would fail: it would
+    /// keep getting hash-A's parts back.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn dev_cache_invalidates_on_hash_change() {
+        let html_a = "<html><head></head><body class=\"a\"></body></html>";
+        let html_b = "<html><head></head><body class=\"b\"></body></html>";
+        let hash_a = [0xAAu8; 32];
+        let hash_b = [0xBBu8; 32];
+
+        let first = cached_split(&hash_a, html_a).expect("html_a must parse");
+        let repeat = cached_split(&hash_a, html_a).expect("html_a must parse");
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &repeat),
+            "same hash must hit the cache and return the identical Arc"
+        );
+
+        let second = cached_split(&hash_b, html_b).expect("html_b must parse");
+        assert!(
+            !std::sync::Arc::ptr_eq(&first, &second),
+            "a hash change must invalidate the cache rather than reuse the stale Arc"
+        );
+        assert!(
+            second.prefix.contains("class=\"b\""),
+            "the refreshed split must reflect the new HTML: {:?}",
+            second.prefix
+        );
+        assert!(
+            !second.prefix.contains("class=\"a\""),
+            "the refreshed split must not still carry the previous shell's content: {:?}",
+            second.prefix
+        );
     }
 }

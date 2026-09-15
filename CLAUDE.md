@@ -61,15 +61,17 @@ The Leptos frontend has THREE separate build artifacts (Tailwind CSS, WASM, serv
 
 **Before verifying ANY UI change, read `~/repos/kyomi-private/docs/BUILD_AND_TESTING.md`.**
 
-**Use `dev-server` profile for development.** It reads `dist/` from disk — no server restart for frontend changes.
+**Use `dev-server` profile for development.** It reads `dist/` from disk — no server restart for CSR frontend changes (static assets, the WASM bundle). The SSR-rendered `/login` page is the exception: it's compiled into the server binary itself, not read from `dist/`.
 
 Quick reference — what to rebuild per change type:
 ```
 CSS only (main.css):      trunk build → refresh browser
-Frontend Rust (.rs):      trunk build → refresh browser
+Frontend Rust (.rs):      trunk build → refresh browser; ALSO cargo build --locked --profile dev-server → restart server if the change touches code the SSR login page renders
 Path dep (chartml etc):   trunk build → refresh browser
 Server-side Rust:         cargo build --locked --profile dev-server → restart server
 ```
+
+**`kyomi-ui` is statically linked into `apps/server`, not just served as static files.** `login_ssr_handler` (`apps/server/src/leptos_frontend.rs`) calls `kyomi_ui::app::App` directly to server-render `/login`, so a Rust change to `LoginPage` or to a provider that always wraps the router (`ThemeProvider`, `ToastProvider`, `NavigationProgress`) changes the *server-rendered* markup too — and `trunk build` alone won't update it, because that only rebuilds the client WASM bundle. Rebuild the server binary and restart whenever a frontend Rust change could reach the login page's render tree.
 
 **NEVER run `tailwindcss` manually.** Trunk runs it as a pre-build hook. Running it separately breaks content hashes in `index.html`.
 
