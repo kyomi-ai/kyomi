@@ -248,16 +248,39 @@ All scripts are organized by environment. **Every script is environment-specific
   the narrowed crates or when `-p` is omitted, and is otherwise skipped with
   an explicit note in the summary. Runs all three passes even after an
   earlier one fails, so one cold run surfaces every problem instead of just
-  the first. **Exit-code contract:** `0` every pass that ran was clean; `1`
-  at least one pass reported lints; `2` usage error; `3` a pass could not be
-  run at all (`wasm32-unknown-unknown` not installed) — deliberately never
+  the first.
+
+  **`-p` narrowing derives, and adds, a `--features` flag (KYO-723).** A bare
+  `-p kyomi-ui` builds a smaller dependency graph than CI's
+  `--workspace --exclude kyomi-desktop` passes do, so it misses feature
+  unification `apps/server`'s own dependency on `kyomi-ui` would otherwise
+  trigger (its `ssr` feature, and `slack` via `apps/server`'s own default
+  features) — without correcting for that, `-p kyomi-ui` used to report
+  `credential_status_indicates_connected`
+  (`crates/kyomi-ui/src/pages/settings/datasources.rs`) as `dead_code`, a
+  false positive CI never produces. This script now runs
+  `cargo metadata --locked --format-version 1` once per narrowed invocation,
+  reads each named crate's unified feature set straight from
+  `.resolve.nodes[].features`, and passes it to passes 1 and 2 as
+  `--features <crate>/<feature>,...` (sorted, comma-joined, empty when a
+  crate resolves to `default` alone) — never a hand-maintained per-crate
+  table, so it cannot drift from `ci.yml`'s own resolution the way a second,
+  manually-updated list would. Requires `jq`, only when `-p` is given; the
+  unnarrowed run stays exactly as before, `jq`-free. **Exit-code contract:**
+  `0` every pass that ran was clean; `1` at least one pass reported lints;
+  `2` usage error; `3` a pass could not be run at all —
+  `wasm32-unknown-unknown` not installed, or (with `-p`) the unified feature
+  set could not be derived (`jq` missing, `cargo metadata` failed, or a
+  named crate has no unique match in its output) — deliberately never
   reported as `0`, checked ahead of `1` the same way
   `check-ticket-in-flight.sh` checks its FAILURES ahead of its HITS.
   Self-tested by `scripts/preflight-clippy-test.sh`, which stubs `cargo` and
   `rustup` to pin the exact argv this script emits (no Rust toolchain
-  needed) and, most importantly, parses the three `run: cargo clippy` lines
-  back out of `.github/workflows/ci.yml` itself and diffs them against what
-  this script runs, so the two cannot silently drift apart again.
+  needed — though the `-p` feature-derivation tests do need the real `jq`
+  binary, which is not stubbed) and, most importantly, parses the three
+  `run: cargo clippy` lines back out of `.github/workflows/ci.yml` itself
+  and diffs them against what this script runs, so the two cannot silently
+  drift apart again.
 
 ## Directory Structure
 
