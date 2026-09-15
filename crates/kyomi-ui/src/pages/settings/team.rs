@@ -675,12 +675,17 @@ fn TeamPageInner() -> impl IntoView {
                     </div>
                 </Modal>
 
-            // Confirm Dialog
+            // Confirm Dialog — pass the signals through so `ConfirmDialog`
+            // re-reads them reactively when it opens (KYO-726). The
+            // request_* helpers above set these signals right before
+            // flipping `dialog_open`, so `.get_untracked()` here would
+            // freeze the title/message/confirm text at the empty values
+            // they held at initial render, before any dialog request fired.
             <ConfirmDialog
                 open=Signal::from(dialog_open)
-                title=dialog_title.get_untracked()
-                message=dialog_message.get_untracked()
-                confirm_text=dialog_confirm_text.get_untracked()
+                title=dialog_title
+                message=dialog_message
+                confirm_text=dialog_confirm_text
                 on_confirm=on_confirm
                 on_cancel=on_cancel
             />
