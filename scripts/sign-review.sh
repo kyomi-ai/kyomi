@@ -173,21 +173,92 @@
 # script. Any further lines are additive and must stay optional to read.
 #
 # Self-test: scripts/sign-review-test.sh.
+#
+# KYO-779: a rebase can rewrite already committed work with no staged diff.
+# The explicit --committed-range mode signs a separate approval containing
+# the base and HEAD object IDs plus the net diff hash. Its public-key-only
+# verifier rejects an old approval after either object changes. This file is
+# deliberately separate from .review-approval, which pre-commit interprets
+# only as a staged-diff approval.
 # ------------------------------------------------------------------------------
 
 set -e
+set -o pipefail
+
+# A committed-range approval is separate from .review-approval: the latter
+# belongs to pre-commit and must continue to describe the staged diff only.
+# `--verify-committed-range` needs no private key and is run immediately before
+# a rebase-only push. The public key matches .githooks/pre-commit.
+REVIEW_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEApRtsZODQxaUNP383HB/iqLHSlrf92Fe3UB43Bc2TaG0=
+-----END PUBLIC KEY-----"
+RANGE_APPROVAL=.review-range-approval
+RANGE_FORMAT=COMMITTED-RANGE-V1
+
+range_state() {
+    local base_ref="$1" base head merge_base staged unstaged untracked
+    base="$(git rev-parse --verify "${base_ref}^{commit}")" || return 1
+    head="$(git rev-parse --verify 'HEAD^{commit}')" || return 1
+    merge_base="$(git merge-base "$base" "$head")" || return 1
+    if [ "$base" != "$merge_base" ] || [ "$base" = "$head" ]; then
+        echo "ERROR: committed range must have a non-empty branch diff based on $base_ref." >&2
+        return 1
+    fi
+    # No staged or working-tree content may be mistaken for reviewed commits.
+    staged="$(git diff --cached --name-only)" || return 1
+    unstaged="$(git diff --name-only)" || return 1
+    untracked="$(git ls-files --others --exclude-standard)" || return 1
+    if [ -n "$staged$unstaged$untracked" ]; then
+        echo "ERROR: committed-range review requires a clean index and working tree." >&2
+        return 1
+    fi
+    local diff_hash
+    diff_hash="$(git diff "$base" "$head" | sha256sum | awk '{print $1}')" || return 1
+    if [ "$diff_hash" = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" ]; then
+        echo "ERROR: committed range has no content change to review." >&2
+        return 1
+    fi
+    printf '%s\n%s\n%s\n' "$base" "$head" "$diff_hash"
+}
+
+if [ "${1:-}" = "--verify-committed-range" ]; then
+    if [ "$#" -ne 2 ]; then
+        echo "Usage: scripts/sign-review.sh --verify-committed-range <base-ref>" >&2
+        exit 1
+    fi
+    [ -f "$RANGE_APPROVAL" ] || { echo "ERROR: no committed-range approval found." >&2; exit 1; }
+    state="$(range_state "$2")" || exit 1
+    expected="$(printf '%s\n%s' "$RANGE_FORMAT" "$state")"
+    actual="$(sed -n '1,4p' "$RANGE_APPROVAL")"
+    if [ "$actual" != "$expected" ] || [ "$(wc -l < "$RANGE_APPROVAL")" -ne 5 ]; then
+        echo "ERROR: committed-range approval is stale or malformed; request a fresh review." >&2
+        exit 1
+    fi
+    pub_file="$(mktemp)"; sig_file="$(mktemp)"; val_file="$(mktemp)"
+    trap 'rm -f "$pub_file" "$sig_file" "$val_file"' EXIT
+    printf '%s\n' "$REVIEW_PUBLIC_KEY" > "$pub_file"
+    printf '%s' "$actual" > "$val_file"
+    if ! sed -n '5p' "$RANGE_APPROVAL" | base64 -d > "$sig_file" 2>/dev/null \
+        || ! openssl pkeyutl -verify -rawin -pubin -inkey "$pub_file" -in "$val_file" -sigfile "$sig_file" >/dev/null 2>&1; then
+        echo "ERROR: committed-range review signature is invalid." >&2
+        exit 1
+    fi
+    echo "Committed-range review signature verified."
+    exit 0
+fi
 
 PRIVATE_KEY="${1:-}"
 
 if [ -z "$PRIVATE_KEY" ]; then
     echo "ERROR: Private key argument required." >&2
-    echo "Usage: scripts/sign-review.sh <private_key_pem_string> [--allow-unstaged <reason>]" >&2
+    echo "Usage: scripts/sign-review.sh <private_key_pem_string> [--allow-unstaged <reason> | --committed-range <base-ref>]" >&2
     exit 1
 fi
 shift
 
 ALLOW_UNSTAGED=0
 ALLOW_UNSTAGED_REASON=""
+RANGE_BASE_REF=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -206,13 +277,39 @@ while [ $# -gt 0 ]; do
             ALLOW_UNSTAGED_REASON="$2"
             shift 2
             ;;
+        --committed-range)
+            if [ $# -lt 2 ] || [ -z "$2" ] || [ -n "$RANGE_BASE_REF" ]; then
+                echo "ERROR: --committed-range requires one base ref." >&2
+                exit 1
+            fi
+            RANGE_BASE_REF="$2"
+            shift 2
+            ;;
         *)
             echo "ERROR: unknown argument: $1" >&2
-            echo "Usage: scripts/sign-review.sh <private_key_pem_string> [--allow-unstaged <reason>]" >&2
+            echo "Usage: scripts/sign-review.sh <private_key_pem_string> [--allow-unstaged <reason> | --committed-range <base-ref>]" >&2
             exit 1
             ;;
     esac
 done
+
+if [ -n "$RANGE_BASE_REF" ]; then
+    if [ "$ALLOW_UNSTAGED" -eq 1 ]; then
+        echo "ERROR: --allow-unstaged cannot be used with --committed-range." >&2
+        exit 1
+    fi
+    state="$(range_state "$RANGE_BASE_REF")" || exit 1
+    signed_value="$(printf '%s\n%s' "$RANGE_FORMAT" "$state")"
+    key_file="$(mktemp)"; val_file="$(mktemp)"
+    trap 'rm -f "$key_file" "$val_file"' EXIT
+    printf '%s\n' "$PRIVATE_KEY" > "$key_file"
+    printf '%s' "$signed_value" > "$val_file"
+    signature="$(openssl pkeyutl -sign -rawin -inkey "$key_file" -in "$val_file" | base64 -w 0)" || exit 1
+    [ -n "$signature" ] || { echo "ERROR: committed-range signing failed." >&2; exit 1; }
+    printf '%s\n%s\n' "$signed_value" "$signature" > "$RANGE_APPROVAL"
+    echo "Committed range signed for $RANGE_BASE_REF."
+    exit 0
+fi
 
 # Write private key to temp file (Ed25519 PEM format)
 KEY_FILE=$(mktemp)

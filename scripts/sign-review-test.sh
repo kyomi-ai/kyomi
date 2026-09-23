@@ -49,6 +49,8 @@
 #      from the index (not a modification) is still refused
 #  11. the refusal message distinguishes a modified-tracked file from an
 #      untracked-new one when both are present
+#  12. committed-range approval binds base, HEAD and hash; rebase, base
+#      advance, tampering, and dirty worktree are refused
 #
 # Exit 0 = all pass, exit 1 = any failure.
 # ------------------------------------------------------------------------------
@@ -412,6 +414,80 @@ assert_contains "names b.txt (modified tracked)" "b.txt"
 assert_contains "names new.txt (untracked new)" "new.txt"
 assert_contains "labels the modified-tracked category" "Modified tracked files"
 assert_contains "labels the untracked-new category" "New files that were never staged"
+echo
+
+# ─── Test 12: committed-range signature binds base and HEAD (KYO-779) ───────
+# The production public key is replaced only in a private copy of the signer;
+# the real key is never used by this test. A rebase over an unrelated commit
+# leaves the patch for a.txt unchanged, but changes both Git object IDs.
+echo "-- Test 12: committed-range approval expires after a rebase"
+range_sign="$tmpdir/range-sign-review.sh"
+cp "$SIGN" "$range_sign"
+test_pub_b64="$(sed -n '2p' "$PUB_PEM")"
+sed -i "s|MCowBQYDK2VwAyEApRtsZODQxaUNP383HB/iqLHSlrf92Fe3UB43Bc2TaG0=|$test_pub_b64|" "$range_sign"
+t12="$tmpdir/t12"
+new_repo_with_files "$t12" a.txt b.txt
+printf '.review-range-approval\n' >> "$t12/.git/info/exclude"
+git -C "$t12" checkout -q -b feature
+echo "change a" >>"$t12/a.txt"
+git -C "$t12" add a.txt
+git -C "$t12" commit -q -m feature
+base_before="$(git -C "$t12" rev-parse main)"
+head_before="$(git -C "$t12" rev-parse HEAD)"
+if out="$(cd "$t12" && "$range_sign" "$PRIVATE_KEY" --committed-range main 2>&1)"; then
+    pass "signs a clean committed range"
+else
+    fail "signs a clean committed range" "$out"
+fi
+if [ "$(sed -n '1p' "$t12/.review-range-approval")" = COMMITTED-RANGE-V1 ] \
+    && [ "$(sed -n '2p' "$t12/.review-range-approval")" = "$base_before" ] \
+    && [ "$(sed -n '3p' "$t12/.review-range-approval")" = "$head_before" ]; then
+    pass "approval records range format, base, and HEAD"
+else
+    fail "approval records range format, base, and HEAD" "$(cat "$t12/.review-range-approval")"
+fi
+if out="$(cd "$t12" && "$range_sign" --verify-committed-range main 2>&1)"; then
+    pass "public-key verifier accepts the exact reviewed range"
+else
+    fail "public-key verifier accepts the exact reviewed range" "$out"
+fi
+# A forged hash cannot pass even though the recorded base and HEAD still do.
+cp "$t12/.review-range-approval" "$tmpdir/t12-approval"
+sed -i '4c\0000000000000000000000000000000000000000000000000000000000000000' "$t12/.review-range-approval"
+if out="$(cd "$t12" && "$range_sign" --verify-committed-range main 2>&1)"; then
+    fail "rejects a modified range hash" "$out"
+else
+    pass "rejects a modified range hash"
+fi
+cp "$tmpdir/t12-approval" "$t12/.review-range-approval"
+git -C "$t12" checkout -q main
+echo "unrelated base change" >>"$t12/b.txt"
+git -C "$t12" add b.txt
+git -C "$t12" commit -q -m base-change
+git -C "$t12" checkout -q feature
+if out="$(cd "$t12" && "$range_sign" --verify-committed-range main 2>&1)"; then
+    fail "rejects approval when the base advances before a rebase" "$out"
+else
+    pass "rejects approval when the base advances before a rebase"
+fi
+git -C "$t12" rebase -q main
+if out="$(cd "$t12" && "$range_sign" --verify-committed-range main 2>&1)"; then
+    fail "rejects old approval after a rebase with unchanged a.txt patch" "$out"
+else
+    pass "rejects old approval after a rebase with unchanged a.txt patch"
+fi
+if out="$(cd "$t12" && "$range_sign" "$PRIVATE_KEY" --committed-range main 2>&1)" \
+    && (cd "$t12" && "$range_sign" --verify-committed-range main >/dev/null 2>&1); then
+    pass "fresh review signature verifies after the rebase"
+else
+    fail "fresh review signature verifies after the rebase" "$out"
+fi
+echo "uncommitted" >>"$t12/a.txt"
+if out="$(cd "$t12" && "$range_sign" "$PRIVATE_KEY" --committed-range main 2>&1)"; then
+    fail "committed-range signer rejects uncommitted content" "$out"
+else
+    pass "committed-range signer rejects uncommitted content"
+fi
 echo
 
 echo "Results: $PASS passed, $FAIL failed"
