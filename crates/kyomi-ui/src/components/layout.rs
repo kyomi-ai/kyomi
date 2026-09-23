@@ -393,10 +393,23 @@ pub fn Layout(children: ChildrenFn) -> impl IntoView {
             if path.starts_with("/settings") || path.starts_with("/login") || path.starts_with("/signup") {
                 return;
             }
-            // Stripe manages trial expiry via webhooks. When the trial ends
-            // without a payment method, Stripe fires `invoice.payment_failed`
-            // which sets subscription_status to "past_due". We only need to
-            // gate on the final status — no client-side trial_ends_at check.
+            // Stripe manages trial expiry via webhooks for subscriptions it
+            // owns. With the default `missing_payment_method` behaviour
+            // (`create_subscription` in kyomi-auth's stripe_service.rs never
+            // overrides it), trial end does NOT go straight to "past_due":
+            // Stripe moves the subscription to "active" and creates a draft
+            // invoice, which finalizes roughly 72 hours later — only once
+            // that charge actually fails does the status become "past_due".
+            // That ~3-day window before this gate fires is accepted.
+            //
+            // This gate also does not catch the no-Stripe fallback trial
+            // (signup succeeded but Stripe customer/subscription creation
+            // failed, so the workspace has no stripe_subscription_id and
+            // relies solely on trial_ends_at) — that workspace stays
+            // "trialing" here forever, since nothing sets it to "past_due"
+            // or "cancelled". Later work will close that gap; this client
+            // gate still checks only the two statuses below, not
+            // trial_ends_at.
             let needs_gate = matches!(
                 user.subscription_status.as_str(),
                 "cancelled" | "past_due"
