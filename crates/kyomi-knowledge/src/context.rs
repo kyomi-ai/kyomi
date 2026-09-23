@@ -228,7 +228,7 @@ pub async fn retrieve_and_inject(
             &context.injected_metrics,
             &already_injected,
         )
-        .await;
+        .await?;
 
         if !expansion_hits.is_empty() {
             merge_expansion_hits(&mut result, expansion_hits, budget);

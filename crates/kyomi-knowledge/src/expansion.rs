@@ -107,6 +107,31 @@ struct MetricTableExpansionRow {
 ///
 /// Unlike the FalkorDB version which takes a `ConversationContext`, this version
 /// takes the individual sets directly to avoid circular dependencies.
+///
+/// # Error policy: propagate, don't degrade
+///
+/// A broken query (e.g. a column that was renamed or never existed) and a
+/// genuine "no matching edges" both produce an empty result set, so keeping
+/// only the empty vec loses the distinction. Every leaf here queries the same
+/// database as the retrieval step `retrieve_and_inject` runs before calling
+/// this function, and that step already propagates its own errors with `?`;
+/// each leaf's error now bubbles out the same way, via `?`, with no
+/// swallowing in between. Whether context enrichment should be best-effort
+/// for a given chat turn is a decision for the call site -- which already
+/// has to decide what to do when `retrieval::retrieve` fails, and can apply
+/// the same policy here -- not a decision each leaf should make privately.
+/// The one exception is the empty-anchor case immediately below, which is a
+/// genuine empty result (nothing to expand from), not a failure, and returns
+/// `Ok(vec![])` accordingly.
+///
+/// KYO-808's `agent_learnings.is_superseded` bug -- a column that has never
+/// existed on either DB dialect -- was present in `expand_table_to_learnings`'s
+/// query, so that leaf failed on every call. Swallowed the same way the other
+/// leaves were, it was indistinguishable from an empty result here too, which
+/// is what exposed this whole swallow-on-error pattern. This change fixes
+/// both: `expand_table_to_learnings`'s query now filters on `superseded_by IS
+/// NULL` (the column that actually exists), and every leaf, this one
+/// included, now propagates its query error instead of swallowing it.
 pub async fn expand_from_anchors(
     db: &DbPool,
     workspace_id: &str,
@@ -114,31 +139,31 @@ pub async fn expand_from_anchors(
     injected_learnings: &HashSet<String>,
     injected_metrics: &HashSet<String>,
     already_injected: &HashSet<String>,
-) -> Vec<ExpansionHit> {
+) -> kyomi_core::Result<Vec<ExpansionHit>> {
     if injected_tables.is_empty() && injected_learnings.is_empty() && injected_metrics.is_empty() {
-        return vec![];
+        return Ok(vec![]);
     }
 
     let mut hits: Vec<ExpansionHit> = Vec::new();
 
     // Expand from injected tables -> find connected columns and learnings
     for table_name in injected_tables {
-        let columns = expand_table_to_columns(db, workspace_id, table_name, already_injected).await;
+        let columns = expand_table_to_columns(db, workspace_id, table_name, already_injected).await?;
         hits.extend(columns);
 
-        let learnings = expand_table_to_learnings(db, workspace_id, table_name, already_injected).await;
+        let learnings = expand_table_to_learnings(db, workspace_id, table_name, already_injected).await?;
         hits.extend(learnings);
     }
 
     // Expand from injected learnings -> find connected tables
     for learning_id in injected_learnings {
-        let tables = expand_learning_to_tables(db, workspace_id, learning_id, already_injected).await;
+        let tables = expand_learning_to_tables(db, workspace_id, learning_id, already_injected).await?;
         hits.extend(tables);
     }
 
     // Expand from injected metrics -> find source tables (2 hops)
     for metric_name in injected_metrics {
-        let tables = expand_metric_to_tables(db, workspace_id, metric_name, already_injected).await;
+        let tables = expand_metric_to_tables(db, workspace_id, metric_name, already_injected).await?;
         hits.extend(tables);
     }
 
@@ -150,7 +175,7 @@ pub async fn expand_from_anchors(
         "SQL anchor expansion complete"
     );
 
-    hits
+    Ok(hits)
 }
 
 /// From an injected table, find its columns via column_embeddings (1 hop).
@@ -162,7 +187,7 @@ async fn expand_table_to_columns(
     workspace_id: &str,
     table_full_name: &str,
     already_injected: &HashSet<String>,
-) -> Vec<ExpansionHit> {
+) -> kyomi_core::Result<Vec<ExpansionHit>> {
     // Match the full_name by constructing it from parts using the same
     // logic as build_full_table_name: project.dataset.table or dataset.table
     let is_pg = db.is_postgres();
@@ -182,17 +207,11 @@ async fn expand_table_to_columns(
         &table_full_name
     );
 
-    let rows = match result {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(
-                table = table_full_name,
-                error = %e,
-                "Expansion: Table->Column query failed, skipping"
-            );
-            return vec![];
-        }
-    };
+    let rows = result.map_err(|e| {
+        kyomi_core::Error::Internal(format!(
+            "expand_table_to_columns: table={table_full_name}: {e}"
+        ))
+    })?;
 
     let mut hits = Vec::new();
     for row in rows {
@@ -211,7 +230,7 @@ async fn expand_table_to_columns(
         });
     }
 
-    hits
+    Ok(hits)
 }
 
 /// From an injected table, find learnings that reference it (1 hop).
@@ -220,7 +239,7 @@ async fn expand_table_to_learnings(
     workspace_id: &str,
     table_full_name: &str,
     already_injected: &HashSet<String>,
-) -> Vec<ExpansionHit> {
+) -> kyomi_core::Result<Vec<ExpansionHit>> {
     let is_pg = db.is_postgres();
     let true_val = kyomi_core::sql_compat::bool_true(is_pg);
     let sql = format!(
@@ -239,17 +258,11 @@ async fn expand_table_to_learnings(
         &workspace_id
     );
 
-    let rows = match result {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(
-                table = table_full_name,
-                error = %e,
-                "Expansion: Table->Learning query failed, skipping"
-            );
-            return vec![];
-        }
-    };
+    let rows = result.map_err(|e| {
+        kyomi_core::Error::Internal(format!(
+            "expand_table_to_learnings: table={table_full_name}: {e}"
+        ))
+    })?;
 
     let mut hits = Vec::new();
     for row in rows {
@@ -266,18 +279,26 @@ async fn expand_table_to_learnings(
         });
     }
 
-    hits
+    Ok(hits)
 }
 
 /// From an injected learning, find tables it references (1 hop).
+///
+/// `lr.learning_id` is compared to `$1` untyped, not cast with
+/// `sql_compat::cast_to_uuid` -- `learning_references.learning_id` has been
+/// `TEXT` on Postgres since `20260315000000_uuid_columns_to_text.sql`, and
+/// Postgres has no `text = uuid` operator, so casting `$1::uuid` here made
+/// this leaf's query fail on every call. It was invisible until this leaf
+/// stopped swallowing its own errors (KYO-809): discovered via this file's
+/// healthy-schema control for this leaf, which failed even before any test
+/// deliberately broke the schema.
 async fn expand_learning_to_tables(
     db: &DbPool,
     workspace_id: &str,
     learning_id: &str,
     already_injected: &HashSet<String>,
-) -> Vec<ExpansionHit> {
+) -> kyomi_core::Result<Vec<ExpansionHit>> {
     let is_pg = db.is_postgres();
-    let uuid_param = kyomi_core::sql_compat::cast_to_uuid(is_pg, "$1");
     let json_desc = kyomi_core::sql_compat::json_extract_text(is_pg, "tc.table_metadata", "description");
     let sql = format!(
         "SELECT lr.ref_name as full_name, \
@@ -288,7 +309,7 @@ async fn expand_learning_to_tables(
            {FULL_NAME_CASE_SQL} = lr.ref_name \
            AND tc.workspace_id = lr.workspace_id \
          LEFT JOIN datasource_configs dc ON tc.datasource_config_id = dc.id \
-         WHERE lr.learning_id = {uuid_param} AND lr.ref_type = 'table' \
+         WHERE lr.learning_id = $1 AND lr.ref_type = 'table' \
            AND lr.workspace_id = $2 AND tc.is_archived = {false_val}",
         false_val = kyomi_core::sql_compat::bool_false(is_pg),
     );
@@ -300,17 +321,11 @@ async fn expand_learning_to_tables(
         &workspace_id
     );
 
-    let rows = match result {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(
-                learning_id,
-                error = %e,
-                "Expansion: Learning->Table query failed, skipping"
-            );
-            return vec![];
-        }
-    };
+    let rows = result.map_err(|e| {
+        kyomi_core::Error::Internal(format!(
+            "expand_learning_to_tables: learning_id={learning_id}: {e}"
+        ))
+    })?;
 
     let mut hits = Vec::new();
     for row in rows {
@@ -328,7 +343,7 @@ async fn expand_learning_to_tables(
         });
     }
 
-    hits
+    Ok(hits)
 }
 
 /// From an injected metric, find tables via learning_references 2-hop:
@@ -338,7 +353,7 @@ async fn expand_metric_to_tables(
     workspace_id: &str,
     metric_name: &str,
     already_injected: &HashSet<String>,
-) -> Vec<ExpansionHit> {
+) -> kyomi_core::Result<Vec<ExpansionHit>> {
     let result = kyomi_core::db_fetch_all!(
         db,
         MetricTableExpansionRow,
@@ -351,17 +366,11 @@ async fn expand_metric_to_tables(
         &workspace_id
     );
 
-    let rows = match result {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(
-                metric = metric_name,
-                error = %e,
-                "Expansion: Metric->Table query failed, skipping"
-            );
-            return vec![];
-        }
-    };
+    let rows = result.map_err(|e| {
+        kyomi_core::Error::Internal(format!(
+            "expand_metric_to_tables: metric={metric_name}: {e}"
+        ))
+    })?;
 
     let mut hits = Vec::new();
     for row in rows {
@@ -381,7 +390,7 @@ async fn expand_metric_to_tables(
         });
     }
 
-    hits
+    Ok(hits)
 }
 
 #[cfg(test)]
