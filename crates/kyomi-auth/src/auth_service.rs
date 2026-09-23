@@ -223,8 +223,15 @@ pub async fn signup_start_service(
                 // itself is created (verified = true) when that token is
                 // redeemed, by `signup_complete_service` /
                 // `signup_verify_service` below.
-                mint_verification_email_or_notify_existing(db, email, name, frontend_url, None)
-                    .await?;
+                mint_verification_email_or_notify_existing(
+                    db,
+                    email,
+                    name,
+                    frontend_url,
+                    self_hosted,
+                    None,
+                )
+                .await?;
                 Ok(SignupStartServiceResult::VerificationRequired)
             }
         }
@@ -241,6 +248,7 @@ pub async fn signup_start_service(
                 email,
                 name,
                 frontend_url,
+                self_hosted,
                 Some(user),
             )
             .await?;
@@ -349,6 +357,41 @@ enum VerificationEmailKind {
     ExistingAccount { auth_methods: Vec<String> },
 }
 
+/// Whether the operator log may contain the *live, unhashed* value of a
+/// verification/recovery token — i.e. the whole URL, not just that a token
+/// was minted.
+///
+/// KYO-763: every one of these tokens is a live credential, not just an
+/// email-confirmation nonce — redeeming one creates the account
+/// (`"email_verification"` / `"signup"`, post-KYO-683) or recovers it
+/// (`"passkey_recovery"`, and the `"account_recovery"` sibling in
+/// `kyomi-ui`'s `recovery_start`). Logging the full link is therefore
+/// equivalent to logging a password. A SaaS production build ships its
+/// logs to an aggregator with real retention, so anyone with log access —
+/// not just the account owner — could complete the flow for any address
+/// that requests one.
+///
+/// `self_hosted` keeps the line: that deployment is its own instance with
+/// its own log retention, and the line is the documented way an
+/// administrator unblocks a user whose mail server is misbehaving (see
+/// `kyomi-ui`'s `recovery_start`, which shares this exact predicate for its
+/// own failure-path link). `dev_mode` keeps it too, for a locally run
+/// `dev-server`-profile build (`debug-assertions = true`, `Cargo.toml`) —
+/// the shape CLAUDE.md's "Local Dev Server" section runs dev.kyomi.ai
+/// under: `self_hosted` is false there (it's SaaS-mode config), but there
+/// is no aggregated log and, for agent/manual testing with no mailbox to
+/// check, often no working SMTP either.
+///
+/// Neither flag is set on a real SaaS production build, which is the case
+/// this predicate exists to close. Takes both as plain `bool`s — rather
+/// than reading `Config`/`cfg!(debug_assertions)` itself — so every
+/// combination is exercised by a plain unit test regardless of the profile
+/// the test binary itself was compiled with (`cfg!(debug_assertions)` is
+/// `true` in an ordinary `cargo test` run, same as `dev-server`).
+pub fn may_log_live_credential_link(self_hosted: bool, dev_mode: bool) -> bool {
+    self_hosted || dev_mode
+}
+
 /// Parameters for `mint_and_send_verification_email`.
 struct MintVerificationEmailParams<'a> {
     db: &'a DbPool,
@@ -361,6 +404,15 @@ struct MintVerificationEmailParams<'a> {
     /// existing row.
     user_id: Option<&'a str>,
     frontend_url: &'a str,
+    /// Fed to [`may_log_live_credential_link`] — see that function for what
+    /// each flag means. Real callers pass their own `self_hosted` and
+    /// `cfg!(debug_assertions)`; kept as explicit fields (rather than this
+    /// function reading `cfg!` itself) so a test can drive the SaaS-
+    /// production combination (`false, false`) directly, which an ordinary
+    /// `cargo test` binary's own `debug_assertions` can never produce on
+    /// its own (KYO-763).
+    self_hosted: bool,
+    dev_mode: bool,
     token_type: &'a str,
     verification_path: &'a str,
     /// Token lifetime override, in hours. `None` uses
@@ -374,8 +426,9 @@ struct MintVerificationEmailParams<'a> {
     email_kind: VerificationEmailKind,
 }
 
-/// Mint a verification token, build the verification/landing URL, log it,
-/// and send the verification email in the background.
+/// Mint a verification token, build the verification/landing URL, log it
+/// (only where [`may_log_live_credential_link`] allows — KYO-763), and send
+/// the verification email in the background.
 ///
 /// Shared primitive behind every "mint a token + email a link" step: the
 /// brand-new-signup case for both password signup ("email_verification"
@@ -388,7 +441,9 @@ struct MintVerificationEmailParams<'a> {
 /// `send_passkey_recovery` email rather than the generic verification one).
 /// Token type, landing path, expiry, and which email to send are the only
 /// things that vary between callers; parameterizing them here avoids
-/// near-identical copies of "mint token, build URL, log, spawn email".
+/// near-identical copies of "mint token, build URL, log, spawn email" — and,
+/// as of KYO-763, near-identical copies of deciding whether the link may be
+/// logged at all.
 ///
 /// Deliberately does **not** touch the `users` table (KYO-683 phase 1): the
 /// row is created or adopted only when the token is redeemed, by
@@ -402,6 +457,8 @@ async fn mint_and_send_verification_email(
         name,
         user_id,
         frontend_url,
+        self_hosted,
+        dev_mode,
         token_type,
         verification_path,
         expire_hours,
@@ -419,13 +476,15 @@ async fn mint_and_send_verification_email(
         "{}{verification_path}?token={raw_token}",
         frontend_url.trim_end_matches('/')
     );
-    match user_id {
-        Some(user_id) => tracing::info!(
-            "Verification link ({token_type}) for {email}: {url} (user_id={user_id})"
-        ),
-        None => tracing::info!(
-            "Verification link ({token_type}) for {email}: {url} (user not yet created)"
-        ),
+    if may_log_live_credential_link(self_hosted, dev_mode) {
+        match user_id {
+            Some(user_id) => tracing::info!(
+                "Verification link ({token_type}) for {email}: {url} (user_id={user_id})"
+            ),
+            None => tracing::info!(
+                "Verification link ({token_type}) for {email}: {url} (user not yet created)"
+            ),
+        }
     }
     spawn_verification_email(email.to_string(), name.to_string(), url, email_kind);
     Ok(())
@@ -517,6 +576,7 @@ async fn mint_verification_email_or_notify_existing(
     email: &str,
     name: Option<&str>,
     frontend_url: &str,
+    self_hosted: bool,
     existing_user: Option<&kyomi_core::models::User>,
 ) -> kyomi_core::Result<()> {
     match existing_user {
@@ -527,6 +587,8 @@ async fn mint_verification_email_or_notify_existing(
                 name: name.unwrap_or_default(),
                 user_id: None,
                 frontend_url,
+                self_hosted,
+                dev_mode: cfg!(debug_assertions),
                 token_type: "email_verification",
                 verification_path: "/signup/complete",
                 expire_hours: None,
@@ -2159,6 +2221,8 @@ pub async fn passkey_signup_start_service(
                     name: name.unwrap_or_default(),
                     user_id: None,
                     frontend_url,
+                    self_hosted,
+                    dev_mode: cfg!(debug_assertions),
                     token_type: "signup",
                     verification_path: "/auth/passkey-signup",
                     expire_hours: None,
@@ -2574,6 +2638,7 @@ pub async fn resend_verification_service(
     frontend_url: &str,
     ip: &str,
     email: &str,
+    self_hosted: bool,
 ) -> kyomi_core::Result<()> {
     let rate = check_rate_limit(kv, ip, "register").await?;
     if !rate.allowed {
@@ -2581,8 +2646,15 @@ pub async fn resend_verification_service(
     }
 
     let existing_user = crate::user_service::get_user_by_email(db, email).await?;
-    mint_verification_email_or_notify_existing(db, email, None, frontend_url, existing_user.as_ref())
-        .await
+    mint_verification_email_or_notify_existing(
+        db,
+        email,
+        None,
+        frontend_url,
+        self_hosted,
+        existing_user.as_ref(),
+    )
+    .await
 }
 
 /// Result of attempting to start account recovery.
@@ -2716,6 +2788,7 @@ pub async fn passkey_recovery_start_service(
     ip: &str,
     email: &str,
     frontend_url: &str,
+    self_hosted: bool,
 ) -> kyomi_core::Result<()> {
     let rate = check_rate_limit(kv, ip, "passkey_recovery").await?;
     if !rate.allowed {
@@ -2739,6 +2812,8 @@ pub async fn passkey_recovery_start_service(
             name: &user_name,
             user_id: Some(&user.user_id),
             frontend_url,
+            self_hosted,
+            dev_mode: cfg!(debug_assertions),
             token_type: "passkey_recovery",
             verification_path: "/auth/recover-passkey/complete",
             expire_hours: Some(0.25),
@@ -4126,6 +4201,7 @@ mod tests {
                 "127.0.0.1",
                 email,
                 "https://app.example.com",
+                false,
             )
             .await;
 
@@ -4151,7 +4227,7 @@ mod tests {
             .await
             .expect("create verified user");
 
-        passkey_recovery_start_service(&db, &kv, "127.0.0.1", email, "https://app.example.com")
+        passkey_recovery_start_service(&db, &kv, "127.0.0.1", email, "https://app.example.com", false)
             .await
             .expect("service call should not error");
 
@@ -4177,7 +4253,7 @@ mod tests {
             .await
             .expect("create unverified user");
 
-        passkey_recovery_start_service(&db, &kv, "127.0.0.1", email, "https://app.example.com")
+        passkey_recovery_start_service(&db, &kv, "127.0.0.1", email, "https://app.example.com", false)
             .await
             .expect("service call should not error");
 
@@ -4230,7 +4306,7 @@ mod tests {
             "sanity check: totp auth method exists before the call"
         );
 
-        passkey_recovery_start_service(&db, &kv, "127.0.0.1", email, "https://app.example.com")
+        passkey_recovery_start_service(&db, &kv, "127.0.0.1", email, "https://app.example.com", false)
             .await
             .expect("service call should not error");
 
@@ -4501,7 +4577,14 @@ mod tests {
     // the way `signup_complete_service_still_works_end_to_end_after_signup_start`
     // (below) drives `signup_start_service` / `signup_complete_service` —
     // scraping each minted token out of its captured log line, since there
-    // is no `users` row to look either up through.
+    // is no `users` row to look either up through. That log line is what
+    // KYO-763 gated behind `may_log_live_credential_link`; these tests still
+    // see it because an ordinary `cargo test` binary's own
+    // `cfg!(debug_assertions)` is `true` (same as the `dev-server` profile),
+    // independent of the `self_hosted: false` these calls pass — see
+    // `mint_and_send_verification_email_omits_the_link_in_saas_production`
+    // below for the test that actually drives the `false, false` (real SaaS
+    // production) combination directly.
 
     /// The core regression this finding exists for: resending during the
     /// pre-redemption window (no `users` row yet) must mint and email a
@@ -4523,7 +4606,7 @@ mod tests {
             SignupStartServiceResult::VerificationRequired
         ));
 
-        resend_verification_service(&db, &kv, "https://app.example.com", "127.0.0.1", email)
+        resend_verification_service(&db, &kv, "https://app.example.com", "127.0.0.1", email, false)
             .await
             .expect("resend should not error");
 
@@ -4583,7 +4666,7 @@ mod tests {
             .await
             .expect("create verified user");
 
-        resend_verification_service(&db, &kv, "https://app.example.com", "127.0.0.1", email)
+        resend_verification_service(&db, &kv, "https://app.example.com", "127.0.0.1", email, false)
             .await
             .expect("resend should not error");
 
@@ -5392,12 +5475,12 @@ mod tests {
         // config; data/constants.toml: [rate_limits.login] ip_capacity = 10
         // — exhaust it so the next call is denied.
         for i in 0..10 {
-            passkey_recovery_start_service(&db, &kv, ip, email, frontend_url)
+            passkey_recovery_start_service(&db, &kv, ip, email, frontend_url, false)
                 .await
                 .unwrap_or_else(|e| panic!("call {i} should be within the rate limit, got Err: {e}"));
         }
 
-        let err = passkey_recovery_start_service(&db, &kv, ip, email, frontend_url)
+        let err = passkey_recovery_start_service(&db, &kv, ip, email, frontend_url, false)
             .await
             .expect_err(
                 "the 11th call within the login bucket's ip_capacity window must be rate limited",
@@ -5534,6 +5617,174 @@ mod tests {
         assert!(
             logs.has_message_containing(Level::INFO, "Verification email sent"),
             "a successful send must still be reported: {:?}",
+            logs.events()
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // `may_log_live_credential_link` / `mint_and_send_verification_email`
+    // link redaction (KYO-763)
+    // -----------------------------------------------------------------
+    //
+    // Before this fix, `mint_and_send_verification_email` logged the full
+    // verification/recovery URL — including the live, unhashed token — at
+    // `info!` unconditionally. Any deployment's log stream could complete
+    // signup, passkey signup, or passkey recovery for any address that
+    // requested one. These tests drive both the isolated predicate and the
+    // real shared mint function directly.
+
+    /// The predicate itself, all four combinations. Pure, so this is
+    /// exhaustive rather than representative.
+    #[test]
+    fn may_log_live_credential_link_truth_table() {
+        assert!(
+            !may_log_live_credential_link(false, false),
+            "SaaS production (neither self-hosted nor a dev build) must never log the \
+             live token — this is the exact case KYO-763 closes"
+        );
+        assert!(
+            may_log_live_credential_link(true, false),
+            "self-hosted keeps the line regardless of build profile — it's the \
+             documented operator escape valve for that deployment's own logs"
+        );
+        assert!(
+            may_log_live_credential_link(false, true),
+            "a dev build keeps the line regardless of self_hosted — local/agent \
+             testing with no mailbox still needs it"
+        );
+        assert!(
+            may_log_live_credential_link(true, true),
+            "self-hosted dev build: both reasons apply, still must log"
+        );
+    }
+
+    /// The regression this ticket exists to fix, proven against the real,
+    /// shared `mint_and_send_verification_email` — not just the isolated
+    /// predicate, so a caller that stopped checking the predicate (e.g. a
+    /// revert back to an unconditional `tracing::info!`) is caught here,
+    /// not only in a unit test of a function nothing calls
+    /// (`docs/standards/security/unused-security-helper-worse-than-none.md`).
+    ///
+    /// `dev_mode: false` is not reachable through any higher-level service
+    /// function in an ordinary `cargo test` run — `cfg!(debug_assertions)`
+    /// is `true` there, same as the `dev-server` profile — so this calls
+    /// `mint_and_send_verification_email` directly with the SaaS-production
+    /// combination (`self_hosted: false, dev_mode: false`) explicitly, the
+    /// one combination that must never see the link in a log.
+    #[tokio::test]
+    async fn mint_and_send_verification_email_omits_the_link_in_saas_production() {
+        let db = test_pool().await;
+        let email = "kyo763-saas-production@example.com";
+        let frontend_url = "https://app.example.com";
+
+        let logs = capture_tracing();
+
+        mint_and_send_verification_email(MintVerificationEmailParams {
+            db: &db,
+            email,
+            name: "Jane",
+            user_id: None,
+            frontend_url,
+            self_hosted: false,
+            dev_mode: false,
+            token_type: "email_verification",
+            verification_path: "/signup/complete",
+            expire_hours: None,
+            email_kind: VerificationEmailKind::Verification,
+        })
+        .await
+        .expect("mint should not error");
+
+        assert_eq!(
+            count_tokens_of_type(&db, email, "email_verification").await,
+            1,
+            "the token must still be minted — only the log line is affected"
+        );
+
+        for (level, message) in logs.events() {
+            assert!(
+                !message.contains(frontend_url) && !message.contains("token="),
+                "SaaS production (self_hosted: false, dev_mode: false) must never log the \
+                 live verification link in any event, got a {level:?} event: {message}"
+            );
+        }
+    }
+
+    /// Sibling positive case: `self_hosted: true` must still log the link —
+    /// the documented self-hosted operator escape valve KYO-763 preserves.
+    #[tokio::test]
+    async fn mint_and_send_verification_email_logs_the_link_when_self_hosted() {
+        let db = test_pool().await;
+        let email = "kyo763-self-hosted@example.com";
+        let frontend_url = "https://app.example.com";
+
+        let logs = capture_tracing();
+
+        mint_and_send_verification_email(MintVerificationEmailParams {
+            db: &db,
+            email,
+            name: "Jane",
+            user_id: None,
+            frontend_url,
+            self_hosted: true,
+            dev_mode: false,
+            token_type: "email_verification",
+            verification_path: "/signup/complete",
+            expire_hours: None,
+            email_kind: VerificationEmailKind::Verification,
+        })
+        .await
+        .expect("mint should not error");
+
+        assert!(
+            logs.events_at(Level::INFO)
+                .iter()
+                .any(|(_, msg)| msg.contains("Verification link (email_verification)")
+                    && msg.contains(frontend_url)
+                    && msg.contains(email)),
+            "a self-hosted deployment must still get the full link in its own logs; \
+             captured: {:?}",
+            logs.events()
+        );
+    }
+
+    /// The other preserved case: a locally run `dev-server`-profile build
+    /// (`dev_mode: true`) keeps the link even in SaaS-mode config
+    /// (`self_hosted: false`) — this is the shape CLAUDE.md's "Local Dev
+    /// Server" section runs dev.kyomi.ai under, and it's how local/agent
+    /// testing recovers a token with no mailbox to check.
+    #[tokio::test]
+    async fn mint_and_send_verification_email_logs_the_link_in_dev_mode() {
+        let db = test_pool().await;
+        let email = "kyo763-dev-mode@example.com";
+        let frontend_url = "https://app.example.com";
+
+        let logs = capture_tracing();
+
+        mint_and_send_verification_email(MintVerificationEmailParams {
+            db: &db,
+            email,
+            name: "Jane",
+            user_id: None,
+            frontend_url,
+            self_hosted: false,
+            dev_mode: true,
+            token_type: "email_verification",
+            verification_path: "/signup/complete",
+            expire_hours: None,
+            email_kind: VerificationEmailKind::Verification,
+        })
+        .await
+        .expect("mint should not error");
+
+        assert!(
+            logs.events_at(Level::INFO)
+                .iter()
+                .any(|(_, msg)| msg.contains("Verification link (email_verification)")
+                    && msg.contains(frontend_url)
+                    && msg.contains(email)),
+            "a locally run dev-server-profile build must still get the full link; \
+             captured: {:?}",
             logs.events()
         );
     }
