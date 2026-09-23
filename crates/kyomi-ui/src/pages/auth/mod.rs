@@ -13,6 +13,4 @@ pub mod login;
 pub mod oauth_complete;
 pub mod passkey_recovery;
 pub mod passkey_recovery_complete;
-pub mod passkey_signup_complete;
 pub mod signup_complete;
-pub mod verify_email;

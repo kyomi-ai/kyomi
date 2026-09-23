@@ -358,13 +358,14 @@ mod submit_button_guard_tests {
             }
         }
 
-        // A floor, not an exact count: 11 `<form on:submit=` blocks existed
-        // under src/pages when this test was written. Hardcoding 11 would
-        // fail the next time anyone adds a form; 10 stays comfortably
-        // below that while still catching "the walk found nothing."
+        // A floor, not an exact count: 10 `<form on:submit=` blocks exist
+        // under src/pages as of KYO-729 (11 minus the one deleted with
+        // `passkey_signup_complete.rs`). Hardcoding 10 would fail the next
+        // time anyone adds a form; 9 stays comfortably below that while
+        // still catching "the walk found nothing."
         assert!(
-            checked_forms >= 10,
-            "expected to find at least 10 `<form on:submit=` blocks under src/pages, found \
+            checked_forms >= 9,
+            "expected to find at least 9 `<form on:submit=` blocks under src/pages, found \
              {checked_forms} — the directory walk or the `<form` scanner may be broken"
         );
     }

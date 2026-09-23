@@ -174,7 +174,6 @@ fn is_public_route(path: &str) -> bool {
     ) || path.starts_with("signup/")
         || path.starts_with("auth/")
         || path.starts_with("account/")
-        || path.starts_with("verify")
 }
 
 /// Files that should never be cached (always revalidated by the browser).
@@ -553,8 +552,6 @@ mod tests {
             "billing/return",
             "auth/google/callback",
             "account/recover",
-            "verify",
-            "verify/email",
         ] {
             assert!(is_public_route(path), "{path} should be public");
         }
