@@ -27,10 +27,27 @@
 pub const PASSKEY_LOGIN: &str = "passkey_login";
 
 /// `purpose` for a passkey registration challenge minted as part of the
-/// email-verification-token-gated signup flow.
+/// (now-retired) email-verification-token-gated *standalone passkey signup*
+/// flow.
 ///
-/// Minted by `auth_service::passkey_signup_complete_service`.
-/// Consumed by `auth_service::passkey_register_complete_service`.
+/// **Retired (KYO-729).** The mint site (`auth_service::
+/// passkey_signup_complete_service`) and its consumer
+/// (`auth_service::passkey_register_complete_service`) were both deleted —
+/// the standalone "Sign up with Passkey" flow no longer exists, so nothing
+/// mints or checks this purpose any more.
+///
+/// This constant MUST stay, and its value MUST NEVER be reused for a new
+/// purpose. Every challenge blob ever minted under the old flow has this
+/// exact string in its `purpose` field; those blobs expire out of the KV
+/// store on their own TTL, but this module's whole safety argument is that
+/// `has_purpose` fails closed by construction — a value nothing lists as
+/// `allowed` is rejected everywhere. Reusing `"passkey_signup"` for a
+/// different flow would silently resurrect that argument's blind spot: an
+/// old, outstanding challenge minted under the dead flow (however
+/// improbable — KV entries here are short-lived) would validate against the
+/// *new* flow's completion endpoint, because the purpose string alone is
+/// what every consumer trusts. Mint a new constant with a new string for
+/// any future flow instead.
 pub const PASSKEY_SIGNUP: &str = "passkey_signup";
 
 /// `purpose` for a passkey registration challenge minted as part of the
@@ -38,9 +55,10 @@ pub const PASSKEY_SIGNUP: &str = "passkey_signup";
 ///
 /// Minted by `auth_service::passkey_recovery_verify_service`.
 /// Consumed by `auth_service::passkey_recovery_complete_service` (KYO-284
-/// split this off `passkey_register_complete_service`, which now rejects
-/// this purpose — recovery completion additionally requires the HttpOnly
-/// `recovery_session` cookie minted alongside this challenge).
+/// split this off the signup-only registration-complete path — since
+/// retired in full by KYO-729 — because recovery completion additionally
+/// requires the HttpOnly `recovery_session` cookie minted alongside this
+/// challenge).
 pub const PASSKEY_RECOVERY: &str = "passkey_recovery";
 
 /// `purpose` for a passkey registration challenge minted on behalf of an

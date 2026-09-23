@@ -221,8 +221,7 @@ pub async fn signup_start_service(
                 // KYO-683 phase 1: no `users` row is written here anymore.
                 // Only a verification token is minted and emailed; the row
                 // itself is created (verified = true) when that token is
-                // redeemed, by `signup_complete_service` /
-                // `signup_verify_service` below.
+                // redeemed, by `signup_verify_service` below.
                 mint_verification_email_or_notify_existing(db, email, name, frontend_url, None)
                     .await?;
                 Ok(SignupStartServiceResult::VerificationRequired)
@@ -378,11 +377,9 @@ struct MintVerificationEmailParams<'a> {
 /// and send the verification email in the background.
 ///
 /// Shared primitive behind every "mint a token + email a link" step: the
-/// brand-new-signup case for both password signup ("email_verification"
-/// token type, `/signup/complete` landing page) and passkey signup ("signup"
-/// token type, `/auth/passkey-signup` landing page); the resend case
-/// (`resend_verification_service`, same token type and landing page as
-/// signup); and `passkey_recovery_start_service` further down
+/// brand-new-signup case ("email_verification" token type, `/signup/complete`
+/// landing page); the resend case (`resend_verification_service`, same token
+/// type and landing page as signup); and `passkey_recovery_start_service` further down
 /// ("passkey_recovery" token type, 15-minute expiry,
 /// `/auth/recover-passkey/complete` landing page, and the
 /// `send_passkey_recovery` email rather than the generic verification one).
@@ -446,10 +443,9 @@ struct ExistingAccountNoticeParams<'a> {
 /// Deliberately mints **no** token — there is nothing to verify — and sends
 /// a different email: a sign-in link plus the account's active auth
 /// methods, rather than a verification link. This is what lets the
-/// `Some(_)` (verified user) arms of `signup_start_service` and
-/// `passkey_signup_start_service` stop being a silent dead end while still
-/// returning the exact same `VerificationRequired` result the other two
-/// account states return.
+/// `Some(_)` (verified user) arm of `signup_start_service` stop being a
+/// silent dead end while still returning the exact same
+/// `VerificationRequired` result the other account states return.
 ///
 /// The enumeration-resistance property those callers guard only constrains
 /// the *HTTP response* — it says nothing about the mailbox, which only the
@@ -557,10 +553,9 @@ struct EstablishVerifiedAccountParams<'a> {
     db: &'a DbPool,
     email: &'a str,
     /// Display name to set, if the redeeming step collected one.
-    /// `signup_verify_service` forwards whatever its own caller passed
-    /// (`None` for a bare redemption); `signup_complete_service` and
-    /// `passkey_signup_complete_service` both collect it up front and pass
-    /// `Some`.
+    /// `signup_verify_service` forwards whatever its own caller passed —
+    /// `None` for a bare redemption, `Some` if the caller's "Confirm" step
+    /// already collected one.
     name: Option<&'a str>,
     marketing_consent: bool,
     config: Option<&'a kyomi_core::Config>,
@@ -572,11 +567,9 @@ struct EstablishVerifiedAccountParams<'a> {
 /// ensure a workspace exists.
 ///
 /// KYO-683 phase 1: no signup flow writes a `users` row until its
-/// verification token is redeemed. This is the shared "redemption" step —
-/// `signup_verify_service`, `signup_complete_service`, and
-/// `passkey_signup_complete_service` all call it, because all three now have
-/// to create the account rather than find a row an earlier step already
-/// wrote.
+/// verification token is redeemed. This is that redemption step —
+/// `signup_verify_service` calls it, because it now has to create the
+/// account rather than find a row an earlier step already wrote.
 ///
 /// - No row for `email` exists: create one, pre-verified, and fire the
 ///   admin `notify_signup` notification (a genuinely new account).
@@ -720,12 +713,12 @@ pub struct SignupVerifyParams<'a> {
 ///
 /// KYO-683 phase 1: this is the contract that actually creates the `users`
 /// row for password signup — `signup_start_service` only ever mints and
-/// emails the token. Unlike `signup_complete_service`, this contract
-/// collects no password; it exists for the phase-2 (KYO-728)
-/// confirm-then-credentials flow, where the password is collected in a
-/// later, separate step against the now-authenticated session. A display
-/// name is optional here — pass `None` for a bare redemption, or `Some` if
-/// the caller's "Confirm" step already collected one.
+/// emails the token. This contract collects no password; it exists for the
+/// phase-2 (KYO-728) confirm-then-credentials flow, where the password is
+/// collected in a later, separate step against the now-authenticated
+/// session. A display name is optional here — pass `None` for a bare
+/// redemption, or `Some` if the caller's "Confirm" step already collected
+/// one.
 pub async fn signup_verify_service(
     params: SignupVerifyParams<'_>,
 ) -> kyomi_core::Result<SignupVerifyServiceResult> {
@@ -759,102 +752,6 @@ pub async fn signup_verify_service(
 
     let sess = create_authenticated_session(db, kv, jwt_secret, &user, device).await?;
     Ok(SignupVerifyServiceResult::Success(Box::new(sess)))
-}
-
-// ---------------------------------------------------------------------------
-// Signup complete (email verification token flow)
-// ---------------------------------------------------------------------------
-
-/// Outcome of `signup_complete_service`.
-pub enum SignupCompleteServiceResult {
-    /// Validation error (terms not accepted, bad password, etc.).
-    Error { message: String },
-    /// Invalid or expired signup token.
-    InvalidToken,
-    /// Account created and authenticated — server_fn should set cookies.
-    Success(Box<AuthenticatedSession>),
-}
-
-/// Parameters for `signup_complete_service`.
-pub struct SignupCompleteParams<'a> {
-    pub db: &'a DbPool,
-    pub kv: &'a KVPool,
-    pub jwt_secret: &'a str,
-    pub token: &'a str,
-    pub name: &'a str,
-    pub password: &'a str,
-    pub terms_accepted: bool,
-    pub marketing_consent: bool,
-    pub device: &'a DeviceInfo,
-    pub config: Option<&'a kyomi_core::Config>,
-    pub slack_feedback_webhook_url: Option<&'a str>,
-    pub support_email: &'a str,
-}
-
-/// Full signup-complete orchestration (email verification token flow).
-pub async fn signup_complete_service(
-    params: SignupCompleteParams<'_>,
-) -> kyomi_core::Result<SignupCompleteServiceResult> {
-    let SignupCompleteParams {
-        db, kv, jwt_secret, token, name, password, terms_accepted, marketing_consent, device, config,
-        slack_feedback_webhook_url, support_email,
-    } = params;
-    if !terms_accepted {
-        return Ok(SignupCompleteServiceResult::Error {
-            message: "You must accept the Terms of Service and Privacy Policy to create an account.".to_string(),
-        });
-    }
-    if password.len() < 8 {
-        return Ok(SignupCompleteServiceResult::Error {
-            message: "Password must be at least 8 characters".to_string(),
-        });
-    }
-    let name = name.trim().to_string();
-    if name.is_empty() {
-        return Ok(SignupCompleteServiceResult::Error {
-            message: "Name is required".to_string(),
-        });
-    }
-
-    // Verify email verification token
-    let email =
-        crate::token_service::verify_verification_token(db, token, "email_verification").await?;
-    let Some(email) = email else {
-        return Ok(SignupCompleteServiceResult::InvalidToken);
-    };
-
-    // KYO-683 phase 1: this is what creates (or adopts) the `users` row —
-    // there is no pre-existing row from signup-start to find anymore.
-    let user = establish_verified_account(EstablishVerifiedAccountParams {
-        db,
-        email: &email,
-        name: Some(&name),
-        marketing_consent,
-        config,
-        slack_feedback_webhook_url,
-        support_email,
-    })
-    .await?;
-
-    // Set the password after the account exists — `security_service::
-    // set_password` needs a `user_id` to upsert the auth method against, and
-    // that row may not have existed before the call above (the previous
-    // "hash first, fail early before DB writes" ordering isn't available to
-    // a helper shared with signup_verify_service, which never touches a
-    // password at all). A hash failure or an already-set password (the
-    // adopt path can find one, e.g. an OAuth account manually adding a
-    // password before clicking a stale signup link) now surfaces as this
-    // service's own `Error` variant rather than a 500, and never leaves the
-    // account half-established — it's already fully established at this
-    // point, just without this password.
-    if let Err(e) = crate::security_service::set_password(db, &user.user_id, password).await {
-        return Ok(SignupCompleteServiceResult::Error {
-            message: e.user_message().to_string(),
-        });
-    }
-
-    let sess = create_authenticated_session(db, kv, jwt_secret, &user, device).await?;
-    Ok(SignupCompleteServiceResult::Success(Box::new(sess)))
 }
 
 // ---------------------------------------------------------------------------
@@ -1665,21 +1562,24 @@ pub async fn passkey_login_complete_service(
 }
 
 // ---------------------------------------------------------------------------
-// Passkey register complete
+// Passkey registration verify-and-store
 // ---------------------------------------------------------------------------
 
 /// Verify a completed WebAuthn registration ceremony and persist the
 /// resulting passkey credential.
 ///
-/// Shared by `passkey_register_complete_service` and
-/// `passkey_recovery_complete_service` (KYO-284). Before this extraction,
-/// the verify-and-store sequence below — `finish_registration` → cred-id
-/// base64 encoding → passkey serialization → counter extraction →
-/// `add_passkey_to_user` — was duplicated byte-for-byte between the two
-/// services. That's precisely the failure mode that produced
-/// KYO-279/281/282 in this subsystem: a future fix to one copy (e.g. the
-/// counter-extraction fallback, or a new validation step) silently missing
-/// the other.
+/// Used by `passkey_recovery_complete_service` (KYO-284). Originally
+/// extracted because the verify-and-store sequence below —
+/// `finish_registration` → cred-id base64 encoding → passkey serialization →
+/// counter extraction → `add_passkey_to_user` — was duplicated byte-for-byte
+/// between that service and the since-retired (KYO-729) unauthenticated
+/// passkey-signup completion. That was precisely the failure mode that
+/// produced KYO-279/281/282 in this subsystem: a future fix to one copy
+/// (e.g. the counter-extraction fallback, or a new validation step) silently
+/// missing the other. Kept as its own function rather than inlined back in
+/// now that only one caller remains, in case a future authenticated
+/// registration path (e.g. the add-device flow, currently its own
+/// implementation in `security_service`) needs to share it again.
 ///
 /// Returns the base64url (no padding) encoded credential id on success.
 async fn verify_and_store_passkey(
@@ -1726,85 +1626,6 @@ async fn verify_and_store_passkey(
     .await?;
 
     Ok(credential_id_b64)
-}
-
-/// Full passkey-register-complete orchestration.
-///
-/// Returns an `AuthenticatedSession` on success (auto-login after registration).
-///
-/// Signup only (KYO-284) — see the purpose gate below. Recovery completion
-/// has its own service, [`passkey_recovery_complete_service`].
-pub async fn passkey_register_complete_service(
-    db: &DbPool,
-    kv: &KVPool,
-    jwt_secret: &str,
-    webauthn: &webauthn_rs::Webauthn,
-    challenge_id: &str,
-    credential_json: &str,
-    device: &DeviceInfo,
-) -> kyomi_core::Result<AuthenticatedSession> {
-    use webauthn_rs::prelude::*;
-
-    let credential: RegisterPublicKeyCredential =
-        serde_json::from_str(credential_json)
-            .map_err(|e| kyomi_core::Error::Internal(format!("Invalid credential JSON: {e}")))?;
-
-    // Get and delete challenge
-    let challenge_data = crate::redis_ops::get_webauthn_challenge(kv, challenge_id)
-        .await?
-        .ok_or_else(|| {
-            kyomi_core::Error::Internal("Invalid or expired challenge".into())
-        })?;
-    crate::redis_ops::delete_webauthn_challenge(kv, challenge_id).await?;
-
-    // Reject a challenge minted by any other flow (KYO-279/KYO-284) —
-    // deliberately NOT PASSKEY_RECOVERY: recovery registration has its own
-    // service (`passkey_recovery_complete_service`) which additionally
-    // requires an HttpOnly `recovery_session` cookie binding the caller to
-    // the browser session that redeemed the recovery token. Accepting a
-    // recovery-purpose challenge here would let a caller holding only a
-    // `challenge_id` bypass that cookie gate. Same rejection as "not found"
-    // so this can't be used to probe purpose.
-    if !crate::webauthn_challenge_purpose::has_purpose(
-        &challenge_data,
-        &[crate::webauthn_challenge_purpose::PASSKEY_SIGNUP],
-    ) {
-        return Err(kyomi_core::Error::Internal(
-            "Invalid or expired challenge".into(),
-        ));
-    }
-
-    // Extract challenge state
-    let reg_state: PasskeyRegistration =
-        serde_json::from_value(challenge_data["registration_state"].clone())
-            .map_err(|e| kyomi_core::Error::Internal(format!("Deserialize reg state: {e}")))?;
-    let email = challenge_data["email"]
-        .as_str()
-        .ok_or_else(|| kyomi_core::Error::Internal("Missing email in challenge".into()))?;
-    let user_id = challenge_data["user_id"]
-        .as_str()
-        .ok_or_else(|| kyomi_core::Error::Internal("Missing user_id in challenge".into()))?;
-    let device_name = challenge_data["device_name"]
-        .as_str()
-        .unwrap_or("Unknown Device");
-
-    let credential_id_b64 =
-        verify_and_store_passkey(webauthn, &credential, &reg_state, db, user_id, device_name)
-            .await?;
-
-    // Get user and create session
-    let user = crate::user_service::get_user_by_id(db, user_id)
-        .await?
-        .ok_or_else(|| kyomi_core::Error::Internal("User not found".into()))?;
-
-    let sess = create_authenticated_session(db, kv, jwt_secret, &user, device).await?;
-    tracing::info!(
-        user_id = %user.user_id,
-        email = %email,
-        credential_id = %credential_id_b64,
-        "Passkey registered and user auto-logged in"
-    );
-    Ok(sess)
 }
 
 // ---------------------------------------------------------------------------
@@ -2031,276 +1852,6 @@ async fn revoke_sessions_and_mint_recovery_session(
     );
 
     create_authenticated_session(db, kv, jwt_secret, user, device).await
-}
-
-// ---------------------------------------------------------------------------
-// Passkey signup start
-// ---------------------------------------------------------------------------
-
-/// Outcome of `passkey_signup_start_service`.
-pub enum PasskeySignupStartServiceResult {
-    /// Self-hosted SMTP-less: a "signup" verification token was minted
-    /// directly (no email sent) — the caller should return it to the client
-    /// so the frontend can navigate straight to
-    /// `/auth/passkey-signup?token=...` to complete the WebAuthn ceremony.
-    TokenIssued { token: String },
-    /// SaaS / SMTP-configured flow: verification email sent (or, for an
-    /// account that already exists, deliberately not sent — see the
-    /// `Some(_)` arm below). Identical across both account states so the
-    /// response can't be used to enumerate registered emails.
-    VerificationRequired,
-    /// Rate limited.
-    RateLimited { retry_after_secs: u64 },
-    /// Non-fatal error (registration closed, etc.).
-    Error { message: String },
-}
-
-/// Parameters for `passkey_signup_start_service`.
-pub struct PasskeySignupStartParams<'a> {
-    pub db: &'a DbPool,
-    pub kv: &'a KVPool,
-    pub email: &'a str,
-    pub name: Option<&'a str>,
-    pub ip: &'a str,
-    pub self_hosted: bool,
-    pub smtp_configured: bool,
-    pub frontend_url: &'a str,
-}
-
-/// Full passkey-signup-start orchestration.
-///
-/// Modelled directly on `signup_start_service` above, with two differences:
-/// there is no password to collect, and the verification token is minted
-/// with type `"signup"` (not `"email_verification"`) at the
-/// `/auth/passkey-signup` landing page — the type
-/// `passkey_signup_complete_service` verifies. No `AuthenticatedSession` is
-/// ever created here (unlike the password flow's SMTP-less one-step path):
-/// passkey signup always has a second step — the WebAuthn ceremony on
-/// `/auth/passkey-signup` — so this function's job ends at "the user now has
-/// a way to reach that page," whether via an emailed link or a token handed
-/// straight back to the SMTP-less caller.
-///
-/// Like `SignupStartParams`, carries no `slack_feedback_webhook_url` /
-/// `support_email` (KYO-683 phase 1) — the admin signup notification those
-/// fed now fires from `establish_verified_account`, at redemption
-/// (`passkey_signup_complete_service`), not here.
-///
-/// # Security (KYO-279 / KYO-280)
-///
-/// This function must never mint a `"signup"` token — and therefore never
-/// let the client reach a WebAuthn *registration* challenge — for an email
-/// address that already has an account. The `Some(_)` arm below is
-/// deliberately a no-op (beyond the existing-account notice email) that
-/// returns the exact same `VerificationRequired` result as the `None` arm,
-/// both to close that hole and to avoid recreating the account-enumeration
-/// oracle the REST implementation this replaced had: it returned a distinct
-/// `BadRequest` for verified users, which let a caller tell registered
-/// emails apart from unregistered ones. Mirror `signup_start_service`'s
-/// enumeration-safe behavior here, not the deleted route's.
-pub async fn passkey_signup_start_service(
-    params: PasskeySignupStartParams<'_>,
-) -> kyomi_core::Result<PasskeySignupStartServiceResult> {
-    let PasskeySignupStartParams {
-        db, kv, email, name, ip, self_hosted, smtp_configured, frontend_url,
-    } = params;
-
-    // Rate limit — shares the "signup" bucket with password signup.
-    let rate = crate::rate_limiter::check_rate_limit(kv, ip, "signup", None).await?;
-    if !rate.allowed {
-        return Ok(PasskeySignupStartServiceResult::RateLimited {
-            retry_after_secs: rate.retry_after_secs,
-        });
-    }
-
-    let smtp_less_self_hosted = self_hosted && !smtp_configured;
-
-    // Look up existing user
-    let existing_user = crate::user_service::get_user_by_email(db, email).await?;
-
-    // Self-hosted without SMTP: only first user or invited users may register
-    if smtp_less_self_hosted
-        && existing_user.is_none()
-        && crate::user_service::has_any_users(db).await?
-    {
-        let pending =
-            crate::workspace_service::get_pending_invitations_for_email(db, email).await?;
-        if pending.is_empty() {
-            return Ok(PasskeySignupStartServiceResult::Error {
-                message: "Registration is closed. Ask your administrator to invite you."
-                    .to_string(),
-            });
-        }
-    }
-
-    match existing_user {
-        None => {
-            if smtp_less_self_hosted {
-                // Create pre-verified — no email needed. Workspace creation
-                // is deferred to passkey_signup_complete_service, which runs
-                // after the WebAuthn ceremony.
-                let user = crate::user_service::create_user(db, email, name, true).await?;
-                let raw_token =
-                    crate::token_service::create_verification_token(db, email, "signup").await?;
-                tracing::info!(
-                    email = %email,
-                    user_id = %user.user_id,
-                    "Self-hosted SMTP-less: created passkey user as pre-verified, token issued directly"
-                );
-                Ok(PasskeySignupStartServiceResult::TokenIssued { token: raw_token })
-            } else {
-                // KYO-683 phase 1: no `users` row is written here anymore —
-                // only a "signup" token is minted and emailed. The row
-                // itself is created (verified = true) by
-                // `passkey_signup_complete_service` when that token is
-                // redeemed, after the WebAuthn ceremony.
-                mint_and_send_verification_email(MintVerificationEmailParams {
-                    db,
-                    email,
-                    name: name.unwrap_or_default(),
-                    user_id: None,
-                    frontend_url,
-                    token_type: "signup",
-                    verification_path: "/auth/passkey-signup",
-                    expire_hours: None,
-                    email_kind: VerificationEmailKind::Verification,
-                })
-                .await?;
-                Ok(PasskeySignupStartServiceResult::VerificationRequired)
-            }
-        }
-        Some(user) => {
-            // An account already exists for this email — verified, or (only
-            // possible for a pre-KYO-683 row) still pending. Mint no
-            // "signup" token either way (see the security note on this
-            // function) and return the same VerificationRequired result as
-            // the `None` arm above. That used to mean sending nothing at
-            // all for a verified account — the KYO-681 dead end. Instead,
-            // send a "you already have an account" notice to the mailbox,
-            // which is the one channel safe to be specific on; the HTTP
-            // response stays identical across both account states.
-            let user_name = user.name.clone().unwrap_or_default();
-            notify_existing_verified_account(ExistingAccountNoticeParams {
-                db,
-                email,
-                name: &user_name,
-                user_id: &user.user_id,
-                frontend_url,
-            })
-            .await?;
-            Ok(PasskeySignupStartServiceResult::VerificationRequired)
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Passkey signup complete
-// ---------------------------------------------------------------------------
-
-/// Parameters for `passkey_signup_complete_service`.
-pub struct PasskeySignupCompleteParams<'a> {
-    pub db: &'a DbPool,
-    pub kv: &'a KVPool,
-    pub webauthn: &'a webauthn_rs::Webauthn,
-    pub token: &'a str,
-    pub name: &'a str,
-    pub terms_accepted: bool,
-    pub marketing_consent: bool,
-    pub config: Option<&'a kyomi_core::Config>,
-    pub slack_feedback_webhook_url: Option<&'a str>,
-    pub support_email: &'a str,
-}
-
-/// Full passkey-signup-complete orchestration.
-///
-/// Verifies the email verification token, sets up the user account, and
-/// generates a WebAuthn registration challenge. Returns the challenge for the
-/// client to complete via `passkey_register_complete`.
-pub async fn passkey_signup_complete_service(
-    params: PasskeySignupCompleteParams<'_>,
-) -> kyomi_core::Result<Result<(String, String), String>> {
-    let PasskeySignupCompleteParams {
-        db, kv, webauthn, token, name, terms_accepted, marketing_consent, config,
-        slack_feedback_webhook_url, support_email,
-    } = params;
-    // Returns Ok((challenge_id, creation_challenge)) or Err(message)
-
-    if !terms_accepted {
-        return Ok(Err(
-            "You must accept the Terms of Service and Privacy Policy to create an account."
-                .to_string(),
-        ));
-    }
-    let name = name.trim().to_string();
-    if name.is_empty() {
-        return Ok(Err("Name is required".to_string()));
-    }
-
-    // Verify token. Must be "signup" — the type minted for this exact URL
-    // (`/auth/passkey-signup`) — not
-    // "email_verification", which is minted by the separate *password*
-    // signup flow. Accepting "email_verification" here (KYO-282) meant a
-    // password-signup verification link would also validate on the
-    // passkey-signup page, letting one flow's token complete the other.
-    let email =
-        crate::token_service::verify_verification_token(db, token, "signup").await?;
-    let Some(email) = email else {
-        return Ok(Err(
-            "Invalid or expired signup link. Please request a new one.".to_string(),
-        ));
-    };
-
-    // KYO-683 phase 1: this is what creates (or adopts) the `users` row —
-    // the self-hosted-SMTP-less start path already created one (verified,
-    // no workspace yet); the SaaS start path created none at all. Either
-    // way, `establish_verified_account` leaves it verified, with terms
-    // recorded and a workspace.
-    let user = establish_verified_account(EstablishVerifiedAccountParams {
-        db,
-        email: &email,
-        name: Some(&name),
-        marketing_consent,
-        config,
-        slack_feedback_webhook_url,
-        support_email,
-    })
-    .await?;
-
-    // Generate WebAuthn registration challenge
-    let user_unique_id = webauthn_user_id_inner(&email);
-    let creds = crate::user_service::get_passkey_credentials(db, &user.user_id).await?;
-    let exclude_ids = build_exclude_ids(&creds);
-    let exclude_opt = if exclude_ids.is_empty() {
-        None
-    } else {
-        Some(exclude_ids)
-    };
-
-    let (ccr, reg_state) =
-        crate::webauthn::start_registration(webauthn, user_unique_id, &email, &name, exclude_opt)
-            .map_err(|e| kyomi_core::Error::Internal(e.to_string()))?;
-
-    let challenge_id = crate::redis_ops::generate_token();
-    let reg_state_json = serde_json::to_value(&reg_state)
-        .map_err(|e| kyomi_core::Error::Internal(format!("Serialize reg state: {e}")))?;
-    let challenge_data = serde_json::json!({
-        "registration_state": reg_state_json,
-        "email": email,
-        "user_name": &name,
-        "user_id": user.user_id,
-        "device_name": "Unknown Device",
-        "purpose": crate::webauthn_challenge_purpose::PASSKEY_SIGNUP,
-    });
-    crate::redis_ops::store_webauthn_challenge(kv, &challenge_id, &challenge_data).await?;
-
-    let creation_challenge = serde_json::to_string(&ccr)
-        .map_err(|e| kyomi_core::Error::Internal(format!("Serialize creation challenge: {e}")))?;
-
-    tracing::info!(
-        email = %email,
-        user_id = %user.user_id,
-        "Passkey signup token verified, WebAuthn challenge generated"
-    );
-    Ok(Ok((challenge_id, creation_challenge)))
 }
 
 // ---------------------------------------------------------------------------
@@ -2860,10 +2411,10 @@ fn spawn_verification_email(
 // Tests — WebAuthn challenge purpose binding (KYO-279)
 // ---------------------------------------------------------------------------
 //
-// These exercise the real `passkey_login_complete_service` and
-// `passkey_register_complete_service` orchestration against an in-memory KV
-// store and an in-memory (migrated) SQLite pool — no network, no real
-// authenticator ceremony. The credential/assertion JSON fixtures are
+// These exercise the real `passkey_login_complete_service` orchestration
+// against an in-memory KV store and an in-memory (migrated) SQLite pool —
+// no network, no real authenticator ceremony. The credential/assertion
+// JSON fixtures are
 // structurally-valid captures from webauthn-rs's own test suite
 // (`webauthn-rs-core`'s `core.rs` `test_authentication` /
 // `test_registration_yk`), used only so the JSON parses into the right Rust
@@ -3009,52 +2560,6 @@ mod tests {
         ));
     }
 
-    async fn register_complete_with_purpose(
-        purpose_field: Option<&str>,
-        include_registration_state: bool,
-    ) -> kyomi_core::Result<AuthenticatedSession> {
-        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
-        let db = test_pool().await;
-        let webauthn = test_webauthn();
-        let device = test_device();
-
-        let challenge_id = "register-challenge-1".to_string();
-        let mut challenge_data = serde_json::json!({
-            "email": "victim@example.com",
-            "user_id": "victim-user-id",
-            "device_name": "Test Device",
-        });
-        if include_registration_state {
-            let (_ccr, reg_state) = crate::webauthn::start_registration(
-                &webauthn,
-                Uuid::new_v4(),
-                "victim@example.com",
-                "Victim",
-                None,
-            )
-            .expect("start registration");
-            challenge_data["registration_state"] =
-                serde_json::to_value(&reg_state).expect("serialize reg state");
-        }
-        if let Some(p) = purpose_field {
-            challenge_data["purpose"] = serde_json::json!(p);
-        }
-        crate::redis_ops::store_webauthn_challenge(&kv, &challenge_id, &challenge_data)
-            .await
-            .expect("store challenge");
-
-        passkey_register_complete_service(
-            &db,
-            &kv,
-            "test-secret",
-            &webauthn,
-            &challenge_id,
-            REGISTER_CREDENTIAL_JSON,
-            &device,
-        )
-        .await
-    }
-
     /// Assert a purpose-gate rejection: the exact `Error::Internal` message
     /// the "challenge not found" path also uses — no distinguishing oracle.
     fn assert_invalid_or_expired_challenge(result: kyomi_core::Result<AuthenticatedSession>) {
@@ -3067,66 +2572,6 @@ mod tests {
             ),
             Ok(_) => panic!("expected Error::Internal(\"Invalid or expired challenge\"), got Ok"),
         }
-    }
-
-    #[tokio::test]
-    async fn register_complete_rejects_challenge_minted_for_login() {
-        let result =
-            register_complete_with_purpose(Some(purpose::PASSKEY_LOGIN), false).await;
-        assert_invalid_or_expired_challenge(result);
-    }
-
-    #[tokio::test]
-    async fn register_complete_rejects_challenge_minted_for_add_device() {
-        let result =
-            register_complete_with_purpose(Some(purpose::PASSKEY_ADD_DEVICE), false).await;
-        assert_invalid_or_expired_challenge(result);
-    }
-
-    #[tokio::test]
-    async fn register_complete_rejects_missing_purpose() {
-        let result = register_complete_with_purpose(None, false).await;
-        assert_invalid_or_expired_challenge(result);
-    }
-
-    #[tokio::test]
-    async fn register_complete_rejects_unknown_purpose() {
-        let result = register_complete_with_purpose(Some("bogus"), false).await;
-        assert_invalid_or_expired_challenge(result);
-    }
-
-    #[tokio::test]
-    async fn register_complete_accepts_signup_purpose() {
-        // Correct purpose clears the gate; verification then fails for an
-        // unrelated reason (fixture credential doesn't match this reg_state)
-        // — a *different* error than the purpose-gate rejection, proving the
-        // purpose check specifically did not block it.
-        let result =
-            register_complete_with_purpose(Some(purpose::PASSKEY_SIGNUP), true).await;
-        let err = match result {
-            Err(e) => e,
-            Ok(_) => panic!("fixture credential must fail real verification"),
-        };
-        let msg = err.to_string();
-        assert_ne!(msg, "internal: Invalid or expired challenge");
-        assert!(
-            msg.contains("registration failed"),
-            "expected a WebAuthn verification failure, got: {msg}"
-        );
-    }
-
-    #[tokio::test]
-    async fn register_complete_rejects_challenge_minted_for_recovery() {
-        // KYO-284: recovery registration was split into its own service
-        // (`passkey_recovery_complete_service`, tested below) which
-        // additionally requires the HttpOnly `recovery_session` cookie.
-        // `passkey_register_complete_service` must now reject a
-        // PASSKEY_RECOVERY-purpose challenge exactly like an unrecognised
-        // one — accepting it here would let a caller holding only a bare
-        // `challenge_id` bypass that cookie gate.
-        let result =
-            register_complete_with_purpose(Some(purpose::PASSKEY_RECOVERY), true).await;
-        assert_invalid_or_expired_challenge(result);
     }
 
     // -----------------------------------------------------------------
@@ -3754,6 +3199,12 @@ mod tests {
 
     const TOKEN_TYPE_PASSWORD_SIGNUP: &str = "email_verification";
     const TOKEN_TYPE_PASSWORD_RECOVERY: &str = "account_recovery";
+    /// KYO-729 retired the standalone passkey-signup flow that used to mint
+    /// and verify this token type — nothing mints a `"signup"` token any
+    /// more. Kept only as a negative-test fixture below: a stray token of
+    /// this (now-dead) type must still fail to validate against every
+    /// surviving flow, the same fail-closed property `verify_verification_token`
+    /// gives every other type here.
     const TOKEN_TYPE_PASSKEY_SIGNUP: &str = "signup";
     const TOKEN_TYPE_PASSKEY_RECOVERY: &str = "passkey_recovery";
 
@@ -3771,7 +3222,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn password_signup_verify_only_accepts_its_own_token_type() {
+    async fn signup_verify_only_accepts_its_own_token_type() {
         for &token_type in &ALL_VERIFICATION_TOKEN_TYPES {
             let db = test_pool().await;
             let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
@@ -3784,32 +3235,19 @@ mod tests {
 
             let token = mint_token(&db, email, token_type).await;
 
-            let result = signup_complete_service(SignupCompleteParams {
-                db: &db,
-                kv: &kv,
-                jwt_secret: "test-secret",
-                token: &token,
-                name: "Test User",
-                password: "password123",
-                terms_accepted: true,
-                marketing_consent: false,
-                device: &device,
-                config: None,
-                slack_feedback_webhook_url: None,
-                support_email: "support@example.com",
-            })
-            .await
-            .expect("service call should not error");
+            let result = signup_verify_service(signup_verify_params(&db, &kv, &token, &device, true))
+                .await
+                .expect("service call should not error");
 
             if token_type == TOKEN_TYPE_PASSWORD_SIGNUP {
                 assert!(
-                    matches!(result, SignupCompleteServiceResult::Success(_)),
-                    "password signup must accept its own token type ({token_type})"
+                    matches!(result, SignupVerifyServiceResult::Success(_)),
+                    "signup verify must accept its own token type ({token_type})"
                 );
             } else {
                 assert!(
-                    matches!(result, SignupCompleteServiceResult::InvalidToken),
-                    "password signup must reject token type {token_type}"
+                    matches!(result, SignupVerifyServiceResult::InvalidToken),
+                    "signup verify must reject token type {token_type}"
                 );
             }
         }
@@ -3847,49 +3285,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn passkey_signup_verify_only_accepts_its_own_token_type() {
-        for &token_type in &ALL_VERIFICATION_TOKEN_TYPES {
-            let db = test_pool().await;
-            let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
-            let webauthn = test_webauthn();
-            let email = "passkey-signup-binding@example.com";
-
-            crate::user_service::create_user(&db, email, None, false)
-                .await
-                .expect("create user");
-
-            let token = mint_token(&db, email, token_type).await;
-
-            let result = passkey_signup_complete_service(PasskeySignupCompleteParams {
-                db: &db,
-                kv: &kv,
-                webauthn: &webauthn,
-                token: &token,
-                name: "Test User",
-                terms_accepted: true,
-                marketing_consent: false,
-                config: None,
-                slack_feedback_webhook_url: None,
-                support_email: "support@example.com",
-            })
-            .await
-            .expect("service call should not error");
-
-            if token_type == TOKEN_TYPE_PASSKEY_SIGNUP {
-                assert!(
-                    matches!(result, Ok((_, _))),
-                    "passkey signup must accept its own token type ({token_type}), got {result:?}"
-                );
-            } else {
-                assert!(
-                    matches!(&result, Err(msg) if msg.contains("Invalid or expired")),
-                    "passkey signup must reject token type {token_type}, got {result:?}"
-                );
-            }
-        }
-    }
-
-    #[tokio::test]
     async fn passkey_recovery_verify_only_accepts_its_own_token_type() {
         for &token_type in &ALL_VERIFICATION_TOKEN_TYPES {
             let db = test_pool().await;
@@ -3920,157 +3315,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    // -----------------------------------------------------------------
-    // passkey_signup_start_service (KYO-283 / KYO-279)
-    // -----------------------------------------------------------------
-
-    async fn count_signup_tokens(db: &DbPool, email: &str) -> i64 {
-        kyomi_core::db_fetch_scalar!(
-            db,
-            i64,
-            "SELECT COUNT(*) FROM verification_tokens WHERE email = $1 AND token_type = $2",
-            email,
-            "signup"
-        )
-        .expect("count verification_tokens")
-    }
-
-    fn saas_start_params<'a>(
-        db: &'a DbPool,
-        kv: &'a KVPool,
-        email: &'a str,
-    ) -> PasskeySignupStartParams<'a> {
-        PasskeySignupStartParams {
-            db,
-            kv,
-            email,
-            name: None,
-            ip: "127.0.0.1",
-            self_hosted: false,
-            smtp_configured: true,
-            frontend_url: "https://app.example.com",
-        }
-    }
-
-    /// KYO-279: an already-verified account must never have a new "signup"
-    /// token minted for it — that token is what unlocks a WebAuthn
-    /// *registration* challenge at `passkey_signup_complete_service`, so
-    /// minting one for an existing verified account is exactly the
-    /// account-takeover primitive KYO-279 closed for the login/register
-    /// challenge purpose check. This asserts the same guarantee holds at
-    /// the token-minting step, one layer earlier.
-    #[tokio::test]
-    async fn passkey_signup_start_mints_no_token_for_verified_user() {
-        let db = test_pool().await;
-        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
-        let email = "passkey-signup-verified@example.com";
-
-        crate::user_service::create_user(&db, email, Some("Existing User"), true)
-            .await
-            .expect("create verified user");
-
-        assert_eq!(
-            count_signup_tokens(&db, email).await,
-            0,
-            "sanity check: no signup tokens exist before the call"
-        );
-
-        let result = passkey_signup_start_service(saas_start_params(&db, &kv, email))
-            .await
-            .expect("service call should not error");
-
-        assert!(matches!(
-            result,
-            PasskeySignupStartServiceResult::VerificationRequired
-        ));
-        assert_eq!(
-            count_signup_tokens(&db, email).await,
-            0,
-            "a verified account's email must never mint a new signup token (KYO-279)"
-        );
-    }
-
-    /// The response for a brand-new email, an existing-but-unverified email,
-    /// and an existing-verified email must be indistinguishable — otherwise
-    /// the endpoint is an account-enumeration oracle (the failure mode of the
-    /// REST implementation this replaced, whose `register_start` returned a
-    /// distinct `BadRequest` for verified users). Mirrors
-    /// `signup_start_service`'s enumeration-safe behavior instead.
-    #[tokio::test]
-    async fn passkey_signup_start_indistinguishable_across_account_states() {
-        let db = test_pool().await;
-        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
-
-        let new_email = "passkey-signup-new@example.com";
-        let unverified_email = "passkey-signup-unverified@example.com";
-        let verified_email = "passkey-signup-verified-2@example.com";
-
-        crate::user_service::create_user(&db, unverified_email, None, false)
-            .await
-            .expect("create unverified user");
-        crate::user_service::create_user(&db, verified_email, Some("Verified User"), true)
-            .await
-            .expect("create verified user");
-
-        for email in [new_email, unverified_email, verified_email] {
-            let result = passkey_signup_start_service(saas_start_params(&db, &kv, email))
-                .await
-                .expect("service call should not error");
-
-            assert!(
-                matches!(result, PasskeySignupStartServiceResult::VerificationRequired),
-                "expected VerificationRequired for {email} — new/unverified/verified account \
-                 states must return the same result (email enumeration guard)"
-            );
-        }
-    }
-
-    /// Wiring test, passkey-flow sibling of
-    /// `signup_start_service_for_verified_user_logs_existing_account_notice`.
-    /// Both `signup_start_service` and `passkey_signup_start_service` got
-    /// their own copy of the KYO-681 fix — each needs its own regression
-    /// trap, since a `Some(user)` arm reverted in only one of them would
-    /// leave the other's test suite green.
-    #[tokio::test]
-    async fn passkey_signup_start_service_for_verified_user_logs_existing_account_notice() {
-        let db = test_pool().await;
-        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
-        let email = "passkey-signup-verified-logged@example.com";
-
-        let user = crate::user_service::create_user(&db, email, Some("Existing User"), true)
-            .await
-            .expect("create verified user");
-        crate::user_service::upsert_auth_method(
-            &db,
-            &user.user_id,
-            "webauthn",
-            &serde_json::json!({"credential": "test-credential"}),
-        )
-        .await
-        .expect("seed webauthn auth method");
-
-        let logs = capture_tracing();
-
-        let result = passkey_signup_start_service(saas_start_params(&db, &kv, email))
-            .await
-            .expect("service call should not error");
-
-        assert!(matches!(
-            result,
-            PasskeySignupStartServiceResult::VerificationRequired
-        ));
-
-        let info_events = logs.events_at(Level::INFO);
-        assert!(
-            info_events
-                .iter()
-                .any(|(_, msg)| msg.contains("existing-account notice") && msg.contains(email)),
-            "verified-user passkey signup must log that an existing-account notice was sent \
-             instead of staying silent (KYO-681); captured: {:?}",
-            logs.events()
-        );
     }
 
     // -----------------------------------------------------------------
@@ -4255,11 +3499,10 @@ mod tests {
     // signup_start_service (KYO-681)
     // -----------------------------------------------------------------
     //
-    // Password-signup counterparts of the passkey_signup_start_service tests
-    // above: KYO-681 fixed the verified-user arm of both services (it used
-    // to be a silent dead end — no email, no log line), and the fix must
-    // not weaken either service's account-enumeration guard or reintroduce
-    // token-minting on a path that has nothing to verify.
+    // KYO-681 fixed the verified-user arm of signup-start (it used to be a
+    // silent dead end — no email, no log line), and the fix must not weaken
+    // the account-enumeration guard or reintroduce token-minting on a path
+    // that has nothing to verify.
 
     fn password_start_params<'a>(
         db: &'a DbPool,
@@ -4288,9 +3531,7 @@ mod tests {
     /// the endpoint is an account-enumeration oracle. Guards the security
     /// property KYO-681's fix relies on: the verified-user arm may now send
     /// an email, but the HTTP response it returns must stay identical to
-    /// the other two arms. Password-signup counterpart of
-    /// `passkey_signup_start_indistinguishable_across_account_states` above,
-    /// which previously had no sibling covering this flow.
+    /// the other two arms.
     #[tokio::test]
     async fn signup_start_service_indistinguishable_across_account_states() {
         let db = test_pool().await;
@@ -4400,8 +3641,6 @@ mod tests {
     /// token when they attempt to sign up again — there is nothing to
     /// verify. KYO-681 added an email on this path; it must go out through
     /// `notify_existing_verified_account`, not `mint_and_send_verification_email`.
-    /// Password-signup counterpart of
-    /// `passkey_signup_start_mints_no_token_for_verified_user` above.
     #[tokio::test]
     async fn signup_start_service_mints_no_token_for_verified_user() {
         let db = test_pool().await;
@@ -4497,9 +3736,7 @@ mod tests {
     // puts the user in front of is shown — between signup-start and the
     // link being clicked — there is no row, the lookup always returned
     // `None`, and the function silently sent nothing. These tests drive
-    // the real `signup_start_service` / `resend_verification_service` pair
-    // the way `signup_complete_service_still_works_end_to_end_after_signup_start`
-    // (below) drives `signup_start_service` / `signup_complete_service` —
+    // the real `signup_start_service` / `resend_verification_service` pair,
     // scraping each minted token out of its captured log line, since there
     // is no `users` row to look either up through.
 
@@ -4601,14 +3838,13 @@ mod tests {
     // KYO-683 phase 1 moves the `users` row write from signup-start to
     // token-redemption: `signup_start_service` only ever mints and emails a
     // token now (see `signup_start_service_creates_no_users_row_for_new_address`
-    // above the passkey/password enumeration-guard tests), and
-    // `signup_verify_service` — the new POST-only redeem contract KYO-728's
-    // "Confirm" button will call — is what actually creates the account.
-    // These tests cover both ends of that move, the property the whole
+    // above the password enumeration-guard tests), and `signup_verify_service`
+    // — the POST-only redeem contract KYO-728's "Confirm" button calls, and
+    // the only signup-completion contract left after KYO-729 retired the
+    // standalone passkey-signup flow — is what actually creates the account.
+    // These tests cover both ends of that move: the property the whole
     // redesign exists for (a mail scanner's GET-prefetch must never create
-    // an account), and that `signup_complete_service` still works
-    // end-to-end unchanged, since it — not KYO-728 — is still what
-    // `/signup/complete` posts to today.
+    // an account), and the account-establishment contract itself.
 
     async fn count_users(db: &DbPool, email: &str) -> i64 {
         kyomi_core::db_fetch_scalar!(
@@ -4768,8 +4004,7 @@ mod tests {
 
     /// Terms rejection must fail before the token is ever checked, so it
     /// creates nothing and leaves the token available for a subsequent
-    /// call that does accept — matching `signup_complete_service`'s
-    /// pre-existing terms-gate-first ordering.
+    /// call that does accept.
     #[tokio::test]
     async fn signup_verify_service_rejects_missing_terms_and_leaves_token_usable() {
         let db = test_pool().await;
@@ -4907,17 +4142,15 @@ mod tests {
         );
     }
 
-    /// Regression guard: `signup_complete_service` (still what
-    /// `/signup/complete` posts to — KYO-728 hasn't landed) must keep
-    /// working end-to-end against a token minted by the now-account-less
-    /// `signup_start_service`. Shipping KYO-683 phase 1 must not break
-    /// signup.
+    /// Regression guard: a token minted by `signup_start_service` must still
+    /// be redeemable by `signup_verify_service` end-to-end. Shipping KYO-683
+    /// phase 1 must not break signup.
     #[tokio::test]
-    async fn signup_complete_service_still_works_end_to_end_after_signup_start() {
+    async fn signup_verify_service_still_works_end_to_end_after_signup_start() {
         let db = test_pool().await;
         let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
         let device = test_device();
-        let email = "signup-complete-e2e@example.com";
+        let email = "signup-verify-e2e@example.com";
 
         let logs = capture_tracing();
         let start_result = signup_start_service(password_start_params(&db, &kv, email, &device))
@@ -4950,30 +4183,18 @@ mod tests {
             .expect("log line must contain a token= value")
             .to_string();
 
-        let complete_result = signup_complete_service(SignupCompleteParams {
-            db: &db,
-            kv: &kv,
-            jwt_secret: "test-secret",
-            token: &token,
-            name: "Real Name",
-            password: "password12345",
-            terms_accepted: true,
-            marketing_consent: false,
-            device: &device,
-            config: None,
-            slack_feedback_webhook_url: None,
-            support_email: "support@example.com",
-        })
-        .await
-        .expect("service call should not error");
+        let verify_result =
+            signup_verify_service(signup_verify_params(&db, &kv, &token, &device, true))
+                .await
+                .expect("service call should not error");
 
-        match complete_result {
-            SignupCompleteServiceResult::Success(_) => {}
-            SignupCompleteServiceResult::InvalidToken => {
-                panic!("expected Success, got InvalidToken — signup_complete_service can no \
+        match verify_result {
+            SignupVerifyServiceResult::Success(_) => {}
+            SignupVerifyServiceResult::InvalidToken => {
+                panic!("expected Success, got InvalidToken — signup_verify_service can no \
                         longer redeem a token minted by signup_start_service")
             }
-            SignupCompleteServiceResult::Error { message } => {
+            SignupVerifyServiceResult::Error { message } => {
                 panic!("expected Success, got Error({message})")
             }
         }
@@ -4983,15 +4204,9 @@ mod tests {
             .expect("lookup user")
             .expect("user must have been created");
         assert!(user.verified);
-        assert_eq!(user.name.as_deref(), Some("Real Name"));
-
-        let has_pw = crate::user_service::has_password(&db, &user.user_id)
-            .await
-            .expect("lookup has_password");
-        assert!(has_pw, "signup_complete_service must still set the password");
     }
 
-    /// `notify_existing_verified_account` (both signup flows go through it)
+    /// `notify_existing_verified_account` (signup-start goes through it)
     /// reads the account's active auth methods via
     /// `user_service::list_active_auth_types` to tell the owner how they can
     /// sign in. Assert that query returns exactly the seeded, active
