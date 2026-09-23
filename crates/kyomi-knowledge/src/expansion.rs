@@ -223,13 +223,12 @@ async fn expand_table_to_learnings(
 ) -> Vec<ExpansionHit> {
     let is_pg = db.is_postgres();
     let true_val = kyomi_core::sql_compat::bool_true(is_pg);
-    let false_val = kyomi_core::sql_compat::bool_false(is_pg);
     let sql = format!(
         "SELECT CAST(al.learning_id AS TEXT) as learning_id, al.insight \
          FROM learning_references lr \
          JOIN agent_learnings al ON lr.learning_id = al.learning_id \
          WHERE lr.ref_type = 'table' AND lr.ref_name = $1 AND lr.workspace_id = $2 \
-           AND al.enabled = {true_val} AND al.is_superseded = {false_val}"
+           AND al.enabled = {true_val} AND al.superseded_by IS NULL"
     );
 
     let result = kyomi_core::db_fetch_all!(
