@@ -154,6 +154,76 @@ fn is_stripe_transient(e: &StripeError) -> bool {
     }
 }
 
+// ─── Subscription status mapping ────────────────────────────────────────────
+
+/// Map a Stripe subscription status to Kyomi's own [`kyomi_core::enums::SubscriptionStatus`].
+///
+/// Pure and unit-testable without a Stripe client — every known Stripe
+/// variant gets its own arm, and both `Unknown` and the mandatory `_` arm
+/// (required because `stripe_shared::SubscriptionStatus` is
+/// `#[non_exhaustive]`, so a match on it from outside `async-stripe-shared`
+/// can never itself be exhaustive) fail **closed**: they map to
+/// [`kyomi_core::enums::SubscriptionStatus::Cancelled`], never `Active`, and
+/// log the raw status so a Stripe-side status this mapping doesn't know
+/// about is visible instead of silently granting access.
+///
+/// Mapping, with reasoning:
+/// - `Active` → `Active`.
+/// - `Trialing` → `Trialing`.
+/// - `PastDue` → `PastDue` — a subscription exists and payment is overdue.
+/// - `Incomplete` → `PastDue`. A subscription object exists and its first
+///   invoice hasn't been paid, which is the same "money owed, must pay"
+///   shape as `past_due` — never `active`. (`create_subscription` above,
+///   which is the only place this codebase creates a Stripe subscription,
+///   never sets `payment_behavior` and always passes `trial_period_days`,
+///   so the flows here don't put a fresh subscription into `incomplete` at
+///   creation time; this arm exists for subscriptions that reach
+///   `incomplete` by some other route, e.g. a future non-trial or
+///   Checkout-created subscription whose first payment didn't complete.)
+/// - `Canceled`, `Unpaid`, `Paused`, `IncompleteExpired` → `Cancelled`. Each
+///   means Stripe itself has stopped trying to collect payment on this
+///   subscription.
+/// - `Unknown(_)` (Stripe sent a status string this crate version doesn't
+///   recognise) and the mandatory `_` arm (a future variant added to
+///   `stripe_shared::SubscriptionStatus`) → `Cancelled`, with the raw status
+///   logged via `tracing::error!`.
+///
+/// The `cancel_at_period_end` override (the subscription is scheduled to
+/// cancel but Stripe still reports it `active` until the period ends) is
+/// handled by the caller, [`StripeService::parse_subscription_data`], before
+/// this function is reached — this function only maps Stripe's `status`
+/// field itself.
+fn map_stripe_status(status: &SubscriptionStatus) -> kyomi_core::enums::SubscriptionStatus {
+    use kyomi_core::enums::SubscriptionStatus as KyomiStatus;
+
+    match status {
+        SubscriptionStatus::Active => KyomiStatus::Active,
+        SubscriptionStatus::Trialing => KyomiStatus::Trialing,
+        SubscriptionStatus::PastDue => KyomiStatus::PastDue,
+        SubscriptionStatus::Incomplete => KyomiStatus::PastDue,
+        SubscriptionStatus::Canceled => KyomiStatus::Cancelled,
+        SubscriptionStatus::Unpaid => KyomiStatus::Cancelled,
+        SubscriptionStatus::Paused => KyomiStatus::Cancelled,
+        SubscriptionStatus::IncompleteExpired => KyomiStatus::Cancelled,
+        SubscriptionStatus::Unknown(raw) => {
+            tracing::error!(
+                raw_status = %raw,
+                "Unrecognized Stripe subscription status (explicit Unknown variant) — \
+                 treating billing as lapsed rather than silently granting access"
+            );
+            KyomiStatus::Cancelled
+        }
+        _ => {
+            tracing::error!(
+                raw_status = status.as_str(),
+                "Unrecognized Stripe subscription status (new variant added upstream) — \
+                 treating billing as lapsed rather than silently granting access"
+            );
+            KyomiStatus::Cancelled
+        }
+    }
+}
+
 // ─── Service ────────────────────────────────────────────────────────────────
 
 /// Wraps the `async-stripe` `Client` and provides typed methods for
@@ -679,18 +749,15 @@ impl StripeService {
         // always unlimited rather than the subscription item quantity.
         let user_limit = kyomi_core::capability::UNLIMITED_USER_LIMIT;
 
-        // Determine status
+        // Determine status. `cancel_at_period_end` overrides the raw Stripe
+        // status — the subscription is still technically active with Stripe
+        // until the period end, but the workspace has already elected to
+        // cancel, so we treat it as cancelled immediately (existing,
+        // out-of-scope-for-KYO-804 behaviour).
         let status = if subscription.cancel_at_period_end {
             "cancelled".to_string()
         } else {
-            match subscription.status {
-                SubscriptionStatus::Trialing => "trialing".to_string(),
-                SubscriptionStatus::Active => "active".to_string(),
-                SubscriptionStatus::PastDue => "past_due".to_string(),
-                SubscriptionStatus::Canceled => "cancelled".to_string(),
-                SubscriptionStatus::Unpaid => "cancelled".to_string(),
-                _ => "active".to_string(),
-            }
+            map_stripe_status(&subscription.status).to_string()
         };
 
         // Get period dates from the first subscription item
@@ -1008,6 +1075,72 @@ mod tests {
         assert_eq!(json["tier"], "cloud");
         assert_eq!(json["status"], "active");
         assert_eq!(json["user_limit"], 3);
+    }
+
+    // -- Stripe subscription status mapping -----------------------------------
+    //
+    // One assertion per `stripe_shared::SubscriptionStatus` variant (the
+    // registry the mapping is keyed on), plus `Unknown`, so a variant added
+    // upstream with no corresponding arm/test fails loudly rather than
+    // silently falling through the mandatory `_` arm unnoticed. See
+    // docs/standards/testing/enumerate-the-variant-registry.md.
+
+    use kyomi_core::enums::SubscriptionStatus as KyomiStatus;
+
+    #[test]
+    fn stripe_active_maps_to_active() {
+        assert_eq!(map_stripe_status(&SubscriptionStatus::Active), KyomiStatus::Active);
+    }
+
+    #[test]
+    fn stripe_trialing_maps_to_trialing() {
+        assert_eq!(map_stripe_status(&SubscriptionStatus::Trialing), KyomiStatus::Trialing);
+    }
+
+    #[test]
+    fn stripe_past_due_maps_to_past_due() {
+        assert_eq!(map_stripe_status(&SubscriptionStatus::PastDue), KyomiStatus::PastDue);
+    }
+
+    #[test]
+    fn stripe_canceled_maps_to_cancelled() {
+        assert_eq!(map_stripe_status(&SubscriptionStatus::Canceled), KyomiStatus::Cancelled);
+    }
+
+    #[test]
+    fn stripe_unpaid_maps_to_cancelled_not_active() {
+        // The exact regression this ticket exists to fix: an unpaid
+        // subscription must never be read back as a paid, active one.
+        assert_eq!(map_stripe_status(&SubscriptionStatus::Unpaid), KyomiStatus::Cancelled);
+    }
+
+    #[test]
+    fn stripe_paused_maps_to_cancelled_not_active() {
+        assert_eq!(map_stripe_status(&SubscriptionStatus::Paused), KyomiStatus::Cancelled);
+    }
+
+    #[test]
+    fn stripe_incomplete_maps_to_past_due_not_active() {
+        // A subscription with an unpaid first invoice must route to billing
+        // (past_due is lapsed), not be granted access as active.
+        assert_eq!(map_stripe_status(&SubscriptionStatus::Incomplete), KyomiStatus::PastDue);
+    }
+
+    #[test]
+    fn stripe_incomplete_expired_maps_to_cancelled_not_active() {
+        assert_eq!(
+            map_stripe_status(&SubscriptionStatus::IncompleteExpired),
+            KyomiStatus::Cancelled
+        );
+    }
+
+    #[test]
+    fn stripe_unknown_status_fails_closed_not_active() {
+        // A brand new Stripe status this mapping has never seen (the
+        // catch-all this ticket's premise correction is about) must fail
+        // closed, not silently become the old `_ => "active"` grant.
+        let unknown = SubscriptionStatus::Unknown("some_future_status".to_string());
+        assert_eq!(map_stripe_status(&unknown), KyomiStatus::Cancelled);
     }
 
     // -- Stripe retry classification -----------------------------------------
