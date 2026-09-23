@@ -29,7 +29,7 @@ use kyomi_core::enums::WorkspaceRole;
 use kyomi_core::{DbPool, KVPool};
 use kyomi_embed::LazyEmbedding;
 
-use crate::adapter::{ChatAgentAdapter, UserMessagePersistence};
+use crate::adapter::{AssistantMessagePersistence, ChatAgentAdapter, UserMessagePersistence};
 
 /// SQL used to persist a row to `api_usage_log` after an agent turn.
 ///
@@ -107,7 +107,11 @@ pub struct AgentExecutionConfig {
     /// each enforces. Threaded into
     /// [`ChatParams::user_message_persistence`](crate::adapter::ChatParams::user_message_persistence).
     pub user_message_persistence: UserMessagePersistence,
-    pub assistant_message_id: Option<String>,
+    /// How the assistant's reply for this execution reaches the database —
+    /// see [`AssistantMessagePersistence`] for the two arms and the
+    /// contract each enforces. Threaded into
+    /// [`ChatParams::assistant_message_persistence`](crate::adapter::ChatParams::assistant_message_persistence).
+    pub assistant_message_persistence: AssistantMessagePersistence,
     /// Optional conversation history for multi-turn conversations.
     /// Each entry is a (role, content) pair where role is "user" or "assistant".
     pub conversation_history: Option<Vec<(String, String)>>,
@@ -161,7 +165,7 @@ impl Default for AgentExecutionConfig {
             max_tokens: 4096,
             component: "custom_agent".into(),
             user_message_persistence: UserMessagePersistence::AdapterPersists(None),
-            assistant_message_id: None,
+            assistant_message_persistence: AssistantMessagePersistence::AdapterInserts(None),
             conversation_history: None,
             user_display_name: "Unknown".to_string(),
             context_window: 0,
@@ -201,7 +205,7 @@ pub struct AgentExecutionResult {
 /// contain `"cancelled"`, so this choice doesn't change behavior today, but
 /// `Display` is the more conservative substring to key off because it can
 /// only gain content relative to `user_message()`, never lose it.
-fn classify_agent_failure(error: &kyomi_core::Error) -> (&'static str, String) {
+pub(crate) fn classify_agent_failure(error: &kyomi_core::Error) -> (&'static str, String) {
     let is_cancelled = error.to_string().contains("cancelled");
     if is_cancelled {
         ("cancelled", "Request was cancelled.".to_string())
@@ -213,6 +217,39 @@ fn classify_agent_failure(error: &kyomi_core::Error) -> (&'static str, String) {
                 error.user_message()
             ),
         )
+    }
+}
+
+/// Map an execution outcome to the `content`/`status` step 15 of
+/// [`execute_agent_chat`] should write to the assistant row (KYO-493).
+///
+/// Pure — no I/O — so the terminal-state mapping can be unit-tested without
+/// driving the full LLM loop (`execute_agent_chat` resolves a real,
+/// network-calling LLM provider from workspace config, which makes it
+/// impractical to exercise directly in a unit test; this mirrors
+/// [`build_tool_context`] / [`build_agent_config`] pulling the parts of
+/// that function that *can* be pure out into their own testable units).
+///
+/// `exec_status` is `AgentExecutionResult::status`'s wire vocabulary
+/// ("completed" | "error" | "cancelled" — anything else is treated as
+/// "error", since `classify_agent_failure` only ever produces those two
+/// non-"completed" values and a third value would itself be a bug worth
+/// surfacing as an error status rather than silently falling through).
+///
+/// - "completed": `content` is `None` — the real answer was already
+///   written by `persist_after_chat()` (either an UPDATE of chat's
+///   pre-inserted placeholder, or a plain INSERT for copilot/Slack/watch).
+/// - "error" / "cancelled": `content` is `Some(response_text)` — nothing
+///   else ever persists this text (see the call site's doc), so this is
+///   the only write for it.
+pub(crate) fn finalize_terminal_write<'a>(
+    exec_status: &str,
+    response_text: &'a str,
+) -> (Option<&'a str>, chat_service::MessageStatus) {
+    match exec_status {
+        "completed" => (None, chat_service::MessageStatus::Complete),
+        "cancelled" => (Some(response_text), chat_service::MessageStatus::Cancelled),
+        _ => (Some(response_text), chat_service::MessageStatus::Error),
     }
 }
 
@@ -469,12 +506,18 @@ pub async fn execute_agent_chat(
         encryption_key.clone(),
     );
 
-    // 9. Generate assistant message ID (no DB placeholder).
-    //    The adapter's persist_after_chat() saves the actual assistant response
-    //    with the correct content. This avoids empty placeholder rows.
+    // 9. Resolve the assistant message id.
+    //    `AssistantMessagePersistence::tag_id()` covers both arms: for
+    //    `CallerPreInserted` (chat — KYO-493) this is the id of the
+    //    placeholder row `prepare_chat_dispatch` already wrote; for
+    //    `AdapterInserts` (copilot, Slack, watch) it's either the caller's
+    //    chosen id or, if none, freshly generated here — either way no row
+    //    exists for it yet, and `persist_after_chat()` INSERTs the real
+    //    response under it once the loop produces one.
     let assistant_message_id = config
-        .assistant_message_id
-        .clone()
+        .assistant_message_persistence
+        .tag_id()
+        .map(str::to_string)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     // 10. Create thinking tracker.
@@ -514,7 +557,7 @@ pub async fn execute_agent_chat(
             message_source: config.message_source.as_deref(),
             user_id: Some(&config.user_id),
             user_message_persistence: &config.user_message_persistence,
-            assistant_message_id: Some(&assistant_message_id),
+            assistant_message_persistence: &config.assistant_message_persistence,
         })
         .await;
 
@@ -609,9 +652,24 @@ pub async fn execute_agent_chat(
         }
     }
 
-    // 15. Attach metadata to the assistant message (model, thinking events, token usage).
-    //     The message content was already saved by persist_after_chat();
-    //     we only update the extra_metadata column here.
+    // 15. Finalize the assistant message: attach metadata (model, thinking
+    //     events, token usage) and, via `MessageStatus`, the turn's
+    //     terminal outcome (KYO-493) — this is the single place that runs
+    //     for every outcome (`status` is always one of "completed" /
+    //     "error" / "cancelled" here; a pre-loop failure never reaches this
+    //     function at all — see `save_agent_error`), so it is also the
+    //     single place `status` is finalized.
+    //
+    //     On a successful completion the real answer was already written
+    //     by `persist_after_chat()` — via `AssistantMessagePersistence`,
+    //     either UPDATEing chat's pre-inserted placeholder or INSERTing a
+    //     fresh row for copilot/Slack/watch — so `content` stays `None`
+    //     here. On an in-loop error or cancellation, nothing else ever
+    //     writes `response_text` anywhere (`classify_agent_failure`'s
+    //     output lives only in this function's local variables), so this
+    //     call is the only place it's persisted — the exact gap KYO-493's
+    //     ticket describes ("today an in-loop error is streamed to the
+    //     client but never persisted").
     {
         let metadata = serde_json::json!({
             "model": model_name,
@@ -619,18 +677,29 @@ pub async fn execute_agent_chat(
             "token_usage": token_usage,
             "component": config.component,
         });
+        let (content, message_status) = finalize_terminal_write(&status, &response_text);
 
-        // Non-fatal: content is already saved by persist_after_chat, this only attaches metadata.
-        if let Err(e) = chat_service::update_message(
-            db,
-            encryption_key,
-            &assistant_message_id,
-            None, // content already saved by persist_after_chat
-            Some(&metadata),
-        )
-        .await
+        // Non-fatal by design (mirrors persist_after_chat's own error
+        // handling): `response_text` is what was already delivered to the
+        // caller (WebSocket / SendMessageResponse), so failing this turn
+        // now would report success as failure without giving the user
+        // anything back. Logged at error level when it carries content —
+        // unlike a metadata-only failure, that loses the only durable copy
+        // of an error/cancellation turn's outcome.
+        if let Err(e) =
+            chat_service::update_message(db, encryption_key, &assistant_message_id, content, Some(&metadata), Some(message_status))
+                .await
         {
-            tracing::warn!(error = %e, "Failed to attach metadata to assistant message (non-fatal)");
+            if content.is_some() {
+                error!(
+                    session_id = %config.session_id,
+                    assistant_message_id = %assistant_message_id,
+                    error = %e,
+                    "Failed to finalize assistant message — terminal content/status may be lost"
+                );
+            } else {
+                tracing::warn!(error = %e, "Failed to attach metadata to assistant message (non-fatal)");
+            }
         }
     }
 
@@ -1656,7 +1725,10 @@ mod tests {
         assert_eq!(config.max_total_tokens, Some(1_500_000));
         assert_eq!(config.max_tokens, 4096);
         assert_eq!(config.component, "custom_agent");
-        assert!(config.assistant_message_id.is_none());
+        assert!(matches!(
+            config.assistant_message_persistence,
+            AssistantMessagePersistence::AdapterInserts(None)
+        ));
         assert_eq!(config.context_window, 0);
         // Empty is the correct *test/placeholder* default (see field doc) —
         // production call sites must never rely on this default; they must
@@ -1688,7 +1760,9 @@ mod tests {
             max_total_tokens: Some(500_000),
             max_tokens: 8_000,
             component: "watch_agent".into(),
-            assistant_message_id: Some("msg-pre-created".into()),
+            assistant_message_persistence: AssistantMessagePersistence::CallerPreInserted(
+                "msg-pre-created".into(),
+            ),
             user_message_persistence: UserMessagePersistence::CallerPersisted(
                 "msg-user-123".into(),
             ),
@@ -1839,6 +1913,57 @@ mod tests {
             )
         );
         assert!(!response_text.contains("internal:"));
+    }
+
+    // -- Contract: finalize_terminal_write (KYO-493) -------------------------
+    //
+    // The three terminal-status tests the ticket asks for, as unit tests of
+    // the pure mapping `execute_agent_chat`'s step 15 uses — see that
+    // function's doc for why the full loop can't be driven directly here.
+
+    #[test]
+    fn finalize_terminal_write_completed_leaves_content_to_persist_after_chat() {
+        let (content, status) = finalize_terminal_write("completed", "The answer is 42.");
+        assert_eq!(
+            content, None,
+            "a completed turn's content was already written by persist_after_chat — \
+             writing it again here would just be redundant, not wrong, but None proves \
+             this function doesn't do it"
+        );
+        assert_eq!(status, chat_service::MessageStatus::Complete);
+    }
+
+    #[test]
+    fn finalize_terminal_write_error_persists_the_error_text() {
+        let (content, status) = finalize_terminal_write(
+            "error",
+            "I encountered an error while processing your request: boom",
+        );
+        assert_eq!(
+            content,
+            Some("I encountered an error while processing your request: boom"),
+            "an in-loop error's response text must be written here — nothing else \
+             persists it (KYO-493's reported gap)"
+        );
+        assert_eq!(status, chat_service::MessageStatus::Error);
+    }
+
+    #[test]
+    fn finalize_terminal_write_cancelled_persists_the_cancellation_notice() {
+        let (content, status) = finalize_terminal_write("cancelled", "Request was cancelled.");
+        assert_eq!(content, Some("Request was cancelled."));
+        assert_eq!(status, chat_service::MessageStatus::Cancelled);
+    }
+
+    #[test]
+    fn finalize_terminal_write_treats_an_unknown_status_as_error() {
+        // classify_agent_failure only ever produces "error" or "cancelled"
+        // for a non-completed run — an unrecognised third value would
+        // itself be a bug, and this function surfaces it as a visible
+        // status='error' row rather than silently matching neither arm.
+        let (content, status) = finalize_terminal_write("something-unexpected", "text");
+        assert_eq!(content, Some("text"));
+        assert_eq!(status, chat_service::MessageStatus::Error);
     }
 
     // -- Contract: Streaming constants are reasonable -----------------------

@@ -34,7 +34,7 @@ use kyomi_core::{capability, DbPool, KVPool, WatchMode};
 use kyomi_embed::EmbeddingService;
 use kyomi_types::truncate_preview;
 
-use crate::adapter::UserMessagePersistence;
+use crate::adapter::{AssistantMessagePersistence, UserMessagePersistence};
 use crate::alert::deliver_watch_alert;
 use crate::execution::{execute_agent_chat, AgentExecutionConfig};
 use crate::tools::WATCH_TOOLS;
@@ -1039,6 +1039,7 @@ pub(crate) async fn prepare_watch_dispatch(
         None, // tool_call_id
         None, // tool_name
         None, // tool_calls
+        chat_service::MessageStatus::Complete,
     )
     .await?;
 
@@ -1324,7 +1325,7 @@ async fn execute_watch_inner(
         // writing it again. `workspace_learnings` is per-run generated
         // context, not user content, so it must not become the durable row.
         user_message_persistence: watch_dispatch.user_message_persistence,
-        assistant_message_id: None,
+        assistant_message_persistence: AssistantMessagePersistence::AdapterInserts(None),
         conversation_history: None,
         user_display_name: "Kyomi Watch".to_string(),
         context_window: 0,
@@ -1437,7 +1438,7 @@ async fn execute_watch_inner(
                         max_tokens: MAX_WATCH_OUTPUT_TOKENS,
                         component: "kyomi_watch".into(),
                         user_message_persistence: UserMessagePersistence::AdapterPersists(None),
-                        assistant_message_id: None,
+                        assistant_message_persistence: AssistantMessagePersistence::AdapterInserts(None),
                         conversation_history: None,
                         user_display_name: "Kyomi Watch".to_string(),
                         context_window: 0,

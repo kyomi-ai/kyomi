@@ -36,7 +36,7 @@ pub mod error_sanitizer;
 pub mod retry;
 pub mod sql_compat;
 
-pub use config::Config;
+pub use config::{Config, resolve_process_instance};
 pub use db::DbPool;
 pub use enums::{
     CatalogRefreshStatus, ChatMessageRole, DatasourceType, FeedbackStatus, FeedbackType,

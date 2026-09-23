@@ -22,6 +22,74 @@ use kyomi_types::CreatedBy;
 use kyomi_types::sync::{SyncActionType, entity_types};
 
 // ---------------------------------------------------------------------------
+// Message status (KYO-493)
+// ---------------------------------------------------------------------------
+
+/// Lifecycle of a `chat_messages` row.
+///
+/// Matches the `chat_messages.status` CHECK constraint exactly (see the
+/// KYO-493 migration) and follows the same explicit-mapping pattern as
+/// [`crate::workspace_ai_config::WorkspaceAiProvider`] — an `as_str`/
+/// `FromStr` pair, never a free string, at every call site that reads or
+/// writes this column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageStatus {
+    /// The agent turn that will fill this row is still running. Only ever
+    /// set for the assistant placeholder [`prepare_chat_dispatch`] writes
+    /// before the agent is spawned — never for a `user`/`tool` row.
+    InProgress,
+    /// The row holds its final content — a normal completed turn, or any
+    /// row written before this column existed (the migration's default).
+    Complete,
+    /// The turn that would have filled this row failed — either before the
+    /// agent loop started ([`save_agent_error`]) or during it
+    /// (`kyomi_agent::execution::execute_agent_chat`'s in-loop failure
+    /// path). The row's content is the user-facing error text.
+    Error,
+    /// The turn was cancelled before producing a final answer. The row's
+    /// content is the cancellation notice.
+    Cancelled,
+    /// Reserved for the stuck-row sweep (KYO-493 Phase 4): an `in_progress`
+    /// row whose `owner_instance` process is no longer running. Nothing in
+    /// Phase 1/2 writes this variant yet.
+    Interrupted,
+}
+
+impl MessageStatus {
+    /// Canonical string form stored in the `status` column. Matches the
+    /// CHECK constraint values exactly.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::InProgress => "in_progress",
+            Self::Complete => "complete",
+            Self::Error => "error",
+            Self::Cancelled => "cancelled",
+            Self::Interrupted => "interrupted",
+        }
+    }
+}
+
+impl std::str::FromStr for MessageStatus {
+    type Err = kyomi_core::Error;
+
+    /// Parse a status string. Matching is case-sensitive — values come from
+    /// the DB's own CHECK-constrained column, never user free-text.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "in_progress" => Ok(Self::InProgress),
+            "complete" => Ok(Self::Complete),
+            "error" => Ok(Self::Error),
+            "cancelled" => Ok(Self::Cancelled),
+            "interrupted" => Ok(Self::Interrupted),
+            other => Err(kyomi_core::Error::Internal(format!(
+                "invalid chat_messages.status value: {other:?}"
+            ))),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Response structs
 // ---------------------------------------------------------------------------
 
@@ -984,6 +1052,21 @@ pub async fn get_session_messages(
 /// text (baked in by `agent.chat()` before persistence), so reconstructing
 /// on top of that would double it.
 ///
+/// `status` is written at INSERT time — see [`MessageStatus`]. Every caller
+/// must pass one explicitly (no default): almost always
+/// [`MessageStatus::Complete`], since almost every `add_message` call is
+/// writing a row that's already finished (a stored user turn, a completed
+/// assistant/tool message from `persist_after_chat`, a watch's logged
+/// prompt/response, ...). The one exception is an error-fallback INSERT
+/// (`save_agent_error`, `copilot_service::handle_copilot_agent_error`) —
+/// those pass [`MessageStatus::Error`], so a pre-loop failure that reaches
+/// this INSERT (because no placeholder existed to UPDATE instead) is never
+/// left mislabeled `complete`. Passing `status` here — rather than
+/// INSERTing and then issuing a second `update_message` call to correct
+/// it — avoids exactly the extra write (and the window where a concurrent
+/// reader could see the wrong status) that this alternative would
+/// otherwise require.
+///
 /// Returns the message_id.
 #[allow(clippy::too_many_arguments)]
 pub async fn add_message(
@@ -1000,6 +1083,7 @@ pub async fn add_message(
     tool_call_id: Option<&str>,
     tool_name: Option<&str>,
     tool_calls: Option<&serde_json::Value>,
+    status: MessageStatus,
 ) -> kyomi_core::Result<String> {
     let msg_id = message_id
         .map(|s| s.to_string())
@@ -1021,8 +1105,8 @@ pub async fn add_message(
         "INSERT INTO chat_messages \
          (message_id, session_id, role, content, sent_by_user_id, pinned, \
           created_at, current_time_user_tz, message_source, extra_metadata, \
-          tool_call_id, tool_name, tool_calls) \
-         VALUES ($1, $2, $3, $4, $5, false, $6, $7, $8, $9, $10, $11, $12)",
+          tool_call_id, tool_name, tool_calls, status) \
+         VALUES ($1, $2, $3, $4, $5, false, $6, $7, $8, $9, $10, $11, $12, $13)",
         &msg_id,
         session_id,
         role,
@@ -1034,7 +1118,8 @@ pub async fn add_message(
         encrypted_metadata,
         tool_call_id,
         tool_name,
-        tool_calls as Option<&serde_json::Value>
+        tool_calls as Option<&serde_json::Value>,
+        status.as_str()
     )
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to add message: {e}")))?;
 
@@ -1054,13 +1139,23 @@ pub async fn add_message(
     Ok(msg_id)
 }
 
-/// Update message content and/or metadata (re-encrypts).
+/// Update message content, metadata, and/or status (re-encrypts content and
+/// metadata; `status` is stored in the clear — see [`MessageStatus`]).
+///
+/// `status` is the terminal-state writer for the assistant placeholder
+/// [`prepare_chat_dispatch`] pre-inserts (KYO-493) — `execute_agent_chat`
+/// calls this with `Some(MessageStatus::Complete/Error/Cancelled)` once a
+/// turn's outcome is known, and [`save_agent_error`] calls it with
+/// `Some(MessageStatus::Error)` for a pre-loop failure. Every other caller
+/// (metadata attachment, user content edits) passes `None`, leaving
+/// whatever status the row already has untouched.
 pub async fn update_message(
     db: &DbPool,
     encryption_key: &[u8; 32],
     message_id: &str,
     content: Option<&str>,
     metadata: Option<&serde_json::Value>,
+    status: Option<MessageStatus>,
 ) -> kyomi_core::Result<bool> {
     // Dynamic SQL — cannot use dispatch macros
     let mut set_parts: Vec<String> = Vec::new();
@@ -1072,7 +1167,14 @@ pub async fn update_message(
     }
     if metadata.is_some() {
         set_parts.push(format!("extra_metadata = ${param_idx}"));
-        // param_idx incremented but not used further
+        param_idx += 1;
+    }
+    if status.is_some() {
+        set_parts.push(format!("status = ${param_idx}"));
+        // `status` is the last field this function can set — no `param_idx
+        // += 1` here, unlike the branches above, because nothing after
+        // this point ever reads `param_idx` again. A field added after
+        // this one must add its own `+= 1` here first.
     }
 
     if set_parts.is_empty() {
@@ -1093,6 +1195,7 @@ pub async fn update_message(
         Some(m) => Some(encryption::encrypt_json(m, encryption_key)?),
         None => None,
     };
+    let status_str: Option<&'static str> = status.map(|s| s.as_str());
     let rows_affected = kyomi_core::db_with_pool!(db, |p| {
         let mut query = sqlx::query(&sql).bind(message_id);
         if let Some(ref enc) = encrypted_content {
@@ -1101,10 +1204,45 @@ pub async fn update_message(
         if let Some(ref enc) = encrypted_metadata_dyn {
             query = query.bind(enc);
         }
+        if let Some(s) = status_str {
+            query = query.bind(s);
+        }
         query.execute(p).await.map(|r| r.rows_affected())
     })
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to update message: {e}")))?;
     Ok(rows_affected > 0)
+}
+
+/// Row shape for [`get_message_status`].
+#[derive(Debug, sqlx::FromRow)]
+struct MessageStatusRow {
+    status: String,
+    owner_instance: Option<String>,
+}
+
+/// Read a message's `status` and `owner_instance` columns (KYO-493).
+///
+/// Returns `None` if no row exists for `message_id`. Used by this module's
+/// own tests to confirm what the placeholder-insert and terminal-state
+/// writers actually persisted; the eventual stuck-row sweep (KYO-493 Phase
+/// 4) needs the same read for `status = 'in_progress'` rows.
+pub async fn get_message_status(
+    db: &DbPool,
+    message_id: &str,
+) -> kyomi_core::Result<Option<(MessageStatus, Option<String>)>> {
+    let row = kyomi_core::db_fetch_optional!(
+        db,
+        MessageStatusRow,
+        "SELECT status, owner_instance FROM chat_messages WHERE message_id = $1",
+        message_id
+    )?;
+    match row {
+        Some(r) => {
+            let status = r.status.parse::<MessageStatus>()?;
+            Ok(Some((status, r.owner_instance)))
+        }
+        None => Ok(None),
+    }
 }
 
 /// Update session title, model, and/or config.
@@ -2059,6 +2197,13 @@ pub struct ChatDispatchParams<'a> {
     pub skip_ai: bool,
     /// Optimistic client message ID for deduplication.
     pub client_msg_id: Option<&'a str>,
+    /// This process's identity (see `kyomi_core::resolve_process_instance`;
+    /// `"{HOSTNAME}:{PORT}"`, or `"desktop"` in personal mode, resolved once
+    /// at server startup), recorded as `owner_instance` on the
+    /// `in_progress` assistant placeholder this function pre-inserts on the
+    /// AI path (KYO-493). Unused on the `skip_ai` path, which never creates
+    /// that row.
+    pub owner_instance: &'a str,
 }
 
 /// Find-or-create session, store the user message, and optionally broadcast
@@ -2160,6 +2305,7 @@ pub async fn prepare_chat_dispatch(
         None,
         None,
         None,
+        MessageStatus::Complete,
     )
     .await
     .map_err(|e| kyomi_core::Error::Internal(format!("Failed to store message: {e}")))?;
@@ -2178,8 +2324,29 @@ pub async fn prepare_chat_dispatch(
         });
     }
 
-    // ── Generate assistant placeholder ID ─────────────────────────────────
+    // ── Generate and pre-insert the assistant placeholder ─────────────────
+    // KYO-493: mirrors KYO-492's user-message write above — the row exists
+    // (status='in_progress') the instant this function returns Ready,
+    // before the agent is even spawned, so a client that reloads mid-turn
+    // finds a row for `assistant_message_id` instead of nothing.
+    // `kyomi_agent::adapter::ChatAgentAdapter::persist_after_chat` UPDATEs
+    // this same row once the turn produces a real answer
+    // (`AssistantMessagePersistence::CallerPreInserted` — see that type's
+    // doc for why this must never be a second INSERT: KYO-572 already
+    // shipped and fixed exactly that collision for copilot's placeholder,
+    // which is why copilot deliberately does NOT pre-insert one).
     let assistant_message_id = uuid::Uuid::new_v4().to_string();
+    insert_in_progress_assistant_placeholder(
+        p.db,
+        p.encryption_key,
+        &session_id,
+        &assistant_message_id,
+        p.owner_instance,
+    )
+    .await
+    .map_err(|e| {
+        kyomi_core::Error::Internal(format!("Failed to store assistant placeholder: {e}"))
+    })?;
 
     // ── Broadcast user message to shared-session observers ────────────────
     if is_shared && let Some(ws_manager) = p.ws_manager {
@@ -2205,6 +2372,84 @@ pub async fn prepare_chat_dispatch(
         assistant_message_id,
         is_shared,
     })
+}
+
+/// Insert an empty, `in_progress` assistant placeholder row (KYO-493).
+///
+/// Written only by [`prepare_chat_dispatch`]'s AI path, before the agent is
+/// spawned. Deliberately does not update `chat_sessions.updated_at` or
+/// write a sync-log entry — the user-message insert immediately above it
+/// in `prepare_chat_dispatch` already did both for this dispatch, and an
+/// empty placeholder has no content a sync client needs to know about yet.
+async fn insert_in_progress_assistant_placeholder(
+    db: &DbPool,
+    encryption_key: &[u8; 32],
+    session_id: &str,
+    message_id: &str,
+    owner_instance: &str,
+) -> kyomi_core::Result<()> {
+    let encrypted_content = encryption::encrypt("", encryption_key)?;
+    let now = Utc::now();
+    kyomi_core::db_execute!(
+        db,
+        "INSERT INTO chat_messages \
+         (message_id, session_id, role, content, pinned, created_at, status, owner_instance) \
+         VALUES ($1, $2, 'assistant', $3, false, $4, $5, $6)",
+        message_id,
+        session_id,
+        &encrypted_content,
+        now,
+        MessageStatus::InProgress.as_str(),
+        owner_instance
+    )
+    .map_err(|e| {
+        kyomi_core::Error::Internal(format!("failed to insert assistant placeholder: {e}"))
+    })?;
+    Ok(())
+}
+
+/// Finalize a pre-inserted assistant placeholder row with the agent's real
+/// first-class message fields (KYO-493).
+///
+/// Used only by `kyomi_agent::adapter::ChatAgentAdapter::persist_after_chat`,
+/// when it reaches the message tagged with an
+/// `AssistantMessagePersistence::CallerPreInserted` id — UPDATEs the row
+/// [`prepare_chat_dispatch`] pre-inserted instead of INSERTing a second row
+/// under the same primary key (the exact collision KYO-572 fixed for
+/// copilot, which is why copilot's placeholder-less path must never reach
+/// this function — see that type's doc).
+///
+/// Deliberately does not touch `status`: `kyomi_agent::execution::execute_agent_chat`
+/// is the single place that knows the turn's true terminal outcome
+/// (complete / error / cancelled, via `classify_agent_failure`) and
+/// finalizes `status` itself — through [`update_message`] — after this call
+/// returns. Returns whether a row was actually updated, mirroring
+/// [`update_message`]'s return contract.
+pub async fn finalize_assistant_placeholder(
+    db: &DbPool,
+    encryption_key: &[u8; 32],
+    message_id: &str,
+    content: &str,
+    tool_call_id: Option<&str>,
+    tool_name: Option<&str>,
+    tool_calls: Option<&serde_json::Value>,
+) -> kyomi_core::Result<bool> {
+    let encrypted_content = encryption::encrypt(content, encryption_key)?;
+    let rows_affected = kyomi_core::db_execute!(
+        db,
+        "UPDATE chat_messages SET content = $2, tool_call_id = $3, tool_name = $4, tool_calls = $5 \
+         WHERE message_id = $1",
+        message_id,
+        &encrypted_content,
+        tool_call_id,
+        tool_name,
+        tool_calls as Option<&serde_json::Value>
+    )
+    .map_err(|e| {
+        kyomi_core::Error::Internal(format!("failed to finalize assistant placeholder: {e}"))
+    })?
+    .rows_affected();
+    Ok(rows_affected > 0)
 }
 
 // ---------------------------------------------------------------------------
@@ -2249,19 +2494,25 @@ pub async fn save_agent_error(params: SaveAgentErrorParams<'_>) {
         "error": error,
     });
 
-    // Try update first (persist may have already saved the placeholder).
+    // Try update first — as of KYO-493, `prepare_chat_dispatch`'s AI path
+    // always pre-inserts this row (status='in_progress'), so this is the
+    // normal case for a pre-loop failure: finalize the placeholder with the
+    // error text and status='error' instead of leaving it stuck in_progress.
     let updated = update_message(
         db,
         encryption_key,
         assistant_message_id,
         Some(&error_text),
         Some(&error_metadata),
+        Some(MessageStatus::Error),
     )
     .await
     .unwrap_or(false);
 
     // If no placeholder existed, insert a new message so the user sees the
-    // error in the conversation.
+    // error in the conversation. status=Error at INSERT time (KYO-493 code
+    // review) — not INSERT-then-UPDATE — so there is no window where this
+    // row reads as the 'complete' default despite holding error content.
     if !updated
         && let Err(e) = add_message(
             db,
@@ -2277,6 +2528,7 @@ pub async fn save_agent_error(params: SaveAgentErrorParams<'_>) {
             None,
             None,
             None,
+            MessageStatus::Error,
         )
         .await
     {
@@ -2350,7 +2602,8 @@ pub async fn update_message_content_owned(
     }
 
     // Update and re-encrypt.
-    let updated = update_message(db, encryption_key, message_id, Some(content), None).await?;
+    let updated =
+        update_message(db, encryption_key, message_id, Some(content), None, None).await?;
     if !updated {
         return Err(kyomi_core::Error::Internal("Message not found".to_string()));
     }
@@ -2955,6 +3208,7 @@ mod tests {
             message_source: Some("web"),
             skip_ai: false,
             client_msg_id: None,
+            owner_instance: "test-instance",
         })
         .await
         .expect("prepare_chat_dispatch should succeed for the AI path");
@@ -2967,26 +3221,112 @@ mod tests {
             .await
             .expect("get_session_messages should succeed");
 
+        // KYO-493: the AI path now also pre-inserts an assistant
+        // placeholder alongside the user message (see
+        // prepare_chat_dispatch_ready_preinserts_in_progress_assistant_placeholder
+        // below) — filter to the user row this test is actually about, so
+        // that addition doesn't weaken the guarantee this test predates.
+        let user_messages: Vec<_> =
+            messages.iter().filter(|m| m.message_type == "user").collect();
+
         assert_eq!(
-            messages.len(),
+            user_messages.len(),
             1,
             "the user's message must be durable the instant prepare_chat_dispatch \
              returns Ready, before the agent loop is even spawned — not deferred to \
              ChatAgentAdapter::persist_after_chat, which only runs after the whole \
              agent loop finishes"
         );
-        assert_eq!(messages[0].message_type, "user");
         assert_eq!(
-            messages[0].message_id, user_message_id,
+            user_messages[0].message_id, user_message_id,
             "the stored row must carry the same id returned in the Ready outcome, \
              so the persisted id matches the id streamed to the client"
         );
         assert_eq!(
-            messages[0].content, "what was Q4 revenue",
+            user_messages[0].content, "what was Q4 revenue",
             "the stored content must be the raw message the user sent, not the \
              metadata-prefixed form agent.chat() builds for the LLM via \
              build_metadata_prefix"
         );
+    }
+
+    // ── KYO-493: assistant placeholder pre-inserted at dispatch ────────────
+    //
+    // Failure scenario from the ticket: re-enter a chat that is mid-response
+    // and there is nothing durable for it — not even an empty row — until
+    // the agent loop finishes. This test reproduces the exact reproduction
+    // steps: dispatch a turn, then (before any agent code runs — this
+    // function returns before the agent is even spawned) read the
+    // session's state back and assert an assistant row already exists.
+    //
+    // On unfixed code this fails: `get_message_status` returns `None` for
+    // `assistant_message_id` (no row exists yet), and `get_session_messages`
+    // returns only the one user row.
+
+    #[tokio::test]
+    async fn prepare_chat_dispatch_ready_preinserts_in_progress_assistant_placeholder() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        let key = test_key();
+        seed_user(sq, "user-a", "user-a@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+
+        let client_sid = uuid::Uuid::new_v4().to_string();
+        let outcome = prepare_chat_dispatch(ChatDispatchParams {
+            db: &db,
+            encryption_key: &key,
+            ws_manager: None,
+            user_id: "user-a",
+            workspace_id: "ws-1",
+            user_display_name: "User A",
+            session_id: &client_sid,
+            is_new_session: true,
+            message: "what was Q4 revenue",
+            current_time_user_tz: None,
+            message_source: Some("web"),
+            skip_ai: false,
+            client_msg_id: None,
+            owner_instance: "kyomi-api-7f8b9-x2k4p",
+        })
+        .await
+        .expect("prepare_chat_dispatch should succeed for the AI path");
+
+        let ChatDispatchOutcome::Ready { assistant_message_id, .. } = outcome else {
+            panic!("skip_ai=false must return Ready");
+        };
+
+        let status = get_message_status(&db, &assistant_message_id)
+            .await
+            .expect("get_message_status should succeed")
+            .expect(
+                "an assistant row for the dispatched assistant_message_id must exist \
+                 before the agent is even spawned",
+            );
+        assert_eq!(
+            status.0,
+            MessageStatus::InProgress,
+            "the pre-inserted placeholder must be status=in_progress, not the \
+             complete-by-default the migration gives every other row"
+        );
+        assert_eq!(
+            status.1.as_deref(),
+            Some("kyomi-api-7f8b9-x2k4p"),
+            "owner_instance must record the process that dispatched this turn"
+        );
+
+        // Also visible through the normal read path — get_session_messages
+        // does not filter out an empty-content assistant row the way
+        // get_agent_messages does (that filter exists precisely so this
+        // placeholder is never fed back into the LLM's context).
+        let messages = get_session_messages(&db, &key, &client_sid, 100)
+            .await
+            .expect("get_session_messages should succeed");
+        let assistant_row = messages
+            .iter()
+            .find(|m| m.message_id == assistant_message_id)
+            .expect("the placeholder row must be readable through get_session_messages too");
+        assert_eq!(assistant_row.message_type, "assistant");
+        assert_eq!(assistant_row.content, "", "the placeholder starts with no content");
     }
 
     #[tokio::test]
@@ -3014,6 +3354,7 @@ mod tests {
             message_source: Some("web"),
             skip_ai: true,
             client_msg_id: None,
+            owner_instance: "test-instance",
         })
         .await
         .expect("prepare_chat_dispatch should succeed for the skip_ai path");
@@ -3059,6 +3400,7 @@ mod tests {
             message_source: Some("web"),
             skip_ai: true,
             client_msg_id: None,
+            owner_instance: "test-instance",
         })
         .await
         .expect("prepare_chat_dispatch should succeed for a fresh client id");
@@ -3100,6 +3442,7 @@ mod tests {
             message_source: Some("web"),
             skip_ai: true,
             client_msg_id: None,
+            owner_instance: "test-instance",
         })
         .await;
 
@@ -3139,6 +3482,7 @@ mod tests {
             message_source: Some("web"),
             skip_ai: true,
             client_msg_id: None,
+            owner_instance: "test-instance",
         })
         .await;
 
@@ -4856,6 +5200,73 @@ mod tests {
             "expected an error log carrying both session_id ({session_id}) and \
              assistant_message_id ({assistant_message_id}); captured: {:?}",
             logs.events()
+        );
+    }
+
+    // KYO-493: the pre-loop `Err` path (`execute_agent_chat` fails before
+    // the agent loop even starts — e.g. resolving workspace AI config) goes
+    // through `save_agent_error` directly, never through
+    // `execute_agent_chat`'s own step-15 finalization. Since
+    // `prepare_chat_dispatch`'s AI path now always pre-inserts the
+    // placeholder, `save_agent_error`'s "try update first" branch is the
+    // normal case in production — this pins that it actually finalizes the
+    // placeholder with status='error', not just content.
+    #[tokio::test]
+    async fn save_agent_error_finalizes_a_preinserted_placeholder_with_error_status() {
+        let db = test_pool().await;
+        let key = test_key();
+        let sq = sqlite_pool(&db);
+        seed_user(sq, "user-a", "user-a@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+        seed_chat_session(sq, SeedSession::new("sess-1", "user-a", "ws-1", "Test")).await;
+
+        let assistant_message_id = "msg-placeholder-1";
+        insert_in_progress_assistant_placeholder(
+            &db,
+            &key,
+            "sess-1",
+            assistant_message_id,
+            "kyomi-api-abc123",
+        )
+        .await
+        .expect("seed the placeholder exactly as prepare_chat_dispatch does");
+
+        let manager = crate::websocket::WebSocketManager::new(None, db.clone());
+        save_agent_error(SaveAgentErrorParams {
+            db: &db,
+            encryption_key: &key,
+            ws_manager: &manager,
+            session_id: "sess-1",
+            user_id: "user-a",
+            assistant_message_id,
+            context_type: "chat",
+            error: "workspace AI config could not be loaded",
+        })
+        .await;
+
+        let (status, _owner) = get_message_status(&db, assistant_message_id)
+            .await
+            .expect("get_message_status should succeed")
+            .expect("the placeholder row must still exist");
+        assert_eq!(
+            status,
+            MessageStatus::Error,
+            "a pre-loop failure must finalize the placeholder as status=error, not \
+             leave it stuck in_progress"
+        );
+
+        let messages = get_session_messages(&db, &key, "sess-1", 100)
+            .await
+            .expect("get_session_messages should succeed");
+        assert_eq!(
+            messages.len(),
+            1,
+            "the UPDATE must not have produced a second row alongside the placeholder"
+        );
+        assert!(
+            messages[0].content.contains("workspace AI config could not be loaded"),
+            "the error text must be persisted into the placeholder's content; got {:?}",
+            messages[0].content
         );
     }
 }

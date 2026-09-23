@@ -575,6 +575,7 @@ pub async fn send_chat_message(
             message_source: Some(MESSAGE_SOURCE),
             skip_ai,
             client_msg_id: client_msg_id.as_deref(),
+            owner_instance: &ac.ctx.process_instance,
         },
     )
     .await
@@ -661,7 +662,12 @@ pub async fn send_chat_message(
         user_message_persistence: kyomi_agent::UserMessagePersistence::CallerPersisted(
             user_message_id.clone(),
         ),
-        assistant_message_id: Some(assistant_message_id.clone()),
+        // KYO-493: prepare_chat_dispatch already pre-inserted an
+        // in_progress placeholder for this id — persist_after_chat must
+        // UPDATE it, never INSERT a second row.
+        assistant_message_persistence: kyomi_agent::AssistantMessagePersistence::CallerPreInserted(
+            assistant_message_id.clone(),
+        ),
         conversation_history: None,
         user_display_name: ac.auth.name.clone().unwrap_or_else(|| ac.auth.email.clone()),
         context_window: 0,

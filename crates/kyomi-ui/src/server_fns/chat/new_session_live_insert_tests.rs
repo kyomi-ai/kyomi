@@ -254,6 +254,7 @@ async fn dispatch_new_session_and_capture_insert_snapshot(
         message_source: Some("web"),
         skip_ai: true,
         client_msg_id: None,
+        owner_instance: "test-instance",
     })
     .await
     .expect("prepare_chat_dispatch should succeed for a brand-new session");

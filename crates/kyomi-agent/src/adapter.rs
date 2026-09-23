@@ -68,6 +68,10 @@ pub struct ChatAgentAdapter {
     /// [`ChatAgentAdapter::chat`], before `load_context()` runs. See that
     /// field's doc for the contract this enforces.
     user_message_persistence: UserMessagePersistence,
+    /// Set from [`ChatParams::assistant_message_persistence`] at the top of
+    /// [`ChatAgentAdapter::chat`]. See [`AssistantMessagePersistence`] for
+    /// the contract this enforces on [`ChatAgentAdapter::persist_after_chat`].
+    assistant_message_persistence: AssistantMessagePersistence,
 }
 
 /// How the user's message for a given turn reaches the database.
@@ -136,6 +140,75 @@ impl UserMessagePersistence {
     }
 }
 
+/// How the assistant's reply for a given turn reaches the database.
+///
+/// Mirrors [`UserMessagePersistence`] on the other side of the same turn —
+/// same shape, same reason: which arm applies is a claim about what the
+/// caller already did to the DB, and folding it back into a bare
+/// `Option<String>` (as this crate did before KYO-493) makes "an id was
+/// minted" and "a row was pre-inserted for that id" indistinguishable at
+/// the call site, which is exactly the ambiguity that caused KYO-572.
+#[derive(Debug, Clone)]
+pub enum AssistantMessagePersistence {
+    /// [`ChatAgentAdapter::persist_after_chat`] INSERTs the final assistant
+    /// message itself, once the agent loop produces it — pre-KYO-493
+    /// behaviour, and still correct for every caller that does not
+    /// pre-insert a placeholder: copilot (KYO-572 — deliberately no
+    /// placeholder, see `kyomi_auth::copilot_service::prepare_copilot_message`),
+    /// Slack, and watch execution. `Some(id)` stamps the row with a
+    /// caller-chosen id (kept in sync with the id already used for
+    /// WebSocket streaming / thinking-tracker attribution); `None` lets the
+    /// database layer generate one.
+    AdapterInserts(Option<String>),
+    /// The caller already INSERTed an empty placeholder row for this id
+    /// before the agent ran, with `status = 'in_progress'` (KYO-493 —
+    /// `kyomi_auth::chat_service::prepare_chat_dispatch`).
+    /// `persist_after_chat` must UPDATE that row — via
+    /// `kyomi_auth::chat_service::finalize_assistant_placeholder` — never
+    /// INSERT a second one under the same primary key, when it reaches the
+    /// message tagged with this id. `status` itself is finalized separately
+    /// by `kyomi_agent::execution::execute_agent_chat`, which is the one
+    /// place that knows the turn's true terminal outcome.
+    CallerPreInserted(String),
+}
+
+impl Default for AssistantMessagePersistence {
+    /// `AdapterInserts(None)` — no pre-inserted row, no caller-chosen id.
+    /// Pre-KYO-493 behaviour: the adapter both generates and inserts the
+    /// message id itself.
+    fn default() -> Self {
+        Self::AdapterInserts(None)
+    }
+}
+
+impl AssistantMessagePersistence {
+    /// The id to stamp on the final assistant message in agent state, if
+    /// any — fires for either variant whenever a concrete id is available.
+    /// This is what keeps the id used for WebSocket streaming / the
+    /// thinking tracker in sync with the id ultimately written to the DB.
+    ///
+    /// `pub(crate)`: also called from `crate::execution::execute_agent_chat`
+    /// to resolve the id it hands the thinking tracker and
+    /// `AgentExecutionResult`, before `ChatParams` is even built.
+    pub(crate) fn tag_id(&self) -> Option<&str> {
+        match self {
+            Self::AdapterInserts(id) => id.as_deref(),
+            Self::CallerPreInserted(id) => Some(id.as_str()),
+        }
+    }
+
+    /// The id of a row the caller already pre-inserted — `Some` only for
+    /// `CallerPreInserted`. Drives the UPDATE-instead-of-INSERT branch in
+    /// `persist_after_chat`; `AdapterInserts` never triggers it, even when
+    /// it carries an id.
+    fn preinserted_id(&self) -> Option<&str> {
+        match self {
+            Self::CallerPreInserted(id) => Some(id.as_str()),
+            Self::AdapterInserts(_) => None,
+        }
+    }
+}
+
 /// Arguments for [`ChatAgentAdapter::chat`] — one agent turn.
 ///
 /// Packaged into a struct to keep the public signature under clippy's
@@ -151,7 +224,10 @@ pub struct ChatParams<'a> {
     /// [`UserMessagePersistence`] for the two arms and the contract each
     /// enforces.
     pub user_message_persistence: &'a UserMessagePersistence,
-    pub assistant_message_id: Option<&'a str>,
+    /// How the assistant's reply for this turn reaches the database — see
+    /// [`AssistantMessagePersistence`] for the two arms and the contract
+    /// each enforces.
+    pub assistant_message_persistence: &'a AssistantMessagePersistence,
 }
 
 impl ChatAgentAdapter {
@@ -177,6 +253,7 @@ impl ChatAgentAdapter {
             encryption_key,
             messages_loaded_count: 0,
             user_message_persistence: UserMessagePersistence::default(),
+            assistant_message_persistence: AssistantMessagePersistence::default(),
         }
     }
 
@@ -403,6 +480,34 @@ impl ChatAgentAdapter {
                     .as_ref()
                     .map(|tc| serde_json::to_value(tc).unwrap_or_default());
 
+                // KYO-493: the one message tagged with
+                // `AssistantMessagePersistence::CallerPreInserted`'s id
+                // already has a row — `prepare_chat_dispatch` wrote it
+                // before the agent was spawned. UPDATE it instead of
+                // INSERTing a second row under the same primary key (the
+                // exact collision KYO-572 fixed for copilot, which is why
+                // copilot's placeholder-less path — `AdapterInserts` — must
+                // never take this branch and always falls through to the
+                // plain INSERT below).
+                if msg.role == MessageRole::Assistant
+                    && self
+                        .assistant_message_persistence
+                        .preinserted_id()
+                        .is_some_and(|id| msg.message_id.as_deref() == Some(id))
+                {
+                    chat_service::finalize_assistant_placeholder(
+                        &self.db,
+                        &self.encryption_key,
+                        msg.message_id.as_deref().expect("matched Some above"),
+                        &msg.content,
+                        msg.tool_call_id.as_deref(),
+                        msg.name.as_deref(),
+                        tool_calls_json.as_ref(),
+                    )
+                    .await?;
+                    continue;
+                }
+
                 chat_service::add_message(
                     &self.db,
                     &self.encryption_key,
@@ -436,6 +541,7 @@ impl ChatAgentAdapter {
                     msg.tool_call_id.as_deref(),
                     msg.name.as_deref(),
                     tool_calls_json.as_ref(),
+                    chat_service::MessageStatus::Complete,
                 )
                 .await?;
             }
@@ -468,14 +574,17 @@ impl ChatAgentAdapter {
     /// post-chat persistence. All new messages (user, tool, assistant)
     /// are saved to the DB by `persist_after_chat()`.
     ///
-    /// If `assistant_message_id` is provided, it will be set on the final
-    /// assistant response message before persistence, ensuring the DB record
-    /// matches the ID used for WebSocket streaming and UI display.
+    /// `params.assistant_message_persistence` is set on the final assistant
+    /// response message before persistence, ensuring the DB record matches
+    /// the ID used for WebSocket streaming and UI display — and, for
+    /// `CallerPreInserted`, that `persist_after_chat` UPDATEs the
+    /// pre-inserted placeholder row rather than inserting a second one.
     pub async fn chat(&mut self, params: ChatParams<'_>) -> kyomi_core::Result<String> {
-        // Record how this turn's user message is persisted before
-        // load_context() runs, so the filter it applies (and the
+        // Record how this turn's user/assistant messages are persisted
+        // before load_context() runs, so the filter it applies (and the
         // persist-skip below) see it.
         self.user_message_persistence = params.user_message_persistence.clone();
+        self.assistant_message_persistence = params.assistant_message_persistence.clone();
 
         // Lazy context loading on first call.
         if !self.context_loaded {
@@ -508,7 +617,7 @@ impl ChatAgentAdapter {
 
         // Tag the final assistant message with the known ID so that the DB
         // record matches the ID used for WebSocket streaming.
-        if let Some(amid) = params.assistant_message_id {
+        if let Some(amid) = params.assistant_message_persistence.tag_id() {
             self.tag_last_assistant_message_id(amid);
         }
 
@@ -525,7 +634,7 @@ impl ChatAgentAdapter {
         if let Err(e) = self.persist_after_chat().await {
             error!(
                 session_id = self.session_id.as_deref().unwrap_or("<none>"),
-                assistant_message_id = params.assistant_message_id.unwrap_or("<none>"),
+                assistant_message_id = params.assistant_message_persistence.tag_id().unwrap_or("<none>"),
                 user_id = %self.user_id,
                 error = %e,
                 "Failed to persist agent state after chat — messages may be lost"
@@ -1467,6 +1576,35 @@ mod tests {
         }
     }
 
+    /// An [`LLMProvider`] whose very first call fails — no message is ever
+    /// appended to agent state, so `tag_last_assistant_message_id` has
+    /// nothing to tag and the pre-inserted placeholder is left completely
+    /// untouched by `persist_after_chat` (KYO-493's terminal-state tests
+    /// need exactly this: a clean failure with no intermediate tool-call
+    /// message for `tag_last_assistant_message_id`'s "lands on an
+    /// intermediate row" edge case to complicate the assertion).
+    struct FailingProvider {
+        message: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::provider::LLMProvider for FailingProvider {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[crate::types::Tool],
+            _temperature: Option<f32>,
+            _max_tokens: u32,
+            _user_names: &std::collections::HashMap<String, String>,
+        ) -> kyomi_core::Result<crate::types::LLMResponse> {
+            Err(kyomi_core::Error::Internal(self.message.to_string()))
+        }
+
+        fn model(&self) -> &str {
+            "failing-test-provider"
+        }
+    }
+
     /// Same as [`adapter_over`] but with an explicit provider, for tests
     /// that need to drive `ChatAgentAdapter::chat()` (not just
     /// `load_context()`) and therefore need a provider that actually
@@ -1531,6 +1669,7 @@ mod tests {
             None,                                        // tool_call_id
             None,                                        // tool_name
             None,                                        // tool_calls
+            chat_service::MessageStatus::Complete,
         )
         .await
         .expect("store turn 1's user message the way prepare_chat_dispatch does");
@@ -1581,6 +1720,7 @@ mod tests {
             None,
             None,
             None,
+            chat_service::MessageStatus::Complete,
         )
         .await
         .expect("store a row with time but no source");
@@ -1670,6 +1810,11 @@ mod tests {
         // post-fix: CallerPersisted(user_message_id) — the row
         // prepare_copilot_message already wrote.
         let persistence = UserMessagePersistence::CallerPersisted(prep.user_message_id.clone());
+        // Exactly the persistence choice send_copilot_message configures:
+        // AdapterInserts(Some(id)) — copilot mints the assistant id but
+        // (KYO-572) deliberately never pre-inserts a placeholder for it.
+        let assistant_persistence =
+            AssistantMessagePersistence::AdapterInserts(Some(prep.assistant_message_id.clone()));
         adapter
             .chat(ChatParams {
                 message: &prep.user_message,
@@ -1678,7 +1823,7 @@ mod tests {
                 message_source: Some("web"),
                 user_id: Some("user-a"),
                 user_message_persistence: &persistence,
-                assistant_message_id: Some(&prep.assistant_message_id),
+                assistant_message_persistence: &assistant_persistence,
             })
             .await
             .expect("chat() should succeed");
@@ -1767,6 +1912,8 @@ mod tests {
         );
 
         let persistence = UserMessagePersistence::CallerPersisted(prep.user_message_id.clone());
+        let assistant_persistence =
+            AssistantMessagePersistence::AdapterInserts(Some(prep.assistant_message_id.clone()));
         adapter
             .chat(ChatParams {
                 message: &prep.user_message,
@@ -1775,7 +1922,7 @@ mod tests {
                 message_source: Some("web"),
                 user_id: Some("user-a"),
                 user_message_persistence: &persistence,
-                assistant_message_id: Some(&prep.assistant_message_id),
+                assistant_message_persistence: &assistant_persistence,
             })
             .await
             .expect("chat() should succeed");
@@ -1808,6 +1955,247 @@ mod tests {
             "the assistant row must hold the provider's real reply, not be left empty by a \
              swallowed primary-key collision (KYO-572)"
         );
+    }
+
+    // -- Contract: chat's pre-inserted placeholder is UPDATEd, never
+    // -- INSERTed a second time, and terminal outcomes persist correctly
+    // -- (KYO-493) ----------------------------------------------------------
+    //
+    // Unlike copilot (KYO-572, deliberately no placeholder), the main chat
+    // surface (`kyomi_auth::chat_service::prepare_chat_dispatch`) DOES
+    // pre-insert an empty, `status = 'in_progress'` placeholder before the
+    // agent runs, and configures `AssistantMessagePersistence::CallerPreInserted`
+    // over it. These tests drive that real dispatch seam (not a hand-rolled
+    // stand-in) followed by a real turn, so a regression back to plain
+    // INSERT would fail these exactly as the collision failed KYO-572's.
+    //
+    // The last two compose the same finalization steps
+    // `kyomi_agent::execution::execute_agent_chat`'s step 13/15 perform
+    // (`classify_agent_failure` + `finalize_terminal_write` +
+    // `chat_service::update_message`) around a real `adapter.chat()` call —
+    // `execute_agent_chat` itself resolves a real, network-calling LLM
+    // provider from workspace config, which makes it impractical to drive
+    // directly in a unit test (see that function's own doc).
+
+    /// Dispatch a turn exactly the way `send_chat_message` does — through
+    /// the real `prepare_chat_dispatch` seam, so the pre-inserted
+    /// placeholder and its `CallerPreInserted` persistence value are
+    /// genuine production state, not reimplemented by the test.
+    async fn dispatch_chat_turn(
+        db: &kyomi_core::DbPool,
+        key: &Arc<[u8; 32]>,
+        session_id: &str,
+        message: &str,
+    ) -> (UserMessagePersistence, AssistantMessagePersistence) {
+        let outcome = kyomi_auth::chat_service::prepare_chat_dispatch(
+            kyomi_auth::chat_service::ChatDispatchParams {
+                db,
+                encryption_key: key,
+                ws_manager: None,
+                user_id: "user-a",
+                workspace_id: "ws-1",
+                user_display_name: "User A",
+                session_id,
+                is_new_session: true,
+                message,
+                current_time_user_tz: None,
+                message_source: Some("web"),
+                skip_ai: false,
+                client_msg_id: None,
+                owner_instance: "test-instance",
+            },
+        )
+        .await
+        .expect("prepare_chat_dispatch should succeed, exactly as send_chat_message calls it");
+
+        let kyomi_auth::chat_service::ChatDispatchOutcome::Ready {
+            user_message_id, assistant_message_id, ..
+        } = outcome
+        else {
+            panic!("skip_ai=false must return Ready");
+        };
+
+        (
+            UserMessagePersistence::CallerPersisted(user_message_id),
+            AssistantMessagePersistence::CallerPreInserted(assistant_message_id),
+        )
+    }
+
+    #[tokio::test]
+    async fn preinserted_placeholder_completed_run_updates_the_row_not_insert() {
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let key: Arc<[u8; 32]> = Arc::new([7u8; 32]);
+        let session_id = uuid::Uuid::new_v4().to_string();
+
+        const REAL_REPLY: &str = "Q4 revenue was $1M.";
+        let (user_persistence, assistant_persistence) =
+            dispatch_chat_turn(&db, &key, &session_id, "what was Q4 revenue").await;
+        let assistant_message_id = assistant_persistence.tag_id().expect("CallerPreInserted has an id").to_string();
+
+        let mut adapter = adapter_with_provider(
+            db.clone(),
+            "user-a",
+            &session_id,
+            key.clone(),
+            Box::new(TextReplyProvider { reply: REAL_REPLY }),
+        );
+        adapter
+            .chat(ChatParams {
+                message: "what was Q4 revenue",
+                cancel_token: CancellationToken::new(),
+                current_time_user_tz: None,
+                message_source: Some("web"),
+                user_id: Some("user-a"),
+                user_message_persistence: &user_persistence,
+                assistant_message_persistence: &assistant_persistence,
+            })
+            .await
+            .expect("chat() should succeed");
+
+        let stored = chat_service::get_session_messages(&db, &key, &session_id, 100)
+            .await
+            .expect("get_session_messages should succeed");
+        let assistant_rows: Vec<&chat_service::MessageItem> =
+            stored.iter().filter(|m| m.message_type == "assistant").collect();
+
+        assert_eq!(
+            assistant_rows.len(),
+            1,
+            "exactly one assistant row must exist — a regression back to plain INSERT \
+             would either duplicate-key-fail (swallowed by persist_after_chat's \
+             error-log-only handling, per KYO-572) or produce a second row; found {}: {:?}",
+            assistant_rows.len(),
+            assistant_rows.iter().map(|m| &m.content).collect::<Vec<_>>()
+        );
+        assert_eq!(assistant_rows[0].message_id, assistant_message_id);
+        assert_eq!(
+            assistant_rows[0].content, REAL_REPLY,
+            "the placeholder's content must have been UPDATEd to the real reply"
+        );
+    }
+
+    #[tokio::test]
+    async fn preinserted_placeholder_in_loop_error_persists_error_text_and_status() {
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let key: Arc<[u8; 32]> = Arc::new([7u8; 32]);
+        let session_id = uuid::Uuid::new_v4().to_string();
+
+        let (user_persistence, assistant_persistence) =
+            dispatch_chat_turn(&db, &key, &session_id, "what was Q4 revenue").await;
+        let assistant_message_id = assistant_persistence.tag_id().expect("has an id").to_string();
+
+        let mut adapter = adapter_with_provider(
+            db.clone(),
+            "user-a",
+            &session_id,
+            key.clone(),
+            Box::new(FailingProvider { message: "workspace AI config could not be loaded" }),
+        );
+        let result = adapter
+            .chat(ChatParams {
+                message: "what was Q4 revenue",
+                cancel_token: CancellationToken::new(),
+                current_time_user_tz: None,
+                message_source: Some("web"),
+                user_id: Some("user-a"),
+                user_message_persistence: &user_persistence,
+                assistant_message_persistence: &assistant_persistence,
+            })
+            .await;
+        let err = result.expect_err("FailingProvider must make chat() return Err");
+
+        // Exactly what execute_agent_chat's step 13/15 do with that Err.
+        let (exec_status, response_text) = crate::execution::classify_agent_failure(&err);
+        assert_eq!(exec_status, "error");
+        let (content, message_status) =
+            crate::execution::finalize_terminal_write(exec_status, &response_text);
+        chat_service::update_message(&db, &key, &assistant_message_id, content, None, Some(message_status))
+            .await
+            .expect("update_message should succeed");
+
+        let (status, _owner) = chat_service::get_message_status(&db, &assistant_message_id)
+            .await
+            .expect("get_message_status should succeed")
+            .expect("the placeholder row must still exist");
+        assert_eq!(status, chat_service::MessageStatus::Error);
+
+        let stored = chat_service::get_session_messages(&db, &key, &session_id, 100)
+            .await
+            .expect("get_session_messages should succeed");
+        let assistant_rows: Vec<&chat_service::MessageItem> =
+            stored.iter().filter(|m| m.message_type == "assistant").collect();
+        assert_eq!(
+            assistant_rows.len(),
+            1,
+            "exactly one assistant row, carrying the placeholder id, even though the \
+             turn never produced a real answer"
+        );
+        assert!(
+            assistant_rows[0].content.contains("workspace AI config could not be loaded"),
+            "today an in-loop error is streamed to the client but never persisted \
+             (KYO-493) — this must no longer be true; got {:?}",
+            assistant_rows[0].content
+        );
+    }
+
+    #[tokio::test]
+    async fn preinserted_placeholder_cancelled_run_persists_cancellation_notice_and_status() {
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let key: Arc<[u8; 32]> = Arc::new([7u8; 32]);
+        let session_id = uuid::Uuid::new_v4().to_string();
+
+        let (user_persistence, assistant_persistence) =
+            dispatch_chat_turn(&db, &key, &session_id, "what was Q4 revenue").await;
+        let assistant_message_id = assistant_persistence.tag_id().expect("has an id").to_string();
+
+        // Matches the exact text crate::agent constructs on cancellation
+        // (e.g. agent.rs's cancel-token checks) — classify_agent_failure
+        // keys off this substring.
+        let mut adapter = adapter_with_provider(
+            db.clone(),
+            "user-a",
+            &session_id,
+            key.clone(),
+            Box::new(FailingProvider { message: "Request cancelled" }),
+        );
+        let result = adapter
+            .chat(ChatParams {
+                message: "what was Q4 revenue",
+                cancel_token: CancellationToken::new(),
+                current_time_user_tz: None,
+                message_source: Some("web"),
+                user_id: Some("user-a"),
+                user_message_persistence: &user_persistence,
+                assistant_message_persistence: &assistant_persistence,
+            })
+            .await;
+        let err = result.expect_err("FailingProvider must make chat() return Err");
+
+        let (exec_status, response_text) = crate::execution::classify_agent_failure(&err);
+        assert_eq!(exec_status, "cancelled");
+        assert_eq!(response_text, "Request was cancelled.");
+        let (content, message_status) =
+            crate::execution::finalize_terminal_write(exec_status, &response_text);
+        chat_service::update_message(&db, &key, &assistant_message_id, content, None, Some(message_status))
+            .await
+            .expect("update_message should succeed");
+
+        let (status, _owner) = chat_service::get_message_status(&db, &assistant_message_id)
+            .await
+            .expect("get_message_status should succeed")
+            .expect("the placeholder row must still exist");
+        assert_eq!(status, chat_service::MessageStatus::Cancelled);
+
+        let stored = chat_service::get_session_messages(&db, &key, &session_id, 100)
+            .await
+            .expect("get_session_messages should succeed");
+        let assistant_rows: Vec<&chat_service::MessageItem> =
+            stored.iter().filter(|m| m.message_type == "assistant").collect();
+        assert_eq!(assistant_rows.len(), 1);
+        assert_eq!(assistant_rows[0].content, "Request was cancelled.");
     }
 
     // -- Contract: a watch turn must not double-write the user message,
@@ -1891,7 +2279,7 @@ mod tests {
                 message_source: Some("Kyomi Watch"),
                 user_id: Some("user-a"),
                 user_message_persistence: &watch_dispatch.user_message_persistence,
-                assistant_message_id: None,
+                assistant_message_persistence: &AssistantMessagePersistence::AdapterInserts(None),
             })
             .await
             .expect("chat() should succeed");

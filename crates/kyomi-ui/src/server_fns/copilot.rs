@@ -201,7 +201,12 @@ pub async fn send_copilot_message(
         user_message_persistence: kyomi_agent::UserMessagePersistence::CallerPersisted(
             prep.user_message_id,
         ),
-        assistant_message_id: Some(prep.assistant_message_id.clone()),
+        // KYO-572: copilot deliberately never pre-inserts a placeholder for
+        // this id (see `CopilotMessagePrep::assistant_message_id`'s doc) —
+        // AdapterInserts, not CallerPreInserted.
+        assistant_message_persistence: kyomi_agent::AssistantMessagePersistence::AdapterInserts(
+            Some(prep.assistant_message_id.clone()),
+        ),
         conversation_history: None,
         user_display_name: ac.auth.name.clone().unwrap_or_else(|| ac.auth.email.clone()),
         context_window: 0,

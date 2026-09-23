@@ -369,6 +369,18 @@ async fn serve() {
         platforms: platforms.clone(),
     };
 
+    // KYO-493: resolved once, here at startup, so a misconfigured HOSTNAME
+    // fails the server at boot instead of panicking on a user's first chat
+    // message. `config_arc.port` is the same `PORT` this process is
+    // actually listening on — see `resolve_process_instance`'s doc for why
+    // that (not HOSTNAME alone) is the identity, and why it must not be
+    // read from `PORT` a second time here.
+    let process_instance = kyomi_core::resolve_process_instance(
+        &config_arc,
+        std::env::var("HOSTNAME").ok().as_deref(),
+        config_arc.port,
+    );
+
     let state = kyomi_server::state::AppState {
         db: db.clone(),
         kv: kv.clone(),
@@ -385,6 +397,7 @@ async fn serve() {
         connect_registry,
         platforms,
         schema_drift: schema_drift.clone(),
+        process_instance,
     };
 
     // Shared cancellation token for graceful shutdown of all background tasks

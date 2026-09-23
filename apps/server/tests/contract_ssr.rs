@@ -54,6 +54,7 @@ async fn base_url() -> String {
         connect_registry: kyomi_server::connect::registry::ConnectRegistry::new_local(),
         platforms: std::sync::Arc::new(kyomi_core::platform::PlatformRegistry::new()),
         schema_drift: kyomi_server::schema_drift::SchemaDriftStatus::default(),
+        process_instance: "test-instance:0".to_string(),
     };
 
     let app = kyomi_server::build_service(state);

@@ -318,6 +318,16 @@ async fn start_server(
     let registry = kyomi_core::platform::PlatformRegistry::new();
     let platforms = Arc::new(registry);
 
+    // KYO-493: resolved once at startup — see the doc on
+    // `resolve_process_instance` for why. `config_arc.is_personal()` is
+    // always true on this boot path, so this always resolves to the fixed
+    // "desktop" literal regardless of HOSTNAME/port.
+    let process_instance = kyomi_core::resolve_process_instance(
+        &config_arc,
+        std::env::var("HOSTNAME").ok().as_deref(),
+        config_arc.port,
+    );
+
     let state = kyomi_server::state::AppState {
         db: db.clone(),
         kv: kv.clone(),
@@ -339,6 +349,7 @@ async fn start_server(
         // migrates before returning successfully, so drift is zero here by
         // construction.
         schema_drift: kyomi_server::schema_drift::SchemaDriftStatus::default(),
+        process_instance,
     };
 
     let shutdown_token = CancellationToken::new();

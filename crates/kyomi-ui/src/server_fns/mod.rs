@@ -117,6 +117,15 @@ pub struct ServerContext {
     /// Present only when the `slack` feature is enabled and Slack is configured.
     #[cfg(feature = "slack")]
     pub slack_client: Option<kyomi_slack::client::SlackClient>,
+
+    /// This process's identity for owning `chat_messages` rows that are
+    /// `in_progress` (KYO-493's `owner_instance` column). Resolved exactly
+    /// once at server startup (`apps/server/src/main.rs`, via
+    /// `kyomi_core::resolve_process_instance`) and copied onto every
+    /// request's `ServerContext` from `AppState::process_instance` — never
+    /// re-derived here, so a misconfigured `HOSTNAME` fails the server at
+    /// boot rather than panicking on a user's first chat message.
+    pub process_instance: String,
 }
 
 #[cfg(feature = "ssr")]
