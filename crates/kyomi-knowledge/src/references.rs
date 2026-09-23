@@ -249,10 +249,9 @@ pub async fn backfill_all_references(
 
     let is_pg = db.is_postgres();
     let true_val = kyomi_core::sql_compat::bool_true(is_pg);
-    let false_val = kyomi_core::sql_compat::bool_false(is_pg);
     let sql = format!(
         "SELECT CAST(learning_id AS TEXT) as learning_id FROM agent_learnings \
-         WHERE workspace_id = $1 AND enabled = {true_val} AND is_superseded = {false_val}"
+         WHERE workspace_id = $1 AND enabled = {true_val} AND superseded_by IS NULL"
     );
 
     let learning_rows = kyomi_core::db_fetch_all!(

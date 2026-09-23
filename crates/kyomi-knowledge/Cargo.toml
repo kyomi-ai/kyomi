@@ -21,5 +21,13 @@ regex = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 
+[dev-dependencies]
+# Enables kyomi-core's "test-helpers" feature (gating `kyomi_core::test_db`)
+# for this crate's own test target only — kyomi-core is already a normal
+# dependency above without that feature. Same pattern as
+# crates/kyomi-auth/Cargo.toml and apps/server/Cargo.toml; see
+# crates/kyomi-core/src/test_db.rs's module docs. KYO-292.
+kyomi-core = { workspace = true, features = ["test-helpers"] }
+
 [lints]
 workspace = true
