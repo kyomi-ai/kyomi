@@ -621,7 +621,7 @@ jobs:
         run: sccache --show-stats || true
 
   # ---------------------------------------------------------------------------
-  # Worktree lifecycle & script self-tests (KYO-578, KYO-617, KYO-629, KYO-632, KYO-662, KYO-679, KYO-710)
+  # Worktree lifecycle & script self-tests (KYO-578, KYO-617, KYO-629, KYO-632, KYO-662, KYO-679, KYO-710, KYO-733)
   #
   # scripts/check-ticket-in-flight.sh, scripts/mark-worktree-stranded.sh,
   # scripts/mark-branch-stranded.sh, scripts/append-review-log.sh,
@@ -764,7 +764,14 @@ jobs:
   # instead (the real Rust toolchain is never invoked), and its own parity
   # check reads this file with grep/sed, not a YAML parser.
   # stale-tooling-guard-test.sh needs only bash + git, same as the others —
-  # no `gh` stub, no python3 either. check-real-identifiers-test.sh needs
+  # no `gh` stub, no python3 either. retire-worktree-test.sh (KYO-733) is
+  # the self-test for scripts/retire-worktree.sh, the single supported way
+  # to remove a linked `kyomi-wt-*` worktree — it refuses when the tree
+  # looks live (a recent write, a process with its cwd inside the tree) or
+  # has unsaved/unpushed work, closing the gap where a bulk cleanup ran
+  # `git worktree remove` on a live agent's tree and lost its work. Like
+  # stale-tooling-guard-test.sh, it needs only bash + git — no `gh` stub,
+  # no python3. check-real-identifiers-test.sh needs
   # perl with core Digest::SHA (already on ubuntu-latest, no extra install
   # step) to compute the salted SHA-256 hash for its throwaway denylist
   # fixture. check-disposal-safety-test.sh (KYO-679) needs the same
@@ -837,6 +844,7 @@ jobs:
           suites=(
             scripts/check-ticket-in-flight-test.sh
             scripts/mark-worktree-stranded-test.sh
+            scripts/retire-worktree-test.sh
             scripts/mark-branch-stranded-test.sh
             scripts/append-review-log-test.sh
             scripts/audit-agent-run-deaths-test.sh

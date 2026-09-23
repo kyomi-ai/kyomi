@@ -195,6 +195,42 @@ All scripts are organized by environment. **Every script is environment-specific
   `scripts/mark-worktree-stranded-test.sh`, including an interop check that
   `check-ticket-in-flight.sh` actually honours a marker this script wrote.
 
+- **`retire-worktree.sh`** - The ONLY supported way to remove a linked
+  `kyomi-wt-*` worktree (KYO-733, after a bulk cleanup ran
+  `git worktree remove` on a live agent's tree and lost its staged,
+  uncommitted work, and separately deleted a tree explicitly tombstoned
+  with `STRANDED.md`). `ps` alone is a known-insufficient liveness signal —
+  an agent sitting between tool calls has no child process in the tree at
+  all — so this script refuses removal, reporting EVERY reason found (not
+  just the first), when any of: (a) a file outside `target/` and `.git`
+  was modified in the last 30 minutes; (b) a process (other than this
+  script's own PID and its direct children) has its cwd inside the tree —
+  corroboration, not the sole signal, but still a refusal on its own; (c)
+  `git status --porcelain` is non-empty; (d) HEAD has commits unreachable
+  from any `origin` remote-tracking ref, checked after `git fetch --prune
+  origin` so a stale tracking ref for a since-deleted remote branch can't
+  read as "pushed"; (e) a `STRANDED.md` tombstone is present. Usage:
+  `scripts/retire-worktree.sh <path>` or
+  `scripts/retire-worktree.sh --force <path> <path>` — `--force` overrides
+  reasons (a)-(e) (printing each one it overrides) once a human has
+  confirmed the work is safe to discard (e.g. the PR merged and the remote
+  branch was since deleted, which reads as unpushed by design). It never
+  overrides a usage error (path missing, not a git worktree, not a
+  registered linked worktree, or the primary worktree / canonical clone)
+  or a "could not complete a check" result, and requires the path twice
+  under `--force` as a typo guard. Removes ONLY the worktree — it never
+  deletes the branch (that's the caller's job) and never runs
+  `git worktree prune`. **Exit-code contract:** `0` removed; `1` refused —
+  a check found live/unsaved work; `2` usage error, never overridden by
+  `--force`; `3` a check could not be completed (unsupported git version,
+  `find`/`git worktree list`/`git fetch`/`git rev-list` failed, or `/proc`
+  was wholly unreadable) or the removal itself failed after every check
+  passed — also never overridden by `--force`. Self-tested by
+  `scripts/retire-worktree-test.sh`, including a real backgrounded process
+  planted inside a fixture tree to exercise the `/proc` scan, and mutation
+  checks that prove the find-failure and recent-write assertions actually
+  exercise the script's own bytes.
+
 - **`mark-branch-stranded.sh`** - The writer side of the KYO-567 `stranded/`
   remote-branch tombstone above, and the answer to "what does *releasing* a
   ticket whose worker died after `git push` actually do?" It is
