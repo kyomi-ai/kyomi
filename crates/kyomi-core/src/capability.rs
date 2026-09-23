@@ -179,9 +179,34 @@ pub fn get_user_limit(workspace: &Workspace, tier: SubscriptionTier) -> i32 {
 /// this change; follow-up work (server-side 402 enforcement, then a paywall)
 /// consumes it.
 ///
-/// - `PastDue`, `Cancelled` → always lapsed: Stripe (or our own bookkeeping
-///   for the no-Stripe fallback, see below) has already determined this
+/// - `PastDue` → always lapsed: Stripe has already determined this
 ///   workspace isn't paid up.
+/// - `Cancelled` **with** a live Stripe subscription (`stripe_subscription_id`
+///   is `Some`) **and** `subscription_period_end` in the future → **not**
+///   lapsed. This is a *scheduled* cancellation: the user cancelled but
+///   Stripe (and our billing page's "you'll retain access until the end of
+///   your billing period" copy) keeps them paid up through the period they
+///   already paid for. `StripeService::parse_subscription_data`
+///   (`kyomi-auth/src/stripe_service.rs`) writes `status = "cancelled"` the
+///   instant `cancel_at_period_end` is set — well before Stripe's own status
+///   moves — but in that same call it also sets `period_end` from the
+///   subscription item's `current_period_end` and keeps
+///   `stripe_subscription_id` populated, so a scheduled-cancellation row
+///   always carries both. `handle_subscription_deleted`
+///   (`apps/server/src/routes/billing.rs`) is the only writer that clears
+///   both fields to `NULL` when Stripe actually deletes the subscription —
+///   so "sub id present + period end present and future" reliably
+///   distinguishes "cancellation is scheduled" from "subscription is gone".
+/// - Every other `Cancelled` row is lapsed: no Stripe subscription id (never
+///   scheduled, or Stripe already deleted it), or the period end has passed,
+///   or `subscription_period_end` is `None`. The `None` case deliberately
+///   reads as lapsed rather than permissive: unlike `Trialing`'s
+///   `trial_ends_at` (see below), a scheduled cancellation's `period_end` is
+///   not optional at the writer — `parse_subscription_data` always populates
+///   it from Stripe's `current_period_end` whenever `cancel_at_period_end` is
+///   set, so a `Cancelled` row with `stripe_subscription_id` set but no
+///   `period_end` gives no evidence of any paid-up time remaining and there
+///   is nothing to honour.
 /// - `Trialing` **with** a Stripe subscription (`stripe_subscription_id` is
 ///   `Some`) → **never** lapsed via this predicate, even if `trial_ends_at`
 ///   itself is in the past. Once Stripe's own trial ends it moves the
@@ -208,7 +233,14 @@ pub fn get_user_limit(workspace: &Workspace, tier: SubscriptionTier) -> i32 {
 /// - `Active` → never lapsed.
 pub fn is_billing_lapsed(workspace: &Workspace, now: DateTime<Utc>) -> bool {
     match workspace.subscription_status {
-        SubscriptionStatus::PastDue | SubscriptionStatus::Cancelled => true,
+        SubscriptionStatus::PastDue => true,
+        SubscriptionStatus::Cancelled => {
+            let scheduled_cancellation = workspace.stripe_subscription_id.is_some()
+                && workspace
+                    .subscription_period_end
+                    .is_some_and(|period_end| period_end > now);
+            !scheduled_cancellation
+        }
         SubscriptionStatus::Active => false,
         SubscriptionStatus::Trialing => {
             workspace.stripe_subscription_id.is_none()
@@ -894,10 +926,71 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_is_lapsed() {
+    fn cancelled_scheduled_with_future_period_end_is_not_lapsed() {
+        // Scheduled cancellation (cancel_at_period_end): stripe_subscription_id
+        // still set, subscription_period_end still in the future. This is the
+        // exact KYO-811 case — the user cancelled but is still inside the
+        // period they already paid for.
+        let now = Utc::now();
         let mut ws = test_workspace(SubscriptionTier::Cloud, 0.0);
         ws.subscription_status = SubscriptionStatus::Cancelled;
-        assert!(is_billing_lapsed(&ws, Utc::now()));
+        ws.stripe_subscription_id = Some("sub_live_123".to_string());
+        ws.subscription_period_end = Some(now + chrono::Duration::days(5));
+        assert!(!is_billing_lapsed(&ws, now));
+    }
+
+    #[test]
+    fn cancelled_scheduled_with_past_period_end_is_lapsed() {
+        // Same shape as the scheduled-cancellation case above, but the paid
+        // period has actually elapsed — must be lapsed.
+        let now = Utc::now();
+        let mut ws = test_workspace(SubscriptionTier::Cloud, 0.0);
+        ws.subscription_status = SubscriptionStatus::Cancelled;
+        ws.stripe_subscription_id = Some("sub_live_123".to_string());
+        ws.subscription_period_end = Some(now - chrono::Duration::days(1));
+        assert!(is_billing_lapsed(&ws, now));
+    }
+
+    #[test]
+    fn cancelled_no_sub_with_future_period_end_is_lapsed() {
+        // Proves stripe_subscription_id is load-bearing, not just
+        // period_end: a future period_end alone (e.g. a stale value left
+        // over from before Stripe deleted the subscription) must not be
+        // enough to avoid the gate once the subscription id itself is gone.
+        let now = Utc::now();
+        let mut ws = test_workspace(SubscriptionTier::Cloud, 0.0);
+        ws.subscription_status = SubscriptionStatus::Cancelled;
+        ws.stripe_subscription_id = None;
+        ws.subscription_period_end = Some(now + chrono::Duration::days(5));
+        assert!(is_billing_lapsed(&ws, now));
+    }
+
+    #[test]
+    fn cancelled_sub_with_no_period_end_is_lapsed() {
+        // subscription_period_end = None with a live sub id: parse_subscription_data
+        // always sets period_end from Stripe's current_period_end whenever
+        // cancel_at_period_end is set, so a Cancelled row with a sub id but no
+        // period_end gives no evidence of paid-up time remaining — there is
+        // nothing to honour, so this reads as lapsed (see the doc comment
+        // above for the full justification).
+        let now = Utc::now();
+        let mut ws = test_workspace(SubscriptionTier::Cloud, 0.0);
+        ws.subscription_status = SubscriptionStatus::Cancelled;
+        ws.stripe_subscription_id = Some("sub_live_123".to_string());
+        ws.subscription_period_end = None;
+        assert!(is_billing_lapsed(&ws, now));
+    }
+
+    #[test]
+    fn cancelled_scheduled_with_period_end_exactly_now_is_lapsed() {
+        // Boundary: period_end == now is not "> now", so this must be
+        // lapsed, not the last instant of grace.
+        let now = Utc::now();
+        let mut ws = test_workspace(SubscriptionTier::Cloud, 0.0);
+        ws.subscription_status = SubscriptionStatus::Cancelled;
+        ws.stripe_subscription_id = Some("sub_live_123".to_string());
+        ws.subscription_period_end = Some(now);
+        assert!(is_billing_lapsed(&ws, now));
     }
 
     #[test]
