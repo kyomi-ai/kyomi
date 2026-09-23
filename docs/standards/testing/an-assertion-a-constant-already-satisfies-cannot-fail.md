@@ -95,11 +95,9 @@ count — which cannot see what the wiring is bound to. Both assertions here are
 squarely at the computed value; the defect is the shape of the question asked about it.
 
 Distinct from
-[choose-inputs-the-broken-code-would-answer-differently.md](choose-inputs-the-broken-code-would-answer-differently.md)
-and
-[vary-the-fixture-only-on-the-axis-under-test.md](vary-the-fixture-only-on-the-axis-under-test.md):
-those are input-side — the fixtures agree by accident, so a coarser rule sorts them
-correctly and the axis under test is never reached. Change the fixtures and those tests come
+[choose-inputs-the-broken-code-would-answer-differently.md](choose-inputs-the-broken-code-would-answer-differently.md):
+that one is input-side — the fixtures agree by accident, so a coarser rule sorts them
+correctly and the axis under test is never reached. Change the fixtures and that test comes
 alive. No fixture rescues a predicate that is true for every value the code can construct.
 
 Distinct from
