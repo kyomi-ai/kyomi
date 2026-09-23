@@ -7,8 +7,22 @@
  * success, straight into the open modal (the listener validates
  * `event.origin === window.location.origin`, so posting from the page itself
  * is legitimate — see `install_oauth_listener` /
- * `crates/kyomi-ui/src/utils/oauth_popup.rs:140-178`), and assert the
+ * `crates/kyomi-ui/src/utils/oauth_popup.rs:522-551`), and assert the
  * create-mode "Next" gate reacts correctly.
+ *
+ * KYO-473 RETARGET (this revision): Arm A used to dispatch
+ * `GOOGLE_OAUTH_SUCCESS` against BigQuery's `kyomi_oauth` Authentication
+ * Mode. KYO-704 (`686c9a91`, PR #513) removed `kyomi_oauth` from
+ * `BIGQUERY_META.auth_modes` entirely (`crates/kyomi-core/src/
+ * datasource_registry.rs`) — it is no longer a selectable option in the
+ * Authentication Mode dropdown at all (confirmed live: the dropdown now
+ * lists exactly `"Google OAuth (Enterprise)"` and
+ * `"Service Account (Recommended)"`), so the old `pickAuthMode(page,
+ * 'Kyomi')` call threw a Playwright timeout before Arm A ever reached its
+ * assertions. Arm A now selects BigQuery's `enterprise_oauth` mode and
+ * dispatches `BIGQUERY_ENTERPRISE_OAUTH_SUCCESS` instead — see the ARM A
+ * DETERMINISM and Coverage sections below for why that changes what the
+ * arm's secondary assertion can honestly claim.
  *
  * ARM A DETERMINISM — KYO-429 was a confirmed app bug (via prior
  * instrumented repro, not a test defect): any recognized `*_OAUTH_SUCCESS`
@@ -16,11 +30,12 @@
  * cache, and when that background `list_datasources` refetch's *response*
  * resolved, the page's top-level view closure re-ran unconditionally,
  * reconstructing the whole `DatasourcesContent` subtree and remounting
- * `DatasourceModal` with default state — discarding the very "Next"
- * transition Arm A exists to prove, ~20ms after the message. Left alone,
- * whether Arm A observed the transition or the remount was a race between
- * two async events, and it was genuinely flaky: three manual runs (pre-fix)
- * produced FAIL / PASS / FAIL.
+ * `DatasourceModal` with default state — discarding whatever in-progress
+ * create-mode state Arm A was observing, ~20ms after the message. Left
+ * alone, whether Arm A observed the modal intact or the remount was a race
+ * between two async events, and it was genuinely flaky: three manual runs
+ * (pre-fix, against the original `GOOGLE_OAUTH_SUCCESS`/`kyomi_oauth`
+ * pairing) produced FAIL / PASS / FAIL.
  *
  * KYO-429 is now FIXED, merged as `c2800fca` (PR #374): `DatasourcesPage`'s
  * view closure (`crates/kyomi-ui/src/pages/settings/datasources.rs`) now
@@ -31,7 +46,15 @@
  * refetch — exactly what a cache invalidation with unchanged data
  * produces — no longer flips the branch, and `DatasourcesContent`/
  * `DatasourceModal` are never rebuilt out from under an open modal's
- * unsaved input.
+ * unsaved input. The fix is generic over *which* recognized
+ * `*_OAUTH_SUCCESS` message triggered the invalidation — the list-level
+ * listener (`datasources.rs`, ~L740-750) calls
+ * `query_cache.invalidate("datasources")` identically for
+ * `GoogleSuccess`/`SnowflakeSuccess`/`DatabricksSuccess`/`MicrosoftSuccess`/
+ * `MicrosoftEnterpriseSuccess`/`BigqueryEnterpriseSuccess` — so
+ * `BIGQUERY_ENTERPRISE_OAUTH_SUCCESS` exercises exactly the same
+ * invalidate-then-refetch path `GOOGLE_OAUTH_SUCCESS` did and is an
+ * equally valid KYO-429 regression guard.
  *
  * This spec keeps two layers of protection rather than trusting the fix
  * blindly. First, it still arms a Playwright `page.route()` interception on
@@ -41,54 +64,123 @@
  * so the script can never hang) — this is timing control, not mocking: the
  * real request still reaches the real server and gets the real response,
  * only its arrival at the page is deferred. Second, and this is the AC2
- * addition, Arm A now asserts directly on the regression this bug caused,
- * not just on its downstream symptom: after the postMessage, in addition
- * to the "Next" transition, it asserts the create modal is still open AND
- * that the Name field it was seeded with earlier still holds its typed
- * value — the exact form-state-loss scenario KYO-429 described. If the
- * modal-died branch below is ever taken again, or the Name field comes
- * back empty, that is a KYO-429 regression, not an accepted race outcome —
- * see `regressionBanner()` at that call site. Arm B is independent and
- * unaffected — see below.
+ * addition, Arm A asserts directly on the regression this bug caused, not
+ * just on a downstream symptom: after the postMessage, it asserts the
+ * create modal is still open AND that the Name field it was seeded with
+ * earlier still holds its typed value — the exact form-state-loss scenario
+ * KYO-429 described. If the modal-survival guard below is ever tripped
+ * again, or the Name field comes back empty, that is a KYO-429 regression,
+ * not an accepted race outcome — see `regressionBanner()` at that call
+ * site. Arm B is independent and unaffected — see below.
+ *
+ * KYO-473 hardening — the modal-survival guard is DOM-node-identity based,
+ * not text/visibility based. An earlier revision asked "is `text=Connection
+ * Method` visible?" after the postMessage and treated `true` as proof the
+ * original modal survived untouched. Verified against a deliberately
+ * reintroduced KYO-429 regression (a raw tracked `match
+ * datasources_signal.get()` in `DatasourcesPage`, replacing the `Memo`
+ * branch above — the exact pre-fix shape), that check is vacuous: it reads
+ * PASS (modal "visible") on every run even though the Name field has
+ * already lost its typed value. The reason is structural, not timing luck:
+ * a remounted `DatasourceModal` starts CLOSED — `modal_datasource_id`
+ * resets to its fresh-signal default of `None` (`datasources.rs` ~L628),
+ * and `Modal`'s entire body is gated behind `<Show when=show>`
+ * (`crates/kyomi-ui-components/src/components/modal.rs` ~L176 — a `false`
+ * show renders nothing) — so a genuinely fresh post-remount instance has no
+ * "Connection Method" text to find at all. A `true` visibility reading
+ * during/just after a regression is therefore never a freshly-reopened
+ * modal; it can only be the OLD, about-to-be-torn-down instance's DOM,
+ * sampled in the async gap between the deferred `list_datasources`
+ * response landing and Leptos actually swapping the subtree. A text query
+ * cannot distinguish "the modal I started with, still alive" from "debris
+ * of that modal, moments from being replaced by nothing" — a DOM node
+ * reference can. This revision tags the Name `<input>` element itself
+ * (`nameInput.elementHandle()`, captured right before the postMessage) and
+ * polls that *same JS object's* `.isConnected` — true only for as long as
+ * that exact node stays attached to the document. A remount necessarily
+ * constructs a brand-new input element (a fresh `DatasourceModal` instance
+ * re-declares `let (name, set_name) = signal(String::new())` and its own
+ * view from scratch; the old element is never reused), so `.isConnected` on
+ * the pre-message handle flips to `false` the moment the swap actually
+ * lands, regardless of what a text query happens to read at that instant.
+ * On the fixed build this same check is expected to stay connected for the
+ * whole observation window: the Memo branch above means the subtree — and
+ * therefore this exact input node — is never rebuilt at all for a
+ * `Some(Ok(_))` -> `Some(Ok(_))` refetch, so nothing ever detaches it.
  *
  * Coverage (see the final report for the authoritative list + reasons):
  *
- *   COVERED, including the disabled -> enabled transition itself:
- *     - BigQuery + kyomi_oauth via GOOGLE_OAUTH_SUCCESS. By design,
- *       `datasources.rs:2787-2803` sets `test_result{success:true}` and
- *       `discovery_status="success"` directly off the postMessage — no
- *       server round-trip needed, so the "Next disabled -> enabled"
- *       transition is directly assertable here. It previously wasn't,
- *       because of the independently-confirmed KYO-429 bug described
- *       above: delivering *any* recognized `*_OAUTH_SUCCESS` postMessage on
- *       `/settings/datasources` could silently reset the whole page's
- *       component tree within ~20ms — the create modal closing and all
- *       in-progress form state discarded before the transition could be
- *       observed. Reproduced with `page.addEventListener`/
- *       `removeEventListener` instrumentation showing both
- *       `install_oauth_listener` instances tear down and reinstall
- *       immediately after the message is delivered; ruled out real
- *       navigation (`framenavigated` never fires, URL unchanged), full
- *       reload (a `window.__marker` set beforehand survives), and the
- *       top-level WASM panic overlay (never appears). See KYO-429 for the
- *       original repro + evidence; the app bug itself is now fixed there
- *       (`DatasourcesPage` branches on a memoized view-state instead of a
- *       raw tracked `datasources_signal.get()` read — see the ARM A
- *       DETERMINISM header above). This spec asserts the transition it was
- *       written to prove, plus the modal-still-open and
- *       Name-field-retained checks added alongside the fix, and keeps the
- *       list_datasources response delay as a regression guard rather than
- *       a required race-avoidance workaround.
+ *   COVERED — the KYO-429 modal-survival guard (primary), plus a
+ *   remount-detecting continuity check (secondary), NOT a disabled ->
+ *   enabled transition:
+ *     - BigQuery + enterprise_oauth via BIGQUERY_ENTERPRISE_OAUTH_SUCCESS.
+ *       `connection_step_satisfied_from` (`datasources.rs:342-353`)
+ *       special-cases `enterprise_oauth` to always satisfy the create-mode
+ *       gate the instant the mode is selected — no slug-scoped connect
+ *       endpoint exists before the datasource is saved, so Next is already
+ *       ENABLED before any OAuth message reaches the page (confirmed live:
+ *       selecting "Google OAuth (Enterprise)" alone enables Next). There is
+ *       therefore no disabled -> enabled transition left to assert for this
+ *       pair, and the spec does not pretend otherwise. What IS asserted:
+ *       (1) the KYO-429 pair — modal survives (DOM-identity check, see the
+ *       KYO-473 hardening paragraph above), Name field retained — after
+ *       `BIGQUERY_ENTERPRISE_OAUTH_SUCCESS` triggers the same cache
+ *       invalidation + `list_datasources` refetch the original bug rode in
+ *       on; and (2) a KYO-404 design check that Next *stays* enabled
+ *       through that window, run ONLY when (1) confirms no remount
+ *       happened. (2) is explicitly NOT a second KYO-429 detector — an
+ *       earlier revision claimed a remount would "flip Next to disabled"
+ *       (reasoning: a fresh instance's `bq_auth_mode` defaults back to
+ *       `service_account`, whose gate needs an actual successful test).
+ *       Verified against a reintroduced regression, that reasoning doesn't
+ *       hold and the claim was retracted: `connection_step_satisfied_from`
+ *       (`datasources.rs:342-353`) resolves the (bigquery, enterprise_oauth)
+ *       pair to `OAuthStatusSource::Datasource(_)`, which returns `true`
+ *       unconditionally regardless of `bq_auth_mode`'s current value — and
+ *       in any case a genuine remount doesn't reopen the modal at a
+ *       default auth mode with Next visibly disabled, it closes the whole
+ *       modal (`modal_datasource_id` resets to `None`, gating `Modal`'s
+ *       entire body via `<Show>` — see the hardening paragraph above), so
+ *       there is no "Next" button left to read at all. What was actually
+ *       observed reading `enabled=true` during a live regression was the
+ *       OLD, about-to-be-torn-down instance's DOM, not survived state —
+ *       exactly the same artifact the text-visibility check suffered from.
+ *       This is why (2) only runs once (1) has confirmed the modal wasn't
+ *       replaced: without that guard its reading is meaningless noise, not
+ *       evidence either way.
  *
  *   COVERED, but as "already enabled by design" (KYO-404) — NOT a
- *   transition, and the spec does not pretend it is one:
- *     - BigQuery + enterprise_oauth: `connection_step_satisfied_from`
- *       (`datasources.rs:240`) special-cases this combination to always
- *       satisfy the create-mode gate, because no slug-scoped connect
- *       endpoint exists before the datasource is saved. Next is enabled
- *       from the moment this mode is selected, before any OAuth message.
+ *   transition, and the spec does not pretend it is one (Arm B):
+ *     - BigQuery + enterprise_oauth, mode-selection alone, no postMessage:
+ *       the same `connection_step_satisfied_from` special-case as above,
+ *       asserted directly with no OAuth message involved.
  *
  *   NOT COVERED (documented, not fabricated):
+ *     - BigQuery kyomi_oauth (GOOGLE_OAUTH_SUCCESS) — retired by KYO-704
+ *       (`686c9a91`, PR #513): removed from `BIGQUERY_META.auth_modes`
+ *       (`crates/kyomi-core/src/datasource_registry.rs`), so it is no
+ *       longer a selectable Authentication Mode in the create-mode UI at
+ *       all. This was previously the one arm with a genuine, directly
+ *       assertable disabled -> enabled Next transition driven purely by a
+ *       simulated postMessage (`datasources.rs`'s modal-level listener sets
+ *       `test_result{success:true}` off `GoogleSuccess` with no server
+ *       round-trip, and `service_account`/`enterprise_oauth` are the only
+ *       modes left, per the "already enabled by design" and "needs a real
+ *       test" entries above and below respectively) — with it gone, no
+ *       create-mode auth mode can reach "Next enabled" from a simulated
+ *       message any more. This is a finding, not a gap papered over: the
+ *       modal-level listener still sets `test_result`/`modal_oauth_connected`
+ *       off `GoogleSuccess`/`BigqueryEnterpriseSuccess` unconditionally,
+ *       regardless of which auth mode is currently selected (`datasources.rs`
+ *       ~L3707-3726) — which means dispatching either message while
+ *       `service_account` (the current default) is selected would flip
+ *       `test_succeeded` to `true` and enable Next for a mode with no
+ *       actual validated credential. That cross-mode leakage was
+ *       deliberately NOT used to manufacture a transition here — asserting
+ *       against it would test an incidental side effect instead of a
+ *       designed gate, exactly the kind of fake result this suite must not
+ *       produce. Flagged out of scope in the KYO-473 report as a possible
+ *       latent bug worth its own ticket.
  *     - Snowflake oauth (SNOWFLAKE_OAUTH_SUCCESS)
  *     - Databricks oauth (DATABRICKS_OAUTH_SUCCESS)
  *     - Synapse enterprise_oauth (MICROSOFT_ENTERPRISE_OAUTH_SUCCESS)
@@ -109,19 +201,9 @@
  *     modal at all (`OAuthMessage::MicrosoftSuccess` only clears the
  *     "connecting" flag); it isn't wired to any create-mode gate to assert.
  *
- * Assertions use isVisible()/isEnabled(), never count().
- *
- * KYO-704 (not yet reconciled against a real browser — same "needs a real
- * browser to pick correct selectors" reasoning as bigquery-create-modal.cjs,
- * KYO-602/KYO-604): Arm A above ("BigQuery + kyomi_oauth via
- * GOOGLE_OAUTH_SUCCESS") assumed a freshly opened create-mode BigQuery
- * datasource lands on the kyomi_oauth panel by default. KYO-704 retired
- * kyomi_oauth and made service_account the create-mode default
- * (`BIGQUERY_DEFAULT_AUTH_MODE`,
- * crates/kyomi-ui/src/pages/settings/datasources.rs), so this arm now
- * needs to explicitly select BigQuery's kyomi_oauth Authentication Mode
- * before dispatching `GOOGLE_OAUTH_SUCCESS`, or be retargeted at
- * enterprise_oauth/service_account instead. Not rewritten here.
+ * Assertions use isVisible()/isEnabled()/isConnected (the last via a
+ * pre-tagged elementHandle — see the KYO-473 hardening paragraph above),
+ * never count().
  */
 const { chromium } = require('playwright');
 
@@ -174,8 +256,10 @@ function regressionBanner(ticket, reason) {
 // it is kept deliberately, as a regression guard: belt-and-braces so the
 // assertion below stays deterministic even if the Memo branch is ever
 // weakened, cheap insurance that costs nothing else in the script (the
-// modal-still-open / Name-field-retained assertions added alongside it are
-// the primary guard). This is request delay, not response mocking: the
+// DOM-identity modal-survival / Name-field-retained assertions added
+// alongside it are the primary guard — see the KYO-473 hardening
+// paragraph in the header comment for why identity, not visibility, is
+// what actually catches a remount). This is request delay, not response mocking: the
 // real request still goes to the real server and gets the real response —
 // only fulfilment to the page is deferred.
 //
@@ -267,7 +351,16 @@ async function pickAuthMode(page, label) {
     const nextBtn = () => page.locator('button:has-text("Next")').last();
     const modalVisible = () => page.locator('text=Connection Method').isVisible().catch(() => false);
 
-    // ══ A — BigQuery kyomi_oauth: GOOGLE_OAUTH_SUCCESS sets test_result ═══
+    // ══ A — BigQuery enterprise_oauth: BIGQUERY_ENTERPRISE_OAUTH_SUCCESS ══
+    //        triggers the same cache-invalidate + refetch KYO-429 rode in
+    //        on; Next itself is already enabled by mode selection alone
+    //        (KYO-404 — see Arm B) so this is a survival/continuity guard,
+    //        not a disabled -> enabled transition. See the KYO-473 RETARGET
+    //        and Coverage sections in the header comment for why
+    //        `kyomi_oauth`/GOOGLE_OAUTH_SUCCESS could not stay Arm A's
+    //        vehicle (retired by KYO-704) and why enterprise_oauth is the
+    //        correct replacement rather than a weaker substitute.
+    //
     // Wrapped so that an unexpected exception here does not abort Arm B
     // below, which is independent and unaffected.
     //
@@ -281,94 +374,150 @@ async function pickAuthMode(page, label) {
     // delay — see the ARM A DETERMINISM header comment for the full
     // mechanism and why the delay is kept anyway, as a regression guard.
     //
-    // Verdict: this arm expects exactly one outcome — Next reaches enabled
-    // while the modal is still alive, still showing the Name field's typed
-    // value. The modal-died and modal-survived-but-never-enabled branches
-    // are kept as defensive reporting (distinctly labelled, not conflated)
-    // in case KYO-429 or something with the same signature ever regresses;
-    // they are not the expected path.
+    // Verdict: this arm expects exactly one outcome — the Name-input DOM
+    // node survives untouched (KYO-429), still showing its typed value,
+    // and (only meaningful once that's confirmed) Next reads enabled per
+    // KYO-404. The remounted branch is kept as defensive reporting,
+    // distinctly labelled, in case KYO-429 or something with the same
+    // signature ever regresses; it is not the expected path.
     try {
-      await pickAuthMode(page, 'Kyomi');
-      await page.screenshot({ path: `${SHOT}-A0-kyomi-oauth-before.png`, fullPage: true });
+      await pickAuthMode(page, 'Enterprise');
+      await page.screenshot({ path: `${SHOT}-A0-bigquery-enterprise-oauth-before.png`, fullPage: true });
 
-      let disabledBefore = await nextBtn().isDisabled().catch(() => null);
-      check('A: Next is DISABLED for kyomi_oauth before any OAuth message',
-        disabledBefore === true, `disabled=${disabledBefore}`);
+      // Not a "before" state in the disabled -> enabled sense — enterprise_
+      // oauth's create-mode gate is satisfied the instant the mode is
+      // selected (KYO-404, `connection_step_satisfied_from`), before any
+      // OAuth message. Asserted here anyway so a regression that somehow
+      // ties this pair's create-mode gate back to needing the message
+      // would show up as a baseline failure, not just an after-message one.
+      let enabledBefore = await nextBtn().isEnabled().catch(() => null);
+      check('A: Next is already ENABLED for bigquery/enterprise_oauth before any OAuth message (KYO-404 design)',
+        enabledBefore === true, `enabled=${enabledBefore}`);
+
+      // Tag the live Name <input> DOM node itself, right before the
+      // postMessage, so the guard below can tell "this exact modal, still
+      // alive" from "the text/controls of A modal, possibly a fresh
+      // instance" — see the KYO-473 hardening paragraph in the header
+      // comment for why a text/visibility read cannot make that
+      // distinction, and why this elementHandle can.
+      const nameInputHandle = await nameInput.elementHandle();
+      const nameInputStillConnected = () =>
+        nameInputHandle.evaluate((el) => el.isConnected).catch(() => false);
 
       let enabledAfter = null;
-      let modalDied = false;
+      let remounted = false;
+      let textAlsoGoneAtPoll = null; // diagnostic only — see header comment
       await armListDatasourcesDelay(page);
       try {
         await page.evaluate(() => window.postMessage(
-          { type: 'GOOGLE_OAUTH_SUCCESS', data: { email: 'e2e@kyomi.dev', provider_email: 'e2e@kyomi.dev' } },
+          { type: 'BIGQUERY_ENTERPRISE_OAUTH_SUCCESS', data: { email: 'e2e@kyomi.dev', provider_email: 'e2e@kyomi.dev' } },
           window.location.origin));
 
-        // Tight poll rather than a single fixed wait, so the transition is
-        // caught as soon as it happens rather than over-waiting.
+        // Tight poll for the full observation window rather than a single
+        // fixed wait. Unlike the retired kyomi_oauth arm, there is no
+        // disabled -> enabled transition to wait for here (Next is already
+        // enabled) — this loop instead gives the deliberately-held
+        // list_datasources refetch its full window to resolve and, if
+        // KYO-429 has regressed, remount the modal out from under this
+        // observation. The identity check is checked FIRST and is the only
+        // thing that breaks the loop on its own — it is the authoritative
+        // signal (see header comment). `enabledAfter` is still sampled
+        // each tick for the KYO-404 check below, but is not trusted to
+        // detect a remount by itself.
         for (let i = 0; i < 40; i++) {
-          if (!(await modalVisible())) { modalDied = true; break; }
-          enabledAfter = await nextBtn().isEnabled().catch(() => null);
-          if (enabledAfter === true) break;
+          if (!(await nameInputStillConnected())) { remounted = true; break; }
+          if (textAlsoGoneAtPoll === null && !(await modalVisible())) { textAlsoGoneAtPoll = i; }
+          // Explicit short timeout: isEnabled() (unlike isVisible()) auto-waits
+          // up to its default timeout if the element vanishes, so a remount
+          // landing in this gap could otherwise stall this iteration up to 30s.
+          enabledAfter = await nextBtn().isEnabled({ timeout: 200 }).catch(() => null);
           await page.waitForTimeout(50);
         }
       } finally {
-        // Release immediately once the assertion window has closed, rather
-        // than sitting on the held response for the full safety-net
-        // duration — nothing downstream (Arm B's modal reopen) should pay
-        // for this arm's timing control. Deliberately does NOT call
-        // page.unroute() here — see the comment on armListDatasourcesDelay()
-        // for why that raced and crashed the process in an earlier version.
+        // Release immediately once the observation window has closed,
+        // rather than sitting on the held response for the full
+        // safety-net duration — nothing downstream (Arm B's modal reopen)
+        // should pay for this arm's timing control. Deliberately does NOT
+        // call page.unroute() here — see the comment on
+        // armListDatasourcesDelay() for why that raced and crashed the
+        // process in an earlier version.
         releaseListDatasourcesDelay();
       }
-      await page.screenshot({ path: `${SHOT}-A1-kyomi-oauth-after.png`, fullPage: true });
 
-      // ── KYO-429 regression guard: modal survives, Name field untouched ──
+      // The delay is released above, but the deferred list_datasources
+      // response hasn't necessarily reached the page and been processed
+      // yet — give it a bounded extra window to land before taking the
+      // final reading, so "survived" means "survived the actual refetch
+      // landing," not "survived only until this script happened to stop
+      // polling." Harmless on the fixed build too: the Memo branch means
+      // this can only ever time out without finding a remount.
+      if (!remounted) {
+        for (let i = 0; i < 20; i++) {
+          if (!(await nameInputStillConnected())) { remounted = true; break; }
+          await page.waitForTimeout(50);
+        }
+      }
+      await page.screenshot({ path: `${SHOT}-A1-bigquery-enterprise-oauth-after.png`, fullPage: true });
+
+      // ── KYO-429 regression guard: Name-input DOM node survives intact ──
       // This is the direct assertion of the bug KYO-429 described — the
-      // create modal (and its in-progress, unsaved Name field) must survive
-      // a *_OAUTH_SUCCESS postMessage unchanged. The "Next" transition
-      // checked below is a secondary signal that also happens to require
-      // the modal to be alive; this pair is the primary one.
-      check('A: create modal remains open after simulated GOOGLE_OAUTH_SUCCESS (KYO-429 regression guard)',
-        !modalDied, `modalDied=${modalDied}`);
+      // create modal (and its in-progress, unsaved Name field) must
+      // survive a *_OAUTH_SUCCESS postMessage unchanged, proven by DOM
+      // node identity rather than a text/visibility read that a stale,
+      // about-to-be-torn-down instance can satisfy just as well as a
+      // genuinely untouched one (see header comment).
+      check('A: create modal\'s Name-input DOM node is NOT remounted after simulated BIGQUERY_ENTERPRISE_OAUTH_SUCCESS (KYO-429 regression guard)',
+        !remounted,
+        `remounted=${remounted}` + (textAlsoGoneAtPoll !== null
+          ? `; note: "Connection Method" text also read not-visible at poll #${textAlsoGoneAtPoll} (diagnostic only, not authoritative)`
+          : ''));
 
-      const nameValueAfter = modalDied ? null : await nameInput.inputValue().catch(() => null);
-      check('A: Name field still holds its typed value after simulated GOOGLE_OAUTH_SUCCESS (KYO-429 regression guard)',
-        !modalDied && nameValueAfter === 'E2E OAuth Contract',
-        modalDied ? 'modal closed — cannot read Name field' : `value=${JSON.stringify(nameValueAfter)}`);
+      const nameValueAfter = remounted ? null : await nameInput.inputValue().catch(() => null);
+      check('A: Name field still holds its typed value after simulated BIGQUERY_ENTERPRISE_OAUTH_SUCCESS (KYO-429 regression guard)',
+        !remounted && nameValueAfter === 'E2E OAuth Contract',
+        remounted ? 'modal remounted — cannot read Name field' : `value=${JSON.stringify(nameValueAfter)}`);
 
-      if (modalDied) {
+      if (remounted) {
         // Unexpected with the list_datasources delay armed AND with the
         // KYO-429 root cause fixed — DatasourcesPage no longer remounts
         // DatasourcesContent on a Some(Ok(_)) -> Some(Ok(_)) refetch at
         // all, so nothing should be able to tear down the modal here
         // regardless of the delay. Still bannered rather than reported as
-        // a generic failure, since a dead modal here is the KYO-429
+        // a generic failure, since a remount here is the KYO-429
         // signature regardless of what let it back in.
         regressionBanner('KYO-429',
           'a recognized *_OAUTH_SUCCESS postMessage on /settings/datasources ' +
-          'closed or reset the create modal during the observation window. ' +
-          'KYO-429 fixed exactly this: DatasourcesPage (crates/kyomi-ui/src/' +
-          'pages/settings/datasources.rs) now branches its view on a ' +
-          'Memo<DatasourcesViewState> so a Some(Ok(_)) -> Some(Ok(_)) ' +
-          'list_datasources refetch no longer changes the branch and ' +
-          'DatasourcesContent/DatasourceModal are never rebuilt. Seeing the ' +
-          'modal die here — with the list_datasources response delay still ' +
-          'armed — means that fix has regressed; investigate ' +
-          'DatasourcesPage before assuming this is a test issue.');
-        check('A ★ Next transitions to ENABLED after simulated GOOGLE_OAUTH_SUCCESS (bigquery/kyomi_oauth)',
-          false, 'KYO-429 REGRESSION — see banner above');
+          'caused the create modal\'s Name-input DOM node to be replaced ' +
+          '(a remount), detected by DOM node identity (isConnected), not ' +
+          'text visibility. KYO-429 fixed exactly this: DatasourcesPage ' +
+          '(crates/kyomi-ui/src/pages/settings/datasources.rs) now ' +
+          'branches its view on a Memo<DatasourcesViewState> so a ' +
+          'Some(Ok(_)) -> Some(Ok(_)) list_datasources refetch no longer ' +
+          'changes the branch and DatasourcesContent/DatasourceModal are ' +
+          'never rebuilt. Seeing a remount here — with the list_datasources ' +
+          'response delay still armed — means that fix has regressed; ' +
+          'investigate DatasourcesPage before assuming this is a test issue.');
+        // KYO-404 design check, NOT a second KYO-429 detector — see header
+        // comment. Once the modal has been proven remounted, any reading
+        // of Next taken during/after that window is unreliable (it may be
+        // sampling the old, about-to-be-torn-down instance, or nothing at
+        // all) and asserts nothing about KYO-404 either way. Reported
+        // failed for visibility alongside the banner, not because Next
+        // itself was shown to misbehave.
+        check('A (KYO-404 design check, NOT a KYO-429 detector): Next-enabled reading for bigquery/enterprise_oauth after simulated BIGQUERY_ENTERPRISE_OAUTH_SUCCESS',
+          false, 'KYO-429 REGRESSION — see banner above; last sampled enabled=' + enabledAfter + ' is not trustworthy once the modal has remounted');
       } else if (enabledAfter === true) {
-        check('A ★ Next transitions to ENABLED after simulated GOOGLE_OAUTH_SUCCESS (bigquery/kyomi_oauth)',
+        check('A (KYO-404 design check, NOT a KYO-429 detector): Next remains ENABLED for bigquery/enterprise_oauth after simulated BIGQUERY_ENTERPRISE_OAUTH_SUCCESS',
           true, `enabled=${enabledAfter}`);
       } else {
-        // Modal survived the whole poll window but Next never enabled —
-        // NOT the KYO-429 signature (that always kills the modal). A
-        // distinct, un-bannered failure so it isn't conflated with KYO-429.
-        check('A ★ Next transitions to ENABLED after simulated GOOGLE_OAUTH_SUCCESS (bigquery/kyomi_oauth)',
-          false, `enabled=${enabledAfter}, modal survived — NOT the KYO-429 signature, investigate separately`);
+        // The Name-input node was never replaced, so this is a genuine,
+        // standalone KYO-404 regression — independent of KYO-429, and not
+        // bannered as one.
+        check('A (KYO-404 design check, NOT a KYO-429 detector): Next remains ENABLED for bigquery/enterprise_oauth after simulated BIGQUERY_ENTERPRISE_OAUTH_SUCCESS',
+          false, `enabled=${enabledAfter} while the modal's Name-input node was confirmed NOT remounted — investigate connection_step_satisfied_from / bq_auth_mode directly, this is not a KYO-429 signature`);
       }
     } catch (armAErr) {
-      check('A ★ Next transitions to ENABLED after simulated GOOGLE_OAUTH_SUCCESS (bigquery/kyomi_oauth)',
+      check('A (KYO-404 design check, NOT a KYO-429 detector): Next remains ENABLED for bigquery/enterprise_oauth after simulated BIGQUERY_ENTERPRISE_OAUTH_SUCCESS',
         false, `threw: ${armAErr.message.split('\n')[0]}`);
     }
 
@@ -405,6 +554,7 @@ async function pickAuthMode(page, label) {
     console.log('\n--- HTTP >=400 ---');
     failedReqs.forEach(f => console.log('  ' + f));
     console.log('\n--- Uncovered arms (documented, not asserted) ---');
+    console.log('  - bigquery/kyomi_oauth (GOOGLE_OAUTH_SUCCESS) — retired by KYO-704 (686c9a91, PR #513); no longer a selectable Authentication Mode');
     console.log('  - snowflake/oauth (SNOWFLAKE_OAUTH_SUCCESS) — needs real Snowflake account for do_test_and_discover()');
     console.log('  - databricks/oauth (DATABRICKS_OAUTH_SUCCESS) — needs real Databricks warehouse for do_test_and_discover()');
     console.log('  - synapse/enterprise_oauth (MICROSOFT_ENTERPRISE_OAUTH_SUCCESS) — needs real Synapse account for do_test_and_discover()');
