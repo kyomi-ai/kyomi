@@ -33,125 +33,16 @@
 //! `agent_learnings` rows that are live / superseded-via-pointer / disabled, and
 //! asserts the fixed query returns only the live row. Because these exercise the real
 //! migrated schema rather than a mock, a regression back to `is_superseded` is caught,
-//! not a false green: the `backfill_all_references` and `populate_workspace` tests fail
-//! with the exact `column "is_superseded" does not exist` Postgres error production
-//! hit, and the `expand_from_anchors` test fails via its hit-count assertion instead,
-//! because `expand_table_to_learnings` swallows that same database error internally
-//! (see that test's own doc comment). See the mutation check recorded in the KYO-808
-//! PR description.
+//! not a false green: all three tests fail with the exact
+//! `column "is_superseded" does not exist` Postgres error production hit. (For the
+//! `expand_from_anchors` test that relies on KYO-809: `expand_table_to_learnings` now
+//! propagates its query error as `Err` instead of logging it and returning no hits.)
+//! See the mutation check recorded in the KYO-808 PR description.
 
-use kyomi_core::db::DbPool;
+mod common;
+
+use common::{seed_learning, with_scratch_workspace};
 use std::collections::HashSet;
-use std::future::Future;
-
-/// Create a throwaway scratch Postgres database, run the real migration chain
-/// against it, seed a user + workspace, hand `(db, workspace_id)` to `body`, then
-/// drop the scratch database -- regardless of whether `body` panics, so a failing
-/// assertion can never leak a database (KYO-242).
-///
-/// Mirrors `agent_learnings_superseded_by_on_delete.rs` / `schema_parity.rs`'s
-/// create-scratch-database pattern; factored out here because three tests need it.
-async fn with_scratch_workspace<F, Fut, T>(test_name: &str, body: F) -> T
-where
-    F: FnOnce(DbPool, String) -> Fut,
-    Fut: Future<Output = T>,
-{
-    let base_url = kyomi_core::test_db::test_database_url();
-    let (server_url, _) = kyomi_core::test_db::split_database_url(&base_url);
-
-    let scratch_db = format!("kyomi_kyo808_{test_name}_{}", uuid::Uuid::new_v4().simple());
-
-    let admin_pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&format!("{server_url}/postgres"))
-        .await
-        .unwrap_or_else(|e| {
-            panic!(
-                "connect to Postgres admin database at {server_url}/postgres \
-                 (is the test Postgres container running? see CLAUDE.md): {e}"
-            )
-        });
-
-    sqlx::query(&format!("CREATE DATABASE \"{scratch_db}\""))
-        .execute(&admin_pool)
-        .await
-        .unwrap_or_else(|e| panic!("create scratch database `{scratch_db}`: {e}"));
-
-    let scratch_url = format!("{server_url}/{scratch_db}");
-
-    // Run the real embedded Postgres migration chain (crates/kyomi-core/src/db.rs)
-    // against the scratch database -- the same entry point `DbPool::connect` gives
-    // production, so this can only pass if the real migrated schema supports the
-    // fixed query, not just if the new SQL text parses.
-    let db = DbPool::connect(&scratch_url)
-        .await
-        .expect("run Postgres migration chain against scratch database");
-
-    let workspace_id = format!("kyo808-ws-{test_name}");
-    let user_id = format!("kyo808-user-{test_name}");
-
-    sqlx::query("INSERT INTO users (user_id, email) VALUES ($1, $2)")
-        .bind(&user_id)
-        .bind(format!("{user_id}@example.com"))
-        .execute(db.pg_pool())
-        .await
-        .expect("seed users row");
-
-    sqlx::query("INSERT INTO workspaces (workspace_id, owner_user_id) VALUES ($1, $2)")
-        .bind(&workspace_id)
-        .bind(&user_id)
-        .execute(db.pg_pool())
-        .await
-        .expect("seed workspaces row");
-
-    // Run the test body, capturing its outcome without panicking on it, so the
-    // scratch database is dropped below regardless of whether the caller's
-    // assertions (made after this function returns) pass or fail.
-    let outcome = body(db.clone(), workspace_id).await;
-
-    db.pg_pool().close().await;
-
-    sqlx::query(&format!("DROP DATABASE \"{scratch_db}\""))
-        .execute(&admin_pool)
-        .await
-        .unwrap_or_else(|e| panic!("drop scratch database `{scratch_db}`: {e}"));
-
-    outcome
-}
-
-/// Insert an `agent_learnings` row and return its `learning_id`.
-///
-/// `learning_id` is bound explicitly (as a `uuid::Uuid::new_v4()` string) rather
-/// than left to a column default: `apps/server/migrations/20260315000000_uuid_columns_to_text.sql`
-/// converted `learning_id` from `uuid DEFAULT gen_random_uuid()` to `TEXT` and
-/// dropped the default, so callers must supply it -- exactly as production code does.
-async fn seed_learning(
-    db: &DbPool,
-    workspace_id: &str,
-    insight: &str,
-    enabled: bool,
-    superseded_by: Option<&str>,
-    structured_metadata: Option<serde_json::Value>,
-) -> String {
-    let learning_id = uuid::Uuid::new_v4().to_string();
-
-    sqlx::query(
-        "INSERT INTO agent_learnings \
-           (learning_id, workspace_id, insight, enabled, superseded_by, structured_metadata) \
-         VALUES ($1, $2, $3, $4, $5, $6)",
-    )
-    .bind(&learning_id)
-    .bind(workspace_id)
-    .bind(insight)
-    .bind(enabled)
-    .bind(superseded_by)
-    .bind(structured_metadata)
-    .execute(db.pg_pool())
-    .await
-    .expect("seed agent_learnings row");
-
-    learning_id
-}
 
 /// KYO-808 regression test for `references.rs::backfill_all_references`.
 ///
@@ -240,14 +131,10 @@ async fn backfill_all_references_processes_only_the_live_learning() {
 /// via the public `expand_from_anchors`).
 ///
 /// Seeds `learning_references` rows linking a table anchor to all three learnings,
-/// then asserts anchor expansion surfaces only the live one. Note:
-/// `expand_table_to_learnings` catches its own query errors and logs+returns `vec![]`
-/// rather than propagating them (so a caller's one bad anchor doesn't fail the whole
-/// expansion), so under the pre-fix `is_superseded` mutation this test goes red via
-/// the surfaced-hit-count assertion below (`0` learnings instead of `1`), not via a
-/// visible "column does not exist" panic -- confirmed directly against
-/// `tracing::warn!`'s output during the mutation check recorded in the KYO-808 PR
-/// description.
+/// then asserts anchor expansion surfaces only the live one. Since KYO-809,
+/// `expand_from_anchors` propagates leaf query errors as `Err`, so under the pre-fix
+/// `is_superseded` mutation this test goes red on the `.expect` below with the
+/// "column does not exist" error, rather than silently seeing `0` learnings.
 #[tokio::test]
 async fn expand_from_anchors_surfaces_only_the_live_learning() {
     const TABLE: &str = "public.orders";
@@ -292,7 +179,8 @@ async fn expand_from_anchors_surfaces_only_the_live_learning() {
             &HashSet::new(),
             &HashSet::new(),
         )
-        .await;
+        .await
+        .expect("expand_from_anchors must succeed against the real migrated schema");
 
         (hits, live_id)
     })
