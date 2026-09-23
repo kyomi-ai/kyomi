@@ -29,7 +29,8 @@
 //! `create_dashboard`, `modify_dashboard` — stay in `tools::knowledge` /
 //! `tools::dashboard` as their own structs, but call into this module's
 //! shared functions for the parts that genuinely are the same operation
-//! ([`resolve_document`], [`find_document_by_title`], [`apply_update`]).
+//! ([`resolve_document`], [`find_document_by_title`], [`apply_update`],
+//! [`apply_create`]).
 //!
 //! KYO-538 is stage 2 of 7 in the document-tool consolidation and unifies
 //! *structure*, not *behaviour*. Every place the two families genuinely
@@ -38,7 +39,11 @@
 //! out with a `NOTE:` naming the ticket that will decide whether to
 //! collapse it (KYO-541/542). CAS enforcement was one such difference
 //! until KYO-539 unified it — both families now thread a real
-//! `expected_content_hash` through [`apply_update`].
+//! `expected_content_hash` through [`apply_update`]. Initial
+//! `knowledge_chunks` population on create was another — until KYO-776
+//! unified it, `CreateDashboardTool` never populated it at all, while
+//! `write_knowledge_file`'s create branch always did — both now go through
+//! [`apply_create`].
 
 mod delete;
 mod edit;
@@ -247,6 +252,81 @@ pub(crate) fn enforce_document_scope(
         )));
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// apply_create — the shared "call create_dashboard, then populate
+// knowledge_chunks" tail (KYO-776)
+// ---------------------------------------------------------------------------
+
+/// Parameters for [`apply_create`].
+pub(crate) struct ApplyCreateParams<'a> {
+    pub db: &'a kyomi_core::DbPool,
+    pub user_id: &'a str,
+    pub workspace_id: &'a str,
+    pub title: &'a str,
+    pub content: &'a str,
+    pub doc_type: DocType,
+    /// KYO-776: the shared population step below needs a resolved embedding
+    /// service to call `rechunk_document`, the same requirement
+    /// [`ApplyUpdateParams::embed`] documents for updates. Every caller
+    /// resolves this via `ctx.embedding.wait_ready().await?` before
+    /// constructing this struct.
+    pub embed: &'a EmbeddingService,
+}
+
+/// Shared tail of every "create a new document" tool: call
+/// `dashboard_service::create_dashboard`, then populate `knowledge_chunks`
+/// for the row it just inserted.
+///
+/// NOTE (KYO-776 resolved policy, mirroring [`apply_update`]'s own NOTE
+/// above): `create_dashboard`'s own `embed` parameter is always passed as
+/// `None` here, which means its internal "rechunk newly created document in
+/// background" branch (`spawn_rechunk_document`, see
+/// `kyomi_auth::dashboard_service::create_dashboard`) never fires from this
+/// call site. That is deliberate, not an oversight — this function does the
+/// population itself, synchronously, immediately below. Passing `Some`
+/// instead would *additionally* spawn a second, redundant rechunk in the
+/// background on every create.
+///
+/// The population is synchronous rather than backgrounded for the same
+/// reason `apply_update` rechunks synchronously rather than via
+/// `spawn_rechunk_document` (see its doc comment above): it makes a
+/// chunking failure visible in the tool's own result instead of vanishing
+/// into a detached task, and it means `search_knowledge` can find the
+/// document immediately rather than only after a background task happens
+/// to finish first.
+///
+/// Before KYO-776, `CreateDashboardTool` never rechunked at all — a
+/// dashboard created through the agent had zero `knowledge_chunks` rows
+/// until its first edit, so `search_knowledge` could not find it in the
+/// interval (`search_knowledge_chunks`, `tools/knowledge.rs`, reads
+/// `knowledge_chunks` for both doc types whenever a caller omits
+/// `doc_type`, the normal case). `write_knowledge_file`'s create-on-no-match
+/// branch already rechunked explicitly on its own; it now goes through this
+/// shared function instead of carrying its own copy of the same two calls.
+pub(crate) async fn apply_create(params: ApplyCreateParams<'_>) -> kyomi_core::Result<String> {
+    let dashboard_id = kyomi_auth::dashboard_service::create_dashboard(
+        params.db,
+        params.user_id,
+        params.workspace_id,
+        params.title,
+        params.content,
+        params.doc_type,
+        None, // rechunk happens synchronously below — see the NOTE above.
+    )
+    .await?;
+
+    kyomi_auth::dashboard_service::rechunk_document(
+        params.db,
+        params.embed,
+        &dashboard_id,
+        params.content,
+        params.workspace_id,
+    )
+    .await?;
+
+    Ok(dashboard_id)
 }
 
 /// Shared tail of every "replace a document's content" tool: call
