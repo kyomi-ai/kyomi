@@ -50,7 +50,7 @@ use tracing::{debug, error, info, warn};
 
 use kyomi_auth::catalog::helpers as catalog_helpers;
 use kyomi_auth::credential_service::decrypt_connection_config_secrets;
-use kyomi_core::{DbPool, KVPool};
+use kyomi_core::{Config, DbPool, KVPool};
 use kyomi_embed::LazyEmbedding;
 
 // ---------------------------------------------------------------------------
@@ -152,6 +152,11 @@ pub struct CatalogRefreshScheduler {
     encryption_key: std::sync::Arc<[u8; 32]>,
     embedding: LazyEmbedding,
     cancel: CancellationToken,
+    /// Threaded explicitly (never sniffed from an env var) so the
+    /// per-workspace loops below can apply the KYO-805 billing gate via
+    /// `kyomi_core::capability::billing_gate_blocks`, which needs to know
+    /// whether this deployment enforces billing at all.
+    config: std::sync::Arc<Config>,
 }
 
 impl CatalogRefreshScheduler {
@@ -162,6 +167,7 @@ impl CatalogRefreshScheduler {
         encryption_key: std::sync::Arc<[u8; 32]>,
         embedding: LazyEmbedding,
         cancel: CancellationToken,
+        config: std::sync::Arc<Config>,
     ) -> Self {
         Self {
             db,
@@ -169,6 +175,7 @@ impl CatalogRefreshScheduler {
             encryption_key,
             embedding,
             cancel,
+            config,
         }
     }
 
@@ -267,6 +274,33 @@ impl CatalogRefreshScheduler {
         info!("Catalog refresh scheduler exited");
     }
 
+    /// Whether `workspace_id`'s billing gate blocks scheduled background
+    /// work (KYO-805) — shared by `refresh_all_workspaces` (hourly catalog
+    /// re-indexing) and `run_knowledge_maintenance` (daily learning
+    /// reference backfill, which calls out to an LLM), so neither can drift
+    /// from the other.
+    ///
+    /// A thin wrapper around `kyomi_auth::billing_gate::check_workspace_billing_gate`
+    /// — the single "load workspace, apply the gate, fail closed"
+    /// implementation also used by the WS sync handlers
+    /// (`apps/server/src/routes/websocket.rs`) and the watch scheduler
+    /// (`kyomi_agent::scheduler::due_watches_to_execute`), extracted (KYO-805
+    /// follow-up) so none of the three can drift from each other. Its own
+    /// unit tests (fail-closed on a missing workspace, on a DB/decode error,
+    /// etc.) live alongside it in `kyomi-auth`; the tests here only need to
+    /// prove this method forwards `self.config.self_hosted` correctly and
+    /// interprets the result via `blocks()`.
+    async fn workspace_billing_gate_blocks(&self, workspace_id: &str) -> bool {
+        kyomi_auth::billing_gate::check_workspace_billing_gate(
+            &self.db,
+            workspace_id,
+            self.config.self_hosted,
+            Utc::now(),
+        )
+        .await
+        .blocks()
+    }
+
     /// Refresh catalog for all eligible datasources across all workspaces.
     ///
     /// For each workspace:
@@ -313,6 +347,11 @@ impl CatalogRefreshScheduler {
 
         for ws_row in &workspaces {
             let workspace_id = &ws_row.workspace_id;
+
+            if self.workspace_billing_gate_blocks(workspace_id).await {
+                debug!(workspace_id, "Skipping catalog refresh — workspace billing is lapsed");
+                continue;
+            }
 
             // Get all active datasources for this workspace
             #[derive(sqlx::FromRow)]
@@ -886,6 +925,11 @@ impl CatalogRefreshScheduler {
 
         for ws_row in &workspaces {
             let workspace_id = &ws_row.workspace_id;
+
+            if self.workspace_billing_gate_blocks(workspace_id).await {
+                debug!(workspace_id, "Skipping knowledge maintenance — workspace billing is lapsed");
+                continue;
+            }
 
             // Backfill learning references (ensures pre-migration learnings get reference rows)
             if let Err(e) = kyomi_knowledge::references::backfill_all_references(&self.db, workspace_id).await {
@@ -1571,5 +1615,77 @@ mod tests {
     #[test]
     fn default_retention_is_30_days() {
         assert_eq!(DEFAULT_QUERY_HISTORY_RETENTION_DAYS, 30);
+    }
+
+    // -- workspace_billing_gate_blocks (KYO-805: skip lapsed workspaces) --
+    //
+    // `workspace_billing_gate_blocks` is now a thin wrapper around
+    // `kyomi_auth::billing_gate::check_workspace_billing_gate`, which carries
+    // its own exhaustive coverage (active/lapsed/self-hosted/missing-
+    // workspace/decode-error) in `crates/kyomi-auth/src/billing_gate.rs`.
+    // These tests are trimmed to what still proves *wiring* — that this
+    // method forwards `self.config.self_hosted` and interprets the shared
+    // helper's result via `blocks()` correctly — not a second copy of the
+    // shared helper's own fail-closed matrix (KYO-805 follow-up).
+
+    mod billing_gate_tests {
+        use super::*;
+        use crate::test_support::{seed_user_and_workspace, test_pool};
+
+        fn test_scheduler(db: DbPool, self_hosted: bool) -> CatalogRefreshScheduler {
+            let mut config = kyomi_core::Config::test_config();
+            config.self_hosted = self_hosted;
+            CatalogRefreshScheduler::new(
+                db,
+                kyomi_core::kv_store_memory::InMemoryKVStore::new_pool(),
+                std::sync::Arc::new([0u8; 32]),
+                LazyEmbedding::new(),
+                CancellationToken::new(),
+                std::sync::Arc::new(config),
+            )
+        }
+
+        async fn set_subscription_status(db: &DbPool, workspace_id: &str, status: &str) {
+            let sq = match db {
+                DbPool::Sqlite(sq) => sq,
+                DbPool::Postgres(_) => unreachable!("test pool is always sqlite"),
+            };
+            sqlx::query("UPDATE workspaces SET subscription_status = $1 WHERE workspace_id = $2")
+                .bind(status)
+                .bind(workspace_id)
+                .execute(sq)
+                .await
+                .expect("update subscription_status");
+        }
+
+        #[tokio::test]
+        async fn active_workspace_is_not_blocked() {
+            let db = test_pool().await;
+            seed_user_and_workspace(&db).await;
+            let scheduler = test_scheduler(db, false);
+            assert!(!scheduler.workspace_billing_gate_blocks("ws-1").await);
+        }
+
+        #[tokio::test]
+        async fn lapsed_workspace_is_blocked() {
+            let db = test_pool().await;
+            seed_user_and_workspace(&db).await;
+            set_subscription_status(&db, "ws-1", "past_due").await;
+            let scheduler = test_scheduler(db, false);
+            assert!(scheduler.workspace_billing_gate_blocks("ws-1").await);
+        }
+
+        #[tokio::test]
+        async fn self_hosted_never_blocks_even_when_past_due() {
+            let db = test_pool().await;
+            seed_user_and_workspace(&db).await;
+            set_subscription_status(&db, "ws-1", "past_due").await;
+            let scheduler = test_scheduler(db, true);
+            assert!(
+                !scheduler.workspace_billing_gate_blocks("ws-1").await,
+                "self-hosted/personal mode must never block scheduled work on billing status"
+            );
+        }
+
     }
 }

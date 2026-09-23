@@ -350,6 +350,7 @@ async fn start_server(
             encryption_key_arc.clone(),
             embedding.clone(),
             shutdown_token.child_token(),
+            config_arc.clone(),
         ));
         let _ = catalog_scheduler.start();
         tracing::info!("Catalog refresh scheduler started");

@@ -28,7 +28,7 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, IntoServerFnErrorCore};
+use super::{extract_auth, extract_auth_allow_lapsed, extract_context, IntoServerFnErrorCore};
 
 /// TOTP status returned by `get_totp_status()`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -311,9 +311,13 @@ pub async fn logout() -> Result<(), ServerFnError> {
 }
 
 /// Log out from all devices by revoking every refresh token for the user.
+///
+/// Uses `extract_auth_allow_lapsed()` (KYO-805) — a lapsed workspace must
+/// still be able to log out everywhere; billing status is orthogonal to
+/// "does this session get to keep existing."
 #[server(prefix = "/leptos-api")]
 pub async fn logout_all_sessions() -> Result<String, ServerFnError> {
-    let auth = extract_auth().await?;
+    let auth = extract_auth_allow_lapsed().await?;
     let ctx = extract_context()?;
 
     let revoked_count =

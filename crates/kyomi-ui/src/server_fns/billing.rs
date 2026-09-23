@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
 use super::{
-    extract_auth, extract_context, AuthenticatedContext, IntoServerFnErrorCore,
+    extract_auth_allow_lapsed, extract_context, AuthenticatedContext, IntoServerFnErrorCore,
     IntoServerFnErrorSqlx,
 };
 #[cfg(feature = "ssr")]
@@ -240,9 +240,12 @@ fn require_stripe(
 /// Note: subscription data (tier, status, period) comes from the database and
 /// is always available regardless of Stripe configuration. Only checkout and
 /// portal operations require Stripe.
+///
+/// Allowlisted while billing is lapsed (KYO-805, via `extract_allow_lapsed`)
+/// — this is the endpoint that tells the owner their subscription IS lapsed.
 #[server(prefix = "/leptos-api")]
 pub async fn get_subscription_info() -> Result<SubscriptionInfo, ServerFnError> {
-    let ac = AuthenticatedContext::extract().await?;
+    let ac = AuthenticatedContext::extract_allow_lapsed().await?;
 
     require_workspace_owner(&ac.auth)?;
 
@@ -322,9 +325,12 @@ pub async fn get_subscription_info() -> Result<SubscriptionInfo, ServerFnError> 
 /// Fetch recent invoices for the current workspace.
 ///
 /// Mirrors `GET /api/v1/billing/invoices`.
+///
+/// Allowlisted while billing is lapsed (KYO-805) — the owner needs to see
+/// past invoices while sorting out a lapsed subscription.
 #[server(prefix = "/leptos-api")]
 pub async fn get_invoices() -> Result<Vec<InvoiceRecord>, ServerFnError> {
-    let ac = AuthenticatedContext::extract().await?;
+    let ac = AuthenticatedContext::extract_allow_lapsed().await?;
 
     // Stripe not configured — no invoices to show.
     if ac.ctx.config.stripe_secret_key.is_none() {
@@ -368,11 +374,14 @@ pub async fn get_invoices() -> Result<Vec<InvoiceRecord>, ServerFnError> {
 /// subscriptions (mount via Stripe.js embedded checkout), or
 /// `CheckoutOutcome::Modified` when an existing subscription was
 /// reactivated directly (no checkout needed).
+///
+/// Allowlisted while billing is lapsed (KYO-805) — this is how the owner
+/// pays to un-lapse the workspace.
 #[server(prefix = "/leptos-api")]
 pub async fn create_checkout(
     quantity: u64,
 ) -> Result<CheckoutOutcome, ServerFnError> {
-    let ac = AuthenticatedContext::extract().await?;
+    let ac = AuthenticatedContext::extract_allow_lapsed().await?;
     require_workspace_owner(&ac.auth)?;
 
     let stripe_service = require_stripe(&ac.ctx.config)?;
@@ -572,9 +581,12 @@ pub async fn update_user_limit(limit: i32) -> Result<i32, ServerFnError> {
 /// Create a Stripe billing portal session and return the redirect URL.
 ///
 /// Mirrors `POST /api/v1/billing/create-portal-session`.
+///
+/// Allowlisted while billing is lapsed (KYO-805) — the Stripe portal is
+/// where the owner updates a failed payment method.
 #[server(prefix = "/leptos-api")]
 pub async fn create_portal_session() -> Result<RedirectUrl, ServerFnError> {
-    let ac = AuthenticatedContext::extract().await?;
+    let ac = AuthenticatedContext::extract_allow_lapsed().await?;
     require_workspace_owner(&ac.auth)?;
 
     let stripe_service = require_stripe(&ac.ctx.config)?;
@@ -699,9 +711,12 @@ pub async fn purchase_analytics_bundle(quantity: u32) -> Result<EmbeddedCheckout
 /// Get the Stripe publishable key (needed for embedded checkout on the frontend).
 ///
 /// Publishable keys are designed to be public — this is not a secret.
+///
+/// Allowlisted while billing is lapsed (KYO-805) — needed to mount the
+/// embedded checkout that pays to un-lapse the workspace.
 #[server(prefix = "/leptos-api")]
 pub async fn get_stripe_publishable_key() -> Result<Option<String>, ServerFnError> {
-    let _auth = extract_auth().await?;
+    let _auth = extract_auth_allow_lapsed().await?;
     let ctx = extract_context()?;
     Ok(ctx.config.stripe_publishable_key.clone())
 }
@@ -710,11 +725,16 @@ pub async fn get_stripe_publishable_key() -> Result<Option<String>, ServerFnErro
 ///
 /// Called by the embedded checkout `onComplete` callback to confirm
 /// the session actually completed before showing success UI.
+///
+/// Allowlisted while billing is lapsed (KYO-805) — this fires at the tail
+/// end of the exact checkout flow that un-lapses the workspace, so the
+/// workspace is very possibly still lapsed (webhook not yet processed) at
+/// the moment this is called.
 #[server(prefix = "/leptos-api")]
 pub async fn get_checkout_session_status(
     session_id: String,
 ) -> Result<CheckoutStatus, ServerFnError> {
-    let _auth = extract_auth().await?;
+    let _auth = extract_auth_allow_lapsed().await?;
     let ctx = extract_context()?;
     let stripe_service = require_stripe(&ctx.config)?;
 

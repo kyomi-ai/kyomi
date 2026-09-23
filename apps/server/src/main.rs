@@ -399,6 +399,7 @@ async fn serve() {
             encryption_key_arc.clone(),
             embedding.clone(),
             shutdown_token.child_token(),
+            config_arc.clone(),
         ));
         let (_refresh_handle, _cleanup_handle, _maintenance_handle, _query_history_cleanup_handle, _public_dataset_handle) = catalog_scheduler.start();
         tracing::info!("Catalog refresh scheduler started");

@@ -76,6 +76,7 @@ impl FromRef<AppState> for AuthState {
             jwt_secret: state.config.jwt_secret.clone(),
             db: state.db.clone(),
             is_personal: state.config.is_personal(),
+            self_hosted: state.config.self_hosted,
         }
     }
 }

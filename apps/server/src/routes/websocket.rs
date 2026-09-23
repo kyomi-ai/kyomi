@@ -14,7 +14,7 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 
-use kyomi_auth::{jwt, user_service};
+use kyomi_auth::{billing_gate, jwt, user_service};
 
 use crate::state::AppState;
 
@@ -171,6 +171,7 @@ async fn handle_authenticated_ws(
     let manager_clone = state.ws_manager.clone();
     let db_clone = state.db.clone();
     let cancel_registry_clone = state.cancel_registry.clone();
+    let self_hosted = state.config.self_hosted;
     let user_id_for_recv = jwt_user_id.clone();
     let workspace_id_for_recv = workspace_id.clone();
     let recv_task = tokio::spawn(async move {
@@ -184,6 +185,7 @@ async fn handle_authenticated_ws(
                         &manager_clone,
                         &db_clone,
                         &cancel_registry_clone,
+                        self_hosted,
                     )
                     .await;
                 }
@@ -262,6 +264,7 @@ async fn handle_client_message(
     manager: &kyomi_auth::websocket::WebSocketManager,
     db: &kyomi_core::DbPool,
     cancel_registry: &crate::cancel_registry::CancelRegistry,
+    self_hosted: bool,
 ) {
     let msg: serde_json::Value = match serde_json::from_str(text) {
         Ok(v) => v,
@@ -310,14 +313,14 @@ async fn handle_client_message(
             }
         }
         "sync_bootstrap" => {
-            handle_sync_bootstrap(manager, db, user_id, workspace_id).await;
+            handle_sync_bootstrap(manager, db, user_id, workspace_id, self_hosted).await;
         }
         "sync_delta" => {
             let last_sync_id = msg
                 .get("last_sync_id")
                 .and_then(|v| v.as_i64())
                 .unwrap_or(0);
-            handle_sync_delta(manager, db, user_id, workspace_id, last_sync_id).await;
+            handle_sync_delta(manager, db, user_id, workspace_id, last_sync_id, self_hosted).await;
         }
         _ => {
             tracing::debug!(user_id, msg_type, "Received unknown client message type");
@@ -327,19 +330,101 @@ async fn handle_client_message(
 
 // ─── Sync protocol handlers ───────────────────────────────────────────────────
 
+/// Maps a [`billing_gate::WorkspaceBillingGate`] outcome to the message and
+/// (optional) machine-readable error code a refused sync request should
+/// carry — `None` for [`billing_gate::WorkspaceBillingGate::Open`] (nothing
+/// to refuse). A pure function, deliberately split out of
+/// [`refuse_if_billing_gate_blocks`] so this mapping — in particular, that
+/// [`billing_gate::WorkspaceBillingGate::Unverifiable`] never carries the
+/// `payment_required` code — is unit-testable without a live
+/// `WebSocketManager` or database connection (KYO-805 follow-up): this repo
+/// has no WebSocket integration-test harness, so this is the level at which
+/// the refusal *decision* gets coverage.
+///
+/// `Unverifiable` deliberately gets no error code at all rather than a new
+/// invented one: KYO-806's client-side paywall keys off
+/// `error_code == Some("payment_required")`, so sending any code here risks
+/// the client treating "we don't know" the same as "billing is definitely
+/// lapsed" the moment it starts handling more codes than it does today.
+fn billing_refusal_message(
+    gate: billing_gate::WorkspaceBillingGate,
+) -> Option<(&'static str, Option<&'static str>)> {
+    match gate {
+        billing_gate::WorkspaceBillingGate::Open => None,
+        billing_gate::WorkspaceBillingGate::Lapsed => Some((
+            "This workspace's billing is past due.",
+            Some(kyomi_core::PAYMENT_REQUIRED_CODE),
+        )),
+        billing_gate::WorkspaceBillingGate::Unverifiable => Some((
+            "Unable to verify workspace access right now. Please try again shortly.",
+            None,
+        )),
+    }
+}
+
+/// Whether `workspace_id`'s billing gate blocks bulk data delivery over an
+/// already-open, already-authenticated WebSocket connection (KYO-805), and —
+/// if so — sends the caller a `send_error` explaining the refusal before
+/// returning `true`.
+///
+/// The WS connection itself stays open for a lapsed SaaS workspace — the
+/// live-refresh flow needs it to unlock the tab the moment payment succeeds
+/// — but `sync_bootstrap`/`sync_delta` are how that connection actually
+/// hands the client the workspace's data (every dashboard, chat session,
+/// watch, knowledge doc), which is exactly the exposure the REST/server-fn
+/// `AuthUser` gate closes for HTTP. `handle_sync_bootstrap` and
+/// `handle_sync_delta` both call this — once each — before streaming
+/// anything, rather than each carrying its own copy of the same check-then-
+/// send-error block.
+///
+/// Delegates the load-and-decide step to
+/// `kyomi_auth::billing_gate::check_workspace_billing_gate` — the single
+/// implementation also used by the catalog refresh scheduler and the watch
+/// scheduler (KYO-805 follow-up) — so this function's only job is turning
+/// that verdict into the right client-facing message via
+/// [`billing_refusal_message`].
+async fn refuse_if_billing_gate_blocks(
+    manager: &kyomi_auth::websocket::WebSocketManager,
+    db: &kyomi_core::DbPool,
+    user_id: &str,
+    workspace_id: &str,
+    self_hosted: bool,
+) -> bool {
+    let gate =
+        billing_gate::check_workspace_billing_gate(db, workspace_id, self_hosted, chrono::Utc::now())
+            .await;
+    let Some((message, error_code)) = billing_refusal_message(gate) else {
+        return false;
+    };
+
+    tracing::info!(user_id, workspace_id, ?gate, "sync refused by billing gate");
+    kyomi_auth::websocket::helpers::send_error(manager, user_id, None, message, error_code, None)
+        .await;
+    true
+}
+
 /// Handle a `sync_bootstrap` request.
 ///
 /// Streams all Tier 1 entities for the workspace as `SyncAction` messages with
 /// `action = insert`, then closes with a `SyncComplete` carrying the current
 /// `latest_sync_id`. Clients should store this ID and use `sync_delta` for
 /// subsequent reconnects.
+///
+/// Refuses (sends a billing-gate error instead of streaming) when
+/// `workspace_id`'s billing gate blocks it (KYO-805) — see
+/// [`refuse_if_billing_gate_blocks`].
 async fn handle_sync_bootstrap(
     manager: &kyomi_auth::websocket::WebSocketManager,
     db: &kyomi_core::DbPool,
     user_id: &str,
     workspace_id: &str,
+    self_hosted: bool,
 ) {
     use kyomi_types::sync::{SyncResponse, entity_types};
+
+    if refuse_if_billing_gate_blocks(manager, db, user_id, workspace_id, self_hosted).await {
+        return;
+    }
 
     tracing::debug!(user_id, workspace_id, "Handling sync_bootstrap");
 
@@ -449,14 +534,23 @@ async fn handle_sync_bootstrap(
 /// Streams all sync log entries with `sync_id > last_sync_id`. If the
 /// requested `sync_id` is no longer in the log (pruned), sends `SyncReset`
 /// so the client falls back to a full bootstrap.
+///
+/// Refuses (sends a billing-gate error instead of streaming) when
+/// `workspace_id`'s billing gate blocks it (KYO-805) — see
+/// [`refuse_if_billing_gate_blocks`].
 async fn handle_sync_delta(
     manager: &kyomi_auth::websocket::WebSocketManager,
     db: &kyomi_core::DbPool,
     user_id: &str,
     workspace_id: &str,
     last_sync_id: i64,
+    self_hosted: bool,
 ) {
     use kyomi_types::sync::SyncResponse;
+
+    if refuse_if_billing_gate_blocks(manager, db, user_id, workspace_id, self_hosted).await {
+        return;
+    }
 
     tracing::debug!(user_id, workspace_id, last_sync_id, "Handling sync_delta");
 
@@ -717,6 +811,47 @@ mod tests {
     // this function entirely, which is a visible, reviewable change (unlike
     // two independent copies of the same "insert on Ok, skip on Err" logic
     // silently diverging, which is exactly what happened before this fix).
+
+    // ── billing_refusal_message (KYO-805 follow-up) ─────────────────────────
+    //
+    // `handle_sync_bootstrap`/`handle_sync_delta` are DB- and
+    // WebSocketManager-backed async fns with no lightweight unit-test seam
+    // (this repo has no WebSocket integration-test harness), so these tests
+    // target the pure decision function directly — proving the refusal
+    // *message* is correct proves it's correct at both call sites
+    // structurally, since `refuse_if_billing_gate_blocks` is the only place
+    // either one produces one.
+
+    #[test]
+    fn billing_refusal_message_open_refuses_nothing() {
+        assert_eq!(billing_refusal_message(billing_gate::WorkspaceBillingGate::Open), None);
+    }
+
+    #[test]
+    fn billing_refusal_message_lapsed_carries_the_payment_required_code() {
+        let (message, code) =
+            billing_refusal_message(billing_gate::WorkspaceBillingGate::Lapsed)
+                .expect("Lapsed must refuse");
+        assert_eq!(code, Some(kyomi_core::PAYMENT_REQUIRED_CODE));
+        assert!(message.contains("billing"));
+    }
+
+    /// The exact defect this guards against: an `Unverifiable` outcome (the
+    /// workspace couldn't be loaded at all — not a confirmed lapse) must
+    /// never carry the `payment_required` code, or KYO-806's client-side
+    /// paywall would tell a user their billing is past due when the server
+    /// simply couldn't check.
+    #[test]
+    fn billing_refusal_message_unverifiable_carries_no_payment_required_code() {
+        let (message, code) =
+            billing_refusal_message(billing_gate::WorkspaceBillingGate::Unverifiable)
+                .expect("Unverifiable must refuse");
+        assert_eq!(code, None, "must not claim a confirmed billing lapse");
+        assert!(
+            !message.to_lowercase().contains("billing"),
+            "must not read as a billing-specific refusal, got: {message:?}"
+        );
+    }
 
     #[test]
     fn insert_count_if_present_records_a_present_value() {

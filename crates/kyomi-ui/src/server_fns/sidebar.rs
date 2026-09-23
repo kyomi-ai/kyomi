@@ -6,7 +6,7 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
-use super::IntoServerFnErrorCore;
+use super::{extract_auth_allow_lapsed, IntoServerFnErrorCore};
 
 /// Minimal chat session info for the sidebar list.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -78,9 +78,14 @@ pub async fn get_recent_sessions() -> Result<Vec<SidebarSession>, ServerFnError>
 }
 
 /// Load current user info for the sidebar user menu.
+///
+/// Uses `extract_auth_allow_lapsed()` (KYO-805): the sidebar — including the
+/// billing_lapsed flag itself, which drives the client-side redirect to the
+/// billing page — must render for a lapsed workspace, or the owner has no
+/// way to reach the page that fixes it.
 #[server(prefix = "/leptos-api")]
 pub async fn get_sidebar_user() -> Result<SidebarUser, ServerFnError> {
-    let auth = super::extract_auth().await?;
+    let auth = extract_auth_allow_lapsed().await?;
     let ctx = super::extract_context()?;
 
     // Read theme preference from user's extra_metadata (same source as profile.rs)
@@ -100,26 +105,13 @@ pub async fn get_sidebar_user() -> Result<SidebarUser, ServerFnError> {
     // trial_ends_at is already on the middleware's WorkspaceContext — no extra DB query needed.
     let trial_ends_at = auth.workspace.trial_ends_at.map(|dt| dt.to_rfc3339());
 
-    // is_billing_lapsed is SaaS-only (see its doc comment) — self-hosted and
-    // personal deployments have no billing. `ctx.config.self_hosted` already
-    // covers personal mode too: `KyomiMode::self_hosted()` derives `true` for
-    // both `SelfHosted` and `Personal`, mirroring the same branch in
-    // `get_user_context` (context.rs). The middleware's `WorkspaceContext`
-    // doesn't carry `stripe_subscription_id` / `subscription_period_end`, so
-    // a SaaS workspace needs its own load, same as `get_user_context` does
-    // for capabilities.
-    let billing_lapsed = if ctx.config.self_hosted {
-        false
-    } else if let Some(ws_id) = auth.workspace.workspace_id.as_deref() {
-        let workspace = kyomi_auth::workspace_service::get_workspace_full(&ctx.db, ws_id)
-            .await
-            .into_sfn_core()?
-            .ok_or_else(|| ServerFnError::new("Workspace not found"))?;
-        kyomi_core::capability::is_billing_lapsed(&workspace, chrono::Utc::now())
-    } else {
-        // SaaS with no workspace: nothing is billed, so nothing can be lapsed.
-        false
-    };
+    // billing_lapsed is computed once, in the AuthUser extractor
+    // (`kyomi_auth::middleware::load_auth_user`), and carried on
+    // `WorkspaceContext` — read it from there rather than re-deriving it
+    // with a second workspace load (KYO-805). That extractor already
+    // applies the exact same SaaS-only, self-hosted-and-personal-never
+    // reasoning this comment used to explain locally.
+    let billing_lapsed = auth.workspace.billing_lapsed;
 
     Ok(SidebarUser {
         user_id: auth.user_id.clone(),
