@@ -30,6 +30,16 @@ pub struct SidebarUser {
     pub subscription_status: String,
     /// Trial expiration ISO 8601 timestamp. Present when status is "trialing".
     pub trial_ends_at: Option<String>,
+    /// Whether this workspace must pay before continuing to use the app.
+    ///
+    /// Computed server-side by `kyomi_core::capability::is_billing_lapsed` —
+    /// the one definition of this rule. The client must never re-derive it
+    /// (e.g. by string-matching `subscription_status`) — that predicate
+    /// already accounts for cases a naive status match gets wrong, such as a
+    /// scheduled cancellation (`cancel_at_period_end`) that still has paid-up
+    /// time remaining. Always `false` outside SaaS mode (self-hosted and
+    /// personal deployments have no billing).
+    pub billing_lapsed: bool,
     /// User's theme preference: "light", "dark", or "system".
     pub theme_preference: String,
 }
@@ -90,6 +100,27 @@ pub async fn get_sidebar_user() -> Result<SidebarUser, ServerFnError> {
     // trial_ends_at is already on the middleware's WorkspaceContext — no extra DB query needed.
     let trial_ends_at = auth.workspace.trial_ends_at.map(|dt| dt.to_rfc3339());
 
+    // is_billing_lapsed is SaaS-only (see its doc comment) — self-hosted and
+    // personal deployments have no billing. `ctx.config.self_hosted` already
+    // covers personal mode too: `KyomiMode::self_hosted()` derives `true` for
+    // both `SelfHosted` and `Personal`, mirroring the same branch in
+    // `get_user_context` (context.rs). The middleware's `WorkspaceContext`
+    // doesn't carry `stripe_subscription_id` / `subscription_period_end`, so
+    // a SaaS workspace needs its own load, same as `get_user_context` does
+    // for capabilities.
+    let billing_lapsed = if ctx.config.self_hosted {
+        false
+    } else if let Some(ws_id) = auth.workspace.workspace_id.as_deref() {
+        let workspace = kyomi_auth::workspace_service::get_workspace_full(&ctx.db, ws_id)
+            .await
+            .into_sfn_core()?
+            .ok_or_else(|| ServerFnError::new("Workspace not found"))?;
+        kyomi_core::capability::is_billing_lapsed(&workspace, chrono::Utc::now())
+    } else {
+        // SaaS with no workspace: nothing is billed, so nothing can be lapsed.
+        false
+    };
+
     Ok(SidebarUser {
         user_id: auth.user_id.clone(),
         workspace_id: auth.workspace.workspace_id.clone(),
@@ -100,6 +131,7 @@ pub async fn get_sidebar_user() -> Result<SidebarUser, ServerFnError> {
         is_self_hosted: ctx.config.self_hosted,
         subscription_status: auth.workspace.subscription_status.to_string(),
         trial_ends_at,
+        billing_lapsed,
         theme_preference,
     })
 }

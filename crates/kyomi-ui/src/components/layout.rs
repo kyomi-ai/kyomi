@@ -370,8 +370,15 @@ pub fn Layout(children: ChildrenFn) -> impl IntoView {
         }
     });
 
-    // Subscription gate: redirect to billing when trial expired or subscription cancelled.
-    // Only enforced for non-personal-mode users navigating to non-settings pages.
+    // Subscription gate: redirect to billing when the workspace's billing
+    // has lapsed. `user.billing_lapsed` is computed server-side by the one
+    // definition of this rule, `kyomi_core::capability::is_billing_lapsed`
+    // (see its doc comment) — this effect must never re-derive the rule by
+    // string-matching `subscription_status` itself, since the predicate
+    // already handles cases a naive status match gets wrong, e.g. a
+    // scheduled cancellation (`cancel_at_period_end`) that still has
+    // paid-up time remaining (KYO-811). Only enforced for non-personal-mode
+    // users navigating to non-settings pages.
     #[cfg(target_arch = "wasm32")]
     let navigate_billing = use_navigate();
     #[cfg(target_arch = "wasm32")]
@@ -384,7 +391,10 @@ pub fn Layout(children: ChildrenFn) -> impl IntoView {
                 return;
             }
             let Some(Ok(user)) = user_info_for_sub_gate.get() else { return };
-            // Personal mode / self-hosted don't have billing
+            // Personal mode / self-hosted don't have billing.
+            // `billing_lapsed` is already always `false` for these — this
+            // early return just skips the rest of the effect on every
+            // navigation rather than relying on that.
             if user.is_personal_mode {
                 return;
             }
@@ -400,21 +410,11 @@ pub fn Layout(children: ChildrenFn) -> impl IntoView {
             // Stripe moves the subscription to "active" and creates a draft
             // invoice, which finalizes roughly 72 hours later — only once
             // that charge actually fails does the status become "past_due".
-            // That ~3-day window before this gate fires is accepted.
-            //
-            // This gate also does not catch the no-Stripe fallback trial
-            // (signup succeeded but Stripe customer/subscription creation
-            // failed, so the workspace has no stripe_subscription_id and
-            // relies solely on trial_ends_at) — that workspace stays
-            // "trialing" here forever, since nothing sets it to "past_due"
-            // or "cancelled". Later work will close that gap; this client
-            // gate still checks only the two statuses below, not
-            // trial_ends_at.
-            let needs_gate = matches!(
-                user.subscription_status.as_str(),
-                "cancelled" | "past_due"
-            );
-            if needs_gate {
+            // That ~3-day window before this gate fires is accepted — it's
+            // also why `is_billing_lapsed` treats `Trialing` with a live
+            // Stripe subscription as never lapsed: Stripe, not our cached
+            // status, governs that transition.
+            if user.billing_lapsed {
                 navigate_billing("/settings/billing", NavigateOptions::default());
             }
         });
