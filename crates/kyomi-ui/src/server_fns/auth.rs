@@ -676,6 +676,7 @@ pub async fn resend_verification(email: String) -> Result<(), ServerFnError> {
         &ctx.config.frontend_url,
         &ip,
         &email,
+        ctx.config.self_hosted,
     )
     .await
     .into_sfn_core()?;
@@ -767,6 +768,15 @@ pub enum RecoverySetPasswordResult {
 /// SMTP-not-configured precondition below, both of which fire before any
 /// account lookup and so leak nothing about a specific email. Delegates
 /// email dispatch to a background task inline.
+///
+/// KYO-763: on a failed send, the background task logs an ERROR naming the
+/// recipient and reason (KYO-697; unconditional, unchanged) plus one more
+/// INFO line — the full recovery link, including its live token, only in a
+/// deployment `account_recovery_failure_log_line` says may see it
+/// (self-hosted, or a locally run `dev-server`-profile build). A real SaaS
+/// production build gets a redacted line instead, naming the recipient and
+/// the safe self-service remedy (retry once mail delivery is restored —
+/// `recovery_start_service` always mints a fresh token).
 #[server(prefix = "/leptos-api")]
 pub async fn recovery_start(email: String) -> Result<(), ServerFnError> {
     let ctx = extract_context()?;
@@ -802,6 +812,7 @@ pub async fn recovery_start(email: String) -> Result<(), ServerFnError> {
             r.raw_token
         );
         let email_clone = email.to_string();
+        let self_hosted = ctx.config.self_hosted;
         tokio::spawn(async move {
             let email_svc = kyomi_auth::email_service::EmailService::from_env();
             let result = email_svc
@@ -815,7 +826,15 @@ pub async fn recovery_start(email: String) -> Result<(), ServerFnError> {
                         error = %e,
                         "Failed to send account recovery email"
                     );
-                    tracing::info!("ACCOUNT RECOVERY LINK for {email_clone}: {recovery_url}");
+                    tracing::info!(
+                        "{}",
+                        account_recovery_failure_log_line(
+                            self_hosted,
+                            cfg!(debug_assertions),
+                            &email_clone,
+                            &recovery_url,
+                        )
+                    );
                 }
             }
         });
@@ -874,6 +893,7 @@ pub async fn passkey_recovery_start(email: String) -> Result<(), ServerFnError> 
         &ip,
         email,
         &ctx.config.frontend_url,
+        ctx.config.self_hosted,
     )
     .await
     .into_sfn_core()
@@ -1532,6 +1552,53 @@ pub(crate) fn extract_device_info(headers: &axum::http::HeaderMap) -> kyomi_auth
     kyomi_auth::request_meta::extract_device_info(headers)
 }
 
+/// The one INFO line `recovery_start`'s fire-and-forget send task emits
+/// right after the KYO-697 ERROR line, when `send_account_recovery` fails.
+///
+/// KYO-763: the pre-fix version of this line always included the full
+/// recovery URL — the live, unhashed token, a credential equivalent to a
+/// password, since redeeming it recovers the account regardless of the
+/// owner's actual password/passkey. In a SaaS production build that log
+/// reaches an aggregated, retained stream any operator (Kyomi staff, not
+/// just the account owner) can read — turning a transient SMTP hiccup into
+/// a standing account-takeover primitive for every failed send.
+///
+/// Gated on `kyomi_auth::auth_service::may_log_live_credential_link` — the
+/// same predicate every verification-link mint in `kyomi-auth` uses, so
+/// this deployment-mode decision has exactly one definition. Self-hosted
+/// operators keep the full link (their own instance, their own log
+/// retention — the documented way they unblock a user whose mail server is
+/// misbehaving); a locally run `dev-server`-profile build keeps it too, so
+/// local/agent testing without a mailbox to check still works. A real SaaS
+/// production build gets the redacted line instead: it still names the
+/// recipient (to correlate with the ERROR line above it) and the safe,
+/// self-service remedy — `recovery_start_service` always mints a fresh
+/// token on the next attempt, so asking the user to retry once mail
+/// delivery is restored costs nothing.
+///
+/// Pure and takes `self_hosted`/`dev_mode` as plain `bool`s (rather than
+/// reading `ctx.config`/`cfg!` itself) so it is directly unit-testable —
+/// the fire-and-forget task around it has no DB/KV/SMTP harness at this
+/// layer to drive an end-to-end test through.
+#[cfg(feature = "ssr")]
+fn account_recovery_failure_log_line(
+    self_hosted: bool,
+    dev_mode: bool,
+    email: &str,
+    recovery_url: &str,
+) -> String {
+    if kyomi_auth::auth_service::may_log_live_credential_link(self_hosted, dev_mode) {
+        format!("ACCOUNT RECOVERY LINK for {email}: {recovery_url}")
+    } else {
+        format!(
+            "Account recovery email failed to send for {email}; the live recovery link \
+             is withheld from logs in this deployment (KYO-763). Ask the user to retry \
+             via \"Forgot password?\" once mail delivery is restored — recovery_start \
+             always mints a fresh token, so a retry is safe."
+        )
+    }
+}
+
 #[cfg(all(test, feature = "ssr"))]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -1606,6 +1673,58 @@ mod tests {
             super::extract_client_ip(&bad),
             "unknown",
             "malformed header values must be rejected, not stored verbatim"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // `account_recovery_failure_log_line` (KYO-763)
+    // -----------------------------------------------------------------
+
+    const EMAIL: &str = "recovery-failure@example.com";
+    const RECOVERY_URL: &str = "https://app.example.com/account/recover/complete?token=raw-token-value";
+
+    /// The regression this ticket exists to fix: a real SaaS production
+    /// build (`self_hosted: false, dev_mode: false` — the one combination
+    /// `cfg!(debug_assertions)` can never produce inside an ordinary
+    /// `cargo test` binary, which is exactly why this function takes both
+    /// as explicit `bool`s rather than reading `cfg!` itself) must never
+    /// put the live recovery token in a log line.
+    #[test]
+    fn omits_the_link_in_saas_production() {
+        let line = super::account_recovery_failure_log_line(false, false, EMAIL, RECOVERY_URL);
+
+        assert!(
+            !line.contains(RECOVERY_URL) && !line.contains("token="),
+            "SaaS production must never log the live recovery link: {line}"
+        );
+        assert!(
+            line.contains(EMAIL),
+            "the redacted line must still name the recipient, to correlate with the \
+             ERROR line logged alongside it: {line}"
+        );
+    }
+
+    /// Self-hosted keeps the full link — the documented operator escape
+    /// valve for that deployment's own logs.
+    #[test]
+    fn logs_the_link_when_self_hosted() {
+        let line = super::account_recovery_failure_log_line(true, false, EMAIL, RECOVERY_URL);
+        assert!(
+            line.contains(RECOVERY_URL) && line.contains(EMAIL),
+            "a self-hosted deployment must still get the full link in its own logs: {line}"
+        );
+    }
+
+    /// A locally run `dev-server`-profile build keeps it too, even in
+    /// SaaS-mode config — the shape CLAUDE.md's "Local Dev Server" section
+    /// runs dev.kyomi.ai under, and how local/agent testing recovers a
+    /// token with no mailbox to check.
+    #[test]
+    fn logs_the_link_in_dev_mode() {
+        let line = super::account_recovery_failure_log_line(false, true, EMAIL, RECOVERY_URL);
+        assert!(
+            line.contains(RECOVERY_URL) && line.contains(EMAIL),
+            "a locally run dev-server-profile build must still get the full link: {line}"
         );
     }
 }
