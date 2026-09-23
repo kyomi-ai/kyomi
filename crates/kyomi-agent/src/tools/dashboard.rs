@@ -359,6 +359,7 @@ impl AgentTool for CreateDashboardTool {
                     content: content.to_string(),
                     app_config: ctx.config.clone(),
                     doc_type: "dashboard".to_string(),
+                    copilot_receipt_id: None,
                 },
             );
         }
@@ -510,6 +511,17 @@ impl AgentTool for ModifyDashboardTool {
         )
         .await?;
 
+        if let Some(dash) = existing.as_ref()
+            && title.map(str::trim).unwrap_or(&dash.title) == dash.title
+            && content.unwrap_or(&dash.content) == dash.content
+        {
+            return Ok(serde_json::json!({
+                "success": false,
+                "dashboard_id": dashboard_id,
+                "message": "The dashboard is already in the requested state",
+            }).to_string());
+        }
+
         // Reject title-only updates on empty dashboards before writing.
         // Returning success:true with a soft warning caused a 21-call loop —
         // models read "success" and repeat the same call. A hard failure breaks
@@ -538,6 +550,13 @@ impl AgentTool for ModifyDashboardTool {
         // the only one of the three "replace a document's content" tools
         // that never refreshed chunks at all.
         let embed = ctx.embedding.wait_ready().await?;
+        let receipt_id = if ctx.document_id.as_deref() == Some(dashboard_id)
+            && ctx.session_id.is_some()
+        {
+            Some(uuid::Uuid::new_v4().to_string())
+        } else {
+            None
+        };
 
         match apply_update(ApplyUpdateParams {
             db: &ctx.db,
@@ -548,6 +567,12 @@ impl AgentTool for ModifyDashboardTool {
             content,
             change_summary,
             expected_content_hash: existing.as_ref().and_then(|d| d.content_hash.as_deref()),
+            copilot_receipt: receipt_id.as_deref().zip(ctx.session_id.as_deref()).map(
+                |(receipt_id, session_id)| kyomi_auth::dashboard_service::CopilotReceiptInput {
+                    receipt_id,
+                    session_id,
+                }
+            ),
             document_scope: ctx.document_id.as_deref(),
             embed,
         })
@@ -584,6 +609,28 @@ impl AgentTool for ModifyDashboardTool {
             Err(e) => return Err(e),
         }
 
+        if let Some(receipt_id) = receipt_id.as_deref() {
+            let receipt = kyomi_auth::dashboard_service::get_copilot_mutation_receipt(
+                &ctx.db, receipt_id, &ctx.workspace_id, &ctx.user_id,
+            )
+            .await?
+            .ok_or_else(|| kyomi_core::Error::Internal("saved copilot receipt disappeared".into()))?;
+            let event = kyomi_core::WebSocketMessage::new(
+                kyomi_core::MessageType::CopilotMutationReceipt,
+            )
+            .with_session(&receipt.session_id)
+            .with_data(serde_json::json!({
+                "context_type": "dashboard_copilot",
+                "receipt_id": receipt.receipt_id,
+                "dashboard_id": dashboard_id,
+                "version_number": receipt.pre_version_number,
+                "saved_revision": receipt.saved_revision,
+                "title": receipt.saved_title,
+                "change_summary": receipt.change_summary,
+            }));
+            ctx.ws_manager.send_to_user(&ctx.user_id, event).await;
+        }
+
         // Spawn background embedding if content changed and is substantial
         if let Some(c) = content
             && c.len() >= 50
@@ -613,6 +660,7 @@ impl AgentTool for ModifyDashboardTool {
                         content: c.to_string(),
                         app_config: ctx.config.clone(),
                         doc_type: "dashboard".to_string(),
+                        copilot_receipt_id: receipt_id.clone(),
                     },
                 );
             }
@@ -706,6 +754,13 @@ mod tests {
     use kyomi_auth::websocket::WebSocketManager;
 
     use crate::test_support::{build_ctx, loaded_embedding, seed_user_and_workspace, test_pool};
+
+    fn sqlite_pool(db: &kyomi_core::DbPool) -> &sqlx::SqlitePool {
+        match db {
+            kyomi_core::DbPool::Sqlite(pool) => pool,
+            kyomi_core::DbPool::Postgres(_) => panic!("test requires SQLite"),
+        }
+    }
 
     /// Insert a second user, `"user-b"`, into workspace `"ws-1"` alongside
     /// the `"user-a"` owner `seed_user_and_workspace` sets up. Used by the
@@ -1397,6 +1452,7 @@ mod tests {
                 content: Some("v2"),
                 change_summary: None,
                 expected_content_hash: None,
+                copilot_receipt: None,
             },
         )
         .await
@@ -1413,6 +1469,7 @@ mod tests {
             content: Some("v3, from a writer holding the stale v1 hash"),
             change_summary: None,
             expected_content_hash: Some("0000000000000000-not-the-real-hash"),
+            copilot_receipt: None,
             document_scope: None,
             embed,
         })
@@ -1596,6 +1653,7 @@ mod tests {
         // The copilot is scoped to the document it was opened against —
         // here, the same dashboard being edited.
         ctx.document_id = Some(dashboard_id.clone());
+        ctx.session_id = Some("session-a".to_string());
         // KYO-541: the write below carries `content`, so `apply_update`
         // rechunks `knowledge_chunks` synchronously.
         ctx.embedding = loaded_embedding();
@@ -1631,6 +1689,25 @@ mod tests {
             versions_before + 1,
             "a copilot edit must create a version row like any other update_dashboard call"
         );
+        let receipts: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM copilot_mutation_receipts WHERE dashboard_id = $1 AND session_id = $2"
+        )
+        .bind(&dashboard_id).bind("session-a")
+        .fetch_one(sqlite_pool(&ctx.db)).await.expect("count receipts");
+        assert_eq!(receipts, 1);
+
+        let noop = ModifyDashboardTool.execute(
+            serde_json::json!({"dashboard_id": dashboard_id, "content": "v2, written by the copilot"}),
+            &ctx,
+        ).await.expect("no-op result");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&noop).expect("json")["success"],
+            serde_json::json!(false),
+        );
+        let receipts_after_noop: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM copilot_mutation_receipts WHERE dashboard_id = $1"
+        ).bind(&dashboard_id).fetch_one(sqlite_pool(&ctx.db)).await.expect("count receipts");
+        assert_eq!(receipts_after_noop, 1, "no-op must not produce an Undo receipt");
     }
 
     /// A copilot scoped to one open document must not be able to write a
@@ -1653,6 +1730,7 @@ mod tests {
 
         let mut ctx = build_ctx(db);
         ctx.document_id = Some(open_id.clone());
+        ctx.session_id = Some("session-a".to_string());
         // KYO-541: `apply_update` resolves `embed` before the scope check
         // inside it runs.
         ctx.embedding = loaded_embedding();
@@ -1684,6 +1762,10 @@ mod tests {
             .expect("lookup")
             .expect("exists");
         assert_eq!(other.content, "other content", "the out-of-scope document must be untouched");
+        let receipts: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM copilot_mutation_receipts WHERE dashboard_id = $1"
+        ).bind(&other_id).fetch_one(sqlite_pool(&ctx.db)).await.expect("count receipts");
+        assert_eq!(receipts, 0, "rejected cross-document write must not produce a receipt");
     }
 
     // -- DeleteDashboardTool --------------------------------------------------

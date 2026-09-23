@@ -22,22 +22,25 @@ use leptos_router::hooks::use_params_map;
 
 use crate::chartml_provider::{DashboardChartProviders, RefreshAllSignal};
 use crate::components::dashboard::{
-    ChartInfoModal, HistoryPanel, MarkdownRenderer, DashboardParameters,
+    ChartInfoModal, CopilotSidebar, DashboardParameters, HistoryPanel, MarkdownRenderer,
     SaveDashboardModal,
 };
-use crate::components::{Button, ButtonLink, ButtonSize, ButtonVariant, DetailPageSkeleton, ToggleButton, Skeleton};
 #[cfg(target_arch = "wasm32")]
 use crate::components::toast::toast_error;
-use phosphor_leptos::Icon;
+use crate::components::{
+    Button, ButtonLink, ButtonSize, ButtonVariant, DetailPageSkeleton, Skeleton, ToggleButton,
+};
 use crate::parser::parse_markdown_chartml;
-#[cfg(target_arch = "wasm32")]
-use wasm_bindgen::JsCast;
 use crate::query_cache::QueryCache;
+use crate::server_fns::context::UserContext;
+use crate::server_fns::copilot::get_dashboard_copilot_access;
 use crate::server_fns::dashboards::{
     get_dashboard, get_user_default_dashboard, get_workspace_default_dashboard,
     set_user_default_dashboard, set_workspace_default_dashboard, update_dashboard,
 };
-use crate::server_fns::context::UserContext;
+use phosphor_leptos::Icon;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::JsCast;
 
 // ─── Relative time formatting ───────────────────────────────────────────────
 
@@ -49,6 +52,121 @@ fn format_date(iso: &str) -> String {
         return iso.to_string();
     };
     dt.format("%d/%m/%Y").to_string()
+}
+
+#[cfg(test)]
+mod parameter_tests {
+    use super::reconcile_parameters;
+    use std::collections::HashMap;
+
+    #[test]
+    fn preserves_selected_filter_when_document_changes() {
+        let previous = HashMap::from([
+            ("region".to_string(), "West".to_string()),
+            ("removed".to_string(), "old".to_string()),
+        ]);
+        let content = r#"```chartml
+type: params
+version: 1
+params:
+  - id: region
+    type: select
+    label: Region
+    default: East
+    options: [East, West]
+  - id: year
+    type: select
+    label: Year
+    default: "2026"
+```"#;
+
+        let values = reconcile_parameters(content, &previous);
+        assert_eq!(values.get("region").map(String::as_str), Some("West"));
+        assert_eq!(values.get("year").map(String::as_str), Some("2026"));
+        assert!(!values.contains_key("removed"));
+    }
+
+    #[test]
+    fn resets_filter_when_new_options_exclude_old_choice() {
+        let previous = HashMap::from([("region".to_string(), "West".to_string())]);
+        let content = r#"```chartml
+type: params
+version: 1
+params:
+  - id: region
+    type: select
+    label: Region
+    default: East
+    options: [East, North]
+```"#;
+
+        let values = reconcile_parameters(content, &previous);
+        assert_eq!(values.get("region").map(String::as_str), Some("East"));
+    }
+}
+
+/// Keep values the viewer chose when the saved document is refreshed, while
+/// dropping parameters that no longer exist and seeding newly added ones.
+fn reconcile_parameters(
+    content: &str,
+    previous: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    fn as_text(value: &serde_json::Value) -> String {
+        match value {
+            serde_json::Value::String(value) => value.clone(),
+            serde_json::Value::Number(value) => value.to_string(),
+            serde_json::Value::Bool(value) => value.to_string(),
+            other => other.to_string(),
+        }
+    }
+
+    let mut values = HashMap::new();
+    for group in parse_markdown_chartml(content).params {
+        for param in group.params {
+            if values.contains_key(&param.id) {
+                continue;
+            }
+            if param.param_type == "daterange" {
+                let default = param.default.as_ref().and_then(|value| value.as_array());
+                for (index, suffix) in ["start", "end"].into_iter().enumerate() {
+                    let key = format!("{}_{}", param.id, suffix);
+                    if let Some(value) = previous.get(&key).cloned().or_else(|| {
+                        default.and_then(|values| values.get(index)).map(as_text)
+                    }) {
+                        values.insert(key, value);
+                    }
+                }
+                if let Some(value) = previous.get(&param.id).cloned().or_else(|| {
+                    param.default.as_ref().filter(|value| !value.is_array()).map(as_text)
+                }) {
+                    values.insert(param.id, value);
+                }
+                continue;
+            }
+
+            let options = param.options.as_ref().map(|options| options.iter().map(as_text).collect::<Vec<_>>());
+            let is_valid = |value: &str| match (param.param_type.as_str(), options.as_deref()) {
+                ("select", Some(options)) if !options.is_empty() => options.iter().any(|option| option == value),
+                ("multiselect", Some(options)) if !options.is_empty() => value.split(',').all(|part| options.iter().any(|option| option == part.trim())),
+                _ => true,
+            };
+            let selected = previous.get(&param.id).filter(|value| is_valid(value)).cloned();
+            let fallback = param.default.as_ref().map(|default| {
+                if param.param_type == "multiselect" {
+                    default.as_array().map(|items| items.iter().map(as_text).collect::<Vec<_>>().join(","))
+                        .unwrap_or_else(|| as_text(default))
+                } else {
+                    as_text(default)
+                }
+            }).filter(|value| is_valid(value));
+            if let Some(value) = selected.or(fallback).or_else(|| {
+                if param.param_type == "select" { options.as_ref().and_then(|values| values.first().cloned()) } else { None }
+            }) {
+                values.insert(param.id, value);
+            }
+        }
+    }
+    values
 }
 
 // ─── Inline Editable Title ──────────────────────────────────────────────────
@@ -212,28 +330,94 @@ pub fn DashboardViewerPage() -> impl IntoView {
     // the view closures (the toolbar action closures are FnOnce, so reactive
     // `move || ...` wrappers around them won't compile).
     let show_default_toggles = Memo::new(move |_| !is_knowledge.get());
-    let list_href = move || if is_knowledge.get() { "/knowledge" } else { "/dashboards" };
-    let back_aria = move || if is_knowledge.get() { "Back to knowledge" } else { "Back to dashboards" };
-    let not_found_label = move || if is_knowledge.get() { "Knowledge Document Not Found" } else { "Dashboard Not Found" };
-    let back_label = move || if is_knowledge.get() { "Back to Knowledge" } else { "Back to Dashboards" };
-    let base_path = move || if is_knowledge.get() { "/knowledge" } else { "/dashboard" };
+    let list_href = move || {
+        if is_knowledge.get() {
+            "/knowledge"
+        } else {
+            "/dashboards"
+        }
+    };
+    let back_aria = move || {
+        if is_knowledge.get() {
+            "Back to knowledge"
+        } else {
+            "Back to dashboards"
+        }
+    };
+    let not_found_label = move || {
+        if is_knowledge.get() {
+            "Knowledge Document Not Found"
+        } else {
+            "Dashboard Not Found"
+        }
+    };
+    let back_label = move || {
+        if is_knowledge.get() {
+            "Back to Knowledge"
+        } else {
+            "Back to Dashboards"
+        }
+    };
+    let base_path = move || {
+        if is_knowledge.get() {
+            "/knowledge"
+        } else {
+            "/dashboard"
+        }
+    };
     // Singular nouns for button labels, empty states, and PDF fallback filename.
-    let edit_label = move || if is_knowledge.get() { "Edit Document" } else { "Edit Dashboard" };
-    let empty_title = move || if is_knowledge.get() { "This document is empty" } else { "This dashboard is empty" };
-    let empty_hint = move || if is_knowledge.get() { "Click \"Edit Document\" to add content and charts" } else { "Click \"Edit Dashboard\" to add content and charts" };
+    let edit_label = move || {
+        if is_knowledge.get() {
+            "Edit Document"
+        } else {
+            "Edit Dashboard"
+        }
+    };
+    let empty_title = move || {
+        if is_knowledge.get() {
+            "This document is empty"
+        } else {
+            "This dashboard is empty"
+        }
+    };
+    let empty_hint = move || {
+        if is_knowledge.get() {
+            "Click \"Edit Document\" to add content and charts"
+        } else {
+            "Click \"Edit Dashboard\" to add content and charts"
+        }
+    };
     // Used only inside the WASM-gated PDF download block below.
     #[cfg(target_arch = "wasm32")]
-    let pdf_fallback_name = move || if is_knowledge.get() { "Document.pdf" } else { "Dashboard.pdf" };
+    let pdf_fallback_name = move || {
+        if is_knowledge.get() {
+            "Document.pdf"
+        } else {
+            "Dashboard.pdf"
+        }
+    };
 
     // ── User context (roles, capabilities) ──────────────────────────────
     // Provided by the parent Layout.
-    let user_ctx_resource =
-        expect_context::<LocalResource<Result<UserContext, ServerFnError>>>();
+    let user_ctx_resource = expect_context::<LocalResource<Result<UserContext, ServerFnError>>>();
 
     // ── Fetch dashboard detail ──────────────────────────────────────────
-    let dashboard_resource = Resource::new(
-        move || dashboard_id.get(),
-        get_dashboard,
+    let dashboard_resource = Resource::new(move || dashboard_id.get(), get_dashboard);
+    let refresh_pending = RwSignal::new(false);
+    let refresh_error = RwSignal::new(None::<String>);
+    let receipt_sync_generation = RwSignal::new(0_u32);
+    let request_dashboard_refresh = Callback::new(move |()| {
+        refresh_pending.try_set(true);
+        refresh_error.try_set(None);
+        receipt_sync_generation.try_update(|generation| *generation += 1);
+        dashboard_resource.refetch();
+    });
+    let copilot_access = Resource::new(
+        move || (dashboard_id.get(), is_knowledge.get()),
+        |(id, knowledge)| async move {
+            let access = if knowledge { None } else { Some(get_dashboard_copilot_access(id.clone()).await) };
+            (id, access)
+        },
     );
 
     // ── Tier 2 cache: cached dashboard detail signal (KYO-215) ──────────
@@ -262,11 +446,10 @@ pub fn DashboardViewerPage() -> impl IntoView {
                     &ws_id,
                 )
                 .await
-                && let Some((_id, json, _ts)) =
-                    entries.iter().find(|(id, _, _)| id == &dash_id)
-                && let Ok(detail) = serde_json::from_str::<
-                    crate::server_fns::dashboards::DashboardDetail,
-                >(json)
+                && let Some((_id, json, _ts)) = entries.iter().find(|(id, _, _)| id == &dash_id)
+                && let Ok(detail) =
+                    serde_json::from_str::<crate::server_fns::dashboards::DashboardDetail>(json)
+                && dashboard_id.try_get_untracked().as_deref() == Some(dash_id.as_str())
             {
                 cached_dashboard.try_set(Some(detail));
             }
@@ -325,6 +508,21 @@ pub fn DashboardViewerPage() -> impl IntoView {
 
     // ── History panel state ─────────────────────────────────────────────
     let (history_open, set_history_open) = signal(false);
+    let (copilot_open, set_copilot_open) = signal(false);
+    let current_copilot_access = Signal::derive(move || {
+        copilot_access.try_get().flatten().and_then(|(id, access)| {
+            (Some(id) == dashboard_id.try_get()).then_some(access).flatten()
+        })
+    });
+    let copilot_read_only = Signal::derive(move || {
+        !current_copilot_access.try_get().flatten().and_then(Result::ok).is_some_and(|access| access.can_edit)
+    });
+    let copilot_access_error = Signal::derive(move || {
+        current_copilot_access.try_get().flatten().and_then(Result::err).map(|error| {
+            format!("Could not confirm edit access: {error}. Copilot is in question-only mode.")
+        })
+    });
+    let retry_copilot_access = Callback::new(move |()| copilot_access.refetch());
 
     // ── Preview state (from HistoryPanel on_preview) ────────────────────
     let (preview_content, set_preview_content) = signal(Option::<String>::None);
@@ -332,6 +530,114 @@ pub fn DashboardViewerPage() -> impl IntoView {
     // ── Parameter values ────────────────────────────────────────────────
     let (param_values, set_param_values) = signal(HashMap::<String, String>::new());
     let (params_initialized, set_params_initialized) = signal(false);
+    let (title_override, set_title_override) = signal(Option::<String>::None);
+    let last_parameter_content = RwSignal::new(None::<String>);
+
+    // Keep this state above the resource-rendered subtree. A dashboard update
+    // refetches that subtree; neither the chosen filters nor the chat session
+    // should be recreated by the response.
+    let current_dashboard = RwSignal::new(None::<crate::server_fns::dashboards::DashboardDetail>);
+    let content_scroll_ref = NodeRef::<leptos::html::Div>::new();
+    let saved_scroll_top = RwSignal::new(0_i32);
+    #[cfg(target_arch = "wasm32")]
+    Effect::new(move |_| {
+        if let Some(element) = content_scroll_ref.get() {
+            element.set_scroll_top(saved_scroll_top.get_untracked());
+        }
+    });
+    let last_viewed_dashboard_id = RwSignal::new(None::<String>);
+    Effect::new(move |_| {
+        let id = dashboard_id.get();
+        if last_viewed_dashboard_id.get_untracked().as_deref() == Some(id.as_str()) {
+            return;
+        }
+        last_viewed_dashboard_id.set(Some(id));
+        cached_dashboard.set(None);
+        current_dashboard.set(None);
+        saved_scroll_top.set(0);
+        #[cfg(target_arch = "wasm32")]
+        if let Some(element) = content_scroll_ref.get_untracked() {
+            element.set_scroll_top(0);
+        }
+        refresh_pending.set(false);
+        refresh_error.set(None);
+        last_parameter_content.set(None);
+        set_param_values.set(HashMap::new());
+        set_params_initialized.set(false);
+        set_preview_content.set(None);
+        set_history_open.set(false);
+        set_copilot_open.set(false);
+        set_title_override.set(None);
+    });
+    Effect::new(move |_| {
+        let dashboard = match dashboard_resource.get() {
+            Some(Ok(dashboard)) => dashboard,
+            Some(Err(error)) => {
+                refresh_pending.set(false);
+                refresh_error.set(Some(format!("Dashboard refresh failed: {error}")));
+                return;
+            }
+            None => return,
+        };
+        if dashboard.dashboard_id != dashboard_id.get() {
+            return;
+        }
+        refresh_pending.set(false);
+        refresh_error.set(None);
+        if last_parameter_content.get_untracked().as_deref() != Some(dashboard.content.as_str()) {
+            let next = reconcile_parameters(&dashboard.content, &param_values.get_untracked());
+            set_param_values.set(next);
+            set_params_initialized.set(true);
+            last_parameter_content.set(Some(dashboard.content.clone()));
+        }
+        if title_override.get_untracked().as_deref() == Some(dashboard.title.as_str()) {
+            set_title_override.set(None);
+        }
+        current_dashboard.set(Some(dashboard));
+    });
+    let copilot_content = Signal::derive(move || {
+        preview_content
+            .try_get().flatten()
+            .or_else(|| current_dashboard.try_get().flatten().map(|dashboard| dashboard.content))
+            .unwrap_or_default()
+    });
+    let copilot_view_context = Signal::derive(move || {
+        let Some(dashboard) = current_dashboard.try_get().flatten() else {
+            return String::new();
+        };
+        let mut context = serde_json::json!({
+            "active_filters": param_values.try_get().unwrap_or_default(),
+            "dashboard_updated_at": dashboard.updated_at,
+            "view_observed_at_utc": chrono::Utc::now().to_rfc3339(),
+            "chart_data_freshness": "not verified by this viewer",
+            "viewer_timezone": crate::utils::time::get_user_timezone(),
+        })
+        .to_string();
+        if let Some(preview) = preview_content.try_get().flatten() {
+            context.push_str("\nHistorical preview content:\n");
+            context.push_str(&preview);
+        }
+        context
+    });
+    let copilot_filter_summary = Signal::derive(move || {
+        let mut filters = param_values.try_get().unwrap_or_default().into_iter().collect::<Vec<_>>();
+        filters.sort_by(|left, right| left.0.cmp(&right.0));
+        if filters.is_empty() { return "Active filters: none".to_string(); }
+        let extra = filters.len().saturating_sub(3);
+        let mut summary = filters.into_iter().take(3)
+            .map(|(name, value)| format!("{name}: {value}"))
+            .collect::<Vec<_>>().join(" · ");
+        if extra > 0 { summary.push_str(&format!(" · +{extra} more")); }
+        format!("Active filters: {summary}")
+    });
+    let no_pending_editor_save: crate::components::chat::BeforeSendHook = std::sync::Arc::new(move || {
+        let confirmed_reader = current_copilot_access.get_untracked()
+            .and_then(Result::ok).is_some_and(|access| !access.can_edit);
+        let question_only = preview_content.get_untracked().is_some() || confirmed_reader;
+        let ready = question_only || (current_dashboard.get_untracked().is_some()
+            && !refresh_pending.get_untracked() && refresh_error.get_untracked().is_none());
+        Box::pin(async move { ready })
+    });
 
     // ── Modal states ────────────────────────────────────────────────────
     let (save_modal_open, set_save_modal_open) = signal(false);
@@ -346,9 +652,6 @@ pub fn DashboardViewerPage() -> impl IntoView {
     let (is_exporting, set_is_exporting) = signal(false);
     #[cfg(not(target_arch = "wasm32"))]
     let _ = set_is_exporting;
-
-    // ── Title editing state (for optimistic update) ─────────────────────
-    let (title_override, set_title_override) = signal(Option::<String>::None);
 
     // ── Dashboard-wide refresh signal ───────────────────────────────────
     // Provided here (above `DashboardChartProviders`) so the toolbar's
@@ -398,9 +701,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
             } else {
                 Some(did.clone())
             };
-            async move {
-                set_user_default_dashboard(new_id).await
-            }
+            async move { set_user_default_dashboard(new_id).await }
         });
 
     Effect::new(move |_| {
@@ -419,17 +720,14 @@ pub fn DashboardViewerPage() -> impl IntoView {
 
     // ── Toggle workspace-default action ─────────────────────────────────
     // Same dispatch-time value threading pattern as toggle_user_default_action.
-    let toggle_ws_default_action =
-        Action::new(move |(did, currently_default): &(String, bool)| {
-            let new_id = if *currently_default {
-                None
-            } else {
-                Some(did.clone())
-            };
-            async move {
-                set_workspace_default_dashboard(new_id).await
-            }
-        });
+    let toggle_ws_default_action = Action::new(move |(did, currently_default): &(String, bool)| {
+        let new_id = if *currently_default {
+            None
+        } else {
+            Some(did.clone())
+        };
+        async move { set_workspace_default_dashboard(new_id).await }
+    });
 
     Effect::new(move |_| {
         if let Some(result) = toggle_ws_default_action.value().get() {
@@ -448,17 +746,16 @@ pub fn DashboardViewerPage() -> impl IntoView {
     // ── Ask-about-chart action ──────────────────────────────────────────
     // Stores chart context on the server then navigates to /chat?chart=<id>.
     let navigate_for_ask = leptos_router::hooks::use_navigate();
-    let ask_about_chart_action =
-        Action::new(move |chart_md: &String| {
-            let chart_md = chart_md.clone();
-            async move {
-                crate::server_fns::chat::store_chart_context_for_ask(
-                    chart_md,
-                    "Chart Exploration".to_string(),
-                )
-                .await
-            }
-        });
+    let ask_about_chart_action = Action::new(move |chart_md: &String| {
+        let chart_md = chart_md.clone();
+        async move {
+            crate::server_fns::chat::store_chart_context_for_ask(
+                chart_md,
+                "Chart Exploration".to_string(),
+            )
+            .await
+        }
+    });
 
     {
         let navigate_for_ask = navigate_for_ask.clone();
@@ -502,11 +799,10 @@ pub fn DashboardViewerPage() -> impl IntoView {
                     None => return,
                 };
 
-                let event_dashboard_id =
-                    match data.get("dashboard_id").and_then(|v| v.as_str()) {
-                        Some(id) => id,
-                        None => return,
-                    };
+                let event_dashboard_id = match data.get("dashboard_id").and_then(|v| v.as_str()) {
+                    Some(id) => id,
+                    None => return,
+                };
 
                 // Only process events for the currently viewed dashboard
                 let current_id = dashboard_id.get_untracked();
@@ -518,7 +814,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
 
                 match action {
                     "updated" => {
-                        dashboard_resource.refetch();
+                        request_dashboard_refresh.try_run(());
                     }
                     "deleted" => {
                         navigate(list_href(), leptos_router::NavigateOptions::default());
@@ -535,6 +831,8 @@ pub fn DashboardViewerPage() -> impl IntoView {
     }
 
     view! {
+        <div class="flex h-full min-w-0 overflow-hidden">
+        <div class="flex-1 min-w-0 overflow-hidden">
         <Transition fallback=move || view! { <DetailPageSkeleton /> }>
             {move || {
                 let dashboard_result = dashboard_resource.get();
@@ -547,13 +845,16 @@ pub fn DashboardViewerPage() -> impl IntoView {
                     (Some(d), Some(u)) => (d, u),
                     (None, Some(u)) => {
                         // Server not ready yet — use cached version if available.
-                        match cached_dashboard.get() {
+                        match cached_dashboard.get().filter(|cached| cached.dashboard_id == dashboard_id.get()) {
                             Some(cached) => (Ok(cached), u),
                             None => return None,
                         }
                     }
                     _ => return None,
                 };
+                if dashboard_result.as_ref().ok().is_some_and(|dashboard| dashboard.dashboard_id != dashboard_id.get()) {
+                    return None;
+                }
 
                 // Get user context (gracefully handle errors)
                 let user_ctx = user_ctx_result.ok();
@@ -612,9 +913,16 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                         <p class="text-muted-foreground mb-6">
                                             {err_msg}
                                         </p>
-                                        <ButtonLink href=list_href().to_string()>
-                                            {back_label()}
-                                        </ButtonLink>
+                                        <div class="flex items-center justify-center gap-3">
+                                            <Button
+                                                variant=ButtonVariant::Secondary
+                                                disabled=Signal::derive(move || refresh_pending.try_get().unwrap_or(false))
+                                                on:click=move |_| request_dashboard_refresh.run(())
+                                            >"Retry"</Button>
+                                            <ButtonLink href=list_href().to_string()>
+                                                {back_label()}
+                                            </ButtonLink>
+                                        </div>
                                     </div>
                                 </div>
                             }.into_any()
@@ -636,41 +944,6 @@ pub fn DashboardViewerPage() -> impl IntoView {
                         let created_at = dashboard.created_at.clone();
                         let updated_at = dashboard.updated_at.clone();
                         let original_title = dashboard.title.clone();
-
-                        // Initialize parameters from parsed content
-                        {
-                            let content_for_params = content.clone();
-                            Effect::new(move |prev: Option<bool>| {
-                                if prev.is_some() {
-                                    return true;
-                                }
-
-                                let parsed = parse_markdown_chartml(&content_for_params);
-                                let mut initial_values = HashMap::new();
-
-                                // Process dashboard-level parameters
-                                for group in &parsed.params {
-                                    for param in &group.params {
-                                        if initial_values.contains_key(&param.id) {
-                                            continue;
-                                        }
-                                        if let Some(ref default) = param.default {
-                                            let val = match default {
-                                                serde_json::Value::String(s) => s.clone(),
-                                                serde_json::Value::Number(n) => n.to_string(),
-                                                serde_json::Value::Bool(b) => b.to_string(),
-                                                other => other.to_string(),
-                                            };
-                                            initial_values.insert(param.id.clone(), val);
-                                        }
-                                    }
-                                }
-
-                                set_param_values.set(initial_values);
-                                set_params_initialized.set(true);
-                                true
-                            });
-                        }
 
                         // ── Title signal ────────────────────────────────
                         let title_signal = Signal::derive({
@@ -816,7 +1089,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                         let on_history_restore = Callback::new(move |()| {
                             set_history_open.set(false);
                             set_preview_content.set(None);
-                            dashboard_resource.refetch();
+                            request_dashboard_refresh.run(());
                         });
 
                         // ── Chart action callbacks ─────────────────────
@@ -958,6 +1231,20 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                             <Icon icon=phosphor_leptos::ARROWS_CLOCKWISE size="14px" />
                                             <span class="hidden @6xl:inline whitespace-nowrap">"Refresh All"</span>
                                         </Button>
+
+                                        <Show when=move || !is_knowledge.get()>
+                                        <ToggleButton
+                                            variant=Signal::derive(move || if copilot_open.get() { ButtonVariant::Active } else { ButtonVariant::Secondary })
+                                            size=ButtonSize::Sm
+                                            aria_label="Toggle Copilot"
+                                            on:click=move |_| {
+                                                set_copilot_open.update(|open| *open = !*open);
+                                            }
+                                        >
+                                            <Icon icon=phosphor_leptos::SPARKLE size="14px" />
+                                            <span class="hidden @6xl:inline whitespace-nowrap">"Copilot"</span>
+                                        </ToggleButton>
+                                        </Show>
 
                                         // Download PDF — visible when toolbar has room
                                         {pdf_export_enabled.then(|| {
@@ -1106,7 +1393,16 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                 // ─── Content area with optional History panel ───
                                 <div class="flex-1 overflow-hidden flex">
                                     // Main content
-                                    <div class="flex-1 overflow-y-auto p-4 md:p-6 bg-background">
+                                    <div
+                                        class="flex-1 overflow-y-auto p-4 md:p-6 bg-background"
+                                        node_ref=content_scroll_ref
+                                        on:scroll=move |_| {
+                                            #[cfg(target_arch = "wasm32")]
+                                            if let Some(element) = content_scroll_ref.get_untracked() {
+                                                saved_scroll_top.set(element.scroll_top());
+                                            }
+                                        }
+                                    >
                                         // Dashboard parameters (above content card)
                                         {has_params.then(|| {
                                             view! {
@@ -1214,6 +1510,8 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                         on_close=on_history_close
                                         on_preview=on_history_preview
                                         on_restore=on_history_restore
+                                        on_ask_copilot=Callback::new(move |()| set_copilot_open.set(true))
+                                        show_ask_copilot=Signal::derive(move || !is_knowledge.try_get().unwrap_or(false))
                                     />
                                 </div>
 
@@ -1251,5 +1549,33 @@ pub fn DashboardViewerPage() -> impl IntoView {
                 })
             }}
         </Transition>
+        </div>
+        <For
+            each=move || if is_knowledge.get() { vec![] } else { vec![dashboard_id.get()] }
+            key=|id| id.clone()
+            children=move |id| view! { <CopilotSidebar
+            dashboard_id=id
+            dashboard_content=copilot_content
+            open=Signal::derive(move || copilot_open.try_get().unwrap_or(false))
+            on_close=Callback::new(move |()| set_copilot_open.set(false))
+            before_send=no_pending_editor_save.clone()
+            context_name="dashboard".to_string()
+            view_context=copilot_view_context
+            read_only=copilot_read_only
+            historical_preview=Signal::derive(move || preview_content.try_get().flatten().is_some())
+            access_error=copilot_access_error
+            on_retry_access=retry_copilot_access
+            on_saved_change=request_dashboard_refresh
+            receipt_refresh=Signal::derive(move || receipt_sync_generation.try_get().unwrap_or(0))
+            filter_summary=copilot_filter_summary
+            refresh_error=Signal::derive(move || refresh_error.try_get().flatten())
+            on_retry_refresh=request_dashboard_refresh
+            on_open_history=Callback::new(move |()| {
+                set_copilot_open.set(false);
+                set_history_open.set(true);
+            })
+        /> }
+        />
+        </div>
     }
 }

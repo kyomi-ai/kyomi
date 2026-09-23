@@ -196,6 +196,11 @@ pub fn HistoryPanel(
     on_preview: Option<Callback<Option<String>>>,
     /// Callback after restoring a version.
     on_restore: Callback<()>,
+    /// Open the viewer Copilot while keeping this preview active.
+    #[prop(optional)]
+    on_ask_copilot: Option<Callback<()>>,
+    #[prop(into, default = Signal::stored(false))]
+    show_ask_copilot: Signal<bool>,
 ) -> impl IntoView {
     let dashboard_id = StoredValue::new(dashboard_id);
 
@@ -452,14 +457,24 @@ pub fn HistoryPanel(
                                                                                 "Click \"Exit Preview\" to return to current version"
                                                                             </p>
                                                                         </div>
-                                                                        <Button
-                                                                            variant=ButtonVariant::Outline
-                                                                            size=ButtonSize::Sm
-                                                                            class="text-warning-foreground border-warning-border hover:bg-warning"
-                                                                            on:click=move |_| handle_exit_preview()
-                                                                        >
-                                                                            "Exit Preview"
-                                                                        </Button>
+                                                                        <div class="flex items-center gap-2">
+                                                                            {show_ask_copilot.get().then_some(on_ask_copilot).flatten().map(|open_copilot| view! {
+                                                                                <Button
+                                                                                    variant=ButtonVariant::Outline
+                                                                                    size=ButtonSize::Sm
+                                                                                    class="text-warning-foreground border-warning-border hover:bg-warning"
+                                                                                    on:click=move |_| open_copilot.run(())
+                                                                                >"Ask Copilot"</Button>
+                                                                            })}
+                                                                            <Button
+                                                                                variant=ButtonVariant::Outline
+                                                                                size=ButtonSize::Sm
+                                                                                class="text-warning-foreground border-warning-border hover:bg-warning"
+                                                                                on:click=move |_| handle_exit_preview()
+                                                                            >
+                                                                                "Exit Preview"
+                                                                            </Button>
+                                                                        </div>
                                                                     </div>
                                                                 </div>
                                                             })}

@@ -417,6 +417,8 @@ pub fn ChatPage() -> impl IntoView {
         context_label: None,
         // Main chat is not scoped to a single document and never autosaves.
         document_id: None,
+        view_context: None,
+        historical_preview: None,
         before_send: None,
     });
 
