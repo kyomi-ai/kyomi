@@ -86,6 +86,7 @@ apps/mcp-chart-app-wasm/dist/
 .worktrees/
 .gstack/
 .review-approval
+.review-range-approval
 
 # STRANDED.md tombstone marker (KYO-529) — written by
 # scripts/mark-worktree-stranded.sh at the root of a worktree preserved by
