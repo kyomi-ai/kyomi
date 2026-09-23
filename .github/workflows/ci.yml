@@ -693,55 +693,50 @@ jobs:
   # through real `git commit` invocations — the same review-integrity
   # concern as sign-review-test.sh, one layer down.
   #
-  # Each suite carries its own self-test assertions (652
-  # total, RECOUNTED LIVE on 2026-09-11 (KYO-712 rework) by actually
-  # running all thirteen suites and summing their own "Results: N passed"
-  # lines (check-real-identifiers-test.sh's own summary line reads "N
-  # checks, N failed" instead, counted the same way):
+  # Each suite carries its own self-test assertions (752
+  # total, RECOUNTED LIVE on 2026-09-23 (KYO-747, which adds the fifteenth
+  # suite, scripts/sign-verification-test.sh) by actually running all
+  # fifteen suites and summing their own "Results: N passed" lines
+  # (check-real-identifiers-test.sh's own summary line reads "N checks, N
+  # failed" instead, counted the same way):
   # check-ticket-in-flight-test.sh 119 + mark-worktree-stranded-test.sh 32 +
   # mark-branch-stranded-test.sh 78 + append-review-log-test.sh 11 +
   # audit-agent-run-deaths-test.sh 43 + reconcile-merged-tickets-test.sh 99 +
-  # preflight-clippy-test.sh 43 + stale-tooling-guard-test.sh 35 +
-  # check-real-identifiers-test.sh 41 +
+  # preflight-clippy-test.sh 59 + stale-tooling-guard-test.sh 35 +
+  # check-real-identifiers-test.sh 41 + check-disposal-safety-test.sh 63 +
   # repro-headless-subagent-survival-test.sh 20 +
   # check-agent-run-result-test.sh 71 + sign-review-test.sh 37 +
-  # pre-commit-hook-test.sh 23
-  # = 652. This recount folds in every suite the array below runs,
-  # including repro-headless-subagent-survival-test.sh — every recount
-  # before this one had either included it (origin/main's most recent,
-  # 592) or explicitly disclosed omitting it (this branch's most recent,
-  # 561); that disclosure no longer applies, it is included below like
-  # every other suite. The two figures this comment carried immediately
-  # before this recount — 592 (origin/main, dated 2026-09-11, eleven
-  # suites) and 561 (this branch, dated 2026-09-11, ten suites plus the
-  # two KYO-712 additions) — were each independent live recounts of
-  # partially-overlapping suite sets that diverged after a shared 501/521
-  # base (KYO-712's own chain read 526, then 536, then 561 from that base;
-  # KYO-710's chain read 521 corrected, then 592); this recount is the
-  # first to run all thirteen suites the merged array now contains in one
-  # pass, superseding both. As before, this was a live recount, as was the
-  # 460 before the shared base, the 425 before that, the 382 before that,
-  # the 287 before that, and all of them ultimately corrections of a stale
-  # 197 that undercounted the then-five suites by 86 assertions. Note per
-  # KYO-609 this tally is still hand-maintained and will re-rot on the
-  # next suite change; that is a known, separately-filed gap, not
-  # something this recount or this job fixes — the recount only makes
-  # today's number true, it does not make
-  # tomorrow's number self-maintaining. KYO-679 is exactly that predicted
-  # rot: it adds a fourteenth suite,
-  # scripts/lint/check-disposal-safety-test.sh, to the array below without
-  # redoing this live recount — per KYO-609 that is the known, accepted gap,
-  # not a new one), but until this job existed none of
+  # pre-commit-hook-test.sh 23 + sign-verification-test.sh 21
+  # = 752. This recount folds in every suite the array below runs,
+  # including scripts/lint/check-disposal-safety-test.sh (KYO-679), whose 63
+  # assertions the previous 652 figure explicitly disclosed omitting —
+  # that's most of the jump on its own. preflight-clippy-test.sh also grew
+  # from 43 to 59 assertions since the 652 figure was set (KYO-536, PR
+  # #536), uncounted until now. The 652 figure this comment carried
+  # immediately before this recount was itself a live recount, on
+  # 2026-09-11 (KYO-712 rework), of the then-thirteen suites the array
+  # contained at that time. Before that: 592 (origin/main, eleven suites)
+  # and 561 (a branch, ten suites plus the two KYO-712 additions) were
+  # independent live recounts of partially-overlapping suite sets that
+  # diverged after a shared 501/521 base; and before that, 460, 425, 382,
+  # 287, and a stale 197 that undercounted the then-five suites by 86
+  # assertions. Note per KYO-609 this tally is still hand-maintained and
+  # will re-rot on the next suite change — that is a known, separately-
+  # filed gap, not something this recount or this job fixes; the recount
+  # only makes today's number true, it does not make tomorrow's number
+  # self-maintaining. This job's value never depended on the count being
+  # current, though: until this job existed none of
   # the original scripts ran anywhere except when a human or agent remembered
   # to invoke it by hand — a load-bearing check that never runs in CI is a
   # fail-open shape this workflow has already been bitten by twice (KYO-511,
   # KYO-529).
   #
   # Every suite in the array below is hermetic: they build their own
-  # throwaway git repos and/or JSON fixture files (and, for four of them —
+  # throwaway git repos and/or JSON fixture files (and, for five of them —
   # check-ticket-in-flight-test.sh, mark-worktree-stranded-test.sh,
-  # mark-branch-stranded-test.sh, and reconcile-merged-tickets-test.sh — a
-  # stub `gh` placed first on PATH) under mktemp -d, with `trap ... EXIT`
+  # mark-branch-stranded-test.sh, reconcile-merged-tickets-test.sh, and
+  # sign-verification-test.sh — a stub `gh` placed first on PATH) under
+  # mktemp -d, with `trap ... EXIT`
   # cleanup, and pin their fixtures' branch names explicitly rather than
   # relying on the runner's `init.defaultBranch` (which is `master` on
   # ubuntu-latest, not `main`). None needs a Rust toolchain, a service
@@ -776,18 +771,23 @@ jobs:
   # bin directory of symlinks to the real python3/git/coreutils and points
   # PATH at ONLY that directory, so it can prove `notify-send` is genuinely
   # absent (not just unlikely to be found) without touching the runner's
-  # real PATH for every other test in the file. sign-review-test.sh and
-  # pre-commit-hook-test.sh both need `openssl` (already on ubuntu-latest,
-  # no extra install step): sign-review-test.sh to generate a throwaway
-  # Ed25519 keypair and verify the signatures scripts/sign-review.sh
-  # produces, pre-commit-hook-test.sh to generate its own throwaway
-  # keypair (substituted into the copied hook in place of the production
-  # public key) and to call the real scripts/sign-review.sh with it. No
-  # other suite in this job needs it. pre-commit-hook-test.sh also reads
-  # origin/main:scripts/sign-review.sh (Test 6, the backward-compatibility
-  # case) via `git show`, not `git fetch`, riding the same fetch-depth: 0
-  # checkout below that stale-tooling-guard-test.sh's guard already needs
-  # a populated `origin/main` for.
+  # real PATH for every other test in the file. sign-review-test.sh,
+  # pre-commit-hook-test.sh, and sign-verification-test.sh all need
+  # `openssl` (already on ubuntu-latest, no extra install step):
+  # sign-review-test.sh to generate a throwaway Ed25519 keypair and verify
+  # the signatures scripts/sign-review.sh produces, pre-commit-hook-test.sh
+  # to generate its own throwaway keypair (substituted into the copied hook
+  # in place of the production public key) and to call the real
+  # scripts/sign-review.sh with it, and sign-verification-test.sh (KYO-747)
+  # for the same reason as sign-review-test.sh, one layer over: a throwaway
+  # Ed25519 keypair to verify the signatures scripts/sign-verification.sh
+  # produces, plus a direct flagless-vs-`-rawin` byte-identity check on
+  # whatever openssl the runner has. No other suite in this job needs it.
+  # pre-commit-hook-test.sh also reads origin/main:scripts/sign-review.sh
+  # (Test 6, the backward-compatibility case) via `git show`, not `git
+  # fetch`, riding the same fetch-depth: 0 checkout below that
+  # stale-tooling-guard-test.sh's guard already needs a populated
+  # `origin/main` for.
   #
   # Deliberately no `paths:` filter, unlike the ticket's original wording of
   # "on push/PR touching scripts/**" — two reasons:
@@ -849,6 +849,7 @@ jobs:
             scripts/check-agent-run-result-test.sh
             scripts/sign-review-test.sh
             scripts/pre-commit-hook-test.sh
+            scripts/sign-verification-test.sh
           )
           failed=()
           for suite in "${suites[@]}"; do
