@@ -7,7 +7,8 @@ use async_trait::async_trait;
 use kyomi_auth::websocket::helpers as ws_helpers;
 
 use crate::tools::document::{
-    apply_update, ApplyUpdateOutcome, ApplyUpdateParams, DocumentDeleteTool, DocumentReadTool,
+    apply_create, apply_update, ApplyCreateParams, ApplyUpdateOutcome, ApplyUpdateParams,
+    DocumentDeleteTool, DocumentReadTool,
 };
 use crate::tools::{AgentTool, ToolContext};
 use crate::types::ToolAnnotations;
@@ -301,15 +302,22 @@ impl AgentTool for CreateDashboardTool {
             .to_string());
         }
 
-        let dashboard_id = match kyomi_auth::dashboard_service::create_dashboard(
-            &ctx.db,
-            &ctx.user_id,
-            &ctx.workspace_id,
+        // KYO-776: resolved once, up front, for `apply_create`'s synchronous
+        // `knowledge_chunks` population below — the same pattern
+        // `ModifyDashboardTool` already uses for `apply_update` (see its own
+        // `embed` resolution above the `apply_update` call further down in
+        // this file).
+        let embed = ctx.embedding.wait_ready().await?;
+
+        let dashboard_id = match apply_create(ApplyCreateParams {
+            db: &ctx.db,
+            user_id: &ctx.user_id,
+            workspace_id: &ctx.workspace_id,
             title,
             content,
-            kyomi_core::models::DocType::Dashboard,
-            None, // Embedding generation handled separately below
-        )
+            doc_type: kyomi_core::models::DocType::Dashboard,
+            embed,
+        })
         .await
         {
             Ok(id) => id,
@@ -332,11 +340,14 @@ impl AgentTool for CreateDashboardTool {
             Err(e) => return Err(e),
         };
 
-        // Spawn background embedding generation for non-trivial content
+        // Spawn background embedding generation for non-trivial content.
+        // This writes the row-level `dashboards.embedding` column (nothing
+        // reads it today — see KYO-777), a separate concern from the
+        // `knowledge_chunks` population `apply_create` just did above.
         if content.len() >= 50 {
             kyomi_auth::dashboard_service::spawn_embedding_generation(
                 ctx.db.clone(),
-                ctx.embedding.wait_ready().await?.clone(),
+                embed.clone(),
                 dashboard_id.clone(),
                 ctx.workspace_id.clone(),
                 title.trim().to_string(),
@@ -1061,6 +1072,9 @@ mod tests {
 
         let mut ctx = build_ctx(db);
         ctx.ws_manager = manager;
+        // KYO-776: `apply_create` resolves an embedding reference for every
+        // create this tool makes, to populate `knowledge_chunks`.
+        ctx.embedding = loaded_embedding();
 
         let result = CreateDashboardTool
             .execute(
@@ -1107,7 +1121,10 @@ mod tests {
             .await
             .expect("seed pre-existing dashboard");
         }
-        let ctx = build_ctx(db);
+        let mut ctx = build_ctx(db);
+        // KYO-776: `apply_create` resolves `embed` before the free-tier
+        // limit check inside `create_dashboard` runs.
+        ctx.embedding = loaded_embedding();
 
         let result = CreateDashboardTool
             .execute(
@@ -1123,6 +1140,62 @@ mod tests {
         assert!(
             parsed["error"].as_str().unwrap_or_default().contains("Free tier is limited to 5"),
             "{result}"
+        );
+    }
+
+    /// KYO-776, the load-bearing regression test. Before this ticket,
+    /// `CreateDashboardTool` never called `rechunk_document` at all — only
+    /// `spawn_embedding_generation` (the row-level `dashboards.embedding`
+    /// column nothing reads — KYO-777), never the `knowledge_chunks` table
+    /// `search_knowledge_chunks` actually queries. A dashboard created
+    /// through the agent therefore had zero `knowledge_chunks` rows until
+    /// its first edit, so `search_knowledge` could not find it at all in
+    /// the interval — see `apply_create`'s doc comment in
+    /// `tools/document/mod.rs`.
+    ///
+    /// Confirmed by mutation: commenting out the `rechunk_document(...)
+    /// .await?;` call `apply_create` added and re-running this test fails
+    /// with `left: Vec::new()`, `right: ["Q3 numbers land here."]` — the
+    /// exact bug this ticket fixes.
+    #[tokio::test]
+    async fn create_dashboard_populates_knowledge_chunks_before_any_edit() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let mut ctx = build_ctx(db);
+        ctx.embedding = loaded_embedding();
+
+        let result = CreateDashboardTool
+            .execute(
+                serde_json::json!({
+                    "title": "Q3 Report",
+                    "content": "Q3 numbers land here.",
+                    "verified_no_duplicates": true,
+                }),
+                &ctx,
+            )
+            .await
+            .expect("execute");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+        assert_eq!(parsed["success"], serde_json::json!(true), "{result}");
+        let dashboard_id = parsed["dashboard_id"].as_str().expect("dashboard_id").to_string();
+
+        let sq = match &ctx.db {
+            kyomi_core::DbPool::Sqlite(sq) => sq,
+            kyomi_core::DbPool::Postgres(_) => unreachable!("test pool is always sqlite"),
+        };
+        let chunk_contents: Vec<String> = sqlx::query_scalar(
+            "SELECT content FROM knowledge_chunks WHERE dashboard_id = ? ORDER BY chunk_index",
+        )
+        .bind(&dashboard_id)
+        .fetch_all(sq)
+        .await
+        .expect("read back knowledge_chunks");
+
+        assert_eq!(
+            chunk_contents,
+            vec!["Q3 numbers land here.".to_string()],
+            "create_dashboard must populate knowledge_chunks with the created content before \
+             any edit, not leave it empty until the first edit: {chunk_contents:?}"
         );
     }
 
