@@ -41,9 +41,95 @@ use crate::components::dashboard::{
     chart_builder::ast_set_chart_type,
     markdown_renderer::{set_chart_height, set_col_span},
 };
-use crate::components::{Button, ButtonLink, ButtonSize, ButtonVariant, DetailPageSkeleton, ToggleButton, Spinner};
+use crate::components::{Alert, AlertDescription, AlertTitle, AlertVariant, Button, ButtonLink, ButtonSize, ButtonVariant, DetailPageSkeleton, ToggleButton, Spinner};
 use crate::server_fns::context::UserContext;
 use crate::server_fns::dashboards::{create_dashboard, get_dashboard, update_dashboard};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EditorSnapshot {
+    title: String,
+    content: String,
+}
+
+impl EditorSnapshot {
+    fn new(title: String, content: String) -> Self { Self { title, content } }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RemoteDecision {
+    Unchanged,
+    Apply,
+    Conflict,
+}
+
+fn reconcile_remote(saved: &EditorSnapshot, draft: &EditorSnapshot, remote: &EditorSnapshot) -> RemoteDecision {
+    if remote == saved { RemoteDecision::Unchanged }
+    else if draft == saved || draft == remote { RemoteDecision::Apply }
+    else { RemoteDecision::Conflict }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PersistedEvent { Updated, Deleted }
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn persisted_document_event(data: &serde_json::Value, current_id: &str) -> Option<PersistedEvent> {
+    if data.get("entity_id")?.as_str()? != current_id { return None; }
+    match data.get("entity_type")?.as_str()? {
+        kyomi_types::sync::entity_types::DASHBOARD | kyomi_types::sync::entity_types::KNOWLEDGE => {}
+        _ => return None,
+    }
+    match data.get("action")?.as_str()? {
+        "insert" | "update" => Some(PersistedEvent::Updated),
+        "delete" => Some(PersistedEvent::Deleted),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod reconciliation_tests {
+    use super::*;
+
+    #[test]
+    fn clean_buffer_accepts_persisted_update() {
+        let saved = EditorSnapshot::new("Old".into(), "before".into());
+        let latest = EditorSnapshot::new("New".into(), "after".into());
+        assert_eq!(reconcile_remote(&saved, &saved, &latest), RemoteDecision::Apply);
+    }
+
+    #[test]
+    fn dirty_title_or_content_requires_explicit_resolution() {
+        let saved = EditorSnapshot::new("Old".into(), "before".into());
+        let latest = EditorSnapshot::new("New".into(), "after".into());
+        for draft in [
+            EditorSnapshot::new("Draft".into(), "before".into()),
+            EditorSnapshot::new("Old".into(), "draft content".into()),
+        ] {
+            assert_eq!(reconcile_remote(&saved, &draft, &latest), RemoteDecision::Conflict);
+        }
+    }
+
+    #[test]
+    fn own_persisted_version_acknowledges_draft_without_conflict() {
+        let saved = EditorSnapshot::new("Old".into(), "before".into());
+        let draft = EditorSnapshot::new("Mine".into(), "after".into());
+        assert_eq!(reconcile_remote(&saved, &draft, &draft), RemoteDecision::Apply);
+        assert_eq!(reconcile_remote(&saved, &draft, &saved), RemoteDecision::Unchanged);
+    }
+
+    #[test]
+    fn persisted_sync_routes_only_the_open_dashboard_or_knowledge_document() {
+        for entity_type in ["dashboard", "knowledge"] {
+            let event = serde_json::json!({"entity_id": "open", "entity_type": entity_type, "action": "update"});
+            assert_eq!(persisted_document_event(&event, "open"), Some(PersistedEvent::Updated));
+            assert_eq!(persisted_document_event(&event, "other"), None);
+        }
+        let deleted = serde_json::json!({"entity_id": "open", "entity_type": "knowledge", "action": "delete"});
+        assert_eq!(persisted_document_event(&deleted, "open"), Some(PersistedEvent::Deleted));
+        let unrelated = serde_json::json!({"entity_id": "open", "entity_type": "watch", "action": "update"});
+        assert_eq!(persisted_document_event(&unrelated, "open"), None);
+    }
+}
 
 // ─── Editor mode ─────────────────────────────────────────────────────────────
 
@@ -256,6 +342,14 @@ fn DashboardEditorInner(
     // ── Save state ───────────────────────────────────────────────────────
     let (save_error, set_save_error) = signal(Option::<String>::None);
     let (save_success, set_save_success) = signal(false);
+    let (remote_conflict, set_remote_conflict) = signal(Option::<EditorSnapshot>::None);
+    let (retained_draft, set_retained_draft) = signal(Option::<EditorSnapshot>::None);
+    let (refresh_error, set_refresh_error) = signal(Option::<String>::None);
+    let (refresh_pending, set_refresh_pending) = signal(false);
+    let (remote_deleted, set_remote_deleted) = signal(false);
+    let (refresh_generation, set_refresh_generation) = signal(0u64);
+    let (history_revision, set_history_revision) = signal(0u64);
+    let (pending_snapshot, set_pending_snapshot) = signal(Option::<EditorSnapshot>::None);
 
     // ── History panel ────────────────────────────────────────────────────
     let (history_open, set_history_open) = signal(false);
@@ -312,6 +406,10 @@ fn DashboardEditorInner(
         title.get() != original_title.get()
             || editor_content.get() != original_content.get()
     });
+    let writes_blocked = Memo::new(move |_| {
+        remote_conflict.try_get().flatten().is_some() || refresh_error.try_get().flatten().is_some()
+            || refresh_pending.try_get().unwrap_or(true) || remote_deleted.try_get().unwrap_or(true)
+    });
 
     // ── Debounced preview update (500ms) ─────────────────────────────────
     #[cfg(target_arch = "wasm32")]
@@ -354,6 +452,122 @@ fn DashboardEditorInner(
         });
     });
 
+    // WebSocket events carry an identity and action. Read the authoritative
+    // saved document, then reconcile against the current buffer. The
+    // generation prevents a slower earlier read from winning.
+    let refresh_remote = move || {
+        let Some(did) = current_dashboard_id.try_get_untracked().flatten() else { return; };
+        if set_refresh_pending.try_set(true).is_none() { return; }
+        if set_refresh_generation.try_update(|n| *n += 1).is_none() { return; }
+        let Some(generation) = refresh_generation.try_get_untracked() else { return; };
+        leptos::task::spawn_local(async move {
+            let result = get_dashboard(did.clone()).await;
+            if refresh_generation.try_get_untracked() != Some(generation)
+                || current_dashboard_id.try_get_untracked().flatten().as_deref() != Some(did.as_str()) { return; }
+            set_refresh_pending.try_set(false);
+            match result {
+                Ok(dashboard) => {
+                    set_refresh_error.try_set(None);
+                    set_remote_deleted.try_set(false);
+                    set_history_revision.try_update(|n| *n += 1);
+                    let (Some(saved_title), Some(saved_content), Some(draft_title), Some(draft_content)) = (
+                        original_title.try_get_untracked(), original_content.try_get_untracked(),
+                        title.try_get_untracked(), editor_content.try_get_untracked(),
+                    ) else { return; };
+                    let saved = EditorSnapshot::new(saved_title, saved_content);
+                    let draft = EditorSnapshot::new(draft_title, draft_content);
+                    let remote = EditorSnapshot::new(dashboard.title, dashboard.content);
+                    if pending_snapshot.try_get_untracked().flatten().as_ref() == Some(&remote) {
+                        set_original_title.try_set(remote.title);
+                        set_original_content.try_set(remote.content);
+                        set_remote_conflict.try_set(None);
+                        return;
+                    }
+                    match reconcile_remote(&saved, &draft, &remote) {
+                        RemoteDecision::Unchanged => { set_remote_conflict.try_set(None); }
+                        RemoteDecision::Apply => {
+                            #[cfg(target_arch = "wasm32")]
+                            debounce_handle.try_update_value(|h| { drop(h.take()); });
+                            set_title.try_set(remote.title.clone());
+                            set_editor_content.try_set(remote.content.clone());
+                            set_preview_content.try_set(remote.content.clone());
+                            set_original_title.try_set(remote.title);
+                            set_original_content.try_set(remote.content);
+                            set_remote_conflict.try_set(None);
+                        }
+                        RemoteDecision::Conflict => { set_remote_conflict.try_set(Some(remote)); }
+                    }
+                }
+                Err(e) => {
+                    // An unavailable document may have been deleted or access
+                    // revoked. Keep the buffer and require a successful Retry.
+                    set_refresh_error.try_set(Some(format!("Could not load the latest saved version: {e}")));
+                }
+            }
+        });
+    };
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        use crate::components::chat::websocket_client::{ConnectionState, WebSocketContext};
+        if let Some(ws) = use_context::<WebSocketContext>() {
+            // Agent dashboard writes send dashboard_update followed by
+            // sync_action. Delay the first event briefly so the paired sync
+            // event can cancel it; a standalone event still triggers a read.
+            let pending_event_refresh: StoredValue<Option<send_wrapper::SendWrapper<gloo_timers::callback::Timeout>>> = StoredValue::new(None);
+            let connection_state = ws.connection_state;
+            Effect::new(move |_| {
+                if connection_state.get() == ConnectionState::Connected {
+                    refresh_remote();
+                }
+            });
+            let dashboard_unsubscribe = ws.subscribe("dashboard_update", move |msg| {
+                let Some(data) = msg.data.as_ref() else { return; };
+                let Some(event_id) = data.get("dashboard_id").and_then(|v| v.as_str()) else { return; };
+                if current_dashboard_id.get_untracked().as_deref() != Some(event_id) { return; }
+                match data.get("action").and_then(|v| v.as_str()) {
+                    Some("updated") => {
+                        pending_event_refresh.update_value(|h| { drop(h.take()); });
+                        let timeout = gloo_timers::callback::Timeout::new(75, refresh_remote);
+                        pending_event_refresh.set_value(Some(send_wrapper::SendWrapper::new(timeout)));
+                    }
+                    Some("deleted") => {
+                        pending_event_refresh.update_value(|h| { drop(h.take()); });
+                        set_refresh_generation.update(|n| *n += 1);
+                        set_refresh_pending.set(false);
+                        set_refresh_error.set(None);
+                        set_remote_deleted.set(true);
+                        set_remote_conflict.set(None);
+                    }
+                    _ => {}
+                }
+            });
+            let sync_unsubscribe = ws.subscribe("sync_action", move |msg| {
+                let Some(data) = msg.data.as_ref() else { return; };
+                let Some(did) = current_dashboard_id.get_untracked() else { return; };
+                let Some(event) = persisted_document_event(data, &did) else { return; };
+                pending_event_refresh.update_value(|h| { drop(h.take()); });
+                match event {
+                    PersistedEvent::Updated => refresh_remote(),
+                    PersistedEvent::Deleted => {
+                        set_refresh_generation.update(|n| *n += 1);
+                        set_refresh_pending.set(false);
+                        set_refresh_error.set(None);
+                        set_remote_deleted.set(true);
+                        set_remote_conflict.set(None);
+                    }
+                }
+            });
+            let dashboard_unsubscribe = send_wrapper::SendWrapper::new(dashboard_unsubscribe);
+            let sync_unsubscribe = send_wrapper::SendWrapper::new(sync_unsubscribe);
+            on_cleanup(move || {
+                pending_event_refresh.update_value(|h| { drop(h.take()); });
+                dashboard_unsubscribe.take()();
+                sync_unsubscribe.take()();
+            });
+        }
+    }
+
     // ── Save Action ──────────────────────────────────────────────────────
     // Input: (existing_id, title, content)
     // Output: Ok((maybe_new_id, saved_title, saved_content)) on success.
@@ -376,6 +590,7 @@ fn DashboardEditorInner(
 
     Effect::new(move |_| {
         if let Some(result) = save_action.value().get() {
+            set_pending_snapshot.set(None);
             match result {
                 Ok((maybe_new_id, saved_title, saved_content)) => {
                     if let Some(new_id) = maybe_new_id {
@@ -400,6 +615,8 @@ fn DashboardEditorInner(
                             }
                         }
                     }
+                    // A keystroke after dispatch is still an unsaved draft.
+                    // Advancing the baseline must not replace that buffer.
                     set_original_title.set(saved_title);
                     set_original_content.set(saved_content);
                     set_save_success.set(true);
@@ -417,7 +634,7 @@ fn DashboardEditorInner(
 
     // ── Save handler ─────────────────────────────────────────────────────
     let trigger_save = move || {
-        if save_action.pending().get_untracked() || !has_unsaved_changes.get_untracked() {
+        if writes_blocked.get_untracked() || save_action.pending().get_untracked() || !has_unsaved_changes.get_untracked() {
             return;
         }
 
@@ -426,6 +643,7 @@ fn DashboardEditorInner(
         let existing_id = current_dashboard_id.get_untracked();
 
         set_save_error.set(None);
+        set_pending_snapshot.set(Some(EditorSnapshot::new(current_title.clone(), current_content.clone())));
         save_action.dispatch((existing_id, current_title, current_content));
     };
 
@@ -864,26 +1082,12 @@ fn DashboardEditorInner(
     });
 
     let on_history_restore = Callback::new(move |()| {
-        // Cancel any pending debounce so restored content isn't overwritten
-        #[cfg(target_arch = "wasm32")]
-        debounce_handle.update_value(|h| { drop(h.take()); });
-
-        // Refetch the dashboard to get restored content
-        let did = current_dashboard_id.get_untracked();
+        // The restored version is persisted before this callback fires. Read
+        // it through the same generation and draft reconciliation path as a
+        // WebSocket update; an older response cannot replace a newer one.
         set_history_preview_content.set(None);
         set_history_open.set(false);
-
-        if let Some(did) = did {
-            leptos::task::spawn_local(async move {
-                if let Ok(dashboard) = get_dashboard(did).await {
-                    set_title.try_set(dashboard.title.clone());
-                    set_editor_content.try_set(dashboard.content.clone());
-                    set_preview_content.try_set(dashboard.content.clone());
-                    set_original_title.try_set(dashboard.title);
-                    set_original_content.try_set(dashboard.content);
-                }
-            });
-        }
+        refresh_remote();
     });
 
     let on_history_close = Callback::new(move |()| {
@@ -1078,7 +1282,7 @@ fn DashboardEditorInner(
                     // Save button
                     <Button
                         size=ButtonSize::Sm
-                        disabled=Signal::derive(move || save_action.pending().get() || !has_unsaved_changes.get())
+                        disabled=Signal::derive(move || writes_blocked.try_get().unwrap_or(true) || save_action.pending().try_get().unwrap_or(true) || !has_unsaved_changes.try_get().unwrap_or(false))
                         on:click=save_on_click
                     >
                         {move || {
@@ -1096,6 +1300,93 @@ fn DashboardEditorInner(
                     </Button>
                 </div>
             </div>
+
+            {move || remote_deleted.get().then(|| view! {
+                <div class="px-6 py-2">
+                    <Alert variant=AlertVariant::Error>
+                        <AlertTitle>"Document unavailable"</AlertTitle>
+                        <AlertDescription>"This document was deleted or is no longer available. Your local draft remains here; saving is disabled."</AlertDescription>
+                    </Alert>
+                </div>
+            })}
+            {move || refresh_error.get().map(|error| view! {
+                <div class="px-6 py-2">
+                    <Alert variant=AlertVariant::Warning>
+                        <AlertTitle>"Could not refresh this document"</AlertTitle>
+                        <AlertDescription>
+                            <p>{error}</p>
+                            <Button variant=ButtonVariant::Outline size=ButtonSize::Xs class="mt-2" on:click=move |_| refresh_remote()>"Retry"</Button>
+                        </AlertDescription>
+                    </Alert>
+                </div>
+            })}
+            {move || remote_conflict.get().map(|latest| {
+                let noun = if is_knowledge.get() { "document" } else { "dashboard" };
+                let latest_for_use = latest.clone();
+                view! {
+                    <div class="px-6 py-2">
+                    <Alert variant=AlertVariant::Warning>
+                        <AlertTitle>{format!("This {noun} changed while you were editing")}</AlertTitle>
+                        <AlertDescription>
+                        <p>"Review your draft and the latest saved version before choosing. Saving is paused."</p>
+                        <details>
+                            <summary class="cursor-pointer underline">"Review changes"</summary>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mt-2">
+                                <div><p class="font-medium mb-1">"Your local draft"</p>
+                                    <p>{move || title.get()}</p>
+                                    <textarea readonly class="w-full h-32 p-2 bg-card border border-border rounded font-mono text-xs" prop:value=move || editor_content.get() />
+                                </div>
+                                <div><p class="font-medium mb-1">"Latest saved version"</p>
+                                    <p>{latest.title.clone()}</p>
+                                    <textarea readonly class="w-full h-32 p-2 bg-card border border-border rounded font-mono text-xs" prop:value=latest.content.clone() />
+                                </div>
+                            </div>
+                        </details>
+                        <div class="flex gap-3">
+                            <Button variant=ButtonVariant::Outline size=ButtonSize::Xs on:click=move |_| {
+                                #[cfg(target_arch = "wasm32")]
+                                if let Some(window) = web_sys::window() {
+                                    let draft = format!("# {}\n\n{}", title.get_untracked(), editor_content.get_untracked());
+                                    let _ = window.navigator().clipboard().write_text(&draft);
+                                }
+                            }>"Copy local draft"</Button>
+                            <Button size=ButtonSize::Xs on:click=move |_| {
+                                set_retained_draft.set(Some(EditorSnapshot::new(title.get_untracked(), editor_content.get_untracked())));
+                                #[cfg(target_arch = "wasm32")]
+                                debounce_handle.update_value(|h| { drop(h.take()); });
+                                set_title.set(latest_for_use.title.clone());
+                                set_editor_content.set(latest_for_use.content.clone());
+                                set_preview_content.set(latest_for_use.content.clone());
+                                set_original_title.set(latest_for_use.title.clone());
+                                set_original_content.set(latest_for_use.content.clone());
+                                set_remote_conflict.set(None);
+                                set_history_revision.update(|n| *n += 1);
+                            }>"Use saved version"</Button>
+                        </div>
+                        </AlertDescription>
+                    </Alert>
+                    </div>
+                }
+            })}
+            {move || retained_draft.get().map(|draft| view! {
+                <div class="px-6 py-2">
+                    <Alert variant=AlertVariant::Info>
+                    <AlertDescription>
+                    <details><summary class="cursor-pointer">"Previous local draft (available to copy)"</summary>
+                        <p>{draft.title.clone()}</p>
+                        <textarea readonly class="w-full h-32 p-2 bg-card border border-border rounded font-mono text-xs" prop:value=draft.content.clone() />
+                        <Button variant=ButtonVariant::Outline size=ButtonSize::Xs on:click=move |_| {
+                            #[cfg(target_arch = "wasm32")]
+                            if let Some(window) = web_sys::window() {
+                                let text = format!("# {}\n\n{}", draft.title, draft.content);
+                                let _ = window.navigator().clipboard().write_text(&text);
+                            }
+                        }>"Copy previous draft"</Button>
+                    </details>
+                    </AlertDescription>
+                    </Alert>
+                </div>
+            })}
 
             // ── Content area — no card wrapper, matches viewer bg-background ──
             <div class="flex-1 overflow-hidden flex">
@@ -1270,6 +1561,7 @@ fn DashboardEditorInner(
                         view! {
                             <HistoryPanel
                                 dashboard_id=did
+                                refresh_revision=history_revision
                                 open=Signal::derive(move || history_open.get())
                                 on_close=on_history_close
                                 on_preview=on_history_preview
@@ -1307,6 +1599,11 @@ fn DashboardEditorInner(
                         let before_send_did = did.clone();
                         let before_send: BeforeSendHook = std::sync::Arc::new(move || {
                             let did = before_send_did.clone();
+                            if writes_blocked.get_untracked() || save_action.pending().get_untracked() {
+                                return Box::pin(async { false }) as std::pin::Pin<
+                                    Box<dyn std::future::Future<Output = bool> + Send>,
+                                >;
+                            }
                             if !has_unsaved_changes.get_untracked() {
                                 return Box::pin(async { true }) as std::pin::Pin<
                                     Box<dyn std::future::Future<Output = bool> + Send>,
@@ -1314,6 +1611,7 @@ fn DashboardEditorInner(
                             }
                             let current_title = title.get_untracked();
                             let current_content = editor_content.get_untracked();
+                            set_pending_snapshot.set(Some(EditorSnapshot::new(current_title.clone(), current_content.clone())));
                             Box::pin(async move {
                                 match update_dashboard(
                                     did,
@@ -1324,6 +1622,7 @@ fn DashboardEditorInner(
                                 .await
                                 {
                                     Ok(()) => {
+                                        set_pending_snapshot.set(None);
                                         set_original_title.set(current_title);
                                         set_original_content.set(current_content);
                                         set_save_success.set(true);
@@ -1332,9 +1631,10 @@ fn DashboardEditorInner(
                                             set_save_success.try_set(false);
                                         })
                                         .forget();
-                                        true
+                                        !writes_blocked.get_untracked()
                                     }
                                     Err(e) => {
+                                        set_pending_snapshot.set(None);
                                         set_save_error.set(Some(e.to_string()));
                                         false
                                     }
