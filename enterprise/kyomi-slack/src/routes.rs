@@ -42,6 +42,7 @@ use serde_json::json;
 use tracing::{error, info, warn};
 
 use kyomi_auth::{
+    billing_gate::WorkspaceBillingGate,
     encryption,
     middleware::AuthUser,
     permissions::permissions_for,
@@ -51,6 +52,7 @@ use kyomi_auth::{
 use kyomi_core::{enums::WorkspaceRole, DbPool};
 use kyomi_types::Permission;
 
+use crate::billing_gate::{admit_slack_agent_request, SlackAgentAdmission, SlackBillingAdmission};
 use crate::client::{self as slack_client, SlackClient, SLACK_TIMEZONE_CACHE_HOURS};
 use crate::helpers as slack_helpers;
 use crate::SlackState;
@@ -1280,7 +1282,12 @@ async fn handle_command_disconnect(
 /// - If `type == "event_callback"`: verify signature, spawn background task,
 ///   return `{ "ok": true }` within 3 seconds (Slack requirement).
 ///
-/// No auth middleware — uses Slack signature verification instead.
+/// No auth middleware — uses Slack signature verification instead. The
+/// spawned background task (`handle_app_mention` / `handle_direct_message`)
+/// is where the KYO-823 billing gate runs, via the shared
+/// `process_slack_agent_message` pipeline — after this handler has already
+/// returned `{ "ok": true }`, so the gate check never risks Slack's
+/// 3-second ack window.
 async fn handle_slack_events(
     State(state): State<SlackState>,
     headers: HeaderMap,
@@ -1421,7 +1428,11 @@ async fn handle_slack_interactions(
 
 /// Handle an `app_mention` event — user @mentioned the bot in a channel.
 ///
-/// Runs in a background task spawned from the events endpoint.
+/// Runs in a background task spawned from the events endpoint. Thin
+/// wrapper: does only the handler-specific text preprocessing (mention
+/// stripping) and logging, then hands off to the shared
+/// [`process_slack_agent_message`] pipeline — which is where the KYO-823
+/// billing gate lives.
 async fn handle_app_mention(
     team_id: &str,
     event: &serde_json::Value,
@@ -1453,92 +1464,27 @@ async fn handle_app_mention(
         "Processing app_mention"
     );
 
-    // Look up workspace and user.
-    let ctx =
-        match resolve_slack_context(&state.db, &state.encryption_key, team_id, slack_user_id).await
-        {
-            Ok(ctx) => ctx,
-            Err(err_msg) => {
-                // We cannot post ephemeral without a bot token, so log and return.
-                warn!(
-                    team_id = %team_id,
-                    slack_user_id = %slack_user_id,
-                    error = %err_msg,
-                    "Cannot resolve Slack context for app_mention"
-                );
-                return Ok(());
-            }
-        };
-
-    // Find or create a chat session for this Slack thread.
-    let (session_id, is_new_session) = find_or_create_slack_session(
-        &state.db,
-        &ctx.workspace_id,
-        &ctx.user_id,
-        channel_id,
-        thread_ts,
-        true, // shared (channel mention)
+    process_slack_agent_message(
+        state,
+        team_id,
+        InboundSlackMessage {
+            slack_user_id,
+            channel_id,
+            thread_ts,
+            text: &text,
+            is_shared: true, // channel mention
+            context: "app_mention",
+        },
     )
-    .await?;
-
-    // Fire-and-forget title generation for new sessions.
-    if is_new_session
-        && kyomi_agent::resolve_provider_config(&state.config).is_ok() {
-            kyomi_agent::generate_session_title(
-                state.db.clone(),
-                state.ws_manager.clone(),
-                session_id.clone(),
-                ctx.user_id.clone(),
-                ctx.workspace_id.clone(),
-                text.clone(),
-                state.config.clone(),
-            );
-        }
-
-    // Post "thinking" placeholder.
-    let placeholder_ts = post_slack_placeholder(
-        &ctx.bot_token,
-        channel_id,
-        thread_ts,
-        &state.slack_client,
-    )
-    .await;
-
-    // Execute the agent query (shared=true for channel mentions).
-    let response = run_slack_query(
-        &state.db,
-        &state.kv,
-        &state.encryption_key,
-        &state.embedding,
-        &state.ws_manager,
-        &state.config,
-        &state.connect_registry,
-        state.platforms.clone(),
-        &session_id,
-        &ctx.user_id,
-        &ctx.workspace_id,
-        &text,
-        slack_user_id,
-        &ctx.bot_token,
-        &state.slack_client,
-        true, // shared (channel mention)
-    )
-    .await;
-
-    let target = SlackReplyTarget {
-        channel_id,
-        thread_ts,
-        placeholder_ts: placeholder_ts.as_deref(),
-        slack_user_id,
-    };
-    respond_to_slack_query(state, response, &ctx, &target, &session_id, "app_mention").await;
-
-    Ok(())
+    .await
 }
 
 /// Handle a direct message event — user sent a DM to the bot.
 ///
-/// Similar to `handle_app_mention` but no @mention stripping and `shared=false`.
+/// Thin wrapper, same shape as [`handle_app_mention`]: no @mention
+/// stripping, `is_shared: false`. Hands off to the same
+/// [`process_slack_agent_message`] pipeline, so the KYO-823 billing gate has
+/// exactly one call site for both event types.
 async fn handle_direct_message(
     team_id: &str,
     event: &serde_json::Value,
@@ -1571,57 +1517,206 @@ async fn handle_direct_message(
         "Processing direct message"
     );
 
-    // Look up workspace and user.
-    let ctx =
-        match resolve_slack_context(&state.db, &state.encryption_key, team_id, slack_user_id).await
-        {
-            Ok(ctx) => ctx,
-            Err(err_msg) => {
-                warn!(
-                    team_id = %team_id,
-                    slack_user_id = %slack_user_id,
-                    error = %err_msg,
-                    "Cannot resolve Slack context for DM"
-                );
-                return Ok(());
-            }
-        };
+    process_slack_agent_message(
+        state,
+        team_id,
+        InboundSlackMessage {
+            slack_user_id,
+            channel_id,
+            thread_ts,
+            text: &text,
+            is_shared: false, // DM
+            context: "direct_message",
+        },
+    )
+    .await
+}
 
-    // Find or create a chat session for this DM thread.
+// ---------------------------------------------------------------------------
+// KYO-823: shared inbound-message pipeline (billing gate lives here)
+// ---------------------------------------------------------------------------
+
+/// One inbound Slack message ready for the shared agent pipeline.
+///
+/// Bundles the fields [`handle_app_mention`] and [`handle_direct_message`]
+/// extract slightly differently (mention-stripped text vs raw, shared vs
+/// not, and their log-context label) so the pipeline itself has exactly one
+/// implementation and exactly one billing-gate call site — the duplication
+/// this replaces is what let KYO-190's role-lookup fix land in only one of
+/// the two handlers the first time around.
+struct InboundSlackMessage<'a> {
+    slack_user_id: &'a str,
+    channel_id: &'a str,
+    thread_ts: &'a str,
+    text: &'a str,
+    is_shared: bool,
+    /// Log-only label: `"app_mention"` / `"direct_message"`.
+    context: &'a str,
+}
+
+/// Result of resolving a Slack event down to "who is this, and are they
+/// allowed to spend an agent turn right now" — a pure DB decision with no
+/// Slack API calls and no agent execution, so it is directly testable
+/// against an in-process SQLite pool (see `test_support`) without a real
+/// Slack client or network access. [`process_slack_agent_message`] is the
+/// only caller and owns every side effect (posting to Slack, running the
+/// agent).
+enum SlackMessageDisposition {
+    /// [`resolve_slack_context`] failed — most commonly no bot token/Slack
+    /// link found for this team/user pairing. There is no bot token to post
+    /// an ephemeral reply with, so the only right move is to log and stop,
+    /// exactly as before KYO-823.
+    Unresolvable(String),
+    /// Context resolved, but the KYO-823 billing gate refused the request.
+    /// `outcome` is always [`WorkspaceBillingGate::Lapsed`] or
+    /// [`WorkspaceBillingGate::Unverifiable`] (see
+    /// [`SlackAgentAdmission::Refused`]'s doc comment) and exists purely so
+    /// the caller can log which one fired.
+    Refused {
+        ctx: SlackContext,
+        message: String,
+        outcome: WorkspaceBillingGate,
+    },
+    /// Billing gate passed — caller may proceed to spend LLM/agent work.
+    Admitted {
+        ctx: SlackContext,
+        admission: SlackBillingAdmission,
+    },
+}
+
+/// Resolve Slack context, then apply the KYO-823 billing gate.
+///
+/// Split out of [`process_slack_agent_message`] specifically so this
+/// DB-only decision is unit-testable without standing up a `SlackClient` or
+/// hitting the network — see `routes::tests` for the SQLite-backed cases.
+async fn prepare_slack_agent_message(
+    db: &DbPool,
+    encryption_key: &[u8; 32],
+    config: &kyomi_core::Config,
+    team_id: &str,
+    slack_user_id: &str,
+    now: chrono::DateTime<Utc>,
+) -> SlackMessageDisposition {
+    let ctx = match resolve_slack_context(db, encryption_key, team_id, slack_user_id).await {
+        Ok(ctx) => ctx,
+        Err(err_msg) => return SlackMessageDisposition::Unresolvable(err_msg),
+    };
+
+    match admit_slack_agent_request(db, config, &ctx.workspace_id, now).await {
+        SlackAgentAdmission::Admitted(admission) => {
+            SlackMessageDisposition::Admitted { ctx, admission }
+        }
+        SlackAgentAdmission::Refused { message, outcome } => {
+            SlackMessageDisposition::Refused {
+                ctx,
+                message,
+                outcome,
+            }
+        }
+    }
+}
+
+/// Shared pipeline for both [`handle_app_mention`] and
+/// [`handle_direct_message`].
+///
+/// Order: resolve Slack context → KYO-823 billing gate → (only if admitted)
+/// find-or-create session → fire-and-forget title generation → placeholder →
+/// run the agent → post the result. The billing gate runs immediately after
+/// context resolution and strictly before session creation, title
+/// generation, or the agent call, so a refused request never creates a chat
+/// session, never spends an LLM call, and never touches the warehouse.
+///
+/// Runs inside the background task `handle_slack_events` already spawned —
+/// Slack's 3-second ack requirement is unaffected, because
+/// `handle_slack_events` has already returned `{ "ok": true }` by the time
+/// this function is even called.
+async fn process_slack_agent_message(
+    state: &SlackState,
+    team_id: &str,
+    msg: InboundSlackMessage<'_>,
+) -> kyomi_core::Result<()> {
+    let disposition = prepare_slack_agent_message(
+        &state.db,
+        &state.encryption_key,
+        &state.config,
+        team_id,
+        msg.slack_user_id,
+        Utc::now(),
+    )
+    .await;
+
+    let (ctx, admission) = match disposition {
+        SlackMessageDisposition::Unresolvable(err_msg) => {
+            // We cannot post ephemeral without a bot token, so log and return.
+            warn!(
+                team_id = %team_id,
+                slack_user_id = %msg.slack_user_id,
+                error = %err_msg,
+                context = %msg.context,
+                "Cannot resolve Slack context"
+            );
+            return Ok(());
+        }
+        SlackMessageDisposition::Refused {
+            ctx,
+            message,
+            outcome,
+        } => {
+            // KYO-823: billing gate refused. Post ephemerally — visible
+            // only to the requesting user — rather than into the channel:
+            // billing state is workspace-private, and an @-mentioned
+            // channel may be Slack-Connect-shared with another
+            // organisation that has no business seeing it.
+            warn!(
+                workspace_id = %ctx.workspace_id,
+                team_id = %team_id,
+                context = %msg.context,
+                gate_outcome = ?outcome,
+                "KYO-823: Slack agent request refused by billing gate"
+            );
+            post_slack_error(
+                &ctx.bot_token,
+                msg.channel_id,
+                msg.slack_user_id,
+                &message,
+                &state.slack_client,
+            )
+            .await;
+            return Ok(());
+        }
+        SlackMessageDisposition::Admitted { ctx, admission } => (ctx, admission),
+    };
+
+    // Find or create a chat session for this Slack thread/DM.
     let (session_id, is_new_session) = find_or_create_slack_session(
         &state.db,
         &ctx.workspace_id,
         &ctx.user_id,
-        channel_id,
-        thread_ts,
-        false, // not shared (DM)
+        msg.channel_id,
+        msg.thread_ts,
+        msg.is_shared,
     )
     .await?;
 
     // Fire-and-forget title generation for new sessions.
-    if is_new_session
-        && kyomi_agent::resolve_provider_config(&state.config).is_ok() {
-            kyomi_agent::generate_session_title(
-                state.db.clone(),
-                state.ws_manager.clone(),
-                session_id.clone(),
-                ctx.user_id.clone(),
-                ctx.workspace_id.clone(),
-                text.clone(),
-                state.config.clone(),
-            );
-        }
+    if is_new_session && kyomi_agent::resolve_provider_config(&state.config).is_ok() {
+        kyomi_agent::generate_session_title(
+            state.db.clone(),
+            state.ws_manager.clone(),
+            session_id.clone(),
+            ctx.user_id.clone(),
+            ctx.workspace_id.clone(),
+            msg.text.to_string(),
+            state.config.clone(),
+        );
+    }
 
     // Post "thinking" placeholder.
-    let placeholder_ts = post_slack_placeholder(
-        &ctx.bot_token,
-        channel_id,
-        thread_ts,
-        &state.slack_client,
-    )
-    .await;
+    let placeholder_ts =
+        post_slack_placeholder(&ctx.bot_token, msg.channel_id, msg.thread_ts, &state.slack_client)
+            .await;
 
-    // Execute the agent query (shared=false for DMs).
+    // Execute the agent query.
     let response = run_slack_query(
         &state.db,
         &state.kv,
@@ -1632,23 +1727,23 @@ async fn handle_direct_message(
         &state.connect_registry,
         state.platforms.clone(),
         &session_id,
+        &admission,
         &ctx.user_id,
-        &ctx.workspace_id,
-        &text,
-        slack_user_id,
+        msg.text,
+        msg.slack_user_id,
         &ctx.bot_token,
         &state.slack_client,
-        false, // not shared (DM)
+        msg.is_shared,
     )
     .await;
 
     let target = SlackReplyTarget {
-        channel_id,
-        thread_ts,
+        channel_id: msg.channel_id,
+        thread_ts: msg.thread_ts,
         placeholder_ts: placeholder_ts.as_deref(),
-        slack_user_id,
+        slack_user_id: msg.slack_user_id,
     };
-    respond_to_slack_query(state, response, &ctx, &target, &session_id, "direct_message").await;
+    respond_to_slack_query(state, response, &ctx, &target, &session_id, msg.context).await;
 
     Ok(())
 }
@@ -1747,6 +1842,13 @@ async fn resolve_active_workspace_roles(
 ///
 /// NOTE: AI capability is checked inside `execute_agent_chat()` — no need to
 /// duplicate here (DRY).
+///
+/// Takes `admission: &SlackBillingAdmission` in place of a bare
+/// `workspace_id: &str` (KYO-823): that type can only be constructed by
+/// `crate::billing_gate::admit_slack_agent_request` returning `Admitted`, so
+/// reaching this function — and therefore `execute_agent_chat` below, which
+/// is where warehouse SQL and LLM spend actually happen — from Slack without
+/// first passing the billing gate is a compile error, not a convention.
 #[allow(clippy::too_many_arguments)]
 async fn run_slack_query(
     db: &DbPool,
@@ -1758,14 +1860,16 @@ async fn run_slack_query(
     connect_registry: &kyomi_datasource_server::ConnectRegistry,
     platforms: std::sync::Arc<kyomi_core::platform::PlatformRegistry>,
     session_id: &str,
+    admission: &SlackBillingAdmission,
     user_id: &str,
-    workspace_id: &str,
     message: &str,
     slack_user_id: &str,
     bot_token: &str,
     slack_client_ref: &SlackClient,
     is_shared: bool,
 ) -> kyomi_core::Result<String> {
+    let workspace_id = admission.workspace_id();
+
     // Get user timezone (cached 24h).
     let user_tz = get_slack_user_timezone(
         slack_user_id,
@@ -2197,90 +2301,11 @@ async fn get_slack_user_timezone(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqlx::sqlite::SqlitePoolOptions;
-
-    /// Build an in-memory SQLite pool with migrations applied.
-    ///
-    /// Mirrors the `test_pool()` helper in `kyomi_auth::session` /
-    /// `workspace_service` — the established in-memory-sqlite pattern used
-    /// across the workspace's unit tests.
-    async fn test_pool() -> DbPool {
-        let _ = kyomi_core::constants::load_with_fallback();
-
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("connect in-memory sqlite");
-
-        sqlx::query("PRAGMA foreign_keys=ON")
-            .execute(&pool)
-            .await
-            .expect("enable foreign keys");
-
-        sqlx::migrate!("../../apps/server/migrations-sqlite")
-            .run(&pool)
-            .await
-            .expect("run sqlite migrations");
-
-        DbPool::Sqlite(pool)
-    }
-
-    /// Insert a user row with the given id.
-    async fn insert_user(pool: &DbPool, user_id: &str) {
-        let sq = match pool {
-            DbPool::Sqlite(sq) => sq,
-            _ => unreachable!(),
-        };
-        sqlx::query("INSERT INTO users (user_id, email) VALUES ($1, $2)")
-            .bind(user_id)
-            .bind(format!("{user_id}@test.local"))
-            .execute(sq)
-            .await
-            .expect("insert user");
-    }
-
-    /// Insert a workspace row owned by `owner_user_id`.
-    async fn insert_workspace(pool: &DbPool, workspace_id: &str, owner_user_id: &str) {
-        let sq = match pool {
-            DbPool::Sqlite(sq) => sq,
-            _ => unreachable!(),
-        };
-        sqlx::query(
-            "INSERT INTO workspaces (workspace_id, name, owner_user_id) VALUES ($1, $2, $3)",
-        )
-        .bind(workspace_id)
-        .bind(format!("Workspace {workspace_id}"))
-        .bind(owner_user_id)
-        .execute(sq)
-        .await
-        .expect("insert workspace");
-    }
-
-    /// Insert a `workspace_users` row with an explicit `active` flag.
-    async fn insert_workspace_user(
-        pool: &DbPool,
-        workspace_id: &str,
-        user_id: &str,
-        role: &str,
-        active: bool,
-    ) {
-        let sq = match pool {
-            DbPool::Sqlite(sq) => sq,
-            _ => unreachable!(),
-        };
-        sqlx::query(
-            "INSERT INTO workspace_users (workspace_id, user_id, role, active) \
-             VALUES ($1, $2, $3, $4)",
-        )
-        .bind(workspace_id)
-        .bind(user_id)
-        .bind(role)
-        .bind(active)
-        .execute(sq)
-        .await
-        .expect("insert workspace_users row");
-    }
+    use crate::test_support::{
+        count_chat_messages_for_workspace, count_chat_sessions_for_workspace, insert_platform_user_link,
+        insert_slack_workspace_integration, insert_user, insert_workspace, insert_workspace_user,
+        set_workspace_billing, test_pool,
+    };
 
     // -----------------------------------------------------------------
     // KYO-223: resolve_active_workspace_roles (the membership gate that
@@ -2526,5 +2551,245 @@ mod tests {
         let query: OAuthCallbackQuery = serde_json::from_str(json).unwrap();
         assert_eq!(query.code, "abc123");
         assert_eq!(query.state, "xyz789");
+    }
+
+    // -----------------------------------------------------------------
+    // KYO-823: the Slack billing gate wired into the inbound event
+    // pipeline (`prepare_slack_agent_message`) and proven absent from the
+    // slash-command / interactions paths, which never reach the agent.
+    // -----------------------------------------------------------------
+
+    /// Fixed 32-byte key for encrypting/decrypting Slack tokens in these
+    /// tests. Unrelated to `Config::test_config()`'s own `encryption_key`
+    /// field (which backs a different subsystem) — `SlackState.encryption_key`
+    /// is threaded through independently, exactly as `main.rs` does in
+    /// production, so tests use their own fixed key end to end.
+    const TEST_ENCRYPTION_KEY: [u8; 32] = [7u8; 32];
+
+    fn test_config_with_signing_secret() -> kyomi_core::Config {
+        let mut config = kyomi_core::Config::test_config();
+        config.slack_signing_secret = Some("test-signing-secret".into());
+        config
+    }
+
+    /// Build a full `SlackState` for handler-level tests. No field here
+    /// makes a network call at construction time (`SlackClient::new()` only
+    /// builds a `reqwest::Client`; `ConnectRegistry::new_local()` and
+    /// `WebSocketManager::new(None, ..)` are both explicitly the
+    /// no-Redis/no-cross-replica local-only constructors) — safe to
+    /// construct in a unit test.
+    async fn test_slack_state(db: DbPool, config: kyomi_core::Config) -> SlackState {
+        SlackState {
+            db: db.clone(),
+            kv: kyomi_core::kv_store_memory::InMemoryKVStore::new_pool(),
+            redis: None,
+            config: std::sync::Arc::new(config),
+            encryption_key: std::sync::Arc::new(TEST_ENCRYPTION_KEY),
+            slack_client: SlackClient::new().expect("build slack client"),
+            ws_manager: kyomi_auth::websocket::WebSocketManager::new(None, db),
+            embedding: kyomi_embed::LazyEmbedding::new(),
+            connect_registry: kyomi_datasource_server::ConnectRegistry::new_local(),
+            platforms: std::sync::Arc::new(kyomi_core::platform::PlatformRegistry::new()),
+        }
+    }
+
+    /// Seed a workspace fully wired for Slack: an admin member, a
+    /// `workspace_integrations` row (encrypted bot token, `team_id`), and a
+    /// `platform_user_links` row connecting `slack_user_id` to that member.
+    /// Billing is left at the migration default (open) — callers that need
+    /// a lapsed workspace call `set_workspace_billing` afterwards.
+    async fn seed_slack_linked_workspace(
+        pool: &DbPool,
+        workspace_id: &str,
+        user_id: &str,
+        team_id: &str,
+        slack_user_id: &str,
+    ) {
+        insert_user(pool, user_id).await;
+        insert_workspace(pool, workspace_id, user_id).await;
+        insert_workspace_user(pool, workspace_id, user_id, "workspace_admin", true).await;
+        let encrypted_bot_token =
+            encryption::encrypt_slack_token("test-bot-token", &TEST_ENCRYPTION_KEY)
+                .expect("encrypt test bot token");
+        insert_slack_workspace_integration(pool, workspace_id, team_id, &encrypted_bot_token)
+            .await;
+        insert_platform_user_link(pool, workspace_id, user_id, slack_user_id).await;
+    }
+
+    /// Sign a body the way Slack signs webhook requests, using the crate's
+    /// own `verify_slack_signature` scheme (`v0:{timestamp}:{body}`,
+    /// HMAC-SHA256, hex-encoded) — same construction as
+    /// `client::tests::verify_signature_known_valid`.
+    fn signed_slack_headers(secret: &str, body: &[u8]) -> HeaderMap {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        type HmacSha256 = Hmac<Sha256>;
+
+        let timestamp = chrono::Utc::now().timestamp().to_string();
+        let sig_basestring = format!("v0:{timestamp}:{}", std::str::from_utf8(body).unwrap());
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("hmac key");
+        mac.update(sig_basestring.as_bytes());
+        let signature = format!("v0={}", hex::encode(mac.finalize().into_bytes()));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Slack-Request-Timestamp",
+            timestamp.parse().expect("valid header value"),
+        );
+        headers.insert(
+            "X-Slack-Signature",
+            signature.parse().expect("valid header value"),
+        );
+        headers
+    }
+
+    // --- prepare_slack_agent_message: the pure DB decision -------------
+
+    #[tokio::test]
+    async fn prepare_slack_agent_message_lapsed_workspace_is_refused_before_session_creation() {
+        let pool = test_pool().await;
+        seed_slack_linked_workspace(&pool, "ws-1", "user-1", "T1", "U1").await;
+        set_workspace_billing(&pool, "ws-1", "past_due", None, None, None).await;
+        let config = test_config_with_signing_secret();
+
+        let disposition =
+            prepare_slack_agent_message(&pool, &TEST_ENCRYPTION_KEY, &config, "T1", "U1", Utc::now())
+                .await;
+
+        match disposition {
+            SlackMessageDisposition::Refused {
+                ctx,
+                message,
+                outcome,
+            } => {
+                assert_eq!(ctx.workspace_id, "ws-1");
+                assert_eq!(outcome, WorkspaceBillingGate::Lapsed);
+                assert!(
+                    message.contains("billing needs attention")
+                        && message.contains("<http://localhost:5173/settings/billing|Settings &gt; Billing>")
+                        && !message.contains("Settings > Billing"),
+                    "unexpected lapsed message (expected an escaped '&gt;' in the link label, \
+                     not a raw '>' which Slack would truncate the link on): {message}"
+                );
+            }
+            SlackMessageDisposition::Admitted { ctx, .. } => {
+                panic!("expected Refused, got Admitted(workspace_id: {})", ctx.workspace_id);
+            }
+            SlackMessageDisposition::Unresolvable(err) => {
+                panic!("expected Refused, got Unresolvable({err})");
+            }
+        }
+
+        // The billing gate must stop the pipeline before a chat session is
+        // ever created for this workspace — proves ordering, not just outcome.
+        assert_eq!(
+            count_chat_sessions_for_workspace(&pool, "ws-1").await,
+            0,
+            "a refused request must never create a chat session"
+        );
+    }
+
+    #[tokio::test]
+    async fn prepare_slack_agent_message_active_workspace_is_admitted() {
+        let pool = test_pool().await;
+        seed_slack_linked_workspace(&pool, "ws-1", "user-1", "T1", "U1").await;
+        let config = test_config_with_signing_secret();
+
+        let disposition =
+            prepare_slack_agent_message(&pool, &TEST_ENCRYPTION_KEY, &config, "T1", "U1", Utc::now())
+                .await;
+
+        match disposition {
+            SlackMessageDisposition::Admitted { ctx, admission } => {
+                assert_eq!(ctx.workspace_id, "ws-1");
+                assert_eq!(admission.workspace_id(), "ws-1");
+            }
+            SlackMessageDisposition::Refused { message, outcome, .. } => {
+                panic!("expected Admitted, got Refused {{ outcome: {outcome:?}, message: {message:?} }}");
+            }
+            SlackMessageDisposition::Unresolvable(err) => {
+                panic!("expected Admitted, got Unresolvable({err})");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn prepare_slack_agent_message_missing_integration_is_unresolvable() {
+        let pool = test_pool().await;
+        // No workspace_integrations row exists for this team_id at all.
+        let config = test_config_with_signing_secret();
+
+        let disposition = prepare_slack_agent_message(
+            &pool,
+            &TEST_ENCRYPTION_KEY,
+            &config,
+            "T-unknown",
+            "U1",
+            Utc::now(),
+        )
+        .await;
+
+        assert!(
+            matches!(disposition, SlackMessageDisposition::Unresolvable(_)),
+            "a team_id with no workspace_integrations row must be Unresolvable"
+        );
+    }
+
+    // --- Slash command / interactions: never reach the billing gate ----
+    //
+    // Neither handler calls `prepare_slack_agent_message` or
+    // `run_slack_query` — `/command` only handles connect/status/disconnect
+    // text, and `/interactions` only logs and acks. These tests prove that
+    // stays true for a lapsed workspace: same response as an open one, and
+    // no chat_sessions/chat_messages row is created.
+
+    #[tokio::test]
+    async fn handle_slack_command_status_answers_normally_for_lapsed_workspace() {
+        let pool = test_pool().await;
+        seed_slack_linked_workspace(&pool, "ws-1", "user-1", "T1", "U1").await;
+        set_workspace_billing(&pool, "ws-1", "past_due", None, None, None).await;
+        let config = test_config_with_signing_secret();
+        let signing_secret = config.slack_signing_secret.clone().expect("secret set above");
+        let state = test_slack_state(pool.clone(), config).await;
+
+        let body = b"text=status&user_id=U1&team_id=T1&command=%2Fkyomi".to_vec();
+        let headers = signed_slack_headers(&signing_secret, &body);
+
+        let response = handle_slack_command(State(state), headers, Bytes::from(body))
+            .await
+            .expect("the slash command must succeed for a lapsed workspace — it never reaches the agent");
+
+        let text = response.0["text"].as_str().unwrap_or_default();
+        assert!(
+            text.contains("Connected to Kyomi"),
+            "expected the normal /kyomi status reply, got: {text}"
+        );
+
+        assert_eq!(count_chat_sessions_for_workspace(&pool, "ws-1").await, 0);
+        assert_eq!(count_chat_messages_for_workspace(&pool, "ws-1").await, 0);
+    }
+
+    #[tokio::test]
+    async fn handle_slack_interactions_acks_normally_for_lapsed_workspace() {
+        let pool = test_pool().await;
+        seed_slack_linked_workspace(&pool, "ws-1", "user-1", "T1", "U1").await;
+        set_workspace_billing(&pool, "ws-1", "past_due", None, None, None).await;
+        let config = test_config_with_signing_secret();
+        let signing_secret = config.slack_signing_secret.clone().expect("secret set above");
+        let state = test_slack_state(pool.clone(), config).await;
+
+        let payload = serde_json::json!({"type": "block_actions"}).to_string();
+        let body = serde_urlencoded::to_string([("payload", payload.as_str())])
+            .expect("form-encode payload")
+            .into_bytes();
+        let headers = signed_slack_headers(&signing_secret, &body);
+
+        let response = handle_slack_interactions(State(state), headers, Bytes::from(body))
+            .await
+            .expect("interactions endpoint must always ack");
+
+        assert_eq!(response.0["ok"], true);
+        assert_eq!(count_chat_sessions_for_workspace(&pool, "ws-1").await, 0);
+        assert_eq!(count_chat_messages_for_workspace(&pool, "ws-1").await, 0);
     }
 }
