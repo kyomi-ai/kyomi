@@ -249,6 +249,24 @@ pub fn is_billing_lapsed(workspace: &Workspace, now: DateTime<Utc>) -> bool {
     }
 }
 
+/// Whether the billing gate blocks `workspace` from being served right now.
+///
+/// The single function every enforcement point (the `AuthUser` axum
+/// extractor, the WebSocket sync handlers, the watch scheduler, the catalog
+/// scheduler) calls — combining "does this deployment mode enforce billing
+/// at all" with [`is_billing_lapsed`] in one place so none of those callers
+/// can drift from each other or re-derive either half independently
+/// (KYO-805).
+///
+/// `self_hosted` must come from `kyomi_core::Config::self_hosted`, which is
+/// `true` for **both** `KyomiMode::SelfHosted` and `KyomiMode::Personal`
+/// (see `Config::self_hosted`'s doc comment) — neither deployment mode has
+/// billing, so this always returns `false` for them regardless of whatever
+/// `subscription_status` happens to be sitting in the row.
+pub fn billing_gate_blocks(workspace: &Workspace, self_hosted: bool, now: DateTime<Utc>) -> bool {
+    !self_hosted && is_billing_lapsed(workspace, now)
+}
+
 // ─── Main entry point ────────────────────────────────────────────────────────
 
 /// Compute the full capabilities for a workspace.
@@ -1057,5 +1075,41 @@ mod tests {
         ws.stripe_subscription_id = None;
         ws.trial_ends_at = None;
         assert!(!is_billing_lapsed(&ws, Utc::now()));
+    }
+
+    // ─── billing_gate_blocks ────────────────────────────────────────────
+
+    #[test]
+    fn billing_gate_blocks_lapsed_saas_workspace() {
+        let mut ws = test_workspace(SubscriptionTier::Cloud, 0.0);
+        ws.subscription_status = SubscriptionStatus::PastDue;
+        assert!(billing_gate_blocks(&ws, false, Utc::now()));
+    }
+
+    #[test]
+    fn billing_gate_blocks_never_blocks_self_hosted_even_when_past_due() {
+        // self_hosted=true must short-circuit regardless of subscription
+        // status — self-hosted/personal deployments have no billing at all,
+        // so a stray past_due row (e.g. leftover test data, a manually
+        // edited row) must never gate them.
+        let mut ws = test_workspace(SubscriptionTier::Cloud, 0.0);
+        ws.subscription_status = SubscriptionStatus::PastDue;
+        assert!(!billing_gate_blocks(&ws, true, Utc::now()));
+    }
+
+    #[test]
+    fn billing_gate_blocks_does_not_block_active_saas_workspace() {
+        let ws = test_workspace(SubscriptionTier::Cloud, 0.0);
+        assert!(!billing_gate_blocks(&ws, false, Utc::now()));
+    }
+
+    #[test]
+    fn billing_gate_blocks_does_not_block_scheduled_cancellation_in_grace_period() {
+        let now = Utc::now();
+        let mut ws = test_workspace(SubscriptionTier::Cloud, 0.0);
+        ws.subscription_status = SubscriptionStatus::Cancelled;
+        ws.stripe_subscription_id = Some("sub_live_123".to_string());
+        ws.subscription_period_end = Some(now + chrono::Duration::days(5));
+        assert!(!billing_gate_blocks(&ws, false, now));
     }
 }

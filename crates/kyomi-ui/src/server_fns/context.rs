@@ -18,7 +18,7 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, IntoServerFnErrorCore};
+use super::{extract_auth_allow_lapsed, extract_context, IntoServerFnErrorCore};
 
 /// Combined user, workspace, and capability context.
 ///
@@ -78,7 +78,12 @@ impl UserContext {
 #[server(prefix = "/leptos-api")]
 pub async fn get_user_context() -> Result<UserContext, ServerFnError> {
     // lint-allow: server-fn-callouts=this fn's entire purpose is aggregating workspace/capability/permission context from several kyomi_auth services into one RPC (see module doc) — it has no REST counterpart to drift from, so Rule B's drift rationale does not apply
-    let auth = extract_auth().await?;
+    //
+    // extract_auth_allow_lapsed() (KYO-805): a lapsed workspace still needs
+    // its own UserContext — the sidebar, nav, and the billing settings page
+    // that lets the owner fix the lapse all read it, and it's how the
+    // client learns is_owner/permissions in the first place.
+    let auth = extract_auth_allow_lapsed().await?;
     let ctx = extract_context()?;
 
     let workspace_id = auth.workspace.workspace_id.as_deref();

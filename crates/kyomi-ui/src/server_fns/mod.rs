@@ -121,26 +121,115 @@ pub struct ServerContext {
 #[cfg(feature = "ssr")]
 pub use kyomi_core::cancel_registry::CancelRegistry;
 
-/// Extract the authenticated user from the Axum request.
+/// KYO-805/KYO-806 contract: when a server fn's auth extraction fails
+/// because the caller's workspace billing is lapsed, [`extract_auth`]'s
+/// `ServerFnError` carries a message of the exact form
+/// `"{PAYMENT_REQUIRED_MARKER}: <reason>"` — e.g.
+/// `"payment_required: This workspace's billing is past due."` — so the
+/// client-side paywall (KYO-806) can detect it via
+/// `ServerFnError::to_string().contains(PAYMENT_REQUIRED_MARKER)` without
+/// parsing prose. The HTTP status is *also* set to 402 via `ResponseOptions`
+/// in the same branch, for any caller that reads the raw HTTP status instead
+/// (e.g. code with access to the underlying `fetch()` `Response`) — the two
+/// signals must never disagree; see [`extract_auth`]'s implementation, the
+/// only place either is set.
 ///
-/// Returns an `Err` when no auth is present AND sets the HTTP response
-/// status to 401 Unauthorized via `ResponseOptions`. Without the status
-/// override the default `ServerFnError::ServerError` serializes as a
-/// 500 Internal Server Error, which triggers `tower_http::trace`'s
-/// on-failure classification and spams both server logs and the browser
-/// console with spurious 5xx entries on every unauthenticated page load
-/// (e.g. anonymous visits to `/login`). Auth failure is a client error,
-/// not a server error — 401 is the correct classification.
+/// A `pub use` re-export of `kyomi_types::PAYMENT_REQUIRED_CODE` under the
+/// name this module's callers already use, rather than a second definition
+/// of the literal. `kyomi-types` is a non-optional dependency of both this
+/// crate and `kyomi-core` (unlike `kyomi-core` itself, which is an
+/// `ssr`-only dependency here and therefore can't be re-exported from on the
+/// WASM client side of the boundary) — see
+/// `docs/standards/string-text-processing/shared-types-belong-in-kyomi-types.md`
+/// and `kyomi_types::PAYMENT_REQUIRED_CODE`'s own doc comment. One
+/// definition, no `#[cfg]` split, nothing that can drift.
+pub const PAYMENT_REQUIRED_MARKER: &str = kyomi_types::PAYMENT_REQUIRED_CODE;
+
+/// Pull the raw Axum [`Parts`](axum::http::request::Parts) out of Leptos
+/// context — the same context leptos_axum itself populates before running a
+/// server fn body. [`extract_auth`] and [`extract_auth_allow_lapsed`] use
+/// this (rather than `leptos_axum::extract_with_state`) so they can inspect
+/// the real `kyomi_core::Error` variant an extractor rejected with —
+/// `extract_with_state` immediately collapses any rejection to a
+/// `Debug`-formatted string, which would make distinguishing "payment
+/// required" (402) from "not authenticated" (401) a matter of string-parsing
+/// a debug format instead of matching an enum.
+#[cfg(feature = "ssr")]
+async fn extract_parts() -> Result<axum::http::request::Parts, leptos::prelude::ServerFnError> {
+    leptos::prelude::use_context::<axum::http::request::Parts>().ok_or_else(|| {
+        leptos::prelude::ServerFnError::new(
+            "should have had Parts provided by the leptos_axum integration",
+        )
+    })
+}
+
+/// Extract the authenticated user from the Axum request, enforcing the
+/// billing gate (KYO-805): a lapsed SaaS workspace's request is rejected
+/// here, same as it would be for any other REST route taking a bare
+/// `AuthUser` — see `kyomi_auth::middleware::AuthUser`'s `FromRequestParts`
+/// impl, which this calls directly.
+///
+/// Sets the HTTP response status via `ResponseOptions` on every `Err` path:
+/// 402 Payment Required for a lapsed workspace (see
+/// [`PAYMENT_REQUIRED_MARKER`] for the message contract), 401 Unauthorized
+/// for every other auth failure. Without the status override the default
+/// `ServerFnError::ServerError` serializes as a 500 Internal Server Error,
+/// which triggers `tower_http::trace`'s on-failure classification and spams
+/// both server logs and the browser console with spurious 5xx entries on
+/// every unauthenticated page load (e.g. anonymous visits to `/login`).
+/// Neither auth failure nor payment-required is a server error — both are
+/// client errors with distinct, correct status codes.
+///
+/// For the small allowlisted set of endpoints that must keep working while
+/// billing is lapsed (login/logout, billing settings, workspace switching,
+/// user/sidebar context — see the KYO-805 ticket for the full list), use
+/// [`extract_auth_allow_lapsed`] instead.
 #[cfg(feature = "ssr")]
 pub(crate) async fn extract_auth() -> Result<kyomi_auth::middleware::AuthUser, leptos::prelude::ServerFnError> {
+    use axum::extract::FromRequestParts;
+
     let ctx = extract_context()?;
-    match leptos_axum::extract_with_state::<kyomi_auth::middleware::AuthUser, _>(&ctx.auth_state).await {
+    let mut parts = extract_parts().await?;
+    match kyomi_auth::middleware::AuthUser::from_request_parts(&mut parts, &ctx.auth_state).await {
         Ok(auth) => Ok(auth),
+        Err(kyomi_core::Error::PaymentRequired(msg)) => {
+            leptos::prelude::expect_context::<leptos_axum::ResponseOptions>()
+                .set_status(axum::http::StatusCode::PAYMENT_REQUIRED);
+            Err(leptos::prelude::ServerFnError::new(format!(
+                "{PAYMENT_REQUIRED_MARKER}: {msg}"
+            )))
+        }
         Err(e) => {
             // Flag the response as 401 so tower_http and the browser don't
             // classify this as a 5xx server error. Every server fn invocation
             // has a ResponseOptions in context; matches the pattern used in
             // auth.rs / security.rs / onboarding.rs.
+            leptos::prelude::expect_context::<leptos_axum::ResponseOptions>()
+                .set_status(axum::http::StatusCode::UNAUTHORIZED);
+            Err(leptos::prelude::ServerFnError::new(format!("Authentication required: {e}")))
+        }
+    }
+}
+
+/// Extract the authenticated user WITHOUT enforcing the billing gate
+/// (KYO-805) — the explicit opt-out from [`extract_auth`]'s default-gated
+/// behaviour. Use only for the small, named allowlist of endpoints that must
+/// keep working while a SaaS workspace's billing is lapsed; every other
+/// server fn should call [`extract_auth`] and get the gate for free.
+///
+/// Still rejects (401) for every ordinary auth failure — missing/expired
+/// token, inactive user, revoked membership — via the same shared
+/// `kyomi_auth::middleware::load_auth_user` loading path `extract_auth`
+/// uses; it just never turns `billing_lapsed = true` into a rejection.
+#[cfg(feature = "ssr")]
+pub(crate) async fn extract_auth_allow_lapsed() -> Result<kyomi_auth::middleware::AuthUser, leptos::prelude::ServerFnError> {
+    use axum::extract::FromRequestParts;
+
+    let ctx = extract_context()?;
+    let mut parts = extract_parts().await?;
+    match kyomi_auth::middleware::AuthUserAllowLapsed::from_request_parts(&mut parts, &ctx.auth_state).await {
+        Ok(wrapped) => Ok(wrapped.into_inner()),
+        Err(e) => {
             leptos::prelude::expect_context::<leptos_axum::ResponseOptions>()
                 .set_status(axum::http::StatusCode::UNAUTHORIZED);
             Err(leptos::prelude::ServerFnError::new(format!("Authentication required: {e}")))
@@ -222,11 +311,28 @@ pub(crate) struct AuthenticatedContext {
 
 #[cfg(feature = "ssr")]
 impl AuthenticatedContext {
-    pub(crate) async fn extract() -> Result<Self, leptos::prelude::ServerFnError> {
-        let auth = extract_auth().await?;
+    /// Shared tail of [`Self::extract`] and [`Self::extract_allow_lapsed`] —
+    /// the two differ only in which extractor produced `auth`, so factoring
+    /// out everything after that call is the only way to guarantee they
+    /// can't drift (e.g. one gaining a step the other quietly misses).
+    async fn from_auth(
+        auth: kyomi_auth::middleware::AuthUser,
+    ) -> Result<Self, leptos::prelude::ServerFnError> {
         let ctx = extract_context()?;
         let ws_id = workspace_id(&auth)?.to_string();
         Ok(Self { auth, ctx, ws_id })
+    }
+
+    pub(crate) async fn extract() -> Result<Self, leptos::prelude::ServerFnError> {
+        Self::from_auth(extract_auth().await?).await
+    }
+
+    /// Same as [`Self::extract`], but via [`extract_auth_allow_lapsed`] — the
+    /// billing-gate opt-out (KYO-805). Use only for the allowlisted billing
+    /// server fns that must keep working while the workspace's billing is
+    /// itself lapsed (`get_subscription_info`, `create_portal_session`, ...).
+    pub(crate) async fn extract_allow_lapsed() -> Result<Self, leptos::prelude::ServerFnError> {
+        Self::from_auth(extract_auth_allow_lapsed().await?).await
     }
 
     pub(crate) fn db(&self) -> &kyomi_core::DbPool {
@@ -544,5 +650,200 @@ mod into_sfn_sqlx_tests {
             "sqlx::Error::ColumnNotFound's raw Display (a schema column name) leaked \
              into the client-facing message: {client_message:?}"
         );
+    }
+}
+
+/// KYO-805: pins the small, explicit "opt out of the billing gate" allowlist
+/// by source inspection — the same technique
+/// `server_fns::workspace::tests::get_workspace_slack_status_requires_manage_integrations`
+/// (KYO-321) uses, for the same reason: these are `#[cfg(feature = "ssr")]`
+/// functions whose auth extraction needs a real Leptos/Axum request context
+/// leptos_axum provides, which a plain unit test can't fake (see
+/// `kyomi_auth::permissions::tests::gated_server_fn`'s doc comment). A
+/// `kyomi_auth::middleware::tests` extractor-level test proves the
+/// *mechanism* (`AuthUser` vs `AuthUserAllowLapsed`) rejects/admits
+/// correctly; this proves each server fn actually calls the extractor its
+/// role in the KYO-805 ticket's allowlist requires — a correct extractor
+/// called from the wrong place is just as broken as an incorrect one called
+/// from the right place, and neither failure is visible to the other test.
+#[cfg(all(test, feature = "ssr"))]
+mod kyo_805_billing_gate_allowlist_tests {
+    use crate::test_support::extract_between;
+
+    const SECURITY_SRC: &str = include_str!("security.rs");
+    const CONTEXT_SRC: &str = include_str!("context.rs");
+    const SIDEBAR_SRC: &str = include_str!("sidebar.rs");
+    const WORKSPACE_SRC: &str = include_str!("workspace.rs");
+    const BILLING_SRC: &str = include_str!("billing.rs");
+
+    #[test]
+    fn logout_all_sessions_is_allow_lapsed() {
+        let body = extract_between(
+            SECURITY_SRC,
+            "pub async fn logout_all_sessions() -> Result<String, ServerFnError> {",
+            "\n// ---------------------------------------------------------------------------\n// Passkey management server functions",
+        );
+        assert!(
+            body.contains("extract_auth_allow_lapsed()"),
+            "logout_all_sessions must opt out of the KYO-805 billing gate — a lapsed \
+             workspace must still be able to log out everywhere"
+        );
+    }
+
+    #[test]
+    fn other_security_fns_remain_gated() {
+        // Spot-check a sibling in the same file: passkeys/2FA/password stay
+        // on the strict gate — only logout_all_sessions (and the
+        // already-unauthenticated logout()) opt out.
+        let body = extract_between(
+            SECURITY_SRC,
+            "pub async fn set_password(new_password: String) -> Result<String, ServerFnError> {",
+            "\n/// Change password for a user who already has one.",
+        );
+        assert!(body.contains("extract_auth()"));
+        assert!(!body.contains("extract_auth_allow_lapsed()"));
+    }
+
+    #[test]
+    fn get_user_context_is_allow_lapsed() {
+        let body = extract_between(
+            CONTEXT_SRC,
+            "pub async fn get_user_context() -> Result<UserContext, ServerFnError> {",
+            "\n/// Convert the Capabilities struct into a HashMap<String, bool> for the frontend.",
+        );
+        assert!(body.contains("extract_auth_allow_lapsed()"));
+    }
+
+    #[test]
+    fn get_sidebar_user_is_allow_lapsed_and_reads_billing_lapsed_off_workspace_context() {
+        let body = extract_between(
+            SIDEBAR_SRC,
+            "pub async fn get_sidebar_user() -> Result<SidebarUser, ServerFnError> {",
+            "\n}\n",
+        );
+        assert!(body.contains("extract_auth_allow_lapsed()"));
+        // KYO-805: must read the single-computation-site verdict off
+        // WorkspaceContext, not re-derive it with a second workspace load
+        // (that was the pre-KYO-805 shape of this function).
+        assert!(body.contains("auth.workspace.billing_lapsed"));
+        assert!(!body.contains("is_billing_lapsed("));
+    }
+
+    #[test]
+    fn get_recent_sessions_remains_gated() {
+        let body = extract_between(
+            SIDEBAR_SRC,
+            "pub async fn get_recent_sessions() -> Result<Vec<SidebarSession>, ServerFnError> {",
+            "\n/// Load current user info for the sidebar user menu.",
+        );
+        assert!(body.contains("extract_auth()"));
+        assert!(!body.contains("extract_auth_allow_lapsed"));
+    }
+
+    #[test]
+    fn workspace_switcher_fns_are_allow_lapsed() {
+        let list_body = extract_between(
+            WORKSPACE_SRC,
+            "pub async fn list_my_workspaces() -> Result<Vec<WorkspaceSummary>, ServerFnError> {",
+            "\n/// Switch the caller's active workspace and re-mint their session.",
+        );
+        assert!(list_body.contains("extract_auth_allow_lapsed()"));
+
+        let switch_body = extract_between(
+            WORKSPACE_SRC,
+            "pub async fn switch_workspace(workspace_id: String) -> Result<(), ServerFnError> {",
+            "\n// ─────────────────────────────────────────────────────────────────────────────\n// Helpers (server-only)",
+        );
+        assert!(switch_body.contains("extract_auth_allow_lapsed()"));
+    }
+
+    #[test]
+    fn workspace_settings_writer_remains_gated() {
+        let body = extract_between(
+            WORKSPACE_SRC,
+            "pub async fn update_workspace_name(name: String) -> Result<(), ServerFnError> {",
+            "\n/// Update the workspace default AI model.",
+        );
+        assert!(body.contains("AuthenticatedContext::extract()"));
+        assert!(!body.contains("extract_allow_lapsed"));
+    }
+
+    #[test]
+    fn allowlisted_billing_fns_use_the_allow_lapsed_extractor() {
+        let cases: &[(&str, &str, &str)] = &[
+            (
+                "pub async fn get_subscription_info() -> Result<SubscriptionInfo, ServerFnError> {",
+                "\n/// Fetch recent invoices for the current workspace.",
+                "AuthenticatedContext::extract_allow_lapsed()",
+            ),
+            (
+                "pub async fn get_invoices() -> Result<Vec<InvoiceRecord>, ServerFnError> {",
+                "\n/// Create a Stripe checkout session for subscription.",
+                "AuthenticatedContext::extract_allow_lapsed()",
+            ),
+            (
+                "pub async fn create_checkout(",
+                "\n/// Cancel the current subscription at period end.",
+                "AuthenticatedContext::extract_allow_lapsed()",
+            ),
+            (
+                "pub async fn create_portal_session() -> Result<RedirectUrl, ServerFnError> {",
+                "\n/// Purchase an AI token bundle via embedded Stripe checkout.",
+                "AuthenticatedContext::extract_allow_lapsed()",
+            ),
+            (
+                "pub async fn get_stripe_publishable_key() -> Result<Option<String>, ServerFnError> {",
+                "\n/// Check the status of a checkout session (for verifying completion).",
+                "extract_auth_allow_lapsed()",
+            ),
+            (
+                "pub async fn get_checkout_session_status(",
+                "\n#[cfg(all(test, feature = \"ssr\"))]\nmod tests {",
+                "extract_auth_allow_lapsed()",
+            ),
+        ];
+
+        for (start, end, expected) in cases {
+            let body = extract_between(BILLING_SRC, start, end);
+            assert!(
+                body.contains(expected),
+                "expected {start:?}'s body to call {expected}, got:\n{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_allowlisted_billing_fns_remain_gated() {
+        let cases: &[(&str, &str)] = &[
+            (
+                "pub async fn cancel_subscription() -> Result<BillingResult, ServerFnError> {",
+                "\n/// Reactivate a cancelled subscription.",
+            ),
+            (
+                "pub async fn reactivate_subscription() -> Result<BillingResult, ServerFnError> {",
+                "\npub const UNLIMITED_SEAT_CAP",
+            ),
+            (
+                "pub async fn update_user_limit(limit: i32) -> Result<i32, ServerFnError> {",
+                "\n/// Create a Stripe billing portal session and return the redirect URL.",
+            ),
+            (
+                "pub async fn purchase_ai_bundle(quantity: u32) -> Result<EmbeddedCheckoutSession, ServerFnError> {",
+                "\n/// Purchase an analytics event bundle via embedded Stripe checkout.",
+            ),
+            (
+                "pub async fn purchase_analytics_bundle(quantity: u32) -> Result<EmbeddedCheckoutSession, ServerFnError> {",
+                "\n/// Get the Stripe publishable key (needed for embedded checkout on the frontend).",
+            ),
+        ];
+
+        for (start, end) in cases {
+            let body = extract_between(BILLING_SRC, start, end);
+            assert!(
+                body.contains("AuthenticatedContext::extract()"),
+                "expected {start:?}'s body to still call the gated AuthenticatedContext::extract()"
+            );
+            assert!(!body.contains("extract_allow_lapsed"));
+        }
     }
 }

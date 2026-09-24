@@ -197,23 +197,10 @@ impl WatchScheduler {
         // Clean up finished executions from tracking map
         self.clean_finished_executions().await;
 
-        // Query for due watches
-        let now = Utc::now();
-        let is_pg = self.db.is_postgres();
-        let bool_true = kyomi_core::sql_compat::bool_true(is_pg);
-        let due_sql = format!(
-            "SELECT watch_id, schedule, next_run_at \
-             FROM watches \
-             WHERE enabled = {bool_true} \
-               AND next_run_at IS NOT NULL \
-               AND next_run_at <= $1"
-        );
-        let due_watches: Vec<DueWatch> = kyomi_core::db_fetch_all!(
-            self.db, DueWatch,
-            &due_sql,
-            now
-        )
-        .map_err(|e| format!("failed to query due watches: {e}"))?;
+        // Query for due watches, filtering out any whose workspace's
+        // billing is lapsed (KYO-805) — see `due_watches_to_execute`.
+        let due_watches: Vec<DueWatch> =
+            due_watches_to_execute(&self.db, self.config.self_hosted, Utc::now()).await?;
 
         if due_watches.is_empty() {
             return Ok(());
@@ -680,11 +667,70 @@ impl WatchScheduler {
 // ---------------------------------------------------------------------------
 
 /// Row type for the due watches query.
-#[derive(sqlx::FromRow)]
+#[derive(Debug, sqlx::FromRow)]
 struct DueWatch {
     watch_id: String,
+    workspace_id: String,
     schedule: String,
     next_run_at: DateTime<Utc>,
+}
+
+/// Query watches due for execution and filter out any belonging to a
+/// billing-lapsed SaaS workspace (KYO-805) — split out from
+/// `WatchScheduler::poll_due_watches` so the gating logic is testable
+/// without constructing a full `WatchScheduler` (KV store, embedding
+/// model, `WebSocketManager`, Connect registry, platform registry — none
+/// of which this query or its filter need).
+///
+/// Routes each due watch's workspace through
+/// `kyomi_auth::billing_gate::check_workspace_billing_gate` — the single
+/// "load workspace, apply the KYO-805 gate, fail closed" implementation
+/// also used by the WS sync handlers (`apps/server/src/routes/websocket.rs`)
+/// and the catalog refresh scheduler
+/// (`kyomi_agent::catalog_scheduler::CatalogRefreshScheduler`), extracted
+/// (KYO-805 follow-up) so none of the three can drift from each other —
+/// never re-derives lapsed-ness from a status string in SQL. A workspace
+/// that fails to load, or doesn't exist, is skipped rather than executed:
+/// the shared helper fails closed and logs the reason itself.
+async fn due_watches_to_execute(
+    db: &DbPool,
+    self_hosted: bool,
+    now: DateTime<Utc>,
+) -> Result<Vec<DueWatch>, String> {
+    let is_pg = db.is_postgres();
+    let bool_true = kyomi_core::sql_compat::bool_true(is_pg);
+    let due_sql = format!(
+        "SELECT watch_id, workspace_id, schedule, next_run_at \
+         FROM watches \
+         WHERE enabled = {bool_true} \
+           AND next_run_at IS NOT NULL \
+           AND next_run_at <= $1"
+    );
+    let due_watches: Vec<DueWatch> = kyomi_core::db_fetch_all!(db, DueWatch, &due_sql, now)
+        .map_err(|e| format!("failed to query due watches: {e}"))?;
+
+    let mut executable = Vec::with_capacity(due_watches.len());
+    for watch in due_watches {
+        if kyomi_auth::billing_gate::check_workspace_billing_gate(
+            db,
+            &watch.workspace_id,
+            self_hosted,
+            now,
+        )
+        .await
+        .blocks()
+        {
+            info!(
+                watch_id = %watch.watch_id,
+                workspace_id = %watch.workspace_id,
+                "Skipping watch execution — workspace billing is lapsed or could not be verified"
+            );
+            continue;
+        }
+        executable.push(watch);
+    }
+
+    Ok(executable)
 }
 
 /// Row type for the missed watches query.
@@ -743,10 +789,12 @@ mod tests {
         let now = Utc::now();
         let watch = DueWatch {
             watch_id: "watch-abc".into(),
+            workspace_id: "ws-1".into(),
             schedule: "0 9 * * *".into(),
             next_run_at: now,
         };
         assert_eq!(watch.watch_id, "watch-abc");
+        assert_eq!(watch.workspace_id, "ws-1");
         assert_eq!(watch.schedule, "0 9 * * *");
         assert_eq!(watch.next_run_at, now);
     }
@@ -791,5 +839,166 @@ mod tests {
         // Cutoff should be at least 1 hour and at most 48 hours
         const { assert!(MISSED_EXECUTION_CUTOFF_HOURS >= 1) };
         const { assert!(MISSED_EXECUTION_CUTOFF_HOURS <= 48) };
+    }
+
+    // -- due_watches_to_execute (KYO-805: skip lapsed workspaces) --
+
+    mod due_watches_to_execute_tests {
+        use super::*;
+        use crate::test_support::{seed_user_and_workspace, test_pool};
+
+        fn sqlite(db: &DbPool) -> &sqlx::SqlitePool {
+            match db {
+                DbPool::Sqlite(sq) => sq,
+                DbPool::Postgres(_) => unreachable!("test pool is always sqlite"),
+            }
+        }
+
+        async fn insert_watch(
+            db: &DbPool,
+            watch_id: &str,
+            workspace_id: &str,
+            owner: &str,
+            next_run_at: DateTime<Utc>,
+        ) {
+            sqlx::query(
+                "INSERT INTO watches \
+                 (watch_id, workspace_id, created_by, name, prompt, schedule, enabled, next_run_at) \
+                 VALUES ($1, $2, $3, 'Test Watch', 'test prompt', '0 9 * * *', 1, $4)",
+            )
+            .bind(watch_id)
+            .bind(workspace_id)
+            .bind(owner)
+            .bind(next_run_at)
+            .execute(sqlite(db))
+            .await
+            .expect("insert watch");
+        }
+
+        async fn insert_workspace(db: &DbPool, workspace_id: &str, owner: &str, status: &str) {
+            sqlx::query(
+                "INSERT INTO workspaces (workspace_id, name, owner_user_id, subscription_status) \
+                 VALUES ($1, $2, $3, $4)",
+            )
+            .bind(workspace_id)
+            .bind(format!("Workspace {workspace_id}"))
+            .bind(owner)
+            .bind(status)
+            .execute(sqlite(db))
+            .await
+            .expect("insert workspace");
+        }
+
+        async fn set_subscription_status(db: &DbPool, workspace_id: &str, status: &str) {
+            sqlx::query("UPDATE workspaces SET subscription_status = $1 WHERE workspace_id = $2")
+                .bind(status)
+                .bind(workspace_id)
+                .execute(sqlite(db))
+                .await
+                .expect("update subscription_status");
+        }
+
+        #[tokio::test]
+        async fn active_workspace_watch_is_included() {
+            let db = test_pool().await;
+            seed_user_and_workspace(&db).await;
+            let now = Utc::now();
+            insert_watch(&db, "watch-1", "ws-1", "user-a", now - chrono::Duration::minutes(1)).await;
+
+            let due = due_watches_to_execute(&db, false, now)
+                .await
+                .expect("query due watches");
+            assert_eq!(
+                due.iter().map(|w| w.watch_id.as_str()).collect::<Vec<_>>(),
+                vec!["watch-1"]
+            );
+        }
+
+        #[tokio::test]
+        async fn lapsed_workspace_watch_is_skipped() {
+            let db = test_pool().await;
+            seed_user_and_workspace(&db).await;
+            set_subscription_status(&db, "ws-1", "past_due").await;
+            let now = Utc::now();
+            insert_watch(&db, "watch-1", "ws-1", "user-a", now - chrono::Duration::minutes(1)).await;
+
+            let due = due_watches_to_execute(&db, false, now)
+                .await
+                .expect("query due watches");
+            assert!(
+                due.is_empty(),
+                "a watch belonging to a billing-lapsed workspace must be skipped, got {due:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn self_hosted_never_skips_even_with_past_due_workspace() {
+            let db = test_pool().await;
+            seed_user_and_workspace(&db).await;
+            set_subscription_status(&db, "ws-1", "past_due").await;
+            let now = Utc::now();
+            insert_watch(&db, "watch-1", "ws-1", "user-a", now - chrono::Duration::minutes(1)).await;
+
+            let due = due_watches_to_execute(&db, true, now)
+                .await
+                .expect("query due watches");
+            assert_eq!(
+                due.len(),
+                1,
+                "self-hosted/personal mode must never skip a watch on billing status"
+            );
+        }
+
+        #[tokio::test]
+        async fn mixed_batch_only_skips_the_lapsed_workspaces_watch() {
+            let db = test_pool().await;
+            seed_user_and_workspace(&db).await;
+            insert_workspace(&db, "ws-2", "user-a", "past_due").await;
+            let now = Utc::now();
+            insert_watch(&db, "watch-active", "ws-1", "user-a", now - chrono::Duration::minutes(1)).await;
+            insert_watch(&db, "watch-lapsed", "ws-2", "user-a", now - chrono::Duration::minutes(1)).await;
+
+            let due = due_watches_to_execute(&db, false, now)
+                .await
+                .expect("query due watches");
+            assert_eq!(
+                due.iter().map(|w| w.watch_id.as_str()).collect::<Vec<_>>(),
+                vec!["watch-active"]
+            );
+        }
+
+        #[tokio::test]
+        async fn workspace_load_error_fails_closed() {
+            let db = test_pool().await;
+            seed_user_and_workspace(&db).await;
+            // Corrupt subscription_status so decoding the workspace row
+            // fails — same technique as
+            // `kyomi_auth::middleware::tests::db_error_loading_workspace_fails_closed`.
+            // A DB/decode error must skip the watch, not execute it.
+            set_subscription_status(&db, "ws-1", "not-a-real-status").await;
+            let now = Utc::now();
+            insert_watch(&db, "watch-1", "ws-1", "user-a", now - chrono::Duration::minutes(1)).await;
+
+            let due = due_watches_to_execute(&db, false, now)
+                .await
+                .expect("query due watches");
+            assert!(
+                due.is_empty(),
+                "a workspace load/decode error must fail closed (skip), got {due:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn not_yet_due_watch_is_excluded_regardless_of_billing() {
+            let db = test_pool().await;
+            seed_user_and_workspace(&db).await;
+            let now = Utc::now();
+            insert_watch(&db, "watch-future", "ws-1", "user-a", now + chrono::Duration::hours(1)).await;
+
+            let due = due_watches_to_execute(&db, false, now)
+                .await
+                .expect("query due watches");
+            assert!(due.is_empty());
+        }
     }
 }

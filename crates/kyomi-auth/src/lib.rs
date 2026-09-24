@@ -17,6 +17,7 @@ pub mod analytics_notifications;
 pub mod analytics_quota;
 pub mod analytics_site_service;
 pub mod auth_service;
+pub mod billing_gate;
 pub mod billing_service;
 pub mod catalog;
 pub mod chat_service;

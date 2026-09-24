@@ -105,6 +105,7 @@ mod tests {
                 subscription_status: SubscriptionStatus::Active,
                 trial_ends_at: None,
                 is_owner,
+                billing_lapsed: false,
             },
             token_exp: None,
             token_jti: None,
@@ -234,6 +235,7 @@ mod tests {
                 jwt_secret: SECRET.to_string(),
                 db: pool.clone(),
                 is_personal: false,
+                self_hosted: false,
             };
 
             let admin_token = mint_token("admin-1", "ws-1");
@@ -305,6 +307,7 @@ mod tests {
                 jwt_secret: SECRET.to_string(),
                 db: pool.clone(),
                 is_personal: false,
+                self_hosted: false,
             };
 
             let admin_token = mint_token("admin-2", "ws-2");

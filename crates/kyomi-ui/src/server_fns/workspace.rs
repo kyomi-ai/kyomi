@@ -28,9 +28,13 @@ pub struct WorkspaceSummary {
 }
 
 /// List all workspaces the caller belongs to, for the sidebar switcher.
+///
+/// Uses `extract_auth_allow_lapsed()` (KYO-805): a member of several
+/// workspaces must not be trapped in a lapsed one — this is how they find
+/// the others to switch to.
 #[server(prefix = "/leptos-api")]
 pub async fn list_my_workspaces() -> Result<Vec<WorkspaceSummary>, ServerFnError> {
-    let auth = extract_auth().await?;
+    let auth = extract_auth_allow_lapsed().await?;
     let ctx = extract_context()?;
 
     let current = auth.workspace.workspace_id.clone();
@@ -67,9 +71,12 @@ pub async fn list_my_workspaces() -> Result<Vec<WorkspaceSummary>, ServerFnError
 }
 
 /// Switch the caller's active workspace and re-mint their session.
+///
+/// Uses `extract_auth_allow_lapsed()` (KYO-805) for the same reason as
+/// `list_my_workspaces`: switching *out of* the lapsed workspace must work.
 #[server(prefix = "/leptos-api")]
 pub async fn switch_workspace(workspace_id: String) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
+    let auth = extract_auth_allow_lapsed().await?;
     let ctx = extract_context()?;
 
     let user = kyomi_auth::user_service::get_user_by_id(&ctx.db, &auth.user_id)
@@ -471,7 +478,7 @@ pub async fn uninstall_workspace_slack(team_id: String) -> Result<(), ServerFnEr
 
 // Helpers — delegate to shared extractors in parent module
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, AuthenticatedContext, IntoServerFnErrorCore};
+use super::{extract_auth_allow_lapsed, extract_context, AuthenticatedContext, IntoServerFnErrorCore};
 #[cfg(feature = "ssr")]
 use kyomi_types::Permission;
 

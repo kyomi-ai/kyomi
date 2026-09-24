@@ -44,7 +44,7 @@ pub use enums::{
     SubscriptionTier, TransferStatus, WatchExecutionStatus, WatchMode, WorkspaceRole,
     WorkspaceStatus,
 };
-pub use error::{Error, Result};
+pub use error::{Error, Result, PAYMENT_REQUIRED_CODE};
 pub use error_sanitizer::sanitize_error;
 pub use kv_store::{KVPool, KVStore, create_kv_store, kv_consume_json, kv_peek_json, kv_store_json};
 pub use redis::RedisPool;
