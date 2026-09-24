@@ -149,7 +149,20 @@ pub async fn create_provider_for_datasource(
     } else {
         // Direct datasources: resolve credentials and create provider via factory.
         let ds_type: kyomi_core::datasource_registry::DatasourceType = ds.datasource_type.into();
-        let credentials = super::resolve_credentials(ctx, ds, &ds_type)
+
+        // `ds.connection_config` came straight from the database and may
+        // hold encrypted `COMMON_SENSITIVE` fields, including
+        // `oauth_client_secret` (KYO-786) — every driver, and
+        // `resolve_credentials`'s own OAuth-refresh step below, needs
+        // plaintext. Decrypted once here and threaded through both, rather
+        // than each decrypting `ds.connection_config` separately.
+        let decrypted_config = kyomi_auth::credential_service::decrypt_connection_config_secrets(
+            &ds.connection_config,
+            &ctx.encryption_key,
+        )
+        .map_err(|e| format!("Failed to decrypt connection_config for '{}': {e}", ds.slug))?;
+
+        let credentials = super::resolve_credentials(ctx, ds, &ds_type, &decrypted_config)
             .await
             .map_err(|e| format!("Failed to resolve credentials for '{}': {e}", ds.slug))?;
 
@@ -158,15 +171,6 @@ pub async fn create_provider_for_datasource(
             user_email: String::new(),
             workspace_id: ctx.workspace_id.clone(),
         };
-
-        // `ds.connection_config` came straight from the database and may
-        // hold encrypted `COMMON_SENSITIVE` fields — every driver needs
-        // plaintext.
-        let decrypted_config = kyomi_auth::credential_service::decrypt_connection_config_secrets(
-            &ds.connection_config,
-            &ctx.encryption_key,
-        )
-        .map_err(|e| format!("Failed to decrypt connection_config for '{}': {e}", ds.slug))?;
 
         kyomi_datasource_server::factory::create_provider(
             &ds_type,

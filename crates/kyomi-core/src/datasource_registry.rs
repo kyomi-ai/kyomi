@@ -388,18 +388,35 @@ pub struct DatasourceTypeMetadata {
     pub sensitive_credential_fields: &'static [&'static str],
 
     /// Connection config fields that must be masked in API responses
-    /// (e.g., `["oauth_client_secret", "service_account_json"]`) **and**
-    /// restored from the stored config on write when the client's submission
-    /// still carries that mask or omits the field (KYO-780) — these fields
-    /// are a read/write pair, not read-only. See
+    /// **and** restored from the stored config on write when the client's
+    /// submission still carries that mask or omits the field (KYO-780) —
+    /// these fields are a read/write pair, not read-only. See
     /// `kyomi_auth::credential_service::mask_connection_config` (the read
     /// side) and `finalize_connection_config_secrets` (the write side,
     /// which further gates *restoring* one of these fields on it being
     /// owned by the auth mode active in the write, via
     /// [`DatasourceTypeMetadata::inactive_auth_mode_connection_config_fields`]).
     ///
-    /// Note: `shared_password`, `ssh_private_key`, and `ssh_passphrase` are
-    /// always masked (and encrypted at rest) regardless of this list — see
+    /// Empty for every type as of KYO-786: `oauth_client_secret` and
+    /// `service_account_json` (BigQuery, Snowflake, Databricks, Synapse)
+    /// used to live here, but moved into `COMMON_SENSITIVE` in
+    /// `kyomi_auth::credential_service` so they are encrypted at rest like
+    /// every other secret, not just masked. This field remains as the
+    /// extension point for a future *type-specific* sensitive field — one
+    /// added here gets the same masking, at-rest encryption, and
+    /// auth-mode-ownership-gated restoration as `COMMON_SENSITIVE` members
+    /// (`finalize_connection_config_secrets` treats the two sets
+    /// identically). It does **not** get the same decryption: `kyomi_auth`'s
+    /// `decrypt_connection_config_secrets` reads only `COMMON_SENSITIVE`, so
+    /// adding a type-specific entry here without also extending that
+    /// function would repeat the KYO-786 plaintext-at-rest gap in a new
+    /// form — encrypted on write, never decrypted on read. Prefer adding the
+    /// field to `COMMON_SENSITIVE` instead unless it genuinely needs to vary
+    /// by type.
+    ///
+    /// Note: `shared_password`, `ssh_private_key`, `ssh_passphrase`,
+    /// `oauth_client_secret`, and `service_account_json` are always masked
+    /// (and encrypted at rest) regardless of this list — see
     /// `COMMON_SENSITIVE` in `kyomi_auth::credential_service`.
     pub sensitive_connection_config_fields: &'static [&'static str],
 
@@ -629,7 +646,10 @@ static BIGQUERY_META: LazyLock<DatasourceTypeMetadata> = LazyLock::new(|| Dataso
     default_port: None,
     credential_fields: &["billing_project", "query_size_limit_gb"],
     sensitive_credential_fields: &[],
-    sensitive_connection_config_fields: &["oauth_client_secret", "service_account_json"],
+    // oauth_client_secret and service_account_json moved to COMMON_SENSITIVE
+    // in kyomi_auth::credential_service (KYO-786) — masking is unaffected,
+    // see that constant's doc.
+    sensitive_connection_config_fields: &[],
     requires_user_credentials: false,
     accepts_user_context: true,
     auth_modes: leak_auth_modes(vec![
@@ -678,12 +698,10 @@ static CLICKHOUSE_META: LazyLock<DatasourceTypeMetadata> =
 // AuthModeConfig below) is just as sensitive and is masked here too — see
 // KYO-330.
 //
-// sensitive_connection_config_fields: ["oauth_client_secret"] (KYO-780). This
-// mirrors what `oauth_auth_mode`'s own `connection_config_fields` already
-// declared this mode owns — this list had simply never been kept in sync,
-// which left the real client secret being returned in cleartext by every
-// settings read for a Snowflake datasource in OAuth mode. Matches BigQuery's
-// and Synapse's `enterprise_oauth` handling of the same field.
+// oauth_client_secret was added here for KYO-780 (mirroring what
+// `oauth_auth_mode`'s own `connection_config_fields` already declared this
+// mode owns) and moved to COMMON_SENSITIVE in kyomi_auth::credential_service
+// for KYO-786 — masking is unaffected, see that constant's doc.
 static SNOWFLAKE_META: LazyLock<DatasourceTypeMetadata> =
     LazyLock::new(|| DatasourceTypeMetadata {
         type_id: "snowflake",
@@ -696,7 +714,7 @@ static SNOWFLAKE_META: LazyLock<DatasourceTypeMetadata> =
         // fields at the per-mode level).
         credential_fields: &["username", "password", "private_key"],
         sensitive_credential_fields: &["password", "private_key"],
-        sensitive_connection_config_fields: &["oauth_client_secret"],
+        sensitive_connection_config_fields: &[],
         requires_user_credentials: true,
         accepts_user_context: false,
         auth_modes: leak_auth_modes(vec![
@@ -775,10 +793,8 @@ static SNOWFLAKE_META: LazyLock<DatasourceTypeMetadata> =
 // credential_fields: ["access_token"]
 // sensitive_credential_fields: ["access_token"]
 //
-// sensitive_connection_config_fields: ["oauth_client_secret"] (KYO-780) — see
-// the identical note on Snowflake above; `oauth_auth_mode`'s
-// `connection_config_fields` already declared this mode owns the field, this
-// list had simply never been kept in sync.
+// oauth_client_secret was added here for KYO-780 — see the identical note on
+// Snowflake above — and moved to COMMON_SENSITIVE for KYO-786.
 static DATABRICKS_META: LazyLock<DatasourceTypeMetadata> =
     LazyLock::new(|| DatasourceTypeMetadata {
         type_id: "databricks",
@@ -787,7 +803,7 @@ static DATABRICKS_META: LazyLock<DatasourceTypeMetadata> =
         default_port: Some(443),
         credential_fields: &["access_token"],
         sensitive_credential_fields: &["access_token"],
-        sensitive_connection_config_fields: &["oauth_client_secret"],
+        sensitive_connection_config_fields: &[],
         requires_user_credentials: true,
         accepts_user_context: false,
         auth_modes: leak_auth_modes(vec![
@@ -940,7 +956,9 @@ static SYNAPSE_META: LazyLock<DatasourceTypeMetadata> =
             "oauth_access_token",
             "oauth_refresh_token",
         ],
-        sensitive_connection_config_fields: &["oauth_client_secret"],
+        // oauth_client_secret moved to COMMON_SENSITIVE for KYO-786 (see the
+        // note on BigQuery above).
+        sensitive_connection_config_fields: &[],
         requires_user_credentials: true,
         accepts_user_context: false,
         auth_modes: leak_auth_modes(vec![
@@ -1319,11 +1337,15 @@ mod tests {
 
     #[test]
     fn sensitive_fields_are_correct() {
-        // BigQuery — no sensitive credential fields but has sensitive config
+        // BigQuery — no sensitive credential fields. oauth_client_secret and
+        // service_account_json used to be listed here (KYO-780) but moved to
+        // COMMON_SENSITIVE in kyomi_auth::credential_service for KYO-786, so
+        // this type's own sensitive_connection_config_fields is empty —
+        // masking and at-rest encryption for both fields still happen, just
+        // via COMMON_SENSITIVE instead of this per-type list.
         let bq = get_metadata(&DatasourceType::BigQuery);
         assert!(bq.sensitive_credential_fields.is_empty());
-        assert!(bq.sensitive_connection_config_fields.contains(&"oauth_client_secret"));
-        assert!(bq.sensitive_connection_config_fields.contains(&"service_account_json"));
+        assert!(bq.sensitive_connection_config_fields.is_empty());
 
         // Postgres — password is sensitive, no type-specific sensitive config
         // (ssh_private_key is in COMMON_SENSITIVE in credential_service.rs)
@@ -1336,21 +1358,21 @@ mod tests {
         assert_eq!(rs.sensitive_credential_fields, &["password"]);
 
         // Databricks — access_token is the sensitive credential field; its
-        // "oauth" mode's own oauth_client_secret is sensitive config (KYO-780
-        // — this list had never been kept in sync with `oauth_auth_mode`'s
-        // `connection_config_fields`, which already declared ownership).
+        // "oauth" mode's own oauth_client_secret was sensitive config here
+        // under KYO-780, now moved to COMMON_SENSITIVE for KYO-786 (same as
+        // BigQuery above).
         let db = get_metadata(&DatasourceType::Databricks);
         assert_eq!(db.sensitive_credential_fields, &["access_token"]);
-        assert_eq!(db.sensitive_connection_config_fields, &["oauth_client_secret"]);
+        assert!(db.sensitive_connection_config_fields.is_empty());
 
         // Snowflake — password (password auth mode) and private_key
         // (key-pair auth mode, KYO-330) are both sensitive credential
         // fields; the Python source predates key-pair auth and only had
-        // "password". Its "oauth" mode's own oauth_client_secret is
-        // sensitive config, same KYO-780 fix as Databricks above.
+        // "password". Its "oauth" mode's own oauth_client_secret moved to
+        // COMMON_SENSITIVE for KYO-786, same as Databricks above.
         let sf = get_metadata(&DatasourceType::Snowflake);
         assert_eq!(sf.sensitive_credential_fields, &["password", "private_key"]);
-        assert_eq!(sf.sensitive_connection_config_fields, &["oauth_client_secret"]);
+        assert!(sf.sensitive_connection_config_fields.is_empty());
 
         // Synapse — multiple sensitive fields
         let sy = get_metadata(&DatasourceType::Synapse);
@@ -1358,7 +1380,7 @@ mod tests {
         assert!(sy.sensitive_credential_fields.contains(&"client_secret"));
         assert!(sy.sensitive_credential_fields.contains(&"oauth_access_token"));
         assert!(sy.sensitive_credential_fields.contains(&"oauth_refresh_token"));
-        assert!(sy.sensitive_connection_config_fields.contains(&"oauth_client_secret"));
+        assert!(sy.sensitive_connection_config_fields.is_empty());
     }
 
     #[test]

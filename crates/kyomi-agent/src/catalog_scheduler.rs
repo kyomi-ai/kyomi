@@ -778,6 +778,18 @@ impl CatalogRefreshScheduler {
 
         let row = row?;
 
+        // `row.connection_config` came straight off the SELECT above and may
+        // hold an encrypted `service_account_json` (COMMON_SENSITIVE,
+        // KYO-786) — the JWT exchange below needs the plaintext key file.
+        let decrypted_connection_config =
+            match decrypt_connection_config_secrets(&row.connection_config, &self.encryption_key) {
+                Ok(config) => config,
+                Err(e) => {
+                    warn!(error = %e, "Failed to decrypt connection_config for service account token exchange");
+                    return None;
+                }
+            };
+
         // Exchange service account JWT for access token
         let client = match kyomi_datasource_server::http_client() {
             Ok(c) => c,
@@ -789,7 +801,7 @@ impl CatalogRefreshScheduler {
 
         match kyomi_datasource_server::providers::bigquery::exchange_service_account_jwt(
             &client,
-            &row.connection_config,
+            &decrypted_connection_config,
         )
         .await
         {
@@ -1615,6 +1627,59 @@ mod tests {
     #[test]
     fn default_retention_is_30_days() {
         assert_eq!(DEFAULT_QUERY_HISTORY_RETENTION_DAYS, 30);
+    }
+
+    // -- resolve_service_account_token (KYO-786: service_account_json is now encrypted at rest) --
+
+    #[tokio::test]
+    async fn resolve_service_account_token_returns_none_when_service_account_json_cannot_be_decrypted() {
+        // KYO-786 regression guard: `service_account_json` is now
+        // COMMON_SENSITIVE (encrypted at rest). Ciphertext encrypted with a
+        // key other than the scheduler's own must fail to decrypt and yield
+        // `None` (logged, not panicked) — never be handed to
+        // `exchange_service_account_jwt` as if it were the plaintext key file.
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+
+        let sq = match &db {
+            DbPool::Sqlite(pool) => pool,
+            DbPool::Postgres(_) => unreachable!("test pool is always sqlite"),
+        };
+
+        let wrong_key = [7u8; 32];
+        let bogus_ciphertext =
+            kyomi_auth::encryption::encrypt("{\"type\":\"service_account\"}", &wrong_key)
+                .expect("encrypt fixture");
+        let connection_config = serde_json::json!({
+            "auth_mode": "service_account",
+            "service_account_json": bogus_ciphertext,
+        })
+        .to_string();
+
+        sqlx::query(
+            "INSERT INTO datasource_configs \
+                 (id, workspace_id, name, datasource_type, slug, connection_config) \
+             VALUES ('ds-bq-1', 'ws-1', 'BQ', 'bigquery', 'test-bq', $1)",
+        )
+        .bind(connection_config)
+        .execute(sq)
+        .await
+        .expect("seed datasource_configs");
+
+        let scheduler = CatalogRefreshScheduler::new(
+            db,
+            kyomi_core::kv_store_memory::InMemoryKVStore::new_pool(),
+            std::sync::Arc::new([0u8; 32]),
+            LazyEmbedding::new(),
+            CancellationToken::new(),
+            std::sync::Arc::new(kyomi_core::Config::test_config()),
+        );
+
+        let token = scheduler.resolve_service_account_token().await;
+        assert!(
+            token.is_none(),
+            "an undecryptable service_account_json must never yield a token"
+        );
     }
 
     // -- workspace_billing_gate_blocks (KYO-805: skip lapsed workspaces) --
