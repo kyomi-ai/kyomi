@@ -401,7 +401,7 @@ pub fn SessionManagement() -> impl IntoView {
                         <Button
                             variant=ButtonVariant::Destructive
                             on:click=open_logout_all_dialog
-                            disabled=loading.get_untracked()
+                            disabled=loading
                         >
                             {move || if loading.get() { "Logging out..." } else { "Log Out from All Devices" }}
                         </Button>

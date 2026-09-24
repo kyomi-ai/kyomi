@@ -753,7 +753,7 @@ fn SiteForm(
                         </p>
                     </div>
                     <div class="flex items-center gap-2 pt-2">
-                        <Button disabled=saving.get_untracked() on:click=on_submit>
+                        <Button disabled=saving on:click=on_submit>
                             {if is_editing { "Save Changes" } else { "Create Site" }}
                         </Button>
                         <Button variant=ButtonVariant::Outline on:click=on_cancel>

@@ -651,6 +651,11 @@ fn TeamPageInner() -> impl IntoView {
                             <label class="block text-sm font-medium text-foreground mb-1">
                                 "Role"
                             </label>
+                            // KYO-793: correct one-time seed, not a stale-render bug.
+                            // This is inside `Modal`'s `ChildrenFn`, which lives in a
+                            // `<Show>` and is unmounted/re-invoked fresh on every open
+                            // (see modal.rs); `invite_role` is reset to "user" before
+                            // each close, so this snapshot is retaken on every reopen.
                             <crate::components::StaticSelect
                                 value=invite_role.get_untracked()
                                 options=vec![
