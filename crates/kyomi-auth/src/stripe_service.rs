@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use stripe::{Client, StripeError};
 use stripe_billing::{
-    invoice::ListInvoice,
+    invoice::{ListInvoice, PayInvoice, RetrieveInvoice},
     subscription::{
         CancelSubscription, CreateSubscription, CreateSubscriptionItems, RetrieveSubscription,
         UpdateSubscription,
@@ -20,15 +20,15 @@ use stripe_billing::{
 use stripe_checkout::checkout_session::{
     CreateCheckoutSession, CreateCheckoutSessionAutomaticTax, CreateCheckoutSessionCustomText,
     CreateCheckoutSessionCustomerUpdate, CreateCheckoutSessionLineItems,
-    CreateCheckoutSessionPaymentMethodTypes, CreateCheckoutSessionSubscriptionData,
-    CreateCheckoutSessionTaxIdCollection, CreateCheckoutSessionCustomerUpdateName,
-    CreateCheckoutSessionCustomerUpdateAddress, CustomTextPositionParam,
-    RetrieveCheckoutSession,
+    CreateCheckoutSessionPaymentMethodTypes, CreateCheckoutSessionSetupIntentData,
+    CreateCheckoutSessionSubscriptionData, CreateCheckoutSessionTaxIdCollection,
+    CreateCheckoutSessionCustomerUpdateName, CreateCheckoutSessionCustomerUpdateAddress,
+    CustomTextPositionParam, RetrieveCheckoutSession,
 };
 use stripe_checkout::CheckoutSessionMode;
-use stripe_core::customer::CreateCustomer;
+use stripe_core::customer::{CreateCustomer, UpdateCustomer, UpdateCustomerInvoiceSettings};
 use stripe_shared::{
-    Subscription, SubscriptionStatus,
+    CheckoutSession, Invoice, InvoiceStatus, Subscription, SubscriptionStatus,
 };
 use stripe_types::Expandable;
 use stripe_webhook::Webhook;
@@ -88,6 +88,15 @@ pub struct EmbeddedCheckoutParams {
     pub workspace_id: String,
     pub quantity: u64,
     pub trial_days: u32,
+}
+
+/// Parameters for creating an embedded Setup-mode Checkout Session used to
+/// recover a `past_due` subscription (KYO-806 A3) — the customer adds or
+/// updates a card without a second subscription ever being created.
+#[derive(Debug)]
+pub struct RecoverySetupSessionParams {
+    pub customer_id: String,
+    pub workspace_id: String,
 }
 
 /// Parameters for creating an embedded payment checkout session (bundle purchases).
@@ -987,6 +996,209 @@ impl StripeService {
             status,
             payment_status,
         })
+    }
+
+    // ── Payment recovery (KYO-806 A3/A4) ─────────────────────────────────
+
+    /// Create an embedded Setup-mode Checkout Session for an existing Stripe
+    /// customer, used to recover a `past_due` subscription.
+    ///
+    /// Unlike [`Self::create_embedded_checkout_session`] (mode
+    /// `subscription`), this never creates a subscription — it only
+    /// collects/updates a card via a `SetupIntent`. Stripe does not
+    /// automatically apply the resulting payment method to any existing
+    /// subscription or pay any open invoice for a `setup`-mode session;
+    /// `crate::payment_recovery` does both explicitly once the session
+    /// completes.
+    ///
+    /// Metadata carrying `workspace_id`, `app`, `brand`, and the recovery
+    /// purpose marker is set on both the session itself (what
+    /// [`Self::retrieve_checkout_session_with_setup_intent`] reads back) and
+    /// the resulting `SetupIntent` (via `setup_intent_data`, for parity with
+    /// every other object this codebase tags and so the purpose is visible
+    /// directly on the SetupIntent in the Stripe dashboard).
+    ///
+    /// `currency` is intentionally omitted: per the crate's own doc comment
+    /// on `CreateCheckoutSession::currency` ("Required in `setup` mode when
+    /// `payment_method_types` is not set"), it's only mandatory when
+    /// `payment_method_types` is absent, and this call always sets it to
+    /// `[Card]`.
+    pub async fn create_recovery_setup_session(
+        &self,
+        params: &RecoverySetupSessionParams,
+    ) -> Result<EmbeddedCheckoutResult, StripeError> {
+        let metadata: std::collections::HashMap<String, String> = [
+            ("workspace_id".to_string(), params.workspace_id.clone()),
+            ("app".to_string(), "kyomi".to_string()),
+            ("brand".to_string(), "kyomi".to_string()),
+            (
+                "purpose".to_string(),
+                crate::payment_recovery::RECOVERY_PURPOSE_MARKER.to_string(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+
+        let setup_intent_data = CreateCheckoutSessionSetupIntentData {
+            metadata: Some(metadata.clone()),
+            ..Default::default()
+        };
+
+        let session = CreateCheckoutSession::new()
+            .customer(&params.customer_id)
+            .mode(CheckoutSessionMode::Setup)
+            .ui_mode(stripe_shared::CheckoutSessionUiMode::Embedded)
+            .redirect_on_completion(stripe_shared::CheckoutSessionRedirectOnCompletion::Never)
+            .payment_method_types(vec![CreateCheckoutSessionPaymentMethodTypes::Card])
+            .setup_intent_data(setup_intent_data)
+            .metadata(metadata)
+            .send(&self.client)
+            .await?;
+
+        tracing::info!(
+            session_id = %session.id,
+            workspace_id = %params.workspace_id,
+            "Created payment-recovery setup session"
+        );
+
+        let client_secret = session.client_secret.ok_or_else(|| {
+            StripeError::ClientError(
+                "Recovery setup session created but no client_secret returned".into(),
+            )
+        })?;
+
+        Ok(EmbeddedCheckoutResult {
+            session_id: session.id.to_string(),
+            client_secret,
+        })
+    }
+
+    /// Retrieve a Checkout Session with its `setup_intent` expanded — the
+    /// read side of [`Self::create_recovery_setup_session`]. Needed to learn
+    /// the `SetupIntent`'s status and the payment method it collected.
+    pub async fn retrieve_checkout_session_with_setup_intent(
+        &self,
+        session_id: &str,
+    ) -> Result<CheckoutSession, StripeError> {
+        RetrieveCheckoutSession::new(session_id.to_string())
+            .expand(vec!["setup_intent".to_string()])
+            .send(&self.client)
+            .await
+    }
+
+    /// Retrieve a Checkout Session with its `subscription` expanded — used
+    /// by `sync_checkout_subscription` (KYO-806 A4) to learn the
+    /// subscription a completed `subscription`-mode session created,
+    /// without waiting for the `customer.subscription.created` webhook.
+    pub async fn retrieve_checkout_session_with_subscription(
+        &self,
+        session_id: &str,
+    ) -> Result<CheckoutSession, StripeError> {
+        RetrieveCheckoutSession::new(session_id.to_string())
+            .expand(vec!["subscription".to_string()])
+            .send(&self.client)
+            .await
+    }
+
+    /// Retrieve a subscription by ID.
+    ///
+    /// Public wrapper around the same retry-classified retrieval
+    /// [`Self::update_subscription`] and [`Self::update_seat_count`] already
+    /// perform internally — exposed here for `crate::payment_recovery`,
+    /// which needs the freshly-retrieved `Subscription` object to
+    /// re-`parse_subscription_data` after paying the open invoice(s).
+    pub async fn retrieve_subscription(
+        &self,
+        subscription_id: &str,
+    ) -> Result<Subscription, StripeError> {
+        kyomi_core::retry::retry_with_backoff_classified(
+            || async { RetrieveSubscription::new(subscription_id).send(&self.client).await },
+            is_stripe_transient,
+        )
+        .await
+    }
+
+    /// Set `payment_method_id` as the default payment method on both the
+    /// customer (`invoice_settings.default_payment_method`, used for future
+    /// invoices in general) and the subscription (`default_payment_method`,
+    /// which takes precedence for that subscription's own invoices) —
+    /// KYO-806 A3 step 2. Both must be set: the customer-level default is
+    /// what a *new* subscription or a portal-driven change would otherwise
+    /// fall back to, but the subscription-level default is what
+    /// [`Self::pay_invoice`] (and Stripe's own automatic retry) prefers for
+    /// this specific subscription's invoices.
+    pub async fn set_default_payment_method(
+        &self,
+        customer_id: &str,
+        subscription_id: &str,
+        payment_method_id: &str,
+    ) -> Result<(), StripeError> {
+        UpdateCustomer::new(customer_id)
+            .invoice_settings(UpdateCustomerInvoiceSettings {
+                default_payment_method: Some(payment_method_id.to_string()),
+                ..Default::default()
+            })
+            .send(&self.client)
+            .await?;
+
+        UpdateSubscription::new(subscription_id)
+            .default_payment_method(payment_method_id)
+            .send(&self.client)
+            .await?;
+
+        tracing::info!(
+            customer_id,
+            subscription_id,
+            "Set default payment method on customer and subscription after recovery"
+        );
+
+        Ok(())
+    }
+
+    /// List a subscription's `open` invoices — the ones payment recovery
+    /// must pay. Returns the raw `stripe_shared::Invoice` objects (not the
+    /// `InvoiceData` DTO [`Self::list_invoices`] returns) because recovery
+    /// needs the invoice `id` to pay it and `hosted_invoice_url` /
+    /// `status` for outcome classification, none of which `InvoiceData`
+    /// carries.
+    pub async fn list_open_invoices(
+        &self,
+        subscription_id: &str,
+    ) -> Result<Vec<Invoice>, StripeError> {
+        let invoices = ListInvoice::new()
+            .subscription(subscription_id)
+            .status(InvoiceStatus::Open)
+            .send(&self.client)
+            .await?;
+
+        Ok(invoices.data)
+    }
+
+    /// Attempt to pay a single invoice with a specific payment method.
+    ///
+    /// Returns the updated `Invoice` on success. Stripe rejects the call
+    /// with an error (rather than returning a still-open invoice) for a
+    /// declined card or a payment that requires additional authentication —
+    /// `crate::payment_recovery` classifies both the `Ok` and `Err` cases.
+    pub async fn pay_invoice(
+        &self,
+        invoice_id: &str,
+        payment_method_id: &str,
+    ) -> Result<Invoice, StripeError> {
+        PayInvoice::new(invoice_id.to_string())
+            .payment_method(payment_method_id)
+            .send(&self.client)
+            .await
+    }
+
+    /// Retrieve an invoice's current state — used by `crate::payment_recovery`
+    /// to check whether an invoice [`Self::pay_invoice`] errored on was
+    /// actually already paid by a concurrent webhook-driven attempt (the
+    /// server-fn completion call and the webhook backstop can race).
+    pub async fn retrieve_invoice(&self, invoice_id: &str) -> Result<Invoice, StripeError> {
+        RetrieveInvoice::new(invoice_id.to_string())
+            .send(&self.client)
+            .await
     }
 
     // ── Billing Portal ───────────────────────────────────────────────────

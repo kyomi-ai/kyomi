@@ -29,6 +29,7 @@ pub mod home;
 pub mod knowledge;
 pub mod onboarding;
 pub mod ownership;
+pub mod paywall_client;
 pub mod profile;
 pub(crate) mod provider_cache;
 pub mod security;
@@ -783,6 +784,26 @@ mod kyo_805_billing_gate_allowlist_tests {
             ),
             (
                 "pub async fn create_checkout(",
+                "\n/// Fetch the details the full-screen billing paywall renders from",
+                "AuthenticatedContext::extract_allow_lapsed()",
+            ),
+            (
+                "pub async fn get_billing_paywall() -> Result<BillingPaywall, ServerFnError> {",
+                "\n/// Start past-due payment recovery:",
+                "AuthenticatedContext::extract_allow_lapsed()",
+            ),
+            (
+                "pub async fn start_payment_recovery() -> Result<EmbeddedCheckoutSession, ServerFnError> {",
+                "\n/// Complete past-due payment recovery",
+                "AuthenticatedContext::extract_allow_lapsed()",
+            ),
+            (
+                "pub async fn complete_payment_recovery(",
+                "\n/// Sync a completed new-subscription Checkout Session's resulting",
+                "AuthenticatedContext::extract_allow_lapsed()",
+            ),
+            (
+                "pub async fn sync_checkout_subscription(session_id: String) -> Result<(), ServerFnError> {",
                 "\n/// Cancel the current subscription at period end.",
                 "AuthenticatedContext::extract_allow_lapsed()",
             ),
@@ -845,5 +866,125 @@ mod kyo_805_billing_gate_allowlist_tests {
             );
             assert!(!body.contains("extract_allow_lapsed"));
         }
+    }
+}
+
+/// KYO-806: closes the class on a future `#[server(...)]` silently bypassing
+/// the paywall.
+///
+/// `server_fn` 0.8 has no global request/response hook (see
+/// `paywall_client`'s module doc) — every `#[server(...)]` attribute must
+/// individually opt in to 402 interception via
+/// `client = crate::server_fns::paywall_client::PaywallAwareClient`. Nothing
+/// stops a future server fn from being added without that argument (the
+/// macro silently falls back to the default `BrowserClient`, which never
+/// calls `report_payment_required`) — this test scans every `#[server(...)]`
+/// attribute in every file under `server_fns/` by source inspection (same
+/// technique `kyo_805_billing_gate_allowlist_tests` uses, for the same
+/// reason: this is compile-time source text, not something a runtime test
+/// against a live request context can observe) and fails if even one is
+/// missing the client override.
+#[cfg(all(test, feature = "ssr"))]
+mod kyo_806_paywall_client_allowlist_tests {
+    const AI_SRC: &str = include_str!("ai.rs");
+    const ANALYTICS_SRC: &str = include_str!("analytics.rs");
+    const AUTH_SRC: &str = include_str!("auth.rs");
+    const BILLING_SRC: &str = include_str!("billing.rs");
+    const CHAT_SRC: &str = include_str!("chat.rs");
+    const COLLECTIONS_SRC: &str = include_str!("collections.rs");
+    const CONNECT_SRC: &str = include_str!("connect.rs");
+    const CONTEXT_SRC: &str = include_str!("context.rs");
+    const COPILOT_SRC: &str = include_str!("copilot.rs");
+    const DASHBOARDS_SRC: &str = include_str!("dashboards.rs");
+    const DATASOURCE_OAUTH_SRC: &str = include_str!("datasource_oauth.rs");
+    const DATASOURCES_SRC: &str = include_str!("datasources.rs");
+    const FEEDBACK_SRC: &str = include_str!("feedback.rs");
+    const HOME_SRC: &str = include_str!("home.rs");
+    const KNOWLEDGE_SRC: &str = include_str!("knowledge.rs");
+    const ONBOARDING_SRC: &str = include_str!("onboarding.rs");
+    const OWNERSHIP_SRC: &str = include_str!("ownership.rs");
+    const PROFILE_SRC: &str = include_str!("profile.rs");
+    const SECURITY_SRC: &str = include_str!("security.rs");
+    const SETUP_SRC: &str = include_str!("setup.rs");
+    const SIDEBAR_SRC: &str = include_str!("sidebar.rs");
+    const SLACK_SRC: &str = include_str!("slack.rs");
+    const SQL_EDITOR_SRC: &str = include_str!("sql_editor.rs");
+    const TEAM_SRC: &str = include_str!("team.rs");
+    const UNSUBSCRIBE_SRC: &str = include_str!("unsubscribe.rs");
+    const USAGE_SRC: &str = include_str!("usage.rs");
+    const WATCHES_SRC: &str = include_str!("watches.rs");
+    const WORKSPACE_SRC: &str = include_str!("workspace.rs");
+
+    /// Every file under `server_fns/` that declares at least one
+    /// `#[server(...)]` attribute, paired with its source text. Extending
+    /// this list is how a newly-added `server_fns/*.rs` file gets covered —
+    /// `all_server_attrs_have_paywall_client` iterates it, so a file added
+    /// here and left off is the only way this test could miss one.
+    const FILES: &[(&str, &str)] = &[
+        ("ai.rs", AI_SRC),
+        ("analytics.rs", ANALYTICS_SRC),
+        ("auth.rs", AUTH_SRC),
+        ("billing.rs", BILLING_SRC),
+        ("chat.rs", CHAT_SRC),
+        ("collections.rs", COLLECTIONS_SRC),
+        ("connect.rs", CONNECT_SRC),
+        ("context.rs", CONTEXT_SRC),
+        ("copilot.rs", COPILOT_SRC),
+        ("dashboards.rs", DASHBOARDS_SRC),
+        ("datasource_oauth.rs", DATASOURCE_OAUTH_SRC),
+        ("datasources.rs", DATASOURCES_SRC),
+        ("feedback.rs", FEEDBACK_SRC),
+        ("home.rs", HOME_SRC),
+        ("knowledge.rs", KNOWLEDGE_SRC),
+        ("onboarding.rs", ONBOARDING_SRC),
+        ("ownership.rs", OWNERSHIP_SRC),
+        ("profile.rs", PROFILE_SRC),
+        ("security.rs", SECURITY_SRC),
+        ("setup.rs", SETUP_SRC),
+        ("sidebar.rs", SIDEBAR_SRC),
+        ("slack.rs", SLACK_SRC),
+        ("sql_editor.rs", SQL_EDITOR_SRC),
+        ("team.rs", TEAM_SRC),
+        ("unsubscribe.rs", UNSUBSCRIBE_SRC),
+        ("usage.rs", USAGE_SRC),
+        ("watches.rs", WATCHES_SRC),
+        ("workspace.rs", WORKSPACE_SRC),
+    ];
+
+    const REQUIRED_CLIENT_ARG: &str =
+        "client = crate::server_fns::paywall_client::PaywallAwareClient";
+
+    #[test]
+    fn all_server_attrs_have_paywall_client() {
+        let mut total_server_attrs = 0usize;
+
+        for (file, src) in FILES {
+            for line in src.lines() {
+                let trimmed = line.trim_start();
+                if !trimmed.starts_with("#[server(") {
+                    continue;
+                }
+                total_server_attrs += 1;
+                assert!(
+                    trimmed.contains(REQUIRED_CLIENT_ARG),
+                    "{file}: found a #[server(...)] attribute missing `{REQUIRED_CLIENT_ARG}` \
+                     (KYO-806) — every server fn in this crate must route through \
+                     PaywallAwareClient so a 402 payment_required response is never silently \
+                     ignored. Offending attribute: {trimmed}"
+                );
+            }
+        }
+
+        // Floor check (same idea as `lib.rs`'s `SERVER_FN_REGISTRY_FLOOR`):
+        // guards against `FILES` silently going stale — a `server_fns/*.rs`
+        // file added without an entry here would make this test vacuously
+        // pass. 205 is the count as of KYO-806; only grows over time.
+        assert!(
+            total_server_attrs >= 205,
+            "expected at least 205 #[server(...)] attributes across FILES, found \
+             {total_server_attrs} — either a server_fns/*.rs file gained a #[server] fn \
+             (fine, just bump this floor) or FILES is missing a file entirely (not fine — \
+             add it, otherwise its server fns are invisible to this allowlist)"
+        );
     }
 }

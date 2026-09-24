@@ -150,7 +150,7 @@ fn execution_to_alert(execution: &kyomi_core::models::WatchExecution) -> AlertIt
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// List all watches in the current workspace.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn list_watches() -> Result<Vec<WatchListItem>, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -167,7 +167,7 @@ pub async fn list_watches() -> Result<Vec<WatchListItem>, ServerFnError> {
 }
 
 /// Create a new watch.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn create_watch(config: WatchConfig) -> Result<WatchListItem, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -243,7 +243,7 @@ pub async fn create_watch(config: WatchConfig) -> Result<WatchListItem, ServerFn
 }
 
 /// Update a watch with partial fields.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn update_watch(
     watch_id: String,
     config: WatchConfig,
@@ -371,7 +371,7 @@ pub async fn update_watch(
 }
 
 /// Delete a watch.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn delete_watch(watch_id: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -391,7 +391,7 @@ pub async fn delete_watch(watch_id: String) -> Result<(), ServerFnError> {
 }
 
 /// Toggle a watch's enabled state.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn toggle_watch(watch_id: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -423,7 +423,7 @@ pub async fn toggle_watch(watch_id: String) -> Result<(), ServerFnError> {
 /// Manually trigger a watch run.
 ///
 /// Checks rate limits and concurrency, then spawns background execution.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn run_watch_now(watch_id: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -497,7 +497,7 @@ pub async fn run_watch_now(watch_id: String) -> Result<(), ServerFnError> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Get execution history for a watch.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_watch_executions(
     watch_id: String,
     limit: Option<i64>,
@@ -520,7 +520,7 @@ pub async fn get_watch_executions(
 }
 
 /// Get a specific execution by ID.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_watch_execution(
     watch_id: String,
     execution_id: i32,
@@ -546,7 +546,7 @@ pub async fn get_watch_execution(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Get alerts history (paginated).
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_alerts(
     watch_id: Option<String>,
     limit: Option<i64>,
@@ -578,7 +578,7 @@ pub async fn get_alerts(
 }
 
 /// Get unread alerts count for the sidebar badge.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_unread_alerts_count() -> Result<i64, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -588,7 +588,7 @@ pub async fn get_unread_alerts_count() -> Result<i64, ServerFnError> {
 }
 
 /// Mark an alert as read.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn mark_alert_read(execution_id: i32) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -598,7 +598,7 @@ pub async fn mark_alert_read(execution_id: i32) -> Result<(), ServerFnError> {
 }
 
 /// Mark an alert as unread.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn mark_alert_unread(execution_id: i32) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -608,7 +608,7 @@ pub async fn mark_alert_unread(execution_id: i32) -> Result<(), ServerFnError> {
 }
 
 /// Soft-delete an alert.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn delete_alert(execution_id: i32) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -618,7 +618,7 @@ pub async fn delete_alert(execution_id: i32) -> Result<(), ServerFnError> {
 }
 
 /// Restore a soft-deleted alert.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn restore_alert(execution_id: i32) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -628,7 +628,7 @@ pub async fn restore_alert(execution_id: i32) -> Result<(), ServerFnError> {
 }
 
 /// Bulk soft-delete alerts.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn bulk_delete_alerts(execution_ids: Vec<i32>) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -656,7 +656,7 @@ pub async fn bulk_delete_alerts(execution_ids: Vec<i32>) -> Result<(), ServerFnE
 }
 
 /// Bulk mark alerts as read.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn bulk_mark_alerts_read(execution_ids: Vec<i32>) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -689,7 +689,7 @@ pub async fn bulk_mark_alerts_read(execution_ids: Vec<i32>) -> Result<(), Server
 }
 
 /// Bulk mark alerts as unread.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn bulk_mark_alerts_unread(execution_ids: Vec<i32>) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -724,7 +724,7 @@ pub async fn bulk_mark_alerts_unread(execution_ids: Vec<i32>) -> Result<(), Serv
 /// Create a chat session from an alert, continuing the conversation.
 ///
 /// Returns the new session_id.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn continue_alert_in_chat(execution_id: i32) -> Result<String, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -747,7 +747,7 @@ pub async fn continue_alert_in_chat(execution_id: i32) -> Result<String, ServerF
 /// consume it as-is. The now-deleted REST route this replaced
 /// (`GET /watches/{watch_id}/executions/{execution_id}/thinking-events`) wrapped
 /// the same data in an envelope object (`{ execution_id, session_id, events }`).
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_thinking_events(
     watch_id: String,
     execution_id: i32,

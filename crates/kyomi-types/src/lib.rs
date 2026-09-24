@@ -7,7 +7,7 @@ pub mod permission;
 pub mod sync;
 pub mod text;
 pub mod websocket;
-pub use billing::PAYMENT_REQUIRED_CODE;
+pub use billing::{BillingLapseReason, PAYMENT_REQUIRED_CODE};
 pub use datasource_contracts::{
     DatasourceOAuthDisconnectResult, DatasourceOAuthRevocationOutcome, DatasourceOAuthStatus,
     GeneratedSshKey,

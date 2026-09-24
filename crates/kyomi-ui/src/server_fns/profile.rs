@@ -18,7 +18,7 @@ use crate::types::{DashboardSummary, InvitationData, ProfileData};
 ///
 /// Combines user info, preferences, chart config, and system config
 /// into a single response — replacing multiple separate REST calls.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_profile() -> Result<ProfileData, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -70,7 +70,7 @@ pub async fn get_profile() -> Result<ProfileData, ServerFnError> {
 }
 
 /// Load dashboards for the default dashboard selector.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_dashboards() -> Result<Vec<DashboardSummary>, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -96,7 +96,7 @@ pub async fn get_dashboards() -> Result<Vec<DashboardSummary>, ServerFnError> {
 }
 
 /// Load pending workspace invitations for the current user.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_pending_invitations() -> Result<Vec<InvitationData>, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -127,7 +127,7 @@ pub async fn get_pending_invitations() -> Result<Vec<InvitationData>, ServerFnEr
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Update the user's display name.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn update_profile_name(name: String) -> Result<(), ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -145,7 +145,7 @@ pub async fn update_profile_name(name: String) -> Result<(), ServerFnError> {
 }
 
 /// Update user theme preference (light, dark, or system).
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn update_theme(theme: String) -> Result<(), ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -163,7 +163,7 @@ pub async fn update_theme(theme: String) -> Result<(), ServerFnError> {
 }
 
 /// Update the user's landing page preference.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn update_landing_page(page: String) -> Result<(), ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -184,7 +184,7 @@ pub async fn update_landing_page(page: String) -> Result<(), ServerFnError> {
 }
 
 /// Update the user's default dashboard.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn update_default_dashboard(dashboard_id: Option<String>) -> Result<(), ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -202,7 +202,7 @@ pub async fn update_default_dashboard(dashboard_id: Option<String>) -> Result<()
 }
 
 /// Update the user's query history retention days.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn update_query_retention(days: i32) -> Result<(), ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -222,7 +222,7 @@ pub async fn update_query_retention(days: i32) -> Result<(), ServerFnError> {
 }
 
 /// Update the user's chart color palette.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn update_chart_palette(palette: String) -> Result<(), ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -270,7 +270,7 @@ fn check_invitation_acceptable(
 /// still pending, and not expired before accepting (KYO-159 — the previous
 /// implementation had no recipient check, allowing any authenticated user to
 /// accept any invitation by ID).
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn accept_invitation(invitation_id: String) -> Result<(), ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -343,7 +343,7 @@ pub async fn accept_invitation(invitation_id: String) -> Result<(), ServerFnErro
 /// Same recipient/state validation as `accept_invitation` (KYO-159 — the
 /// previous implementation let any authenticated user decline any
 /// invitation by ID).
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn decline_invitation(invitation_id: String) -> Result<(), ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -382,7 +382,7 @@ pub struct InvitationDisplay {
 /// Returns `Ok(None)` both when the invitation doesn't exist AND when it
 /// exists but isn't addressed to the authenticated user — the latter case
 /// must not leak invitation existence to a non-recipient.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_invitation_for_accept(
     invitation_id: String,
 ) -> Result<Option<InvitationDisplay>, ServerFnError> {

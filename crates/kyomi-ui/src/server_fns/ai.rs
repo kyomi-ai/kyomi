@@ -187,7 +187,7 @@ async fn load_ai_bundle_remaining_usd(
 
 /// Read the current workspace AI configuration. Any authenticated workspace
 /// member may call this.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_workspace_ai_config() -> Result<WorkspaceAiConfigView, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
     require_saas(&ac.ctx)?;
@@ -212,7 +212,7 @@ pub async fn get_workspace_ai_config() -> Result<WorkspaceAiConfigView, ServerFn
 ///   key is always cleared in that case).
 /// * `base_url` — optional base URL override for BYOK providers.
 /// * `model` — optional default model name.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn update_workspace_ai_config(
     provider: String,
     api_key: Option<String>,
@@ -273,7 +273,7 @@ pub async fn update_workspace_ai_config(
 ///
 /// Never writes to the DB, never logs the key, and never echoes the key into
 /// the returned error message.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn test_workspace_ai_config(
     provider: String,
     api_key: String,
@@ -324,7 +324,7 @@ pub async fn test_workspace_ai_config(
 /// See [`resolve_effective_ai_provider`] for the BYOK-vs-env precedence this
 /// mirrors, and [`ResolvedAiProviderView`] for the security guarantee on
 /// what may appear in the response.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_resolved_ai_provider() -> Result<ResolvedAiProviderView, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
     // Resolution reporting is only meaningful for self-hosted deployments —
@@ -607,7 +607,7 @@ fn extract_error_message(body: &str) -> Option<String> {
 ///
 /// `kyomi` is rejected: Kyomi-credits mode uses the OpenRouter model list
 /// (via [`list_openrouter_models`]) rather than a per-provider live fetch.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn list_workspace_ai_models(
     provider: String,
     api_key: Option<String>,
@@ -947,7 +947,7 @@ fn parse_gemini_models(body: &str) -> Result<Vec<AiModelInfo>, serde_json::Error
 ///
 /// Unlike [`list_workspace_ai_models`] this function is not restricted to
 /// SaaS mode — OpenRouter works in self-hosted deployments too.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn list_openrouter_models(
     force_refresh: bool,
 ) -> Result<Vec<AiModelInfo>, ServerFnError> {

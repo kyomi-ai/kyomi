@@ -43,6 +43,16 @@ pub struct UserContext {
     /// `capabilities["billing_enabled"]` — duplicated here so callers can
     /// check billing gating without reaching into the capabilities map.
     pub billing_enabled: bool,
+    /// Whether this workspace must pay before continuing to use the app.
+    ///
+    /// Read from `auth.workspace.billing_lapsed` — the single computation
+    /// site (`kyomi_core::capability::is_billing_lapsed`, via the `AuthUser`
+    /// extractor) `SidebarUser.billing_lapsed` (KYO-805) also reads. Never
+    /// re-derive this from `subscription_status` here; see
+    /// `SidebarUser::billing_lapsed`'s doc comment for why a naive status
+    /// match gets scheduled-cancellation grace periods wrong. Always
+    /// `false` outside SaaS mode (KYO-806).
+    pub billing_lapsed: bool,
     /// Feature flags — boolean capabilities keyed by name.
     pub capabilities: HashMap<String, bool>,
     /// User's chart color palette preference (e.g. "balanced", "vibrant", "accessible").
@@ -75,7 +85,7 @@ impl UserContext {
 ///
 /// This is called once at the settings shell level and provided via Leptos context
 /// so all settings tabs can read it without re-fetching.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_user_context() -> Result<UserContext, ServerFnError> {
     // lint-allow: server-fn-callouts=this fn's entire purpose is aggregating workspace/capability/permission context from several kyomi_auth services into one RPC (see module doc) — it has no REST counterpart to drift from, so Rule B's drift rationale does not apply
     //
@@ -170,6 +180,7 @@ pub async fn get_user_context() -> Result<UserContext, ServerFnError> {
         is_personal_mode: ctx.config.is_personal(),
         is_self_hosted: ctx.config.self_hosted,
         billing_enabled,
+        billing_lapsed: auth.workspace.billing_lapsed,
         capabilities: caps_map,
         chart_palette,
         permissions,
@@ -229,6 +240,7 @@ mod tests {
             is_personal_mode: false,
             is_self_hosted: false,
             billing_enabled: false,
+            billing_lapsed: false,
             capabilities: HashMap::new(),
             chart_palette: "balanced".to_string(),
             permissions: Vec::new(),

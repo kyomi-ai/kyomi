@@ -56,7 +56,7 @@ pub struct AnalyticsUsageData {
 // ─── Server Functions ───────────────────────────────────────────────────────
 
 /// List all analytics sites for the current workspace.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn list_analytics_sites() -> Result<Vec<AnalyticsSiteData>, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -85,7 +85,7 @@ pub async fn list_analytics_sites() -> Result<Vec<AnalyticsSiteData>, ServerFnEr
 /// Requires `Permission::ManageAnalytics` — checked before every return
 /// path below, including the self-hosted short-circuit, so a self-hosted
 /// non-admin is refused rather than handed a zeroed-out result (KYO-278).
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_analytics_usage() -> Result<AnalyticsUsageData, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -182,7 +182,7 @@ pub async fn get_analytics_usage() -> Result<AnalyticsUsageData, ServerFnError> 
 }
 
 /// Create a new analytics site.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn create_analytics_site(
     name: String,
     allowed_domains: String,
@@ -247,7 +247,7 @@ pub async fn create_analytics_site(
 }
 
 /// Update an existing analytics site.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn update_analytics_site(
     site_id: String,
     name: String,
@@ -302,7 +302,7 @@ pub async fn update_analytics_site(
 }
 
 /// Delete an analytics site.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn delete_analytics_site(site_id: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 

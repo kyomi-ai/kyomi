@@ -62,7 +62,7 @@ pub struct UsageData {
 /// Fetch the AI usage status for the current user's workspace.
 ///
 /// Self-hosted mode returns unlimited usage (no billing).
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_ai_usage_status() -> Result<UsageData, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 

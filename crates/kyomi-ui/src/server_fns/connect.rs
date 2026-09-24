@@ -54,7 +54,7 @@ pub struct ConnectStatusResponse {
 ///
 /// Returns only the fields needed by the Connect Setup page's selection list.
 /// Mirrors `GET /api/v1/datasources` with client-side filtering in the React page.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn list_connect_datasources() -> Result<Vec<ConnectDatasource>, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -80,7 +80,7 @@ pub async fn list_connect_datasources() -> Result<Vec<ConnectDatasource>, Server
 ///
 /// Mirrors `POST /api/v1/datasources` with `connection_type: "connect"`,
 /// followed by automatic token generation (same as the REST route).
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn create_connect_datasource(
     name: String,
     slug: Option<String>,
@@ -166,7 +166,7 @@ pub async fn create_connect_datasource(
 ///
 /// Mirrors `POST /api/v1/datasources/{id}/connect/rotate-token`.
 /// The old token is immediately invalidated (JTI replaced).
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn rotate_connect_token(datasource_id: String) -> Result<String, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -210,7 +210,7 @@ pub async fn rotate_connect_token(datasource_id: String) -> Result<String, Serve
 /// Mirrors `GET /api/v1/datasources/{identifier}/connect/status`. When the
 /// server is running without Redis (single-instance mode), the agent is always
 /// reported as disconnected — matching the REST handler's behavior.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn connect_status(datasource_id: String) -> Result<ConnectStatusResponse, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -249,7 +249,7 @@ pub async fn connect_status(datasource_id: String) -> Result<ConnectStatusRespon
 ///
 /// Mirrors `POST /api/v1/datasources/{identifier}/connect/disconnect`.
 /// Clears the stored JTI so any active token immediately fails verification.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn disconnect_connect_datasource(datasource_id: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -287,7 +287,7 @@ pub async fn disconnect_connect_datasource(datasource_id: String) -> Result<(), 
 /// live agent — no full table/column crawl. Requires the agent to be online;
 /// when it isn't reachable, returns a clear error the UI surfaces as a disabled
 /// "connect the agent to choose schemas" state rather than a hanging spinner.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn discover_connect_containers(
     datasource_id: String,
 ) -> Result<Vec<String>, ServerFnError> {

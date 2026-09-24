@@ -286,6 +286,25 @@ pub fn start_sync_engine(
         }
     });
 
+    // ── Subscribe to error (KYO-806: payment-required sync refusal) ─────────
+    // `handle_sync_bootstrap`/`handle_sync_delta` (apps/server/src/routes/
+    // websocket.rs) refuse a lapsed workspace with a `send_error` carrying
+    // `error_code == kyomi_types::PAYMENT_REQUIRED_CODE` — the *only* code
+    // that must flip this tab into the paywall. The `Unverifiable` refusal
+    // ("try again shortly") carries no code at all and must not (see
+    // `billing_refusal_message`'s doc comment on the server side), so this
+    // checks the code, never just "did an error arrive".
+    let unsub_error = ws.subscribe("error", move |msg| {
+        let error_code = msg
+            .data
+            .as_ref()
+            .and_then(|d| d.get("error_code"))
+            .and_then(|v| v.as_str());
+        if crate::utils::billing_lapse::is_payment_required_error_code(error_code) {
+            crate::utils::billing_lapse::report_payment_required();
+        }
+    });
+
     // ── Register cleanup ──────────────────────────────────────────────────────
     // Unsubscribe when the component that called start_sync_engine is dropped.
     // The unsubscribe closures are `Box<dyn FnOnce()>` which is !Send, so wrap
@@ -293,10 +312,12 @@ pub fn start_sync_engine(
     let unsub_action = SendWrapper::new(unsub_action);
     let unsub_complete = SendWrapper::new(unsub_complete);
     let unsub_reset = SendWrapper::new(unsub_reset);
+    let unsub_error = SendWrapper::new(unsub_error);
     on_cleanup(move || {
         unsub_action.take()();
         unsub_complete.take()();
         unsub_reset.take()();
+        unsub_error.take()();
     });
 
     // ── Watch connection state to send bootstrap or delta on connect ────────

@@ -42,7 +42,6 @@ ssr = [
     "dep:arrow-schema",
     "dep:arrow-array",
     "dep:arrow-ipc",
-    "dep:futures-util",
     "dep:reqwest",
 ]
 # Client-side hydration — compiles to WASM, no server deps
@@ -214,8 +213,14 @@ arrow-schema = { workspace = true, optional = true }
 arrow-array = { workspace = true, optional = true }
 arrow-ipc = { workspace = true, optional = true }
 
-# Futures (for StreamExt in streaming query server functions — server-only)
-futures-util = { workspace = true, optional = true }
+# Futures — StreamExt in streaming query server functions (server-only), AND
+# the `Stream`/`Sink` bounds `server_fns::paywall_client::PaywallAwareClient`
+# (KYO-806) must name in its `open_websocket` signature, which also compiles
+# under `hydrate`. Unconditional (not `ssr`-optional) for that reason.
+futures-util = { workspace = true }
+# `Bytes` — the `open_websocket` item type `PaywallAwareClient` (KYO-806)
+# forwards to `server_fn::client::browser::BrowserClient`'s own signature.
+bytes = { workspace = true }
 
 # Enterprise crates (optional, behind feature flags)
 kyomi-slack = { path = "../../enterprise/kyomi-slack", optional = true }

@@ -65,7 +65,7 @@ async fn get_current_workspace(
 /// List all workspace members with user details.
 ///
 /// Mirrors `GET /api/v1/workspaces/members` in workspaces.rs.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn list_workspace_members() -> Result<Vec<TeamMember>, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -95,7 +95,7 @@ pub async fn list_workspace_members() -> Result<Vec<TeamMember>, ServerFnError> 
 /// Update a member's role. Requires admin.
 ///
 /// Mirrors `PATCH /api/v1/workspaces/members/{id}/role` in workspaces.rs.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn update_member_role(user_id: String, role: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
     ac.require(Permission::ManageTeam, "Workspace admin access required")?;
@@ -140,7 +140,7 @@ pub async fn update_member_role(user_id: String, role: String) -> Result<(), Ser
 /// Remove a member from the workspace. Requires admin.
 ///
 /// Mirrors `DELETE /api/v1/workspaces/members/{id}` in workspaces.rs.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn remove_member(user_id: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
     ac.require(Permission::ManageTeam, "Workspace admin access required")?;
@@ -168,7 +168,7 @@ pub async fn remove_member(user_id: String) -> Result<(), ServerFnError> {
 /// List pending invitations for the workspace. Requires admin.
 ///
 /// Mirrors `GET /api/v1/workspaces/invitations` in workspaces.rs.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn list_workspace_invitations() -> Result<Vec<TeamInvitation>, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
     ac.require(Permission::ManageTeam, "Workspace admin access required")?;
@@ -203,7 +203,7 @@ pub async fn list_workspace_invitations() -> Result<Vec<TeamInvitation>, ServerF
 /// Create a new invitation. Requires admin.
 ///
 /// Mirrors `POST /api/v1/workspaces/invitations` in workspaces.rs.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn invite_member(email: String, role: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
     ac.require(Permission::ManageTeam, "Workspace admin access required")?;
@@ -281,7 +281,7 @@ pub async fn invite_member(email: String, role: String) -> Result<(), ServerFnEr
 /// Cancel a pending invitation. Requires admin.
 ///
 /// Mirrors `DELETE /api/v1/workspaces/invitations/{id}` in workspaces.rs.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn cancel_invitation(invitation_id: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
     ac.require(Permission::ManageTeam, "Workspace admin access required")?;
@@ -310,7 +310,7 @@ pub async fn cancel_invitation(invitation_id: String) -> Result<(), ServerFnErro
 /// List ownership transfers for the current user.
 ///
 /// Mirrors `GET /api/v1/workspaces/ownership/transfers` in workspaces.rs.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn list_ownership_transfers() -> Result<Vec<OwnershipTransferData>, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -341,7 +341,7 @@ pub async fn list_ownership_transfers() -> Result<Vec<OwnershipTransferData>, Se
 /// Cancel an ownership transfer. Only the initiator can cancel.
 ///
 /// Mirrors `DELETE /api/v1/workspaces/ownership/transfer/{id}` in workspaces.rs.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn cancel_ownership_transfer(transfer_id: String) -> Result<(), ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -373,7 +373,7 @@ pub async fn cancel_ownership_transfer(transfer_id: String) -> Result<(), Server
 ///
 /// Mirrors `POST /api/v1/workspaces/ownership/transfer` in workspaces.rs.
 /// Only the workspace owner can call this.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn initiate_ownership_transfer(to_user_id: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 

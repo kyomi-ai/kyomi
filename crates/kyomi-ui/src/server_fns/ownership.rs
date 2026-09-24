@@ -43,7 +43,7 @@ pub struct OwnershipTransfer {
 ///
 /// Mirrors the React flow: fetch all pending transfers for the user,
 /// find the one matching `transfer_id`, verify status == "pending".
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_ownership_transfer(
     transfer_id: String,
 ) -> Result<Option<OwnershipTransfer>, ServerFnError> {
@@ -70,7 +70,7 @@ pub async fn get_ownership_transfer(
 /// Accept an ownership transfer. Only the recipient can accept.
 ///
 /// Mirrors `POST /api/v1/workspaces/ownership/transfer/{id}/accept`.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn accept_ownership_transfer(
     transfer_id: String,
 ) -> Result<(), ServerFnError> {
@@ -125,7 +125,7 @@ pub async fn accept_ownership_transfer(
 /// Decline an ownership transfer. Only the recipient can decline.
 ///
 /// Mirrors `POST /api/v1/workspaces/ownership/transfer/{id}/decline`.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn decline_ownership_transfer(
     transfer_id: String,
 ) -> Result<(), ServerFnError> {

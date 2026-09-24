@@ -231,20 +231,60 @@ pub fn get_user_limit(workspace: &Workspace, tier: SubscriptionTier) -> i32 {
 ///     until that signal is actually present, rather than inferring intent
 ///     from its absence.
 /// - `Active` → never lapsed.
+///
+/// Defined as `billing_lapse_reason(workspace, now).is_some()` (KYO-806) —
+/// see that function for the typed reason behind each lapsed case. Kept as
+/// its own named predicate (rather than inlining `.is_some()` at every call
+/// site) because most callers only need the boolean and `bool` reads better
+/// than `Option<_>.is_some()` at those sites.
 pub fn is_billing_lapsed(workspace: &Workspace, now: DateTime<Utc>) -> bool {
+    billing_lapse_reason(workspace, now).is_some()
+}
+
+/// The typed reason `workspace`'s billing is currently lapsed, or `None` if
+/// it isn't (KYO-806).
+///
+/// This is the ONE implementation of the lapsed rule — [`is_billing_lapsed`]
+/// is defined in terms of this function's `.is_some()`, never the reverse
+/// and never a second, independent match. See [`is_billing_lapsed`]'s doc
+/// comment (reproduced here only where the reason mapping needs its own
+/// note) for the full reasoning behind each branch:
+/// - `PastDue` → [`kyomi_types::BillingLapseReason::PaymentFailed`].
+/// - `Cancelled`, unless it's a scheduled cancellation still inside its
+///   paid-up grace period → [`kyomi_types::BillingLapseReason::SubscriptionEnded`].
+/// - `Trialing` with no live Stripe subscription and an expired
+///   `trial_ends_at` → [`kyomi_types::BillingLapseReason::TrialEnded`].
+/// - Everything else (including `Active`, and every "not actually lapsed"
+///   sub-case of `Cancelled`/`Trialing` documented on [`is_billing_lapsed`])
+///   → `None`.
+pub fn billing_lapse_reason(
+    workspace: &Workspace,
+    now: DateTime<Utc>,
+) -> Option<kyomi_types::BillingLapseReason> {
+    use kyomi_types::BillingLapseReason;
+
     match workspace.subscription_status {
-        SubscriptionStatus::PastDue => true,
+        SubscriptionStatus::PastDue => Some(BillingLapseReason::PaymentFailed),
         SubscriptionStatus::Cancelled => {
             let scheduled_cancellation = workspace.stripe_subscription_id.is_some()
                 && workspace
                     .subscription_period_end
                     .is_some_and(|period_end| period_end > now);
-            !scheduled_cancellation
+            if scheduled_cancellation {
+                None
+            } else {
+                Some(BillingLapseReason::SubscriptionEnded)
+            }
         }
-        SubscriptionStatus::Active => false,
+        SubscriptionStatus::Active => None,
         SubscriptionStatus::Trialing => {
-            workspace.stripe_subscription_id.is_none()
-                && workspace.trial_ends_at.is_some_and(|trial_ends_at| trial_ends_at < now)
+            let expired_no_stripe_trial = workspace.stripe_subscription_id.is_none()
+                && workspace.trial_ends_at.is_some_and(|trial_ends_at| trial_ends_at < now);
+            if expired_no_stripe_trial {
+                Some(BillingLapseReason::TrialEnded)
+            } else {
+                None
+            }
         }
     }
 }
@@ -1075,6 +1115,75 @@ mod tests {
         ws.stripe_subscription_id = None;
         ws.trial_ends_at = None;
         assert!(!is_billing_lapsed(&ws, Utc::now()));
+    }
+
+    // ─── billing_lapse_reason (KYO-806) ────────────────────────────────
+    //
+    // is_billing_lapsed is now `billing_lapse_reason(..).is_some()`, so its
+    // tests above already cover the lapsed/not-lapsed boundary. These tests
+    // cover the one thing they can't: which reason each lapsed case maps to.
+
+    use kyomi_types::BillingLapseReason;
+
+    #[test]
+    fn billing_lapse_reason_past_due_is_payment_failed() {
+        let mut ws = test_workspace(SubscriptionTier::Cloud, 0.0);
+        ws.subscription_status = SubscriptionStatus::PastDue;
+        assert_eq!(
+            billing_lapse_reason(&ws, Utc::now()),
+            Some(BillingLapseReason::PaymentFailed)
+        );
+    }
+
+    #[test]
+    fn billing_lapse_reason_cancelled_not_scheduled_is_subscription_ended() {
+        let ws = test_workspace(SubscriptionTier::Cloud, 0.0);
+        let mut ws = ws;
+        ws.subscription_status = SubscriptionStatus::Cancelled;
+        ws.stripe_subscription_id = None;
+        assert_eq!(
+            billing_lapse_reason(&ws, Utc::now()),
+            Some(BillingLapseReason::SubscriptionEnded)
+        );
+    }
+
+    #[test]
+    fn billing_lapse_reason_cancelled_scheduled_grace_period_is_none() {
+        let now = Utc::now();
+        let mut ws = test_workspace(SubscriptionTier::Cloud, 0.0);
+        ws.subscription_status = SubscriptionStatus::Cancelled;
+        ws.stripe_subscription_id = Some("sub_live_123".to_string());
+        ws.subscription_period_end = Some(now + chrono::Duration::days(5));
+        assert_eq!(billing_lapse_reason(&ws, now), None);
+    }
+
+    #[test]
+    fn billing_lapse_reason_trialing_no_sub_expired_is_trial_ended() {
+        let now = Utc::now();
+        let mut ws = test_workspace(SubscriptionTier::Cloud, 0.0);
+        ws.subscription_status = SubscriptionStatus::Trialing;
+        ws.stripe_subscription_id = None;
+        ws.trial_ends_at = Some(now - chrono::Duration::days(1));
+        assert_eq!(
+            billing_lapse_reason(&ws, now),
+            Some(BillingLapseReason::TrialEnded)
+        );
+    }
+
+    #[test]
+    fn billing_lapse_reason_active_is_none() {
+        let ws = test_workspace(SubscriptionTier::Cloud, 0.0);
+        assert_eq!(billing_lapse_reason(&ws, Utc::now()), None);
+    }
+
+    #[test]
+    fn billing_lapse_reason_trialing_with_sub_is_none_even_if_trial_end_passed() {
+        let now = Utc::now();
+        let mut ws = test_workspace(SubscriptionTier::Cloud, 0.0);
+        ws.subscription_status = SubscriptionStatus::Trialing;
+        ws.stripe_subscription_id = Some("sub_live_123".to_string());
+        ws.trial_ends_at = Some(now - chrono::Duration::days(1));
+        assert_eq!(billing_lapse_reason(&ws, now), None);
     }
 
     // ─── billing_gate_blocks ────────────────────────────────────────────
