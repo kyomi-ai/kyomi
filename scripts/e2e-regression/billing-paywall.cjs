@@ -33,8 +33,8 @@
 //   3. Active workspace: no paywall, normal sidebar + page content.
 //   4. 402-while-open: an already-open, already-authenticated tab (loaded
 //      while active) locks into the paywall after the workspace is lapsed
-//      out from under it and a same-tab client-side navigation fires the
-//      next server-fn call — without a full page reload.
+//      out from under it and Create Dashboard fires a gated server-fn call
+//      — without a full page reload.
 //
 // The workspace is lapsed via `subscription_status = 'past_due'` with no
 // `stripe_subscription_id` on the row (the seeded workspace never had a
@@ -274,9 +274,9 @@ async function scenarioNonOwnerLapsed(browser) {
 /**
  * 402-while-open: load the app while the workspace is active, THEN lapse
  * the workspace out from under the open tab via the direct DB mutation, then
- * drive a same-tab client-side navigation (a real `<a>` click, not
- * `page.goto`) so the resulting server-fn call is the one that should
- * observe the 402 and flip `PaywallAwareClient`'s `report_payment_required`.
+ * click Create Dashboard so its `create_dashboard` server-fn call is the
+ * one that should observe the 402 and flip `PaywallAwareClient`'s
+ * `report_payment_required`.
  * Asserts the paywall appears WITHOUT a full page reload — i.e. this is not
  * just "the paywall shows on the next full navigation", which
  * `assertPaywallAtPath`'s `page.goto` calls would not distinguish from a
@@ -299,32 +299,40 @@ async function scenario402WhileOpen(browser, activeState) {
       return;
     }
 
-    // Track navigations — a full page reload/goto would show up as a
-    // `framenavigated` event with a non-fragment URL change. A same-tab
-    // client-side route swap driven by the Leptos router does NOT trigger
-    // one, so its absence here is what proves this wasn't just a reload.
-    let navigated = false;
-    page.on('framenavigated', (frame) => {
-      if (frame === page.mainFrame()) navigated = true;
-    });
+    const urlBefore = page.url();
+    const timeOriginBefore = await page.evaluate(() => performance.timeOrigin);
 
     lapseWorkspace();
 
-    // Trigger a same-tab client-side navigation, which fires a fresh
-    // server-fn call for the destination page's data — that call is what
-    // should come back 402 and flip `PaywallAwareClient`.
-    const chatsLink = page.locator('a:has-text("Chats")').first();
-    if ((await chatsLink.count()) === 0) {
-      fail('402-while-open: could not find a nav link to trigger a client-side navigation');
-      return;
-    }
-    await chatsLink.click();
-    await page.waitForTimeout(3000);
-
-    if (navigated) {
-      fail('402-while-open: a full page navigation occurred — this scenario needs a same-tab client-side route change to prove the 402 interception, not a reload');
+    // Register the response waiter before clicking so a fast server-fn
+    // response cannot be missed. This action cannot be served from the
+    // client cache as the old Chats navigation could be.
+    const responsePromise = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname.endsWith('/create_dashboard') &&
+        response.request().method() === 'POST',
+      { timeout: 15000 }
+    );
+    await page.getByRole('button', { name: 'Create Dashboard' }).click();
+    const response = await responsePromise;
+    if (response.status() !== 402) {
+      fail(`402-while-open: create_dashboard returned HTTP ${response.status()}, expected 402`);
     } else {
-      ok('402-while-open: no full page navigation occurred');
+      ok('402-while-open: create_dashboard returned HTTP 402');
+    }
+
+    await page.waitForTimeout(1500);
+    const timeOriginAfter = await page.evaluate(() => performance.timeOrigin);
+    if (timeOriginAfter !== timeOriginBefore) {
+      fail('402-while-open: performance.timeOrigin changed — the document reloaded');
+    } else {
+      ok('402-while-open: performance.timeOrigin unchanged — no document reload');
+    }
+
+    if (page.url() !== urlBefore) {
+      fail(`402-while-open: URL changed from ${urlBefore} to ${page.url()}`);
+    } else {
+      ok('402-while-open: URL stayed at /dashboards');
     }
 
     if (!(await paywallIsPresent(page))) {
@@ -343,9 +351,10 @@ async function scenario402WhileOpen(browser, activeState) {
 
 (async () => {
   const originalState = captureWorkspaceSubscriptionState();
-  const browser = await chromium.launch({ headless: true });
+  let browser;
 
   try {
+    browser = await chromium.launch({ headless: true });
     await scenarioActiveUser(browser);
 
     lapseWorkspace();
@@ -356,9 +365,12 @@ async function scenario402WhileOpen(browser, activeState) {
   } catch (e) {
     fail(`unexpected error: ${e.message.split('\n')[0]}`);
   } finally {
-    await browser.close();
-    restoreWorkspaceSubscriptionState(originalState);
-    console.log(`Restored workspace ${WORKSPACE_ID} to its original subscription state.`);
+    try {
+      if (browser) await browser.close();
+    } finally {
+      restoreWorkspaceSubscriptionState(originalState);
+      console.log(`Restored workspace ${WORKSPACE_ID} to its original subscription state.`);
+    }
   }
 
   if (failed) {
