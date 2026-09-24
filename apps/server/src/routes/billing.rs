@@ -18,7 +18,6 @@ use axum::{
 };
 use serde_json::{json, Value};
 use stripe_shared::{Invoice, Subscription};
-use stripe_types::Expandable;
 use stripe_webhook::EventObject;
 
 use kyomi_auth::stripe_service::StripeService;
@@ -48,20 +47,6 @@ fn require_stripe(state: &AppState) -> Result<&StripeService, kyomi_core::Error>
     })
 }
 
-/// Load a workspace by stripe_subscription_id.
-async fn load_workspace_by_subscription(
-    db: &kyomi_core::DbPool,
-    subscription_id: &str,
-) -> Option<WorkspaceRow> {
-    kyomi_core::db_fetch_optional!(
-        db, WorkspaceRow,
-        "SELECT workspace_id FROM workspaces WHERE stripe_subscription_id = $1",
-        subscription_id
-    )
-    .ok()
-    .flatten()
-}
-
 /// Load the Stripe ids the payment-recovery webhook backstop
 /// (`handle_payment_recovery_checkout_completed`, KYO-806) needs to call
 /// `recover_past_due_payment`.
@@ -81,15 +66,6 @@ async fn load_recovery_workspace_row(
 // ===========================================================================
 // Internal row types
 // ===========================================================================
-
-/// Minimal workspace row used by webhook event handlers.
-///
-/// Only `workspace_id` is accessed in code; the struct exists to satisfy
-/// `sqlx::FromRow` for the subscription-lookup query.
-#[derive(Debug, sqlx::FromRow)]
-struct WorkspaceRow {
-    workspace_id: String,
-}
 
 /// Minimal workspace row used by the payment-recovery webhook backstop.
 #[derive(Debug, sqlx::FromRow)]
@@ -171,223 +147,181 @@ async fn stripe_webhook(
 }
 
 /// Handle `customer.subscription.created` and `customer.subscription.updated` events.
+///
+/// Thin adapter (KYO-807): the guard, parse, write, and MCP-invalidation
+/// logic all live in `kyomi_auth::billing_webhook::apply_subscription_webhook_event`,
+/// which is unit-tested directly against a `Subscription` fixture without
+/// needing `AppState`. This function's only job is to pick the write mode
+/// and log the outcome.
 async fn handle_subscription_event(
     state: &AppState,
     stripe_service: &StripeService,
     subscription: &Subscription,
     event_type: &str,
 ) {
-    // Defensive guard: skip subscriptions not owned by Kyomi.
-    // Prevents cross-app contamination when sharing a Stripe account.
-    if subscription.metadata.get("app").map(|s| s.as_str()) != Some("kyomi") {
-        tracing::debug!(
-            subscription_id = %subscription.id,
-            app = ?subscription.metadata.get("app"),
-            "Ignoring subscription event for non-Kyomi app"
-        );
-        return;
-    }
-
-    // Get workspace_id from subscription metadata
-    let workspace_id = match subscription.metadata.get("workspace_id") {
-        Some(id) if !id.is_empty() => id.clone(),
-        _ => {
-            tracing::error!("Subscription missing workspace_id in metadata");
-            return;
-        }
-    };
-
-    // Parse subscription data from Stripe (source of truth)
-    let sub_data = match stripe_service.parse_subscription_data(subscription).await {
-        Ok(data) => data,
-        Err(e) => {
-            tracing::error!(
-                workspace_id = %workspace_id,
-                "Failed to parse subscription data: {e}"
-            );
-            return;
-        }
-    };
-
-    // Write the parsed subscription data to the workspace row via the one
-    // shared writer (KYO-806 A5) — used identically by payment recovery and
-    // new-subscription-checkout sync, so all three call sites move together.
     let write_mode = if event_type == "customer.subscription.created" {
         kyomi_auth::subscription_service::SubscriptionWriteMode::Created
     } else {
         kyomi_auth::subscription_service::SubscriptionWriteMode::Updated
     };
-    let result = kyomi_auth::subscription_service::write_subscription_to_workspace(
+
+    let result = kyomi_auth::billing_webhook::apply_subscription_webhook_event(
         &state.db,
-        &workspace_id,
-        &sub_data,
+        &state.ws_manager,
+        &state.mcp_sessions,
+        stripe_service,
+        subscription,
         write_mode,
     )
     .await;
 
+    use kyomi_auth::billing_webhook::SubscriptionWebhookOutcome;
     match result {
-        Ok(_) => {
+        Ok(SubscriptionWebhookOutcome::NotKyomiApp) => {
+            tracing::debug!(
+                subscription_id = %subscription.id,
+                app = ?subscription.metadata.get("app"),
+                "Ignoring subscription event for non-Kyomi app"
+            );
+        }
+        Ok(SubscriptionWebhookOutcome::MissingWorkspaceId) => {
+            tracing::error!("Subscription missing workspace_id in metadata");
+        }
+        Ok(SubscriptionWebhookOutcome::Applied {
+            workspace_id,
+            tier,
+            changed,
+        }) => {
             tracing::info!(
                 workspace_id = %workspace_id,
-                tier = %sub_data.tier,
-                billing_cycle = ?sub_data.billing_cycle,
-                user_limit = sub_data.user_limit,
+                tier = %tier,
+                changed,
                 "{event_type} processed"
             );
-
-            // Notify connected SSE clients that tools have changed, then invalidate
-            // all sessions so disconnected clients re-initialize on next request.
-            state
-                .mcp_sessions
-                .notify_tools_changed(&workspace_id)
-                .await;
-            state
-                .mcp_sessions
-                .invalidate_workspace_sessions(&workspace_id)
-                .await;
         }
         Err(e) => {
-            tracing::error!(
-                workspace_id = %workspace_id,
-                "Failed to update workspace from {event_type}: {e}"
-            );
+            tracing::error!("Failed to update workspace from {event_type}: {e}");
         }
     }
 }
 
 /// Handle `customer.subscription.deleted` — revert workspace to free tier.
+///
+/// Thin adapter (KYO-807) over
+/// `kyomi_auth::billing_webhook::apply_subscription_deleted_webhook_event`.
 async fn handle_subscription_deleted(state: &AppState, subscription: &Subscription) {
-    if subscription.metadata.get("app").map(|s| s.as_str()) != Some("kyomi") {
-        tracing::debug!(
-            subscription_id = %subscription.id,
-            app = ?subscription.metadata.get("app"),
-            "Ignoring subscription deletion for non-Kyomi app"
-        );
-        return;
-    }
-
-    let workspace_id = match subscription.metadata.get("workspace_id") {
-        Some(id) if !id.is_empty() => id.clone(),
-        _ => {
-            tracing::error!("Subscription missing workspace_id in metadata");
-            return;
-        }
-    };
-
-    let result = kyomi_core::db_execute!(
+    use kyomi_auth::billing_webhook::SubscriptionDeletedOutcome;
+    let result = kyomi_auth::billing_webhook::apply_subscription_deleted_webhook_event(
         &state.db,
-        "UPDATE workspaces SET \
-             subscription_tier = 'free', \
-             subscription_status = 'cancelled', \
-             billing_cycle = NULL, \
-             subscription_period_start = NULL, \
-             subscription_period_end = NULL, \
-             stripe_subscription_id = NULL, \
-             user_limit = 999999, \
-             ai_credits_used_usd = 0.0 \
-         WHERE workspace_id = $1",
-        &workspace_id
-    );
+        &state.ws_manager,
+        &state.mcp_sessions,
+        subscription,
+    )
+    .await;
 
     match result {
-        Ok(_) => {
+        Ok(SubscriptionDeletedOutcome::NotKyomiApp) => {
+            tracing::debug!(
+                subscription_id = %subscription.id,
+                app = ?subscription.metadata.get("app"),
+                "Ignoring subscription deletion for non-Kyomi app"
+            );
+        }
+        Ok(SubscriptionDeletedOutcome::MissingWorkspaceId) => {
+            tracing::error!("Subscription missing workspace_id in metadata");
+        }
+        Ok(SubscriptionDeletedOutcome::Applied {
+            workspace_id,
+            changed,
+        }) => {
             tracing::info!(
                 workspace_id = %workspace_id,
+                changed,
                 "Subscription deleted — reverted to free tier"
             );
-
-            // Notify connected SSE clients that tools have changed, then invalidate
-            // all sessions so disconnected clients re-initialize on next request.
-            state
-                .mcp_sessions
-                .notify_tools_changed(&workspace_id)
-                .await;
-            state
-                .mcp_sessions
-                .invalidate_workspace_sessions(&workspace_id)
-                .await;
         }
         Err(e) => {
-            tracing::error!(
-                workspace_id = %workspace_id,
-                "Failed to revert workspace to free tier: {e}"
-            );
+            tracing::error!("Failed to revert workspace to free tier: {e}");
         }
     }
 }
 
 /// Handle `invoice.payment_succeeded` — reset AI credits for new billing period.
+///
+/// Thin adapter (KYO-807) over
+/// `kyomi_auth::billing_webhook::apply_invoice_payment_succeeded_webhook_event`.
 async fn handle_invoice_payment_succeeded(state: &AppState, invoice: &Invoice) {
-    // Find workspace by subscription ID from the invoice
-    let subscription_id = match &invoice.subscription {
-        Some(Expandable::Id(id)) => Some(id.to_string()),
-        Some(Expandable::Object(sub)) => Some(sub.id.to_string()),
-        None => None,
-    };
+    use kyomi_auth::billing_webhook::InvoiceWebhookOutcome;
+    let result = kyomi_auth::billing_webhook::apply_invoice_payment_succeeded_webhook_event(
+        &state.db,
+        &state.ws_manager,
+        invoice,
+    )
+    .await;
 
-    if let Some(ref sub_id) = subscription_id {
-        if let Some(workspace) = load_workspace_by_subscription(&state.db, sub_id).await {
-            // Reset AI credits for new billing period
-            let result = kyomi_core::db_execute!(
-                &state.db,
-                "UPDATE workspaces SET ai_credits_used_usd = 0.0 WHERE workspace_id = $1",
-                &workspace.workspace_id
-            );
-
-            match result {
-                Ok(_) => {
-                    tracing::info!(
-                        workspace_id = %workspace.workspace_id,
-                        "Payment succeeded — reset AI credits"
-                    );
-                }
-                Err(e) => {
-                    tracing::error!(
-                        workspace_id = %workspace.workspace_id,
-                        "Failed to reset AI credits: {e}"
-                    );
-                }
-            }
-        } else {
+    match result {
+        Ok(InvoiceWebhookOutcome::NoSubscriptionId) => {
+            tracing::debug!("invoice.payment_succeeded: no subscription id on invoice");
+        }
+        Ok(InvoiceWebhookOutcome::WorkspaceNotFound { subscription_id }) => {
             tracing::warn!(
-                subscription_id = %sub_id,
+                subscription_id = %subscription_id,
                 "No workspace found for subscription in payment_succeeded event"
             );
+        }
+        Ok(InvoiceWebhookOutcome::Applied {
+            workspace_id,
+            changed,
+        }) => {
+            tracing::info!(
+                workspace_id = %workspace_id,
+                changed,
+                "Payment succeeded — reset AI credits"
+            );
+        }
+        Err(e) => {
+            tracing::error!("Failed to reset AI credits: {e}");
         }
     }
 }
 
 /// Handle `invoice.payment_failed` — mark subscription as past_due.
+///
+/// Thin adapter (KYO-807) over
+/// `kyomi_auth::billing_webhook::apply_invoice_payment_failed_webhook_event`.
 async fn handle_invoice_payment_failed(state: &AppState, invoice: &Invoice) {
-    let subscription_id = match &invoice.subscription {
-        Some(Expandable::Id(id)) => Some(id.to_string()),
-        Some(Expandable::Object(sub)) => Some(sub.id.to_string()),
-        None => None,
-    };
+    use kyomi_auth::billing_webhook::InvoiceWebhookOutcome;
+    let result = kyomi_auth::billing_webhook::apply_invoice_payment_failed_webhook_event(
+        &state.db,
+        &state.ws_manager,
+        invoice,
+    )
+    .await;
 
-    if let Some(ref sub_id) = subscription_id
-        && let Some(workspace) = load_workspace_by_subscription(&state.db, sub_id).await {
-            let result = kyomi_core::db_execute!(
-                &state.db,
-                "UPDATE workspaces SET subscription_status = 'past_due' WHERE workspace_id = $1",
-                &workspace.workspace_id
-            );
-
-            match result {
-                Ok(_) => {
-                    tracing::warn!(
-                        workspace_id = %workspace.workspace_id,
-                        "Payment failed — marked subscription as past_due"
-                    );
-                }
-                Err(e) => {
-                    tracing::error!(
-                        workspace_id = %workspace.workspace_id,
-                        "Failed to update subscription status to past_due: {e}"
-                    );
-                }
-            }
+    match result {
+        Ok(InvoiceWebhookOutcome::NoSubscriptionId) => {
+            tracing::debug!("invoice.payment_failed: no subscription id on invoice");
         }
+        Ok(InvoiceWebhookOutcome::WorkspaceNotFound { subscription_id }) => {
+            tracing::warn!(
+                subscription_id = %subscription_id,
+                "No workspace found for subscription in payment_failed event"
+            );
+        }
+        Ok(InvoiceWebhookOutcome::Applied {
+            workspace_id,
+            changed,
+        }) => {
+            tracing::warn!(
+                workspace_id = %workspace_id,
+                changed,
+                "Payment failed — marked subscription as past_due"
+            );
+        }
+        Err(e) => {
+            tracing::error!("Failed to update subscription status to past_due: {e}");
+        }
+    }
 }
 
 /// Handle `checkout.session.completed`.
@@ -480,6 +414,7 @@ async fn handle_payment_recovery_checkout_completed(
     match kyomi_auth::payment_recovery::recover_past_due_payment(
         &state.db,
         stripe_service,
+        &state.ws_manager,
         &state.mcp_sessions,
         kyomi_auth::payment_recovery::RecoveryIds {
             workspace_id,

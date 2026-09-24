@@ -490,6 +490,14 @@ pub async fn create_checkout(
         ));
     }
 
+    // Required explicitly, before any Stripe call, matching every other
+    // billing mutation below (KYO-807) — no silent `if let Some` skip.
+    let ws_manager = ac
+        .ctx
+        .ws_manager
+        .as_ref()
+        .ok_or_else(|| ServerFnError::new("WebSocket manager not configured"))?;
+
     let stripe_service = require_stripe(&ac.ctx.config)?;
 
     // If user already has an active subscription, modify it directly.
@@ -506,6 +514,7 @@ pub async fn create_checkout(
         kyomi_auth::subscription_service::modify_existing_subscription(
             ac.db(),
             &stripe_service,
+            ws_manager,
             ac.ctx.mcp_sessions
                 .as_ref()
                 .ok_or_else(|| ServerFnError::new("MCP session manager unavailable"))?,
@@ -737,14 +746,18 @@ pub async fn complete_payment_recovery(
         ServerFnError::new("No Stripe customer on file for this workspace")
     })?;
 
-    let stripe_service = require_stripe(&ac.ctx.config)?;
     let mcp_sessions = ac.ctx.mcp_sessions.as_ref().ok_or_else(|| {
         ServerFnError::new("MCP session manager unavailable")
     })?;
+    let ws_manager = ac.ctx.ws_manager.as_ref().ok_or_else(|| {
+        ServerFnError::new("WebSocket manager not configured")
+    })?;
+    let stripe_service = require_stripe(&ac.ctx.config)?;
 
     let outcome = kyomi_auth::payment_recovery::recover_past_due_payment(
         ac.db(),
         &stripe_service,
+        ws_manager,
         mcp_sessions,
         kyomi_auth::payment_recovery::RecoveryIds {
             workspace_id: &ac.ws_id,
@@ -781,14 +794,18 @@ pub async fn sync_checkout_subscription(session_id: String) -> Result<(), Server
         ServerFnError::new("No Stripe customer on file for this workspace")
     })?;
 
-    let stripe_service = require_stripe(&ac.ctx.config)?;
     let mcp_sessions = ac.ctx.mcp_sessions.as_ref().ok_or_else(|| {
         ServerFnError::new("MCP session manager unavailable")
     })?;
+    let ws_manager = ac.ctx.ws_manager.as_ref().ok_or_else(|| {
+        ServerFnError::new("WebSocket manager not configured")
+    })?;
+    let stripe_service = require_stripe(&ac.ctx.config)?;
 
     kyomi_auth::payment_recovery::sync_new_subscription_checkout(
         ac.db(),
         &stripe_service,
+        ws_manager,
         mcp_sessions,
         &ac.ws_id,
         customer_id,
@@ -808,6 +825,14 @@ pub async fn cancel_subscription() -> Result<BillingResult, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
     require_workspace_owner(&ac.auth)?;
 
+    // Required explicitly, before any Stripe call (KYO-807) — no silent
+    // `if let Some` skip.
+    let ws_manager = ac
+        .ctx
+        .ws_manager
+        .as_ref()
+        .ok_or_else(|| ServerFnError::new("WebSocket manager not configured"))?;
+
     let stripe_service = require_stripe(&ac.ctx.config)?;
     let workspace = load_workspace(ac.db(), &ac.ws_id).await?;
 
@@ -821,12 +846,14 @@ pub async fn cancel_subscription() -> Result<BillingResult, ServerFnError> {
         .await
         .map_err(|e| ServerFnError::new(format!("Failed to cancel subscription: {e}")))?;
 
-    kyomi_core::db_execute!(
+    kyomi_auth::subscription_service::set_subscription_status(
         ac.db(),
-        "UPDATE workspaces SET subscription_status = 'cancelled' WHERE workspace_id = $1",
-        &ac.ws_id
+        ws_manager,
+        &ac.ws_id,
+        "cancelled",
     )
-    .into_sfn_sqlx()?;
+    .await
+    .into_sfn_core()?;
 
     Ok(BillingResult {
         message: "Subscription will be cancelled at the end of your billing period".to_string(),
@@ -840,6 +867,14 @@ pub async fn cancel_subscription() -> Result<BillingResult, ServerFnError> {
 pub async fn reactivate_subscription() -> Result<BillingResult, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
     require_workspace_owner(&ac.auth)?;
+
+    // Required explicitly, before any Stripe call (KYO-807) — no silent
+    // `if let Some` skip.
+    let ws_manager = ac
+        .ctx
+        .ws_manager
+        .as_ref()
+        .ok_or_else(|| ServerFnError::new("WebSocket manager not configured"))?;
 
     let stripe_service = require_stripe(&ac.ctx.config)?;
     let workspace = load_workspace(ac.db(), &ac.ws_id).await?;
@@ -858,12 +893,14 @@ pub async fn reactivate_subscription() -> Result<BillingResult, ServerFnError> {
         .await
         .map_err(|e| ServerFnError::new(format!("Failed to reactivate subscription: {e}")))?;
 
-    kyomi_core::db_execute!(
+    kyomi_auth::subscription_service::set_subscription_status(
         ac.db(),
-        "UPDATE workspaces SET subscription_status = 'active' WHERE workspace_id = $1",
-        &ac.ws_id
+        ws_manager,
+        &ac.ws_id,
+        "active",
     )
-    .into_sfn_sqlx()?;
+    .await
+    .into_sfn_core()?;
 
     Ok(BillingResult {
         message: "Subscription has been reactivated".to_string(),

@@ -1187,6 +1187,33 @@ pub async fn send_dashboard_summary_ready(
     manager.send_to_user(user_id, msg).await;
 }
 
+// ---------------------------------------------------------------------------
+// Billing (KYO-807)
+// ---------------------------------------------------------------------------
+
+/// Broadcast a workspace-scoped `billing_status_changed` event.
+///
+/// The ONE emitter of this event — every billing-state writer in
+/// `crate::subscription_service` and `crate::billing_webhook` calls this
+/// (never constructs the message itself) after its `UPDATE` actually changed
+/// the row, so a broadcast fires exactly once per real change and never for
+/// a no-op write. Carries no status beyond `workspace_id`: the client always
+/// refetches `get_sidebar_user`/`get_user_context` on receipt rather than
+/// trusting a status embedded in the push, so the database stays the single
+/// source of truth (see `crates/kyomi-ui/src/utils/billing_lapse.rs`'s
+/// `refetch_billing_state`, the client-side counterpart this event drives).
+///
+/// Reaches a currently-lapsed workspace's members too — `connect` is never
+/// billing-gated (only `sync_bootstrap`/`sync_delta` are, in
+/// `apps/server/src/routes/websocket.rs`'s `refuse_if_billing_gate_blocks`)
+/// — which is exactly how a lapsed workspace's open tabs learn they've been
+/// unlocked without a reload.
+pub async fn broadcast_billing_status_changed(manager: &WebSocketManager, workspace_id: &str) {
+    let msg = WebSocketMessage::new(MessageType::BillingStatusChanged)
+        .with_data(serde_json::json!({ "workspace_id": workspace_id }));
+    manager.broadcast_to_workspace(workspace_id, msg, None).await;
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 //
 // KYO-329: this module had zero tests despite owning the routing logic that
@@ -1993,6 +2020,170 @@ mod tests {
         assert_no_sync_action(
             &mut rx_owner,
             "owner update must be skipped when the snapshot fetch fails",
+        );
+    }
+
+    // ── broadcast_billing_status_changed (KYO-807) ───────────────────────
+
+    #[tokio::test]
+    async fn broadcast_billing_status_changed_reaches_every_workspace_member() {
+        let db = test_pool().await;
+        let (manager, mut rx_owner, mut rx_other) = setup_workspace_and_connections(&db).await;
+
+        broadcast_billing_status_changed(&manager, "ws-1").await;
+
+        for rx in [&mut rx_owner, &mut rx_other] {
+            let raw = rx
+                .try_recv()
+                .expect("billing_status_changed must be delivered to every workspace member");
+            let envelope: WebSocketMessage =
+                serde_json::from_str(&raw).expect("valid WebSocketMessage JSON");
+            assert_eq!(envelope.message_type, MessageType::BillingStatusChanged);
+            let data = envelope
+                .data
+                .expect("billing_status_changed must carry a `data` field");
+            assert_eq!(
+                data.get("workspace_id").and_then(|v| v.as_str()),
+                Some("ws-1")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn broadcast_billing_status_changed_does_not_reach_another_workspace() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        seed_user(sq, "owner", "owner@test.local").await;
+        seed_user(sq, "outsider", "outsider@test.local").await;
+        seed_workspace(sq, "ws-1", "owner").await;
+        seed_workspace(sq, "ws-2", "outsider").await;
+        seed_membership(sq, "ws-1", "owner", "user", true).await;
+        seed_membership(sq, "ws-2", "outsider", "user", true).await;
+
+        let manager = WebSocketManager::new(None, db.clone());
+        let (_owner_conn, mut rx_owner) = manager.connect("owner").expect("connect owner");
+        let (_outsider_conn, mut rx_outsider) =
+            manager.connect("outsider").expect("connect outsider");
+        rx_owner.try_recv().expect("connect() heartbeat for owner");
+        rx_outsider.try_recv().expect("connect() heartbeat for outsider");
+
+        broadcast_billing_status_changed(&manager, "ws-1").await;
+
+        assert!(
+            rx_owner.try_recv().is_ok(),
+            "ws-1 member must receive the broadcast"
+        );
+        assert!(
+            rx_outsider.try_recv().is_err(),
+            "ws-2 member must not receive ws-1's billing_status_changed"
+        );
+    }
+
+    /// Cross-replica delivery (KYO-807): two independent `WebSocketManager`
+    /// instances — standing in for two server pods — sharing one Redis.
+    /// Connect the user on manager B only, broadcast from manager A only,
+    /// and confirm B's local connection receives it via Redis PUBLISH/
+    /// SUBSCRIBE, not any in-process shortcut (the two managers share
+    /// nothing but the Redis URL).
+    ///
+    /// CI has no Redis, so this is `#[ignore]`d and gated on
+    /// `KYOMI_TEST_REDIS_URL` (fails loudly, not silently skipped, if the
+    /// env var is unset when explicitly run with `--ignored`). A local
+    /// Redis is expected at `redis://localhost:6380/1` — DB index 1, not
+    /// the dev server's own index 0, and user/workspace ids are timestamp-
+    /// suffixed so a run never collides with real dev-server data on the
+    /// same Redis instance.
+    ///
+    /// Run with:
+    /// `KYOMI_TEST_REDIS_URL=redis://localhost:6380/1 cargo test --locked -p kyomi-auth \
+    ///   broadcast_billing_status_changed_cross_replica_via_redis -- --ignored`
+    #[tokio::test]
+    #[ignore = "requires Redis — set KYOMI_TEST_REDIS_URL, e.g. redis://localhost:6380/1"]
+    async fn broadcast_billing_status_changed_cross_replica_via_redis() {
+        let redis_url = std::env::var("KYOMI_TEST_REDIS_URL").expect(
+            "KYOMI_TEST_REDIS_URL must be set to run this ignored test, e.g. \
+             redis://localhost:6380/1",
+        );
+
+        // Timestamp-suffixed ids so concurrent/repeated runs against the
+        // same shared local Redis never collide with each other or with
+        // real dev-server data.
+        let suffix = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        let user_id = format!("kyo807-redis-user-{suffix}");
+        let workspace_id = format!("kyo807-redis-ws-{suffix}");
+
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        seed_user(sq, &user_id, &format!("{user_id}@test.local")).await;
+        seed_workspace(sq, &workspace_id, &user_id).await;
+        seed_membership(sq, &workspace_id, &user_id, "workspace_admin", true).await;
+
+        let pool_a = kyomi_core::redis::create_pool(&redis_url)
+            .await
+            .expect("connect Redis pool for manager A");
+        let pool_b = kyomi_core::redis::create_pool(&redis_url)
+            .await
+            .expect("connect Redis pool for manager B");
+
+        let manager_a = WebSocketManager::new(Some((pool_a, redis_url.clone())), db.clone());
+        let manager_b = WebSocketManager::new(Some((pool_b.clone(), redis_url.clone())), db.clone());
+
+        // Only manager B has a local connection for this user — any
+        // message it receives came over Redis, not local delivery.
+        let (_conn_id, mut rx) = manager_b.connect(&user_id).expect("connect on manager B");
+        rx.try_recv()
+            .expect("connect() must send an immediate heartbeat");
+
+        // `connect()` spawns manager B's Redis subscriber task
+        // asynchronously — poll PUBSUB NUMSUB on the channel until it
+        // reports at least one subscriber, bounded so a genuine failure to
+        // subscribe fails the test instead of hanging.
+        let channel = format!("ws:user:{user_id}");
+        let mut subscriber_live = false;
+        for _ in 0..50 {
+            let numsub: Vec<redis::Value> = redis::cmd("PUBSUB")
+                .arg("NUMSUB")
+                .arg(&channel)
+                .query_async(&mut pool_b.clone())
+                .await
+                .expect("PUBSUB NUMSUB");
+            if let Some(redis::Value::Int(n)) = numsub.get(1)
+                && *n >= 1
+            {
+                subscriber_live = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(
+            subscriber_live,
+            "manager B's Redis subscriber for {channel} never became live within the timeout"
+        );
+
+        broadcast_billing_status_changed(&manager_a, &workspace_id).await;
+
+        // Poll for the message to traverse Redis PUBLISH -> manager B's
+        // subscriber task -> the local mpsc channel.
+        let mut received: Option<String> = None;
+        for _ in 0..50 {
+            if let Ok(raw) = rx.try_recv() {
+                received = Some(raw);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        let raw = received.expect(
+            "manager B never received the billing_status_changed broadcast published by manager A",
+        );
+        let envelope: WebSocketMessage =
+            serde_json::from_str(&raw).expect("valid WebSocketMessage JSON");
+        assert_eq!(envelope.message_type, MessageType::BillingStatusChanged);
+        let data = envelope
+            .data
+            .expect("billing_status_changed must carry data");
+        assert_eq!(
+            data.get("workspace_id").and_then(|v| v.as_str()),
+            Some(workspace_id.as_str())
         );
     }
 }

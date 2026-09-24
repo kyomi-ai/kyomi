@@ -82,6 +82,26 @@ pub fn is_payment_required_error_code(error_code: Option<&str>) -> bool {
     error_code == Some(kyomi_types::PAYMENT_REQUIRED_CODE)
 }
 
+/// Whether a `billing_status_changed` WebSocket event (KYO-807) is for the
+/// sync engine's own workspace.
+///
+/// The event carries no status — the client always refetches — but a
+/// WebSocket connection is scoped per-*user*, not per-workspace
+/// (`crates/kyomi-auth/src/websocket/manager.rs`), so a user who belongs to
+/// two workspaces receives both workspaces' `billing_status_changed` events
+/// on the same socket and must ignore the one that isn't this tab's.
+///
+/// `event_workspace_id` is `None` when the payload's `workspace_id` key is
+/// missing or not a string — should never happen, since the emitter
+/// (`kyomi_auth::websocket::helpers::broadcast_billing_status_changed`)
+/// always sets it, but a malformed payload must not be treated as a match.
+pub fn is_billing_status_change_for_workspace(
+    event_workspace_id: Option<&str>,
+    my_workspace_id: &str,
+) -> bool {
+    event_workspace_id == Some(my_workspace_id)
+}
+
 /// Whether `Layout` should render the full-screen paywall instead of the
 /// sidebar + page content (KYO-806).
 ///
@@ -239,10 +259,6 @@ pub fn unregister_refetch_triggers() {
 /// [`refetch_billing_state`] so the server's own `billing_lapsed` — the
 /// actual authority — catches up.
 ///
-/// This is also **the KYO-807 hook**: pushing a billing-status change over
-/// WebSocket (future work, out of scope here) can call this exact function
-/// to force every open tab to re-check its billing state without a reload.
-///
 /// Callable from both `ssr` and `hydrate` builds (`PaywallAwareClient`
 /// compiles under both); a no-op outside `wasm32` (see the module doc for
 /// why the SSR side must never carry this global).
@@ -288,10 +304,13 @@ pub fn check_rest_response_status(status: u16) {
 /// until `Layout` has called [`register_refetch_triggers`] — there is
 /// nothing to refetch before the app shell mounts.
 ///
-/// Public (not just called from [`report_payment_required`]) because this
-/// is the single hook KYO-807 needs: once the sync engine can push a
-/// billing-status change over an already-open WebSocket, its handler calls
-/// this directly rather than re-deriving its own refetch plumbing.
+/// Public (not just called from [`report_payment_required`]) because
+/// `crate::cache::sync_engine`'s `billing_status_changed` subscription
+/// (KYO-807) calls this directly — once the server pushes a billing-status
+/// change over an already-open WebSocket (see
+/// `is_billing_status_change_for_workspace`, which filters the event to this
+/// tab's own workspace first) — rather than re-deriving its own refetch
+/// plumbing.
 pub fn refetch_billing_state() {
     #[cfg(target_arch = "wasm32")]
     {
@@ -367,5 +386,23 @@ mod tests {
     #[test]
     fn paywall_does_not_show_for_active_saas_workspace() {
         assert!(!should_show_paywall(true, false, false));
+    }
+
+    #[test]
+    fn billing_status_change_for_own_workspace_matches() {
+        assert!(is_billing_status_change_for_workspace(Some("ws-1"), "ws-1"));
+    }
+
+    #[test]
+    fn billing_status_change_for_a_different_workspace_does_not_match() {
+        // A user in two workspaces receives both workspaces' events on the
+        // same per-user WebSocket connection — must ignore the other one.
+        assert!(!is_billing_status_change_for_workspace(Some("ws-2"), "ws-1"));
+    }
+
+    #[test]
+    fn billing_status_change_with_missing_workspace_id_does_not_match() {
+        // A malformed/missing payload key must never be treated as a match.
+        assert!(!is_billing_status_change_for_workspace(None, "ws-1"));
     }
 }
