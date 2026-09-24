@@ -16,7 +16,7 @@
 #   3. Re-check the whole list whenever `cargo update` runs. Entries whose
 #      blocker has cleared must be removed in the same PR that clears them.
 #
-# Last full review: 2026-07-25
+# Last full review: 2026-09-24
 # =============================================================================
 
 [advisories]

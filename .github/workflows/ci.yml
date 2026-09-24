@@ -218,6 +218,22 @@ jobs:
   # Known-unfixable advisories are ignored via .cargo/audit.toml, where each
   # one carries a justification and the upstream condition for removing it.
   # Do NOT add an ignore there to make this job green — take the fix.
+  #
+  # Advisory database: deliberately NOT pinned (KYO-785, decided 2026-09-24).
+  # This job fails only on a real vulnerability — unmaintained/unsound/yanked
+  # are informational via .cargo/audit.toml. A red run that no commit here
+  # caused therefore means a new disclosure against something we ship, which
+  # is the one signal this job exists to surface early. Pinning the DB would
+  # hide that until someone chose to refresh it. The one red run to date
+  # (2026-09-14, KYO-785) was RUSTSEC-2026-0285, a real rustls TLS bug,
+  # cleared by taking the fix (#538) — exactly the asymmetry that makes this
+  # different from pinning the toolchain (KYO-402): a new lint on a new
+  # toolchain says nothing about the shipped artefact, a new advisory does.
+  # This job is not a required status check (as of 2026-09-24), so a red run
+  # leaves PRs mergeable (UNSTABLE) rather than blocked — the cost of staying
+  # unpinned is a visible red, not a merge outage. When it does go red: take
+  # the fix, or add a justified, dated ignore to .cargo/audit.toml — never
+  # pin the DB or skip the job to force green.
   # ---------------------------------------------------------------------------
   cargo-audit:
     name: Dependency Audit
