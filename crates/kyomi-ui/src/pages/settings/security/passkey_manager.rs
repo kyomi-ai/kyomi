@@ -811,7 +811,7 @@ pub fn PasskeyManager() -> impl IntoView {
                 <div class="flex justify-end gap-3 pt-4">
                     <Button
                         variant=ButtonVariant::Outline
-                        disabled=add_loading.get_untracked()
+                        disabled=add_loading
                         on:click=move |_| {
                             add_modal_open.set(false);
                             add_device_name.set(String::new());
@@ -820,7 +820,7 @@ pub fn PasskeyManager() -> impl IntoView {
                         "Cancel"
                     </Button>
                     <Button
-                        disabled=add_loading.get_untracked()
+                        disabled=add_loading
                         on:click=handle_add_passkey
                     >
                         {move || if add_loading.get() { "Adding..." } else { "Add Passkey" }}
@@ -859,7 +859,7 @@ pub fn PasskeyManager() -> impl IntoView {
                 <div class="flex justify-end gap-3 pt-4">
                     <Button
                         variant=ButtonVariant::Outline
-                        disabled=rename_action.pending().get_untracked()
+                        disabled=rename_action.pending()
                         on:click=move |_| {
                             rename_modal_open.set(false);
                             rename_credential_id.set(None);
@@ -869,7 +869,7 @@ pub fn PasskeyManager() -> impl IntoView {
                         "Cancel"
                     </Button>
                     <Button
-                        disabled=rename_action.pending().get_untracked()
+                        disabled=rename_action.pending()
                         on:click=handle_rename
                     >
                         {move || if rename_action.pending().get() { "Saving..." } else { "Save" }}

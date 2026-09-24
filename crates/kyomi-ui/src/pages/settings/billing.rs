@@ -511,6 +511,38 @@ enum ConfirmAction {
 // Billing content (rendered after subscription info loads)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// "Manage Billing" button — opens the Stripe customer portal.
+///
+/// Extracted as its own component (KYO-793) so the double-submit guard
+/// (`disabled` tracking `checkout_loading` reactively, so the button
+/// actually disables once a portal/checkout request is in flight instead
+/// of staying clickable forever) can be pinned by a focused render test
+/// without constructing all of `BillingContent`/`BillingPage`, which need
+/// live `UserContext`/`Resource` plumbing this button itself doesn't.
+#[component]
+fn ManageBillingButton(
+    /// Reactive loading state. Must be passed as a signal, not
+    /// `.get_untracked()`'d into a plain `bool` — `Button`'s `disabled` prop
+    /// is a `MaybeProp<bool>` that re-reads on every render, so a snapshot
+    /// here would freeze the button enabled forever regardless of later
+    /// `.set()` calls (KYO-793).
+    #[prop(into)]
+    loading: Signal<bool>,
+    on_click: Callback<()>,
+) -> impl IntoView {
+    view! {
+        <Button
+            variant=ButtonVariant::Outline
+            size=ButtonSize::Sm
+            disabled=loading
+            on:click=move |_| on_click.run(())
+        >
+            <Icon icon=phosphor_leptos::CREDIT_CARD size="16px" attr:class="mr-2"/>
+            "Manage Billing"
+        </Button>
+    }
+}
+
 #[component]
 fn BillingContent(
     info: SubscriptionInfo,
@@ -589,15 +621,10 @@ fn BillingContent(
                             })}
                             // Manage Billing Button
                             {is_subscribed.then(|| view! {
-                                <Button
-                                    variant=ButtonVariant::Outline
-                                    size=ButtonSize::Sm
-                                    disabled=checkout_loading.get_untracked()
-                                    on:click=move |_| { handle_manage_billing.dispatch(()); }
-                                >
-                                    <Icon icon=phosphor_leptos::CREDIT_CARD size="16px" attr:class="mr-2"/>
-                                    "Manage Billing"
-                                </Button>
+                                <ManageBillingButton
+                                    loading=checkout_loading
+                                    on_click=Callback::new(move |()| { handle_manage_billing.dispatch(()); })
+                                />
                             })}
                         </div>
                     </div>
@@ -701,7 +728,7 @@ fn BillingContent(
                                 <div class="mt-4">
                                     <Button
                                         variant=ButtonVariant::Default
-                                        disabled=checkout_loading.get_untracked()
+                                        disabled=checkout_loading
                                         on:click=move |_| {
                                             handle_subscribe.dispatch(1);
                                         }
@@ -720,7 +747,7 @@ fn BillingContent(
                                 <div class="mt-4">
                                     <Button
                                         variant=ButtonVariant::Default
-                                        disabled=checkout_loading.get_untracked()
+                                        disabled=checkout_loading
                                         on:click=move |_| { handle_manage_billing.dispatch(()); }
                                     >
                                         <Icon icon=phosphor_leptos::CREDIT_CARD size="16px" attr:class="mr-2"/>
@@ -767,7 +794,7 @@ fn BillingContent(
                                     {(status_cl == "past_due").then(|| view! {
                                         <Button
                                             variant=ButtonVariant::Default
-                                            disabled=checkout_loading.get_untracked()
+                                            disabled=checkout_loading
                                             on:click=move |_| { handle_manage_billing.dispatch(()); }
                                         >
                                             "Update Payment Method"
@@ -1231,5 +1258,108 @@ fn InvoicesSection(
                 }
             })}}
         </Transition>
+    }
+}
+
+// Rendering to HTML (`RenderHtml::to_html`) panics unless the shared
+// `leptos`/`tachys` `ssr` feature is active for this build — mirrors
+// `kyomi-ui-components`' own convention for its KYO-487 (switch.rs) and
+// KYO-726 (confirm_dialog.rs) reactive-prop tests: `cargo test -p kyomi-ui`
+// alone skips this module cleanly; `--features ssr` is required to run it.
+#[cfg(all(test, feature = "ssr"))]
+mod reactive_prop_tests {
+    use super::*;
+
+    /// Whether the rendered `<button>`'s HTML carries the boolean `disabled`
+    /// attribute — as opposed to merely containing the substring
+    /// `"disabled"`, which `Button`'s own static `disabled:*` Tailwind
+    /// utilities in `BASE` always do, regardless of the actual disabled
+    /// state. Leptos serializes a `true` boolean attribute as a bare
+    /// `disabled` token immediately before the next attribute, and omits it
+    /// entirely when `false` — so slicing off everything from `class="`
+    /// onward and checking the token immediately preceding it is the
+    /// precise way to read the real attribute state back out of the
+    /// markup. Mirrors `switch.rs`'s identical `button_html_is_disabled`
+    /// helper for its KYO-487 test.
+    fn button_html_is_disabled(html: &str) -> bool {
+        let (before_class, _) = html
+            .split_once("class=\"")
+            .expect("Button's <button> always renders a class attribute");
+        before_class.trim_end().ends_with("disabled")
+    }
+
+    /// KYO-793 — the billing double-submit guard: `ManageBillingButton`'s
+    /// `disabled` must be reactive, not a value snapshotted once at
+    /// construction time. Before this fix, `billing.rs` passed
+    /// `checkout_loading.get_untracked()` as the `disabled` prop argument,
+    /// which — since `checkout_loading` starts `false` and is only flipped
+    /// to `true` inside the click handler's in-flight request — froze the
+    /// button permanently enabled and let a user click "Manage Billing"
+    /// (or "Subscribe", "Add Payment Method", "Update Payment Method")
+    /// repeatedly while a request was already in flight.
+    ///
+    /// This builds the `<ManageBillingButton>` view *before* flipping the
+    /// bound signal, then renders it to HTML *after* the flip — asserting
+    /// on the rendered `disabled` attribute itself, not on the prop value
+    /// that was passed in. Against the pre-fix `.get_untracked()` shape,
+    /// the value would have been copied into `Button`'s `MaybeProp` at
+    /// construction time (the moment the `view!` macro runs, eagerly) — so
+    /// this render, happening strictly after the flip, would still show
+    /// the stale (enabled) value. A component whose callsite genuinely
+    /// passes the signal through cannot fail this.
+    #[test]
+    fn disabled_attribute_reflects_checkout_loading_flip_after_construction() {
+        let owner = Owner::new();
+        owner.set();
+
+        let (checkout_loading, set_checkout_loading) = signal(false);
+
+        let view = view! {
+            <ManageBillingButton
+                loading=checkout_loading
+                on_click=Callback::new(|()| {})
+            />
+        };
+
+        // Flip strictly after the view value above was constructed — exactly
+        // what a real "Manage Billing" click handler's in-flight request does
+        // to `set_checkout_loading` in `BillingPage`.
+        set_checkout_loading.set(true);
+
+        let html = view.to_html();
+        assert!(
+            button_html_is_disabled(&html),
+            "expected the rendered Manage Billing button to carry a \
+             `disabled` attribute after checkout_loading flipped to true \
+             (the double-submit guard), but it did not — this is the \
+             KYO-793 regression (rendered html: {html})"
+        );
+    }
+
+    /// Mirror of the above in the other direction — rules out a component
+    /// that renders `disabled` unconditionally regardless of the signal.
+    #[test]
+    fn disabled_attribute_clears_when_checkout_loading_flips_to_false_after_construction() {
+        let owner = Owner::new();
+        owner.set();
+
+        let (checkout_loading, set_checkout_loading) = signal(true);
+
+        let view = view! {
+            <ManageBillingButton
+                loading=checkout_loading
+                on_click=Callback::new(|()| {})
+            />
+        };
+
+        set_checkout_loading.set(false);
+
+        let html = view.to_html();
+        assert!(
+            !button_html_is_disabled(&html),
+            "expected no `disabled` attribute on the Manage Billing button \
+             after checkout_loading flipped to false, but the render still \
+             carried one (rendered html: {html})"
+        );
     }
 }

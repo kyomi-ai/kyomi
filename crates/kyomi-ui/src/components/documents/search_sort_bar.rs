@@ -127,6 +127,11 @@ pub fn SearchSortBar(
                     class="flex-1"
                 />
                 <div class="w-40">
+                    // KYO-793: correct one-time seed, not a stale-render bug.
+                    // `StaticSelect.value` is a plain `String` that only seeds its
+                    // internal `selected` signal at construction; `sort_signal` is
+                    // never written except by this same select's `on_change` below,
+                    // so there is no external mutation for this snapshot to miss.
                     <StaticSelect
                         value=sort_signal.get_untracked()
                         options=sort_options
