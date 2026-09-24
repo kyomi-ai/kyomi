@@ -5,6 +5,8 @@
 //! Covers the acceptance criteria from the ticket at the HTTP level:
 //! - A representative REST route (`POST /api/v1/query-arrow`) 402s for a
 //!   lapsed workspace.
+//! - The dashboard list REST route returns JSON while active and 402s once
+//!   the workspace lapses (rather than falling through to the SPA shell).
 //! - MCP `initialize` 402s for a lapsed workspace (every MCP HTTP method
 //!   takes a bare `AuthUser`, so this one call proves the shared mechanism).
 //!   `tools/call` is also tested directly, without a session header —
@@ -264,6 +266,46 @@ async fn self_hosted_mode_never_gates_even_with_past_due_workspace() {
 // ===========================================================================
 // A representative data REST route: POST /api/v1/query-arrow
 // ===========================================================================
+
+#[tokio::test]
+async fn dashboard_list_returns_json_when_active_and_402_when_lapsed() {
+    let ctx = setup_auth_context("dashboard-list").await;
+    if ctx.is_none() {
+        eprintln!("SKIP: dashboard_list_returns_json_when_active_and_402_when_lapsed — requires Rust-backend mode");
+        return;
+    }
+    let ctx = ctx.unwrap();
+    let url = format!("{}/api/v1/dashboards", ctx.base_url);
+    let cookie = format!("access_token={}", ctx.access_token);
+
+    let active_resp = client()
+        .get(&url)
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .expect("dashboard list request should succeed at the transport level");
+    assert_eq!(active_resp.status(), 200, "active workspace should be able to list dashboards");
+    assert_eq!(
+        active_resp.headers()[reqwest::header::CONTENT_TYPE],
+        "application/json",
+        "dashboard list must be an API response rather than SPA HTML"
+    );
+    let dashboards: Value = active_resp.json().await.expect("dashboard list should be JSON");
+    assert!(dashboards.is_array(), "dashboard list should be a JSON array");
+
+    set_subscription_status(&ctx, "past_due").await;
+    let lapsed_resp = client()
+        .get(&url)
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .expect("lapsed dashboard list request should succeed at the transport level");
+    assert_eq!(lapsed_resp.status(), 402, "lapsed workspace must be gated before listing dashboards");
+    let body: Value = lapsed_resp.json().await.expect("billing error should be JSON");
+    assert_eq!(body["error"], "payment_required");
+
+    cleanup_test_user(&ctx.db, "billgate-test-dashboard-list@contract-test.local").await;
+}
 
 #[tokio::test]
 async fn query_arrow_returns_402_for_lapsed_workspace() {
