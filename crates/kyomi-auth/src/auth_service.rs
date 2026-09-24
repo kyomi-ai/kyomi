@@ -1229,8 +1229,10 @@ pub async fn datasource_oauth_callback_service(
     let ds = crate::datasource_service::resolve_datasource(db, datasource_slug, workspace_id, false)
         .await?;
 
-    // Extract provider config from connection_config
-    let provider_config = ProviderConfig::from_connection_config(provider, &ds.connection_config)?;
+    // Extract provider config from connection_config — decrypts
+    // oauth_client_secret internally (KYO-786).
+    let provider_config =
+        ProviderConfig::from_connection_config(provider, &ds.connection_config, encryption_key)?;
 
     // Build redirect URI (must match the one used in /connect)
     let redirect_uri = format!(

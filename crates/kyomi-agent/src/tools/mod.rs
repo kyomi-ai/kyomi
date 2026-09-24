@@ -335,15 +335,24 @@ impl Default for ToolRegistry {
 ///   Returns empty credentials — the factory's `resolve_shared_credentials()` extracts
 ///   `shared_username`/`shared_password` from `connection_config`.
 /// - **Personal auth**: Decrypts per-user credentials and refreshes OAuth tokens if needed.
+///
+/// `connection_config` must be the **already-decrypted** connection config
+/// (via [`kyomi_auth::credential_service::decrypt_connection_config_secrets`])
+/// — not `ds.connection_config`, which is ciphertext-at-rest for
+/// `COMMON_SENSITIVE` fields (`oauth_client_secret`, KYO-786). Taking it as a
+/// parameter, rather than decrypting `ds.connection_config` internally, means
+/// this function never touches the raw encrypted value at all, and the one
+/// caller ([`crate::tools::query_utils::create_provider_for_datasource`])
+/// decrypts exactly once and reuses the result for both this OAuth-refresh
+/// step and provider construction.
 pub async fn resolve_credentials(
     ctx: &QueryContext,
     ds: &kyomi_core::models::datasource::DatasourceConfig,
     ds_type: &kyomi_core::datasource_registry::DatasourceType,
+    connection_config: &serde_json::Value,
 ) -> kyomi_core::Result<serde_json::Value> {
-    let is_shared = kyomi_auth::datasource_auth_service::is_shared_auth(
-        ds_type.as_str(),
-        &ds.connection_config,
-    );
+    let is_shared =
+        kyomi_auth::datasource_auth_service::is_shared_auth(ds_type.as_str(), connection_config);
 
     if is_shared {
         // Shared auth: credentials live in connection_config.
@@ -365,8 +374,7 @@ pub async fn resolve_credentials(
         // an absent `auth_mode` must never match `"kyomi_oauth"` here
         // regardless of what the registry default is, so the empty-string
         // sentinel stays correct on its own.
-        let auth_mode = ds
-            .connection_config
+        let auth_mode = connection_config
             .get("auth_mode")
             .and_then(|v| v.as_str())
             .unwrap_or("");
@@ -430,10 +438,12 @@ pub async fn resolve_credentials(
             &ctx.encryption_key,
         )?;
 
-        // OAuth refresh if needed
+        // OAuth refresh if needed. `connection_config` is already decrypted
+        // (see this function's doc) — `ensure_valid_oauth_credentials` needs
+        // plaintext to refresh against the provider's token endpoint.
         let refreshed = kyomi_datasource_server::oauth_refresh::ensure_valid_oauth_credentials(
             &decrypted,
-            &ds.connection_config,
+            connection_config,
             ds_type,
         )
         .await?;
