@@ -305,11 +305,12 @@ async function scenario402WhileOpen(browser, activeState) {
     lapseWorkspace();
 
     // Register the response waiter before clicking so a fast server-fn
-    // response cannot be missed. This action cannot be served from the
-    // client cache as the old Chats navigation could be.
+    // response cannot be missed. Leptos appends a numeric hash to the
+    // create_dashboard route. This action cannot be served from the client
+    // cache as the old Chats navigation could be.
     const responsePromise = page.waitForResponse(
       (response) =>
-        new URL(response.url()).pathname.endsWith('/create_dashboard') &&
+        /^\/leptos-api\/create_dashboard\d*$/.test(new URL(response.url()).pathname) &&
         response.request().method() === 'POST',
       { timeout: 15000 }
     );
