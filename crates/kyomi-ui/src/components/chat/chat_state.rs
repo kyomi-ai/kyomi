@@ -78,12 +78,22 @@ impl std::fmt::Display for ChatState {
 pub struct ChatStateMachine {
     /// Current chat state.
     state: RwSignal<ChatState>,
+    /// Read-only handle for `state`, captured ONCE in `new()` rather than
+    /// derived on every `state()` call — see that method's doc comment
+    /// (KYO-781) for why.
+    state_read: ReadSignal<ChatState>,
     /// The message ID currently being streamed (set in `start_streaming`).
     active_message_id: RwSignal<Option<String>>,
+    /// Read-only handle for `active_message_id`, captured once — see `state_read`.
+    active_message_id_read: ReadSignal<Option<String>>,
     /// The session ID for the current chat interaction (set in `start_sending`).
     active_session_id: RwSignal<Option<String>>,
+    /// Read-only handle for `active_session_id`, captured once — see `state_read`.
+    active_session_id_read: ReadSignal<Option<String>>,
     /// Error message, if any.
     error: RwSignal<Option<String>>,
+    /// Read-only handle for `error`, captured once — see `state_read`.
+    error_read: ReadSignal<Option<String>>,
 
     // -- Computed signals (cached, derived from state) --
 
@@ -113,9 +123,21 @@ impl ChatStateMachine {
     /// Create a new chat state machine with all reactive signals.
     pub fn new() -> Self {
         let state = RwSignal::new(ChatState::Idle);
+        // KYO-781: capture the read-only handles synchronously here, while
+        // this constructor's `Owner` is current — see `ChatEngine::new`'s
+        // `messages_read` comment in chat_engine.rs for the full mechanism.
+        // `RwSignal::read_only()` allocates a fresh arena node under whatever
+        // owner is current AND panics if `self` is already disposed; deferring
+        // that call to a later, possibly-post-disposal `state()`/etc. access
+        // is exactly what let this state machine panic through a caller's
+        // `try_get_untracked()` guard instead of letting it fire.
+        let state_read = state.read_only();
         let active_message_id = RwSignal::new(None::<String>);
+        let active_message_id_read = active_message_id.read_only();
         let active_session_id = RwSignal::new(None::<String>);
+        let active_session_id_read = active_session_id.read_only();
         let error = RwSignal::new(None::<String>);
+        let error_read = error.read_only();
 
         // Computed signals — matches React's computed properties exactly.
         let can_send = Signal::derive(move || state.get() == ChatState::Idle);
@@ -135,9 +157,13 @@ impl ChatStateMachine {
 
         Self {
             state,
+            state_read,
             active_message_id,
+            active_message_id_read,
             active_session_id,
+            active_session_id_read,
             error,
+            error_read,
             can_send,
             is_sending,
             is_streaming,
@@ -151,23 +177,33 @@ impl ChatStateMachine {
     // -- Read signals --------------------------------------------------------
 
     /// Read signal for the current chat state.
+    ///
+    /// Returns the handle captured once in `new()` (KYO-781) rather than
+    /// calling `.read_only()` here, which would re-allocate an arena node
+    /// under whatever owner is current AND panic if this state machine's
+    /// owner is already disposed — defeating callers' `try_get_untracked()`
+    /// disposal guards (e.g. `chat_page.rs`'s send handler) before they ever
+    /// run.
     pub fn state(&self) -> ReadSignal<ChatState> {
-        self.state.read_only()
+        self.state_read
     }
 
-    /// Read signal for the active message ID.
+    /// Read signal for the active message ID. See `state()` for why this
+    /// returns the handle captured once in `new()` (KYO-781).
     pub fn active_message_id(&self) -> ReadSignal<Option<String>> {
-        self.active_message_id.read_only()
+        self.active_message_id_read
     }
 
-    /// Read signal for the active session ID.
+    /// Read signal for the active session ID. See `state()` for why this
+    /// returns the handle captured once in `new()` (KYO-781).
     pub fn active_session_id(&self) -> ReadSignal<Option<String>> {
-        self.active_session_id.read_only()
+        self.active_session_id_read
     }
 
-    /// Read signal for the error message.
+    /// Read signal for the error message. See `state()` for why this
+    /// returns the handle captured once in `new()` (KYO-781).
     pub fn error(&self) -> ReadSignal<Option<String>> {
-        self.error.read_only()
+        self.error_read
     }
 
     // -- State transitions ---------------------------------------------------
