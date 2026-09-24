@@ -177,6 +177,10 @@ async fn post_arrow_request(body: &serde_json::Value) -> Result<Response, String
 
     // --- Error path: extract message from JSON body if possible ---
     let status = resp.status();
+    // KYO-806: this bypasses the server_fn machinery entirely (raw fetch to
+    // a REST endpoint), so PaywallAwareClient never sees this response —
+    // check for the billing-lapsed refusal here instead.
+    crate::utils::billing_lapse::check_rest_response_status(status);
     if let Ok(text_promise) = resp.text()
         && let Ok(text_value) = JsFuture::from(text_promise).await
         && let Some(text) = text_value.as_string()

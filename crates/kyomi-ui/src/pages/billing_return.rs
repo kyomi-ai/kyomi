@@ -8,6 +8,16 @@
 //! same-origin bounce: it serves the HTML shell (no auth check), then
 //! immediately navigates to `/settings/billing` via client-side routing.
 //! The second navigation is same-origin, so cookies are sent normally.
+//!
+//! That bounce to `/settings/billing` mounts a fresh `Layout` (KYO-806
+//! item 5), which fetches `get_sidebar_user`/`get_user_context` from
+//! scratch rather than reusing any state from before the Portal round trip.
+//! So the outcome of the Portal visit is whatever those refetch to: if the
+//! workspace is still lapsed, `Layout`'s `show_paywall` gate renders the
+//! full-screen paywall at this URL, exactly as it would anywhere else; if
+//! the Portal visit fixed billing, the user lands in the normal settings
+//! page. No code here makes that decision — it's a consequence of `Layout`
+//! always mounting fresh on navigation, not special-cased behaviour.
 
 use leptos::prelude::*;
 

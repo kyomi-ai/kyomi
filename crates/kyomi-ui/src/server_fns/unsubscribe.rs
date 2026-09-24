@@ -15,7 +15,7 @@ use super::{extract_context, IntoServerFnErrorSqlx};
 ///
 /// This is a public endpoint — no authentication required.
 /// Always returns `Ok(())` for privacy, regardless of whether the email exists.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn unsubscribe_email(email: String) -> Result<(), ServerFnError> {
     let ctx = extract_context()?;
 

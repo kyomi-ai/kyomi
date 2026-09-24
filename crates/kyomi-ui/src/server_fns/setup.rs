@@ -16,7 +16,7 @@ use super::{AuthenticatedContext, IntoServerFnErrorCore};
 /// Returns `true` if at least one datasource exists (active or inactive),
 /// `false` otherwise. Used by the setup wizard to skip the "Connect Data"
 /// step when datasources are already configured.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn check_has_datasources() -> Result<bool, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 

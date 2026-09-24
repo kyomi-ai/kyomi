@@ -6547,6 +6547,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
+ "bytes",
  "chartml-chart-cartesian",
  "chartml-chart-metric",
  "chartml-chart-pie",

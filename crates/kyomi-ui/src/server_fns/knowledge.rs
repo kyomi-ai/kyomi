@@ -16,7 +16,7 @@ use leptos::prelude::*;
 ///
 /// Delegates to `dashboard_service::create_dashboard` with
 /// `doc_type = Knowledge`.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn create_knowledge_doc(
     title: String,
     content: Option<String>,
@@ -70,7 +70,7 @@ pub async fn create_knowledge_doc(
 ///
 /// Delegates to `dashboard_service::delete_dashboard`. The service layer
 /// does not distinguish doc_type for deletion.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn delete_knowledge_doc(dashboard_id: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 

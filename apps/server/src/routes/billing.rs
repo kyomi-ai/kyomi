@@ -62,6 +62,22 @@ async fn load_workspace_by_subscription(
     .flatten()
 }
 
+/// Load the Stripe ids the payment-recovery webhook backstop
+/// (`handle_payment_recovery_checkout_completed`, KYO-806) needs to call
+/// `recover_past_due_payment`.
+async fn load_recovery_workspace_row(
+    db: &kyomi_core::DbPool,
+    workspace_id: &str,
+) -> Option<RecoveryWorkspaceRow> {
+    kyomi_core::db_fetch_optional!(
+        db, RecoveryWorkspaceRow,
+        "SELECT stripe_customer_id, stripe_subscription_id FROM workspaces WHERE workspace_id = $1",
+        workspace_id
+    )
+    .ok()
+    .flatten()
+}
+
 // ===========================================================================
 // Internal row types
 // ===========================================================================
@@ -73,6 +89,13 @@ async fn load_workspace_by_subscription(
 #[derive(Debug, sqlx::FromRow)]
 struct WorkspaceRow {
     workspace_id: String,
+}
+
+/// Minimal workspace row used by the payment-recovery webhook backstop.
+#[derive(Debug, sqlx::FromRow)]
+struct RecoveryWorkspaceRow {
+    stripe_customer_id: Option<String>,
+    stripe_subscription_id: Option<String>,
 }
 
 // ===========================================================================
@@ -186,60 +209,21 @@ async fn handle_subscription_event(
         }
     };
 
-    // Build the update query based on event type.
-    //
-    // `sub_data.period_start` / `period_end` are already `Option<DateTime<Utc>>`.
-    // Bind them directly — do NOT convert to RFC3339 strings. Postgres's
-    // `timestamp with time zone` column rejects `text` binds with
-    // `column … is of type timestamp with time zone but expression is of type text`
-    // (the KYO-106 production bug). sqlx's chrono integration maps
-    // `Option<DateTime<Utc>>` to `TIMESTAMPTZ` natively.
-    let result = if event_type == "customer.subscription.created" {
-        // On creation, also set stripe_subscription_id, stripe_customer_id, and reset credits
-        kyomi_core::db_execute!(
-            &state.db,
-            "UPDATE workspaces SET \
-                 subscription_tier = $1, \
-                 subscription_status = $2, \
-                 billing_cycle = $3, \
-                 subscription_period_start = $4, \
-                 subscription_period_end = $5, \
-                 stripe_subscription_id = $6, \
-                 stripe_customer_id = $7, \
-                 user_limit = $8, \
-                 ai_credits_used_usd = 0.0 \
-             WHERE workspace_id = $9",
-            &sub_data.tier,
-            &sub_data.status,
-            sub_data.billing_cycle.as_deref(),
-            sub_data.period_start,
-            sub_data.period_end,
-            &sub_data.stripe_subscription_id,
-            &sub_data.stripe_customer_id,
-            sub_data.user_limit,
-            &workspace_id
-        )
+    // Write the parsed subscription data to the workspace row via the one
+    // shared writer (KYO-806 A5) — used identically by payment recovery and
+    // new-subscription-checkout sync, so all three call sites move together.
+    let write_mode = if event_type == "customer.subscription.created" {
+        kyomi_auth::subscription_service::SubscriptionWriteMode::Created
     } else {
-        // On update, don't overwrite stripe_subscription_id or stripe_customer_id
-        kyomi_core::db_execute!(
-            &state.db,
-            "UPDATE workspaces SET \
-                 subscription_tier = $1, \
-                 subscription_status = $2, \
-                 billing_cycle = $3, \
-                 subscription_period_start = $4, \
-                 subscription_period_end = $5, \
-                 user_limit = $6 \
-             WHERE workspace_id = $7",
-            &sub_data.tier,
-            &sub_data.status,
-            sub_data.billing_cycle.as_deref(),
-            sub_data.period_start,
-            sub_data.period_end,
-            sub_data.user_limit,
-            &workspace_id
-        )
+        kyomi_auth::subscription_service::SubscriptionWriteMode::Updated
     };
+    let result = kyomi_auth::subscription_service::write_subscription_to_workspace(
+        &state.db,
+        &workspace_id,
+        &sub_data,
+        write_mode,
+    )
+    .await;
 
     match result {
         Ok(_) => {
@@ -406,10 +390,17 @@ async fn handle_invoice_payment_failed(state: &AppState, invoice: &Invoice) {
         }
 }
 
-/// Handle `checkout.session.completed` — fulfill one-time bundle purchases.
+/// Handle `checkout.session.completed`.
 ///
-/// Subscription checkouts are handled by `customer.subscription.created` instead.
-/// This handler only processes one-time payment sessions (bundle purchases).
+/// Dispatches on [`kyomi_auth::payment_recovery::classify_webhook_checkout_session`]:
+/// - `Bundle` (`mode = payment`) — fulfil a one-time bundle purchase (AI
+///   credits, analytics events). Unchanged by KYO-806.
+/// - `PaymentRecovery` (`mode = setup` carrying the recovery purpose
+///   marker) — the backstop for [`kyomi_auth::payment_recovery::recover_past_due_payment`]
+///   (KYO-806 A3), covering an owner who closes the tab before the
+///   client-side completion call fires.
+/// - `Ignore` — most commonly `mode = subscription`, handled entirely by
+///   the `customer.subscription.created`/`.updated` events instead.
 async fn handle_checkout_completed(state: &AppState, session: &stripe_shared::CheckoutSession) {
     let metadata = match &session.metadata {
         Some(m) => m,
@@ -424,16 +415,103 @@ async fn handle_checkout_completed(state: &AppState, session: &stripe_shared::Ch
         }
     };
 
-    // Only process one-time payments (bundle purchases). Subscription checkouts
-    // are handled by the customer.subscription.created event.
-    if session.mode != stripe_shared::CheckoutSessionMode::Payment {
-        tracing::info!(
-            workspace_id = %workspace_id,
-            "Subscription checkout completed"
+    match kyomi_auth::payment_recovery::classify_webhook_checkout_session(
+        &session.mode,
+        Some(metadata),
+    ) {
+        kyomi_auth::payment_recovery::CheckoutSessionKind::Bundle => {
+            handle_bundle_checkout_completed(state, &workspace_id, metadata).await;
+        }
+        kyomi_auth::payment_recovery::CheckoutSessionKind::PaymentRecovery => {
+            handle_payment_recovery_checkout_completed(state, &workspace_id, session).await;
+        }
+        kyomi_auth::payment_recovery::CheckoutSessionKind::Ignore => {
+            tracing::info!(
+                workspace_id = %workspace_id,
+                mode = ?session.mode,
+                "Checkout session completed — not a bundle or payment-recovery session"
+            );
+        }
+    }
+}
+
+/// The payment-recovery webhook backstop (KYO-806 A3 step 4) — runs the same
+/// shared service the `complete_payment_recovery` server fn does, so an
+/// owner who closes the tab before that call fires still gets their
+/// subscription recovered once Stripe's webhook arrives.
+async fn handle_payment_recovery_checkout_completed(
+    state: &AppState,
+    workspace_id: &str,
+    session: &stripe_shared::CheckoutSession,
+) {
+    let stripe_service = match require_stripe(state) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(
+                workspace_id,
+                "Payment recovery webhook backstop: Stripe not configured: {e}"
+            );
+            return;
+        }
+    };
+
+    let row = match load_recovery_workspace_row(&state.db, workspace_id).await {
+        Some(row) => row,
+        None => {
+            tracing::error!(
+                workspace_id,
+                "Payment recovery webhook backstop: workspace not found"
+            );
+            return;
+        }
+    };
+
+    let (Some(customer_id), Some(subscription_id)) =
+        (row.stripe_customer_id, row.stripe_subscription_id)
+    else {
+        tracing::error!(
+            workspace_id,
+            "Payment recovery webhook backstop: workspace is missing stripe_customer_id or \
+             stripe_subscription_id — cannot recover"
         );
         return;
-    }
+    };
 
+    match kyomi_auth::payment_recovery::recover_past_due_payment(
+        &state.db,
+        stripe_service,
+        &state.mcp_sessions,
+        kyomi_auth::payment_recovery::RecoveryIds {
+            workspace_id,
+            stripe_customer_id: &customer_id,
+            stripe_subscription_id: &subscription_id,
+            session_id: session.id.as_ref(),
+        },
+    )
+    .await
+    {
+        Ok(outcome) => {
+            tracing::info!(
+                workspace_id,
+                ?outcome,
+                "Payment recovery webhook backstop processed"
+            );
+        }
+        Err(e) => {
+            tracing::error!(workspace_id, "Payment recovery webhook backstop failed: {e}");
+        }
+    }
+}
+
+/// Fulfil a one-time bundle purchase (`mode = payment`) — AI credits or
+/// analytics events. Existing behaviour, unchanged by KYO-806; only
+/// extracted into its own function so [`handle_checkout_completed`] could
+/// add the payment-recovery branch alongside it.
+async fn handle_bundle_checkout_completed(
+    state: &AppState,
+    workspace_id: &str,
+    metadata: &std::collections::HashMap<String, String>,
+) {
     let purchase_type = match metadata.get("purchase_type") {
         Some(pt) => pt.clone(),
         None => {
@@ -467,7 +545,7 @@ async fn handle_checkout_completed(state: &AppState, session: &stripe_shared::Ch
                 "UPDATE workspaces SET ai_bundle_balance_usd = ai_bundle_balance_usd + $1 \
                  WHERE workspace_id = $2",
                 total_credit,
-                &workspace_id
+                workspace_id
             );
             match result {
                 Ok(_) => {
@@ -499,7 +577,7 @@ async fn handle_checkout_completed(state: &AppState, session: &stripe_shared::Ch
                 "UPDATE workspaces SET analytics_bundle_events = analytics_bundle_events + $1 \
                  WHERE workspace_id = $2",
                 total_events,
-                &workspace_id
+                workspace_id
             );
             match result {
                 Ok(_) => {

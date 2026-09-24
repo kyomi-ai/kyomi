@@ -158,7 +158,7 @@ pub enum DatasourceOAuthCallbackResult {
 /// The WebSocket notification is not fired here — the client that initiated
 /// the link will redirect to settings and reload, so the WS notification is
 /// superfluous on this code path.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn datasource_oauth_callback(
     provider: String,
     code: String,
@@ -211,7 +211,7 @@ pub async fn datasource_oauth_callback(
 /// Public endpoint — no authentication required. Reports which auth methods
 /// (password, Google OAuth, passkeys) and SMTP are configured, so the
 /// login/signup UI can conditionally render its options.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_auth_config() -> Result<AuthConfig, ServerFnError> {
     let ctx = extract_context()?;
 
@@ -230,7 +230,7 @@ pub async fn get_auth_config() -> Result<AuthConfig, ServerFnError> {
 /// Public endpoint — no authentication required.
 ///
 /// Delegates all orchestration to `kyomi_auth::auth_service::login_with_password_service`.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn login_with_password(
     email: String,
     password: String,
@@ -297,7 +297,7 @@ pub async fn login_with_password(
 /// Public endpoint — no authentication required.
 ///
 /// Delegates all orchestration to `kyomi_auth::auth_service::signup_start_service`.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn signup_start(
     email: String,
     name: Option<String>,
@@ -368,7 +368,7 @@ pub async fn signup_start(
 /// create the account. KYO-728 will wire the "Confirm" button that calls it.
 ///
 /// Delegates all orchestration to `kyomi_auth::auth_service::signup_verify_service`.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn signup_verify(
     token: String,
     name: Option<String>,
@@ -428,7 +428,7 @@ pub async fn signup_verify(
 /// Mirrors `POST /auth/google/callback` in `apps/server/src/routes/auth_google_oauth.rs`.
 ///
 /// Delegates all orchestration to `kyomi_auth::auth_service::google_oauth_callback_service`.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn google_oauth_callback(
     code: String,
     state: Option<String>,
@@ -510,7 +510,7 @@ pub async fn google_oauth_callback(
 /// The WebSocket notification is not fired here — the client that initiated the
 /// link will redirect to settings and reload, so the WS notification is
 /// superfluous on this code path.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn google_link_callback(
     code: String,
     state: String,
@@ -575,7 +575,7 @@ pub async fn google_link_callback(
 ///
 /// For an email with a pending signup (registered but not yet verified),
 /// re-sends the verification link rather than creating a new account.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn resend_verification(email: String) -> Result<(), ServerFnError> {
     let ctx = extract_context()?;
 
@@ -643,7 +643,7 @@ pub enum RecoverySetPasswordResult {
 /// SMTP-not-configured precondition below, both of which fire before any
 /// account lookup and so leak nothing about a specific email. Delegates
 /// email dispatch to a background task inline.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn recovery_start(email: String) -> Result<(), ServerFnError> {
     let ctx = extract_context()?;
 
@@ -722,7 +722,7 @@ pub async fn recovery_start(email: String) -> Result<(), ServerFnError> {
 /// precondition above, both of which fire before any account lookup and so
 /// leak nothing about a specific email. Delegates token minting + email
 /// dispatch to `passkey_recovery_start_service`.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn passkey_recovery_start(email: String) -> Result<(), ServerFnError> {
     let ctx = extract_context()?;
 
@@ -760,7 +760,7 @@ pub async fn passkey_recovery_start(email: String) -> Result<(), ServerFnError> 
 /// Public endpoint — no authentication required.
 ///
 /// Delegates all orchestration to `kyomi_auth::auth_service::recovery_verify_service`.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn recovery_verify(
     token: String,
 ) -> Result<RecoveryVerifyResult, ServerFnError> {
@@ -804,7 +804,7 @@ pub async fn recovery_verify(
 /// Public endpoint — no authentication required.
 ///
 /// Delegates all orchestration to `kyomi_auth::auth_service::recovery_set_password_service`.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn recovery_set_password(
     recovery_session_id: String,
     new_password: String,
@@ -873,7 +873,7 @@ pub struct PasskeyLoginStartResult {
 /// Uses discoverable credential flow (empty `allowCredentials`) so the browser
 /// presents all available passkeys. If an email is provided and the user has
 /// registered passkeys, uses the standard flow with `allowCredentials` populated.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn passkey_login_start() -> Result<PasskeyLoginStartResult, ServerFnError> {
     let ctx = extract_context()?;
 
@@ -923,7 +923,7 @@ pub async fn passkey_login_start() -> Result<PasskeyLoginStartResult, ServerFnEr
 /// Public endpoint — no authentication required.
 ///
 /// Delegates all orchestration to `kyomi_auth::auth_service::passkey_login_complete_service`.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn passkey_login_complete(
     challenge_id: String,
     assertion_json: String,
@@ -1014,7 +1014,7 @@ pub enum PasskeyRecoveryVerifyResult {
 /// eventual `passkey_recovery_complete` call to this same browser session.
 ///
 /// Delegates all orchestration to `kyomi_auth::auth_service::passkey_recovery_verify_service`.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn passkey_recovery_verify(
     token: String,
 ) -> Result<PasskeyRecoveryVerifyResult, ServerFnError> {
@@ -1080,7 +1080,7 @@ pub async fn passkey_recovery_verify(
 ///
 /// Delegates all orchestration to
 /// `kyomi_auth::auth_service::passkey_recovery_complete_service`.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn passkey_recovery_complete(
     challenge_id: String,
     credential_json: String,

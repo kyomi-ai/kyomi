@@ -149,7 +149,7 @@ pub struct ChartContext {
 /// Returns `None` if the context has expired (TTL) or the ID is invalid.
 ///
 /// Mirrors `GET /api/v1/chart-context/:id` in the REST API.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_chart_context(chart_id: String) -> Result<Option<ChartContext>, ServerFnError> {
     let _auth = super::extract_auth().await?;
     let ctx = super::extract_context()?;
@@ -184,7 +184,7 @@ pub async fn get_chart_context(chart_id: String) -> Result<Option<ChartContext>,
 /// used by MCP "Continue in Kyomi" deep-links.
 ///
 /// Uses a 30-day TTL matching `CHART_CONTEXT_TTL_SECS` in `kyomi-agent`.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn store_chart_context_for_ask(
     chart_markdown: String,
     title: String,
@@ -228,7 +228,7 @@ pub async fn store_chart_context_for_ask(
 /// Generates a short-lived JWT (15 minutes) signed with the app's JWT secret,
 /// matching the token format produced by `GET /api/v1/auth/websocket-token`.
 /// The client uses this token to authenticate the WebSocket upgrade request.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_websocket_config() -> Result<WebSocketConfig, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -265,7 +265,7 @@ pub async fn get_websocket_config() -> Result<WebSocketConfig, ServerFnError> {
 ///
 /// Verifies the user has access (owner or shared in workspace) before
 /// returning messages. Returns up to 200 messages, oldest first.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_session_messages(
     session_id: String,
 ) -> Result<SessionMessagesResponse, ServerFnError> {
@@ -306,7 +306,7 @@ pub async fn get_session_messages(
 ///
 /// Only the session owner can update the title. Returns an error if the
 /// session is not found, access is denied, or the user is not the owner.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn update_session_title(
     session_id: String,
     title: String,
@@ -357,7 +357,7 @@ pub async fn update_session_title(
 ///
 /// Only the session owner can delete. Returns an error if the session is
 /// not found or the user is not the owner.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn delete_chat_session(session_id: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -396,7 +396,7 @@ pub async fn delete_chat_session(session_id: String) -> Result<(), ServerFnError
 ///
 /// Validates that the list is non-empty and capped at 100. Only deletes
 /// sessions owned by the current user in the current workspace.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn bulk_delete_sessions(session_ids: Vec<String>) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -441,7 +441,7 @@ pub async fn bulk_delete_sessions(session_ids: Vec<String>) -> Result<(), Server
 ///
 /// Returns sessions (owned + shared) whose title matches the query (ILIKE).
 /// Returns an empty list when the query is empty.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn search_chat_messages(query: String) -> Result<Vec<ChatSessionItem>, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -477,7 +477,7 @@ pub async fn search_chat_messages(query: String) -> Result<Vec<ChatSessionItem>,
 /// Leptos-specific context extraction, agent config construction, and spawn.
 ///
 /// The AI response is delivered asynchronously via WebSocket streaming events.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn send_chat_message(
     message: String,
     // KYO-494: always the session this message belongs to — never a
@@ -804,7 +804,7 @@ pub async fn send_chat_message(
 /// `shared_at` timestamp via `chat_service::set_session_shared`, which also
 /// persists the visibility transition to `sync_log` so an offline
 /// workspace member converges on their next delta sync.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn share_session(session_id: String) -> Result<(), ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -868,7 +868,7 @@ pub async fn share_session(session_id: String) -> Result<(), ServerFnError> {
 /// conversations (they're visible on the platform). Delegates the
 /// `shared` flip and matching `sync_log` write to
 /// `chat_service::set_session_shared`.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn unshare_session(session_id: String) -> Result<(), ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -946,7 +946,7 @@ pub async fn unshare_session(session_id: String) -> Result<(), ServerFnError> {
 ///
 /// Upserts into `conversation_read_status` to track the user's read position.
 /// Used for computing `unread_count` in session listings.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn mark_session_read(
     session_id: String,
     last_message_id: Option<String>,
@@ -1022,7 +1022,7 @@ pub async fn mark_session_read(
 /// Requires access to the session (owner or shared in workspace).
 /// Returns `true` if the toggle was successful (message found), `false`
 /// otherwise.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn toggle_message_pin(
     session_id: String,
     message_id: String,
@@ -1054,7 +1054,7 @@ pub async fn toggle_message_pin(
 ///
 /// Only the session owner can edit messages. Re-encrypts the content before
 /// storing. Thin wrapper around `chat_service::update_message_content_owned`.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn update_message_content(
     session_id: String,
     message_id: String,
@@ -1101,7 +1101,7 @@ pub async fn update_message_content(
 ///
 /// Returns `None` if no full text was stored (the event was short enough to
 /// fit within the 200-char display limit).
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_thinking_event_detail(
     message_id: String,
     event_id: String,

@@ -81,28 +81,18 @@ struct CheckoutContext {
     checkout_handle: StoredValue<Option<send_wrapper::SendWrapper<crate::utils::stripe::EmbeddedCheckoutHandle>>>,
 }
 
-/// Fetch the Stripe publishable key, mount the embedded checkout form,
-/// and wire up the onComplete callback.
+/// Mount the embedded checkout form and wire up the onComplete callback.
+///
+/// The publishable-key fetch, DOM-mount-target wait, and `mount_embedded_checkout`
+/// call are shared with `components/billing_paywall.rs` (KYO-806) via
+/// `crate::utils::stripe::fetch_key_and_mount_embedded_checkout` — only this
+/// page's own completion handling (poll `get_checkout_session_status`) is
+/// specific to this call site.
 async fn open_embedded_checkout(
     client_secret: &str,
     session_id: &str,
     ctx: CheckoutContext,
 ) {
-    // Fetch the publishable key from the server
-    let pk = match get_stripe_publishable_key().await {
-        Ok(Some(pk)) => pk,
-        Ok(None) => {
-            ctx.set_error.set(Some("Stripe is not configured.".into()));
-            ctx.set_checkout_loading.set(false);
-            return;
-        }
-        Err(e) => {
-            ctx.set_error.set(Some(format!("Failed to load Stripe config: {e}")));
-            ctx.set_checkout_loading.set(false);
-            return;
-        }
-    };
-
     // Store session ID for the onComplete callback
     let sid = session_id.to_string();
     ctx.set_checkout_session_id.set(Some(sid.clone()));
@@ -114,11 +104,7 @@ async fn open_embedded_checkout(
     {
         let client_secret = client_secret.to_string();
         leptos::task::spawn_local(async move {
-            // Wait for the mount target to appear in DOM
-            gloo_timers::future::TimeoutFuture::new(50).await;
-
-            let result = crate::utils::stripe::mount_embedded_checkout(
-                &pk,
+            let result = crate::utils::stripe::fetch_key_and_mount_embedded_checkout(
                 &client_secret,
                 "#stripe-checkout-mount",
                 move || {
@@ -184,7 +170,6 @@ async fn open_embedded_checkout(
             ctx.set_error,
             ctx.set_sub_version,
             ctx.checkout_handle,
-            pk,
         );
     }
 }

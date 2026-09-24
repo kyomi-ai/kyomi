@@ -51,7 +51,7 @@ pub struct DryRunResult {
 /// datasource_slug)` to avoid the 300-500ms setup cost on every keystroke.
 /// The cache manages provider lifecycle — `close()` is intentionally not
 /// called here because the cached `Arc` must remain valid for future calls.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn dry_run_sql(
     datasource_slug: String,
     sql: String,
@@ -124,7 +124,7 @@ pub async fn dry_run_sql(
 ///
 /// Supports text search on query_text, filtering to saved-only, and
 /// pagination via limit/offset.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn list_query_history(
     search: Option<String>,
     saved_only: Option<bool>,
@@ -172,7 +172,7 @@ pub async fn list_query_history(
 ///
 /// If `datasource` slug is provided, resolves it to a datasource_config_id.
 /// Returns the new query_id.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn save_query_history(
     query_text: String,
     execution_time_ms: Option<i32>,
@@ -221,7 +221,7 @@ pub async fn save_query_history(
 // ---------------------------------------------------------------------------
 
 /// Update a query history entry (e.g., toggle saved/bookmark).
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn update_query_history(
     query_id: String,
     is_saved: Option<bool>,
@@ -254,7 +254,7 @@ pub async fn update_query_history(
 // ---------------------------------------------------------------------------
 
 /// Delete a query history entry.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn delete_query_history(
     query_id: String,
 ) -> Result<(), ServerFnError> {
@@ -586,7 +586,7 @@ fn build_catalog_tree(
 /// Replicates the tree-building logic from `GET /{identifier}/catalog/tree`
 /// in the REST handler. Builds a hierarchical tree from the
 /// `datasource_table_cache` table: project > dataset/schema > table > column.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_catalog_tree(
     datasource_slug: String,
     include_columns: bool,
@@ -671,7 +671,7 @@ pub async fn get_catalog_tree(
 /// Search the catalog for tables matching a substring query.
 ///
 /// Returns a flat list of matching table nodes (no hierarchy).
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn search_catalog(
     datasource_slug: String,
     query: String,
@@ -780,7 +780,7 @@ pub async fn search_catalog(
 /// poll it via `get_catalog_refresh_status`.
 ///
 /// Returns immediately once validation passes, before indexing starts.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn refresh_catalog(
     datasource_slug: String,
 ) -> Result<String, ServerFnError> {
@@ -908,7 +908,7 @@ pub struct CatalogRefreshStatusResponse {
 /// KYO-267) — `datasource_slug` both confirms the caller has access to this
 /// datasource in the workspace and identifies which datasource's status to
 /// return.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_catalog_refresh_status(
     datasource_slug: String,
 ) -> Result<CatalogRefreshStatusResponse, ServerFnError> {
@@ -977,7 +977,7 @@ pub struct TableInfoResponse {
 /// Requires `datasource_slug` to verify the caller has workspace access
 /// to the datasource that owns this table. Without this check, any
 /// authenticated user could enumerate table metadata across workspaces.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_table_info(
     datasource_slug: String,
     table_id: String,
@@ -1131,7 +1131,7 @@ pub struct GeneratedChart {
 /// categorical and the user gets a worse or empty chart with no error.
 /// JSON preserves the original `Value::Number`/`Value::String` leaves,
 /// matching `create_datasource_modal` (datasources.rs).
-#[server(prefix = "/leptos-api", input = server_fn::codec::Json)]
+#[server(prefix = "/leptos-api", input = server_fn::codec::Json, client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn generate_chart_from_results(
     columns: Vec<String>,
     sample_rows: Vec<Vec<serde_json::Value>>,

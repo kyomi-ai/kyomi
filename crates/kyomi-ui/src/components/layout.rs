@@ -109,6 +109,29 @@ pub fn Layout(children: ChildrenFn) -> impl IntoView {
     let (user_ctx_version, set_user_ctx_version) = signal(0u32);
     provide_context(set_user_ctx_version);
 
+    // Register these two triggers with the KYO-806 billing-lapse module so
+    // `report_payment_required()` (called from `PaywallAwareClient`, the
+    // raw-fetch 402 helper, and the sync engine's WS error handler — none of
+    // which run inside this reactive owner) can force a refetch of both
+    // `get_sidebar_user` and `get_user_context` without duplicating this
+    // Layout's own token-refresh retry plumbing. Also the KYO-807 hook: once
+    // billing-status pushes arrive over an already-open WebSocket, that
+    // handler calls `refetch_billing_state()` directly.
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::utils::billing_lapse::register_refetch_triggers(set_auth_retry, set_user_ctx_version);
+        // Undo the registration above when THIS Layout instance unmounts —
+        // which happens whenever navigation leaves the authed shell this
+        // instance covers (e.g. to /login, /onboarding, /billing/return —
+        // see app.rs's route tree) — so a `refetch_billing_state()` call
+        // that lands after unmount but before the next Layout instance
+        // registers its own triggers can't bump this instance's now-
+        // disposed `WriteSignal`s. See
+        // `utils::billing_lapse::unregister_refetch_triggers`'s doc comment
+        // for the full reasoning.
+        on_cleanup(crate::utils::billing_lapse::unregister_refetch_triggers);
+    }
+
     let user_ctx = LocalResource::new(move || {
         let _v = user_ctx_version.get();
         get_user_context()
@@ -370,55 +393,79 @@ pub fn Layout(children: ChildrenFn) -> impl IntoView {
         }
     });
 
-    // Subscription gate: redirect to billing when the workspace's billing
-    // has lapsed. `user.billing_lapsed` is computed server-side by the one
-    // definition of this rule, `kyomi_core::capability::is_billing_lapsed`
-    // (see its doc comment) — this effect must never re-derive the rule by
-    // string-matching `subscription_status` itself, since the predicate
-    // already handles cases a naive status match gets wrong, e.g. a
-    // scheduled cancellation (`cancel_at_period_end`) that still has
-    // paid-up time remaining (KYO-811). Only enforced for non-personal-mode
-    // users navigating to non-settings pages.
+    // Billing paywall gate (KYO-806) — replaces the old redirect-to-
+    // /settings/billing Effect. A lapsed SaaS workspace now renders the
+    // full-screen paywall INSTEAD of the sidebar + page content (below,
+    // where `show_paywall` gates the `<Show>`), rather than being redirected
+    // to a settings page while the rest of the app shell (and the URL) stay
+    // untouched — that redirect also fought `DashboardsListPage`'s own
+    // URL-sync effect, and left read-only app access reachable via back/
+    // forward navigation.
+    //
+    // `user.billing_lapsed` is computed server-side by the one definition of
+    // this rule, `kyomi_core::capability::is_billing_lapsed` (see its doc
+    // comment) — this must never re-derive the rule by string-matching
+    // `subscription_status` itself, since the predicate already handles
+    // cases a naive status match gets wrong, e.g. a scheduled cancellation
+    // (`cancel_at_period_end`) that still has paid-up time remaining
+    // (KYO-811). `optimistic_lapsed` is ORed in so an already-open tab locks
+    // into the paywall the instant a 402/`payment_required` arrives, before
+    // the refetch that same report kicks off has resolved — see
+    // `utils::billing_lapse::should_show_paywall`'s doc comment.
+    //
+    // Stripe manages trial expiry via webhooks for subscriptions it owns.
+    // With the default `missing_payment_method` behaviour
+    // (`create_subscription` in kyomi-auth's stripe_service.rs never
+    // overrides it), trial end does NOT go straight to "past_due": Stripe
+    // moves the subscription to "active" and creates a draft invoice, which
+    // finalizes roughly 72 hours later — only once that charge actually
+    // fails does the status become "past_due". That ~3-day window before
+    // this gate fires is accepted — it's also why `is_billing_lapsed` treats
+    // `Trialing` with a live Stripe subscription as never lapsed: Stripe,
+    // not our cached status, governs that transition.
     #[cfg(target_arch = "wasm32")]
-    let navigate_billing = use_navigate();
+    let show_paywall = {
+        let user_info_for_paywall = user_info;
+        Memo::new(move |_| {
+            let Some(Some(Ok(user))) = user_info_for_paywall.try_get() else { return false };
+            let is_saas = !user.is_personal_mode && !user.is_self_hosted;
+            crate::utils::billing_lapse::should_show_paywall(
+                is_saas,
+                user.billing_lapsed,
+                crate::utils::billing_lapse::optimistic_lapsed().try_get().unwrap_or(false),
+            )
+        })
+    };
+    // KYO-806 F1: once the server's own `billing_lapsed` (via `user_info`,
+    // the same `get_sidebar_user` resource `show_paywall` above reads)
+    // confirms the workspace is no longer lapsed, drop the optimistic flag
+    // `report_payment_required()` set on an earlier 402 — otherwise it would
+    // keep `should_show_paywall` locked to `true` until a full page reload,
+    // even after the owner pays. Deliberately a separate Effect from the
+    // auth-confirmation one above rather than folded into it: this is a
+    // billing concern, not an auth one, and keeping them apart matches
+    // `utils::billing_lapse`'s own separation of "decision" from
+    // "plumbing". Runs on `user_info`, not `user_ctx` — see
+    // `utils::billing_lapse::clear_optimistic_lapsed`'s doc comment.
     #[cfg(target_arch = "wasm32")]
     {
-        let user_info_for_sub_gate = user_info;
-        let location_for_gate = leptos_router::hooks::use_location();
-        Effect::new(move || {
-            // Don't gate until auth is confirmed
-            if !auth_confirmed.get() {
-                return;
-            }
-            let Some(Ok(user)) = user_info_for_sub_gate.get() else { return };
-            // Personal mode / self-hosted don't have billing.
-            // `billing_lapsed` is already always `false` for these — this
-            // early return just skips the rest of the effect on every
-            // navigation rather than relying on that.
-            if user.is_personal_mode {
-                return;
-            }
-            // Don't gate the settings/billing page itself (or any settings page)
-            let path = location_for_gate.pathname.get();
-            if path.starts_with("/settings") || path.starts_with("/login") || path.starts_with("/signup") {
-                return;
-            }
-            // Stripe manages trial expiry via webhooks for subscriptions it
-            // owns. With the default `missing_payment_method` behaviour
-            // (`create_subscription` in kyomi-auth's stripe_service.rs never
-            // overrides it), trial end does NOT go straight to "past_due":
-            // Stripe moves the subscription to "active" and creates a draft
-            // invoice, which finalizes roughly 72 hours later — only once
-            // that charge actually fails does the status become "past_due".
-            // That ~3-day window before this gate fires is accepted — it's
-            // also why `is_billing_lapsed` treats `Trialing` with a live
-            // Stripe subscription as never lapsed: Stripe, not our cached
-            // status, governs that transition.
-            if user.billing_lapsed {
-                navigate_billing("/settings/billing", NavigateOptions::default());
+        let user_info_for_clear = user_info;
+        Effect::new(move |_| {
+            if let Some(Ok(user)) = user_info_for_clear.get()
+                && !user.billing_lapsed
+            {
+                crate::utils::billing_lapse::clear_optimistic_lapsed();
             }
         });
     }
+    // Layout is never server-rendered: the only SSR route is `/login`
+    // (`login_ssr_handler` in `apps/server/src/leptos_frontend.rs`), which
+    // renders `kyomi_ui::app::App` directly and never mounts `Layout`. So
+    // the non-wasm32 branch below only exists to make this crate compile
+    // under `ssr`/native targets at all (`cargo check --features ssr`);
+    // it is never actually reached by a real request, and always `false`.
+    #[cfg(not(target_arch = "wasm32"))]
+    let show_paywall = Memo::new(move |_| false);
 
     // ── Feedback modal state ──────────────────────────────────────────────
     // Owned here and threaded down to `Sidebar` as props — `Sidebar` renders
@@ -441,6 +488,22 @@ pub fn Layout(children: ChildrenFn) -> impl IntoView {
                 // Drives the bootstrap/delta/live sync protocol over WebSocket
                 // and keeps SyncStore + IndexedDB current. See [KYO-169].
                 <SyncEngineStarter workspace_id=ws_workspace_id.into()/>
+                // Billing paywall gate (KYO-806) — when the workspace is
+                // lapsed, render the full-screen paywall INSTEAD of the
+                // sidebar + page content. `<Show>` never invokes the "true"
+                // branch's children when `when()` is false, so
+                // `children_render` (the page component tree) is never
+                // constructed and none of its effects — including
+                // `DashboardsListPage`'s URL-sync effect — ever run; the
+                // address bar stays exactly where the user was. WS/sync
+                // infrastructure above (`QueryCacheWsBridge`,
+                // `SyncEngineStarter`) stays mounted either way — KYO-807
+                // needs the live WebSocket connection regardless of which
+                // branch renders.
+                <Show
+                    when=move || !show_paywall.get()
+                    fallback=|| view! { <crate::components::BillingPaywall/> }
+                >
                 <div class="h-dvh flex flex-col bg-background app-shell">
                     // ── Mobile header bar (md:hidden) — matches React Sidebar.jsx line 266 ──
                     <div class="mobile-header md:hidden fixed top-0 left-0 right-0 h-16 bg-background border-b border-border z-40 flex items-center px-4">
@@ -498,6 +561,7 @@ pub fn Layout(children: ChildrenFn) -> impl IntoView {
                     </div>
                     <InvitationStatusBar/>
                 </div>
+                </Show>
             </WebSocketProvider>
         </Show>
     }

@@ -104,7 +104,7 @@ fn bare_to_collection_item(coll: &kyomi_core::models::Collection) -> CollectionI
 ///
 /// When `doc_type` is `Some`, only collections containing at least one
 /// document of that type are returned (e.g. `"dashboard"` or `"knowledge"`).
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn list_collections(
     doc_type: Option<String>,
 ) -> Result<Vec<CollectionItem>, ServerFnError> {
@@ -123,7 +123,7 @@ pub async fn list_collections(
 }
 
 /// Create a new collection in the current workspace.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn create_collection(
     name: String,
     description: Option<String>,
@@ -154,7 +154,7 @@ pub async fn create_collection(
 }
 
 /// Update an existing collection.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn update_collection(
     collection_id: String,
     name: Option<String>,
@@ -195,7 +195,7 @@ pub async fn update_collection(
 }
 
 /// Delete a collection.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn delete_collection(collection_id: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -214,7 +214,7 @@ pub async fn delete_collection(collection_id: String) -> Result<(), ServerFnErro
 /// Add a dashboard to a collection.
 ///
 /// Both the collection and dashboard must exist in the same workspace.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn add_dashboard_to_collection(
     collection_id: String,
     dashboard_id: String,
@@ -242,7 +242,7 @@ pub async fn add_dashboard_to_collection(
 }
 
 /// Remove a dashboard from a collection.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn remove_dashboard_from_collection(
     collection_id: String,
     dashboard_id: String,

@@ -37,7 +37,7 @@ pub struct CopilotResponse {
 /// `"watch_copilot"`. Defaults to `"dashboard_copilot"` if unrecognized.
 ///
 /// Returns the new session ID.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn create_copilot_session(
     context_type: String,
 ) -> Result<String, ServerFnError> {
@@ -89,7 +89,7 @@ pub async fn create_copilot_session(
 /// this is an additional restriction layered on top of each tool's own
 /// ownership checks, not a substitute for them, so a client sending an
 /// id it doesn't actually have access to gains nothing.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn send_copilot_message(
     session_id: String,
     message: String,
@@ -309,7 +309,7 @@ pub async fn send_copilot_message(
 /// Delete/cleanup a copilot session.
 ///
 /// Called when the copilot sidebar/modal closes to clean up the ephemeral session.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn delete_copilot_session(session_id: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 

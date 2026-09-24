@@ -45,7 +45,7 @@ pub struct SidebarUser {
 }
 
 /// Load recent chat sessions for the sidebar.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_recent_sessions() -> Result<Vec<SidebarSession>, ServerFnError> {
     let auth = super::extract_auth().await?;
     let ctx = super::extract_context()?;
@@ -83,7 +83,7 @@ pub async fn get_recent_sessions() -> Result<Vec<SidebarSession>, ServerFnError>
 /// billing_lapsed flag itself, which drives the client-side redirect to the
 /// billing page — must render for a lapsed workspace, or the owner has no
 /// way to reach the page that fixes it.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_sidebar_user() -> Result<SidebarUser, ServerFnError> {
     let auth = extract_auth_allow_lapsed().await?;
     let ctx = super::extract_context()?;
