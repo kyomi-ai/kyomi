@@ -114,9 +114,11 @@ pub fn Layout(children: ChildrenFn) -> impl IntoView {
     // raw-fetch 402 helper, and the sync engine's WS error handler — none of
     // which run inside this reactive owner) can force a refetch of both
     // `get_sidebar_user` and `get_user_context` without duplicating this
-    // Layout's own token-refresh retry plumbing. Also the KYO-807 hook: once
-    // billing-status pushes arrive over an already-open WebSocket, that
-    // handler calls `refetch_billing_state()` directly.
+    // Layout's own token-refresh retry plumbing. Also used by KYO-807:
+    // `cache::sync_engine`'s `billing_status_changed` WebSocket subscription
+    // calls `refetch_billing_state()` directly once a billing-status push
+    // arrives over an already-open connection, so every open tab locks or
+    // unlocks without a reload.
     #[cfg(target_arch = "wasm32")]
     {
         crate::utils::billing_lapse::register_refetch_triggers(set_auth_retry, set_user_ctx_version);
@@ -497,9 +499,11 @@ pub fn Layout(children: ChildrenFn) -> impl IntoView {
                 // `DashboardsListPage`'s URL-sync effect — ever run; the
                 // address bar stays exactly where the user was. WS/sync
                 // infrastructure above (`QueryCacheWsBridge`,
-                // `SyncEngineStarter`) stays mounted either way — KYO-807
-                // needs the live WebSocket connection regardless of which
-                // branch renders.
+                // `SyncEngineStarter`) stays mounted either way — KYO-807's
+                // `billing_status_changed` subscription (in
+                // `cache::sync_engine`) needs the live WebSocket connection
+                // regardless of which branch renders, since it's exactly how
+                // a lapsed workspace's own tab learns it's been unlocked.
                 <Show
                     when=move || !show_paywall.get()
                     fallback=|| view! { <crate::components::BillingPaywall/> }

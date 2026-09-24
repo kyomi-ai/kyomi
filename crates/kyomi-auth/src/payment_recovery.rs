@@ -58,6 +58,7 @@ use crate::{
     mcp_session_manager::MCPSessionManager,
     stripe_service::StripeService,
     subscription_service::{write_subscription_to_workspace, SubscriptionWriteMode},
+    websocket::WebSocketManager,
 };
 
 /// The metadata marker (`metadata["purpose"]`) that distinguishes a
@@ -464,6 +465,7 @@ pub fn validate_new_subscription_session_facts(
 pub async fn sync_new_subscription_checkout(
     db: &DbPool,
     stripe: &StripeService,
+    ws: &WebSocketManager,
     mcp_sessions: &MCPSessionManager,
     workspace_id: &str,
     stripe_customer_id: &str,
@@ -491,7 +493,7 @@ pub async fn sync_new_subscription_checkout(
         Error::Internal(format!("failed to parse subscription data: {e}"))
     })?;
 
-    write_subscription_to_workspace(db, workspace_id, &sub_data, SubscriptionWriteMode::Created)
+    write_subscription_to_workspace(db, ws, workspace_id, &sub_data, SubscriptionWriteMode::Created)
         .await?;
 
     mcp_sessions.notify_tools_changed(workspace_id).await;
@@ -591,6 +593,7 @@ pub struct RecoveryIds<'a> {
 pub async fn recover_past_due_payment(
     db: &DbPool,
     stripe: &StripeService,
+    ws: &WebSocketManager,
     mcp_sessions: &MCPSessionManager,
     ids: RecoveryIds<'_>,
 ) -> Result<RecoveryOutcome, Error> {
@@ -651,7 +654,7 @@ pub async fn recover_past_due_payment(
         Error::Internal(format!("failed to parse subscription data after recovery: {e}"))
     })?;
 
-    write_subscription_to_workspace(db, workspace_id, &sub_data, SubscriptionWriteMode::Updated)
+    write_subscription_to_workspace(db, ws, workspace_id, &sub_data, SubscriptionWriteMode::Updated)
         .await?;
 
     mcp_sessions.notify_tools_changed(workspace_id).await;

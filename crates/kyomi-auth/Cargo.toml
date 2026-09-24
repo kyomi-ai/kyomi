@@ -66,6 +66,16 @@ kyomi-core = { workspace = true, features = ["test-helpers"] }
 # HTTP-mocking harness for the BigQuery REST boundary (KYO-623) — no crate
 # in this workspace had one before; see the workspace Cargo.toml comment.
 wiremock = { workspace = true }
+# Enables async-stripe-shared's "deserialize" feature (a real
+# `serde::Deserialize` impl on `Subscription`/`Invoice`/etc, gated off by
+# default) for this crate's own test target only — same pattern as
+# `kyomi-core`'s `test-helpers` override just above. KYO-807's webhook-event
+# adapters (`billing_webhook.rs`) are tested by deserializing a realistic
+# JSON fixture straight into the real Stripe type, so the "decision + write"
+# logic runs against the same struct production code does, without needing
+# `stripe_webhook`'s signature-verification/envelope machinery. Test-only:
+# the production build's dependency graph is unaffected.
+async-stripe-shared = { workspace = true, features = ["deserialize"] }
 
 [lints]
 workspace = true

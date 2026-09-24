@@ -19,6 +19,7 @@ pub mod analytics_site_service;
 pub mod auth_service;
 pub mod billing_gate;
 pub mod billing_service;
+pub mod billing_webhook;
 pub mod catalog;
 pub mod chat_service;
 pub mod collection_service;
