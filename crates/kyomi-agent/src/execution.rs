@@ -528,15 +528,28 @@ pub async fn execute_agent_chat(
     } else {
         provider_context_window
     };
-    let tracker = AgentThinkingTracker::new(
-        config.session_id.clone(),
-        config.user_id.clone(),
-        assistant_message_id.clone(),
-        ws_manager.clone(),
-        config.workspace_user_ids.clone(),
-        Some(config.context_type.clone()),
-        resolved_context_window,
-    );
+    // Only a `CallerPreInserted` assistant row (chat) has a placeholder a
+    // mid-run read can already see — copilot/Slack/watch (`AdapterInserts`)
+    // have no row to flush into until `persist_after_chat` inserts one at
+    // the end (KYO-493 phase 3).
+    let incremental_flush = matches!(
+        config.assistant_message_persistence,
+        AssistantMessagePersistence::CallerPreInserted(_)
+    )
+    .then(|| crate::thinking::IncrementalFlushTarget {
+        db: db.clone(),
+        encryption_key: encryption_key.clone(),
+    });
+    let tracker = AgentThinkingTracker::new(crate::thinking::AgentThinkingTrackerConfig {
+        session_id: config.session_id.clone(),
+        user_id: config.user_id.clone(),
+        message_id: assistant_message_id.clone(),
+        ws_manager: ws_manager.clone(),
+        workspace_user_ids: config.workspace_user_ids.clone(),
+        context_type: Some(config.context_type.clone()),
+        context_window: resolved_context_window,
+        incremental_flush,
+    });
     let tracker = Arc::new(tokio::sync::Mutex::new(tracker));
 
     // Signal agent start.
@@ -585,9 +598,20 @@ pub async fn execute_agent_chat(
         }
     };
 
-    // 14. Get thinking events and token usage from tracker.
+    // 14. Get thinking events and token usage from tracker, and finalize it
+    // (KYO-493 review fix). `finalize()` must run inside this same locked
+    // critical section, before the events below are read, so that no
+    // incremental flush — including one whose spawned task
+    // (`ChatAgentAdapter::set_thinking_tracker`'s five detached
+    // `tokio::spawn`s) hadn't even run yet when the agent loop returned —
+    // can land after step 15's terminal `extra_metadata` write below and
+    // clobber it back down to just `{"thinking_events": [...]}`. See
+    // `AgentThinkingTracker::finalize`'s doc for why the ordering
+    // (finalize while holding the lock, release, then step 15 writes) is
+    // what makes the terminal write strictly win.
     let (thinking_events, full_texts, token_usage, input_tokens, output_tokens, total_cost) = {
-        let t = tracker.lock().await;
+        let mut t = tracker.lock().await;
+        t.finalize();
         let events = t.get_events_for_storage();
         let ft = t.full_texts_for_storage().clone();
         let inp = t.total_input_tokens();

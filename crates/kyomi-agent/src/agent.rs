@@ -17,6 +17,8 @@
 //! 5. If tool calls: execute each tool, add results, continue loop
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -252,6 +254,25 @@ type ToolStartCallback = Box<dyn Fn(&str, &serde_json::Value) + Send + Sync>;
 /// Callback for tool end: `(tool_name, result, success)`.
 type ToolEndCallback = Box<dyn Fn(&str, &str, bool) + Send + Sync>;
 
+/// Callback fired at each agent-loop iteration boundary (KYO-493 phase 3),
+/// with the full message history so far (`&self.state.messages`).
+///
+/// Unlike the callbacks above, this one is awaited directly and in-line in
+/// the loop — never a detached `tokio::spawn` — so invocations are strictly
+/// sequential with no risk of the out-of-order completion the other
+/// callbacks' fire-and-forget spawns accept (see
+/// `ChatAgentAdapter::set_thinking_tracker`'s doc). That's what lets the
+/// adapter track a persisted-up-to index safely: a callback body can commit
+/// to "everything before index N is durably written" without a concurrent,
+/// still-running earlier call being able to invalidate it.
+///
+/// The `for<'a>` HRTB lets the closure borrow the messages slice rather
+/// than requiring the caller to clone the whole history every iteration —
+/// the returned future is free to hold that borrow across its own awaits,
+/// same as `async-trait`'s desugaring.
+pub(crate) type IterationBoundaryCallback =
+    Box<dyn for<'a> Fn(&'a [Message]) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> + Send + Sync>;
+
 // ---------------------------------------------------------------------------
 // AgentConfig
 // ---------------------------------------------------------------------------
@@ -371,6 +392,12 @@ pub struct AgentCallbacks {
     pub on_tool_end: Option<ToolEndCallback>,
     /// Called when the agent is preparing its final response.
     pub on_preparing_response: Option<Box<dyn Fn() + Send + Sync>>,
+    /// Called at each agent-loop iteration boundary — after a tool-call
+    /// round's results are all appended to `state.messages`, before the
+    /// next LLM call — with the full message history so far (KYO-493 phase
+    /// 3). See [`IterationBoundaryCallback`] for why this one is awaited
+    /// in-line rather than spawned like the callbacks above.
+    pub on_iteration_boundary: Option<IterationBoundaryCallback>,
 }
 
 // ---------------------------------------------------------------------------
@@ -743,6 +770,17 @@ impl CustomAgent {
             // Check cancellation after tool execution.
             if cancel_token.is_cancelled() {
                 return Err(kyomi_core::Error::Internal("Request cancelled".into()));
+            }
+
+            // Iteration boundary (KYO-493 phase 3): the assistant
+            // tool-calls message and every tool-result message this
+            // iteration produced are now in `state.messages`. Fire before
+            // the ChartML check below, which can return early with a
+            // terminal assistant message of its own — that message must
+            // never be visible to this callback (it isn't durable yet;
+            // `persist_after_chat`/`execute_agent_chat`'s step 15 own it).
+            if let Some(ref cb) = self.callbacks.on_iteration_boundary {
+                cb(&self.state.messages).await;
             }
 
             // Check if assistant content has ChartML blocks -> validate (YAML + SQL) -> return if valid.
@@ -1958,189 +1996,19 @@ Chart 2:\n```chartml\ndata:\n  query: SELECT 2\nvisualize:\n  type: line\n```";
     // Iteration budget: scripted-provider harness
     // -----------------------------------------------------------------------
 
-    use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
-    use async_trait::async_trait;
     use serde_json::json;
 
-    use crate::tools::AgentTool;
-    use crate::types::{AgentTokenUsage, LLMResponse, MessageRole};
+    use crate::types::{AgentTokenUsage, MessageRole};
 
-    /// Name of the single tool registered by [`scripted_agent`].
-    const NOOP_TOOL_NAME: &str = "noop";
-
-    /// A tool that does nothing, registered so the tool slice the agent hands
-    /// to the LLM during the loop is non-empty — without it, "the wrap-up call
-    /// passes no tools" would hold vacuously.
-    struct NoopTool;
-
-    #[async_trait]
-    impl AgentTool for NoopTool {
-        fn name(&self) -> &str {
-            NOOP_TOOL_NAME
-        }
-
-        fn description(&self) -> &str {
-            "Does nothing."
-        }
-
-        fn parameters_schema(&self) -> serde_json::Value {
-            json!({"type": "object", "properties": {}})
-        }
-
-        async fn execute(
-            &self,
-            _args: serde_json::Value,
-            _ctx: &ToolContext,
-        ) -> kyomi_core::Result<String> {
-            Ok("noop".to_string())
-        }
-    }
-
-    /// What [`ScriptedProvider`] returns for one `complete` call.
-    #[derive(Clone)]
-    enum Reply {
-        /// A plain text answer — ends the agent loop. Carries the default
-        /// (zero) token usage; use `TextWithUsage` when a test needs to
-        /// drive `max_total_tokens`.
-        Text(String),
-        /// A single tool call — drives the loop into another iteration.
-        /// Carries the default (zero) token usage; use `ToolCallWithUsage`
-        /// when a test needs to drive `max_total_tokens`.
-        ToolCall,
-        /// A single tool call carrying explicit token usage — needed by the
-        /// token-ceiling and cache-read tests, which must control exactly
-        /// how many billable tokens each iteration contributes.
-        ToolCallWithUsage(AgentTokenUsage),
-        /// A single tool call preceded by `tokio::time::sleep(duration)` —
-        /// needed by the deadline test, which drives the wall-clock guard
-        /// under a paused tokio clock (`#[tokio::test(start_paused =
-        /// true)]`) rather than a real sleep.
-        SlowToolCall(Duration),
-        /// A provider failure.
-        Failure(String),
-        /// A single tool call whose arguments the provider could not parse
-        /// (KYO-535) — carries `finish_reason: "max_tokens"`, matching the
-        /// truncation-mid-payload shape the ticket traces to. Drives the
-        /// loop into another iteration, same as `ToolCall`, but the noop
-        /// tool must NOT be executed for it.
-        TruncatedToolCall,
-    }
-
-    /// Build a single-tool-call [`LLMResponse`] carrying the given usage.
-    ///
-    /// Shared by the `ToolCall`, `ToolCallWithUsage`, and `SlowToolCall`
-    /// branches of [`ScriptedProvider::complete`] so the noop-tool-call
-    /// shape (id, name, empty arguments) is defined exactly once.
-    fn tool_call_response(usage: AgentTokenUsage) -> LLMResponse {
-        LLMResponse {
-            content: String::new(),
-            finish_reason: "tool_use".to_string(),
-            usage,
-            tool_calls: Some(vec![ToolCall {
-                id: "tc_1".to_string(),
-                name: NOOP_TOOL_NAME.to_string(),
-                arguments: json!({}),
-                arguments_error: None,
-            }]),
-            cost: None,
-            thinking_content: None,
-        }
-    }
-
-    /// One recorded `LLMProvider::complete` invocation.
-    #[derive(Debug)]
-    struct RecordedCall {
-        messages: Vec<Message>,
-        tools: Vec<Tool>,
-    }
-
-    impl RecordedCall {
-        /// Messages in this call that carry an iteration-budget notice.
-        fn budget_notices(&self) -> Vec<&Message> {
-            self.messages
-                .iter()
-                .filter(|m| m.content.contains(BUDGET_NOTICE_PREFIX))
-                .collect()
-        }
-    }
-
-    /// An [`LLMProvider`] that records every call it receives and replays a
-    /// fixed script of replies.
-    struct ScriptedProvider {
-        script: Mutex<VecDeque<Reply>>,
-        /// Replayed once the script runs out (e.g. "keeps calling tools").
-        after_script: Reply,
-        calls: Arc<Mutex<Vec<RecordedCall>>>,
-    }
-
-    #[async_trait]
-    impl LLMProvider for ScriptedProvider {
-        async fn complete(
-            &self,
-            messages: &[Message],
-            tools: &[Tool],
-            _temperature: Option<f32>,
-            _max_tokens: u32,
-            _user_names: &HashMap<String, String>,
-        ) -> kyomi_core::Result<LLMResponse> {
-            self.calls
-                .lock()
-                .expect("call log mutex")
-                .push(RecordedCall {
-                    messages: messages.to_vec(),
-                    tools: tools.to_vec(),
-                });
-
-            let reply = self
-                .script
-                .lock()
-                .expect("script mutex")
-                .pop_front()
-                .unwrap_or_else(|| self.after_script.clone());
-
-            match reply {
-                Reply::Text(content) => Ok(LLMResponse {
-                    content,
-                    finish_reason: "end_turn".to_string(),
-                    usage: AgentTokenUsage::default(),
-                    tool_calls: None,
-                    cost: None,
-                    thinking_content: None,
-                }),
-                Reply::ToolCall => Ok(tool_call_response(AgentTokenUsage::default())),
-                Reply::ToolCallWithUsage(usage) => Ok(tool_call_response(usage)),
-                Reply::SlowToolCall(duration) => {
-                    tokio::time::sleep(duration).await;
-                    Ok(tool_call_response(AgentTokenUsage::default()))
-                }
-                Reply::Failure(message) => Err(kyomi_core::Error::Internal(message)),
-                Reply::TruncatedToolCall => Ok(LLMResponse {
-                    content: String::new(),
-                    finish_reason: "max_tokens".to_string(),
-                    usage: AgentTokenUsage::default(),
-                    tool_calls: Some(vec![ToolCall {
-                        id: "tc_truncated".to_string(),
-                        name: NOOP_TOOL_NAME.to_string(),
-                        arguments: json!({}),
-                        arguments_error: Some(
-                            "arguments could not be parsed as JSON (finish_reason=max_tokens): \
-                             EOF while parsing an object"
-                                .to_string(),
-                        ),
-                    }]),
-                    cost: None,
-                    thinking_content: None,
-                }),
-            }
-        }
-
-        fn model(&self) -> &str {
-            "scripted-model"
-        }
-    }
+    // ScriptedProvider, Reply, NoopTool, RecordedCall — extracted to
+    // `crate::test_support` (KYO-493 phase 3) so `adapter.rs`'s tests can
+    // drive the same ToolCall-then-Text scripting through a full
+    // `ChatAgentAdapter::chat()` turn without a second copy. See that
+    // module's doc comment on the extraction.
+    use crate::test_support::{NoopTool, RecordedCall, Reply, ScriptedProvider};
 
     /// Build a `ToolContext` over an in-memory sqlite pool and in-memory KV
     /// store. `session_id: None` keeps the agent off the ChartML validation
