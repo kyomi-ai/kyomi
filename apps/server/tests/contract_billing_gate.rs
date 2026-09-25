@@ -508,6 +508,52 @@ async fn get_sidebar_user_returns_200_for_lapsed_workspace_and_reports_billing_l
     cleanup_test_user(&ctx.db, "billgate-test-get-sidebar-user@contract-test.local").await;
 }
 
+// KYO-833: `get_websocket_config` must also be allowlisted. Unlike the other
+// allowlisted fns above (billing settings, user/sidebar context), this one
+// isn't about reading billing state — it's what lets a lapsed workspace's tab
+// obtain a WebSocket connection AT ALL, which is the only channel it has to
+// ever learn it's been unlocked (`billing_status_changed`, see
+// `crate::cache::sync_engine` in `kyomi-ui`). Before KYO-833 this called the
+// strict `AuthenticatedContext::extract()`, so `websocket_client.rs`'s
+// `connect()` — which calls this on every connect AND reconnect — could
+// never obtain a token for a lapsed workspace: not on first load after
+// lapsing, and not on any later reconnect either.
+#[tokio::test]
+async fn get_websocket_config_returns_200_for_lapsed_workspace() {
+    let ctx = setup_auth_context("get-websocket-config").await;
+    if ctx.is_none() {
+        eprintln!("SKIP: get_websocket_config_returns_200_for_lapsed_workspace — requires Rust-backend mode");
+        return;
+    }
+    let ctx = ctx.unwrap();
+    set_subscription_status(&ctx, "past_due").await;
+
+    let url = server_fn_url::<kyomi_ui::server_fns::chat::GetWebsocketConfig>(&ctx.base_url);
+    let resp = client()
+        .post(url)
+        .header("origin", "http://localhost:5173")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("cookie", format!("access_token={}", ctx.access_token))
+        .body("")
+        .send()
+        .await
+        .expect("get_websocket_config request should succeed at the transport level");
+
+    assert_eq!(
+        resp.status(),
+        200,
+        "get_websocket_config is allowlisted (KYO-833) — a lapsed workspace must still be able \
+         to obtain a WebSocket connection so it can receive the billing_status_changed unlock event"
+    );
+    let body: Value = resp.json().await.expect("should return JSON");
+    assert!(
+        body["token"].as_str().is_some_and(|t| !t.is_empty()),
+        "get_websocket_config must still mint a real token for a lapsed workspace, got: {body}"
+    );
+
+    cleanup_test_user(&ctx.db, "billgate-test-get-websocket-config@contract-test.local").await;
+}
+
 // ===========================================================================
 // A gated (non-allowlisted) server fn 402s for a lapsed workspace
 // ===========================================================================

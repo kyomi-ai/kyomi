@@ -678,9 +678,33 @@ fn QueryCacheWsBridge() -> impl IntoView {
 /// `<WebSocketProvider>` so that `use_context::<WebSocketContext>()` resolves.
 ///
 /// The component is invisible (returns an empty fragment). Its only job is to
-/// call [`crate::cache::sync_engine::start_sync_engine`] at the right moment.
-/// The sync engine itself watches `connection_state` to re-send sync requests
-/// on reconnect, so start_sync_engine is called at most once per workspace_id.
+/// call [`crate::cache::sync_engine::start_sync_engine`] at the right moment
+/// and keep the resulting engine scope alive for exactly as long as it is
+/// still the right one for the current workspace.
+///
+/// ## Ownership (KYO-833)
+///
+/// The engine's subscriptions are NOT owned by this component's `Effect`
+/// itself. An `Effect`'s owner (`reactive_graph` 0.2.14) runs `cleanup()` —
+/// disposing every child `Owner` and running every `on_cleanup` registered
+/// during the previous run — at the START of every subsequent run of its
+/// closure, not only when the effect is finally dropped. If
+/// `start_sync_engine` (and the `on_cleanup` its subscriptions register) ran
+/// directly inside this component's `Effect` closure, ANY re-run of that
+/// effect for ANY reason — not just a genuine workspace switch, e.g.
+/// `workspace_id` transiently going `None` while an upstream resource
+/// re-fetches — would silently tear down every sync-engine subscription,
+/// including the `billing_status_changed` unlock listener, with nothing to
+/// ever re-register them. That was the KYO-833 bug.
+///
+/// Instead, the engine lives in a child `Owner` of THIS COMPONENT's own
+/// owner (captured once, via `Owner::current()`, when `SyncEngineStarter` is
+/// first instantiated — not re-captured per effect run), and that child
+/// owner is disposed and replaced only when
+/// [`crate::cache::sync_engine_lifecycle::sync_engine_action`] says the
+/// workspace id has genuinely, meaningfully changed. A `None`/empty signal
+/// value or a repeat of the same workspace id leaves the running engine
+/// completely untouched, regardless of how many times the effect reruns.
 #[component]
 fn SyncEngineStarter(
     /// Reactive signal with the current workspace ID, or `None` if not yet
@@ -698,39 +722,206 @@ fn SyncEngineStarter(
     {
         use crate::cache::store::SyncStore;
         use crate::cache::sync_engine::start_sync_engine;
+        use crate::cache::sync_engine_lifecycle::{SyncEngineAction, sync_engine_action};
         use crate::components::chat::websocket_client::WebSocketContext;
 
         let store = expect_context::<SyncStore>();
         let ws_ctx = use_context::<WebSocketContext>();
 
-        // Track whether the engine has already been started for the current
-        // workspace so we don't call start_sync_engine more than once per
-        // workspace. Stored as a StoredValue so the closure can mutate it.
-        let started_for: StoredValue<Option<String>> = StoredValue::new(None);
+        // The Owner active when THIS component is instantiated — the parent
+        // scope that mounts `SyncEngineStarter` (inside `<WebSocketProvider>`
+        // in `Layout`). Captured exactly once, NOT inside the `Effect` below:
+        // see this component's doc comment for why an effect's own owner
+        // cannot be used to hold anything that must survive the effect's own
+        // reruns.
+        let component_owner = Owner::current()
+            .expect("SyncEngineStarter must be mounted inside a live reactive Owner");
+
+        // The workspace id the currently-running engine scope belongs to,
+        // paired with the child `Owner` its subscriptions/cleanups are
+        // registered against. `None` until the first real workspace id
+        // arrives. See `cache::sync_engine_lifecycle` for the decision this
+        // drives.
+        let engine_scope: StoredValue<Option<(String, Owner)>> = StoredValue::new(None);
 
         Effect::new(move |_| {
-            let Some(ref wid) = workspace_id.get() else {
-                return;
-            };
-            if wid.is_empty() {
-                return;
+            let new_wid = workspace_id.get();
+            let current = engine_scope.with_value(|s| s.as_ref().map(|(id, _)| id.clone()));
+
+            match sync_engine_action(current.as_deref(), new_wid.as_deref()) {
+                SyncEngineAction::Keep => {}
+                SyncEngineAction::Start | SyncEngineAction::Restart => {
+                    let Some(ws) = ws_ctx.as_ref().cloned() else {
+                        return;
+                    };
+                    // `sync_engine_action` only returns `Start`/`Restart` for
+                    // `Some(non-empty id)`.
+                    let wid = new_wid.expect("Start/Restart implies Some(workspace_id)");
+
+                    // Dispose the previous engine scope (if any) BEFORE
+                    // starting the new one, so its subscriptions unsubscribe
+                    // first.
+                    if let Some((_, old_owner)) = engine_scope.get_value() {
+                        old_owner.cleanup();
+                    }
+
+                    // `component_owner.child()` pushes a `Weak` onto
+                    // `component_owner`'s own `children` Vec (reactive_graph
+                    // 0.2.14 `owner.rs`, `Owner::child`) and nothing ever
+                    // removes it: `Owner::cleanup`/`OwnerInner::drop` walk
+                    // and clear a Vec of children, but only the owner being
+                    // disposed's own — a disposed child's entry lingers as a
+                    // dead `Weak` in the parent's Vec until `component_owner`
+                    // itself is disposed. So each workspace switch leaves one
+                    // dead `Weak` behind here; bounded by switch count for
+                    // this component's lifetime and reclaimed when
+                    // `SyncEngineStarter` unmounts.
+                    let child_owner = component_owner.child();
+                    engine_scope.set_value(Some((wid.clone(), child_owner.clone())));
+                    child_owner.with(|| {
+                        tracing::info!(workspace_id = %wid, "SyncEngineStarter: starting sync engine");
+                        start_sync_engine(ws, store, wid);
+                    });
+                }
             }
-            // Already started for this workspace — nothing to do.
-            if started_for.try_get_value().flatten().as_deref() == Some(wid.as_str()) {
-                return;
+        });
+
+        // If `SyncEngineStarter` itself unmounts (the authed shell goes away
+        // — see `Layout`'s doc comments on when that happens), dispose
+        // whatever engine scope is still running rather than leaking it.
+        on_cleanup(move || {
+            if let Some((_, owner)) = engine_scope.get_value() {
+                owner.cleanup();
             }
-            let Some(ws) = ws_ctx.as_ref().cloned() else {
-                return;
-            };
-            // Mark as started before calling so a reactive re-run from inside
-            // start_sync_engine can't trigger a second start.
-            started_for.set_value(Some(wid.clone()));
-            tracing::info!(workspace_id = %wid, "SyncEngineStarter: starting sync engine");
-            start_sync_engine(ws, store, wid.clone());
         });
     }
 
     view! { <></> }
+}
+
+// KYO-833 — proves the *mechanism* `SyncEngineStarter`'s ownership fix relies
+// on, directly against `reactive_graph` 0.2.14 (pinned via `Cargo.lock`;
+// leptos 0.8.20) — same technique and same justification as
+// `pages::chat::chat_page::tests_disposal_scope` (KYO-548): a synthetic
+// `Owner` hierarchy, not a live reproduction through a real mounted `Effect`.
+// Driving an actual `reactive_graph::effect::Effect` rerun end-to-end would
+// require pulling in `any_spawner`'s executor plus a `tokio::task::LocalSet`
+// purely for this test (neither is wired up anywhere else in this crate's
+// test suite); the property that actually matters — "does disposing this
+// specific Owner tear down that specific child" — is exactly what
+// `Owner::cleanup()` decides, with or without a real Effect driving it. Using
+// it directly, on a hand-built stand-in for the Effect's own internal owner
+// (`reactive_graph::effect::render_effect::effect_base` creates exactly one
+// `Owner::new()` for the life of the effect, and calls `owner.with_cleanup`
+// on every rerun — see `cache::sync_engine::start_sync_engine`'s doc comment
+// for the citation) reproduces the disposal timing with certainty, rather
+// than hoping a particular signal transition schedules a rerun before the
+// test's assertions run.
+#[cfg(all(test, feature = "ssr"))]
+mod sync_engine_starter_owner_lifetime_tests {
+    use leptos::prelude::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// The bug (pre-KYO-833): the running engine's scope was a child of the
+    /// Effect's OWN owner, created fresh inside the effect closure on every
+    /// run. Reproduces `Owner::with_cleanup`'s documented behaviour —
+    /// "1) Runs `cleanup` on all children" — firing on an unrelated rerun
+    /// (stood in for here by calling `.cleanup()` on the effect-owner
+    /// stand-in directly, exactly what `with_cleanup` does before invoking
+    /// the closure again).
+    #[test]
+    fn engine_scope_owned_by_the_effect_itself_is_torn_down_by_an_unrelated_rerun() {
+        let component_owner = Owner::new();
+        component_owner.set();
+
+        // Stand-in for the `Owner` reactive_graph's `Effect` allocates once,
+        // internally, for its own lifetime (`effect_base`'s `Owner::new()`) —
+        // a child of whatever owner was current when `Effect::new` was
+        // called, i.e. a child of `component_owner` here.
+        let effect_owner = component_owner.child();
+
+        let torn_down = Arc::new(AtomicBool::new(false));
+        // The pre-fix shape: the engine scope is a child of the EFFECT's own
+        // owner, created directly inside what stands in for the effect
+        // closure's first "Some(a)" run. Bound here (not dropped at the end
+        // of a nested block) — `Owner` disposes its arena state when its last
+        // strong reference drops (`impl Drop for OwnerInner`), so an
+        // `Owner` that is never stored anywhere is not a meaningful stand-in
+        // for a value `SyncEngineStarter` keeps alive in a `StoredValue`.
+        let engine_owner = effect_owner.child();
+        {
+            let torn_down = torn_down.clone();
+            engine_owner.with(|| {
+                on_cleanup(move || torn_down.store(true, Ordering::SeqCst));
+            });
+        }
+        assert!(
+            !torn_down.load(Ordering::SeqCst),
+            "must start alive, before any rerun"
+        );
+
+        // Simulate the effect rerunning for an UNRELATED reason (e.g.
+        // `workspace_id` transiently reporting `None` then `Some(a)` again) —
+        // `with_cleanup` calls exactly this before invoking the closure body
+        // again.
+        effect_owner.cleanup();
+
+        assert!(
+            torn_down.load(Ordering::SeqCst),
+            "a KYO-833-shaped bug: an engine scope parented under the \
+             Effect's own owner is torn down by ANY rerun of that effect, \
+             not just a genuine workspace switch"
+        );
+    }
+
+    /// The fix: the running engine's scope is a child of the COMPONENT's
+    /// owner (captured once, before the Effect is even created), never of
+    /// the effect's own owner. It must survive the exact same
+    /// `effect_owner.cleanup()` call the previous test used to tear down the
+    /// buggy shape, and must be disposed only when the component owner
+    /// itself is cleaned up (component unmount).
+    #[test]
+    fn engine_scope_owned_by_the_component_survives_effect_reruns_and_is_disposed_on_unmount() {
+        let component_owner = Owner::new();
+        component_owner.set();
+
+        // Same effect-owner stand-in as the previous test, present here only
+        // to prove it is now IRRELEVANT to the engine scope's lifetime.
+        let effect_owner = component_owner.child();
+
+        let torn_down = Arc::new(AtomicBool::new(false));
+        // The fixed shape: `component_owner.child()`, exactly as
+        // `SyncEngineStarter` now does — NOT `effect_owner.child()`.
+        let engine_owner = component_owner.child();
+        {
+            let torn_down = torn_down.clone();
+            engine_owner.with(|| {
+                on_cleanup(move || torn_down.store(true, Ordering::SeqCst));
+            });
+        }
+
+        // Simulate the value going `Some(a)` -> `None` -> `Some(a)`: one or
+        // more unrelated reruns of the effect. Each would call
+        // `effect_owner.cleanup()` under the real mechanism.
+        effect_owner.cleanup();
+        effect_owner.cleanup();
+        assert!(
+            !torn_down.load(Ordering::SeqCst),
+            "the engine scope must survive effect reruns that do not represent \
+             a genuine workspace change — this is the KYO-833 fix"
+        );
+
+        // Now simulate the component itself unmounting (the authed shell
+        // goes away) — this must dispose the engine scope, matching
+        // `SyncEngineStarter`'s own `on_cleanup`.
+        component_owner.cleanup();
+        assert!(
+            torn_down.load(Ordering::SeqCst),
+            "the engine scope must still be disposed when the component that \
+             owns it unmounts, so it is never leaked"
+        );
+    }
 }
 
 /// Navigation sidebar matching React `Sidebar.jsx`.

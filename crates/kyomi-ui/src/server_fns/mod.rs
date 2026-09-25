@@ -676,6 +676,7 @@ mod kyo_805_billing_gate_allowlist_tests {
     const SIDEBAR_SRC: &str = include_str!("sidebar.rs");
     const WORKSPACE_SRC: &str = include_str!("workspace.rs");
     const BILLING_SRC: &str = include_str!("billing.rs");
+    const CHAT_SRC: &str = include_str!("chat.rs");
 
     #[test]
     fn logout_all_sessions_is_allow_lapsed() {
@@ -866,6 +867,28 @@ mod kyo_805_billing_gate_allowlist_tests {
             );
             assert!(!body.contains("extract_allow_lapsed"));
         }
+    }
+
+    /// KYO-833: `get_websocket_config` must opt out of the billing gate too —
+    /// `websocket_client::connect()` calls it on every connect *and*
+    /// reconnect, so gating it left a lapsed workspace unable to ever obtain
+    /// a socket, cutting it off from the `billing_status_changed` unlock
+    /// event. See the doc comment on `get_websocket_config` itself for why
+    /// this does not weaken the billing gate anywhere else: the WS `connect`
+    /// upgrade was never billing-gated server-side, only `sync_bootstrap`/
+    /// `sync_delta` are (checked live, per message, in
+    /// `apps/server/src/routes/websocket.rs`), so the minted token grants
+    /// nothing beyond what an unauthenticated-but-connected socket already
+    /// could not do.
+    #[test]
+    fn get_websocket_config_is_allow_lapsed() {
+        let body = extract_between(
+            CHAT_SRC,
+            "fn get_websocket_config(",
+            "\n// ─────────────────────────────────────────────────────────────────────────────\n// Task 3.1: Session CRUD Server Functions",
+        );
+        assert!(body.contains("AuthenticatedContext::extract_allow_lapsed()"));
+        assert!(!body.contains("AuthenticatedContext::extract()"));
     }
 }
 

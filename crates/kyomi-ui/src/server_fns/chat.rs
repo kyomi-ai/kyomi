@@ -228,9 +228,31 @@ pub async fn store_chart_context_for_ask(
 /// Generates a short-lived JWT (15 minutes) signed with the app's JWT secret,
 /// matching the token format produced by `GET /api/v1/auth/websocket-token`.
 /// The client uses this token to authenticate the WebSocket upgrade request.
+///
+/// Deliberately allowlisted for the KYO-805 billing gate
+/// (`AuthenticatedContext::extract_allow_lapsed`, not `extract`) — KYO-833.
+/// `apps/server/src/routes/websocket.rs`'s `ws_handler`/`handle_authenticated_ws`
+/// never checks billing status when accepting the upgrade (it only validates
+/// the JWT, matches the path user id, and checks `user.active`); the gate on a
+/// lapsed workspace is enforced per-message, inside `handle_client_message`,
+/// by `refuse_if_billing_gate_blocks` — called once each from
+/// `handle_sync_bootstrap` and `handle_sync_delta` against a live DB read, not
+/// against anything carried in the token. So a token minted here for a lapsed
+/// workspace grants its holder nothing beyond "can open the socket and send
+/// messages" — every other REST/server-fn endpoint the client would need to
+/// actually read or mutate data still re-checks the workspace's *current*
+/// billing state through its own `AuthenticatedContext::extract()` (or
+/// doesn't, and is on the small named allowlist for its own KYO-805 reason),
+/// independent of how the caller authenticated. Gating this call was the
+/// KYO-833 bug: `crate::components::chat::websocket_client`'s `connect()`
+/// calls this on every connect *and* reconnect, so a lapsed workspace could
+/// never obtain a socket at all — not on first load after lapsing, and not
+/// when reconnecting — which cut it off from the one channel
+/// (`billing_status_changed`, see `cache::sync_engine`) a tab needs to learn
+/// it has been unlocked without a manual reload.
 #[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_websocket_config() -> Result<WebSocketConfig, ServerFnError> {
-    let ac = AuthenticatedContext::extract().await?;
+    let ac = AuthenticatedContext::extract_allow_lapsed().await?;
 
     let mut extra = std::collections::HashMap::new();
     extra.insert("user_id".into(), serde_json::json!(ac.auth.user_id));

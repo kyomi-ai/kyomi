@@ -58,16 +58,34 @@
 // ## Scenario
 //
 // 1. Two tabs (two browser contexts, same owner login) open on the active
-//    e2e workspace, each showing the normal app shell (no paywall).
+//    e2e workspace, each showing the normal app shell (no paywall), BEFORE
+//    the workspace lapses.
 // 2. POST a signed `invoice.payment_failed` event for the fake subscription
 //    id. Assert BOTH tabs show the paywall, with NO navigation (checked via
 //    `performance.timeOrigin` staying identical before/after — a full
 //    reload resets it, an in-page WebSocket-driven update does not).
-// 3. POST a signed `customer.subscription.updated` event (status `active`,
+// 3. Open a THIRD tab (KYO-833) — connecting for the first time AFTER the
+//    workspace is already lapsed, unlike tabs A/B which were connected
+//    before. Assert it shows the paywall on its own first load, and that its
+//    `get_websocket_config` requests never came back 402 — that server fn is
+//    allowlisted against the KYO-805 billing gate specifically so a lapsed
+//    workspace can still obtain a WebSocket connection (and therefore ever
+//    receive the unlock broadcast at all); a 402 there means the KYO-833 fix
+//    regressed.
+// 4. POST a signed `customer.subscription.updated` event (status `active`,
 //    `metadata.app = "kyomi"`, `metadata.workspace_id` = the e2e workspace)
-//    for the same fake subscription id. Assert BOTH tabs return to the
-//    normal app shell, again with no navigation.
-// 4. Restore the workspace's original subscription state in a `finally`
+//    for the same fake subscription id. Assert ALL THREE tabs return to the
+//    normal app shell, again with no navigation. Also assert tabs A and B
+//    each issued at least one NEW `get_sidebar_user` server-fn request AFTER
+//    this webhook was sent — the KYO-833 regression was that the sync
+//    engine's `billing_status_changed` subscription silently stopped being
+//    registered (an unrelated effect rerun tore it down with nothing to
+//    re-subscribe), so the unlock broadcast arrived over the WebSocket but
+//    triggered no refetch at all; asserting only "the paywall eventually
+//    cleared" would not catch that regression on its own; the fresh
+//    server-fn request is the direct evidence the refetch was actually
+//    triggered.)
+// 5. Restore the workspace's original subscription state in a `finally`
 //    block regardless of pass/fail/throw — same pattern as
 //    `billing-paywall.cjs`.
 //
@@ -307,6 +325,52 @@ async function assertNoNavigation(page, before, label) {
   }
 }
 
+// ── Server-fn request/response tracking (KYO-833) ───────────────────────────
+//
+// Leptos `#[server(prefix = "/leptos-api", ...)]` fns without an explicit
+// `endpoint = ...` are routed at `/leptos-api/<fn_name>`, but the route is
+// NOT always exactly that string: PR #565 (KYO-834, see
+// `billing-paywall.cjs`'s `create_dashboard` route check) found Leptos
+// appends a numeric hash to at least one such fn's route
+// (`/leptos-api/create_dashboard<digits>`). `trackServerFnRequests` and
+// `trackServerFnResponses` below match with `.includes()` rather than an
+// exact/regex match specifically so a hash suffix on `get_sidebar_user` or
+// `get_websocket_config` wouldn't break tracking. Attached BEFORE
+// navigation/login on each page so every request/response for the fn's whole
+// lifetime is captured, not just ones issued after some later point in the
+// script.
+
+/** Record `{url, time}` for every request to server fn `fnName` on `page`. */
+function trackServerFnRequests(page, fnName) {
+  const events = [];
+  page.on('request', (req) => {
+    if (req.url().includes(`/leptos-api/${fnName}`)) {
+      events.push({ url: req.url(), time: Date.now() });
+    }
+  });
+  return events;
+}
+
+/** Record `{url, status, time}` for every response from server fn `fnName`
+ * on `page`. */
+function trackServerFnResponses(page, fnName) {
+  const events = [];
+  page.on('response', (res) => {
+    if (res.url().includes(`/leptos-api/${fnName}`)) {
+      events.push({ url: res.url(), status: res.status(), time: Date.now() });
+    }
+  });
+  return events;
+}
+
+/** Whether any event in `events` (from [trackServerFnRequests]) has a
+ * timestamp at or after `sinceMs` — i.e. a NEW request issued after that
+ * point in time, not merely one issued at some point during the page's
+ * lifetime. */
+function hasRequestSince(events, sinceMs) {
+  return events.some((e) => e.time >= sinceMs);
+}
+
 // ── Main scenario ────────────────────────────────────────────────────────────
 
 (async () => {
@@ -319,6 +383,18 @@ async function assertNoNavigation(page, before, label) {
   const contextB = await browser.newContext({ viewport: { width: 1920, height: 1080 } });
   const tabA = await contextA.newPage();
   const tabB = await contextB.newPage();
+
+  // Attached before login/navigation so every `get_sidebar_user` call over
+  // each tab's whole lifetime is captured (KYO-833) — including the initial
+  // mount fetch, so a later "at least one NEW request since time T" check has
+  // a clean baseline to compare against.
+  const sidebarReqsA = trackServerFnRequests(tabA, 'get_sidebar_user');
+  const sidebarReqsB = trackServerFnRequests(tabB, 'get_sidebar_user');
+
+  // Tab C (KYO-833) — opened only once the workspace is already lapsed, so
+  // declared here but not created until after the lapse webhook lands.
+  let contextC = null;
+  let tabC = null;
 
   try {
     await login(tabA, OWNER_EMAIL, OWNER_PASSWORD);
@@ -371,6 +447,45 @@ async function assertNoNavigation(page, before, label) {
     await tabA.screenshot({ path: '/tmp/kyo-807-lapsed-tab-a.png', fullPage: true });
     await tabB.screenshot({ path: '/tmp/kyo-807-lapsed-tab-b.png', fullPage: true });
 
+    // ── Tab C (KYO-833): a fresh connection opened AFTER the lapse ─────────
+    //
+    // Tabs A and B were already connected (and had already obtained a
+    // WebSocket) before the workspace lapsed. `websocket_client.rs`'s
+    // `connect()` calls `get_websocket_config` on every connect AND every
+    // reconnect, so the bug this covers — that server fn being billing-gated
+    // — would only surface for a tab that has to obtain a token WHILE
+    // already lapsed: a brand new tab's first connect, exactly like tab C
+    // here. Tracking is attached before login/navigation so it captures the
+    // very first connect attempt.
+    contextC = await browser.newContext({ viewport: { width: 1920, height: 1080 } });
+    tabC = await contextC.newPage();
+    const wsConfigRespC = trackServerFnResponses(tabC, 'get_websocket_config');
+
+    await login(tabC, OWNER_EMAIL, OWNER_PASSWORD);
+    await tabC.goto(`${BASE_URL}/dashboards`, { waitUntil: 'networkidle', timeout: 30000 });
+    await tabC.waitForTimeout(3000);
+
+    if (!(await paywallIsPresent(tabC))) {
+      fail('tab C: did not show the paywall on first load of an already-lapsed workspace');
+    } else {
+      ok('tab C: shows the paywall on first load of an already-lapsed workspace');
+    }
+    const wsConfig402sC = wsConfigRespC.filter((r) => r.status === 402);
+    if (wsConfig402sC.length > 0) {
+      fail(
+        `tab C: get_websocket_config returned 402 (payment_required) ${wsConfig402sC.length} time(s) — ` +
+          'KYO-833 regression: a lapsed workspace must still be able to obtain a WebSocket ' +
+          'connection so it can receive the unlock broadcast'
+      );
+    } else if (wsConfigRespC.length === 0) {
+      fail('tab C: no get_websocket_config response observed at all — cannot confirm the KYO-833 fix');
+    } else {
+      ok(`tab C: get_websocket_config never returned 402 (${wsConfigRespC.length} response(s) observed)`);
+    }
+
+    await tabC.screenshot({ path: '/tmp/kyo-833-lapsed-tab-c.png', fullPage: true });
+
+    const timeOriginCBeforeUnlock = await timeOrigin(tabC);
     const timeOriginABeforeUnlock = await timeOrigin(tabA);
     const timeOriginBBeforeUnlock = await timeOrigin(tabB);
 
@@ -379,11 +494,13 @@ async function assertNoNavigation(page, before, label) {
       __SUBSCRIPTION_ID__: FAKE_SUBSCRIPTION_ID,
       __WORKSPACE_ID__: WORKSPACE_ID,
     });
+    const unlockSentAt = Date.now();
     await postSignedWebhook('customer.subscription.updated', subscriptionPayload);
     ok('unlock: signed customer.subscription.updated POSTed and accepted (2xx)');
 
     await tabA.waitForTimeout(3000);
     await tabB.waitForTimeout(3000);
+    await tabC.waitForTimeout(3000);
 
     if (await paywallIsPresent(tabA)) {
       fail('unlock: tab A still shows the paywall after customer.subscription.updated');
@@ -395,21 +512,47 @@ async function assertNoNavigation(page, before, label) {
     } else {
       ok('unlock: tab B paywall cleared');
     }
-    if (!(await sidebarIsPresent(tabA)) || !(await sidebarIsPresent(tabB))) {
-      fail('unlock: sidebar/nav did not return after unlocking');
+    if (await paywallIsPresent(tabC)) {
+      fail('unlock: tab C (connected while already lapsed) still shows the paywall after unlock');
     } else {
-      ok('unlock: normal app shell (sidebar/nav) returned in both tabs');
+      ok('unlock: tab C (connected while already lapsed) paywall cleared');
+    }
+    if (!(await sidebarIsPresent(tabA)) || !(await sidebarIsPresent(tabB)) || !(await sidebarIsPresent(tabC))) {
+      fail('unlock: sidebar/nav did not return after unlocking in all three tabs');
+    } else {
+      ok('unlock: normal app shell (sidebar/nav) returned in all three tabs');
     }
     await assertNoNavigation(tabA, timeOriginABeforeUnlock, 'unlock (tab A)');
     await assertNoNavigation(tabB, timeOriginBBeforeUnlock, 'unlock (tab B)');
+    await assertNoNavigation(tabC, timeOriginCBeforeUnlock, 'unlock (tab C)');
+
+    // KYO-833's actual regression: the `billing_status_changed` subscription
+    // silently stopped being registered, so nothing re-fetched even though
+    // the paywall's own optimistic/server-lapsed flags could still (by
+    // coincidence, on some other path) end up cleared. The direct evidence
+    // the refetch fired is a NEW `get_sidebar_user` request issued after the
+    // unlock webhook was sent — not merely "the paywall eventually went
+    // away".
+    if (!hasRequestSince(sidebarReqsA, unlockSentAt)) {
+      fail('unlock: tab A issued no new get_sidebar_user request after the unlock webhook was sent');
+    } else {
+      ok('unlock: tab A issued a new get_sidebar_user request after the unlock webhook');
+    }
+    if (!hasRequestSince(sidebarReqsB, unlockSentAt)) {
+      fail('unlock: tab B issued no new get_sidebar_user request after the unlock webhook was sent');
+    } else {
+      ok('unlock: tab B issued a new get_sidebar_user request after the unlock webhook');
+    }
 
     await tabA.screenshot({ path: '/tmp/kyo-807-unlocked-tab-a.png', fullPage: true });
     await tabB.screenshot({ path: '/tmp/kyo-807-unlocked-tab-b.png', fullPage: true });
+    await tabC.screenshot({ path: '/tmp/kyo-833-unlocked-tab-c.png', fullPage: true });
   } catch (e) {
     fail(`unexpected error: ${e.message.split('\n')[0]}`);
   } finally {
     await tabA.close().catch(() => {});
     await tabB.close().catch(() => {});
+    if (tabC) await tabC.close().catch(() => {});
     await browser.close();
     restoreWorkspaceState(originalState);
     console.log(`Restored workspace ${WORKSPACE_ID} to its original subscription state.`);
