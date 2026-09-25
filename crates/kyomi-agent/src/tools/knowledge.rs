@@ -637,6 +637,7 @@ impl AgentTool for WriteDocumentTool {
                 content: Some(content),
                 change_summary: None,
                 expected_content_hash: content_hash,
+                copilot_receipt: None,
                 document_scope: ctx.document_id.as_deref(),
                 embed,
             })

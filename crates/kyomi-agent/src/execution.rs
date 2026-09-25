@@ -952,6 +952,9 @@ pub struct DashboardSummaryParams {
     pub app_config: Arc<kyomi_core::Config>,
     /// Document type: `"dashboard"` or `"knowledge"`.
     pub doc_type: String,
+    /// When the initiating edit has a durable Copilot receipt, attach the
+    /// derived summary to that same Undo revision rather than invalidating it.
+    pub copilot_receipt_id: Option<String>,
 }
 
 /// Generate a dashboard summary in the background (fire-and-forget).
@@ -1073,6 +1076,7 @@ pub(crate) async fn write_dashboard_summary_with_cas(
             content: Some(new_content),
             change_summary: Some("Auto-generated summary"),
             expected_content_hash,
+            copilot_receipt: None,
         },
     )
     .await
@@ -1109,6 +1113,7 @@ async fn generate_dashboard_summary_inner(
         ref db, ref ws_manager, ref dashboard_id, ref user_id,
         ref workspace_id, ref title, ref content, ref app_config,
         ref doc_type,
+        ref copilot_receipt_id,
     } = params;
     if content.trim().is_empty() {
         return Ok(());
@@ -1170,7 +1175,27 @@ async fn generate_dashboard_summary_inner(
     }
     let summary = summary.replace("-->", "\u{2014}");
 
-    apply_dashboard_summary(db, ws_manager, dashboard_id, workspace_id, user_id, &summary).await?;
+    if let Some(receipt_id) = copilot_receipt_id {
+        let applied = kyomi_auth::dashboard_service::append_summary_to_copilot_write(
+            db, receipt_id, dashboard_id, workspace_id, user_id, &summary,
+        ).await?;
+        if applied {
+            let current = kyomi_auth::dashboard_service::get_dashboard(
+                db, dashboard_id, workspace_id, user_id,
+            ).await?;
+            if let Some(current) = current {
+                ws_helpers::send_dashboard_summary_ready(
+                    ws_manager, user_id, dashboard_id, &summary, &current.content,
+                ).await;
+                ws_helpers::broadcast_dashboard_sync(
+                    db, ws_manager, dashboard_id, workspace_id,
+                    kyomi_types::sync::SyncActionType::Update, user_id, None,
+                ).await;
+            }
+        }
+    } else {
+        apply_dashboard_summary(db, ws_manager, dashboard_id, workspace_id, user_id, &summary).await?;
+    }
 
     // -------------------------------------------------------------------------
     // Collection auto-tagging — evaluate whether the dashboard belongs to any
@@ -1364,6 +1389,7 @@ mod tests {
                 content: Some("BBBB concurrent content"),
                 change_summary: None,
                 expected_content_hash: None,
+                copilot_receipt: None,
             },
         )
         .await
@@ -1501,6 +1527,7 @@ mod tests {
                 content: Some("v2, concurrent writer"),
                 change_summary: None,
                 expected_content_hash: None,
+                copilot_receipt: None,
             },
         )
         .await

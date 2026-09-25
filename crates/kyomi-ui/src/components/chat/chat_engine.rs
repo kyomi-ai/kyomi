@@ -34,6 +34,7 @@ use super::ChatState;
 use crate::server_fns::chat::ChatMessageItem;
 use crate::server_fns::copilot::{
     create_copilot_session, delete_copilot_session, send_copilot_message,
+    CopilotMessageRequest,
 };
 
 // ─── Session mode ──────────────────────────────────────────────────────────
@@ -96,6 +97,10 @@ pub struct ChatEngineConfig {
     /// comment. `None` for copilot types with no single open document
     /// (chart builder, watch).
     pub document_id: Option<String>,
+    /// Viewer state sampled for every send, rather than at session creation.
+    pub view_context: Option<Signal<String>>,
+    /// Historical previews may be discussed but never mutated.
+    pub historical_preview: Option<Signal<bool>>,
     /// See [`BeforeSendHook`]. `None` for copilot types with nothing to
     /// autosave (chart builder, watch).
     pub before_send: Option<BeforeSendHook>,
@@ -141,6 +146,8 @@ pub struct ChatEngine {
     context_content: Option<Signal<String>>,
     context_label: StoredValue<Option<String>>,
     document_id: Option<String>,
+    view_context: Option<Signal<String>>,
+    historical_preview: Option<Signal<bool>>,
     before_send: Option<BeforeSendHook>,
 }
 
@@ -161,6 +168,8 @@ impl ChatEngine {
         let context_content = config.context_content;
         let context_label = StoredValue::new(config.context_label);
         let document_id = config.document_id;
+        let view_context = config.view_context;
+        let historical_preview = config.historical_preview;
         let before_send = config.before_send;
 
         // ── Session lifecycle ──────────────────────────────────────────
@@ -286,6 +295,8 @@ impl ChatEngine {
             context_content,
             context_label,
             document_id,
+            view_context,
+            historical_preview,
             before_send,
         }
     }
@@ -346,6 +357,8 @@ impl ChatEngine {
         };
 
         let document_id = self.document_id.clone();
+        let view_context = self.view_context.map(|context| context.get_untracked()).filter(|value| !value.is_empty());
+        let historical_preview = self.historical_preview.is_some_and(|preview| preview.get_untracked());
         let before_send = self.before_send.clone();
 
         // For ephemeral mode, send via copilot server function.
@@ -363,20 +376,22 @@ impl ChatEngine {
                 && !(hook)().await
             {
                 if chat_state_err.state().try_get_untracked().is_some() {
-                    chat_state_err.set_error("Failed to save before sending — please try again.");
+                    chat_state_err.set_error("The document is not ready to send. Resolve the refresh or save error and try again.");
                 }
                 return;
             }
 
-            if let Err(e) = send_copilot_message(
-                sid,
+            if let Err(e) = send_copilot_message(CopilotMessageRequest {
+                session_id: sid,
                 message,
-                ctx_type_for_send,
-                context_prefix,
+                context_type: ctx_type_for_send,
+                content: context_prefix,
                 timezone,
-                time_ctx,
+                current_time_user_tz: time_ctx,
                 document_id,
-            )
+                historical_preview,
+                view_context,
+            })
             .await
             {
                 // Guard: the component may have been disposed while the async
