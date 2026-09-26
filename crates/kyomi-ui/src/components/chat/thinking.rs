@@ -123,6 +123,10 @@ pub fn process_thinking_event(
 pub struct ThinkingManager {
     /// Per-message thinking state.
     state: RwSignal<HashMap<String, ThinkingState>>,
+    /// Read-only handle for `state`, captured ONCE in `new()` rather than
+    /// derived on every `state()` call — see that method's doc comment
+    /// (KYO-781) for why.
+    state_read: ReadSignal<HashMap<String, ThinkingState>>,
 }
 
 impl Default for ThinkingManager {
@@ -134,9 +138,13 @@ impl Default for ThinkingManager {
 impl ThinkingManager {
     /// Create a new thinking manager with empty state.
     pub fn new() -> Self {
-        Self {
-            state: RwSignal::new(HashMap::new()),
-        }
+        let state = RwSignal::new(HashMap::new());
+        // KYO-781: captured synchronously here, while this constructor's
+        // `Owner` is current — see `ChatEngine::new`'s `messages_read`
+        // comment in chat_engine.rs for the full mechanism and why deferring
+        // this to `state()` itself is unsafe.
+        let state_read = state.read_only();
+        Self { state, state_read }
     }
 
     /// Handle an incoming thinking event for a message.
@@ -251,7 +259,12 @@ impl ThinkingManager {
     /// Read signal for the full thinking state map.
     ///
     /// Useful for reactive access to the entire map (e.g., in derived signals).
+    ///
+    /// Returns the handle captured once in `new()` (KYO-781) rather than
+    /// calling `.read_only()` here — see `ChatStateMachine::state`'s doc
+    /// comment in chat_state.rs for why a lazily-derived handle can panic
+    /// through a caller's `try_get_untracked()` disposal guard.
     pub fn state(&self) -> ReadSignal<HashMap<String, ThinkingState>> {
-        self.state.read_only()
+        self.state_read
     }
 }

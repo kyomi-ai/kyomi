@@ -130,9 +130,13 @@ pub struct SendRequest {
 pub struct ChatEngine {
     // Public read signals
     messages: RwSignal<Vec<ChatMessageItem>>,
+    // Captured ONCE at construction time (see `messages()` below for why —
+    // KYO-781) rather than derived on every accessor call.
+    messages_read: ReadSignal<Vec<ChatMessageItem>>,
     chat_state: ChatStateMachine,
     thinking: ThinkingManager,
     session_id: RwSignal<Option<String>>,
+    session_id_read: ReadSignal<Option<String>>,
 
     // Internal state
     has_sent_first: RwSignal<bool>,
@@ -152,9 +156,28 @@ impl ChatEngine {
     /// that are tied to the component lifecycle.
     pub fn new(config: ChatEngineConfig) -> Self {
         let messages = RwSignal::new(Vec::<ChatMessageItem>::new());
+        // KYO-781: `RwSignal::read_only()` (reactive_graph 0.2.14, `src/signal/
+        // rw.rs` ~L173-184) allocates a FRESH `ArenaItem` under whatever `Owner`
+        // is current at the time it's called, and panics via
+        // `unwrap_or_else(unwrap_signal!(self))` if `messages` itself is already
+        // disposed. Calling it lazily from `messages()` on every access meant a
+        // caller that read `messages()` after this engine's owning page was
+        // disposed (e.g. a `spawn_local` continuation that resumes post-`.await`
+        // after the user navigated away) would panic before its own `try_get_
+        // untracked()` guard ever ran. Capturing the `ReadSignal` handle here —
+        // synchronously, while the owning `Owner` is still current — makes it a
+        // plain `Copy` value from then on: returning the stored handle performs
+        // no arena allocation and no owner/disposal check, so it can never panic
+        // regardless of when `messages()` is later called. A disposed handle's
+        // own `try_get_untracked()` correctly returns `None` instead of
+        // panicking (`owner/arena_item.rs` `try_with_value` / `IsDisposed`),
+        // which is exactly what the existing call-site guards throughout
+        // `chat_page.rs` already assume.
+        let messages_read = messages.read_only();
         let chat_state = ChatStateMachine::new();
         let thinking = ThinkingManager::new();
         let session_id = RwSignal::new(None::<String>);
+        let session_id_read = session_id.read_only();
         let has_sent_first = RwSignal::new(false);
         let user_msg_counter = RwSignal::new(0u32);
         let context_type = StoredValue::new(config.context_type);
@@ -277,9 +300,11 @@ impl ChatEngine {
 
         Self {
             messages,
+            messages_read,
             chat_state,
             thinking,
             session_id,
+            session_id_read,
             has_sent_first,
             user_msg_counter,
             context_type,
@@ -293,8 +318,13 @@ impl ChatEngine {
     // ── Read signals ───────────────────────────────────────────────────
 
     /// Read signal for messages.
+    ///
+    /// Returns the handle captured once in [`ChatEngine::new`] — see that
+    /// site's comment (KYO-781) for why this must not call `.read_only()`
+    /// here: doing so on every access re-panics on a disposed owner instead
+    /// of letting the caller's `try_get_untracked()` guard handle it.
     pub fn messages(&self) -> ReadSignal<Vec<ChatMessageItem>> {
-        self.messages.read_only()
+        self.messages_read
     }
 
     /// Access the thinking manager.
@@ -308,8 +338,12 @@ impl ChatEngine {
     }
 
     /// Read signal for session ID.
+    ///
+    /// Same disposal-safety rationale as [`ChatEngine::messages`] (KYO-781):
+    /// returns the handle captured once in [`ChatEngine::new`] instead of
+    /// re-deriving a `ReadSignal` (and re-risking a panic) on every call.
     pub fn session_id(&self) -> ReadSignal<Option<String>> {
-        self.session_id.read_only()
+        self.session_id_read
     }
 
     // ── Send / add message ─────────────────────────────────────────────
@@ -1251,5 +1285,345 @@ mod tests {
         // instead of surfacing it.
         let payload = serde_json::json!({ "message": "should not be read" });
         assert_eq!(error_event_message(Some(&payload)), "An error occurred");
+    }
+}
+
+// KYO-781: requires `Owner`/`RwSignal` disposal directly from `reactive_graph`,
+// exercised natively (no WASM/browser needed — the panic is a pure reactive-graph
+// arena mechanism). Gated on `feature = "ssr"` to match this crate's convention
+// for tests that touch the reactive graph rather than pure functions — see
+// `chat_page.rs`'s `tests_disposal_scope` module (KYO-548) and
+// docs/standards (kyomi-ui tests need `--features ssr`, otherwise this module
+// silently does not compile and a zero-test run looks green).
+#[cfg(all(test, feature = "ssr"))]
+mod tests_disposal_safety {
+    //! Reproduces the panic reported in KYO-781: navigating away from `/chat`
+    //! while a response streams killed the whole WASM module with
+    //! `panicked at .../reactive_graph-0.2.14/src/signal/rw.rs:181:37: ...
+    //! you tried to access a reactive value ... but it has already been
+    //! disposed`, from `ChatEngine::messages()`.
+    //!
+    //! Root cause: `RwSignal::read_only()` (reactive_graph 0.2.14,
+    //! `src/signal/rw.rs` ~L173-184) allocates a FRESH `ArenaItem` under
+    //! whatever `Owner` is current at the moment it's called, and panics via
+    //! `.unwrap_or_else(unwrap_signal!(self))` if the signal it wraps is
+    //! already disposed. `ChatEngine::messages()` (and the sibling accessors
+    //! this ticket also fixes: `ChatEngine::session_id()`,
+    //! `ChatStateMachine::{state, active_message_id, active_session_id,
+    //! error}`, `ThinkingManager::state()`) called `.read_only()` lazily on
+    //! every access. `chat_page.rs`'s send handler calls
+    //! `engine.messages().try_get_untracked()` from inside a `spawn_local`
+    //! continuation that resumes AFTER an `.await` — by which point the user
+    //! may have navigated away and disposed the page's `Owner`. The
+    //! `try_get_untracked()` guard never got a chance to run: the panic fired
+    //! one call earlier, inside `.messages()` itself.
+    //!
+    //! The fix captures each `ReadSignal` handle ONCE at construction time
+    //! (while the owning `Owner` is still current) and returns that stored
+    //! `Copy` value from the accessor thereafter. A stored `ReadSignal` whose
+    //! owner has since been disposed is still a valid value to hold — reading
+    //! it via `try_get_untracked()` correctly returns `None` instead of
+    //! panicking (`owner/arena_item.rs`'s `try_with_value` / `IsDisposed`),
+    //! which is exactly what every existing call-site guard in `chat_page.rs`
+    //! already assumes is true.
+    //!
+    //! This directly exercises `reactive_graph` 0.2.14 (pinned via
+    //! `Cargo.lock`; leptos 0.8.20) rather than reasoning about it from the
+    //! Leptos book — same convention as `chat_page.rs`'s
+    //! `tests_disposal_scope` module (KYO-548).
+    //!
+    //! **Why `ChatEngine::new` itself is not called here**: it always
+    //! constructs at least one `Effect::new` (the `SessionMode::External`
+    //! session-sync effect, unconditionally; a second WS-subscription effect
+    //! under `#[cfg(target_arch = "wasm32")]`). `reactive_graph` 0.2.14's
+    //! `Effect::new` (`src/effect/effect.rs:177`) unconditionally calls
+    //! `any_spawner::Executor::spawn_local()` at CONSTRUCTION time — not
+    //! lazily when the effect first runs — and that panics with "tried to
+    //! spawn a Future ... before a global executor was initialized" unless a
+    //! global `any_spawner` executor has been installed first.
+    //!
+    //! An executor genuinely CAN be installed natively: `kyomi-ui`'s `ssr`
+    //! feature pulls in `any_spawner`'s `tokio` and `futures-executor`
+    //! features transitively (`cargo tree --locked -p kyomi-ui --features
+    //! ssr -e features -i any_spawner` shows both), and `tokio` is already a
+    //! `kyomi-ui` dev-dependency, matching the idiom `reactive_graph` uses in
+    //! its own `tests/effect.rs`: `_ = any_spawner::Executor::init_tokio();`
+    //! then run the effect-driving code inside
+    //! `tokio::task::LocalSet::new().run_until(...)`. What blocks it here is
+    //! narrower than "no executor is available" — it's that naming
+    //! `any_spawner::Executor` requires `any_spawner` to be a direct (or
+    //! dev-)dependency of the crate doing the naming, and `kyomi-ui` isn't:
+    //! only `apps/server`'s `Cargo.toml` declares `any_spawner` directly.
+    //! Confirmed empirically, not assumed: adding a probe test to this file
+    //! that calls `any_spawner::Executor::init_tokio()` and running `cargo
+    //! check --locked -p kyomi-ui --features ssr --tests` fails with
+    //! `error[E0433]: cannot find module or crate 'any_spawner' in this
+    //! scope ... use of unresolved module or unlinked crate 'any_spawner'`
+    //! (the probe was then removed — it doesn't compile, so it can't be left
+    //! behind as a test). Unblocking `ChatEngine::new()` itself natively
+    //! would need a one-line `kyomi-ui` dev-dependency addition
+    //! (`any_spawner = { version = "0.3", features = ["tokio"] }`, mirroring
+    //! `apps/server`'s declaration) — a `Cargo.toml`/`Cargo.lock` change,
+    //! which is out of scope for a fix confined to `chat_engine.rs`,
+    //! `chat_state.rs`, and `thinking.rs`.
+    //!
+    //! So instead of a mirror struct that only copies the pattern (proving
+    //! nothing about whether `ChatEngine` itself still uses it), this module
+    //! builds the REAL `ChatEngine` by struct literal — not `ChatEngine::
+    //! new()` — in `build_real_engine_for_disposal_test()` below.
+    //! `tests_disposal_safety` is a descendant of `chat_engine`'s own
+    //! module, so it has exactly the private-field access `ChatEngine::new()`
+    //! itself has, and can therefore construct the actual `ChatEngine` type
+    //! directly, skipping only `new()`'s Effect-registering side effects.
+    //! Those side effects are irrelevant to the property under test: the
+    //! capture-once-at-construction disposal-safety of `messages_read`/
+    //! `session_id_read` depends only on those `ReadSignal`s being captured
+    //! via `.read_only()` while an `Owner` is current and returned as a
+    //! stored `Copy` value thereafter — not on what else `new()` sets up.
+    //! The resulting value's `.messages()`/`.session_id()` are the real
+    //! `ChatEngine` methods, exercised on a real `ChatEngine` value, which is
+    //! exactly what a revert of either method (see the load-bearing proof
+    //! below) makes fail. `ChatStateMachine` and `ThinkingManager` below are
+    //! exercised through their REAL constructors and REAL accessors too
+    //! (no stand-in needed), because neither one constructs any `Effect` —
+    //! see `ChatStateMachine::new` (chat_state.rs) and `ThinkingManager::new`
+    //! (thinking.rs), which only create `RwSignal`s and (for
+    //! `ChatStateMachine`) `Signal::derive`s, none of which touch the
+    //! executor.
+    //!
+    //! Proving these tests are load-bearing: temporarily reverting
+    //! `ChatEngine::messages()` back to `self.messages.read_only()`
+    //! reproduces the exact panic in
+    //! `chat_engine_accessors_do_not_panic_after_owner_disposal` — `thread
+    //! '...' panicked at .../rw.rs:181:37: ... you tried to access a
+    //! reactive value ... but it has already been disposed` — confirmed by
+    //! hand during development of this fix, then reverted. The same
+    //! revert-and-rerun was done for `ChatEngine::session_id()`,
+    //! `ChatStateMachine::state()`, and `ThinkingManager::state()`, each
+    //! reproducing the identical panic through its own disposal test before
+    //! being restored.
+
+    use super::*;
+    use crate::components::chat::{ChatState, ThinkingEvent};
+
+    // ── ChatEngine's own accessor pattern (messages / session_id) ──────────
+    //
+    // Builds the REAL `ChatEngine` (see module doc comment above for why
+    // `ChatEngine::new()` itself can't run natively here, and why a struct
+    // literal — not a copy of the pattern — is the correct workaround).
+    fn build_real_engine_for_disposal_test() -> ChatEngine {
+        let messages = RwSignal::new(Vec::<ChatMessageItem>::new());
+        let messages_read = messages.read_only();
+        let session_id = RwSignal::new(None::<String>);
+        let session_id_read = session_id.read_only();
+        ChatEngine {
+            messages,
+            messages_read,
+            chat_state: ChatStateMachine::new(),
+            thinking: ThinkingManager::new(),
+            session_id,
+            session_id_read,
+            has_sent_first: RwSignal::new(false),
+            user_msg_counter: RwSignal::new(0u32),
+            context_type: StoredValue::new(None),
+            context_content: None,
+            context_label: StoredValue::new(None),
+            document_id: None,
+            before_send: None,
+        }
+    }
+
+    #[test]
+    fn chat_engine_accessors_read_and_track_correctly_while_owner_is_alive() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let engine = build_real_engine_for_disposal_test();
+            assert_eq!(engine.messages().try_get_untracked(), Some(Vec::new()));
+            assert_eq!(engine.session_id().try_get_untracked(), Some(None));
+
+            // Prove the read is live through the SAME stored handle, not a
+            // decoy that happens to match the initial value — drive the
+            // mutation through the engine's own real public API
+            // (`add_user_message`) rather than poking the private field
+            // directly, so this also exercises the real write path.
+            let msg_id = engine.add_user_message("hi");
+            engine.session_id.set(Some("sess-1".to_string()));
+            assert_eq!(
+                engine.messages().try_get_untracked().map(|m| m.len()),
+                Some(1)
+            );
+            assert_eq!(
+                engine
+                    .messages()
+                    .try_get_untracked()
+                    .and_then(|m| m.first().map(|m| m.message_id.clone())),
+                Some(msg_id)
+            );
+            assert_eq!(
+                engine.session_id().try_get_untracked(),
+                Some(Some("sess-1".to_string()))
+            );
+        });
+    }
+
+    #[test]
+    fn chat_engine_accessors_do_not_panic_after_owner_disposal() {
+        // Exact reproduction shape of the reported panic: construct the
+        // engine, dispose the owning scope (simulating navigating away from
+        // /chat mid-stream), THEN call the accessor for the first time —
+        // exactly as chat_page.rs's send-handler `spawn_local` continuation
+        // calls `engine.messages()` for the first time when it resumes
+        // post-`.await`, by which point the page may already be disposed.
+        // Calling the accessor BEFORE disposal would not distinguish this
+        // fix from the original bug: the original `.read_only()` only
+        // panics when it re-derives a handle from an already-disposed
+        // signal, which requires the call to happen after disposal.
+        let owner = Owner::new();
+        let engine = owner.with(build_real_engine_for_disposal_test);
+
+        // `Owner::cleanup()` is the same explicit disposal path used in
+        // production (route unmount), not reliance on Rust's Drop/refcounting
+        // — matches `chat_page.rs`'s `tests_disposal_scope` convention.
+        owner.cleanup();
+
+        assert_eq!(
+            engine.messages().try_get_untracked(),
+            None,
+            "ChatEngine::messages() must not panic after owner disposal"
+        );
+        assert_eq!(
+            engine.session_id().try_get_untracked(),
+            None,
+            "ChatEngine::session_id() must not panic after owner disposal"
+        );
+    }
+
+    // ── ChatStateMachine — real constructor, real accessors ────────────────
+
+    #[test]
+    fn chat_state_machine_accessors_read_and_track_correctly_while_owner_is_alive() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let chat_state = ChatStateMachine::new();
+            assert_eq!(
+                chat_state.state().try_get_untracked(),
+                Some(ChatState::Idle)
+            );
+            assert_eq!(chat_state.active_message_id().try_get_untracked(), Some(None));
+            assert_eq!(chat_state.active_session_id().try_get_untracked(), Some(None));
+            assert_eq!(chat_state.error().try_get_untracked(), Some(None));
+
+            // Prove reads are live through the SAME stored handle.
+            chat_state.start_sending("sess-1");
+            assert_eq!(
+                chat_state.state().try_get_untracked(),
+                Some(ChatState::Sending)
+            );
+            assert_eq!(
+                chat_state.active_session_id().try_get_untracked(),
+                Some(Some("sess-1".to_string()))
+            );
+
+            chat_state.start_streaming("msg-1");
+            assert_eq!(
+                chat_state.state().try_get_untracked(),
+                Some(ChatState::Streaming)
+            );
+            assert_eq!(
+                chat_state.active_message_id().try_get_untracked(),
+                Some(Some("msg-1".to_string()))
+            );
+        });
+    }
+
+    #[test]
+    fn chat_state_machine_accessors_do_not_panic_after_owner_disposal() {
+        // This is the real-world trigger from chat_page.rs's send handler:
+        // `chat_state_inner.state().try_get_untracked().is_some()` is used as
+        // a disposal guard before calling `.reset()`/`.set_error()` inside a
+        // `spawn_local` continuation — i.e. `.state()` is called for the
+        // FIRST time post-disposal, not obtained beforehand. Calling the
+        // accessor before disposal would not distinguish this fix from the
+        // original bug: `.read_only()` only panics when it re-derives a
+        // handle from an already-disposed signal, so the accessor call must
+        // happen after `owner.cleanup()` to reproduce it.
+        let owner = Owner::new();
+        let chat_state = owner.with(ChatStateMachine::new);
+
+        owner.cleanup();
+
+        assert_eq!(
+            chat_state.state().try_get_untracked(),
+            None,
+            "ChatStateMachine::state() must not panic after owner disposal"
+        );
+        assert_eq!(
+            chat_state.active_message_id().try_get_untracked(),
+            None,
+            "ChatStateMachine::active_message_id() must not panic after owner disposal"
+        );
+        assert_eq!(
+            chat_state.active_session_id().try_get_untracked(),
+            None,
+            "ChatStateMachine::active_session_id() must not panic after owner disposal"
+        );
+        assert_eq!(
+            chat_state.error().try_get_untracked(),
+            None,
+            "ChatStateMachine::error() must not panic after owner disposal"
+        );
+    }
+
+    // ── ThinkingManager — real constructor, real accessor ───────────────────
+
+    #[test]
+    fn thinking_manager_state_reads_and_tracks_correctly_while_owner_is_alive() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let thinking = ThinkingManager::new();
+            assert!(
+                thinking.state().try_get_untracked().is_some_and(|m| m.is_empty()),
+                "thinking state must start alive and empty"
+            );
+
+            thinking.handle_thinking_event(
+                "msg-1",
+                ThinkingEvent {
+                    event_id: "1-0".to_string(),
+                    event_type: "agent_thought".to_string(),
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    title: "Thinking".to_string(),
+                    description: None,
+                    data: None,
+                    duration_ms: None,
+                    has_full_text: false,
+                },
+                None,
+            );
+            assert!(
+                thinking
+                    .state()
+                    .try_get_untracked()
+                    .is_some_and(|m| m.contains_key("msg-1")),
+                "read must observe the write through the same stored handle"
+            );
+        });
+    }
+
+    #[test]
+    fn thinking_manager_state_does_not_panic_after_owner_disposal() {
+        // As with `ChatStateMachine` above: `.state()` must be called for
+        // the FIRST time after disposal to reproduce the original bug —
+        // `.read_only()` only panics when re-deriving from an
+        // already-disposed signal.
+        let owner = Owner::new();
+        let thinking = owner.with(ThinkingManager::new);
+
+        owner.cleanup();
+
+        assert!(
+            thinking.state().try_get_untracked().is_none(),
+            "ThinkingManager::state() must not panic after owner disposal"
+        );
     }
 }
