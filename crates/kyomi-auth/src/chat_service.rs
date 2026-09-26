@@ -50,9 +50,12 @@ pub enum MessageStatus {
     /// The turn was cancelled before producing a final answer. The row's
     /// content is the cancellation notice.
     Cancelled,
-    /// Reserved for the stuck-row sweep (KYO-493 Phase 4): an `in_progress`
-    /// row whose `owner_instance` process is no longer running. Nothing in
-    /// Phase 1/2 writes this variant yet.
+    /// Written by the stuck-row sweep ([`sweep_interrupted_rows`], KYO-493
+    /// Phase 4): an `in_progress` row whose `owner_instance` process is no
+    /// longer running — or which sat `in_progress` past
+    /// [`IN_PROGRESS_HARD_TIMEOUT`] — so no run is left that could ever
+    /// finalize it. The row keeps whatever partial content the incremental
+    /// flushes managed to write.
     Interrupted,
 }
 
@@ -1243,6 +1246,86 @@ pub async fn get_message_status(
         }
         None => Ok(None),
     }
+}
+
+/// Hard-timeout age bound for `in_progress` rows (the "hard-timeout age
+/// bound" half of KYO-493 Phase 4 — see the KYO-493 migration's column
+/// comment).
+///
+/// Every agent run already hard-times-out on its own well under this bound
+/// (`max_duration`: 15 minutes for chat
+/// (`crates/kyomi-ui/src/server_fns/chat.rs`'s `AgentExecutionConfig`),
+/// 10 for Slack, 3 for copilot). A row still `in_progress` this long
+/// after creation is therefore treated as dead: its run was stopped at
+/// that ceiling and failed to write its terminal status, its process died
+/// under it, or the run wedged past every iteration check and this age
+/// bound is the hard timeout that finally cuts it off. (The ceiling is
+/// checked between iterations rather than imposed as a hard timer, so a
+/// single wedged call can outlive it — the age bound is what caps that
+/// case too.) One hour keeps a 4x margin over the longest ceiling so the
+/// bound can never race a slow but legitimate final write.
+pub const IN_PROGRESS_HARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Sweep `in_progress` rows that can no longer be live and reclassify them
+/// `interrupted` (KYO-493 Phase 4 — the stuck-row sweep the KYO-493
+/// migration reserved [`MessageStatus::Interrupted`] for).
+///
+/// Two clauses, matching the migration's spec:
+///
+/// * **This instance's own rows** (`owner_instance = $owner_instance`):
+///   rows left behind by this process's own previous incarnation (startup
+///   sweep) or by runs this process is being shut down on (graceful-shutdown
+///   sweep). Deliberately no age test on this clause — but the premise
+///   behind that ("nothing this identity owns can still be running") is
+///   discharged at the call sites, not enforced here: `apps/server`'s
+///   startup sweep runs only after its listener has bound, so the previous
+///   incarnation of its `"{HOSTNAME}:{PORT}"` identity (see
+///   [`kyomi_core::resolve_process_instance`]) is already gone and this one
+///   is not yet serving, and its shutdown sweep runs after serving has
+///   stopped and the schedulers drained. What this function does enforce is
+///   the identity boundary: one local instance's sweep never touches
+///   another's rows — a worktree server booting on `:3100` only ever sweeps
+///   rows stamped `"{HOSTNAME}:3100"`, never dev.kyomi.ai's. The one
+///   identity whose exclusivity this crate cannot see is `"desktop"`: it
+///   assumes a single personal-mode process at a time (see
+///   [`kyomi_core::resolve_process_instance`]), which no code here
+///   enforces — two concurrent desktop processes sharing a `DATA_DIR`
+///   would let the second one's sweep interrupt the first one's live
+///   rows.
+/// * **Rows past the hard-timeout age bound** (`created_at` older than
+///   `hard_timeout`, any owner): a row whose owning process died without
+///   ever restarting is observable only through age. The bound
+///   ([`IN_PROGRESS_HARD_TIMEOUT`] at every production call site) is
+///   chosen to never race a live run — see that constant's doc.
+///
+/// Rows already in a terminal status (`complete` / `error` / `cancelled` /
+/// `interrupted`) are never touched, whatever their age. Returns how many
+/// rows were reclassified.
+///
+/// Call sites: `apps/server/src/main.rs` and `apps/desktop/src/main.rs`,
+/// each once at startup and once during graceful shutdown, always with
+/// this process's own `process_instance` identity. Best-effort at those
+/// call sites by design — a sweep failure must not take the server down;
+/// the next boot or the age bound catches whatever was missed.
+pub async fn sweep_interrupted_rows(
+    db: &DbPool,
+    owner_instance: &str,
+    hard_timeout: std::time::Duration,
+) -> kyomi_core::Result<u64> {
+    let cutoff = Utc::now()
+        - chrono::Duration::from_std(hard_timeout)
+            .map_err(|e| kyomi_core::Error::Internal(format!("invalid hard timeout: {e}")))?;
+    let rows = kyomi_core::db_execute!(
+        db,
+        "UPDATE chat_messages SET status = $1 \
+         WHERE status = 'in_progress' \
+           AND (owner_instance = $2 OR created_at < $3)",
+        MessageStatus::Interrupted.as_str(),
+        owner_instance,
+        cutoff
+    )
+    .map_err(|e| kyomi_core::Error::Internal(format!("failed to sweep interrupted rows: {e}")))?;
+    Ok(rows.rows_affected())
 }
 
 /// Update session title, model, and/or config.
@@ -5268,5 +5351,192 @@ mod tests {
             "the error text must be persisted into the placeholder's content; got {:?}",
             messages[0].content
         );
+    }
+
+    // -- Contract: KYO-493 Phase 4 stuck-row sweep --------------------------
+    //
+    // `sweep_interrupted_rows` is the only writer of
+    // `MessageStatus::Interrupted`. Its two clauses answer "which
+    // in_progress rows can no longer be live?": this instance's own rows
+    // (its previous incarnation died mid-turn, or it is shutting down on
+    // them) and any row past the hard-timeout age bound. The first test
+    // pins the boundary the migration comment calls out explicitly — one
+    // local instance's sweep must never interrupt another local instance's
+    // live runs — as a named assertion, not a side effect of a count.
+
+    #[tokio::test]
+    async fn sweep_interrupts_this_instances_own_rows_and_leaves_other_instances_live_runs_alone() {
+        let db = test_pool().await;
+        let key = test_key();
+        let sq = sqlite_pool(&db);
+        seed_user(sq, "user-a", "user-a@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+        seed_chat_session(sq, SeedSession::new("sess-1", "user-a", "ws-1", "Test")).await;
+
+        // A previous incarnation of this instance (`dev:3000`) died mid-turn.
+        insert_in_progress_assistant_placeholder(&db, &key, "sess-1", "msg-own", "dev:3000")
+            .await
+            .expect("seed this instance's stranded placeholder");
+        // Two live runs on the same host under different identities: a
+        // worktree verifier server on another port, and the desktop app in
+        // personal mode. Neither may be swept by `dev:3000`'s startup or
+        // shutdown sweep — their runs are still going.
+        insert_in_progress_assistant_placeholder(&db, &key, "sess-1", "msg-other-port", "dev:3100")
+            .await
+            .expect("seed another server instance's placeholder");
+        insert_in_progress_assistant_placeholder(&db, &key, "sess-1", "msg-desktop", "desktop")
+            .await
+            .expect("seed the desktop instance's placeholder");
+
+        let swept = sweep_interrupted_rows(&db, "dev:3000", IN_PROGRESS_HARD_TIMEOUT)
+            .await
+            .expect("sweep should succeed");
+        assert_eq!(
+            swept, 1,
+            "only the row this instance owns may be swept by identity; the age bound must not fire on rows younger than the hard timeout"
+        );
+
+        let (status, owner) = get_message_status(&db, "msg-own")
+            .await
+            .expect("read should succeed")
+            .expect("the row must still exist");
+        assert_eq!(
+            status,
+            MessageStatus::Interrupted,
+            "a row owned by a dead incarnation of this instance must be reclassified"
+        );
+        assert_eq!(
+            owner.as_deref(),
+            Some("dev:3000"),
+            "the sweep reclassifies a row; it must not erase who owned it"
+        );
+
+        for other in ["msg-other-port", "msg-desktop"] {
+            let (status, _) = get_message_status(&db, other)
+                .await
+                .expect("read should succeed")
+                .expect("the row must still exist");
+            assert_eq!(
+                status,
+                MessageStatus::InProgress,
+                "{other} is another local instance's live run and must survive this instance's sweep untouched"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn sweep_interrupts_in_progress_rows_past_the_hard_timeout_whatever_owner() {
+        let db = test_pool().await;
+        let key = test_key();
+        let sq = sqlite_pool(&db);
+        seed_user(sq, "user-a", "user-a@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+        seed_chat_session(sq, SeedSession::new("sess-1", "user-a", "ws-1", "Test")).await;
+
+        // Two stranded rows past the age bound: one from another instance
+        // that will never restart (so no startup sweep will ever claim it),
+        // one with no recorded owner at all. Plus one live young row.
+        insert_in_progress_assistant_placeholder(&db, &key, "sess-1", "msg-stuck-other", "dev:3100")
+            .await
+            .expect("seed the stranded row");
+        insert_in_progress_assistant_placeholder(&db, &key, "sess-1", "msg-stuck-no-owner", "desktop")
+            .await
+            .expect("seed the ownerless row");
+        insert_in_progress_assistant_placeholder(&db, &key, "sess-1", "msg-live-other", "dev:3100")
+            .await
+            .expect("seed the live row");
+
+        let two_hours_ago = chrono::Utc::now() - chrono::TimeDelta::hours(2);
+        kyomi_core::db_execute!(
+            &db,
+            "UPDATE chat_messages SET created_at = $1 WHERE message_id = $2",
+            two_hours_ago,
+            "msg-stuck-other"
+        )
+        .expect("backdate the stranded row");
+        kyomi_core::db_execute!(
+            &db,
+            "UPDATE chat_messages SET created_at = $1, owner_instance = NULL \
+             WHERE message_id = $2",
+            two_hours_ago,
+            "msg-stuck-no-owner"
+        )
+        .expect("backdate the ownerless row and drop its owner");
+
+        let swept = sweep_interrupted_rows(&db, "dev:3000", IN_PROGRESS_HARD_TIMEOUT)
+            .await
+            .expect("sweep should succeed");
+        assert_eq!(
+            swept, 2,
+            "age is the only remaining evidence for a row whose owner never returned, so the hard-timeout clause must sweep it"
+        );
+
+        for stale in ["msg-stuck-other", "msg-stuck-no-owner"] {
+            let (status, _) = get_message_status(&db, stale)
+                .await
+                .expect("read should succeed")
+                .expect("the row must still exist");
+            assert_eq!(
+                status,
+                MessageStatus::Interrupted,
+                "{stale} is past the hard-timeout age bound and must be interrupted"
+            );
+        }
+        let (status, _) = get_message_status(&db, "msg-live-other")
+            .await
+            .expect("read should succeed")
+            .expect("the row must still exist");
+        assert_eq!(
+            status,
+            MessageStatus::InProgress,
+            "a young row owned by another instance may still be mid-run and must not be swept"
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_never_rewrites_rows_already_in_a_terminal_status() {
+        let db = test_pool().await;
+        let key = test_key();
+        let sq = sqlite_pool(&db);
+        seed_user(sq, "user-a", "user-a@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+        seed_chat_session(sq, SeedSession::new("sess-1", "user-a", "ws-1", "Test")).await;
+
+        let terminal = [
+            ("msg-complete", MessageStatus::Complete),
+            ("msg-error", MessageStatus::Error),
+            ("msg-cancelled", MessageStatus::Cancelled),
+            ("msg-interrupted", MessageStatus::Interrupted),
+        ];
+        for (msg_id, status) in terminal {
+            insert_in_progress_assistant_placeholder(&db, &key, "sess-1", msg_id, "dev:3000")
+                .await
+                .expect("seed the placeholder");
+            kyomi_core::db_execute!(
+                &db,
+                "UPDATE chat_messages SET created_at = $1, status = $2 WHERE message_id = $3",
+                chrono::Utc::now() - chrono::TimeDelta::hours(2),
+                status.as_str(),
+                msg_id
+            )
+            .expect("finalize and backdate the row");
+        }
+
+        // Both clauses fire on this fixture's age and owner; the status
+        // filter is the only thing protecting these rows.
+        let swept = sweep_interrupted_rows(&db, "dev:3000", IN_PROGRESS_HARD_TIMEOUT)
+            .await
+            .expect("sweep should succeed");
+        assert_eq!(
+            swept, 0,
+            "a finished row is history — neither clause may rewrite its status"
+        );
+        for (msg_id, expected) in terminal {
+            let (status, _) = get_message_status(&db, msg_id)
+                .await
+                .expect("read should succeed")
+                .expect("the row must still exist");
+            assert_eq!(status, expected, "{msg_id} must keep its terminal status");
+        }
     }
 }
