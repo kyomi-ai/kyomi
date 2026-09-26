@@ -794,6 +794,7 @@ pub async fn deliver_response(
     // Stream response in chunks.
     let chars: Vec<char> = response.chars().collect();
     let mut offset = 0;
+    let mut byte_offset = 0;
 
     while offset < chars.len() {
         let end = (offset + STREAM_CHUNK_SIZE).min(chars.len());
@@ -805,6 +806,7 @@ pub async fn deliver_response(
             session_id,
             message_id,
             &chunk,
+            byte_offset,
             Some(context_type),
         )
         .await;
@@ -819,6 +821,7 @@ pub async fn deliver_response(
                         session_id,
                         message_id,
                         &chunk,
+                        byte_offset,
                         Some(context_type),
                     )
                     .await;
@@ -827,6 +830,7 @@ pub async fn deliver_response(
         }
 
         offset = end;
+        byte_offset += chunk.len();
         tokio::time::sleep(tokio::time::Duration::from_millis(STREAM_CHUNK_DELAY_MS)).await;
     }
 

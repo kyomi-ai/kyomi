@@ -86,6 +86,12 @@ pub struct ChatStateMachine {
     active_message_id: RwSignal<Option<String>>,
     /// Read-only handle for `active_message_id`, captured once — see `state_read`.
     active_message_id_read: ReadSignal<Option<String>>,
+    /// Server-assigned assistant ID for the send, possibly learned after WS completion.
+    expected_assistant_id: RwSignal<Option<String>>,
+    /// Read-only handle for `expected_assistant_id`, captured once — see `state_read`.
+    expected_assistant_id_read: ReadSignal<Option<String>>,
+    /// Per-send token, independent of optimistic message IDs that can be reused after reset.
+    sending_token: RwSignal<Option<String>>,
     /// The session ID for the current chat interaction (set in `start_sending`).
     active_session_id: RwSignal<Option<String>>,
     /// Read-only handle for `active_session_id`, captured once — see `state_read`.
@@ -134,6 +140,9 @@ impl ChatStateMachine {
         let state_read = state.read_only();
         let active_message_id = RwSignal::new(None::<String>);
         let active_message_id_read = active_message_id.read_only();
+        let expected_assistant_id = RwSignal::new(None::<String>);
+        let expected_assistant_id_read = expected_assistant_id.read_only();
+        let sending_token = RwSignal::new(None::<String>);
         let active_session_id = RwSignal::new(None::<String>);
         let active_session_id_read = active_session_id.read_only();
         let error = RwSignal::new(None::<String>);
@@ -160,6 +169,9 @@ impl ChatStateMachine {
             state_read,
             active_message_id,
             active_message_id_read,
+            expected_assistant_id,
+            expected_assistant_id_read,
+            sending_token,
             active_session_id,
             active_session_id_read,
             error,
@@ -192,6 +204,25 @@ impl ChatStateMachine {
     /// returns the handle captured once in `new()` (KYO-781).
     pub fn active_message_id(&self) -> ReadSignal<Option<String>> {
         self.active_message_id_read
+    }
+
+    /// Read signal for the assistant ID returned by the current send. See
+    /// `state()` for why this returns the handle captured once in `new()`.
+    pub fn expected_assistant_id(&self) -> ReadSignal<Option<String>> {
+        self.expected_assistant_id_read
+    }
+
+    /// Associate the server-assigned assistant with the current send only.
+    /// A late HTTP response from an abandoned send must not bind the new turn.
+    pub fn expect_assistant(&self, session_id: &str, send_token: &str, message_id: &str) -> bool {
+        if self.state.get_untracked() != ChatState::Sending
+            || self.active_session_id.get_untracked().as_deref() != Some(session_id)
+            || self.sending_token.get_untracked().as_deref() != Some(send_token)
+        {
+            return false;
+        }
+        self.expected_assistant_id.set(Some(message_id.to_string()));
+        true
     }
 
     /// Read signal for the active session ID. See `state()` for why this
@@ -243,6 +274,16 @@ impl ChatStateMachine {
     pub fn start_sending(&self, session_id: &str) {
         self.transition(ChatState::Sending, "start_sending");
         self.active_session_id.set(Some(session_id.to_string()));
+        self.active_message_id.set(None);
+        self.expected_assistant_id.set(None);
+        self.sending_token.set(None);
+    }
+
+    /// Start a page send with a fresh local token that survives only this turn.
+    /// Unlike the optimistic user ID, it cannot repeat after an engine reset.
+    pub fn start_sending_with_token(&self, session_id: &str, send_token: &str) {
+        self.start_sending(session_id);
+        self.sending_token.set(Some(send_token.to_string()));
     }
 
     /// Message was sent, now streaming response. Sets `active_message_id`.
@@ -251,6 +292,7 @@ impl ChatStateMachine {
     pub fn start_streaming(&self, message_id: &str) {
         self.transition(ChatState::Streaming, "start_streaming");
         self.active_message_id.set(Some(message_id.to_string()));
+        self.expected_assistant_id.set(Some(message_id.to_string()));
     }
 
     /// User requested cancellation. Returns `true` if the cancel was accepted.
@@ -285,6 +327,8 @@ impl ChatStateMachine {
     pub fn complete(&self) {
         self.transition(ChatState::Idle, "completed");
         self.active_message_id.set(None);
+        self.expected_assistant_id.set(None);
+        self.sending_token.set(None);
     }
 
     /// An error occurred. Sets error message and auto-resets to Idle after 100ms.
@@ -307,6 +351,8 @@ impl ChatStateMachine {
             self.transition(ChatState::Idle, "manual reset");
         }
         self.active_message_id.set(None);
+        self.expected_assistant_id.set(None);
+        self.sending_token.set(None);
         self.active_session_id.set(None);
         self.error.set(None);
     }

@@ -44,7 +44,7 @@ use super::chat_message::ChatMessage;
 use crate::components::chat::websocket_client::{ConnectionState, WebSocketContext};
 use crate::components::chat::ChatInput;
 use crate::components::chat::{
-    ChatEngine, ChatEngineConfig, InlineEditableTitle, SessionMode, ThinkingEvent, TokenUsage,
+    ChatEngine, ChatEngineConfig, ChatStateMachine, InlineEditableTitle, SessionMode, ThinkingEvent, ThinkingManager, TokenUsage,
 };
 use crate::components::dashboard::{ChartInfoModal, SaveDashboardModal};
 use crate::components::button::{Button, ButtonLink, ButtonSize, ButtonVariant, ToggleButton};
@@ -237,6 +237,110 @@ fn resolve_engine_session_id(
     pending: Option<String>,
 ) -> Option<String> {
     current.or(pending)
+}
+
+/// Only the latest assistant row can represent the currently running turn.
+fn in_progress_assistant(messages: &[ChatMessageItem]) -> Option<&str> {
+    messages
+        .last()
+        .filter(|msg| msg.message_type == "assistant" && msg.status == "in_progress")
+        .map(|msg| msg.message_id.as_str())
+}
+
+/// Preserve WebSocket updates that arrived after a DB read began. A completed
+/// row is authoritative over an in-progress row; while both are running,
+/// streamed content is append-only, so the longer prefix is the newer copy.
+fn live_assistant_is_newer(live: &[ChatMessageItem], loaded: &[ChatMessageItem]) -> bool {
+    let Some(current) = live.last().filter(|m| m.message_type == "assistant") else {
+        return false;
+    };
+    if let Some(snapshot) = loaded.last()
+        && snapshot.message_type == "assistant"
+        && current.message_id == snapshot.message_id
+    {
+        return current.status == "complete" && snapshot.status == "in_progress"
+            || current.status == "in_progress" && snapshot.status == "in_progress"
+                && current.content.starts_with(&snapshot.content)
+                && current.content.len() > snapshot.content.len();
+    }
+    // The read may predate the assistant insert altogether. Only use the
+    // local row if the preceding messages identify the same conversation.
+    !loaded.is_empty()
+        && live.len() == loaded.len() + 1
+        && (current.status == "in_progress" || current.status == "complete")
+        && live.iter().zip(loaded).all(|(a, b)| a.message_id == b.message_id)
+}
+
+fn thinking_event_is_terminal(event: &ThinkingEvent) -> bool {
+    event.duration_ms.is_some() || event.data.as_ref()
+        .and_then(|data| data.get("status"))
+        .and_then(|status| status.as_str()) == Some("completed")
+}
+
+/// Replay persisted reasoning without replacing a newer live answer. On a
+/// stale fetch, preserve WS events/usage and terminal state already received.
+fn restore_stored_thinking(
+    thinking: &ThinkingManager,
+    stored: &[ChatMessageItem],
+    live: Option<&[ChatMessageItem]>,
+) {
+    if live.is_none() {
+        thinking.clear_all();
+    }
+    for msg in stored {
+        let existing = live.map(|_| thinking.get_for_message(&msg.message_id));
+        for event in msg.thinking_events.iter().filter_map(|v|
+            serde_json::from_value::<ThinkingEvent>(v.clone()).ok()
+        ) {
+            if let Some(live_event) = existing.as_ref().and_then(|state|
+                state.events.iter().find(|e| e.event_id == event.event_id)
+            ) {
+                // A persisted tool completion may have revised the same
+                // event ID after the live start; never replace a live
+                // completion with an older persisted start.
+                if !thinking_event_is_terminal(&event) || thinking_event_is_terminal(live_event) {
+                    continue;
+                }
+            }
+            thinking.handle_thinking_event(&msg.message_id, event, None);
+        }
+        if let Some(usage) = msg.token_usage.as_ref()
+            .and_then(|v| serde_json::from_value::<TokenUsage>(v.clone()).ok())
+            && existing.as_ref().is_none_or(|state| state.token_usage.is_none())
+        {
+            thinking.update_token_usage(&msg.message_id, usage);
+        }
+        let live_status = live.and_then(|msgs| msgs.iter()
+            .find(|m| m.message_id == msg.message_id).map(|m| m.status.as_str()));
+        if msg.status != "in_progress" || live_status.is_some_and(|status| status != "in_progress") {
+            thinking.complete_thinking(&msg.message_id);
+        }
+    }
+}
+
+/// Reconcile a completion or partial stream that beat the HTTP send
+/// response. Only the assistant ID assigned to this send can finish it.
+fn reconcile_send_reply(
+    state: &ChatStateMachine,
+    session_id: &str,
+    send_token: &str,
+    assistant_id: &str,
+    messages: &[ChatMessageItem],
+) {
+    if assistant_id.is_empty()
+        || !state.expect_assistant(session_id, send_token, assistant_id)
+    {
+        return;
+    }
+    if let Some(reply) = messages.iter().find(|m|
+        m.message_type == "assistant" && m.message_id == assistant_id
+    ) {
+        if reply.status == "complete" {
+            state.complete();
+        } else if reply.status == "in_progress" {
+            state.start_streaming(assistant_id);
+        }
+    }
 }
 
 /// Format cost for the chat footer — always 2 decimal places.
@@ -574,7 +678,13 @@ pub fn ChatPage() -> impl IntoView {
                 // fresh data (checked untracked to avoid reactive dependency).
                 // Use try_ variants: the user may have navigated away while
                 // the IndexedDB read was in flight.
-                if !cached_messages.is_empty() && is_loading.try_get_untracked().unwrap_or(false) {
+                if !cached_messages.is_empty()
+                    && url_session_id.try_get_untracked().flatten().as_deref() == Some(sid.as_str())
+                    && is_loading.try_get_untracked().unwrap_or(false)
+                    && engine_inner.messages().try_get_untracked().is_some_and(|live_messages|
+                        !live_assistant_is_newer(&live_messages, &cached_messages)
+                    )
+                {
                     engine_inner.try_set_messages(cached_messages);
                     set_is_loading.try_set(false);
                 }
@@ -691,7 +801,11 @@ pub fn ChatPage() -> impl IntoView {
                     | crate::components::chat::ChatState::Streaming
                     | crate::components::chat::ChatState::Cancelling
                 );
-                if !is_just_created && !actively_chatting {
+                // An active turn from the previous URL must not prevent recovery
+                // of this sessions turn (or complete its state on a late event).
+                let active_is_this_session = engine_for_load.chat_state()
+                    .active_session_id().get_untracked().as_deref() == Some(sid.as_str());
+                if !is_just_created && (!actively_chatting || !active_is_this_session) {
                     engine_for_load.chat_state().reset();
                 }
             }
@@ -726,6 +840,22 @@ pub fn ChatPage() -> impl IntoView {
     Effect::new(move |_| {
         match session_messages_resource.get() {
             Some(Some((sid, Ok(response)))) => {
+                if url_session_id.get_untracked().as_deref() != Some(sid.as_str()) {
+                    return;
+                }
+                if current_session_id.get_untracked().as_deref() != Some(sid.as_str()) {
+                    return;
+                }
+                let live_messages = engine_for_resource.messages().get_untracked();
+                if live_assistant_is_newer(&live_messages, &response.messages) {
+                    // The DB read began before the terminal WS event. Keep its
+                    // answer, but do not lose reasoning persisted in that read.
+                    restore_stored_thinking(
+                        engine_for_resource.thinking(), &response.messages, Some(&live_messages),
+                    );
+                    set_is_loading.set(false);
+                    return;
+                }
                 // Set session metadata
                 if let Some(ref title) = response.session.title {
                     set_session_title.set(title.clone());
@@ -733,45 +863,34 @@ pub fn ChatPage() -> impl IntoView {
                 let is_shared = response.session.shared;
                 set_session_metadata.set(response.session);
 
-                // Populate thinking state from stored events via the engine's
-                // ThinkingManager. Replay each message's events, then mark complete.
-                engine_for_resource.thinking().clear_all();
-                for msg in &response.messages {
-                    let events: Vec<ThinkingEvent> =
-                        msg.thinking_events
-                            .iter()
-                            .filter_map(|v| serde_json::from_value(v.clone()).ok())
-                            .collect();
-
-                    let token_usage: Option<TokenUsage> =
-                        msg.token_usage
-                            .as_ref()
-                            .and_then(|v| serde_json::from_value(v.clone()).ok());
-
-                    // Replay events through ThinkingManager for dedup/sorting
-                    for event in events {
-                        engine_for_resource.thinking().handle_thinking_event(
-                            &msg.message_id,
-                            event,
-                            None, // token_usage set separately below
-                        );
-                    }
-
-                    // Set token usage if present (works even when no events exist)
-                    if let Some(usage) = token_usage {
-                        engine_for_resource.thinking().update_token_usage(
-                            &msg.message_id,
-                            usage,
-                        );
-                    }
-
-                    // Mark as complete (history events are not active)
-                    engine_for_resource.thinking().complete_thinking(&msg.message_id);
-                }
+                // Answer text and reasoning travel on separate WS events.
+                // Equal answer text does not make a DB thinking snapshot newer
+                // than events or usage already received over the socket.
+                let same_live_turn = response.messages.iter().any(|stored| {
+                    live_messages.iter().any(|live| live.message_id == stored.message_id)
+                });
+                restore_stored_thinking(
+                    engine_for_resource.thinking(), &response.messages,
+                    same_live_turn.then_some(live_messages.as_slice()),
+                );
 
                 // M16 — Capture last message ID before the move
                 let last_msg_id = response.messages.last().map(|m| m.message_id.clone());
+                let running_message_id =
+                    in_progress_assistant(&response.messages).map(str::to_string);
                 engine_for_resource.set_messages(response.messages);
+                if let Some(message_id) = running_message_id {
+                    if engine_for_resource.chat_state().state().get_untracked()
+                        == crate::components::chat::ChatState::Idle
+                    {
+                        engine_for_resource.chat_state().start_sending(&sid);
+                        engine_for_resource.chat_state().start_streaming(&message_id);
+                    }
+                } else if engine_for_resource.chat_state().state().get_untracked()
+                    == crate::components::chat::ChatState::Streaming
+                {
+                    engine_for_resource.chat_state().complete();
+                }
                 set_is_loading.set(false);
 
                 // M16 — Mark session read for shared conversations
@@ -782,7 +901,10 @@ pub fn ChatPage() -> impl IntoView {
                     });
                 }
             }
-            Some(Some((_, Err(_e)))) => {
+            Some(Some((sid, Err(_e)))) => {
+                if url_session_id.get_untracked().as_deref() != Some(sid.as_str()) {
+                    return;
+                }
                 // Gracefully handle by setting empty messages
                 // (matches React's catch block in loadSessionMessages)
                 engine_for_resource.set_messages(Vec::new());
@@ -798,6 +920,28 @@ pub fn ChatPage() -> impl IntoView {
             }
         }
     });
+
+    // The initial load is the recovery snapshot. If the socket disconnects
+    // afterwards, a single refetch on reconnection fills any missed terminal
+    // event; no polling or provider-side streaming is needed.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let ws_for_reconnect = ws_ctx.clone();
+        let engine_for_reconnect = engine.clone();
+        Effect::new(move |previous: Option<Option<ConnectionState>>| {
+            let connection = ws_for_reconnect
+                .as_ref()
+                .map(|ws| ws.connection_state.get());
+            if connection == Some(ConnectionState::Connected)
+                && previous != Some(connection)
+                && url_session_id.get_untracked() == current_session_id.get_untracked()
+                && in_progress_assistant(&engine_for_reconnect.messages().get_untracked()).is_some()
+            {
+                session_messages_resource.refetch();
+            }
+            connection
+        });
+    }
 
     // ── Generate greeting on mount if no messages ───────────────────────
     // Matches React's useEffect for greeting (Chat.jsx lines 760-765)
@@ -1510,8 +1654,10 @@ pub fn ChatPage() -> impl IntoView {
             }
         };
 
-        // Transition to SENDING state
-        chat_state_send.start_sending(&session_id);
+        // A per-send token must not reuse the engines resettable user ID:
+        // an earlier HTTP response may return after navigating away and back.
+        let send_token = generate_client_session_id();
+        chat_state_send.start_sending_with_token(&session_id, &send_token);
 
         // Call send_chat_message server function
         let chat_state_inner = chat_state_send.clone();
@@ -1597,6 +1743,18 @@ pub fn ChatPage() -> impl IntoView {
                             });
                         }
                         return;
+                    }
+
+                    // WebSocket frames may beat this HTTP response. Bind the
+                    // server-assigned assistant ID before reconciling any
+                    // already-delivered terminal row or partial stream.
+                    if chat_state_inner.state().try_get_untracked().is_some()
+                        && let Some(msgs) = engine_inner.messages().try_get_untracked()
+                    {
+                        reconcile_send_reply(
+                            &chat_state_inner, &session_id, &send_token,
+                            &response.assistant_message_id, &msgs,
+                        );
                     }
 
                     // Update current_session_id from response (for new chats)
@@ -2303,6 +2461,201 @@ mod tests {
 
     use super::*;
     use crate::components::chat::chat_engine::should_handle;
+
+    #[test]
+    fn stale_read_merges_reasoning_without_reactivating_live_completion() {
+        let owner = Owner::new();
+        owner.set();
+        let thinking = ThinkingManager::new();
+        let event = |id: &str| serde_json::json!({
+            "event_id": id, "event_type": "agent_thought", "timestamp": "now", "title": id,
+        });
+        let live_event: ThinkingEvent = serde_json::from_value(event("02")).expect("live event");
+        thinking.handle_thinking_event("a", live_event, None);
+        thinking.update_token_usage("a", TokenUsage {
+            input_tokens: 2, output_tokens: 3, total_tokens: 5,
+            cost: 0.0, context_tokens: 0, context_window: 0,
+        });
+        thinking.complete_thinking("a");
+        let stored = ChatMessageItem {
+            message_id: "a".into(), message_type: "assistant".into(),
+            content: "prefix".into(), status: "in_progress".into(),
+            timestamp: String::new(), pinned: false, sent_by: None,
+            thinking_events: vec![event("01"), event("02")],
+            token_usage: Some(serde_json::json!({ "input_tokens": 1, "output_tokens": 1 })),
+        };
+        let mut live = stored.clone();
+        live.content = "finished".into();
+        live.status = "complete".into();
+        assert!(live_assistant_is_newer(std::slice::from_ref(&live), std::slice::from_ref(&stored)));
+        restore_stored_thinking(&thinking, std::slice::from_ref(&stored), Some(std::slice::from_ref(&live)));
+        let state = thinking.get_for_message("a");
+        assert_eq!(state.events.iter().map(|e| e.event_id.as_str()).collect::<Vec<_>>(), vec!["01", "02"]);
+        assert!(!state.is_active);
+        assert_eq!(state.token_usage.expect("live usage").input_tokens, 2);
+        assert_eq!(live.content, "finished");
+        assert_eq!(live.status, "complete");
+        owner.cleanup();
+    }
+
+    #[test]
+    fn equal_answer_snapshot_preserves_newer_live_reasoning_and_usage() {
+        let owner = Owner::new();
+        owner.set();
+        let thinking = ThinkingManager::new();
+        let event = |id: &str| serde_json::json!({
+            "event_id": id, "event_type": "agent_thought", "timestamp": "now", "title": id,
+        });
+        thinking.handle_thinking_event(
+            "a", serde_json::from_value(event("live")).expect("live event"), None,
+        );
+        thinking.update_token_usage("a", TokenUsage {
+            input_tokens: 8, output_tokens: 5, total_tokens: 13,
+            cost: 0.0, context_tokens: 0, context_window: 0,
+        });
+        let stored = ChatMessageItem {
+            message_id: "a".into(), message_type: "assistant".into(),
+            content: "same answer".into(), status: "in_progress".into(),
+            timestamp: String::new(), pinned: false, sent_by: None,
+            thinking_events: vec![event("stored")],
+            token_usage: Some(serde_json::json!({ "input_tokens": 1, "output_tokens": 1 })),
+        };
+        let live = stored.clone();
+        assert!(!live_assistant_is_newer(std::slice::from_ref(&live), std::slice::from_ref(&stored)));
+        restore_stored_thinking(&thinking, std::slice::from_ref(&stored), Some(std::slice::from_ref(&live)));
+        let state = thinking.get_for_message("a");
+        assert_eq!(state.events.iter().map(|e| e.event_id.as_str()).collect::<Vec<_>>(), vec!["live", "stored"]);
+        assert!(state.is_active);
+        assert_eq!(state.token_usage.expect("live usage").input_tokens, 8);
+        owner.cleanup();
+    }
+
+    #[test]
+    fn stored_tool_completion_upgrades_live_start_but_not_the_reverse() {
+        let owner = Owner::new();
+        owner.set();
+        let thinking = ThinkingManager::new();
+        let event = |status: &str| serde_json::json!({
+            "event_id": "tool-1", "event_type": "tool_execution_start",
+            "timestamp": "now", "title": status, "data": { "status": status },
+        });
+        let mut row = ChatMessageItem {
+            message_id: "a".into(), message_type: "assistant".into(),
+            content: String::new(), status: "complete".into(), timestamp: String::new(),
+            pinned: false, sent_by: None, thinking_events: vec![event("completed")],
+            token_usage: None,
+        };
+        let live_start = serde_json::from_value(event("processing")).expect("start event");
+        thinking.handle_thinking_event("a", live_start, None);
+        restore_stored_thinking(&thinking, std::slice::from_ref(&row), Some(std::slice::from_ref(&row)));
+        let state = thinking.get_for_message("a");
+        assert_eq!(state.events[0].title, "completed");
+        assert!(!state.is_active);
+        row.thinking_events = vec![event("processing")];
+        restore_stored_thinking(&thinking, std::slice::from_ref(&row), Some(std::slice::from_ref(&row)));
+        assert_eq!(thinking.get_for_message("a").events[0].title, "completed");
+        owner.cleanup();
+    }
+
+    #[test]
+    fn send_reply_reconciles_zero_chunk_before_or_after_http() {
+        let owner = Owner::new();
+        owner.set();
+        let state = ChatStateMachine::new();
+        let reply = ChatMessageItem {
+            message_id: "b".into(), message_type: "assistant".into(),
+            content: String::new(), status: "complete".into(), timestamp: String::new(),
+            pinned: false, sent_by: None, thinking_events: Vec::new(), token_usage: None,
+        };
+        state.start_sending_with_token("s1", "token-b");
+        let other = ChatMessageItem { message_id: "a".into(), ..reply.clone() };
+        reconcile_send_reply(&state, "s1", "token-b", "b", &[other, reply.clone()]);
+        assert_eq!(state.state().get_untracked(), crate::components::chat::ChatState::Idle);
+        state.start_sending_with_token("s1", "token-b2");
+        reconcile_send_reply(&state, "s1", "token-b2", "b", &[]);
+        assert_eq!(state.expected_assistant_id().get_untracked().as_deref(), Some("b"));
+        assert_eq!(state.state().get_untracked(), crate::components::chat::ChatState::Sending);
+        reconcile_send_reply(&state, "other", "token-b2", "a", std::slice::from_ref(&reply));
+        assert_eq!(state.expected_assistant_id().get_untracked().as_deref(), Some("b"));
+        owner.cleanup();
+    }
+
+    #[test]
+    fn delayed_same_session_http_response_cannot_bind_a_later_send() {
+        let owner = Owner::new();
+        owner.set();
+        let state = ChatStateMachine::new();
+        let optimistic_id_a = "user_0";
+        state.start_sending_with_token("session", "token-a");
+        // Navigation resets A; B starts after returning to the same URL.
+        state.reset();
+        let optimistic_id_b = "user_0";
+        assert_eq!(optimistic_id_a, optimistic_id_b);
+        state.start_sending_with_token("session", "token-b");
+        reconcile_send_reply(&state, "session", "token-a", "assistant-a", &[]);
+        assert_eq!(state.expected_assistant_id().get_untracked(), None);
+        assert_eq!(state.state().get_untracked(), crate::components::chat::ChatState::Sending);
+        reconcile_send_reply(&state, "session", "token-b", "assistant-b", &[]);
+        assert_eq!(state.expected_assistant_id().get_untracked().as_deref(), Some("assistant-b"));
+        reconcile_send_reply(&state, "session", "token-a", "assistant-a", &[]);
+        assert_eq!(state.expected_assistant_id().get_untracked().as_deref(), Some("assistant-b"));
+        // Copilot still uses start_sending without a page token; it does not
+        // accidentally accept a page HTTP response.
+        state.start_sending("session");
+        reconcile_send_reply(&state, "session", "token-a", "assistant-a", &[]);
+        assert_eq!(state.expected_assistant_id().get_untracked(), None);
+        owner.cleanup();
+    }
+
+    #[test]
+    fn restores_only_the_latest_in_progress_assistant_turn() {
+        let msg = |id: &str, role: &str, status: &str| ChatMessageItem {
+            message_id: id.to_string(),
+            message_type: role.to_string(),
+            content: String::new(),
+            timestamp: String::new(),
+            pinned: false,
+            status: status.to_string(),
+            sent_by: None,
+            thinking_events: Vec::new(),
+            token_usage: None,
+        };
+        let mut messages = vec![msg("old", "assistant", "in_progress")];
+        assert_eq!(in_progress_assistant(&messages), Some("old"));
+        messages.push(msg("next", "user", "complete"));
+        assert_eq!(in_progress_assistant(&messages), None);
+        messages.push(msg("current", "assistant", "in_progress"));
+        assert_eq!(in_progress_assistant(&messages), Some("current"));
+        messages.last_mut().expect("latest message").status = "interrupted".to_string();
+        assert_eq!(in_progress_assistant(&messages), None);
+    }
+
+    #[test]
+    fn an_older_load_cannot_undo_a_live_completion() {
+        let msg = |status: &str| ChatMessageItem {
+            message_id: "turn-1".to_string(),
+            message_type: "assistant".to_string(),
+            content: String::new(),
+            timestamp: String::new(),
+            pinned: false,
+            status: status.to_string(),
+            sent_by: None,
+            thinking_events: Vec::new(),
+            token_usage: None,
+        };
+        assert!(live_assistant_is_newer(&[msg("complete")], &[msg("in_progress")]));
+        assert!(!live_assistant_is_newer(&[msg("in_progress")], &[msg("complete")]));
+        assert!(!live_assistant_is_newer(&[msg("complete")], &[msg("complete")]));
+        let mut live = msg("in_progress");
+        live.content = "partial response".to_string();
+        let mut snapshot = msg("in_progress");
+        snapshot.content = "partial".to_string();
+        assert!(live_assistant_is_newer(&[live.clone()], &[snapshot.clone()]));
+        assert!(!live_assistant_is_newer(&[snapshot], &[live]));
+        let user = ChatMessageItem { message_id: "user-1".into(), message_type: "user".into(), ..msg("complete") };
+        assert!(live_assistant_is_newer(&[user.clone(), msg("complete")], std::slice::from_ref(&user)));
+        assert!(!live_assistant_is_newer(&[user, msg("complete")], &[msg("complete")]));
+    }
 
     #[test]
     fn resolves_to_pending_id_while_a_new_chat_send_is_in_flight() {
