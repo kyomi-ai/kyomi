@@ -43,15 +43,38 @@ use kyomi_types::sync::entity_types;
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
-/// Start the sync engine. Call **once** from the Layout after the WebSocket
-/// connects (i.e. from inside a `<WebSocketProvider>` subtree).
+/// Start the sync engine for `workspace_id`, from inside a `<WebSocketProvider>`
+/// subtree.
 ///
-/// Subscribes to `sync_action`, `sync_complete`, and `sync_reset` messages.
-/// Sends an immediate bootstrap or delta request based on the stored cursor.
+/// Subscribes to `sync_action`, `sync_complete`, `sync_reset`,
+/// `billing_status_changed`, and `error` messages. Sends an immediate
+/// bootstrap or delta request based on the stored cursor.
 ///
 /// On every reconnection (transition to `Connected`) the engine re-sends the
 /// appropriate request so the client catches up with any events it missed
 /// while offline.
+///
+/// ## Lifetime and re-invocation (KYO-833)
+///
+/// Called from inside `components::layout::SyncEngineStarter`, whose effect
+/// calls this at most once **per distinct workspace id** — never on every
+/// effect rerun, and never merely because the reactive `workspace_id` signal
+/// transiently reported the same id or went briefly empty (see that
+/// component's doc comment, and `cache::sync_engine_lifecycle::sync_engine_action`
+/// for the exact decision). If the caller switches workspaces, it disposes
+/// the previous call's owner (see below) and calls this again for the new
+/// workspace id — this function itself has no "already running" guard of its
+/// own; that is entirely the caller's responsibility.
+///
+/// Every subscription/cleanup this function registers via `on_cleanup` is
+/// bound to whichever reactive `Owner` is current when it is called — the
+/// caller MUST invoke this from inside a dedicated child `Owner`'s `.with()`
+/// (not directly inside its own `Effect`'s closure: an `Effect`'s owner in
+/// `reactive_graph` 0.2.14 has its cleanups wiped at the START of every
+/// rerun, which would silently unsubscribe everything below on the very next
+/// unrelated rerun). Unsubscribe fires when the caller disposes that specific
+/// child `Owner` — on an actual workspace switch, or when the component that
+/// owns it unmounts — not on every effect rerun.
 pub fn start_sync_engine(
     ws: WebSocketContext,
     store: SyncStore,
@@ -339,9 +362,14 @@ pub fn start_sync_engine(
     });
 
     // ── Register cleanup ──────────────────────────────────────────────────────
-    // Unsubscribe when the component that called start_sync_engine is dropped.
-    // The unsubscribe closures are `Box<dyn FnOnce()>` which is !Send, so wrap
-    // them in SendWrapper to satisfy on_cleanup's `Send + 'static` requirement.
+    // Unsubscribe when the caller's child Owner (see this function's doc
+    // comment — KYO-833) is disposed: on a genuine workspace switch, or when
+    // the component that owns it unmounts. Registers against whichever Owner
+    // is current when this line runs, which is why the caller must invoke
+    // this function from inside that Owner's `.with()` rather than directly
+    // inside an Effect closure. The unsubscribe closures are `Box<dyn
+    // FnOnce()>` which is !Send, so wrap them in SendWrapper to satisfy
+    // on_cleanup's `Send + 'static` requirement.
     let unsub_action = SendWrapper::new(unsub_action);
     let unsub_complete = SendWrapper::new(unsub_complete);
     let unsub_reset = SendWrapper::new(unsub_reset);
