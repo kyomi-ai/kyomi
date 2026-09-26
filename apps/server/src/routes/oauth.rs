@@ -13,16 +13,19 @@
 //! `kyomi_auth::redis_ops` — no credential logic is duplicated.
 
 use axum::{
-    extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Redirect, Response},
-    routing::{get, post},
     Form, Json, Router,
+    extract::{Path, Query, State},
+    http::{HeaderMap, HeaderValue, StatusCode, header::SET_COOKIE},
+    response::{Html, IntoResponse, Redirect, Response},
+    routing::{get, post},
 };
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Duration, Utc};
+use kyomi_auth::{jwt, redis_ops, request_meta, token_service, user_service};
+use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use kyomi_auth::{jwt, redis_ops, request_meta, token_service, user_service};
+use url::Url;
 
 use super::route_error::RouteError;
 use crate::state::AppState;
@@ -55,7 +58,10 @@ pub fn well_known_routes() -> Router<AppState> {
 /// Build the OAuth action router (mounted under /api/v1/oauth).
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/authorize", get(oauth_authorize))
+        .route(
+            "/authorize",
+            get(oauth_authorize).post(oauth_consent_decision),
+        )
         .route("/authorize/continue", get(oauth_authorize_continue))
         .route("/token", post(oauth_token))
         .route("/register", post(register_client))
@@ -83,7 +89,13 @@ fn base_url_from_request(headers: &HeaderMap, state: &AppState) -> String {
     let host = headers
         .get("host")
         .and_then(|v| v.to_str().ok())
-        .unwrap_or_else(|| state.config.base_url.trim_start_matches("https://").trim_start_matches("http://"));
+        .unwrap_or_else(|| {
+            state
+                .config
+                .base_url
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+        });
     format!("{scheme}://{host}")
 }
 
@@ -98,6 +110,7 @@ fn oauth_metadata(base: &str) -> serde_json::Value {
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code", "refresh_token"],
         "token_endpoint_auth_methods_supported": ["none"],
+        "code_challenge_methods_supported": ["S256"],
     })
 }
 
@@ -116,7 +129,9 @@ async fn oauth_authorization_server_metadata(
     if state.config.is_personal() {
         return Err(StatusCode::NOT_FOUND);
     }
-    Ok(Json(oauth_metadata(&base_url_from_request(&headers, &state))))
+    Ok(Json(oauth_metadata(&base_url_from_request(
+        &headers, &state,
+    ))))
 }
 
 /// `GET /.well-known/oauth-protected-resource` — RFC 9728.
@@ -209,22 +224,57 @@ struct AuthorizeParams {
     response_type: String,
     state: Option<String>,
     scope: Option<String>,
+    code_challenge: Option<String>,
+    code_challenge_method: Option<String>,
 }
 
 fn default_response_type() -> String {
     "code".into()
 }
 
-/// `GET /api/v1/oauth/authorize` — OAuth 2.0 Authorization Endpoint.
-///
-/// 1. Validate client_id and redirect_uri
-/// 2. If user not logged in → redirect to Kyomi login with return URL
-/// 3. If user logged in → generate auth code, redirect to client
+/// A consent transaction is bound to an independent browser cookie and expires
+/// with the shared OAuth state TTL (five minutes). Only the decision POST mints a code.
 async fn oauth_authorize(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(params): Query<AuthorizeParams>,
 ) -> Result<Response, RouteError> {
+    validate_authorize_params(&params)?;
+    let client = lookup_active_client(&state, &params.client_id).await?;
+    validate_redirect_uri(&client.redirect_uris, &params.redirect_uri)?;
+
+    let cookie_name = &kyomi_core::constants::get().cookies.access_token_name;
+    let token = kyomi_auth::cookies::get_cookie_value(&headers, cookie_name);
+    if let Some(token) = token
+        && let Ok(session) = jwt::validate_token(token, &state.config.jwt_secret)
+    {
+        return render_consent(&state, &client, &params, &session.claims).await;
+    }
+
+    let oauth_state = redis_ops::generate_token();
+    let pending = json!({
+        "client_id": params.client_id,
+        "redirect_uri": params.redirect_uri,
+        "state": params.state,
+        "scope": params.scope,
+        "code_challenge": params.code_challenge,
+        "code_challenge_method": params.code_challenge_method,
+    });
+    redis_ops::store_oauth_state(&state.kv, "oauth_pending", &oauth_state, &pending)
+        .await
+        .map_err(internal_oauth_error)?;
+    let mut login_url = Url::parse(&format!(
+        "{}/login",
+        state.config.frontend_url.trim_end_matches('/')
+    ))
+    .map_err(|_| RouteError::from((StatusCode::INTERNAL_SERVER_ERROR, "Invalid login URL")))?;
+    login_url
+        .query_pairs_mut()
+        .append_pair("oauth_continue", &oauth_state);
+    Ok(Redirect::to(login_url.as_str()).into_response())
+}
+
+fn validate_authorize_params(params: &AuthorizeParams) -> Result<(), RouteError> {
     if params.response_type != "code" {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -232,173 +282,226 @@ async fn oauth_authorize(
         )
             .into());
     }
-
-    // Validate client
-    let client = lookup_active_client(&state, &params.client_id).await?;
-
-    // Validate redirect_uri
-    validate_redirect_uri(&client.redirect_uris, &params.redirect_uri)?;
-
-    // Check if user is logged in (via cookie)
-    let cookie_name = &kyomi_core::constants::get().cookies.access_token_name;
-    let access_token = kyomi_auth::cookies::get_cookie_value(&headers, cookie_name);
-
-    let mut user_id = None;
-    let mut workspace_id = None;
-
-    if let Some(token) = access_token
-        && let Ok(decoded) = jwt::validate_token(token, &state.config.jwt_secret) {
-            user_id = Some(decoded.claims.sub.clone());
-            workspace_id = decoded
-                .claims
-                .extra
-                .get("workspace_id")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-        }
-
-    // If not logged in, redirect to login
-    let Some(user_id) = user_id else {
-        let oauth_state = redis_ops::generate_token();
-        let state_data = json!({
-            "client_id": params.client_id,
-            "redirect_uri": params.redirect_uri,
-            "state": params.state,
-            "scope": params.scope,
-            "created_at": Utc::now().to_rfc3339(),
-        });
-        redis_ops::store_oauth_state(&state.kv, "oauth_pending", &oauth_state, &state_data)
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to store OAuth pending state");
-                RouteError::from((StatusCode::INTERNAL_SERVER_ERROR, "Internal error"))
-            })?;
-
-        let login_url = format!(
-            "{}/login?oauth_continue={}",
-            state.config.frontend_url.trim_end_matches('/'),
-            oauth_state
-        );
-        return Ok(Redirect::to(&login_url).into_response());
-    };
-
-    // User is logged in — generate auth code
-    let auth_code = redis_ops::generate_token();
-    let code_data = json!({
-        "user_id": user_id,
-        "workspace_id": workspace_id,
-        "client_id": params.client_id,
-        "redirect_uri": params.redirect_uri,
-        "scope": params.scope,
-        "created_at": Utc::now().to_rfc3339(),
-    });
-    redis_ops::store_oauth_state(&state.kv, "oauth_code", &auth_code, &code_data)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "Failed to store OAuth auth code");
-            RouteError::from((StatusCode::INTERNAL_SERVER_ERROR, "Internal error"))
-        })?;
-
-    let mut redirect_url = format!("{}?code={}", params.redirect_uri, auth_code);
-    if let Some(st) = &params.state {
-        redirect_url.push_str(&format!("&state={st}"));
+    if params.scope.as_deref().is_some_and(|s| s != "mcp") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "Unsupported scope"})),
+        )
+            .into());
     }
-
-    tracing::info!(
-        user_id = %user_id,
-        client_id = %params.client_id,
-        "OAuth authorize: redirecting to client"
-    );
-
-    Ok(Redirect::to(&redirect_url).into_response())
+    let valid_challenge = params.code_challenge.as_deref().is_some_and(|challenge| {
+        (43..=128).contains(&challenge.len())
+            && challenge
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    });
+    if params.code_challenge_method.as_deref() != Some("S256") || !valid_challenge {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "PKCE S256 code_challenge required"})),
+        )
+            .into());
+    }
+    Ok(())
 }
 
-/// `GET /api/v1/oauth/authorize/continue` — Post-login OAuth continuation.
+async fn render_consent(
+    state: &AppState,
+    client: &kyomi_core::models::OAuthClient,
+    params: &AuthorizeParams,
+    claims: &jwt::Claims,
+) -> Result<Response, RouteError> {
+    let transaction = redis_ops::generate_token();
+    let csrf = redis_ops::generate_token();
+    let browser_nonce = redis_ops::generate_token();
+    let workspace_id = claims.extra.get("workspace_id").and_then(|v| v.as_str());
+    let data = json!({
+        "client_id": params.client_id,
+        "redirect_uri": params.redirect_uri,
+        "state": params.state,
+        "scope": params.scope,
+        "code_challenge": params.code_challenge,
+        "user_id": claims.sub,
+        "workspace_id": workspace_id,
+        "browser_nonce_hash": token_service::hash_refresh_token(&browser_nonce),
+        "csrf": csrf,
+    });
+    redis_ops::store_oauth_state(&state.kv, "oauth_consent", &transaction, &data)
+        .await
+        .map_err(internal_oauth_error)?;
+    let callback = Url::parse(&params.redirect_uri)
+        .map_err(|_| RouteError::from((StatusCode::BAD_REQUEST, "Invalid redirect_uri")))?;
+    let callback_origin = match callback.host_str() {
+        Some(host) => format!(
+            "{}://{}{}",
+            callback.scheme(),
+            host,
+            callback.port().map(|p| format!(":{p}")).unwrap_or_default()
+        ),
+        None => format!("{}:", callback.scheme()),
+    };
+    let account = claims
+        .extra
+        .get("email")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&claims.sub);
+    let owner = Owner::new();
+    let body = owner.with(|| {
+        view! {
+            <kyomi_ui::pages::auth::oauth_consent::OAuthConsentPage
+                client_name=client.name.clone()
+                account=account.to_owned()
+                workspace=workspace_id.unwrap_or("No workspace selected").to_owned()
+                callback_origin=callback_origin
+                transaction=transaction.clone()
+                csrf=csrf
+            />
+        }
+        .to_html()
+    });
+    let page = crate::leptos_frontend::consent_document(&body);
+    let mut response = Html(page).into_response();
+    response
+        .headers_mut()
+        .insert("cache-control", HeaderValue::from_static("no-store"));
+    let secure = if state.config.base_url.starts_with("https://") {
+        "; Secure"
+    } else {
+        ""
+    };
+    let cookie = format!(
+        "oauth_consent_{transaction}={browser_nonce}; Max-Age=300; Path=/api/v1/oauth/authorize; SameSite=Lax; HttpOnly{secure}"
+    );
+    response.headers_mut().append(
+        SET_COOKIE,
+        HeaderValue::from_str(&cookie)
+            .map_err(|_| RouteError::from((StatusCode::INTERNAL_SERVER_ERROR, "Internal error")))?,
+    );
+    Ok(response)
+}
+
 #[derive(Debug, Deserialize)]
 struct AuthorizeContinueParams {
     state: String,
 }
 
+/// Login continuation presents Kyomi consent; it cannot issue a code.
 async fn oauth_authorize_continue(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(params): Query<AuthorizeContinueParams>,
 ) -> Result<Response, RouteError> {
-    // Check authentication FIRST, before consuming the state.
     let cookie_name = &kyomi_core::constants::get().cookies.access_token_name;
-    let access_token = kyomi_auth::cookies::get_cookie_value(&headers, cookie_name)
+    let token = kyomi_auth::cookies::get_cookie_value(&headers, cookie_name)
         .ok_or_else(|| RouteError::from((StatusCode::UNAUTHORIZED, "Not logged in")))?;
-
-    let decoded = jwt::validate_token(access_token, &state.config.jwt_secret).map_err(|_| {
-        RouteError::from((StatusCode::UNAUTHORIZED, "Invalid session"))
-    })?;
-
-    let user_id = decoded.claims.sub.clone();
-    let workspace_id = decoded
-        .claims
-        .extra
-        .get("workspace_id")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    // Now that we've verified auth, consume the state
-    let oauth_params =
-        redis_ops::verify_oauth_state(&state.kv, "oauth_pending", &params.state)
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to verify OAuth pending state");
-                RouteError::from((StatusCode::INTERNAL_SERVER_ERROR, "Internal error"))
-            })?;
-
-    let Some(oauth_params) = oauth_params else {
-        // State was likely already consumed — show friendly message
-        tracing::info!("OAuth authorize/continue: state not found (likely already consumed)");
-        let redirect = format!(
-            "{}/oauth-complete",
-            state.config.frontend_url.trim_end_matches('/')
-        );
-        return Ok(Redirect::to(&redirect).into_response());
-    };
-
-    // Validate client still exists
-    let client_id = oauth_params["client_id"].as_str().unwrap_or("");
-    let redirect_uri = oauth_params["redirect_uri"].as_str().unwrap_or("");
-    let original_state = oauth_params["state"].as_str();
-    let scope = oauth_params["scope"].as_str();
-
-    let client = lookup_active_client(&state, client_id).await?;
-
-    validate_redirect_uri(&client.redirect_uris, redirect_uri)?;
-
-    // Generate auth code
-    let auth_code = redis_ops::generate_token();
-    let code_data = json!({
-        "user_id": user_id,
-        "workspace_id": workspace_id,
-        "client_id": client_id,
-        "redirect_uri": redirect_uri,
-        "scope": scope,
-        "created_at": Utc::now().to_rfc3339(),
-    });
-    redis_ops::store_oauth_state(&state.kv, "oauth_code", &auth_code, &code_data)
+    let session = jwt::validate_token(token, &state.config.jwt_secret)
+        .map_err(|_| RouteError::from((StatusCode::UNAUTHORIZED, "Invalid session")))?;
+    let pending = redis_ops::verify_oauth_state(&state.kv, "oauth_pending", &params.state)
         .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "Failed to store OAuth auth code");
-            RouteError::from((StatusCode::INTERNAL_SERVER_ERROR, "Internal error"))
-        })?;
+        .map_err(internal_oauth_error)?
+        .ok_or_else(|| RouteError::from((StatusCode::BAD_REQUEST, "Authorization expired")))?;
+    let params = AuthorizeParams {
+        client_id: pending["client_id"].as_str().unwrap_or_default().to_owned(),
+        redirect_uri: pending["redirect_uri"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
+        response_type: default_response_type(),
+        state: pending["state"].as_str().map(str::to_owned),
+        scope: pending["scope"].as_str().map(str::to_owned),
+        code_challenge: pending["code_challenge"].as_str().map(str::to_owned),
+        code_challenge_method: pending["code_challenge_method"].as_str().map(str::to_owned),
+    };
+    validate_authorize_params(&params)?;
+    let client = lookup_active_client(&state, &params.client_id).await?;
+    validate_redirect_uri(&client.redirect_uris, &params.redirect_uri)?;
+    render_consent(&state, &client, &params, &session.claims).await
+}
 
-    let mut redirect_url = format!("{redirect_uri}?code={auth_code}");
-    if let Some(st) = original_state {
-        redirect_url.push_str(&format!("&state={st}"));
+#[derive(Debug, Deserialize)]
+struct ConsentDecision {
+    transaction: String,
+    csrf: String,
+    decision: String,
+}
+
+async fn oauth_consent_decision(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<ConsentDecision>,
+) -> Result<Response, RouteError> {
+    let cookie_name = &kyomi_core::constants::get().cookies.access_token_name;
+    let token = kyomi_auth::cookies::get_cookie_value(&headers, cookie_name)
+        .ok_or_else(|| RouteError::from((StatusCode::UNAUTHORIZED, "Not logged in")))?;
+    let session = jwt::validate_token(token, &state.config.jwt_secret)
+        .map_err(|_| RouteError::from((StatusCode::UNAUTHORIZED, "Invalid session")))?;
+    if form.decision != "allow" && form.decision != "deny" {
+        return Err((StatusCode::BAD_REQUEST, "Invalid decision").into());
     }
+    // Atomic GETDEL prevents replay or simultaneous double approval. Invalid
+    // attempts also consume the transaction, requiring a fresh consent page.
+    let consent = redis_ops::verify_oauth_state(&state.kv, "oauth_consent", &form.transaction)
+        .await
+        .map_err(internal_oauth_error)?
+        .ok_or_else(|| RouteError::from((StatusCode::BAD_REQUEST, "Consent expired or used")))?;
+    let browser_nonce = if form.transaction.len() == 43
+        && form
+            .transaction
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        kyomi_auth::cookies::get_cookie_value(
+            &headers,
+            &format!("oauth_consent_{}", form.transaction),
+        )
+    } else {
+        None
+    };
+    if consent["csrf"].as_str() != Some(&form.csrf)
+        || consent["user_id"].as_str() != Some(&session.claims.sub)
+        || browser_nonce.is_none_or(|nonce| {
+            consent["browser_nonce_hash"].as_str()
+                != Some(token_service::hash_refresh_token(nonce).as_str())
+        })
+    {
+        return Err((StatusCode::FORBIDDEN, "Consent session mismatch").into());
+    }
+    let client_id = consent["client_id"].as_str().unwrap_or_default();
+    let redirect_uri = consent["redirect_uri"].as_str().unwrap_or_default();
+    let client = lookup_active_client(&state, client_id).await?;
+    validate_redirect_uri(&client.redirect_uris, redirect_uri)?;
+    let mut callback = Url::parse(redirect_uri)
+        .map_err(|_| RouteError::from((StatusCode::BAD_REQUEST, "Invalid redirect_uri")))?;
+    if form.decision == "deny" {
+        callback
+            .query_pairs_mut()
+            .append_pair("error", "access_denied");
+    } else {
+        let auth_code = redis_ops::generate_token();
+        let code_data = json!({
+            "user_id": session.claims.sub,
+            "workspace_id": consent["workspace_id"],
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "scope": consent["scope"],
+            "code_challenge": consent["code_challenge"],
+        });
+        redis_ops::store_oauth_state(&state.kv, "oauth_code", &auth_code, &code_data)
+            .await
+            .map_err(internal_oauth_error)?;
+        callback.query_pairs_mut().append_pair("code", &auth_code);
+    }
+    if let Some(original_state) = consent["state"].as_str() {
+        callback
+            .query_pairs_mut()
+            .append_pair("state", original_state);
+    }
+    Ok(Redirect::to(callback.as_str()).into_response())
+}
 
-    tracing::info!(
-        user_id = %user_id,
-        client_id = %client_id,
-        "OAuth continue: redirecting to client"
-    );
-
-    Ok(Redirect::to(&redirect_url).into_response())
+fn internal_oauth_error(error: kyomi_core::Error) -> RouteError {
+    tracing::error!(%error, "OAuth state operation failed");
+    (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into()
 }
 
 // ===========================================================================
@@ -412,6 +515,7 @@ struct TokenRequest {
     refresh_token: Option<String>,
     client_id: String,
     redirect_uri: Option<String>,
+    code_verifier: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -441,18 +545,14 @@ async fn oauth_token(
     let _client = lookup_active_client(&state, &params.client_id).await?;
 
     match params.grant_type.as_str() {
-        "authorization_code" => {
-            handle_authorization_code(&state, &headers, &params)
-                .await
-                .map(Json)
-                .map_err(RouteError::from)
-        }
-        "refresh_token" => {
-            handle_refresh_token(&state, &headers, &params)
-                .await
-                .map(Json)
-                .map_err(RouteError::from)
-        }
+        "authorization_code" => handle_authorization_code(&state, &headers, &params)
+            .await
+            .map(Json)
+            .map_err(RouteError::from),
+        "refresh_token" => handle_refresh_token(&state, &headers, &params)
+            .await
+            .map(Json)
+            .map_err(RouteError::from),
         other => Err((
             StatusCode::BAD_REQUEST,
             Json(json!({"error": format!("Unsupported grant_type: {other}")})),
@@ -467,10 +567,34 @@ async fn handle_authorization_code(
     headers: &HeaderMap,
     params: &TokenRequest,
 ) -> Result<TokenResponse, (StatusCode, Json<serde_json::Value>)> {
-    let code = params
-        .code
-        .as_deref()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, Json(json!({"error": "code required"}))))?;
+    let code = params.code.as_deref().ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "code required"})),
+        )
+    })?;
+    let redirect_uri = params.redirect_uri.as_deref().ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "redirect_uri required"})),
+        )
+    })?;
+    let verifier = params.code_verifier.as_deref().ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "code_verifier required"})),
+        )
+    })?;
+    if !(43..=128).contains(&verifier.len())
+        || !verifier
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~')
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid_grant: invalid code_verifier"})),
+        ));
+    }
 
     // Verify and consume auth code
     let code_data = redis_ops::verify_oauth_state(&state.kv, "oauth_code", code)
@@ -496,14 +620,19 @@ async fn handle_authorization_code(
         ));
     }
 
-    // Verify redirect_uri matches (if provided)
-    if let Some(redirect_uri) = &params.redirect_uri
-        && code_data.get("redirect_uri").and_then(|v| v.as_str()) != Some(redirect_uri) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "invalid_grant: redirect_uri mismatch"})),
-            ));
-        }
+    if code_data.get("redirect_uri").and_then(|v| v.as_str()) != Some(redirect_uri) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid_grant: redirect_uri mismatch"})),
+        ));
+    }
+    let digest = pkce_s256(verifier);
+    if code_data.get("code_challenge").and_then(|v| v.as_str()) != Some(digest.as_str()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid_grant: PKCE verification failed"})),
+        ));
+    }
 
     let user_id = code_data["user_id"].as_str().unwrap_or("");
     let workspace_id = code_data["workspace_id"].as_str();
@@ -595,6 +724,24 @@ async fn handle_authorization_code(
     })
 }
 
+fn pkce_s256(verifier: &str) -> String {
+    let hex_digest = token_service::hash_refresh_token(verifier);
+    let digest_bytes: Vec<u8> = hex_digest
+        .as_bytes()
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| {
+            u8::from_str_radix(
+                std::str::from_utf8(pair).expect("SHA-256 digest is ASCII"),
+                16,
+            )
+            .expect("SHA-256 digest is hexadecimal")
+        })
+        .collect();
+    URL_SAFE_NO_PAD.encode(digest_bytes)
+}
+
 /// Refresh access token using refresh token.
 ///
 /// MCP/Cursor OAuth flow intentionally does NOT rotate — returns the same refresh token.
@@ -603,15 +750,12 @@ async fn handle_refresh_token(
     _headers: &HeaderMap,
     params: &TokenRequest,
 ) -> Result<TokenResponse, (StatusCode, Json<serde_json::Value>)> {
-    let refresh_token = params
-        .refresh_token
-        .as_deref()
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "refresh_token required"})),
-            )
-        })?;
+    let refresh_token = params.refresh_token.as_deref().ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "refresh_token required"})),
+        )
+    })?;
 
     // Verify refresh token via DB (handles rotation state)
     let verify_result = token_service::verify_refresh_token(&state.db, refresh_token)
@@ -759,6 +903,18 @@ async fn register_client(
         )
             .into());
     }
+    if registration.redirect_uris.len() > 10
+        || registration
+            .redirect_uris
+            .iter()
+            .any(|uri| !valid_registration_redirect(uri))
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "Invalid redirect_uri"})),
+        )
+            .into());
+    }
 
     // Generate unique client_id
     let client_id = format!("mcp-{}", &redis_ops::generate_token()[..22]);
@@ -769,7 +925,10 @@ async fn register_client(
     let response_types = registration
         .response_types
         .unwrap_or_else(|| vec!["code".into()]);
-    let client_name = registration.client_name.clone().unwrap_or_else(|| "MCP Client".into());
+    let client_name = registration
+        .client_name
+        .clone()
+        .unwrap_or_else(|| "MCP Client".into());
 
     let redirect_uris_json = json!(registration.redirect_uris);
     let scopes_json = json!(["mcp"]);
@@ -859,10 +1018,11 @@ fn validate_redirect_uri(
     allowed: &serde_json::Value,
     redirect_uri: &str,
 ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
-    let is_allowed = allowed
-        .as_array()
-        .map(|uris| uris.iter().any(|u| u.as_str() == Some(redirect_uri)))
-        .unwrap_or(false);
+    let is_allowed = valid_registration_redirect(redirect_uri)
+        && allowed
+            .as_array()
+            .map(|uris| uris.iter().any(|u| u.as_str() == Some(redirect_uri)))
+            .unwrap_or(false);
 
     if !is_allowed {
         return Err((
@@ -872,6 +1032,40 @@ fn validate_redirect_uri(
     }
 
     Ok(())
+}
+
+/// Redirects must be absolute, have no fragment or credentials, and use a
+/// secure web origin, a local HTTP loopback, or a native app callback scheme.
+fn valid_registration_redirect(uri: &str) -> bool {
+    if uri.len() > 2048
+        || uri.chars().any(char::is_control)
+        || uri.contains(' ')
+        || !uri.contains("://")
+    {
+        return false;
+    }
+    let Ok(url) = Url::parse(uri) else {
+        return false;
+    };
+    if url.fragment().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.host_str().is_none()
+    {
+        return false;
+    }
+    match url.scheme() {
+        "https" => true,
+        "http" => url.host_str().is_some_and(|host| {
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .trim_matches(&['[', ']'][..])
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        }),
+        "file" | "ftp" | "javascript" | "data" | "about" => false,
+        _ => url.port().is_none(),
+    }
 }
 
 /// Extract device info from request headers (for refresh token storage).
@@ -908,7 +1102,10 @@ fn validate_redirect_uri(
 ///    wrapped `extract_client_ip`'s `"unknown"` fallback in `Some` — so
 ///    this aligns the MCP path with existing behaviour rather than
 ///    introducing a new shape. See KYO-276 for the display consequence.
-fn extract_device_info(headers: &HeaderMap, oauth_client_id: Option<&str>) -> token_service::DeviceInfo {
+fn extract_device_info(
+    headers: &HeaderMap,
+    oauth_client_id: Option<&str>,
+) -> token_service::DeviceInfo {
     let mut device_info = request_meta::extract_device_info(headers);
     device_info.oauth_client_id = oauth_client_id.map(|s| s.to_string());
     device_info
@@ -921,6 +1118,47 @@ fn extract_device_info(headers: &HeaderMap, oauth_client_id: Option<&str>) -> to
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pkce_s256_matches_rfc_7636_vector() {
+        assert_eq!(
+            pkce_s256("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
+    }
+
+    #[test]
+    fn redirect_syntax_accepts_native_and_loopback_callbacks() {
+        assert!(valid_registration_redirect("cursor://oauth/callback"));
+        assert!(valid_registration_redirect(
+            "http://127.0.0.1:8000/callback"
+        ));
+        assert!(valid_registration_redirect("http://[::1]:8000/callback"));
+        assert!(!valid_registration_redirect(
+            "https://example.com/callback#fragment"
+        ));
+        assert!(!valid_registration_redirect("http://example.com/callback"));
+    }
+
+    #[test]
+    fn client_name_is_escaped_in_consent_markup() {
+        let owner = Owner::new();
+        let html = owner.with(|| {
+            view! {
+                <kyomi_ui::pages::auth::oauth_consent::OAuthConsentPage
+                    client_name="<script>alert(1)</script>".to_owned()
+                    account="person@example.com".to_owned()
+                    workspace="workspace".to_owned()
+                    callback_origin="https://example.com".to_owned()
+                    transaction="transaction".to_owned()
+                    csrf="csrf".to_owned()
+                />
+            }
+            .to_html()
+        });
+        assert!(html.contains("&lt;script&gt;"));
+        assert!(!html.contains("<script>alert(1)</script>"));
+    }
 
     #[test]
     fn oauth_metadata_shape() {

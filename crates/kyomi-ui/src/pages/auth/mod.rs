@@ -11,6 +11,7 @@ pub mod google_callback;
 pub mod google_link_callback;
 pub mod login;
 pub mod oauth_complete;
+pub mod oauth_consent;
 pub mod passkey_recovery;
 pub mod passkey_recovery_complete;
 pub mod signup_complete;
