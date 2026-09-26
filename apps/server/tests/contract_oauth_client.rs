@@ -502,10 +502,14 @@ async fn consent_denial_csrf_and_browser_binding() {
     let expired_access = kyomi_auth::jwt::create_access_token_str(
         &ctx.user_id,
         &ctx.jwt_secret,
-        -1,
+        -5,
         Default::default(),
     )
     .expect("expired access fixture");
+    assert!(
+        kyomi_auth::jwt::validate_token(&expired_access, &ctx.jwt_secret).is_err(),
+        "refresh regression fixture must be expired beyond JWT clock-skew leeway"
+    );
     let refreshed_session = client()
         .post(format!("{}/api/v1/oauth/authorize", ctx.base_url))
         .header(
