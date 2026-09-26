@@ -58,6 +58,12 @@ pub async fn refresh_tokens(
         }
     };
 
+    if user_data.oauth_client_id.is_some() {
+        return Err(kyomi_core::Error::Unauthorized(
+            "OAuth client refresh token cannot refresh a browser session".into(),
+        ));
+    }
+
     // Build JWT claims — mirrors POST /auth/refresh
     let mut extra = HashMap::new();
     extra.insert("user_id".into(), serde_json::json!(user_data.user_id));

@@ -247,6 +247,7 @@ async fn oauth_authorize(
     let token = kyomi_auth::cookies::get_cookie_value(&headers, cookie_name);
     if let Some(token) = token
         && let Ok(session) = jwt::validate_token(token, &state.config.jwt_secret)
+        && session.claims.require_session().is_ok()
     {
         return render_consent(&state, &client, &params, &session.claims).await;
     }
@@ -396,6 +397,9 @@ async fn oauth_authorize_continue(
         .ok_or_else(|| RouteError::from((StatusCode::UNAUTHORIZED, "Not logged in")))?;
     let session = jwt::validate_token(token, &state.config.jwt_secret)
         .map_err(|_| RouteError::from((StatusCode::UNAUTHORIZED, "Invalid session")))?;
+    session.claims.require_session().map_err(|_| {
+        RouteError::from((StatusCode::UNAUTHORIZED, "Invalid session"))
+    })?;
     let pending = redis_ops::verify_oauth_state(&state.kv, "oauth_pending", &params.state)
         .await
         .map_err(internal_oauth_error)?
@@ -435,6 +439,9 @@ async fn oauth_consent_decision(
         .ok_or_else(|| RouteError::from((StatusCode::UNAUTHORIZED, "Not logged in")))?;
     let session = jwt::validate_token(token, &state.config.jwt_secret)
         .map_err(|_| RouteError::from((StatusCode::UNAUTHORIZED, "Invalid session")))?;
+    session.claims.require_session().map_err(|_| {
+        RouteError::from((StatusCode::UNAUTHORIZED, "Invalid session"))
+    })?;
     if form.decision != "allow" && form.decision != "deny" {
         return Err((StatusCode::BAD_REQUEST, "Invalid decision").into());
     }
@@ -671,7 +678,7 @@ async fn handle_authorization_code(
         extra.insert("workspace_id".into(), json!(ws_id));
     }
 
-    let access_token = jwt::create_access_token_str(
+    let access_token = jwt::create_mcp_access_token_str(
         &user.user_id,
         &state.config.jwt_secret,
         jwt_config.access_token_expire_minutes,
@@ -787,6 +794,15 @@ async fn handle_refresh_token(
         }
     };
 
+    // Opaque refresh tokens share storage with browser sessions. Require an
+    // OAuth client marker before minting an MCP token from this grant.
+    if user_data.oauth_client_id.is_none() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid_grant: refresh token is not an OAuth client token"})),
+        ));
+    }
+
     // Verify user still exists and is active
     let user = user_service::get_user_by_id(&state.db, &user_data.user_id)
         .await
@@ -833,7 +849,7 @@ async fn handle_refresh_token(
     extra.insert("name".into(), json!(&user.name));
     extra.insert("workspace_id".into(), json!(&workspace_id));
 
-    let access_token = jwt::create_access_token_str(
+    let access_token = jwt::create_mcp_access_token_str(
         &user.user_id,
         &state.config.jwt_secret,
         jwt_config.access_token_expire_minutes,
