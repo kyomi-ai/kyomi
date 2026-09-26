@@ -18,9 +18,9 @@ use tracing::{info, warn};
 use crate::catalog::traits::CatalogIndexer;
 use kyomi_auth::catalog::helpers::{
     apply_container_coverage, archive_missing_tables, cache_table, check_container_coverage,
-    log_container_table_summary, log_run_enumeration_summary, resolve_run_outcome,
-    update_datasource_last_refresh, update_datasource_status, ArchiveScope, CacheTableParams,
-    ContainerKey, IndexerContext,
+    log_container_table_summary, log_run_enumeration_summary, reconcile_container_liveness,
+    resolve_run_outcome, update_datasource_last_refresh, update_datasource_status, ArchiveScope,
+    CacheTableParams, ContainerKey, IndexerContext,
 };
 use kyomi_auth::catalog::types::{CatalogIndexResult, ColumnEntry};
 use kyomi_core::connect_protocol::{CatalogResult, DiscoverCatalogParams};
@@ -376,6 +376,45 @@ async fn process_discovered_catalog(params: ProcessDiscoveredCatalogParams<'_>) 
         catalog_result.containers.len(),
         &enumerated_containers,
     );
+
+    // KYO-622: reclaim any container that has genuinely stopped existing at
+    // the source — see `reconcile_container_liveness`'s doc comment. Run
+    // immediately before `check_container_coverage` so reclaimed rows drop
+    // out of that function's live-container denominator in this same run.
+    // Skipped for an explicitly emptied selection, same reasoning as the
+    // coverage check below: that path already sweeps the whole datasource
+    // via `ArchiveScope::EntireDatasource`.
+    //
+    // `run_complete` is deliberately conservative — see the SQL-template
+    // path (`kyomi_agent::catalog::traits::index_catalog_sql`) for the
+    // identical reasoning: only a run whose `catalog_result.errors` is empty
+    // counts, even though a table-level error does not strictly mean a
+    // container's own listing was incomplete.
+    //
+    // `&& outcome.archive` is the same closure as the SQL-template path: a
+    // run that enumerated zero containers with zero errors is the
+    // "untrustworthy zero" `outcome.archive` already refuses to archive on
+    // (this is exactly the `nothing_found_reports_idle_not_failed` shape —
+    // "No tables found via Connect — preserving existing catalog" below).
+    // `catalog_result.errors.is_empty()` alone can't see that.
+    if !explicit_empty {
+        let run_complete = catalog_result.errors.is_empty() && outcome.archive;
+        if let Err(e) = reconcile_container_liveness(
+            db,
+            &ctx.workspace_id,
+            &ctx.datasource_config_id,
+            &enumerated_containers,
+            run_complete,
+        )
+        .await
+        {
+            warn!(
+                datasource_config_id = ctx.datasource_config_id,
+                error = %e,
+                "failed to reconcile container liveness — skipping the liveness GC for this run"
+            );
+        }
+    }
 
     // KYO-614: did this run enumerate enough of the datasource's currently
     // -live containers to trust an "idle" status? Skipped for an
@@ -735,6 +774,79 @@ mod tests {
             datasource_status(sq, &ctx.datasource_config_id).await,
             "idle",
             "a genuinely empty (but reachable) Connect catalog must not be reported as failed"
+        );
+    }
+
+    /// KYO-622 regression for the `run_complete` CRITICAL: `reconcile_container_liveness`
+    /// (the container-liveness GC) must treat this exact
+    /// `nothing_found_reports_idle_not_failed` shape — zero containers, zero
+    /// errors, `explicit_empty: false` — as an untrustworthy zero, not a
+    /// complete run. Before the fix, `run_complete` was derived from
+    /// `catalog_result.errors.is_empty()` alone, which is `true` here; three
+    /// such refreshes in a row advanced every live cached container's
+    /// `missed_runs` counter and archived a previously-live table on the
+    /// third, even though nothing was ever actually re-verified as gone.
+    /// Drives the real `process_discovered_catalog` entry point three times
+    /// (not `reconcile_container_liveness` directly) so the assertion
+    /// exercises the call site's `run_complete` expression itself.
+    #[tokio::test]
+    async fn three_reachable_empty_refreshes_do_not_archive_via_liveness_gc() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        let ctx = seed_connect_fixture(sq, "gcempty").await;
+        let embedding = EmbeddingService::new().expect("load embedding model");
+
+        // A previously-cached, still-live table in a container this
+        // "reachable but empty" run never enumerates.
+        sqlx::query(
+            r#"
+            INSERT INTO datasource_table_cache
+                (workspace_id, datasource_config_id, project_id, dataset_id, table_id, table_metadata, is_archived)
+            VALUES (?, ?, '', 'public', 'old_table', '{}', 0)
+            "#,
+        )
+        .bind(&ctx.workspace_id)
+        .bind(&ctx.datasource_config_id)
+        .execute(sq)
+        .await
+        .expect("seed live cache row");
+
+        for i in 0..3 {
+            let result = process_discovered_catalog(ProcessDiscoveredCatalogParams {
+                db: &db,
+                embedding: &embedding,
+                ctx: &ctx,
+                catalog_result: CatalogResult {
+                    containers: Vec::new(),
+                    errors: Vec::new(),
+                },
+                explicit_empty: false,
+                start_time: Utc::now(),
+            })
+            .await;
+            assert_eq!(
+                result.tables_indexed, 0,
+                "run {i}: this scenario must stay a genuinely empty, error-free refresh"
+            );
+        }
+
+        let is_archived: i64 = sqlx::query_scalar(
+            "SELECT is_archived FROM datasource_table_cache \
+             WHERE datasource_config_id = ? AND dataset_id = 'public' AND table_id = 'old_table'",
+        )
+        .bind(&ctx.datasource_config_id)
+        .fetch_one(sq)
+        .await
+        .expect("read archival state");
+        assert_eq!(
+            is_archived, 0,
+            "three ordinary reachable-but-empty refreshes must not archive a live table \
+             via the liveness GC — an un-enumerated container is an unknown, not a \
+             confirmed absence"
         );
     }
 
