@@ -198,6 +198,7 @@ struct MessageWithSenderRow {
     current_time_user_tz: Option<String>,
     extra_metadata: Option<String>,
     sent_by_user_id: Option<String>,
+    status: String,
     // Joined sender fields (nullable because assistant msgs have no sender).
     sender_name: Option<String>,
     sender_email: Option<String>,
@@ -933,6 +934,7 @@ pub async fn get_session_messages(
            cm.pinned,
            cm.created_at,
            cm.current_time_user_tz, cm.extra_metadata, cm.sent_by_user_id,
+           cm.status,
            u.name AS sender_name, u.email AS sender_email
          FROM chat_messages cm
          LEFT JOIN users u ON cm.sent_by_user_id = u.user_id
@@ -1030,7 +1032,7 @@ pub async fn get_session_messages(
             model,
             pinned: row.pinned,
             metadata,
-            status: "completed".to_string(),
+            status: row.status,
             thinking_events,
             token_usage,
             current_time_user_tz: row.current_time_user_tz,
@@ -5538,5 +5540,97 @@ mod tests {
                 .expect("the row must still exist");
             assert_eq!(status, expected, "{msg_id} must keep its terminal status");
         }
+    }
+
+    // KYO-493: `get_session_messages` used to hand the UI a hardcoded
+    // "completed" — a string that matches no `status` CHECK value — for
+    // every row. The interrupted affordance keys off the real column, so
+    // the read path must report what each row actually holds: the
+    // placeholder while its turn is still running, and the same row after
+    // the stuck-row sweep has reclassified it.
+    #[tokio::test]
+    async fn get_session_messages_reports_each_rows_real_status() {
+        let db = test_pool().await;
+        let key = test_key();
+        let sq = sqlite_pool(&db);
+        seed_user(sq, "user-a", "user-a@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+        seed_chat_session(sq, SeedSession::new("sess-1", "user-a", "ws-1", "Test")).await;
+
+        add_message(
+            &db,
+            &key,
+            "sess-1",
+            "user",
+            "hello",
+            None,
+            Some("msg-user"),
+            None,
+            None,
+            Some("user-a"),
+            None,
+            None,
+            None,
+            MessageStatus::Complete,
+        )
+        .await
+        .expect("seed the user row");
+        insert_in_progress_assistant_placeholder(&db, &key, "sess-1", "msg-streaming", "dev:3000")
+            .await
+            .expect("seed the in-flight placeholder");
+        add_message(
+            &db,
+            &key,
+            "sess-1",
+            "assistant",
+            "a finished answer",
+            None,
+            Some("msg-done"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            MessageStatus::Complete,
+        )
+        .await
+        .expect("seed the finished assistant row");
+
+        let status_of = |messages: &[MessageItem], id: &str| {
+            messages
+                .iter()
+                .find(|m| m.message_id == id)
+                .unwrap_or_else(|| panic!("{id} must be listed"))
+                .status
+                .clone()
+        };
+
+        let before = get_session_messages(&db, &key, "sess-1", 100)
+            .await
+            .expect("get_session_messages should succeed");
+        assert_eq!(status_of(&before, "msg-user"), MessageStatus::Complete.as_str());
+        assert_eq!(
+            status_of(&before, "msg-streaming"),
+            MessageStatus::InProgress.as_str(),
+            "a mid-run placeholder must load back as in_progress, not as some hardcoded terminal value"
+        );
+        assert_eq!(status_of(&before, "msg-done"), MessageStatus::Complete.as_str());
+
+        let swept = sweep_interrupted_rows(&db, "dev:3000", IN_PROGRESS_HARD_TIMEOUT)
+            .await
+            .expect("sweep should succeed");
+        assert_eq!(swept, 1, "only the placeholder is stranded");
+
+        let after = get_session_messages(&db, &key, "sess-1", 100)
+            .await
+            .expect("get_session_messages should succeed");
+        assert_eq!(
+            status_of(&after, "msg-streaming"),
+            MessageStatus::Interrupted.as_str(),
+            "the sweep's reclassification must be what the UI reads back — that is the entire signal the interrupted affordance has"
+        );
+        assert_eq!(status_of(&after, "msg-user"), MessageStatus::Complete.as_str());
+        assert_eq!(status_of(&after, "msg-done"), MessageStatus::Complete.as_str());
     }
 }
