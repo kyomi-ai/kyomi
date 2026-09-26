@@ -243,6 +243,24 @@ struct CreatedAtRow {
     created_at: chrono::DateTime<chrono::Utc>,
 }
 
+// Called inside the same transaction that moves a placeholder to the end of
+// the conversation. The extra microsecond gives the final answer a strict
+// position after all tool rows, even when the clock and DB timestamps tie.
+macro_rules! next_terminal_created_at {
+    ($tx:ident, $message_id:expr) => {{
+        let latest: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT MAX(created_at) FROM chat_messages \
+             WHERE session_id = (SELECT session_id FROM chat_messages WHERE message_id = $1) \
+               AND message_id <> $1",
+        )
+        .bind($message_id)
+        .fetch_one(&mut *$tx)
+        .await?;
+        let now = Utc::now();
+        latest.map_or(now, |at| now.max(at + chrono::Duration::microseconds(1)))
+    }};
+}
+
 // ─── Sync snapshot helpers ────────────────────────────────────────────────────
 
 /// Row shared by every chat-session snapshot query — [`fetch_session_snapshot`]
@@ -1176,10 +1194,16 @@ pub async fn update_message(
     }
     if status.is_some() {
         set_parts.push(format!("status = ${param_idx}"));
-        // `status` is the last field this function can set — no `param_idx
-        // += 1` here, unlike the branches above, because nothing after
-        // this point ever reads `param_idx` again. A field added after
-        // this one must add its own `+= 1` here first.
+        param_idx += 1;
+    }
+    let move_terminal_assistant = status.is_some_and(|s| s != MessageStatus::InProgress);
+    if move_terminal_assistant {
+        // Only the first terminal transition moves a dispatch-time assistant
+        // placeholder. A repeated status write must not reorder old history.
+        set_parts.push(format!(
+            "created_at = CASE WHEN role = 'assistant' AND status = 'in_progress' \
+             THEN ${param_idx} ELSE created_at END"
+        ));
     }
 
     if set_parts.is_empty() {
@@ -1201,19 +1225,45 @@ pub async fn update_message(
         None => None,
     };
     let status_str: Option<&'static str> = status.map(|s| s.as_str());
-    let rows_affected = kyomi_core::db_with_pool!(db, |p| {
-        let mut query = sqlx::query(&sql).bind(message_id);
-        if let Some(ref enc) = encrypted_content {
-            query = query.bind(enc);
+    let rows_affected = if move_terminal_assistant {
+        macro_rules! update_terminal_in_transaction {
+            ($pool:expr) => {{
+                let mut tx = $pool.begin().await?;
+                let created_at = next_terminal_created_at!(tx, message_id);
+                let mut query = sqlx::query(&sql).bind(message_id);
+                if let Some(ref enc) = encrypted_content {
+                    query = query.bind(enc);
+                }
+                if let Some(ref enc) = encrypted_metadata_dyn {
+                    query = query.bind(enc);
+                }
+                if let Some(s) = status_str {
+                    query = query.bind(s);
+                }
+                let rows = query.bind(created_at).execute(&mut *tx).await?.rows_affected();
+                tx.commit().await?;
+                Ok::<u64, sqlx::Error>(rows)
+            }};
         }
-        if let Some(ref enc) = encrypted_metadata_dyn {
-            query = query.bind(enc);
+        match db {
+            DbPool::Postgres(pool) => update_terminal_in_transaction!(pool),
+            DbPool::Sqlite(pool) => update_terminal_in_transaction!(pool),
         }
-        if let Some(s) = status_str {
-            query = query.bind(s);
-        }
-        query.execute(p).await.map(|r| r.rows_affected())
-    })
+    } else {
+        kyomi_core::db_with_pool!(db, |p| {
+            let mut query = sqlx::query(&sql).bind(message_id);
+            if let Some(ref enc) = encrypted_content {
+                query = query.bind(enc);
+            }
+            if let Some(ref enc) = encrypted_metadata_dyn {
+                query = query.bind(enc);
+            }
+            if let Some(s) = status_str {
+                query = query.bind(s);
+            }
+            query.execute(p).await.map(|r| r.rows_affected())
+        })
+    }
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to update message: {e}")))?;
     Ok(rows_affected > 0)
 }
@@ -2131,8 +2181,8 @@ struct AgentMessageRow {
 ///
 /// Decrypts `content`. Skips empty assistant placeholders (no content AND no tool_calls).
 ///
-/// If `after_message_id` is provided, only returns messages created after that
-/// message's timestamp.
+/// If `after_message_id` is provided, returns messages after that row in
+/// `(created_at, message_id)` order, including later rows at the same time.
 pub async fn get_agent_messages(
     db: &DbPool,
     encryption_key: &[u8; 32],
@@ -2159,10 +2209,11 @@ pub async fn get_agent_messages(
             "SELECT message_id, role, content, tool_calls, tool_call_id, tool_name, \
               sent_by_user_id, current_time_user_tz, message_source \
              FROM chat_messages \
-             WHERE session_id = $1 AND created_at > $2 \
-             ORDER BY created_at ASC",
+             WHERE session_id = $1 AND (created_at > $2 OR (created_at = $2 AND message_id > $3)) \
+             ORDER BY created_at ASC, message_id ASC",
             session_id,
-            cutoff_row.created_at
+            cutoff_row.created_at,
+            after_id
         )?
     } else {
         kyomi_core::db_fetch_all!(
@@ -2172,7 +2223,7 @@ pub async fn get_agent_messages(
               sent_by_user_id, current_time_user_tz, message_source \
              FROM chat_messages \
              WHERE session_id = $1 \
-             ORDER BY created_at ASC",
+             ORDER BY created_at ASC, message_id ASC",
             session_id
         )?
     };
@@ -2504,7 +2555,9 @@ async fn insert_in_progress_assistant_placeholder(
 /// copilot, which is why copilot's placeholder-less path must never reach
 /// this function — see that type's doc).
 ///
-/// Deliberately does not touch `status`: `kyomi_agent::execution::execute_agent_chat`
+/// Moves `created_at` beyond the tool rows already persisted for this turn,
+/// so the next `get_agent_messages` load sees tool calls/results before the
+/// final answer. Deliberately does not touch `status`: `kyomi_agent::execution::execute_agent_chat`
 /// is the single place that knows the turn's true terminal outcome
 /// (complete / error / cancelled, via `classify_agent_failure`) and
 /// finalizes `status` itself — through [`update_message`] — after this call
@@ -2520,20 +2573,35 @@ pub async fn finalize_assistant_placeholder(
     tool_calls: Option<&serde_json::Value>,
 ) -> kyomi_core::Result<bool> {
     let encrypted_content = encryption::encrypt(content, encryption_key)?;
-    let rows_affected = kyomi_core::db_execute!(
-        db,
-        "UPDATE chat_messages SET content = $2, tool_call_id = $3, tool_name = $4, tool_calls = $5 \
-         WHERE message_id = $1",
-        message_id,
-        &encrypted_content,
-        tool_call_id,
-        tool_name,
-        tool_calls as Option<&serde_json::Value>
-    )
+    macro_rules! finalize_in_transaction {
+        ($pool:expr) => {{
+            let mut tx = $pool.begin().await?;
+            let created_at = next_terminal_created_at!(tx, message_id);
+            let rows = sqlx::query(
+                "UPDATE chat_messages SET content = $2, tool_call_id = $3, tool_name = $4, \
+                 tool_calls = $5, created_at = CASE WHEN status = 'in_progress' \
+                 THEN $6 ELSE created_at END WHERE message_id = $1",
+            )
+            .bind(message_id)
+            .bind(&encrypted_content)
+            .bind(tool_call_id)
+            .bind(tool_name)
+            .bind(tool_calls)
+            .bind(created_at)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+            tx.commit().await?;
+            Ok::<u64, sqlx::Error>(rows)
+        }};
+    }
+    let rows_affected = match db {
+        DbPool::Postgres(pool) => finalize_in_transaction!(pool),
+        DbPool::Sqlite(pool) => finalize_in_transaction!(pool),
+    }
     .map_err(|e| {
         kyomi_core::Error::Internal(format!("failed to finalize assistant placeholder: {e}"))
-    })?
-    .rows_affected();
+    })?;
     Ok(rows_affected > 0)
 }
 
@@ -5353,6 +5421,119 @@ mod tests {
             "the error text must be persisted into the placeholder's content; got {:?}",
             messages[0].content
         );
+    }
+
+    #[tokio::test]
+    async fn terminal_placeholder_follows_tool_history_on_the_next_turn() {
+        let db = test_pool().await;
+        let key = test_key();
+        let sq = sqlite_pool(&db);
+        seed_user(sq, "history-user", "history-user@test.local").await;
+        seed_workspace(sq, "history-ws", "history-user").await;
+
+        for (case, terminal_status) in [
+            ("complete", MessageStatus::Complete),
+            ("error", MessageStatus::Error),
+            ("cancelled", MessageStatus::Cancelled),
+        ] {
+            let session_id = format!("history-{case}");
+            let user_id = format!("user-{case}");
+            let placeholder_id = format!("final-{case}");
+            let tool_call_id = format!("call-{case}");
+            let tool_assistant_id = format!("tool-assistant-{case}");
+            let tool_result_id = format!("tool-result-{case}");
+            let next_user_id = format!("next-user-{case}");
+            seed_chat_session(
+                sq, SeedSession::new(&session_id, "history-user", "history-ws", "History"),
+            ).await;
+            add_message(
+                &db, &key, &session_id, "user", "first question", None, Some(&user_id),
+                None, None, Some("history-user"), None, None, None, MessageStatus::Complete,
+            ).await.expect("first user turn");
+            insert_in_progress_assistant_placeholder(
+                &db, &key, &session_id, &placeholder_id, "dev:3000",
+            ).await.expect("dispatch placeholder");
+            let calls = serde_json::json!([{"id": tool_call_id, "name": "lookup"}]);
+            add_message(
+                &db, &key, &session_id, "assistant", "", None,
+                Some(&tool_assistant_id), None, None, None, None, None,
+                Some(&calls), MessageStatus::Complete,
+            ).await.expect("tool-call assistant row");
+            add_message(
+                &db, &key, &session_id, "tool", "tool result", None,
+                Some(&tool_result_id), None, None, None, Some(&tool_call_id),
+                Some("lookup"), None, MessageStatus::Complete,
+            ).await.expect("tool result row");
+
+            // Force a timestamp later than wall-clock time, with a tool-row
+            // tie. This proves finalization uses the DB's latest row rather
+            // than merely Utc::now(), and the query has a stable tie-break.
+            let tool_time = Utc::now() + chrono::Duration::seconds(2);
+            for id in [&tool_assistant_id, &tool_result_id] {
+                sqlx::query("UPDATE chat_messages SET created_at = $1 WHERE message_id = $2")
+                    .bind(tool_time)
+                    .bind(id)
+                    .execute(sq)
+                    .await
+                    .expect("set tied tool timestamp");
+            }
+            let final_content = format!("{case} answer");
+            if terminal_status == MessageStatus::Complete {
+                finalize_assistant_placeholder(
+                    &db, &key, &placeholder_id, &final_content, None, None, None,
+                ).await.expect("persist final answer");
+                let visible_time: chrono::DateTime<Utc> = sqlx::query_scalar(
+                    "SELECT created_at FROM chat_messages WHERE message_id = $1",
+                ).bind(&placeholder_id).fetch_one(sq).await.expect("visible answer timestamp");
+                assert!(visible_time > tool_time, "visible final content must already follow tools");
+            }
+            update_message(
+                &db, &key, &placeholder_id,
+                (terminal_status != MessageStatus::Complete).then_some(final_content.as_str()),
+                None, Some(terminal_status),
+            ).await.expect("terminal status");
+
+            let final_time: chrono::DateTime<Utc> = sqlx::query_scalar(
+                "SELECT created_at FROM chat_messages WHERE message_id = $1",
+            ).bind(&placeholder_id).fetch_one(sq).await.expect("final timestamp");
+            assert!(final_time > tool_time, "{case} final row must follow tool rows");
+            update_message(&db, &key, &placeholder_id, None, None, Some(terminal_status))
+                .await.expect("repeat terminal status");
+            let repeated_time: chrono::DateTime<Utc> = sqlx::query_scalar(
+                "SELECT created_at FROM chat_messages WHERE message_id = $1",
+            ).bind(&placeholder_id).fetch_one(sq).await.expect("repeated timestamp");
+            assert_eq!(repeated_time, final_time, "repeat status cannot reorder history");
+            add_message(
+                &db, &key, &session_id, "user", "next question", None,
+                Some(&next_user_id), None, None, Some("history-user"), None,
+                None, None, MessageStatus::Complete,
+            ).await.expect("next user turn");
+            sqlx::query("UPDATE chat_messages SET created_at = $1 WHERE message_id = $2")
+                .bind(final_time + chrono::Duration::microseconds(1))
+                .bind(&next_user_id)
+                .execute(sq)
+                .await
+                .expect("place next turn after answer");
+
+            let expected = vec![
+                user_id.clone(), tool_assistant_id.clone(), tool_result_id.clone(),
+                placeholder_id.clone(), next_user_id.clone(),
+            ];
+            let history = get_agent_messages(&db, &key, &session_id, None)
+                .await.expect("next-turn history");
+            assert_eq!(history.iter().map(|m| m.message_id.clone()).collect::<Vec<_>>(), expected);
+            assert_eq!(history[1].role, "assistant");
+            assert!(history[1].tool_calls.is_some());
+            assert_eq!(history[2].role, "tool");
+            assert_eq!(history[2].tool_call_id.as_deref(), Some(tool_call_id.as_str()));
+            assert_eq!(history[3].content, final_content);
+            let after_first = get_agent_messages(&db, &key, &session_id, Some(&user_id))
+                .await.expect("history after first user turn");
+            assert_eq!(
+                after_first.iter().map(|m| m.message_id.clone()).collect::<Vec<_>>(),
+                expected[1..],
+            );
+        }
     }
 
     // -- Contract: KYO-493 Phase 4 stuck-row sweep --------------------------
