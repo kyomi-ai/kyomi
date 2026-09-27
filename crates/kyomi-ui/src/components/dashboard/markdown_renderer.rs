@@ -291,9 +291,34 @@ pub(crate) fn splice_chartml_item(
 // Markdown → HTML
 // ---------------------------------------------------------------------------
 
-/// Convert a markdown string to HTML using pulldown-cmark with GFM extensions.
+/// Only browser-safe destinations may reach generated `href` and `src` attributes.
+/// The Markdown parser decodes entities before this check; reject whitespace and
+/// controls too, since browsers can ignore them while interpreting a scheme.
+fn safe_markdown_url(url: &str, image: bool) -> bool {
+    if url
+        .chars()
+        .any(|ch| ch.is_ascii_whitespace() || ch.is_ascii_control())
+    {
+        return false;
+    }
+
+    let scheme_end = url.find(':');
+    let path_start = url.find(['/', '?', '#']).unwrap_or(url.len());
+    if let Some(end) = scheme_end.filter(|end| *end < path_start) {
+        let scheme = &url[..end];
+        scheme.eq_ignore_ascii_case("https")
+            || scheme.eq_ignore_ascii_case("http")
+            || (!image && scheme.eq_ignore_ascii_case("mailto"))
+    } else {
+        true // Relative URL, fragment, or protocol-relative URL.
+    }
+}
+
+/// Convert untrusted Markdown to HTML using pulldown-cmark with GFM extensions.
+/// Raw HTML tags are discarded and unsafe Markdown destinations are blanked
+/// before the result reaches `inner_html`.
 fn markdown_to_html(markdown: &str) -> String {
-    use pulldown_cmark::{CowStr, Event, Options};
+    use pulldown_cmark::{CowStr, Event, Options, Tag};
     let options = Options::ENABLE_TABLES
         | Options::ENABLE_STRIKETHROUGH
         | Options::ENABLE_TASKLISTS;
@@ -303,6 +328,43 @@ fn markdown_to_html(markdown: &str) -> String {
     const ASTERISM_HTML: &str = "<div class=\"my-10 text-center text-[color:var(--color-muted-foreground)] text-xl font-display\">\u{2042}</div>";
     let parser = pulldown_cmark::Parser::new_ext(markdown, options).map(|event| match event {
         Event::Rule => Event::Html(CowStr::Borrowed(ASTERISM_HTML)),
+        Event::Html(_) | Event::InlineHtml(_) => Event::Text(CowStr::Borrowed("")),
+        Event::Start(Tag::Link {
+            link_type,
+            dest_url,
+            title,
+            id,
+        }) => {
+            let dest_url = if safe_markdown_url(&dest_url, false) {
+                dest_url
+            } else {
+                CowStr::Borrowed("")
+            };
+            Event::Start(Tag::Link {
+                link_type,
+                dest_url,
+                title,
+                id,
+            })
+        }
+        Event::Start(Tag::Image {
+            link_type,
+            dest_url,
+            title,
+            id,
+        }) => {
+            let dest_url = if safe_markdown_url(&dest_url, true) {
+                dest_url
+            } else {
+                CowStr::Borrowed("")
+            };
+            Event::Start(Tag::Image {
+                link_type,
+                dest_url,
+                title,
+                id,
+            })
+        }
         other => other,
     });
     let mut html_output = String::new();
@@ -957,6 +1019,87 @@ mod tests {
         let html = markdown_to_html("**bold** and *italic*");
         assert!(html.contains("<strong>bold</strong>"));
         assert!(html.contains("<em>italic</em>"));
+    }
+
+    #[test]
+    fn markdown_raw_html_cannot_add_active_elements_or_attributes() {
+        let html = markdown_to_html(
+            "<script>alert(1)</script>\n\n<img src=x onerror=alert(1)>\n\n<a href=\"javascript:alert(1)\" inert onclick=\"alert(1)\">bad</a>",
+        );
+        assert!(!html.contains("<script"));
+        assert!(!html.contains("<img"));
+        assert!(!html.contains("<a "));
+        assert!(!html.contains("onerror"));
+        assert!(!html.contains("onclick"));
+        assert!(!html.contains("javascript:"));
+        assert!(!html.contains("inert"));
+    }
+
+    #[test]
+    fn markdown_strips_audited_inline_event_attribute() {
+        let html = markdown_to_html("<span onclick=\"void(0)\">Synthetic audit text</span>");
+        assert!(!html.contains("onclick"), "{html}");
+        assert!(html.contains("Synthetic audit text"), "{html}");
+    }
+
+    #[test]
+    fn markdown_unsafe_destinations_cannot_reach_href_or_src() {
+        for (markdown, safe_attribute) in [
+            ("[click](javascript:alert%281%29)", "href=\"\""),
+            ("[click](JaVaScRiPt:alert%281%29)", "href=\"\""),
+            ("[click](data:text/html,hello)", "href=\"\""),
+            ("[click](vbscript:msgbox%281%29)", "href=\"\""),
+            ("[click](java&#x09;script:alert%281%29)", "href=\"\""),
+            ("[click](javascript&#58;alert%281%29)", "href=\"\""),
+            ("![image](data:image/svg+xml,%3Csvg%3E)", "src=\"\""),
+            ("![image](javascript:alert%281%29)", "src=\"\""),
+        ] {
+            let html = markdown_to_html(markdown);
+            assert!(html.contains(safe_attribute), "{markdown}: {html}");
+            assert!(!html.contains("javascript:"), "{markdown}: {html}");
+            assert!(!html.contains("data:"), "{markdown}: {html}");
+            assert!(!html.contains("vbscript:"), "{markdown}: {html}");
+            assert!(!html.contains("<script"), "{markdown}: {html}");
+        }
+    }
+
+    #[test]
+    fn markdown_keeps_safe_prose_code_tables_links_images_and_asterism() {
+        let markdown = "# Report\n\n`<script>` and **bold**\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n[site](https://example.com/a?q=1) [mail](mailto:a@example.com) [local](/dashboards/1) ![plot](images/plot.png)\n\n---";
+        let html = markdown_to_html(markdown);
+        for expected in [
+            "<h1>Report</h1>",
+            "<code>&lt;script&gt;</code>",
+            "<strong>bold</strong>",
+            "<table>",
+            "href=\"https://example.com/a?q=1\"",
+            "href=\"mailto:a@example.com\"",
+            "href=\"/dashboards/1\"",
+            "src=\"images/plot.png\"",
+            "loading=\"lazy\"",
+            "font-display",
+        ] {
+            assert!(html.contains(expected), "missing {expected}: {html}");
+        }
+    }
+
+    #[test]
+    fn markdown_sanitization_keeps_chartml_segment_separate() {
+        let content = "<span onclick=\"void(0)\">Intro</span>\n\n```chartml\ntype: bar\ntitle: Sales\n```";
+        let segments = parse_segments(content);
+        assert_eq!(segments.len(), 2);
+        match &segments[0] {
+            ContentSegment::Markdown(markdown) => {
+                assert!(!markdown_to_html(markdown).contains("onclick"));
+            }
+            _ => panic!("expected Markdown before chart"),
+        }
+        match &segments[1] {
+            ContentSegment::ChartML { yamls, .. } => {
+                assert_eq!(yamls, &["type: bar\ntitle: Sales".to_string()]);
+            }
+            _ => panic!("expected ChartML block"),
+        }
     }
 
     #[test]
