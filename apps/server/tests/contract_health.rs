@@ -426,6 +426,16 @@ async fn frontend_csp_nonce_matches_shell_and_ssr_inline_scripts() {
         return;
     }
 
+    let embedded_index = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../crates/kyomi-ui/dist/index.html");
+    if !embedded_index.is_file() {
+        eprintln!(
+            "skipping frontend CSP route check: generated frontend index is absent at {} (this job does not run Trunk)",
+            embedded_index.display()
+        );
+        return;
+    }
+
     let base = base_url().await;
     for path in ["/signup/complete", "/login"] {
         let response = client()
