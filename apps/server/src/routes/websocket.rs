@@ -152,15 +152,38 @@ async fn handle_authenticated_ws(
     // Pings every 45s keep the connection alive through Cloudflare (100s idle
     // timeout), nginx, and Vite dev proxy (120s).
     let user_id_for_send = jwt_user_id.clone();
-    let send_task = tokio::spawn(async move {
+    let workspace_id_for_send = workspace_id.clone();
+    let db_for_send = state.db.clone();
+    let (denial_tx, mut denial_rx) = tokio::sync::oneshot::channel::<u16>();
+    let mut send_task = tokio::spawn(async move {
         let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(45));
         ping_interval.tick().await; // consume the immediate first tick
 
         loop {
             tokio::select! {
+                biased;
+                denial = &mut denial_rx => {
+                    if let Ok(code) = denial {
+                        let _ = ws_sender.send(ws::Message::Close(Some(ws::CloseFrame {
+                            code,
+                            reason: "Workspace access denied".into(),
+                        }))).await;
+                    }
+                    break;
+                }
                 msg = manager_rx.recv() => {
                     match msg {
                         Some(json) => {
+                            let denial = outbound_membership_denial_code(
+                                &db_for_send, &workspace_id_for_send, &user_id_for_send, &json,
+                            ).await;
+                            if let Some(code) = denial {
+                                let _ = ws_sender.send(ws::Message::Close(Some(ws::CloseFrame {
+                                    code,
+                                    reason: "Workspace access denied".into(),
+                                }))).await;
+                                break;
+                            }
                             if ws_sender.send(ws::Message::text(json)).await.is_err() {
                                 break;
                             }
@@ -186,10 +209,17 @@ async fn handle_authenticated_ws(
     let self_hosted = state.config.self_hosted;
     let user_id_for_recv = jwt_user_id.clone();
     let workspace_id_for_recv = workspace_id.clone();
-    let recv_task = tokio::spawn(async move {
+    let mut recv_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = ws_receiver.next().await {
             match msg {
                 ws::Message::Text(text) => {
+                    // Check before dispatch, including before billing or any sync reads.
+                    if let Some(code) = workspace_membership_denial_code(
+                        &db_clone, &workspace_id_for_recv, &user_id_for_recv,
+                    ).await {
+                        let _ = denial_tx.send(code);
+                        return;
+                    }
                     handle_client_message(
                         &text,
                         &user_id_for_recv,
@@ -211,8 +241,15 @@ async fn handle_authenticated_ws(
 
     // Wait for either side to finish
     tokio::select! {
-        _ = send_task => {}
-        _ = recv_task => {}
+        _ = &mut send_task => {
+            recv_task.abort();
+            let _ = recv_task.await;
+        }
+        _ = &mut recv_task => {
+            // The oneshot carries a denial or closes on normal EOF. Let the
+            // sender deliver the close frame before dropping registration.
+            let _ = send_task.await;
+        }
     }
 
     // Cleanup
@@ -224,7 +261,7 @@ async fn handle_authenticated_ws(
     );
 }
 
-/// Return the code the WebSocket handler must send before registration when
+/// Return the code the WebSocket handler must send when
 /// membership is absent or cannot be verified.
 async fn workspace_membership_denial_code(
     db: &kyomi_core::DbPool,
@@ -242,6 +279,37 @@ async fn workspace_membership_denial_code(
             Some(CLOSE_FORBIDDEN)
         }
     }
+}
+
+/// User-targeted lifecycle notices deliberately reach invitees/nonmembers.
+/// All other manager traffic revalidates this socket's workspace, plus an
+/// explicit payload workspace when user-wide fan-out crosses workspace scopes.
+/// This costs one membership read per frame (two for a different explicit scope);
+/// caching the result would allow revoked sockets to keep receiving queued data.
+async fn outbound_membership_denial_code(
+    db: &kyomi_core::DbPool,
+    workspace_id: &str,
+    user_id: &str,
+    json: &str,
+) -> Option<u16> {
+    use kyomi_types::websocket::{MessageType, WebSocketMessage};
+    let Ok(message) = serde_json::from_str::<WebSocketMessage>(json) else {
+        return Some(CLOSE_FORBIDDEN);
+    };
+    if matches!(message.message_type, MessageType::WorkspaceInvitation | MessageType::WorkspaceRemoved) {
+        return None;
+    }
+    if let Some(code) = workspace_membership_denial_code(db, workspace_id, user_id).await {
+        return Some(code);
+    }
+    if let Some(scope) = message.data.as_ref()
+        .and_then(|data| data.get("workspace_id"))
+        .and_then(|value| value.as_str())
+        && scope != workspace_id
+    {
+        return workspace_membership_denial_code(db, scope, user_id).await;
+    }
+    None
 }
 
 /// Extract the workspace_id from a path that is "{workspace_id}_{user_id}".
@@ -369,9 +437,8 @@ async fn handle_client_message(
 /// [`refuse_if_billing_gate_blocks`] so this mapping — in particular, that
 /// [`billing_gate::WorkspaceBillingGate::Unverifiable`] never carries the
 /// `payment_required` code — is unit-testable without a live
-/// `WebSocketManager` or database connection (KYO-805 follow-up): this repo
-/// has no WebSocket integration-test harness, so this is the level at which
-/// the refusal *decision* gets coverage.
+/// `WebSocketManager` or database connection (KYO-805 follow-up). Live
+/// delivery is also covered by `contract_websocket_membership`.
 ///
 /// `Unverifiable` deliberately gets no error code at all rather than a new
 /// invented one: KYO-806's client-side paywall keys off
@@ -861,8 +928,8 @@ mod tests {
     //
     // `handle_sync_bootstrap`/`handle_sync_delta` are DB- and
     // WebSocketManager-backed async fns with no lightweight unit-test seam
-    // (this repo has no WebSocket integration-test harness), so these tests
-    // target the pure decision function directly — proving the refusal
+    // in this unit-test module, so these tests target the pure decision
+    // function directly — proving the refusal
     // *message* is correct proves it's correct at both call sites
     // structurally, since `refuse_if_billing_gate_blocks` is the only place
     // either one produces one.
