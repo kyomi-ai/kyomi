@@ -108,7 +108,7 @@ pub async fn verify_refresh_token(
 
     // Fetch the token + user data in one query (include replaced_at and family_id)
     let sql = format!(
-        "SELECT rt.token_id, rt.user_id, rt.family_id, rt.replaced_at, \
+        "SELECT rt.token_id, rt.user_id, rt.family_id, rt.oauth_client_id, rt.replaced_at, \
                 u.email, u.name, u.extra_metadata, u.active as user_active \
          FROM refresh_tokens rt \
          JOIN users u ON u.user_id = rt.user_id \
@@ -142,6 +142,7 @@ pub async fn verify_refresh_token(
         roles,
         token_id: row.token_id,
         family_id: row.family_id.clone(),
+        oauth_client_id: row.oauth_client_id,
     };
 
     // Check if this token has been replaced (rotated)
@@ -460,6 +461,7 @@ pub struct RefreshTokenUserData {
     pub roles: Vec<String>,
     pub token_id: String,
     pub family_id: String,
+    pub oauth_client_id: Option<String>,
 }
 
 /// Internal query result for refresh token + user join.
@@ -468,6 +470,7 @@ struct RefreshTokenWithUser {
     token_id: String,
     user_id: String,
     family_id: String,
+    oauth_client_id: Option<String>,
     replaced_at: Option<DateTime<Utc>>,
     email: String,
     name: Option<String>,
