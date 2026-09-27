@@ -46,8 +46,9 @@ const MAX_MESSAGE_SIZE: usize = 64 * 1024;
 /// 2. Validate JWT signature and expiry
 /// 3. Look up user in database, verify active status
 /// 4. Verify path user_id matches JWT user_id
-/// 5. Register connection with WebSocketManager
-/// 6. Spawn inbound/outbound tasks
+/// 5. Verify active membership in the workspace named by the path
+/// 6. Register connection with WebSocketManager
+/// 7. Spawn inbound/outbound tasks
 pub async fn ws_handler(
     ws: ws::WebSocketUpgrade,
     State(state): State<AppState>,
@@ -116,6 +117,13 @@ async fn handle_authenticated_ws(
     if !user.active {
         tracing::warn!("WebSocket rejected: user disabled: {jwt_user_id}");
         close_with_code(socket, CLOSE_FORBIDDEN, "Account disabled").await;
+        return;
+    }
+
+    // The path workspace controls sync reads. A valid JWT and active account
+    // alone do not authorize that workspace, even when the token names another.
+    if let Some(code) = workspace_membership_denial_code(&state.db, &workspace_id, jwt_user_id).await {
+        close_with_code(socket, code, "Workspace access denied").await;
         return;
     }
 
@@ -210,6 +218,26 @@ async fn handle_authenticated_ws(
         connection_id,
         "WebSocket disconnected"
     );
+}
+
+/// Return the code the WebSocket handler must send before registration when
+/// membership is absent or cannot be verified.
+async fn workspace_membership_denial_code(
+    db: &kyomi_core::DbPool,
+    workspace_id: &str,
+    user_id: &str,
+) -> Option<u16> {
+    match user_service::get_workspace_user(db, workspace_id, user_id).await {
+        Ok(Some(_)) => None,
+        Ok(None) => {
+            tracing::warn!(user_id, workspace_id, "WebSocket rejected: no active workspace membership");
+            Some(CLOSE_FORBIDDEN)
+        }
+        Err(e) => {
+            tracing::error!(user_id, workspace_id, error = %e, "WebSocket membership lookup failed");
+            Some(CLOSE_FORBIDDEN)
+        }
+    }
 }
 
 /// Extract the workspace_id from a path that is "{workspace_id}_{user_id}".
@@ -799,6 +827,19 @@ async fn close_with_code(socket: ws::WebSocket, code: u16, reason: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn membership_lookup_error_uses_forbidden_close_code() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        pool.close().await;
+        let db = kyomi_core::DbPool::Sqlite(pool);
+
+        assert_eq!(
+            workspace_membership_denial_code(&db, "ws-unavailable", "usr_member").await,
+            Some(CLOSE_FORBIDDEN),
+            "a failed membership lookup must close with 4003 before registration"
+        );
+    }
 
     // ── insert_count_if_present (KYO-480 review fix) ────────────────────────
     //
