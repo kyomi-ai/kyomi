@@ -787,6 +787,15 @@ async fn handle_refresh_token(
         }
     };
 
+    // An OAuth refresh grant belongs to the client that received it. Tokens
+    // without a client binding (including older grants) cannot be used here.
+    if user_data.oauth_client_id.as_deref() != Some(params.client_id.as_str()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid_grant: client_id mismatch"})),
+        ));
+    }
+
     // Verify user still exists and is active
     let user = user_service::get_user_by_id(&state.db, &user_data.user_id)
         .await
