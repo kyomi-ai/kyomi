@@ -87,6 +87,10 @@ pub struct ChatMessageItem {
     pub content: String,
     pub timestamp: String,
     pub pinned: bool,
+    /// Lifecycle of the row — one of the `chat_messages.status` CHECK values
+    /// (`kyomi_auth::chat_service::MessageStatus::as_str`). The UI keys the
+    /// interrupted affordance off `"interrupted"` (KYO-493).
+    pub status: String,
     pub sent_by: Option<SessionUser>,
     pub thinking_events: Vec<serde_json::Value>,
     pub token_usage: Option<serde_json::Value>,
@@ -575,6 +579,7 @@ pub async fn send_chat_message(
             message_source: Some(MESSAGE_SOURCE),
             skip_ai,
             client_msg_id: client_msg_id.as_deref(),
+            owner_instance: &ac.ctx.process_instance,
         },
     )
     .await
@@ -661,7 +666,12 @@ pub async fn send_chat_message(
         user_message_persistence: kyomi_agent::UserMessagePersistence::CallerPersisted(
             user_message_id.clone(),
         ),
-        assistant_message_id: Some(assistant_message_id.clone()),
+        // KYO-493: prepare_chat_dispatch already pre-inserted an
+        // in_progress placeholder for this id — persist_after_chat must
+        // UPDATE it, never INSERT a second row.
+        assistant_message_persistence: kyomi_agent::AssistantMessagePersistence::CallerPreInserted(
+            assistant_message_id.clone(),
+        ),
         conversation_history: None,
         user_display_name: ac.auth.name.clone().unwrap_or_else(|| ac.auth.email.clone()),
         context_window: 0,
@@ -1204,6 +1214,7 @@ fn message_item_to_chat_message_item(
         content: m.content,
         timestamp: m.timestamp.unwrap_or_default(),
         pinned: m.pinned,
+        status: m.status,
         sent_by: m.sent_by.map(|cb| SessionUser {
             user_id: cb.user_id,
             display_name: cb.display_name.unwrap_or_default(),

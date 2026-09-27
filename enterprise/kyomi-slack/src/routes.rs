@@ -1952,7 +1952,9 @@ async fn run_slack_query(
         user_message_persistence: kyomi_agent::UserMessagePersistence::AdapterPersists(Some(
             user_message_id,
         )),
-        assistant_message_id: None,
+        // Slack never pre-inserts an assistant placeholder — mirrors
+        // copilot (KYO-572) and watch execution.
+        assistant_message_persistence: kyomi_agent::AssistantMessagePersistence::AdapterInserts(None),
         conversation_history: None,
         user_display_name: "Kyomi Slack".to_string(),
         context_window: 0,

@@ -22,6 +22,77 @@ use kyomi_types::CreatedBy;
 use kyomi_types::sync::{SyncActionType, entity_types};
 
 // ---------------------------------------------------------------------------
+// Message status (KYO-493)
+// ---------------------------------------------------------------------------
+
+/// Lifecycle of a `chat_messages` row.
+///
+/// Matches the `chat_messages.status` CHECK constraint exactly (see the
+/// KYO-493 migration) and follows the same explicit-mapping pattern as
+/// [`crate::workspace_ai_config::WorkspaceAiProvider`] — an `as_str`/
+/// `FromStr` pair, never a free string, at every call site that reads or
+/// writes this column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageStatus {
+    /// The agent turn that will fill this row is still running. Only ever
+    /// set for the assistant placeholder [`prepare_chat_dispatch`] writes
+    /// before the agent is spawned — never for a `user`/`tool` row.
+    InProgress,
+    /// The row holds its final content — a normal completed turn, or any
+    /// row written before this column existed (the migration's default).
+    Complete,
+    /// The turn that would have filled this row failed — either before the
+    /// agent loop started ([`save_agent_error`]) or during it
+    /// (`kyomi_agent::execution::execute_agent_chat`'s in-loop failure
+    /// path). The row's content is the user-facing error text.
+    Error,
+    /// The turn was cancelled before producing a final answer. The row's
+    /// content is the cancellation notice.
+    Cancelled,
+    /// Written by the stuck-row sweep ([`sweep_interrupted_rows`], KYO-493
+    /// Phase 4): an `in_progress` row whose `owner_instance` process is no
+    /// longer running — or which sat `in_progress` past
+    /// [`IN_PROGRESS_HARD_TIMEOUT`] — so no run is left that could ever
+    /// finalize it. The row keeps whatever partial content the incremental
+    /// flushes managed to write.
+    Interrupted,
+}
+
+impl MessageStatus {
+    /// Canonical string form stored in the `status` column. Matches the
+    /// CHECK constraint values exactly.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::InProgress => "in_progress",
+            Self::Complete => "complete",
+            Self::Error => "error",
+            Self::Cancelled => "cancelled",
+            Self::Interrupted => "interrupted",
+        }
+    }
+}
+
+impl std::str::FromStr for MessageStatus {
+    type Err = kyomi_core::Error;
+
+    /// Parse a status string. Matching is case-sensitive — values come from
+    /// the DB's own CHECK-constrained column, never user free-text.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "in_progress" => Ok(Self::InProgress),
+            "complete" => Ok(Self::Complete),
+            "error" => Ok(Self::Error),
+            "cancelled" => Ok(Self::Cancelled),
+            "interrupted" => Ok(Self::Interrupted),
+            other => Err(kyomi_core::Error::Internal(format!(
+                "invalid chat_messages.status value: {other:?}"
+            ))),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Response structs
 // ---------------------------------------------------------------------------
 
@@ -127,6 +198,7 @@ struct MessageWithSenderRow {
     current_time_user_tz: Option<String>,
     extra_metadata: Option<String>,
     sent_by_user_id: Option<String>,
+    status: String,
     // Joined sender fields (nullable because assistant msgs have no sender).
     sender_name: Option<String>,
     sender_email: Option<String>,
@@ -169,6 +241,24 @@ struct QueryCacheRow {
 #[derive(Debug, sqlx::FromRow)]
 struct CreatedAtRow {
     created_at: chrono::DateTime<chrono::Utc>,
+}
+
+// Called inside the same transaction that moves a placeholder to the end of
+// the conversation. The extra microsecond gives the final answer a strict
+// position after all tool rows, even when the clock and DB timestamps tie.
+macro_rules! next_terminal_created_at {
+    ($tx:ident, $message_id:expr) => {{
+        let latest: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT MAX(created_at) FROM chat_messages \
+             WHERE session_id = (SELECT session_id FROM chat_messages WHERE message_id = $1) \
+               AND message_id <> $1",
+        )
+        .bind($message_id)
+        .fetch_one(&mut *$tx)
+        .await?;
+        let now = Utc::now();
+        latest.map_or(now, |at| now.max(at + chrono::Duration::microseconds(1)))
+    }};
 }
 
 // ─── Sync snapshot helpers ────────────────────────────────────────────────────
@@ -862,6 +952,7 @@ pub async fn get_session_messages(
            cm.pinned,
            cm.created_at,
            cm.current_time_user_tz, cm.extra_metadata, cm.sent_by_user_id,
+           cm.status,
            u.name AS sender_name, u.email AS sender_email
          FROM chat_messages cm
          LEFT JOIN users u ON cm.sent_by_user_id = u.user_id
@@ -959,7 +1050,7 @@ pub async fn get_session_messages(
             model,
             pinned: row.pinned,
             metadata,
-            status: "completed".to_string(),
+            status: row.status,
             thinking_events,
             token_usage,
             current_time_user_tz: row.current_time_user_tz,
@@ -984,6 +1075,21 @@ pub async fn get_session_messages(
 /// text (baked in by `agent.chat()` before persistence), so reconstructing
 /// on top of that would double it.
 ///
+/// `status` is written at INSERT time — see [`MessageStatus`]. Every caller
+/// must pass one explicitly (no default): almost always
+/// [`MessageStatus::Complete`], since almost every `add_message` call is
+/// writing a row that's already finished (a stored user turn, a completed
+/// assistant/tool message from `persist_after_chat`, a watch's logged
+/// prompt/response, ...). The one exception is an error-fallback INSERT
+/// (`save_agent_error`, `copilot_service::handle_copilot_agent_error`) —
+/// those pass [`MessageStatus::Error`], so a pre-loop failure that reaches
+/// this INSERT (because no placeholder existed to UPDATE instead) is never
+/// left mislabeled `complete`. Passing `status` here — rather than
+/// INSERTing and then issuing a second `update_message` call to correct
+/// it — avoids exactly the extra write (and the window where a concurrent
+/// reader could see the wrong status) that this alternative would
+/// otherwise require.
+///
 /// Returns the message_id.
 #[allow(clippy::too_many_arguments)]
 pub async fn add_message(
@@ -1000,6 +1106,7 @@ pub async fn add_message(
     tool_call_id: Option<&str>,
     tool_name: Option<&str>,
     tool_calls: Option<&serde_json::Value>,
+    status: MessageStatus,
 ) -> kyomi_core::Result<String> {
     let msg_id = message_id
         .map(|s| s.to_string())
@@ -1021,8 +1128,8 @@ pub async fn add_message(
         "INSERT INTO chat_messages \
          (message_id, session_id, role, content, sent_by_user_id, pinned, \
           created_at, current_time_user_tz, message_source, extra_metadata, \
-          tool_call_id, tool_name, tool_calls) \
-         VALUES ($1, $2, $3, $4, $5, false, $6, $7, $8, $9, $10, $11, $12)",
+          tool_call_id, tool_name, tool_calls, status) \
+         VALUES ($1, $2, $3, $4, $5, false, $6, $7, $8, $9, $10, $11, $12, $13)",
         &msg_id,
         session_id,
         role,
@@ -1034,7 +1141,8 @@ pub async fn add_message(
         encrypted_metadata,
         tool_call_id,
         tool_name,
-        tool_calls as Option<&serde_json::Value>
+        tool_calls as Option<&serde_json::Value>,
+        status.as_str()
     )
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to add message: {e}")))?;
 
@@ -1054,13 +1162,23 @@ pub async fn add_message(
     Ok(msg_id)
 }
 
-/// Update message content and/or metadata (re-encrypts).
+/// Update message content, metadata, and/or status (re-encrypts content and
+/// metadata; `status` is stored in the clear — see [`MessageStatus`]).
+///
+/// `status` is the terminal-state writer for the assistant placeholder
+/// [`prepare_chat_dispatch`] pre-inserts (KYO-493) — `execute_agent_chat`
+/// calls this with `Some(MessageStatus::Complete/Error/Cancelled)` once a
+/// turn's outcome is known, and [`save_agent_error`] calls it with
+/// `Some(MessageStatus::Error)` for a pre-loop failure. Every other caller
+/// (metadata attachment, user content edits) passes `None`, leaving
+/// whatever status the row already has untouched.
 pub async fn update_message(
     db: &DbPool,
     encryption_key: &[u8; 32],
     message_id: &str,
     content: Option<&str>,
     metadata: Option<&serde_json::Value>,
+    status: Option<MessageStatus>,
 ) -> kyomi_core::Result<bool> {
     // Dynamic SQL — cannot use dispatch macros
     let mut set_parts: Vec<String> = Vec::new();
@@ -1072,7 +1190,20 @@ pub async fn update_message(
     }
     if metadata.is_some() {
         set_parts.push(format!("extra_metadata = ${param_idx}"));
-        // param_idx incremented but not used further
+        param_idx += 1;
+    }
+    if status.is_some() {
+        set_parts.push(format!("status = ${param_idx}"));
+        param_idx += 1;
+    }
+    let move_terminal_assistant = status.is_some_and(|s| s != MessageStatus::InProgress);
+    if move_terminal_assistant {
+        // Only the first terminal transition moves a dispatch-time assistant
+        // placeholder. A repeated status write must not reorder old history.
+        set_parts.push(format!(
+            "created_at = CASE WHEN role = 'assistant' AND status = 'in_progress' \
+             THEN ${param_idx} ELSE created_at END"
+        ));
     }
 
     if set_parts.is_empty() {
@@ -1093,18 +1224,160 @@ pub async fn update_message(
         Some(m) => Some(encryption::encrypt_json(m, encryption_key)?),
         None => None,
     };
-    let rows_affected = kyomi_core::db_with_pool!(db, |p| {
-        let mut query = sqlx::query(&sql).bind(message_id);
-        if let Some(ref enc) = encrypted_content {
-            query = query.bind(enc);
+    let status_str: Option<&'static str> = status.map(|s| s.as_str());
+    let rows_affected = if move_terminal_assistant {
+        macro_rules! update_terminal_in_transaction {
+            ($pool:expr) => {{
+                let mut tx = $pool.begin().await?;
+                let created_at = next_terminal_created_at!(tx, message_id);
+                let mut query = sqlx::query(&sql).bind(message_id);
+                if let Some(ref enc) = encrypted_content {
+                    query = query.bind(enc);
+                }
+                if let Some(ref enc) = encrypted_metadata_dyn {
+                    query = query.bind(enc);
+                }
+                if let Some(s) = status_str {
+                    query = query.bind(s);
+                }
+                let rows = query.bind(created_at).execute(&mut *tx).await?.rows_affected();
+                tx.commit().await?;
+                Ok::<u64, sqlx::Error>(rows)
+            }};
         }
-        if let Some(ref enc) = encrypted_metadata_dyn {
-            query = query.bind(enc);
+        match db {
+            DbPool::Postgres(pool) => update_terminal_in_transaction!(pool),
+            DbPool::Sqlite(pool) => update_terminal_in_transaction!(pool),
         }
-        query.execute(p).await.map(|r| r.rows_affected())
-    })
+    } else {
+        kyomi_core::db_with_pool!(db, |p| {
+            let mut query = sqlx::query(&sql).bind(message_id);
+            if let Some(ref enc) = encrypted_content {
+                query = query.bind(enc);
+            }
+            if let Some(ref enc) = encrypted_metadata_dyn {
+                query = query.bind(enc);
+            }
+            if let Some(s) = status_str {
+                query = query.bind(s);
+            }
+            query.execute(p).await.map(|r| r.rows_affected())
+        })
+    }
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to update message: {e}")))?;
     Ok(rows_affected > 0)
+}
+
+/// Row shape for [`get_message_status`].
+#[derive(Debug, sqlx::FromRow)]
+struct MessageStatusRow {
+    status: String,
+    owner_instance: Option<String>,
+}
+
+/// Read a message's `status` and `owner_instance` columns (KYO-493).
+///
+/// Returns `None` if no row exists for `message_id`. Used by this module's
+/// own tests to confirm what the placeholder-insert and terminal-state
+/// writers actually persisted; the eventual stuck-row sweep (KYO-493 Phase
+/// 4) needs the same read for `status = 'in_progress'` rows.
+pub async fn get_message_status(
+    db: &DbPool,
+    message_id: &str,
+) -> kyomi_core::Result<Option<(MessageStatus, Option<String>)>> {
+    let row = kyomi_core::db_fetch_optional!(
+        db,
+        MessageStatusRow,
+        "SELECT status, owner_instance FROM chat_messages WHERE message_id = $1",
+        message_id
+    )?;
+    match row {
+        Some(r) => {
+            let status = r.status.parse::<MessageStatus>()?;
+            Ok(Some((status, r.owner_instance)))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Hard-timeout age bound for `in_progress` rows (the "hard-timeout age
+/// bound" half of KYO-493 Phase 4 — see the KYO-493 migration's column
+/// comment).
+///
+/// Every agent run already hard-times-out on its own well under this bound
+/// (`max_duration`: 15 minutes for chat
+/// (`crates/kyomi-ui/src/server_fns/chat.rs`'s `AgentExecutionConfig`),
+/// 10 for Slack, 3 for copilot). A row still `in_progress` this long
+/// after creation is therefore treated as dead: its run was stopped at
+/// that ceiling and failed to write its terminal status, its process died
+/// under it, or the run wedged past every iteration check and this age
+/// bound is the hard timeout that finally cuts it off. (The ceiling is
+/// checked between iterations rather than imposed as a hard timer, so a
+/// single wedged call can outlive it — the age bound is what caps that
+/// case too.) One hour keeps a 4x margin over the longest ceiling so the
+/// bound can never race a slow but legitimate final write.
+pub const IN_PROGRESS_HARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Sweep `in_progress` rows that can no longer be live and reclassify them
+/// `interrupted` (KYO-493 Phase 4 — the stuck-row sweep the KYO-493
+/// migration reserved [`MessageStatus::Interrupted`] for).
+///
+/// Two clauses, matching the migration's spec:
+///
+/// * **This instance's own rows** (`owner_instance = $owner_instance`):
+///   rows left behind by this process's own previous incarnation (startup
+///   sweep) or by runs this process is being shut down on (graceful-shutdown
+///   sweep). Deliberately no age test on this clause — but the premise
+///   behind that ("nothing this identity owns can still be running") is
+///   discharged at the call sites, not enforced here: `apps/server`'s
+///   startup sweep runs only after its listener has bound, so the previous
+///   incarnation of its `"{HOSTNAME}:{PORT}"` identity (see
+///   [`kyomi_core::resolve_process_instance`]) is already gone and this one
+///   is not yet serving, and its shutdown sweep runs after serving has
+///   stopped and the schedulers drained. What this function does enforce is
+///   the identity boundary: one local instance's sweep never touches
+///   another's rows — a worktree server booting on `:3100` only ever sweeps
+///   rows stamped `"{HOSTNAME}:3100"`, never dev.kyomi.ai's. The one
+///   identity whose exclusivity this crate cannot see is `"desktop"`: it
+///   assumes a single personal-mode process at a time (see
+///   [`kyomi_core::resolve_process_instance`]), which no code here
+///   enforces — two concurrent desktop processes sharing a `DATA_DIR`
+///   would let the second one's sweep interrupt the first one's live
+///   rows.
+/// * **Rows past the hard-timeout age bound** (`created_at` older than
+///   `hard_timeout`, any owner): a row whose owning process died without
+///   ever restarting is observable only through age. The bound
+///   ([`IN_PROGRESS_HARD_TIMEOUT`] at every production call site) is
+///   chosen to never race a live run — see that constant's doc.
+///
+/// Rows already in a terminal status (`complete` / `error` / `cancelled` /
+/// `interrupted`) are never touched, whatever their age. Returns how many
+/// rows were reclassified.
+///
+/// Call sites: `apps/server/src/main.rs` and `apps/desktop/src/main.rs`,
+/// each once at startup and once during graceful shutdown, always with
+/// this process's own `process_instance` identity. Best-effort at those
+/// call sites by design — a sweep failure must not take the server down;
+/// the next boot or the age bound catches whatever was missed.
+pub async fn sweep_interrupted_rows(
+    db: &DbPool,
+    owner_instance: &str,
+    hard_timeout: std::time::Duration,
+) -> kyomi_core::Result<u64> {
+    let cutoff = Utc::now()
+        - chrono::Duration::from_std(hard_timeout)
+            .map_err(|e| kyomi_core::Error::Internal(format!("invalid hard timeout: {e}")))?;
+    let rows = kyomi_core::db_execute!(
+        db,
+        "UPDATE chat_messages SET status = $1 \
+         WHERE status = 'in_progress' \
+           AND (owner_instance = $2 OR created_at < $3)",
+        MessageStatus::Interrupted.as_str(),
+        owner_instance,
+        cutoff
+    )
+    .map_err(|e| kyomi_core::Error::Internal(format!("failed to sweep interrupted rows: {e}")))?;
+    Ok(rows.rows_affected())
 }
 
 /// Update session title, model, and/or config.
@@ -1908,8 +2181,8 @@ struct AgentMessageRow {
 ///
 /// Decrypts `content`. Skips empty assistant placeholders (no content AND no tool_calls).
 ///
-/// If `after_message_id` is provided, only returns messages created after that
-/// message's timestamp.
+/// If `after_message_id` is provided, returns messages after that row in
+/// `(created_at, message_id)` order, including later rows at the same time.
 pub async fn get_agent_messages(
     db: &DbPool,
     encryption_key: &[u8; 32],
@@ -1936,10 +2209,11 @@ pub async fn get_agent_messages(
             "SELECT message_id, role, content, tool_calls, tool_call_id, tool_name, \
               sent_by_user_id, current_time_user_tz, message_source \
              FROM chat_messages \
-             WHERE session_id = $1 AND created_at > $2 \
-             ORDER BY created_at ASC",
+             WHERE session_id = $1 AND (created_at > $2 OR (created_at = $2 AND message_id > $3)) \
+             ORDER BY created_at ASC, message_id ASC",
             session_id,
-            cutoff_row.created_at
+            cutoff_row.created_at,
+            after_id
         )?
     } else {
         kyomi_core::db_fetch_all!(
@@ -1949,7 +2223,7 @@ pub async fn get_agent_messages(
               sent_by_user_id, current_time_user_tz, message_source \
              FROM chat_messages \
              WHERE session_id = $1 \
-             ORDER BY created_at ASC",
+             ORDER BY created_at ASC, message_id ASC",
             session_id
         )?
     };
@@ -2059,6 +2333,13 @@ pub struct ChatDispatchParams<'a> {
     pub skip_ai: bool,
     /// Optimistic client message ID for deduplication.
     pub client_msg_id: Option<&'a str>,
+    /// This process's identity (see `kyomi_core::resolve_process_instance`;
+    /// `"{HOSTNAME}:{PORT}"`, or `"desktop"` in personal mode, resolved once
+    /// at server startup), recorded as `owner_instance` on the
+    /// `in_progress` assistant placeholder this function pre-inserts on the
+    /// AI path (KYO-493). Unused on the `skip_ai` path, which never creates
+    /// that row.
+    pub owner_instance: &'a str,
 }
 
 /// Find-or-create session, store the user message, and optionally broadcast
@@ -2160,6 +2441,7 @@ pub async fn prepare_chat_dispatch(
         None,
         None,
         None,
+        MessageStatus::Complete,
     )
     .await
     .map_err(|e| kyomi_core::Error::Internal(format!("Failed to store message: {e}")))?;
@@ -2178,8 +2460,29 @@ pub async fn prepare_chat_dispatch(
         });
     }
 
-    // ── Generate assistant placeholder ID ─────────────────────────────────
+    // ── Generate and pre-insert the assistant placeholder ─────────────────
+    // KYO-493: mirrors KYO-492's user-message write above — the row exists
+    // (status='in_progress') the instant this function returns Ready,
+    // before the agent is even spawned, so a client that reloads mid-turn
+    // finds a row for `assistant_message_id` instead of nothing.
+    // `kyomi_agent::adapter::ChatAgentAdapter::persist_after_chat` UPDATEs
+    // this same row once the turn produces a real answer
+    // (`AssistantMessagePersistence::CallerPreInserted` — see that type's
+    // doc for why this must never be a second INSERT: KYO-572 already
+    // shipped and fixed exactly that collision for copilot's placeholder,
+    // which is why copilot deliberately does NOT pre-insert one).
     let assistant_message_id = uuid::Uuid::new_v4().to_string();
+    insert_in_progress_assistant_placeholder(
+        p.db,
+        p.encryption_key,
+        &session_id,
+        &assistant_message_id,
+        p.owner_instance,
+    )
+    .await
+    .map_err(|e| {
+        kyomi_core::Error::Internal(format!("Failed to store assistant placeholder: {e}"))
+    })?;
 
     // ── Broadcast user message to shared-session observers ────────────────
     if is_shared && let Some(ws_manager) = p.ws_manager {
@@ -2205,6 +2508,101 @@ pub async fn prepare_chat_dispatch(
         assistant_message_id,
         is_shared,
     })
+}
+
+/// Insert an empty, `in_progress` assistant placeholder row (KYO-493).
+///
+/// Written only by [`prepare_chat_dispatch`]'s AI path, before the agent is
+/// spawned. Deliberately does not update `chat_sessions.updated_at` or
+/// write a sync-log entry — the user-message insert immediately above it
+/// in `prepare_chat_dispatch` already did both for this dispatch, and an
+/// empty placeholder has no content a sync client needs to know about yet.
+async fn insert_in_progress_assistant_placeholder(
+    db: &DbPool,
+    encryption_key: &[u8; 32],
+    session_id: &str,
+    message_id: &str,
+    owner_instance: &str,
+) -> kyomi_core::Result<()> {
+    let encrypted_content = encryption::encrypt("", encryption_key)?;
+    let now = Utc::now();
+    kyomi_core::db_execute!(
+        db,
+        "INSERT INTO chat_messages \
+         (message_id, session_id, role, content, pinned, created_at, status, owner_instance) \
+         VALUES ($1, $2, 'assistant', $3, false, $4, $5, $6)",
+        message_id,
+        session_id,
+        &encrypted_content,
+        now,
+        MessageStatus::InProgress.as_str(),
+        owner_instance
+    )
+    .map_err(|e| {
+        kyomi_core::Error::Internal(format!("failed to insert assistant placeholder: {e}"))
+    })?;
+    Ok(())
+}
+
+/// Finalize a pre-inserted assistant placeholder row with the agent's real
+/// first-class message fields (KYO-493).
+///
+/// Used only by `kyomi_agent::adapter::ChatAgentAdapter::persist_after_chat`,
+/// when it reaches the message tagged with an
+/// `AssistantMessagePersistence::CallerPreInserted` id — UPDATEs the row
+/// [`prepare_chat_dispatch`] pre-inserted instead of INSERTing a second row
+/// under the same primary key (the exact collision KYO-572 fixed for
+/// copilot, which is why copilot's placeholder-less path must never reach
+/// this function — see that type's doc).
+///
+/// Moves `created_at` beyond the tool rows already persisted for this turn,
+/// so the next `get_agent_messages` load sees tool calls/results before the
+/// final answer. Deliberately does not touch `status`: `kyomi_agent::execution::execute_agent_chat`
+/// is the single place that knows the turn's true terminal outcome
+/// (complete / error / cancelled, via `classify_agent_failure`) and
+/// finalizes `status` itself — through [`update_message`] — after this call
+/// returns. Returns whether a row was actually updated, mirroring
+/// [`update_message`]'s return contract.
+pub async fn finalize_assistant_placeholder(
+    db: &DbPool,
+    encryption_key: &[u8; 32],
+    message_id: &str,
+    content: &str,
+    tool_call_id: Option<&str>,
+    tool_name: Option<&str>,
+    tool_calls: Option<&serde_json::Value>,
+) -> kyomi_core::Result<bool> {
+    let encrypted_content = encryption::encrypt(content, encryption_key)?;
+    macro_rules! finalize_in_transaction {
+        ($pool:expr) => {{
+            let mut tx = $pool.begin().await?;
+            let created_at = next_terminal_created_at!(tx, message_id);
+            let rows = sqlx::query(
+                "UPDATE chat_messages SET content = $2, tool_call_id = $3, tool_name = $4, \
+                 tool_calls = $5, created_at = CASE WHEN status = 'in_progress' \
+                 THEN $6 ELSE created_at END WHERE message_id = $1",
+            )
+            .bind(message_id)
+            .bind(&encrypted_content)
+            .bind(tool_call_id)
+            .bind(tool_name)
+            .bind(tool_calls)
+            .bind(created_at)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+            tx.commit().await?;
+            Ok::<u64, sqlx::Error>(rows)
+        }};
+    }
+    let rows_affected = match db {
+        DbPool::Postgres(pool) => finalize_in_transaction!(pool),
+        DbPool::Sqlite(pool) => finalize_in_transaction!(pool),
+    }
+    .map_err(|e| {
+        kyomi_core::Error::Internal(format!("failed to finalize assistant placeholder: {e}"))
+    })?;
+    Ok(rows_affected > 0)
 }
 
 // ---------------------------------------------------------------------------
@@ -2249,19 +2647,25 @@ pub async fn save_agent_error(params: SaveAgentErrorParams<'_>) {
         "error": error,
     });
 
-    // Try update first (persist may have already saved the placeholder).
+    // Try update first — as of KYO-493, `prepare_chat_dispatch`'s AI path
+    // always pre-inserts this row (status='in_progress'), so this is the
+    // normal case for a pre-loop failure: finalize the placeholder with the
+    // error text and status='error' instead of leaving it stuck in_progress.
     let updated = update_message(
         db,
         encryption_key,
         assistant_message_id,
         Some(&error_text),
         Some(&error_metadata),
+        Some(MessageStatus::Error),
     )
     .await
     .unwrap_or(false);
 
     // If no placeholder existed, insert a new message so the user sees the
-    // error in the conversation.
+    // error in the conversation. status=Error at INSERT time (KYO-493 code
+    // review) — not INSERT-then-UPDATE — so there is no window where this
+    // row reads as the 'complete' default despite holding error content.
     if !updated
         && let Err(e) = add_message(
             db,
@@ -2277,6 +2681,7 @@ pub async fn save_agent_error(params: SaveAgentErrorParams<'_>) {
             None,
             None,
             None,
+            MessageStatus::Error,
         )
         .await
     {
@@ -2350,7 +2755,8 @@ pub async fn update_message_content_owned(
     }
 
     // Update and re-encrypt.
-    let updated = update_message(db, encryption_key, message_id, Some(content), None).await?;
+    let updated =
+        update_message(db, encryption_key, message_id, Some(content), None, None).await?;
     if !updated {
         return Err(kyomi_core::Error::Internal("Message not found".to_string()));
     }
@@ -2955,6 +3361,7 @@ mod tests {
             message_source: Some("web"),
             skip_ai: false,
             client_msg_id: None,
+            owner_instance: "test-instance",
         })
         .await
         .expect("prepare_chat_dispatch should succeed for the AI path");
@@ -2967,26 +3374,112 @@ mod tests {
             .await
             .expect("get_session_messages should succeed");
 
+        // KYO-493: the AI path now also pre-inserts an assistant
+        // placeholder alongside the user message (see
+        // prepare_chat_dispatch_ready_preinserts_in_progress_assistant_placeholder
+        // below) — filter to the user row this test is actually about, so
+        // that addition doesn't weaken the guarantee this test predates.
+        let user_messages: Vec<_> =
+            messages.iter().filter(|m| m.message_type == "user").collect();
+
         assert_eq!(
-            messages.len(),
+            user_messages.len(),
             1,
             "the user's message must be durable the instant prepare_chat_dispatch \
              returns Ready, before the agent loop is even spawned — not deferred to \
              ChatAgentAdapter::persist_after_chat, which only runs after the whole \
              agent loop finishes"
         );
-        assert_eq!(messages[0].message_type, "user");
         assert_eq!(
-            messages[0].message_id, user_message_id,
+            user_messages[0].message_id, user_message_id,
             "the stored row must carry the same id returned in the Ready outcome, \
              so the persisted id matches the id streamed to the client"
         );
         assert_eq!(
-            messages[0].content, "what was Q4 revenue",
+            user_messages[0].content, "what was Q4 revenue",
             "the stored content must be the raw message the user sent, not the \
              metadata-prefixed form agent.chat() builds for the LLM via \
              build_metadata_prefix"
         );
+    }
+
+    // ── KYO-493: assistant placeholder pre-inserted at dispatch ────────────
+    //
+    // Failure scenario from the ticket: re-enter a chat that is mid-response
+    // and there is nothing durable for it — not even an empty row — until
+    // the agent loop finishes. This test reproduces the exact reproduction
+    // steps: dispatch a turn, then (before any agent code runs — this
+    // function returns before the agent is even spawned) read the
+    // session's state back and assert an assistant row already exists.
+    //
+    // On unfixed code this fails: `get_message_status` returns `None` for
+    // `assistant_message_id` (no row exists yet), and `get_session_messages`
+    // returns only the one user row.
+
+    #[tokio::test]
+    async fn prepare_chat_dispatch_ready_preinserts_in_progress_assistant_placeholder() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        let key = test_key();
+        seed_user(sq, "user-a", "user-a@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+
+        let client_sid = uuid::Uuid::new_v4().to_string();
+        let outcome = prepare_chat_dispatch(ChatDispatchParams {
+            db: &db,
+            encryption_key: &key,
+            ws_manager: None,
+            user_id: "user-a",
+            workspace_id: "ws-1",
+            user_display_name: "User A",
+            session_id: &client_sid,
+            is_new_session: true,
+            message: "what was Q4 revenue",
+            current_time_user_tz: None,
+            message_source: Some("web"),
+            skip_ai: false,
+            client_msg_id: None,
+            owner_instance: "kyomi-api-7f8b9-x2k4p",
+        })
+        .await
+        .expect("prepare_chat_dispatch should succeed for the AI path");
+
+        let ChatDispatchOutcome::Ready { assistant_message_id, .. } = outcome else {
+            panic!("skip_ai=false must return Ready");
+        };
+
+        let status = get_message_status(&db, &assistant_message_id)
+            .await
+            .expect("get_message_status should succeed")
+            .expect(
+                "an assistant row for the dispatched assistant_message_id must exist \
+                 before the agent is even spawned",
+            );
+        assert_eq!(
+            status.0,
+            MessageStatus::InProgress,
+            "the pre-inserted placeholder must be status=in_progress, not the \
+             complete-by-default the migration gives every other row"
+        );
+        assert_eq!(
+            status.1.as_deref(),
+            Some("kyomi-api-7f8b9-x2k4p"),
+            "owner_instance must record the process that dispatched this turn"
+        );
+
+        // Also visible through the normal read path — get_session_messages
+        // does not filter out an empty-content assistant row the way
+        // get_agent_messages does (that filter exists precisely so this
+        // placeholder is never fed back into the LLM's context).
+        let messages = get_session_messages(&db, &key, &client_sid, 100)
+            .await
+            .expect("get_session_messages should succeed");
+        let assistant_row = messages
+            .iter()
+            .find(|m| m.message_id == assistant_message_id)
+            .expect("the placeholder row must be readable through get_session_messages too");
+        assert_eq!(assistant_row.message_type, "assistant");
+        assert_eq!(assistant_row.content, "", "the placeholder starts with no content");
     }
 
     #[tokio::test]
@@ -3014,6 +3507,7 @@ mod tests {
             message_source: Some("web"),
             skip_ai: true,
             client_msg_id: None,
+            owner_instance: "test-instance",
         })
         .await
         .expect("prepare_chat_dispatch should succeed for the skip_ai path");
@@ -3059,6 +3553,7 @@ mod tests {
             message_source: Some("web"),
             skip_ai: true,
             client_msg_id: None,
+            owner_instance: "test-instance",
         })
         .await
         .expect("prepare_chat_dispatch should succeed for a fresh client id");
@@ -3100,6 +3595,7 @@ mod tests {
             message_source: Some("web"),
             skip_ai: true,
             client_msg_id: None,
+            owner_instance: "test-instance",
         })
         .await;
 
@@ -3139,6 +3635,7 @@ mod tests {
             message_source: Some("web"),
             skip_ai: true,
             client_msg_id: None,
+            owner_instance: "test-instance",
         })
         .await;
 
@@ -4857,5 +5354,464 @@ mod tests {
              assistant_message_id ({assistant_message_id}); captured: {:?}",
             logs.events()
         );
+    }
+
+    // KYO-493: the pre-loop `Err` path (`execute_agent_chat` fails before
+    // the agent loop even starts — e.g. resolving workspace AI config) goes
+    // through `save_agent_error` directly, never through
+    // `execute_agent_chat`'s own step-15 finalization. Since
+    // `prepare_chat_dispatch`'s AI path now always pre-inserts the
+    // placeholder, `save_agent_error`'s "try update first" branch is the
+    // normal case in production — this pins that it actually finalizes the
+    // placeholder with status='error', not just content.
+    #[tokio::test]
+    async fn save_agent_error_finalizes_a_preinserted_placeholder_with_error_status() {
+        let db = test_pool().await;
+        let key = test_key();
+        let sq = sqlite_pool(&db);
+        seed_user(sq, "user-a", "user-a@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+        seed_chat_session(sq, SeedSession::new("sess-1", "user-a", "ws-1", "Test")).await;
+
+        let assistant_message_id = "msg-placeholder-1";
+        insert_in_progress_assistant_placeholder(
+            &db,
+            &key,
+            "sess-1",
+            assistant_message_id,
+            "kyomi-api-abc123",
+        )
+        .await
+        .expect("seed the placeholder exactly as prepare_chat_dispatch does");
+
+        let manager = crate::websocket::WebSocketManager::new(None, db.clone());
+        save_agent_error(SaveAgentErrorParams {
+            db: &db,
+            encryption_key: &key,
+            ws_manager: &manager,
+            session_id: "sess-1",
+            user_id: "user-a",
+            assistant_message_id,
+            context_type: "chat",
+            error: "workspace AI config could not be loaded",
+        })
+        .await;
+
+        let (status, _owner) = get_message_status(&db, assistant_message_id)
+            .await
+            .expect("get_message_status should succeed")
+            .expect("the placeholder row must still exist");
+        assert_eq!(
+            status,
+            MessageStatus::Error,
+            "a pre-loop failure must finalize the placeholder as status=error, not \
+             leave it stuck in_progress"
+        );
+
+        let messages = get_session_messages(&db, &key, "sess-1", 100)
+            .await
+            .expect("get_session_messages should succeed");
+        assert_eq!(
+            messages.len(),
+            1,
+            "the UPDATE must not have produced a second row alongside the placeholder"
+        );
+        assert!(
+            messages[0].content.contains("workspace AI config could not be loaded"),
+            "the error text must be persisted into the placeholder's content; got {:?}",
+            messages[0].content
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_placeholder_follows_tool_history_on_the_next_turn() {
+        let db = test_pool().await;
+        let key = test_key();
+        let sq = sqlite_pool(&db);
+        seed_user(sq, "history-user", "history-user@test.local").await;
+        seed_workspace(sq, "history-ws", "history-user").await;
+
+        for (case, terminal_status) in [
+            ("complete", MessageStatus::Complete),
+            ("error", MessageStatus::Error),
+            ("cancelled", MessageStatus::Cancelled),
+        ] {
+            let session_id = format!("history-{case}");
+            let user_id = format!("user-{case}");
+            let placeholder_id = format!("final-{case}");
+            let tool_call_id = format!("call-{case}");
+            let tool_assistant_id = format!("tool-assistant-{case}");
+            let tool_result_id = format!("tool-result-{case}");
+            let next_user_id = format!("next-user-{case}");
+            seed_chat_session(
+                sq, SeedSession::new(&session_id, "history-user", "history-ws", "History"),
+            ).await;
+            add_message(
+                &db, &key, &session_id, "user", "first question", None, Some(&user_id),
+                None, None, Some("history-user"), None, None, None, MessageStatus::Complete,
+            ).await.expect("first user turn");
+            insert_in_progress_assistant_placeholder(
+                &db, &key, &session_id, &placeholder_id, "dev:3000",
+            ).await.expect("dispatch placeholder");
+            let calls = serde_json::json!([{"id": tool_call_id, "name": "lookup"}]);
+            add_message(
+                &db, &key, &session_id, "assistant", "", None,
+                Some(&tool_assistant_id), None, None, None, None, None,
+                Some(&calls), MessageStatus::Complete,
+            ).await.expect("tool-call assistant row");
+            add_message(
+                &db, &key, &session_id, "tool", "tool result", None,
+                Some(&tool_result_id), None, None, None, Some(&tool_call_id),
+                Some("lookup"), None, MessageStatus::Complete,
+            ).await.expect("tool result row");
+
+            // Force a timestamp later than wall-clock time, with a tool-row
+            // tie. This proves finalization uses the DB's latest row rather
+            // than merely Utc::now(), and the query has a stable tie-break.
+            let tool_time = Utc::now() + chrono::Duration::seconds(2);
+            for id in [&tool_assistant_id, &tool_result_id] {
+                sqlx::query("UPDATE chat_messages SET created_at = $1 WHERE message_id = $2")
+                    .bind(tool_time)
+                    .bind(id)
+                    .execute(sq)
+                    .await
+                    .expect("set tied tool timestamp");
+            }
+            let final_content = format!("{case} answer");
+            if terminal_status == MessageStatus::Complete {
+                finalize_assistant_placeholder(
+                    &db, &key, &placeholder_id, &final_content, None, None, None,
+                ).await.expect("persist final answer");
+                let visible_time: chrono::DateTime<Utc> = sqlx::query_scalar(
+                    "SELECT created_at FROM chat_messages WHERE message_id = $1",
+                ).bind(&placeholder_id).fetch_one(sq).await.expect("visible answer timestamp");
+                assert!(visible_time > tool_time, "visible final content must already follow tools");
+            }
+            update_message(
+                &db, &key, &placeholder_id,
+                (terminal_status != MessageStatus::Complete).then_some(final_content.as_str()),
+                None, Some(terminal_status),
+            ).await.expect("terminal status");
+
+            let final_time: chrono::DateTime<Utc> = sqlx::query_scalar(
+                "SELECT created_at FROM chat_messages WHERE message_id = $1",
+            ).bind(&placeholder_id).fetch_one(sq).await.expect("final timestamp");
+            assert!(final_time > tool_time, "{case} final row must follow tool rows");
+            update_message(&db, &key, &placeholder_id, None, None, Some(terminal_status))
+                .await.expect("repeat terminal status");
+            let repeated_time: chrono::DateTime<Utc> = sqlx::query_scalar(
+                "SELECT created_at FROM chat_messages WHERE message_id = $1",
+            ).bind(&placeholder_id).fetch_one(sq).await.expect("repeated timestamp");
+            assert_eq!(repeated_time, final_time, "repeat status cannot reorder history");
+            add_message(
+                &db, &key, &session_id, "user", "next question", None,
+                Some(&next_user_id), None, None, Some("history-user"), None,
+                None, None, MessageStatus::Complete,
+            ).await.expect("next user turn");
+            sqlx::query("UPDATE chat_messages SET created_at = $1 WHERE message_id = $2")
+                .bind(final_time + chrono::Duration::microseconds(1))
+                .bind(&next_user_id)
+                .execute(sq)
+                .await
+                .expect("place next turn after answer");
+
+            let expected = vec![
+                user_id.clone(), tool_assistant_id.clone(), tool_result_id.clone(),
+                placeholder_id.clone(), next_user_id.clone(),
+            ];
+            let history = get_agent_messages(&db, &key, &session_id, None)
+                .await.expect("next-turn history");
+            assert_eq!(history.iter().map(|m| m.message_id.clone()).collect::<Vec<_>>(), expected);
+            assert_eq!(history[1].role, "assistant");
+            assert!(history[1].tool_calls.is_some());
+            assert_eq!(history[2].role, "tool");
+            assert_eq!(history[2].tool_call_id.as_deref(), Some(tool_call_id.as_str()));
+            assert_eq!(history[3].content, final_content);
+            let after_first = get_agent_messages(&db, &key, &session_id, Some(&user_id))
+                .await.expect("history after first user turn");
+            assert_eq!(
+                after_first.iter().map(|m| m.message_id.clone()).collect::<Vec<_>>(),
+                expected[1..],
+            );
+        }
+    }
+
+    // -- Contract: KYO-493 Phase 4 stuck-row sweep --------------------------
+    //
+    // `sweep_interrupted_rows` is the only writer of
+    // `MessageStatus::Interrupted`. Its two clauses answer "which
+    // in_progress rows can no longer be live?": this instance's own rows
+    // (its previous incarnation died mid-turn, or it is shutting down on
+    // them) and any row past the hard-timeout age bound. The first test
+    // pins the boundary the migration comment calls out explicitly — one
+    // local instance's sweep must never interrupt another local instance's
+    // live runs — as a named assertion, not a side effect of a count.
+
+    #[tokio::test]
+    async fn sweep_interrupts_this_instances_own_rows_and_leaves_other_instances_live_runs_alone() {
+        let db = test_pool().await;
+        let key = test_key();
+        let sq = sqlite_pool(&db);
+        seed_user(sq, "user-a", "user-a@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+        seed_chat_session(sq, SeedSession::new("sess-1", "user-a", "ws-1", "Test")).await;
+
+        // A previous incarnation of this instance (`dev:3000`) died mid-turn.
+        insert_in_progress_assistant_placeholder(&db, &key, "sess-1", "msg-own", "dev:3000")
+            .await
+            .expect("seed this instance's stranded placeholder");
+        // Two live runs on the same host under different identities: a
+        // worktree verifier server on another port, and the desktop app in
+        // personal mode. Neither may be swept by `dev:3000`'s startup or
+        // shutdown sweep — their runs are still going.
+        insert_in_progress_assistant_placeholder(&db, &key, "sess-1", "msg-other-port", "dev:3100")
+            .await
+            .expect("seed another server instance's placeholder");
+        insert_in_progress_assistant_placeholder(&db, &key, "sess-1", "msg-desktop", "desktop")
+            .await
+            .expect("seed the desktop instance's placeholder");
+
+        let swept = sweep_interrupted_rows(&db, "dev:3000", IN_PROGRESS_HARD_TIMEOUT)
+            .await
+            .expect("sweep should succeed");
+        assert_eq!(
+            swept, 1,
+            "only the row this instance owns may be swept by identity; the age bound must not fire on rows younger than the hard timeout"
+        );
+
+        let (status, owner) = get_message_status(&db, "msg-own")
+            .await
+            .expect("read should succeed")
+            .expect("the row must still exist");
+        assert_eq!(
+            status,
+            MessageStatus::Interrupted,
+            "a row owned by a dead incarnation of this instance must be reclassified"
+        );
+        assert_eq!(
+            owner.as_deref(),
+            Some("dev:3000"),
+            "the sweep reclassifies a row; it must not erase who owned it"
+        );
+
+        for other in ["msg-other-port", "msg-desktop"] {
+            let (status, _) = get_message_status(&db, other)
+                .await
+                .expect("read should succeed")
+                .expect("the row must still exist");
+            assert_eq!(
+                status,
+                MessageStatus::InProgress,
+                "{other} is another local instance's live run and must survive this instance's sweep untouched"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn sweep_interrupts_in_progress_rows_past_the_hard_timeout_whatever_owner() {
+        let db = test_pool().await;
+        let key = test_key();
+        let sq = sqlite_pool(&db);
+        seed_user(sq, "user-a", "user-a@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+        seed_chat_session(sq, SeedSession::new("sess-1", "user-a", "ws-1", "Test")).await;
+
+        // Two stranded rows past the age bound: one from another instance
+        // that will never restart (so no startup sweep will ever claim it),
+        // one with no recorded owner at all. Plus one live young row.
+        insert_in_progress_assistant_placeholder(&db, &key, "sess-1", "msg-stuck-other", "dev:3100")
+            .await
+            .expect("seed the stranded row");
+        insert_in_progress_assistant_placeholder(&db, &key, "sess-1", "msg-stuck-no-owner", "desktop")
+            .await
+            .expect("seed the ownerless row");
+        insert_in_progress_assistant_placeholder(&db, &key, "sess-1", "msg-live-other", "dev:3100")
+            .await
+            .expect("seed the live row");
+
+        let two_hours_ago = chrono::Utc::now() - chrono::TimeDelta::hours(2);
+        kyomi_core::db_execute!(
+            &db,
+            "UPDATE chat_messages SET created_at = $1 WHERE message_id = $2",
+            two_hours_ago,
+            "msg-stuck-other"
+        )
+        .expect("backdate the stranded row");
+        kyomi_core::db_execute!(
+            &db,
+            "UPDATE chat_messages SET created_at = $1, owner_instance = NULL \
+             WHERE message_id = $2",
+            two_hours_ago,
+            "msg-stuck-no-owner"
+        )
+        .expect("backdate the ownerless row and drop its owner");
+
+        let swept = sweep_interrupted_rows(&db, "dev:3000", IN_PROGRESS_HARD_TIMEOUT)
+            .await
+            .expect("sweep should succeed");
+        assert_eq!(
+            swept, 2,
+            "age is the only remaining evidence for a row whose owner never returned, so the hard-timeout clause must sweep it"
+        );
+
+        for stale in ["msg-stuck-other", "msg-stuck-no-owner"] {
+            let (status, _) = get_message_status(&db, stale)
+                .await
+                .expect("read should succeed")
+                .expect("the row must still exist");
+            assert_eq!(
+                status,
+                MessageStatus::Interrupted,
+                "{stale} is past the hard-timeout age bound and must be interrupted"
+            );
+        }
+        let (status, _) = get_message_status(&db, "msg-live-other")
+            .await
+            .expect("read should succeed")
+            .expect("the row must still exist");
+        assert_eq!(
+            status,
+            MessageStatus::InProgress,
+            "a young row owned by another instance may still be mid-run and must not be swept"
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_never_rewrites_rows_already_in_a_terminal_status() {
+        let db = test_pool().await;
+        let key = test_key();
+        let sq = sqlite_pool(&db);
+        seed_user(sq, "user-a", "user-a@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+        seed_chat_session(sq, SeedSession::new("sess-1", "user-a", "ws-1", "Test")).await;
+
+        let terminal = [
+            ("msg-complete", MessageStatus::Complete),
+            ("msg-error", MessageStatus::Error),
+            ("msg-cancelled", MessageStatus::Cancelled),
+            ("msg-interrupted", MessageStatus::Interrupted),
+        ];
+        for (msg_id, status) in terminal {
+            insert_in_progress_assistant_placeholder(&db, &key, "sess-1", msg_id, "dev:3000")
+                .await
+                .expect("seed the placeholder");
+            kyomi_core::db_execute!(
+                &db,
+                "UPDATE chat_messages SET created_at = $1, status = $2 WHERE message_id = $3",
+                chrono::Utc::now() - chrono::TimeDelta::hours(2),
+                status.as_str(),
+                msg_id
+            )
+            .expect("finalize and backdate the row");
+        }
+
+        // Both clauses fire on this fixture's age and owner; the status
+        // filter is the only thing protecting these rows.
+        let swept = sweep_interrupted_rows(&db, "dev:3000", IN_PROGRESS_HARD_TIMEOUT)
+            .await
+            .expect("sweep should succeed");
+        assert_eq!(
+            swept, 0,
+            "a finished row is history — neither clause may rewrite its status"
+        );
+        for (msg_id, expected) in terminal {
+            let (status, _) = get_message_status(&db, msg_id)
+                .await
+                .expect("read should succeed")
+                .expect("the row must still exist");
+            assert_eq!(status, expected, "{msg_id} must keep its terminal status");
+        }
+    }
+
+    // KYO-493: `get_session_messages` used to hand the UI a hardcoded
+    // "completed" — a string that matches no `status` CHECK value — for
+    // every row. The interrupted affordance keys off the real column, so
+    // the read path must report what each row actually holds: the
+    // placeholder while its turn is still running, and the same row after
+    // the stuck-row sweep has reclassified it.
+    #[tokio::test]
+    async fn get_session_messages_reports_each_rows_real_status() {
+        let db = test_pool().await;
+        let key = test_key();
+        let sq = sqlite_pool(&db);
+        seed_user(sq, "user-a", "user-a@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+        seed_chat_session(sq, SeedSession::new("sess-1", "user-a", "ws-1", "Test")).await;
+
+        add_message(
+            &db,
+            &key,
+            "sess-1",
+            "user",
+            "hello",
+            None,
+            Some("msg-user"),
+            None,
+            None,
+            Some("user-a"),
+            None,
+            None,
+            None,
+            MessageStatus::Complete,
+        )
+        .await
+        .expect("seed the user row");
+        insert_in_progress_assistant_placeholder(&db, &key, "sess-1", "msg-streaming", "dev:3000")
+            .await
+            .expect("seed the in-flight placeholder");
+        add_message(
+            &db,
+            &key,
+            "sess-1",
+            "assistant",
+            "a finished answer",
+            None,
+            Some("msg-done"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            MessageStatus::Complete,
+        )
+        .await
+        .expect("seed the finished assistant row");
+
+        let status_of = |messages: &[MessageItem], id: &str| {
+            messages
+                .iter()
+                .find(|m| m.message_id == id)
+                .unwrap_or_else(|| panic!("{id} must be listed"))
+                .status
+                .clone()
+        };
+
+        let before = get_session_messages(&db, &key, "sess-1", 100)
+            .await
+            .expect("get_session_messages should succeed");
+        assert_eq!(status_of(&before, "msg-user"), MessageStatus::Complete.as_str());
+        assert_eq!(
+            status_of(&before, "msg-streaming"),
+            MessageStatus::InProgress.as_str(),
+            "a mid-run placeholder must load back as in_progress, not as some hardcoded terminal value"
+        );
+        assert_eq!(status_of(&before, "msg-done"), MessageStatus::Complete.as_str());
+
+        let swept = sweep_interrupted_rows(&db, "dev:3000", IN_PROGRESS_HARD_TIMEOUT)
+            .await
+            .expect("sweep should succeed");
+        assert_eq!(swept, 1, "only the placeholder is stranded");
+
+        let after = get_session_messages(&db, &key, "sess-1", 100)
+            .await
+            .expect("get_session_messages should succeed");
+        assert_eq!(
+            status_of(&after, "msg-streaming"),
+            MessageStatus::Interrupted.as_str(),
+            "the sweep's reclassification must be what the UI reads back — that is the entire signal the interrupted affordance has"
+        );
+        assert_eq!(status_of(&after, "msg-user"), MessageStatus::Complete.as_str());
+        assert_eq!(status_of(&after, "msg-done"), MessageStatus::Complete.as_str());
     }
 }

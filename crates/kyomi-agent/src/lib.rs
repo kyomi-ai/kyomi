@@ -53,7 +53,7 @@ pub mod types;
 pub mod watch_execution;
 pub mod web_push;
 
-pub use adapter::{ChatAgentAdapter, UserMessagePersistence};
+pub use adapter::{AssistantMessagePersistence, ChatAgentAdapter, UserMessagePersistence};
 pub use agent::{AgentCallbacks, AgentConfig, AgentState, CustomAgent};
 pub use anthropic::{AnthropicClient, AUDIT_MODEL, DEFAULT_MODEL};
 pub use execution::{

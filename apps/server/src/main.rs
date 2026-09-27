@@ -369,6 +369,18 @@ async fn serve() {
         platforms: platforms.clone(),
     };
 
+    // KYO-493: resolved once, here at startup, so a misconfigured HOSTNAME
+    // fails the server at boot instead of panicking on a user's first chat
+    // message. `config_arc.port` is the same `PORT` this process is
+    // actually listening on — see `resolve_process_instance`'s doc for why
+    // that (not HOSTNAME alone) is the identity, and why it must not be
+    // read from `PORT` a second time here.
+    let process_instance = kyomi_core::resolve_process_instance(
+        &config_arc,
+        std::env::var("HOSTNAME").ok().as_deref(),
+        config_arc.port,
+    );
+
     let state = kyomi_server::state::AppState {
         db: db.clone(),
         kv: kv.clone(),
@@ -385,6 +397,7 @@ async fn serve() {
         connect_registry,
         platforms,
         schema_drift: schema_drift.clone(),
+        process_instance: process_instance.clone(),
     };
 
     // Shared cancellation token for graceful shutdown of all background tasks
@@ -407,7 +420,7 @@ async fn serve() {
         // Watch scheduler — polls for due watches every 30s
         let scheduler = Arc::new(kyomi_agent::WatchScheduler::new(
             kyomi_agent::WatchSchedulerDeps {
-                db,
+                db: db.clone(),
                 kv: kv.clone(),
                 encryption_key: encryption_key_arc,
                 embedding,
@@ -681,6 +694,29 @@ async fn serve() {
 
     tracing::info!("Kyomi Rust backend listening on port {port}");
 
+    // KYO-493 Phase 4: startup sweep — reclassify `in_progress` chat rows
+    // this instance's previous incarnation left behind (it died mid-turn)
+    // as `interrupted`, plus any row past the hard-timeout age bound. See
+    // `kyomi_auth::chat_service::sweep_interrupted_rows` for the two
+    // clauses and why the identity boundary keeps this from touching
+    // another local instance's live runs. Best-effort by design: a sweep
+    // failure must not keep the server from serving — the next boot or the
+    // age bound catches whatever was missed.
+    match kyomi_auth::chat_service::sweep_interrupted_rows(
+        &db,
+        &process_instance,
+        kyomi_auth::chat_service::IN_PROGRESS_HARD_TIMEOUT,
+    )
+    .await
+    {
+        Ok(n) if n > 0 => tracing::info!(
+            count = n,
+            "startup sweep: marked stranded in_progress chat rows as interrupted"
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("startup sweep of in_progress chat rows failed: {e}"),
+    }
+
     // Run server with graceful shutdown on SIGTERM/SIGINT
     let shutdown_signal = async {
         let ctrl_c = tokio::signal::ctrl_c();
@@ -712,6 +748,29 @@ async fn serve() {
     // Wait for the watch scheduler to drain active executions
     if let Some(scheduler) = watch_scheduler {
         scheduler.shutdown().await;
+    }
+
+    // KYO-493 Phase 4: graceful-shutdown sweep — runs still `in_progress`
+    // here are about to lose their process, so their rows become
+    // `interrupted` now instead of waiting for this instance's next boot.
+    // A detached run that still lands its final write after this sweep
+    // simply overwrites the status with its true terminal state
+    // (`update_message` writes status unconditionally). Rows that already
+    // carry a terminal status are untouched — the sweep only moves rows
+    // still `in_progress`.
+    match kyomi_auth::chat_service::sweep_interrupted_rows(
+        &db,
+        &process_instance,
+        kyomi_auth::chat_service::IN_PROGRESS_HARD_TIMEOUT,
+    )
+    .await
+    {
+        Ok(n) if n > 0 => tracing::info!(
+            count = n,
+            "shutdown sweep: marked this instance's unfinished chat rows as interrupted"
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("shutdown sweep of in_progress chat rows failed: {e}"),
     }
 
     tracing::info!("Kyomi Rust backend shutdown complete");

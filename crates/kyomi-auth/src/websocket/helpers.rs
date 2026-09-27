@@ -20,10 +20,12 @@ pub async fn send_chat_stream(
     session_id: &str,
     message_id: &str,
     content: &str,
+    content_offset: usize,
     context_type: Option<&str>,
 ) {
     let mut data = serde_json::json!({
         "content": content,
+        "content_offset": content_offset,
     });
     if let Some(ct) = context_type {
         data["context_type"] = serde_json::Value::String(ct.to_string());

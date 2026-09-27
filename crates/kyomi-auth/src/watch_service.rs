@@ -2176,6 +2176,7 @@ pub async fn create_chat_session_from_alert(
         None,
         None,
         None,
+        chat_service::MessageStatus::Complete,
     )
     .await?;
 
@@ -2198,6 +2199,7 @@ pub async fn create_chat_session_from_alert(
         None, // tool_call_id
         None, // tool_name
         None, // tool_calls
+        chat_service::MessageStatus::Complete,
     )
     .await?;
 

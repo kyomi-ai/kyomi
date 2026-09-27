@@ -29,7 +29,7 @@ use leptos::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use super::websocket_client::WebSocketContext;
 use super::{ChatStateMachine, ThinkingManager};
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(test, target_arch = "wasm32"))]
 use super::ChatState;
 use crate::server_fns::chat::ChatMessageItem;
 use crate::server_fns::copilot::{
@@ -438,6 +438,7 @@ impl ChatEngine {
                 content: content.to_string(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
                 pinned: false,
+                status: "complete".to_string(),
                 sent_by: None,
                 thinking_events: Vec::new(),
                 token_usage: None,
@@ -697,6 +698,114 @@ fn error_event_message(data: Option<&serde_json::Value>) -> String {
         .to_string()
 }
 
+/// The server sends the entire final answer under `full_content`, not `content`.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn completion_content(data: Option<&serde_json::Value>) -> Option<&str> {
+    data.and_then(|d| d.get("full_content")).and_then(|v| v.as_str())
+}
+
+/// Place a chunk at its absolute byte offset in the final answer. A DB
+/// snapshot may already include it, or earlier WS frames may have been missed.
+/// A gap must wait for the full-content completion rather than fabricating
+/// an answer by joining unrelated spans.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn apply_stream_chunk(
+    msgs: &mut Vec<ChatMessageItem>,
+    message_id: &str,
+    content: &str,
+    content_offset: usize,
+    timestamp: &str,
+) -> bool {
+    if let Some(existing) = msgs.iter_mut().find(|m|
+        m.message_id == message_id && m.message_type == "assistant"
+    ) {
+        if existing.status == "complete" {
+            return false;
+        }
+        if content_offset > existing.content.len() {
+            return true;
+        }
+        let overlap = (existing.content.len() - content_offset).min(content.len());
+        if existing.content.as_bytes()[content_offset..content_offset + overlap]
+            != content.as_bytes()[..overlap]
+            || !content.is_char_boundary(overlap)
+        {
+            return false;
+        }
+        existing.content.push_str(&content[overlap..]);
+    } else {
+        msgs.push(ChatMessageItem {
+            message_id: message_id.to_string(),
+            message_type: "assistant".to_string(),
+            content: if content_offset == 0 { content.to_string() } else { String::new() },
+            timestamp: timestamp.to_string(),
+            pinned: false,
+            status: "in_progress".to_string(),
+            sent_by: None,
+            thinking_events: Vec::new(),
+            token_usage: None,
+        });
+    }
+    true
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn apply_chat_completion(
+    msgs: &mut Vec<ChatMessageItem>,
+    message_id: &str,
+    full_content: Option<&str>,
+    timestamp: &str,
+) {
+    if let Some(m) = msgs.iter_mut().find(|m|
+        m.message_id == message_id && m.message_type == "assistant"
+    ) {
+        if let Some(content) = full_content {
+            m.content = content.to_string();
+        }
+        m.status = "complete".to_string();
+    } else if let Some(content) = full_content {
+        msgs.push(ChatMessageItem {
+            message_id: message_id.to_string(),
+            message_type: "assistant".to_string(),
+            content: content.to_string(),
+            timestamp: timestamp.to_string(),
+            pinned: false,
+            status: "complete".to_string(),
+            sent_by: None,
+            thinking_events: Vec::new(),
+            token_usage: None,
+        });
+    }
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn completion_matches_active_turn(
+    state: ChatState,
+    active_message_id: Option<&str>,
+    active_session_id: Option<&str>,
+    event_message_id: &str,
+    event_session_id: Option<&str>,
+    // None: copilot has no assistant ID in its HTTP response;
+    // Some(None): main chat is still awaiting the HTTP-assigned ID.
+    required_assistant_id: Option<Option<&str>>,
+    messages: &[ChatMessageItem],
+) -> bool {
+    match state {
+        ChatState::Streaming => active_message_id == Some(event_message_id),
+        ChatState::Sending => event_session_id.is_some()
+            && active_session_id == event_session_id
+            // For the main chat, the session alone cannot identify a turn:
+            // defer zero-chunk completion until the HTTP send supplies its ID.
+            && required_assistant_id.is_none_or(|expected| expected == Some(event_message_id))
+            // A delayed duplicate for a completed turn (or an assistant
+            // preceding the latest user message) cannot finish a new send.
+            && messages.iter().position(|m|
+                m.message_type == "assistant" && m.message_id == event_message_id
+            ).is_none_or(|idx| idx == messages.len() - 1 && messages[idx].status != "complete"),
+        _ => false,
+    }
+}
+
 // ─── WebSocket subscription setup ──────────────────────────────────────────
 
 /// Reactive signals owned by the engine — passed as a unit to `setup_ws_subscriptions`
@@ -794,6 +903,7 @@ fn setup_ws_subscriptions(
                     content: String::new(),
                     timestamp: msg.timestamp.clone(),
                     pinned: false,
+                    status: "in_progress".to_string(),
                     sent_by: None,
                     thinking_events: Vec::new(),
                     token_usage: None,
@@ -803,7 +913,11 @@ fn setup_ws_subscriptions(
 
         // Transition to streaming state if still in Sending.
         if let Some(state) = chat_state_thinking.state().try_get_untracked()
-            && state == ChatState::Sending {
+            && state == ChatState::Sending
+            && (context_type.try_get_value().flatten().is_some()
+                || chat_state_thinking.expected_assistant_id().try_get_untracked().flatten()
+                    .as_deref() == Some(msg_message_id.as_str()))
+        {
                 chat_state_thinking.start_streaming(&msg_message_id);
         }
 
@@ -840,37 +954,40 @@ fn setup_ws_subscriptions(
             Some(c) if !c.is_empty() => c.to_string(),
             _ => return,
         };
+        let Some(content_offset) = msg.data.as_ref()
+            .and_then(|d| d.get("content_offset"))
+            .and_then(|v| v.as_u64())
+            .and_then(|offset| usize::try_from(offset).ok()) else {
+                return;
+            };
 
         let msg_message_id = match &msg.message_id {
             Some(m) => m.clone(),
             None => return,
         };
 
-        // State recovery: if state is Idle, force start_streaming.
-        if let Some(stream_state) = chat_state_stream.state().try_get_untracked()
-            && stream_state == ChatState::Idle {
-                chat_state_stream.start_streaming(&msg_message_id);
+        let applied = messages.try_update(|msgs| {
+            apply_stream_chunk(
+                msgs, &msg_message_id, &content, content_offset, &msg.timestamp,
+            )
+        }).unwrap_or(false);
+        if !applied {
+            return;
         }
-
-        messages.try_update(|msgs| {
-            if let Some(existing) = msgs
-                .iter_mut()
-                .find(|m| m.message_id == msg_message_id && m.message_type == "assistant")
+        if let Some(stream_state) = chat_state_stream.state().try_get_untracked() {
+            if stream_state == ChatState::Idle {
+                if let Some(sid) = msg.session_id.as_deref() {
+                    chat_state_stream.start_sending(sid);
+                }
+                chat_state_stream.start_streaming(&msg_message_id);
+            } else if stream_state == ChatState::Sending
+                && (context_type.try_get_value().flatten().is_some()
+                    || chat_state_stream.expected_assistant_id().try_get_untracked().flatten()
+                        .as_deref() == Some(msg_message_id.as_str()))
             {
-                existing.content.push_str(&content);
-            } else {
-                msgs.push(ChatMessageItem {
-                    message_id: msg_message_id,
-                    message_type: "assistant".to_string(),
-                    content,
-                    timestamp: msg.timestamp.clone(),
-                    pinned: false,
-                    sent_by: None,
-                    thinking_events: Vec::new(),
-                    token_usage: None,
-                });
+                chat_state_stream.start_streaming(&msg_message_id);
             }
-        });
+        }
     });
 
     // ── chat_complete ──────────────────────────────────────────────
@@ -904,28 +1021,28 @@ fn setup_ws_subscriptions(
             return;
         }
 
-        let full_content = msg
-            .data
-            .as_ref()
-            .and_then(|d| d.get("content"))
-            .and_then(|v| v.as_str())
-            .map(String::from);
-
-        // Update message with full content.
+        let expected = chat_state_complete.expected_assistant_id().try_get_untracked().flatten();
+        let required_id = context_type.try_get_value().flatten().is_none()
+            .then_some(expected.as_deref());
+        let should_complete = completion_matches_active_turn(
+            state,
+            chat_state_complete.active_message_id().try_get_untracked().flatten().as_deref(),
+            chat_state_complete.active_session_id().try_get_untracked().flatten().as_deref(),
+            &msg_message_id,
+            msg.session_id.as_deref(),
+            required_id,
+            &messages.get_untracked(),
+        );
+        let full_content = completion_content(msg.data.as_ref());
         messages.try_update(|msgs| {
-            for m in msgs.iter_mut() {
-                if m.message_id == msg_message_id && m.message_type == "assistant"
-                    && let Some(ref content) = full_content {
-                        m.content = content.clone();
-                    }
-            }
+            apply_chat_completion(msgs, &msg_message_id, full_content, &msg.timestamp);
         });
 
         // Complete thinking via ThinkingManager.
         thinking_for_complete.complete_thinking(&msg_message_id);
 
         // Only transition state machine if we're actually in Sending or Streaming.
-        if state == ChatState::Sending || state == ChatState::Streaming {
+        if should_complete {
             chat_state_complete.complete();
         }
     });
@@ -1086,6 +1203,103 @@ mod tests {
     //! `context_type_matches` take plain values, not signals.
 
     use super::*;
+
+    #[test]
+    fn completion_before_any_chunk_creates_terminal_message() {
+        let data = serde_json::json!({ "full_content": "entire answer" });
+        let mut msgs = Vec::new();
+        apply_chat_completion(&mut msgs, "a1", completion_content(Some(&data)), "now");
+        assert_eq!(msgs[0].content, "entire answer");
+        assert_eq!(msgs[0].status, "complete");
+        assert!(!apply_stream_chunk(&mut msgs, "a1", "entire", 0, "now"));
+        assert_eq!(msgs[0].content, "entire answer");
+        let empty = serde_json::json!({ "full_content": "" });
+        apply_chat_completion(&mut msgs, "a2", completion_content(Some(&empty)), "now");
+        assert_eq!(msgs[1].content, "");
+        assert_eq!(msgs[1].status, "complete");
+    }
+
+    #[test]
+    fn completion_replaces_partial_stream_content() {
+        let mut msgs = Vec::new();
+        assert!(apply_stream_chunk(&mut msgs, "a1", "part", 0, "now"));
+        let data = serde_json::json!({ "full_content": "partial answer" });
+        apply_chat_completion(&mut msgs, "a1", completion_content(Some(&data)), "now");
+        assert_eq!(msgs[0].content, "partial answer");
+        assert_eq!(msgs[0].status, "complete");
+    }
+
+    #[test]
+    fn stream_offset_places_repeated_chunks_after_db_prefix() {
+        let mut msgs = Vec::new();
+        apply_chat_completion(&mut msgs, "a1", Some("abc"), "now");
+        msgs[0].status = "in_progress".to_string();
+        // The first received frame repeats the DB prefix; its absolute
+        // offset proves it is new text, not a replay of earlier bytes.
+        assert!(apply_stream_chunk(&mut msgs, "a1", "abc", 3, "now"));
+        assert_eq!(msgs[0].content, "abcabc");
+        assert!(apply_stream_chunk(&mut msgs, "a1", "abc", 6, "now"));
+        assert_eq!(msgs[0].content, "abcabcabc");
+        // An older frame arriving after a newer DB snapshot cannot rewind it.
+        assert!(apply_stream_chunk(&mut msgs, "a1", "abc", 3, "now"));
+        assert_eq!(msgs[0].content, "abcabcabc");
+
+        let mut fresh = Vec::new();
+        apply_stream_chunk(&mut fresh, "a2", "ha", 0, "now");
+        apply_stream_chunk(&mut fresh, "a2", "ha", 2, "now");
+        assert_eq!(fresh[0].content, "haha");
+    }
+
+    #[test]
+    fn stream_gap_waits_for_full_completion_without_corrupting_answer() {
+        let mut msgs = Vec::new();
+        apply_chat_completion(&mut msgs, "a1", Some("abc"), "now");
+        msgs[0].status = "in_progress".to_string();
+        // A returning client missed the bytes at offsets 3..6. The later
+        // frame is retained only as progress state; it cannot be appended.
+        assert!(apply_stream_chunk(&mut msgs, "a1", "ghi", 6, "now"));
+        assert_eq!(msgs[0].content, "abc");
+        apply_chat_completion(&mut msgs, "a1", Some("abcdefghi"), "now");
+        assert_eq!(msgs[0].content, "abcdefghi");
+        assert_eq!(msgs[0].status, "complete");
+    }
+
+    #[test]
+    fn stream_offset_handles_overlap_and_utf8_bytes() {
+        let mut msgs = Vec::new();
+        apply_chat_completion(&mut msgs, "a1", Some("éab"), "now");
+        msgs[0].status = "in_progress".to_string();
+        assert!(apply_stream_chunk(&mut msgs, "a1", "abc", 2, "now"));
+        assert_eq!(msgs[0].content, "éabc");
+    }
+
+    #[test]
+    fn sending_requires_exact_assistant_id_even_when_the_row_is_absent() {
+        let mut msgs = Vec::new();
+        let accepts = |expected: Option<&str>, id: &str, rows: &[ChatMessageItem]| {
+            completion_matches_active_turn(
+                ChatState::Sending, None, Some("s1"), id, Some("s1"), Some(expected), rows,
+            )
+        };
+        // A may be another members turn. Before HTTP resolves, neither A
+        // nor the actual zero-chunk B can finish our send.
+        assert!(!accepts(None, "a", &msgs));
+        assert!(!accepts(None, "b", &msgs));
+        apply_chat_completion(&mut msgs, "b", Some(""), "now");
+        assert!(!accepts(None, "b", &msgs));
+        // The page reconciles this terminal B row when HTTP identifies B.
+        assert!(!accepts(Some("b"), "a", &msgs));
+        assert!(accepts(Some("b"), "b", &[]));
+        assert!(!completion_matches_active_turn(
+            ChatState::Sending, None, Some("s1"), "b", Some("s2"), Some(Some("b")), &[],
+        ));
+        assert!(completion_matches_active_turn(
+            ChatState::Streaming, Some("b"), Some("s1"), "b", Some("s1"), Some(Some("b")), &[],
+        ));
+        assert!(!completion_matches_active_turn(
+            ChatState::Streaming, Some("a"), Some("s1"), "b", Some("s1"), Some(Some("b")), &[],
+        ));
+    }
 
     // ── should_handle: default-deny on missing identity ─────────────────
 
