@@ -160,7 +160,8 @@ impl AgentTool for ForecastDataTool {
 
         let result = provider
             .execute_query(sql, Some(FORECAST_QUERY_LIMIT), None, false, None)
-            .await?;
+            .await
+            .map_err(super::query_utils::sanitize_query_transport_error)?;
         provider.close().await;
 
         match result.status {
@@ -168,10 +169,8 @@ impl AgentTool for ForecastDataTool {
                 let error_msg = result
                     .error
                     .unwrap_or_else(|| "Unknown query error".to_string());
-                return Ok(
-                    serde_json::json!({ "error": format!("Query failed: {error_msg}") })
-                        .to_string(),
-                );
+                tracing::warn!(raw_error = %error_msg, "Forecast datasource query error");
+                return Ok(forecast_query_error_response(&error_msg));
             }
             kyomi_datasource_server::provider::QueryStatus::Success => {}
         }
@@ -262,6 +261,11 @@ impl AgentTool for ForecastDataTool {
             )
         }
     }
+}
+
+fn forecast_query_error_response(raw_error: &str) -> String {
+    let message = kyomi_core::sanitize_error(&format!("Query failed: {raw_error}"));
+    serde_json::json!({ "error": message }).to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -589,6 +593,20 @@ fn project_timestamps(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn query_error_response_redacts_clickhouse_password() {
+        let raw_error = "ClickHouse request failed for \
+            http://clickhouse.example:8123/?database=analytics&password=secret123";
+        let output: serde_json::Value =
+            serde_json::from_str(&forecast_query_error_response(raw_error))
+                .expect("forecast query error is JSON");
+        let message = output["error"].as_str().expect("error message");
+        assert!(message.starts_with("Query failed:"));
+        assert!(message.contains("[connection details redacted]"));
+        assert!(!message.contains("secret123"));
+        assert!(!message.contains("password="));
+    }
 
     #[test]
     fn forecast_data_tool_name() {

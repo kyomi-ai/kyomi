@@ -10,6 +10,7 @@ kyomi-auth = { workspace = true }
 kyomi-types = { workspace = true }
 kyomi-datasource-server = { workspace = true }
 kyomi-datasource-drivers = { workspace = true }
+kyomi-connect-protocol = { workspace = true }
 kyomi-embed = { workspace = true }
 kyomi-knowledge = { workspace = true }
 tokio = { workspace = true }
@@ -51,7 +52,6 @@ kyomi-chart-theme = { workspace = true }
 
 [dev-dependencies]
 kyomi-core = { workspace = true, features = ["test-helpers"] }
-kyomi-connect-protocol = { workspace = true }
 tracing-subscriber = { workspace = true }
 arrow-schema = { workspace = true }
 # test-util powers `#[tokio::test(start_paused = true)]`, used by the
