@@ -408,12 +408,99 @@ pub async fn dry_run_datasource_query(
 
     let provider = create_provider_for_datasource(ctx, &ds).await?;
 
-    let result = provider.dry_run(sql).await.map_err(|e| format!("Dry-run failed: {e}"))?;
+    let driver_result = provider.dry_run(sql).await;
+    log_dry_run_issue(&driver_result);
+    let result = sanitize_dry_run_result(driver_result)?;
     provider.close().await;
 
     if result.valid {
         Ok(())
     } else {
         Err(result.message)
+    }
+}
+
+pub(super) fn log_dry_run_issue(
+    result: &kyomi_connect_protocol::Result<kyomi_datasource_server::DryRunResult>,
+) {
+    match result {
+        Ok(result) if !result.valid => {
+            tracing::warn!(
+                message = %result.message,
+                "Datasource SQL dry run validation failed"
+            );
+        }
+        Err(error) => tracing::warn!(error = %error, "Datasource SQL dry run failed"),
+        _ => {}
+    }
+}
+
+/// Preserve the existing internal-error classification while removing
+/// connection details from transport errors returned by agent query tools.
+pub(super) fn sanitize_query_transport_error(
+    error: kyomi_connect_protocol::Error,
+) -> kyomi_core::Error {
+    tracing::warn!(error = %error, "Datasource query transport failed");
+    kyomi_core::Error::Internal(kyomi_core::sanitize_error(&error.to_string()))
+}
+
+/// Sanitize both provider validation messages and transport errors before
+/// either can reach an agent tool result or its caller.
+pub(super) fn sanitize_dry_run_result(
+    result: kyomi_connect_protocol::Result<kyomi_datasource_server::DryRunResult>,
+) -> Result<kyomi_datasource_server::DryRunResult, String> {
+    match result {
+        Ok(mut result) => {
+            result.message = kyomi_core::sanitize_error(&result.message);
+            Ok(result)
+        }
+        Err(error) => Err(kyomi_core::sanitize_error(&format!(
+            "Dry-run failed: {error}"
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod dry_run_redaction_tests {
+    use super::{sanitize_dry_run_result, sanitize_query_transport_error};
+
+    const URL: &str = "http://clickhouse.example:8123/?database=analytics&password=secret123";
+
+    #[test]
+    fn sanitizes_provider_validation_message() {
+        let driver = kyomi_datasource_server::DryRunResult::failure(
+            format!("ClickHouse request failed for {URL}"),
+            Some(2),
+            Some(4),
+        );
+        let result = sanitize_dry_run_result(Ok(driver)).expect("provider returned a result");
+        assert!(!result.valid);
+        assert_eq!((result.line, result.column), (Some(2), Some(4)));
+        assert!(result.message.contains("[connection details redacted]"));
+        assert!(!result.message.contains("secret123"));
+        assert!(!result.message.contains("password="));
+    }
+
+    #[test]
+    fn sanitizes_provider_error() {
+        let error = kyomi_connect_protocol::Error::Provider(format!(
+            "ClickHouse request failed for {URL}"
+        ));
+        let message = sanitize_dry_run_result(Err(error)).expect_err("provider failed");
+        assert!(message.starts_with("Dry-run failed:"));
+        assert!(message.contains("[connection details redacted]"));
+        assert!(!message.contains("secret123"));
+        assert!(!message.contains("password="));
+    }
+
+    #[test]
+    fn sanitizes_query_transport_error() {
+        let error = kyomi_connect_protocol::Error::Provider(format!(
+            "ClickHouse request failed for {URL}"
+        ));
+        let output = sanitize_query_transport_error(error).to_string();
+        assert!(output.contains("[connection details redacted]"));
+        assert!(!output.contains("secret123"));
+        assert!(!output.contains("password="));
     }
 }
