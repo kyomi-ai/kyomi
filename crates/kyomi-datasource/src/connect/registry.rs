@@ -27,7 +27,7 @@ use dashmap::DashMap;
 use futures_util::StreamExt;
 use kyomi_core::connect_protocol::{ConnectRequest, ConnectResponse};
 use kyomi_core::RedisPool;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch, Mutex};
 use tokio::task::JoinHandle;
 
 /// Channel for routing responses back to the caller.
@@ -62,23 +62,41 @@ pub type CommandPayload = (ConnectRequest, ResponseChannel);
 /// Sender half of the per-connection command channel.
 pub type CommandSender = mpsc::Sender<CommandPayload>;
 
-/// Monotonically increasing connection ID for ownership tracking.
-static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
-
 /// Redis channel prefix for command forwarding.
 const CMD_CHANNEL_PREFIX: &str = "connect:cmd:";
 
 /// Redis channel prefix for response routing.
 const RES_CHANNEL_PREFIX: &str = "connect:res:";
+const REVOKE_CHANNEL_PREFIX: &str = "connect:revoke:";
+
+struct Session {
+    connection_id: u64,
+    owner: String,
+    jti: String,
+    revoked: watch::Sender<bool>,
+    sender: CommandSender,
+}
+
+#[derive(Clone)]
+struct ConnectionLifecycle {
+    datasource_config_id: String,
+    owner: String,
+    jti: String,
+}
 
 /// Registry of active Kyomi Connect WebSocket connections.
 ///
 /// Cheaply cloneable (all fields are `Arc`-wrapped or `Clone`).
 #[derive(Clone)]
 pub struct ConnectRegistry {
-    /// Local connections on this pod: `datasource_config_id` -> (connection_id, command sender).
+    /// Local connections on this pod, including their token generation.
     /// The connection_id prevents a stale unregister from removing a newer connection.
-    connections: Arc<DashMap<String, (u64, CommandSender)>>,
+    connections: Arc<DashMap<String, Session>>,
+    next_connection_id: Arc<AtomicU64>,
+    /// Cleanup identity survives replacement of the current routing entry.
+    lifecycle: Arc<DashMap<u64, ConnectionLifecycle>>,
+    /// Serializes authenticated registration across its Redis await points.
+    registration_lock: Arc<Mutex<()>>,
     /// Active Redis command subscriber tasks per datasource_config_id.
     /// Stores `(connection_id, handle)` so stale cleanup cannot kill a newer subscriber.
     subscribers: Arc<DashMap<String, (u64, JoinHandle<()>)>>,
@@ -99,6 +117,9 @@ impl ConnectRegistry {
     pub fn new(redis: RedisPool, redis_url: String) -> Self {
         Self {
             connections: Arc::new(DashMap::new()),
+            next_connection_id: Arc::new(AtomicU64::new(1)),
+            lifecycle: Arc::new(DashMap::new()),
+            registration_lock: Arc::new(Mutex::new(())),
             subscribers: Arc::new(DashMap::new()),
             redis: Some(redis),
             redis_url: Some(redis_url),
@@ -113,6 +134,9 @@ impl ConnectRegistry {
     pub fn new_local() -> Self {
         Self {
             connections: Arc::new(DashMap::new()),
+            next_connection_id: Arc::new(AtomicU64::new(1)),
+            lifecycle: Arc::new(DashMap::new()),
+            registration_lock: Arc::new(Mutex::new(())),
             subscribers: Arc::new(DashMap::new()),
             redis: None,
             redis_url: None,
@@ -127,36 +151,160 @@ impl ConnectRegistry {
     /// Returns a connection ID that must be passed to `unregister()` so that a
     /// stale disconnect cannot remove a newer connection's entry.
     pub async fn register(&self, datasource_config_id: &str, sender: CommandSender) -> u64 {
-        let connection_id = NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed);
-        self.connections
-            .insert(datasource_config_id.to_string(), (connection_id, sender));
+        let connection_id = self.next_connection_id.fetch_add(1, Ordering::Relaxed);
+        let owner = uuid::Uuid::new_v4().to_string();
+        let (revoked, _) = watch::channel(false);
+        self.lifecycle.insert(connection_id, ConnectionLifecycle {
+            datasource_config_id: datasource_config_id.to_owned(),
+            owner: owner.clone(),
+            jti: String::new(),
+        });
+        self.connections.insert(datasource_config_id.to_string(), Session {
+            connection_id,
+            owner: owner.clone(),
+            jti: String::new(),
+            revoked,
+            sender,
+        });
 
-        // Set Redis presence key (best-effort — registry works locally without it).
-        // The value is the connection_id so that unregister can atomically check
-        // ownership before deleting (prevents a stale unregister on one pod from
-        // wiping a fresh registration on another).
+        self.set_presence(datasource_config_id, &owner, "").await;
+
+        tracing::info!(datasource_config_id, connection_id, "Connect instance registered");
+
+        connection_id
+    }
+
+    /// Register an authenticated WebSocket and retain its token generation.
+    pub async fn register_authenticated(
+        &self,
+        datasource_config_id: &str,
+        jti: &str,
+        sender: CommandSender,
+    ) -> kyomi_core::Result<(u64, watch::Receiver<bool>)> {
+        let _registration = self.registration_lock.lock().await;
+        if self.is_revoked(datasource_config_id, jti).await? {
+            return Err(kyomi_core::Error::ServiceUnavailable("Connect token revoked".into()));
+        }
+        let (revoked, receiver) = watch::channel(false);
+        let connection_id = self.next_connection_id.fetch_add(1, Ordering::Relaxed);
+        let owner = uuid::Uuid::new_v4().to_string();
+        self.lifecycle.insert(connection_id, ConnectionLifecycle {
+            datasource_config_id: datasource_config_id.to_owned(),
+            owner: owner.clone(),
+            jti: jti.to_owned(),
+        });
+        self.connections.insert(datasource_config_id.to_owned(), Session {
+            connection_id,
+            owner: owner.clone(),
+            jti: jti.to_owned(),
+            revoked,
+            sender,
+        });
+        self.set_presence(datasource_config_id, &owner, jti).await;
+        if let Err(e) = self.add_active_generation(datasource_config_id, jti, &owner).await {
+            self.unregister(datasource_config_id, connection_id).await;
+            return Err(e);
+        }
+        // Cover a revocation that raced with registration.
+        match self.is_revoked(datasource_config_id, jti).await {
+            Ok(false) => {}
+            Ok(true) => {
+                self.unregister(datasource_config_id, connection_id).await;
+                return Err(kyomi_core::Error::ServiceUnavailable("Connect token revoked".into()));
+            }
+            Err(e) => {
+                self.unregister(datasource_config_id, connection_id).await;
+                return Err(e);
+            }
+        }
+        Ok((connection_id, receiver))
+    }
+
+    async fn add_active_generation(&self, datasource_config_id: &str, jti: &str, owner: &str) -> kyomi_core::Result<()> {
+        let Some(redis) = &self.redis else { return Ok(()); };
+        let mut conn = redis.clone();
+        let key = active_generation_key(datasource_config_id, jti);
+        // No TTL: a blocked WebSocket send can outlive heartbeat/presence
+        // leases. Only owner unregister proves it can no longer flush work.
+        redis::cmd("SADD").arg(&key).arg(owner).query_async::<i64>(&mut conn).await
+            .map_err(|e| kyomi_core::Error::ServiceUnavailable(format!("Connect active session registration failed: {e}")))?;
+        Ok(())
+    }
+
+    async fn set_presence(&self, datasource_config_id: &str, owner: &str, jti: &str) {
         if let Some(ref redis_pool) = self.redis {
-            let key = presence_key(datasource_config_id);
             let mut conn = redis_pool.clone();
             if let Err(e) = redis::cmd("SET")
-                .arg(&key)
-                .arg(connection_id)
+                .arg(presence_key(datasource_config_id))
+                .arg(presence_value(owner, jti))
                 .arg("EX")
                 .arg(60)
                 .query_async::<()>(&mut conn)
                 .await
             {
-                tracing::warn!(
-                    datasource_config_id,
-                    error = %e,
-                    "Failed to set Redis presence key for Connect"
-                );
+                tracing::warn!(datasource_config_id, error = %e, "Failed to set Redis presence key for Connect");
             }
         }
+    }
 
-        tracing::info!(datasource_config_id, connection_id, "Connect instance registered");
+    /// Revoke one token generation locally and across Redis replicas. Redis
+    /// stores a durable marker, so a lost pub/sub event cannot authorize work.
+    pub async fn revoke_generation(&self, datasource_config_id: &str, jti: &str) -> kyomi_core::Result<()> {
+        self.revoke_local(datasource_config_id, jti);
+        if let Some(redis) = &self.redis {
+            let mut conn = redis.clone();
+            redis::cmd("SET")
+                .arg(revoked_key(datasource_config_id, jti))
+                .arg(1)
+                .query_async::<()>(&mut conn)
+                .await
+                .map_err(|e| kyomi_core::Error::ServiceUnavailable(format!("Connect revocation storage failed: {e}")))?;
+            redis::cmd("PUBLISH")
+                .arg(format!("{REVOKE_CHANNEL_PREFIX}{datasource_config_id}"))
+                .arg(jti)
+                .query_async::<i64>(&mut conn)
+                .await
+                .map_err(|e| kyomi_core::Error::ServiceUnavailable(format!("Connect revocation publish failed: {e}")))?;
+        }
+        // A successful mutation response means the old handler has dropped its
+        // pending channels and can no longer send a queued WebSocket command.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                // A reconnect replaces the routing entry before its old
+                // handler has necessarily finished a blocked WebSocket send.
+                let local_gone = !self.lifecycle.iter().any(|entry| {
+                    entry.datasource_config_id == datasource_config_id && entry.jti == jti
+                });
+                let remote_gone = if let Some(redis) = &self.redis {
+                    let mut conn = redis.clone();
+                    let count: i64 = redis::cmd("SCARD")
+                        .arg(active_generation_key(datasource_config_id, jti))
+                        .query_async(&mut conn).await
+                        .map_err(|e| kyomi_core::Error::ServiceUnavailable(format!("Connect revocation confirmation failed: {e}")))?;
+                    count == 0
+                } else { true };
+                if local_gone && remote_gone { return Ok(()); }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.map_err(|_| kyomi_core::Error::ServiceUnavailable("Connect revocation was not confirmed before timeout".into()))?
+    }
 
-        connection_id
+    fn revoke_local(&self, datasource_config_id: &str, jti: &str) {
+        if let Some(session) = self.connections.get(datasource_config_id) {
+            if session.jti != jti { return; }
+            let _ = session.revoked.send(true);
+        }
+    }
+
+    /// Fail closed when Redis cannot confirm whether this generation is revoked.
+    pub async fn is_revoked(&self, datasource_config_id: &str, jti: &str) -> kyomi_core::Result<bool> {
+        let Some(redis) = &self.redis else { return Ok(false); };
+        let mut conn = redis.clone();
+        redis::cmd("EXISTS")
+            .arg(revoked_key(datasource_config_id, jti))
+            .query_async::<bool>(&mut conn)
+            .await
+            .map_err(|e| kyomi_core::Error::ServiceUnavailable(format!("Connect revocation check failed: {e}")))
     }
 
     /// Start a Redis command subscriber for the given datasource.
@@ -183,6 +331,7 @@ impl ConnectRegistry {
         }
         let dsid = datasource_config_id.to_string();
         let channel = format!("{CMD_CHANNEL_PREFIX}{dsid}");
+        let revoke_channel = format!("{REVOKE_CHANNEL_PREFIX}{dsid}");
         // In single-instance mode (no Redis) cross-replica subscriber is a no-op.
         let Some(redis_url) = self.redis_url.clone() else {
             tracing::debug!(
@@ -197,6 +346,7 @@ impl ConnectRegistry {
         };
         let redis_pool = self.redis.clone().expect("redis_url implies redis pool");
         let connections = self.connections.clone();
+        let registry = self.clone();
 
         let handle = tokio::spawn(async move {
             // Create a dedicated Redis connection for SUBSCRIBE.
@@ -232,6 +382,10 @@ impl ConnectRegistry {
                 );
                 return;
             }
+            if let Err(e) = pubsub.subscribe(&revoke_channel).await {
+                tracing::error!(datasource_config_id = %dsid, error = %e, "Redis SUBSCRIBE to revocation channel failed");
+                return;
+            }
 
             tracing::debug!(
                 datasource_config_id = %dsid,
@@ -241,6 +395,12 @@ impl ConnectRegistry {
             let mut stream = pubsub.on_message();
 
             while let Some(msg) = stream.next().await {
+                if msg.get_channel_name() == revoke_channel {
+                    if let Ok(jti) = msg.get_payload::<String>() {
+                        registry.revoke_local(&dsid, &jti);
+                    }
+                    continue;
+                }
                 let payload: String = match msg.get_payload() {
                     Ok(p) => p,
                     Err(e) => {
@@ -268,9 +428,25 @@ impl ConnectRegistry {
 
                 let request_id = request.id.clone();
 
+                // A durable marker protects against missed revocation messages.
+                if let Some(session) = registry.connections.get(&dsid) {
+                    let jti = session.jti.clone();
+                    drop(session);
+                    if !matches!(registry.is_revoked(&dsid, &jti).await, Ok(false)) {
+                        registry.revoke_local(&dsid, &jti);
+                        publish_response(&redis_pool, &request_id, &ConnectResponse {
+                            id: request_id.clone(),
+                            body: kyomi_core::connect_protocol::ConnectResponseBody::Error {
+                                error: "Connect token revoked".into(),
+                            },
+                        }).await;
+                        continue;
+                    }
+                }
+
                 // Get the local command sender
                 let sender = match connections.get(&dsid) {
-                    Some(entry) => entry.value().1.clone(),
+                    Some(entry) => entry.sender.clone(),
                     None => {
                         tracing::warn!(
                             datasource_config_id = %dsid,
@@ -411,52 +587,72 @@ impl ConnectRegistry {
     /// prevents a stale disconnect (old WebSocket closing after a reconnect)
     /// from evicting the newer connection's entry.
     ///
-    /// Deletes the Redis presence key only if the local entry was actually
-    /// removed.
+    /// Clears this connection's Redis generation membership even when a newer
+    /// local routing entry has replaced it. Presence deletion is owner-checked.
     pub async fn unregister(&self, datasource_config_id: &str, connection_id: u64) {
-        let removed = self
-            .connections
-            .remove_if(datasource_config_id, |_key, (id, _sender)| {
-                *id == connection_id
-            })
-            .is_some();
+        let Some(lifecycle) = self.lifecycle.get(&connection_id).map(|entry| entry.clone()) else {
+            return;
+        };
+        if lifecycle.datasource_config_id != datasource_config_id {
+            return;
+        }
 
-        if !removed {
+        let removed_current = self
+            .connections
+            .remove_if(datasource_config_id, |_key, session| {
+                session.connection_id == connection_id
+            }).is_some();
+
+        if !removed_current {
             tracing::debug!(
                 datasource_config_id,
                 connection_id,
-                "Skipped unregister — connection ID does not match (superseded by reconnect)"
+                "Unregistering superseded Connect generation without removing replacement"
             );
-            return;
         }
 
         // Stop the command subscriber for this datasource (only if it belongs to us)
         self.stop_command_subscriber(datasource_config_id, connection_id);
 
-        // Atomically delete the Redis presence key only if it still belongs to
-        // this connection.  This prevents a stale unregister on one pod from wiping
-        // a fresh registration on another pod.
-        if let Some(ref redis_pool) = self.redis {
-            let key = presence_key(datasource_config_id);
-            let mut conn = redis_pool.clone();
-            let lua_script = redis::Script::new(
-                "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end"
-            );
-            if let Err(e) = lua_script
-                .key(&key)
-                .arg(connection_id)
-                .invoke_async::<i64>(&mut conn)
-                .await
-            {
-                tracing::warn!(
-                    datasource_config_id,
-                    error = %e,
-                    "Failed to delete Redis presence key for Connect"
-                );
-            }
+        if let Err(e) = self.clear_redis_lifecycle(&lifecycle).await {
+            tracing::warn!(datasource_config_id, connection_id, error = %e, "Connect Redis cleanup deferred");
+            let registry = self.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    if registry.clear_redis_lifecycle(&lifecycle).await.is_ok() {
+                        registry.lifecycle.remove(&connection_id);
+                        break;
+                    }
+                }
+            });
+        } else {
+            self.lifecycle.remove(&connection_id);
         }
 
         tracing::info!(datasource_config_id, "Connect instance unregistered");
+    }
+
+    async fn clear_redis_lifecycle(&self, lifecycle: &ConnectionLifecycle) -> kyomi_core::Result<()> {
+        let Some(redis) = &self.redis else { return Ok(()); };
+        let mut conn = redis.clone();
+        if !lifecycle.jti.is_empty() {
+            redis::cmd("SREM")
+                .arg(active_generation_key(&lifecycle.datasource_config_id, &lifecycle.jti))
+                .arg(&lifecycle.owner)
+                .query_async::<i64>(&mut conn).await
+                .map_err(|e| kyomi_core::Error::ServiceUnavailable(format!("Connect active generation cleanup failed: {e}")))?;
+        }
+        // Compare-and-delete cannot remove a newer owner, including one on a
+        // different replica whose process-local connection ID is identical.
+        redis::Script::new(
+            "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end"
+        )
+            .key(presence_key(&lifecycle.datasource_config_id))
+            .arg(presence_value(&lifecycle.owner, &lifecycle.jti))
+            .invoke_async::<i64>(&mut conn).await
+            .map_err(|e| kyomi_core::Error::ServiceUnavailable(format!("Connect presence cleanup failed: {e}")))?;
+        Ok(())
     }
 
     /// Send a command to the Connect instance for the given datasource and wait
@@ -476,9 +672,10 @@ impl ConnectRegistry {
         request: ConnectRequest,
         timeout: Duration,
     ) -> kyomi_core::Result<ConnectResponse> {
+        self.ensure_current(datasource_config_id).await?;
         // Fast path: local connection
         if let Some(entry) = self.connections.get(datasource_config_id) {
-            let sender = entry.value().1.clone();
+            let sender = entry.sender.clone();
             drop(entry); // Release DashMap read lock before async work
 
             return self.send_command_local(datasource_config_id, sender, request, timeout).await;
@@ -567,9 +764,10 @@ impl ConnectRegistry {
         request: ConnectRequest,
         timeout: Duration,
     ) -> kyomi_core::Result<mpsc::Receiver<ConnectResponse>> {
+        self.ensure_current(datasource_config_id).await?;
         // Fast path: local connection
         if let Some(entry) = self.connections.get(datasource_config_id) {
-            let sender = entry.value().1.clone();
+            let sender = entry.sender.clone();
             drop(entry);
 
             let (stream_tx, stream_rx) = mpsc::channel(32);
@@ -608,6 +806,19 @@ impl ConnectRegistry {
             // Connection is on another pod — route via Redis pub/sub streaming
             self.send_command_streaming_remote(datasource_config_id, request, timeout).await
         }
+    }
+
+    async fn ensure_current(&self, datasource_config_id: &str) -> kyomi_core::Result<()> {
+        if let Some(session) = self.connections.get(datasource_config_id) {
+            let jti = session.jti.clone();
+            let revoked = *session.revoked.borrow();
+            drop(session);
+            if revoked || self.is_revoked(datasource_config_id, &jti).await? {
+                self.revoke_local(datasource_config_id, &jti);
+                return Err(kyomi_core::Error::ServiceUnavailable("Connect token revoked".into()));
+            }
+        }
+        Ok(())
     }
 
     /// Send a streaming command to a Connect instance on another pod via Redis pub/sub.
@@ -910,24 +1121,23 @@ impl ConnectRegistry {
 
     /// Refresh the Redis presence key for a Connect instance (called on heartbeat pong).
     ///
-    /// Uses SET with EX to recreate the key if it was deleted (e.g. by a race
-    /// condition during rolling restarts where a stale unregister from the old
-    /// pod deletes the key while the new connection is still alive).
+    /// Refreshes only the key owned by this connection. A stale socket must
+    /// never replace a newer connection's presence key.
     pub async fn refresh_heartbeat(&self, datasource_config_id: &str, connection_id: u64) {
+        let Some(session) = self.connections.get(datasource_config_id) else { return; };
+        if session.connection_id != connection_id { return; }
+        let value = presence_value(&session.owner, &session.jti);
+        drop(session);
         // In single-instance mode (no Redis), presence keys are not used.
         let Some(ref redis_pool) = self.redis else {
             return;
         };
         let key = presence_key(datasource_config_id);
         let mut conn = redis_pool.clone();
-        if let Err(e) = redis::cmd("SET")
-            .arg(&key)
-            .arg(connection_id)
-            .arg("EX")
-            .arg(60)
-            .query_async::<()>(&mut conn)
-            .await
-        {
+        let script = redis::Script::new(
+            "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('EXPIRE', KEYS[1], 60) else return 0 end"
+        );
+        if let Err(e) = script.key(&key).arg(value).invoke_async::<i64>(&mut conn).await {
             tracing::warn!(
                 datasource_config_id,
                 error = %e,
@@ -940,6 +1150,18 @@ impl ConnectRegistry {
 /// Build the Redis key for a Connect presence entry.
 fn presence_key(datasource_config_id: &str) -> String {
     format!("connect:{datasource_config_id}")
+}
+
+fn presence_value(owner: &str, jti: &str) -> String {
+    format!("{owner}|{jti}")
+}
+
+fn revoked_key(datasource_config_id: &str, jti: &str) -> String {
+    format!("connect:revoked:{datasource_config_id}:{jti}")
+}
+
+fn active_generation_key(datasource_config_id: &str, jti: &str) -> String {
+    format!("connect:active:{datasource_config_id}:{jti}")
 }
 
 /// Publish a ConnectResponse to the Redis response channel for cross-replica routing.
@@ -984,6 +1206,367 @@ mod tests {
             .await
             .expect("test Redis");
         ConnectRegistry::new(redis, redis_url)
+    }
+
+    fn test_request(id: &str) -> ConnectRequest {
+        ConnectRequest {
+            id: id.into(),
+            op: kyomi_core::connect_protocol::ConnectOp::TestConnection,
+            params: None,
+            streaming: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn local_rotation_revokes_pending_and_preserves_replacement() {
+        let registry = ConnectRegistry::new_local();
+        let dsid = "ds-local-revocation";
+        let (old_tx, mut old_rx) = mpsc::channel(4);
+        let (old_id, mut revoked) = registry.register_authenticated(dsid, "old-jti", old_tx).await.unwrap();
+        let pending = tokio::spawn({
+            let registry = registry.clone();
+            async move { registry.send_command(dsid, test_request("pending"), Duration::from_secs(30)).await }
+        });
+        let (_request, response) = old_rx.recv().await.unwrap();
+
+        let cleanup = tokio::spawn({
+            let registry = registry.clone();
+            async move {
+                revoked.changed().await.unwrap();
+                assert!(*revoked.borrow());
+                drop(response); // synthetic socket closes and drops its pending command
+                registry.unregister(dsid, old_id).await;
+            }
+        });
+        registry.revoke_generation(dsid, "old-jti").await.unwrap();
+        cleanup.await.unwrap();
+        assert!(tokio::time::timeout(Duration::from_secs(1), pending).await.unwrap().unwrap().is_err());
+        assert!(registry.send_command(dsid, test_request("late"), Duration::from_secs(1)).await.is_err());
+
+        let (new_tx, mut new_rx) = mpsc::channel(4);
+        let (new_id, new_revoked) = registry.register_authenticated(dsid, "new-jti", new_tx).await.unwrap();
+        registry.unregister(dsid, old_id).await;
+        registry.revoke_generation(dsid, "old-jti").await.unwrap();
+        assert!(!*new_revoked.borrow());
+        let command = tokio::spawn({
+            let registry = registry.clone();
+            async move { registry.send_command(dsid, test_request("new"), Duration::from_secs(1)).await }
+        });
+        let (request, response) = new_rx.recv().await.unwrap();
+        response.send(ConnectResponse {
+            id: request.id,
+            body: kyomi_core::connect_protocol::ConnectResponseBody::Result { result: serde_json::json!(true) },
+        }).unwrap();
+        assert!(command.await.unwrap().is_ok());
+        registry.unregister(dsid, new_id).await;
+    }
+
+    #[tokio::test]
+    async fn replacing_socket_closes_old_revocation_watch() {
+        let registry = ConnectRegistry::new_local();
+        let (old_tx, _) = mpsc::channel(1);
+        let (old_id, mut old_watch) = registry.register_authenticated("ds-replacement", "same-jti", old_tx).await.unwrap();
+        let (new_tx, _) = mpsc::channel(1);
+        let (new_id, new_watch) = registry.register_authenticated("ds-replacement", "same-jti", new_tx).await.unwrap();
+        assert!(tokio::time::timeout(Duration::from_secs(1), old_watch.changed()).await.unwrap().is_err());
+        assert!(!*new_watch.borrow());
+        registry.unregister("ds-replacement", old_id).await;
+        assert!(registry.is_connected("ds-replacement").await);
+        registry.unregister("ds-replacement", new_id).await;
+    }
+
+    #[tokio::test]
+    async fn local_revocation_waits_for_superseded_old_jti_handler() {
+        let registry = ConnectRegistry::new_local();
+        let dsid = "ds-local-superseded-revocation";
+        let (old_tx, mut old_rx) = mpsc::channel(1);
+        let (old_id, mut old_watch) = registry.register_authenticated(dsid, "old-jti", old_tx).await.unwrap();
+        let pending = tokio::spawn({
+            let registry = registry.clone();
+            async move { registry.send_command(dsid, test_request("old-pending"), Duration::from_secs(30)).await }
+        });
+        let (_request, pending_response) = old_rx.recv().await.unwrap();
+
+        let (new_tx, _) = mpsc::channel(1);
+        let (new_id, new_watch) = registry.register_authenticated(dsid, "new-jti", new_tx).await.unwrap();
+        assert!(old_watch.changed().await.is_err(), "replacement closes the old handler's watch");
+        assert!(registry.lifecycle.contains_key(&old_id));
+
+        let revocation = tokio::spawn({
+            let registry = registry.clone();
+            async move { registry.revoke_generation(dsid, "old-jti").await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!revocation.is_finished(), "old blocked handler still owns its lifecycle");
+        assert!(!*new_watch.borrow());
+
+        drop(pending_response);
+        registry.unregister(dsid, old_id).await;
+        tokio::time::timeout(Duration::from_secs(1), revocation).await.unwrap().unwrap().unwrap();
+        assert!(tokio::time::timeout(Duration::from_secs(1), pending).await.unwrap().unwrap().is_err());
+        assert!(registry.is_connected(dsid).await, "old cleanup cannot evict new JTI");
+        registry.unregister(dsid, new_id).await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_authenticated_handshakes_keep_one_owner_and_generation() {
+        let registry = test_registry().await;
+        let dsid = format!("ds-concurrent-{}", uuid::Uuid::new_v4());
+        let (a_tx, _a_rx) = mpsc::channel(1);
+        let (b_tx, _b_rx) = mpsc::channel(1);
+        let (a, b) = tokio::join!(
+            registry.register_authenticated(&dsid, "jti-a", a_tx),
+            registry.register_authenticated(&dsid, "jti-b", b_tx),
+        );
+        let (a_id, mut a_watch) = a.unwrap();
+        let (b_id, mut b_watch) = b.unwrap();
+        let session = registry.connections.get(&dsid).unwrap();
+        let current_id = session.connection_id;
+        let current_owner = session.owner.clone();
+        let current_jti = session.jti.clone();
+        drop(session);
+        assert!(
+            (current_id == a_id && current_jti == "jti-a")
+                || (current_id == b_id && current_jti == "jti-b")
+        );
+        let mut redis = registry.redis.clone().unwrap();
+        let owner: String = redis::cmd("GET").arg(presence_key(&dsid)).query_async(&mut redis).await.unwrap();
+        assert_eq!(owner, presence_value(&current_owner, &current_jti));
+        if current_id == a_id {
+            assert!(tokio::time::timeout(Duration::from_secs(1), b_watch.changed()).await.unwrap().is_err());
+            assert!(!*a_watch.borrow());
+        } else {
+            assert!(tokio::time::timeout(Duration::from_secs(1), a_watch.changed()).await.unwrap().is_err());
+            assert!(!*b_watch.borrow());
+        }
+        registry.unregister(&dsid, a_id).await;
+        registry.unregister(&dsid, b_id).await;
+    }
+
+    #[tokio::test]
+    async fn superseded_same_and_new_jti_sessions_clear_only_their_own_membership() {
+        let registry = test_registry().await;
+        let dsid = format!("ds-reconnect-{}", uuid::Uuid::new_v4());
+        let (first_tx, _) = mpsc::channel(1);
+        let (first_id, mut first_watch) = registry.register_authenticated(&dsid, "first-jti", first_tx).await.unwrap();
+        let (same_tx, _) = mpsc::channel(1);
+        let (same_id, mut same_watch) = registry.register_authenticated(&dsid, "first-jti", same_tx).await.unwrap();
+        assert!(first_watch.changed().await.is_err());
+
+        let mut redis = registry.redis.clone().unwrap();
+        let first_key = active_generation_key(&dsid, "first-jti");
+        let count: i64 = redis::cmd("SCARD").arg(&first_key).query_async(&mut redis).await.unwrap();
+        assert_eq!(count, 2);
+        registry.unregister(&dsid, first_id).await;
+        let count: i64 = redis::cmd("SCARD").arg(&first_key).query_async(&mut redis).await.unwrap();
+        assert_eq!(count, 1);
+        assert!(registry.is_connected(&dsid).await);
+
+        let (new_tx, _) = mpsc::channel(1);
+        let (new_id, new_watch) = registry.register_authenticated(&dsid, "new-jti", new_tx).await.unwrap();
+        assert!(same_watch.changed().await.is_err());
+        registry.unregister(&dsid, same_id).await;
+        let count: i64 = redis::cmd("SCARD").arg(&first_key).query_async(&mut redis).await.unwrap();
+        assert_eq!(count, 0);
+        let new_count: i64 = redis::cmd("SCARD").arg(active_generation_key(&dsid, "new-jti"))
+            .query_async(&mut redis).await.unwrap();
+        assert_eq!(new_count, 1);
+        registry.revoke_generation(&dsid, "first-jti").await.unwrap();
+        assert!(!*new_watch.borrow());
+        assert!(registry.is_connected(&dsid).await);
+        registry.unregister(&dsid, new_id).await;
+    }
+
+    #[tokio::test]
+    async fn equal_replica_local_ids_cannot_remove_another_redis_owner() {
+        let config = kyomi_core::Config::test_config();
+        let redis_url = config.redis_url.unwrap_or_else(|| "redis://localhost:6380".into());
+        let redis = kyomi_core::redis::create_pool(&redis_url).await.expect("test Redis");
+        let dsid = format!("ds-id-collision-{}", uuid::Uuid::new_v4());
+        let pod_a = ConnectRegistry::new(redis.clone(), redis_url.clone());
+        let pod_b = ConnectRegistry::new(redis.clone(), redis_url.clone());
+        let writer = ConnectRegistry::new(redis.clone(), redis_url);
+        let (a_tx, _) = mpsc::channel(1);
+        let (b_tx, _) = mpsc::channel(1);
+        let (a_id, _) = pod_a.register_authenticated(&dsid, "same-jti", a_tx).await.unwrap();
+        let (b_id, _) = pod_b.register_authenticated(&dsid, "same-jti", b_tx).await.unwrap();
+        assert_eq!(a_id, b_id, "separate replicas may assign the same local ID");
+        let a_owner = pod_a.connections.get(&dsid).unwrap().owner.clone();
+        let b_owner = pod_b.connections.get(&dsid).unwrap().owner.clone();
+        assert_ne!(a_owner, b_owner);
+        let key = active_generation_key(&dsid, "same-jti");
+        let mut conn = redis;
+        let count: i64 = redis::cmd("SCARD").arg(&key).query_async(&mut conn).await.unwrap();
+        assert_eq!(count, 2);
+
+        pod_a.unregister(&dsid, a_id).await;
+        let count: i64 = redis::cmd("SCARD").arg(&key).query_async(&mut conn).await.unwrap();
+        assert_eq!(count, 1, "old replica must not remove the other replica's member");
+        let owner: String = redis::cmd("GET").arg(presence_key(&dsid)).query_async(&mut conn).await.unwrap();
+        assert_eq!(owner, presence_value(&b_owner, "same-jti"));
+        let revocation = tokio::spawn({
+            let dsid = dsid.clone();
+            async move { writer.revoke_generation(&dsid, "same-jti").await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!revocation.is_finished());
+        pod_b.unregister(&dsid, b_id).await;
+        tokio::time::timeout(Duration::from_secs(2), revocation).await.unwrap().unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_redis_cleanup_retains_identity_and_retries() {
+        let registry = test_registry().await;
+        let dsid = format!("ds-cleanup-retry-{}", uuid::Uuid::new_v4());
+        let (tx, _) = mpsc::channel(1);
+        let (id, _) = registry.register_authenticated(&dsid, "old-jti", tx).await.unwrap();
+        let key = active_generation_key(&dsid, "old-jti");
+        let mut conn = registry.redis.clone().unwrap();
+        // Wrong Redis type forces SREM to fail; restore it after unregister.
+        redis::cmd("SET").arg(&key).arg("temporary-bad-type")
+            .query_async::<()>(&mut conn).await.unwrap();
+        registry.unregister(&dsid, id).await;
+        assert!(registry.lifecycle.contains_key(&id), "failed cleanup must retain the UUID");
+        redis::cmd("DEL").arg(&key).query_async::<i64>(&mut conn).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while registry.lifecycle.contains_key(&id) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.unwrap();
+        let present: i64 = redis::cmd("EXISTS").arg(presence_key(&dsid))
+            .query_async(&mut conn).await.unwrap();
+        assert_eq!(present, 0);
+    }
+
+    #[tokio::test]
+    async fn redis_rotation_reaches_other_replica_and_blocks_commands() {
+        let config = kyomi_core::Config::test_config();
+        let redis_url = config.redis_url.unwrap_or_else(|| "redis://localhost:6380".into());
+        let redis = kyomi_core::redis::create_pool(&redis_url).await.expect("test Redis");
+        let dsid = format!("ds-redis-revocation-{}", uuid::Uuid::new_v4());
+        let holder = ConnectRegistry::new(redis.clone(), redis_url.clone());
+        let writer = ConnectRegistry::new(redis, redis_url);
+        let (tx, _rx) = mpsc::channel(4);
+        let (id, mut revoked) = holder.register_authenticated(&dsid, "old-jti", tx).await.unwrap();
+        holder.start_command_subscriber(&dsid, id);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let cleanup = tokio::spawn({
+            let holder = holder.clone();
+            let dsid = dsid.clone();
+            async move {
+                revoked.changed().await.unwrap();
+                assert!(*revoked.borrow());
+                holder.unregister(&dsid, id).await;
+            }
+        });
+        writer.revoke_generation(&dsid, "old-jti").await.unwrap();
+        cleanup.await.unwrap();
+        assert!(holder.send_command(&dsid, test_request("late"), Duration::from_secs(1)).await.is_err());
+        let remote_denied = tokio::time::timeout(Duration::from_secs(2),
+            writer.send_command(&dsid, test_request("remote-late"), Duration::from_secs(30)))
+            .await.expect("revoked remote command must fail promptly");
+        let message = match remote_denied {
+            Err(error) => error.to_string(),
+            Ok(ConnectResponse { body: kyomi_core::connect_protocol::ConnectResponseBody::Error { error }, .. }) => error,
+            Ok(response) => panic!("revoked command returned success: {response:?}"),
+        };
+        assert!(message.contains("offline") || message.contains("revoked"), "unexpected denial: {message}");
+        let (old_attempt, _) = mpsc::channel(4);
+        assert!(holder.register_authenticated(&dsid, "old-jti", old_attempt).await.is_err());
+
+        let (replacement_tx, mut replacement_rx) = mpsc::channel(4);
+        let (replacement_id, replacement_revoked) = holder.register_authenticated(&dsid, "new-jti", replacement_tx).await.unwrap();
+        holder.start_command_subscriber(&dsid, replacement_id);
+        holder.refresh_heartbeat(&dsid, id).await;
+        let mut conn = holder.redis.clone().unwrap();
+        let owner: String = redis::cmd("GET").arg(presence_key(&dsid)).query_async(&mut conn).await.unwrap();
+        let replacement_owner = holder.connections.get(&dsid).unwrap().owner.clone();
+        assert_eq!(owner, presence_value(&replacement_owner, "new-jti"));
+        holder.unregister(&dsid, id).await;
+        writer.revoke_generation(&dsid, "old-jti").await.unwrap();
+        assert!(!*replacement_revoked.borrow());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let remote = tokio::spawn({
+            let writer = writer.clone();
+            let dsid = dsid.clone();
+            async move { writer.send_command(&dsid, test_request("replacement"), Duration::from_secs(2)).await }
+        });
+        let (request, response) = tokio::time::timeout(Duration::from_secs(2), replacement_rx.recv()).await.unwrap().unwrap();
+        response.send(ConnectResponse {
+            id: request.id,
+            body: kyomi_core::connect_protocol::ConnectResponseBody::Result { result: serde_json::json!(true) },
+        }).unwrap();
+        assert!(remote.await.unwrap().is_ok());
+        holder.unregister(&dsid, replacement_id).await;
+    }
+
+    #[tokio::test]
+    async fn redis_revocation_waits_for_old_generation_when_replacement_owns_presence() {
+        let config = kyomi_core::Config::test_config();
+        let redis_url = config.redis_url.unwrap_or_else(|| "redis://localhost:6380".into());
+        let redis = kyomi_core::redis::create_pool(&redis_url).await.expect("test Redis");
+        let dsid = format!("ds-overlap-{}", uuid::Uuid::new_v4());
+        let old_holder = ConnectRegistry::new(redis.clone(), redis_url.clone());
+        let new_holder = ConnectRegistry::new(redis.clone(), redis_url.clone());
+        let writer = ConnectRegistry::new(redis, redis_url);
+        let (old_tx, _) = mpsc::channel(1);
+        let (old_id, mut old_watch) = old_holder.register_authenticated(&dsid, "old-jti", old_tx).await.unwrap();
+        old_holder.start_command_subscriber(&dsid, old_id);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let (new_tx, _) = mpsc::channel(1);
+        let (new_id, new_watch) = new_holder.register_authenticated(&dsid, "new-jti", new_tx).await.unwrap();
+        new_holder.start_command_subscriber(&dsid, new_id);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let (release, released) = oneshot::channel();
+        let cleanup = tokio::spawn({
+            let old_holder = old_holder.clone();
+            let dsid = dsid.clone();
+            async move {
+                old_watch.changed().await.unwrap();
+                released.await.unwrap();
+                old_holder.unregister(&dsid, old_id).await;
+            }
+        });
+        let revocation = tokio::spawn({
+            let writer = writer.clone();
+            let dsid = dsid.clone();
+            async move { writer.revoke_generation(&dsid, "old-jti").await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!revocation.is_finished(), "replacement presence must not hide old session");
+        release.send(()).unwrap();
+        cleanup.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), revocation).await.unwrap().unwrap().unwrap();
+        assert!(!*new_watch.borrow());
+        assert!(new_holder.is_connected(&dsid).await);
+        new_holder.unregister(&dsid, new_id).await;
+    }
+
+    #[tokio::test]
+    async fn redis_revocation_does_not_treat_expired_presence_as_closed_session() {
+        let config = kyomi_core::Config::test_config();
+        let redis_url = config.redis_url.unwrap_or_else(|| "redis://localhost:6380".into());
+        let redis = kyomi_core::redis::create_pool(&redis_url).await.expect("test Redis");
+        let dsid = format!("ds-expired-presence-{}", uuid::Uuid::new_v4());
+        let holder = ConnectRegistry::new(redis.clone(), redis_url.clone());
+        let writer = ConnectRegistry::new(redis.clone(), redis_url);
+        let (tx, _rx) = mpsc::channel(1);
+        let (id, _watch) = holder.register_authenticated(&dsid, "old-jti", tx).await.unwrap();
+        let active_key = active_generation_key(&dsid, "old-jti");
+        let mut conn = redis;
+        let ttl: i64 = redis::cmd("TTL").arg(&active_key).query_async(&mut conn).await.unwrap();
+        assert_eq!(ttl, -1, "active generation must not expire while a send is blocked");
+        redis::cmd("DEL").arg(presence_key(&dsid)).query_async::<i64>(&mut conn).await.unwrap();
+
+        let revocation = tokio::spawn({
+            let dsid = dsid.clone();
+            async move { writer.revoke_generation(&dsid, "old-jti").await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!revocation.is_finished(), "missing presence cannot prove the socket closed");
+        holder.unregister(&dsid, id).await;
+        tokio::time::timeout(Duration::from_secs(2), revocation).await.unwrap().unwrap().unwrap();
     }
 
     #[test]
