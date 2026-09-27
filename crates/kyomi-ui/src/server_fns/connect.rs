@@ -194,6 +194,12 @@ pub async fn rotate_connect_token(datasource_id: String) -> Result<String, Serve
         .await
         .into_sfn_core()?;
 
+    if let Some(old_jti) = ds.connect_token_jti.as_deref() {
+        let registry = ac.ctx.connect_registry.as_ref()
+            .ok_or_else(|| ServerFnError::new("Kyomi Connect is not configured on this server"))?;
+        registry.revoke_generation(&ds.id, old_jti).await.into_sfn_core()?;
+    }
+
     tracing::info!(
         "Rotated Connect token for datasource '{}' (id: {}) by user {}",
         ds.slug,
@@ -269,6 +275,12 @@ pub async fn disconnect_connect_datasource(datasource_id: String) -> Result<(), 
     kyomi_auth::datasource_service::clear_connect_jti(ac.db(), &ds.id)
         .await
         .into_sfn_core()?;
+
+    if let Some(old_jti) = ds.connect_token_jti.as_deref() {
+        let registry = ac.ctx.connect_registry.as_ref()
+            .ok_or_else(|| ServerFnError::new("Kyomi Connect is not configured on this server"))?;
+        registry.revoke_generation(&ds.id, old_jti).await.into_sfn_core()?;
+    }
 
     tracing::info!(
         "Disconnected Connect datasource '{}' (id: {}) by user {}",
