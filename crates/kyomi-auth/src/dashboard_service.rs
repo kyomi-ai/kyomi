@@ -2833,7 +2833,7 @@ visualize:
     // is scoped the same way, rather than counting every row in the
     // workspace regardless of ownership or collection membership.
 
-    use crate::test_support::{seed_user, seed_workspace, sqlite_pool, test_pool};
+    use crate::test_support::{seed_membership, seed_user, seed_workspace, sqlite_pool, test_pool};
 
     /// Seeds `ws-1` with two members: `user-a` (workspace owner) and
     /// `user-b`, a member who owns nothing shared with them by default.
@@ -2842,6 +2842,8 @@ visualize:
         seed_user(sq, "user-a", "a@test.local").await;
         seed_user(sq, "user-b", "b@test.local").await;
         seed_workspace(sq, "ws-1", "user-a").await;
+        seed_membership(sq, "ws-1", "user-a", "workspace_admin", true).await;
+        seed_membership(sq, "ws-1", "user-b", "workspace_user", true).await;
     }
 
     /// Makes `doc_id` workspace-visible by putting it in a fresh public
