@@ -7,7 +7,7 @@
 //! Wire-compatible with Python's `get_current_user` dependency.
 
 use axum::{
-    extract::{FromRef, FromRequestParts},
+    extract::{FromRef, FromRequestParts, OriginalUri},
     http::request::Parts,
 };
 use chrono::Utc;
@@ -125,6 +125,15 @@ where
     let token = extract_token(parts)?;
 
     let token_data = jwt::validate_token(&token, &auth_state.jwt_secret)?;
+
+    // Nested routers can strip their mount prefix from `parts.uri`.
+    // Only the actual MCP resource accepts an MCP OAuth access token.
+    let path = parts.extensions.get::<OriginalUri>()
+        .map(|uri| uri.0.path())
+        .unwrap_or_else(|| parts.uri.path());
+    if path != "/mcp" && path != "/mcp/" {
+        token_data.claims.require_session()?;
+    }
 
     // Get user_id from claims — Python puts it in the `extra` map as "user_id"
     let user_id = token_data.claims.extra

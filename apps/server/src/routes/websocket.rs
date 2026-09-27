@@ -76,7 +76,11 @@ async fn handle_authenticated_ws(
     };
 
     let claims = match jwt::validate_token(&token, &state.config.jwt_secret) {
-        Ok(token_data) => token_data.claims,
+        Ok(token_data) if token_data.claims.require_session().is_ok() => token_data.claims,
+        Ok(_) => {
+            close_with_code(socket, CLOSE_AUTH_REQUIRED, "Authentication failed").await;
+            return;
+        }
         Err(e) => {
             tracing::warn!("WebSocket JWT validation failed: {e}");
             close_with_code(socket, CLOSE_AUTH_REQUIRED, "Authentication failed").await;
