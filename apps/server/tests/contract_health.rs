@@ -415,6 +415,96 @@ async fn has_security_headers() {
     );
 }
 
+/// Exercise the two real HTML paths that serve the shared Trunk shell: the
+/// static SPA route and the SSR-rendered login route. Every inline script
+/// must carry the same nonce authorized by that response's CSP header.
+#[tokio::test]
+async fn frontend_csp_nonce_matches_shell_and_ssr_inline_scripts() {
+    // This is a Rust middleware contract; CONTRACT_TEST_BASE_URL targets the
+    // separate Python server, whose frontend is not served by this router.
+    if std::env::var("CONTRACT_TEST_BASE_URL").is_ok() {
+        return;
+    }
+
+    let embedded_index = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../crates/kyomi-ui/dist/index.html");
+    if !embedded_index.is_file() {
+        eprintln!(
+            "skipping frontend CSP route check: generated frontend index is absent at {} (this job does not run Trunk)",
+            embedded_index.display()
+        );
+        return;
+    }
+
+    let base = base_url().await;
+    for path in ["/signup/complete", "/login"] {
+        let response = client()
+            .get(format!("{base}{path}"))
+            .send()
+            .await
+            .expect("frontend request should succeed");
+        assert_eq!(response.status(), 200, "{path} should serve HTML");
+
+        let csp = response
+            .headers()
+            .get("content-security-policy")
+            .expect("frontend response should include CSP")
+            .to_str()
+            .expect("CSP should be valid ASCII")
+            .to_owned();
+        let script_src = csp
+            .split(';')
+            .find(|directive| directive.trim_start().starts_with("script-src "))
+            .expect("frontend CSP should define script-src");
+        assert!(!script_src.contains("'unsafe-inline'"), "{path}: {csp}");
+        assert!(!script_src.contains("'unsafe-eval'"), "{path}: {csp}");
+        assert!(script_src.contains("'wasm-unsafe-eval'"), "{path}: {csp}");
+        assert!(script_src.contains("https://js.stripe.com"), "{path}: {csp}");
+        assert!(
+            script_src.contains("https://static.cloudflareinsights.com"),
+            "{path}: {csp}"
+        );
+        let style_src = csp
+            .split(';')
+            .find(|directive| directive.trim_start().starts_with("style-src "))
+            .expect("frontend CSP should define style-src");
+        assert!(style_src.contains("'unsafe-inline'"), "{path}: {csp}");
+
+        let nonce = script_src
+            .split_whitespace()
+            .find_map(|source| source.strip_prefix("'nonce-")?.strip_suffix('\''))
+            .expect("frontend CSP should include a nonce source");
+        let html = response.text().await.expect("frontend body should be text");
+        assert!(
+            !html.contains("__KYOMI_CSP_NONCE__"),
+            "{path}: shell nonce was not substituted"
+        );
+        if path == "/login" {
+            assert!(html.contains("<body data-ssr"), "login should use the SSR path");
+        }
+
+        let mut rest = html.as_str();
+        let mut inline_script_count = 0;
+        while let Some(start) = rest.find("<script") {
+            rest = &rest[start..];
+            let end = rest.find('>').expect("script opening tag should close");
+            let tag = &rest[..=end];
+            if !tag.contains("src=") {
+                inline_script_count += 1;
+                assert!(
+                    tag.contains(&format!("nonce=\"{nonce}\"")),
+                    "{path}: inline script did not carry CSP nonce: {tag}"
+                );
+            }
+            rest = &rest[end + 1..];
+        }
+        assert!(
+            inline_script_count > 0,
+            "{path}: expected inline frontend scripts"
+        );
+    }
+}
+
 // KYO-257: HSTS is gated on two independent conditions — non-demo mode
 // (`!demo_mode`, apps/server/src/middleware/mod.rs) AND an https:// frontend
 // (`apply_runtime_overrides()`, crates/kyomi-core/src/constants.rs, reads
