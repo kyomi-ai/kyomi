@@ -69,6 +69,11 @@ pub async fn security_headers(
         .get::<DemoModeFlag>()
         .is_some_and(|f| f.0);
 
+    let is_consent_get = request.method() == Method::GET
+        && matches!(
+            request.uri().path(),
+            "/api/v1/oauth/authorize" | "/api/v1/oauth/authorize/continue"
+        );
     let is_api = request.uri().path().starts_with("/api/")
         || request.uri().path().starts_with("/ws/")
         || request.uri().path().starts_with("/mcp/")
@@ -100,7 +105,18 @@ pub async fn security_headers(
 
     // Apply strict CSP only to API/WS routes. Frontend routes need a permissive
     // policy to load scripts, styles, images, and fonts from the same origin.
-    if is_api {
+    if is_consent_get
+        && headers
+            .get("content-type")
+            .is_some_and(|value| value.as_bytes().starts_with(b"text/html"))
+    {
+        headers.insert(
+            HeaderName::from_static("content-security-policy"),
+            HeaderValue::from_static(
+                "default-src 'none'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+            ),
+        );
+    } else if is_api {
         if let Ok(v) = HeaderValue::from_str(&sh.content_security_policy) {
             headers.insert(HeaderName::from_static("content-security-policy"), v);
         }
