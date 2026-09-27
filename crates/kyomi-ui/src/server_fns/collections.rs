@@ -175,6 +175,7 @@ pub async fn update_collection(
         ac.db(),
         &collection_id,
         &ac.ws_id,
+        &ac.auth.user_id,
         &updates,
         ac.ctx.ws_manager.as_ref(),
     )
@@ -203,6 +204,7 @@ pub async fn delete_collection(collection_id: String) -> Result<(), ServerFnErro
         ac.db(),
         &collection_id,
         &ac.ws_id,
+        &ac.auth.user_id,
         ac.ctx.ws_manager.as_ref(),
     )
     .await
@@ -254,6 +256,7 @@ pub async fn remove_dashboard_from_collection(
         &collection_id,
         &dashboard_id,
         &ac.ws_id,
+        &ac.auth.user_id,
     )
     .await
     .into_sfn_core()?;
