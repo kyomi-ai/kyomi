@@ -1202,6 +1202,8 @@ pub async fn send_dashboard_summary_ready(
 /// trusting a status embedded in the push, so the database stays the single
 /// source of truth (see `crates/kyomi-ui/src/utils/billing_lapse.rs`'s
 /// `refetch_billing_state`, the client-side counterpart this event drives).
+/// Each broadcast has a distinct message ID so the client does not discard a
+/// later state change with the same workspace payload as a duplicate.
 ///
 /// Reaches a currently-lapsed workspace's members too — `connect` is never
 /// billing-gated (only `sync_bootstrap`/`sync_delta` are, in
@@ -1210,6 +1212,7 @@ pub async fn send_dashboard_summary_ready(
 /// unlocked without a reload.
 pub async fn broadcast_billing_status_changed(manager: &WebSocketManager, workspace_id: &str) {
     let msg = WebSocketMessage::new(MessageType::BillingStatusChanged)
+        .with_message_id(uuid::Uuid::new_v4().to_string())
         .with_data(serde_json::json!({ "workspace_id": workspace_id }));
     manager.broadcast_to_workspace(workspace_id, msg, None).await;
 }
@@ -2047,6 +2050,33 @@ mod tests {
                 Some("ws-1")
             );
         }
+    }
+
+    #[tokio::test]
+    async fn successive_billing_changes_have_distinct_ids_shared_by_recipients() {
+        let db = test_pool().await;
+        let (manager, mut rx_owner, mut rx_other) = setup_workspace_and_connections(&db).await;
+
+        broadcast_billing_status_changed(&manager, "ws-1").await;
+        broadcast_billing_status_changed(&manager, "ws-1").await;
+
+        let receive_pair = |rx: &mut mpsc::Receiver<String>| {
+            let first: WebSocketMessage =
+                serde_json::from_str(&rx.try_recv().expect("first billing event")).unwrap();
+            let second: WebSocketMessage =
+                serde_json::from_str(&rx.try_recv().expect("second billing event")).unwrap();
+            (first, second)
+        };
+        let (owner_first, owner_second) = receive_pair(&mut rx_owner);
+        let (other_first, other_second) = receive_pair(&mut rx_other);
+
+        assert_eq!(owner_first.message_type, MessageType::BillingStatusChanged);
+        assert_eq!(owner_second.message_type, MessageType::BillingStatusChanged);
+        assert_eq!(owner_first.data, owner_second.data);
+        assert_eq!(owner_first.message_id, other_first.message_id);
+        assert_eq!(owner_second.message_id, other_second.message_id);
+        assert!(owner_first.message_id.is_some());
+        assert_ne!(owner_first.message_id, owner_second.message_id);
     }
 
     #[tokio::test]
