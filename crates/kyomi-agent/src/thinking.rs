@@ -140,6 +140,7 @@ pub struct AgentThinkingEvent {
 /// them to Redis for WebSocket delivery, and provides the full event list
 /// for database persistence after the agent loop completes.
 pub struct AgentThinkingTracker {
+    workspace_id: String,
     session_id: String,
     message_id: String,
     workspace_user_ids: Vec<String>,
@@ -204,6 +205,7 @@ pub struct IncrementalFlushTarget {
 /// (KYO-493 phase 3) pushed the field count past it, while keeping every
 /// field explicit and named at the one production call site.
 pub struct AgentThinkingTrackerConfig {
+    pub workspace_id: String,
     pub session_id: String,
     pub user_id: String,
     pub message_id: String,
@@ -232,6 +234,7 @@ impl AgentThinkingTracker {
     /// requesting user.
     pub fn new(config: AgentThinkingTrackerConfig) -> Self {
         let AgentThinkingTrackerConfig {
+            workspace_id,
             session_id,
             user_id,
             message_id,
@@ -243,6 +246,7 @@ impl AgentThinkingTracker {
         } = config;
         let ws_users = workspace_user_ids.unwrap_or_else(|| vec![user_id]);
         Self {
+            workspace_id,
             session_id,
             message_id,
             workspace_user_ids: ws_users,
@@ -302,7 +306,7 @@ impl AgentThinkingTracker {
 
         for uid in &self.workspace_user_ids {
             kyomi_auth::websocket::helpers::send_agent_thinking(
-                &self.ws_manager,
+                self.ws_manager.for_workspace(&self.workspace_id),
                 uid,
                 &self.session_id,
                 thinking_data.clone(),
@@ -592,7 +596,7 @@ impl AgentThinkingTracker {
 
         for uid in &self.workspace_user_ids {
             kyomi_auth::websocket::helpers::send_token_usage_update(
-                &self.ws_manager,
+                self.ws_manager.for_workspace(&self.workspace_id),
                 uid,
                 &self.session_id,
                 token_data.clone(),
@@ -1838,6 +1842,7 @@ mod tests {
         incremental_flush: bool,
     ) -> AgentThinkingTrackerConfig {
         AgentThinkingTrackerConfig {
+            workspace_id: "ws-1".to_string(),
             session_id: session_id.to_string(),
             user_id: "user-a".to_string(),
             message_id: message_id.to_string(),

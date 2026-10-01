@@ -105,6 +105,9 @@ pub fn start_sync_engine(
         let workspace_id = workspace_id.clone();
         let ws_for_repair = ws.clone();
         move |msg| {
+            if msg.workspace_id.as_deref() != Some(workspace_id.as_str()) {
+                return;
+            }
             if let Some(data) = &msg.data
                 && let Some(sync_id) = data.get("last_sync_id").and_then(|v| v.as_i64())
             {
@@ -269,7 +272,10 @@ pub fn start_sync_engine(
     let unsub_reset = ws.subscribe("sync_reset", {
         let ws = ws.clone();
         let workspace_id = workspace_id.clone();
-        move |_msg| {
+        move |msg| {
+            if msg.workspace_id.as_deref() != Some(workspace_id.as_str()) {
+                return;
+            }
             tracing::info!("sync_reset: nuking local cache and re-bootstrapping");
             store.reset();
             let wid = workspace_id.clone();
@@ -350,7 +356,11 @@ pub fn start_sync_engine(
     // ("try again shortly") carries no code at all and must not (see
     // `billing_refusal_message`'s doc comment on the server side), so this
     // checks the code, never just "did an error arrive".
+    let error_workspace_id = workspace_id.clone();
     let unsub_error = ws.subscribe("error", move |msg| {
+        if msg.workspace_id.as_deref() != Some(error_workspace_id.as_str()) {
+            return;
+        }
         let error_code = msg
             .data
             .as_ref()

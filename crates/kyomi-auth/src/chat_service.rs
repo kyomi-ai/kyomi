@@ -2381,7 +2381,7 @@ pub async fn prepare_chat_dispatch(
                 && let Ok(data) = serde_json::to_value(&session_info)
             {
                 crate::websocket::helpers::send_session_created(
-                    ws_manager, p.user_id, p.session_id, data,
+                    ws_manager.for_workspace(p.workspace_id), p.user_id, p.session_id, data,
                 )
                 .await;
             }
@@ -2613,6 +2613,7 @@ pub async fn finalize_assistant_placeholder(
 pub struct SaveAgentErrorParams<'a> {
     pub db: &'a DbPool,
     pub encryption_key: &'a [u8; 32],
+    pub workspace_id: &'a str,
     pub ws_manager: &'a crate::websocket::WebSocketManager,
     pub session_id: &'a str,
     pub user_id: &'a str,
@@ -2632,6 +2633,7 @@ pub struct SaveAgentErrorParams<'a> {
 /// `send_chat_message` so the spawn closure remains a thin wrapper.
 pub async fn save_agent_error(params: SaveAgentErrorParams<'_>) {
     let SaveAgentErrorParams {
+        workspace_id,
         db,
         encryption_key,
         ws_manager,
@@ -2694,7 +2696,7 @@ pub async fn save_agent_error(params: SaveAgentErrorParams<'_>) {
     }
 
     crate::websocket::helpers::send_error(
-        ws_manager,
+        ws_manager.for_workspace(workspace_id),
         user_id,
         Some(session_id),
         &format!("AI processing failed: {error}"),
@@ -5312,6 +5314,7 @@ mod tests {
         let logs = capture_tracing();
 
         save_agent_error(SaveAgentErrorParams {
+            workspace_id: "ws-1",
             db: &db,
             encryption_key: &key,
             ws_manager: &manager,
@@ -5386,6 +5389,7 @@ mod tests {
 
         let manager = crate::websocket::WebSocketManager::new(None, db.clone());
         save_agent_error(SaveAgentErrorParams {
+            workspace_id: "ws-1",
             db: &db,
             encryption_key: &key,
             ws_manager: &manager,

@@ -541,6 +541,7 @@ pub async fn execute_agent_chat(
         encryption_key: encryption_key.clone(),
     });
     let tracker = AgentThinkingTracker::new(crate::thinking::AgentThinkingTrackerConfig {
+        workspace_id: config.workspace_id.clone(),
         session_id: config.session_id.clone(),
         user_id: config.user_id.clone(),
         message_id: assistant_message_id.clone(),
@@ -788,7 +789,7 @@ pub async fn deliver_response(
     model: &str,
     usage: Option<serde_json::Value>,
     context_type: &str,
-    workspace_id: Option<&str>,
+    workspace_id: &str,
     workspace_user_ids: Option<&[String]>,
 ) {
     // Stream response in chunks.
@@ -801,7 +802,7 @@ pub async fn deliver_response(
         let chunk: String = chars[offset..end].iter().collect();
 
         ws_helpers::send_chat_stream(
-            ws_manager,
+            ws_manager.for_workspace(workspace_id),
             user_id,
             session_id,
             message_id,
@@ -816,7 +817,7 @@ pub async fn deliver_response(
             for uid in ws_user_ids {
                 if uid != user_id {
                     ws_helpers::send_chat_stream(
-                        ws_manager,
+                        ws_manager.for_workspace(workspace_id),
                         uid,
                         session_id,
                         message_id,
@@ -836,7 +837,7 @@ pub async fn deliver_response(
 
     // Send complete message.
     ws_helpers::send_chat_complete(ws_helpers::ChatCompleteParams {
-        manager: ws_manager,
+        manager: ws_manager.for_workspace(workspace_id),
         user_id,
         session_id,
         message_id,
@@ -848,10 +849,10 @@ pub async fn deliver_response(
     .await;
 
     // Broadcast completion to shared conversation members.
-    if let (Some(wid), Some(_ws_user_ids)) = (workspace_id, workspace_user_ids) {
+    if workspace_user_ids.is_some() {
         ws_helpers::broadcast_chat_complete(ws_helpers::BroadcastChatCompleteParams {
             manager: ws_manager,
-            workspace_id: wid,
+            workspace_id,
             session_id,
             message_id,
             full_content: response,
@@ -1013,7 +1014,7 @@ async fn generate_title_inner(
 
     // Broadcast via WebSocket — both the legacy title_update (sidebar cache
     // invalidation) and sync_action (SyncStore update for the chat list page).
-    ws_helpers::send_title_update(ws_manager, user_id, session_id, &title).await;
+    ws_helpers::send_title_update(ws_manager.for_workspace(workspace_id), user_id, session_id, &title).await;
     ws_helpers::broadcast_chat_session_sync(
         db,
         ws_manager,
@@ -1186,7 +1187,7 @@ pub(crate) async fn write_dashboard_summary_with_cas(
         Err(e) => return Err(e),
     }
 
-    ws_helpers::send_dashboard_summary_ready(ws_manager, user_id, dashboard_id, summary, new_content).await;
+    ws_helpers::send_dashboard_summary_ready(ws_manager.for_workspace(workspace_id), user_id, dashboard_id, summary, new_content).await;
     ws_helpers::broadcast_dashboard_sync(
         db, ws_manager, dashboard_id, workspace_id,
         kyomi_types::sync::SyncActionType::Update,

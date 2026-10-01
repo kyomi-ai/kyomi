@@ -184,6 +184,7 @@ pub async fn prepare_copilot_message(
 pub struct CopilotAgentErrorParams<'a> {
     pub db: &'a DbPool,
     pub encryption_key: &'a [u8; 32],
+    pub workspace_id: &'a str,
     pub ws_manager: &'a WebSocketManager,
     pub user_id: &'a str,
     pub session_id: &'a str,
@@ -209,6 +210,7 @@ pub struct CopilotAgentErrorParams<'a> {
 /// `chat_service::save_agent_error`'s update-then-insert shape exactly.
 pub async fn handle_copilot_agent_error(params: CopilotAgentErrorParams<'_>) {
     let CopilotAgentErrorParams {
+        workspace_id,
         db, encryption_key, ws_manager, user_id, session_id,
         assistant_message_id, context_type, error,
     } = params;
@@ -271,7 +273,7 @@ pub async fn handle_copilot_agent_error(params: CopilotAgentErrorParams<'_>) {
     }
 
     crate::websocket::helpers::send_error(
-        ws_manager,
+        ws_manager.for_workspace(workspace_id),
         user_id,
         Some(session_id),
         &format!("AI processing failed: {error}"),
@@ -323,6 +325,7 @@ mod tests {
         // copilot's real state, since prepare_copilot_message mints the id
         // without writing a row for it (KYO-572).
         handle_copilot_agent_error(CopilotAgentErrorParams {
+            workspace_id: "ws-1",
             db: &db,
             encryption_key: &key,
             ws_manager: &manager,
