@@ -6,7 +6,10 @@ use async_trait::async_trait;
 
 use kyomi_auth::websocket::helpers as ws_helpers;
 
-use crate::tools::document::{apply_update, resolve_document, ApplyUpdateOutcome, ApplyUpdateParams, DocType};
+use crate::tools::document::{
+    apply_update, resolve_document, sql_validation_failure_result, ApplyUpdateOutcome,
+    ApplyUpdateParams, DocType,
+};
 use crate::tools::{AgentTool, ToolContext};
 use crate::types::ToolAnnotations;
 
@@ -127,6 +130,7 @@ impl DocumentEditTool {
 
         // Update via dashboard_service with CAS
         let outcome = apply_update(ApplyUpdateParams {
+            query_context: ctx.query_context(),
             db: &ctx.db,
             dashboard_id: &doc.dashboard_id,
             workspace_id: &ctx.workspace_id,
@@ -141,6 +145,9 @@ impl DocumentEditTool {
         .await?;
 
         match outcome {
+            ApplyUpdateOutcome::ValidationFailed(errors) => {
+                Ok(sql_validation_failure_result(&errors))
+            }
             ApplyUpdateOutcome::Updated => {
                 // KYO-541: `apply_update` rechunks itself now — see its
                 // doc comment in `tools/document/mod.rs`.
