@@ -337,6 +337,12 @@ async fn serve() {
         kyomi_datasource_server::ConnectRegistry::new_local()
     };
 
+    let connect_registry = match std::env::var_os("CONNECT_OWNER_RECOVERY_DIR") {
+        Some(directory) => connect_registry.with_owner_recovery(std::path::Path::new(&directory))
+            .expect("CONNECT_OWNER_RECOVERY_DIR must be a persistent local Linux lock directory"),
+        None => connect_registry,
+    };
+
     // Platform registry — register messaging platform implementations.
     #[cfg_attr(not(feature = "slack"), allow(unused_mut))]
     let mut registry = kyomi_core::platform::PlatformRegistry::new();
