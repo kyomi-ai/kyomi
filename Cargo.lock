@@ -6137,6 +6137,7 @@ dependencies = [
  "chartml-datafusion",
  "chartml-render",
  "chrono",
+ "html5ever",
  "http",
  "kyomi-auth",
  "kyomi-chart-theme",

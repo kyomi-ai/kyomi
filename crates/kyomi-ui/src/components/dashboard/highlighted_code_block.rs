@@ -17,10 +17,10 @@ use phosphor_leptos::Icon;
 
 // ── WASM-only: arborium highlighter ─────────────────────────────────────
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 use std::cell::RefCell;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 thread_local! {
     static HIGHLIGHTER: RefCell<arborium::Highlighter> = RefCell::new(arborium::Highlighter::new());
 }
@@ -29,7 +29,7 @@ thread_local! {
 ///
 /// Returns HTML with `<a-k>`, `<a-s>`, `<a-c>`, `<a-n>`, `<a-f>` custom
 /// elements. Falls back to `html_escape` on error.
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 fn highlight_html(code: &str, language: &str) -> String {
     if language.is_empty() {
         return html_escape(code);
@@ -237,6 +237,10 @@ pub fn HighlightedCodeBlock(
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+#[path = "highlighted_code_block_html_tests.rs"]
+mod html_safety_tests;
 
 #[cfg(test)]
 mod tests {

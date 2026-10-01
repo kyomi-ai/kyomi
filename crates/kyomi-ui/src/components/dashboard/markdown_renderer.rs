@@ -34,6 +34,7 @@ use chartml_core::ChartRenderer;
 pub(crate) use kyomi_chart_theme::{kyomi_palette, kyomi_theme};
 use crate::chartml_provider::{configured_chartml, ChartCacheWorkspaceId};
 use super::kyomi_chart::KyomiChart;
+use kyomi_types::text::safe_markdown_url;
 use leptos::prelude::*;
 
 // ---------------------------------------------------------------------------
@@ -290,29 +291,6 @@ pub(crate) fn splice_chartml_item(
 // ---------------------------------------------------------------------------
 // Markdown → HTML
 // ---------------------------------------------------------------------------
-
-/// Only browser-safe destinations may reach generated `href` and `src` attributes.
-/// The Markdown parser decodes entities before this check; reject whitespace and
-/// controls too, since browsers can ignore them while interpreting a scheme.
-fn safe_markdown_url(url: &str, image: bool) -> bool {
-    if url
-        .chars()
-        .any(|ch| ch.is_ascii_whitespace() || ch.is_ascii_control())
-    {
-        return false;
-    }
-
-    let scheme_end = url.find(':');
-    let path_start = url.find(['/', '?', '#']).unwrap_or(url.len());
-    if let Some(end) = scheme_end.filter(|end| *end < path_start) {
-        let scheme = &url[..end];
-        scheme.eq_ignore_ascii_case("https")
-            || scheme.eq_ignore_ascii_case("http")
-            || (!image && scheme.eq_ignore_ascii_case("mailto"))
-    } else {
-        true // Relative URL, fragment, or protocol-relative URL.
-    }
-}
 
 /// Convert untrusted Markdown to HTML using pulldown-cmark with GFM extensions.
 /// Raw HTML tags are discarded and unsafe Markdown destinations are blanked
