@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Shared Unicode-safe string helpers.
+//! Shared text helpers for Unicode-safe truncation and HTML destinations.
 //!
 //! `&str[..N]` is a **byte** slice in Rust. If `N` falls in the middle of a
 //! multi-byte UTF-8 character, indexing panics at runtime with
@@ -29,6 +29,30 @@ pub fn truncate_preview(message: &str, max_chars: usize) -> String {
         Some((boundary, _)) => format!("{}...", &message[..boundary]),
         // Fewer than `max_chars` characters total — nothing to truncate.
         None => message.to_string(),
+    }
+}
+
+/// Only browser-safe destinations may reach generated `href` and `src` attributes.
+/// Callers must decode entities before checking, or escape the source before
+/// generating HTML so entity text stays literal. Reject whitespace and controls
+/// too, since browsers can ignore them while interpreting a scheme.
+pub fn safe_markdown_url(url: &str, image: bool) -> bool {
+    if url
+        .chars()
+        .any(|ch| ch.is_ascii_whitespace() || ch.is_ascii_control())
+    {
+        return false;
+    }
+
+    let scheme_end = url.find(':');
+    let path_start = url.find(['/', '?', '#']).unwrap_or(url.len());
+    if let Some(end) = scheme_end.filter(|end| *end < path_start) {
+        let scheme = &url[..end];
+        scheme.eq_ignore_ascii_case("https")
+            || scheme.eq_ignore_ascii_case("http")
+            || (!image && scheme.eq_ignore_ascii_case("mailto"))
+    } else {
+        true // Relative URL, fragment, or protocol-relative URL.
     }
 }
 
