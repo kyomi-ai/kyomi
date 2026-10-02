@@ -430,9 +430,9 @@ fn watch_limit_for_tier(tier: kyomi_core::SubscriptionTier) -> i64 {
 
 /// Create a new watch.
 ///
-/// Validates name, prompt, mode, schedule. Checks tier-based limits and
-/// duplicate names within the workspace. Calculates `next_run_at` from
-/// the cron schedule. INSERTs and returns the new watch.
+/// Validates name, prompt, mode, schedule and checks tier-based limits.
+/// Names may be reused; watches are identified by `watch_id`. Calculates
+/// `next_run_at` from the cron schedule. INSERTs and returns the new watch.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_watch(
     db: &DbPool,
@@ -484,21 +484,6 @@ pub async fn create_watch(
     if count >= limit {
         return Err(kyomi_core::Error::Forbidden(format!(
             "Watch limit reached ({limit}). Please upgrade your plan to create more watches."
-        )));
-    }
-
-    // Check duplicate name (case-insensitive)
-    let dup_sql =
-        "SELECT watch_id AS value FROM watches WHERE workspace_id = $1 AND LOWER(name) = LOWER($2) LIMIT 1";
-    let duplicate: Option<StringRow> =
-        kyomi_core::db_fetch_optional!(db, StringRow, dup_sql, workspace_id, name.trim())
-            .map_err(|e| {
-                kyomi_core::Error::Internal(format!("failed to check duplicate name: {e}"))
-            })?;
-
-    if duplicate.is_some() {
-        return Err(kyomi_core::Error::Conflict(format!(
-            "A watch with the name '{name}' already exists in this workspace"
         )));
     }
 
@@ -2835,15 +2820,13 @@ mod privacy_tests {
         let pool = test_pool().await;
         seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
 
-        // Both users have a watch whose name matches the same search term
-        // (watch names are unique per workspace, so the names differ but
-        // both contain "Revenue"), exercising the `has_query` branch (ILIKE
-        // on name/prompt) — this is what proves the renumbered
+        // Both users have identically named watches matching the search term,
+        // exercising the `has_query` branch (ILIKE on name/prompt) — this is what proves the renumbered
         // $3=user_id / $4=query bind chain is correct, since a bind-order
         // mistake would either error or silently leak user-a's row into
         // user-b's results.
-        let wa = create_test_watch(&pool, "user-a", "Revenue Alert Watch A").await;
-        let wb = create_test_watch(&pool, "user-b", "Revenue Alert Watch B").await;
+        let wa = create_test_watch(&pool, "user-a", "Revenue Alert Watch").await;
+        let wb = create_test_watch(&pool, "user-b", "Revenue Alert Watch").await;
 
         let results = search_watches(&pool, "ws-1", "user-b", Some("revenue"), 50)
             .await
@@ -3964,3 +3947,11 @@ mod privacy_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "watch_service/duplicate_names_tests.rs"]
+mod duplicate_names_tests;
+
+#[cfg(test)]
+#[path = "watch_service/name_uniqueness_migration_tests.rs"]
+mod name_uniqueness_migration_tests;
