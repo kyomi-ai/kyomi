@@ -11,10 +11,10 @@
 
 use leptos::prelude::*;
 
+use super::ChatInput;
 use super::agent_message_body::AgentMessageBody;
 use super::chat_engine::{ChatEngine, ChatEngineConfig, SessionMode};
 use super::websocket_client::WebSocketContext;
-use super::ChatInput;
 use crate::components::{EmptyState, Spinner};
 
 // ─── Main component ────────────────────────────────────────────────────────
@@ -48,8 +48,8 @@ pub fn CopilotChat(
     active: Option<Signal<bool>>,
 
     /// Input placeholder text
-    #[prop(into, optional, default = "Ask a question...".into())]
-    placeholder: String,
+    #[prop(into, default = Signal::stored("Ask a question...".to_string()))]
+    placeholder: Signal<String>,
 
     /// Empty state: icon render function
     #[prop(optional)]
@@ -74,8 +74,7 @@ pub fn CopilotChat(
     /// Optional per-assistant-message action slot (e.g., "Apply to Dashboard" button).
     /// Receives the message content string, returns a view.
     #[prop(optional)]
-    assistant_message_action:
-        Option<std::sync::Arc<dyn Fn(String) -> AnyView + Send + Sync>>,
+    assistant_message_action: Option<std::sync::Arc<dyn Fn(String) -> AnyView + Send + Sync>>,
 
     /// Id of the dashboard/knowledge document this copilot is open against,
     /// if any — threaded to `ToolContext::document_id` (see
@@ -83,6 +82,14 @@ pub fn CopilotChat(
     /// single open document (chart builder, watch).
     #[prop(into, optional)]
     document_id: Option<String>,
+
+    /// Viewer state sampled at send time (filters, title and data freshness).
+    #[prop(optional)]
+    view_context: Option<Signal<String>>,
+
+    /// Read-only historical preview state sampled at send time.
+    #[prop(optional)]
+    historical_preview: Option<Signal<bool>>,
 
     /// See `chat_engine::BeforeSendHook`. `None` for copilot types with
     /// nothing to autosave (chart builder, watch).
@@ -101,6 +108,8 @@ pub fn CopilotChat(
         context_content: Some(context_content),
         context_label: Some(context_label),
         document_id,
+        view_context,
+        historical_preview,
         before_send,
     });
 
@@ -109,7 +118,6 @@ pub fn CopilotChat(
     let empty_icon_stored = StoredValue::new(empty_icon);
     let empty_title_stored = StoredValue::new(empty_title);
     let empty_description_stored = StoredValue::new(empty_description);
-    let placeholder_stored = StoredValue::new(placeholder);
 
     // ── Set up scroll ─────────────────────────────────────────────────
     let message_list_ref = NodeRef::<leptos::html::Div>::new();
@@ -296,7 +304,7 @@ pub fn CopilotChat(
                 show_stop_button=chat_state.show_stop_button
                 can_cancel=chat_state.can_cancel
                 connection_state=connection_state
-                placeholder=placeholder_stored.try_get_value().unwrap_or_default()
+                placeholder=placeholder
             />
         </div>
     }

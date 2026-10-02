@@ -313,6 +313,7 @@ pub async fn update_dashboard(
             content: content.as_deref(),
             change_summary: change_summary.as_deref(),
             expected_content_hash: None, // no CAS for dashboard UI
+            copilot_receipt: None,
         },
     )
     .await
@@ -377,6 +378,7 @@ pub async fn update_dashboard(
                     content: c.clone(),
                     app_config: ac.ctx.config.clone(),
                     doc_type: doc_type_for_summary,
+                    copilot_receipt_id: None,
                 },
             );
     }

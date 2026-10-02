@@ -198,6 +198,7 @@ pub(crate) struct ApplyUpdateParams<'a> {
     pub content: Option<&'a str>,
     pub change_summary: Option<&'a str>,
     pub expected_content_hash: Option<&'a str>,
+    pub copilot_receipt: Option<kyomi_auth::dashboard_service::CopilotReceiptInput<'a>>,
     /// KYO-541: the shared chunk-refresh step below needs a resolved
     /// embedding service to call `rechunk_document`, regardless of which
     /// doc-type family called in. Every caller resolves this via
@@ -378,6 +379,7 @@ pub(crate) async fn apply_update(
     // automatically rather than needing its own copy. See
     // `enforce_document_scope`.
     enforce_document_scope(params.document_scope, params.dashboard_id)?;
+    let is_copilot_write = params.copilot_receipt.is_some();
 
     match kyomi_auth::dashboard_service::update_dashboard(
         kyomi_auth::dashboard_service::UpdateDashboardParams {
@@ -390,6 +392,7 @@ pub(crate) async fn apply_update(
             content: params.content,
             change_summary: params.change_summary,
             expected_content_hash: params.expected_content_hash,
+            copilot_receipt: params.copilot_receipt,
         },
     )
     .await
@@ -403,14 +406,25 @@ pub(crate) async fn apply_update(
             // synchronously, rather than in each caller or via
             // `update_dashboard`'s own background path.
             if let Some(content) = params.content {
-                kyomi_auth::dashboard_service::rechunk_document(
+                let rechunk_result = kyomi_auth::dashboard_service::rechunk_document(
                     params.db,
                     params.embed,
                     params.dashboard_id,
                     content,
                     params.workspace_id,
                 )
-                .await?;
+                .await;
+                if let Err(e) = rechunk_result {
+                    if is_copilot_write {
+                        // The document and receipt committed together. A
+                        // derived-index failure cannot turn that saved write
+                        // into a reported failure with no Undo control.
+                        tracing::warn!(error = %e, dashboard_id = %params.dashboard_id,
+                            "copilot write persisted but chunk refresh failed");
+                    } else {
+                        return Err(e);
+                    }
+                }
             }
             Ok(ApplyUpdateOutcome::Updated)
         }
