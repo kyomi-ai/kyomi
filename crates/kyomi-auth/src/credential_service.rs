@@ -129,6 +129,13 @@ pub fn mask_connection_config(config: &Value, ds_type: &str) -> Value {
         mask_field_if_present(&mut masked, field);
     }
 
+    // Legacy invalid shared secrets can have a non-string JSON shape. They
+    // still belong to the secret field and must not leak through repair reads.
+    if masked.get("shared_password").is_some_and(|value| !value.is_null()
+        && value.as_str() != Some("")) {
+        masked.insert("shared_password".into(), Value::String(MASKED_VALUE.into()));
+    }
+
     // Mask indexing_credentials if present as a non-null/non-empty value.
     // It's stored as an encrypted JSON string, but may arrive as an object
     // (after decryption) or as a non-empty string (encrypted blob).
@@ -511,7 +518,7 @@ fn decrypt_or_passthrough(field: &str, s: &str, key: &[u8; 32]) -> kyomi_core::R
 }
 
 /// Decrypt all [`COMMON_SENSITIVE`] fields in `config`, returning a clone
-/// with plaintext values.
+/// with plaintext active values. Dormant `shared_password` remains unchanged.
 ///
 /// Deliberately covers only [`COMMON_SENSITIVE`] — it does not take a
 /// `ds_type` and does not consult a type's `sensitive_connection_config_fields`.
@@ -534,10 +541,9 @@ fn decrypt_or_passthrough(field: &str, s: &str, key: &[u8; 32]) -> kyomi_core::R
 /// # Errors
 ///
 /// Returns [`kyomi_core::Error::CredentialDecryptionFailed`], identifying the
-/// field, if any field looks like Kyomi ciphertext but fails to decrypt (see
-/// [`decrypt_or_passthrough`]). No partial config containing ciphertext is
-/// ever returned — the first undecryptable field short-circuits the whole
-/// call.
+/// field, if any active field looks like Kyomi ciphertext but fails to decrypt
+/// (see [`decrypt_or_passthrough`]). Dormant `shared_password` is preserved
+/// without decryption; any other undecryptable field short-circuits the call.
 pub fn decrypt_connection_config_secrets(config: &Value, key: &[u8; 32]) -> kyomi_core::Result<Value> {
     let Some(obj) = config.as_object() else {
         return Ok(config.clone());
@@ -545,6 +551,12 @@ pub fn decrypt_connection_config_secrets(config: &Value, key: &[u8; 32]) -> kyom
 
     let mut result = obj.clone();
     for &field in COMMON_SENSITIVE {
+        // Retain dormant shared identity at rest without decrypting it for a
+        // personal connection. A damaged dormant secret must remain repairable
+        // and cannot block an unrelated active identity.
+        if field == "shared_password" && config.get("shared_credentials") != Some(&Value::Bool(true)) {
+            continue;
+        }
         if let Some(Value::String(s)) = result.get(field) {
             let decrypted = decrypt_or_passthrough(field, s, key)?;
             result.insert(field.to_string(), Value::String(decrypted));
@@ -1551,6 +1563,7 @@ mod tests {
         let mut config = json!({
             "host": "db.example.com",
             "ssh_private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\nreal-key\n-----END OPENSSH PRIVATE KEY-----",
+            "shared_credentials": true,
             "shared_password": "real-shared-pass"
         });
         finalize_connection_config_secrets(&mut config, None, "postgres", &key).unwrap();
@@ -1845,6 +1858,7 @@ mod tests {
         let good_ciphertext = encryption::encrypt("real-ssh-key", &key_b).unwrap();
         let config = json!({
             "host": "db.example.com",
+            "shared_credentials": true,
             "shared_password": bad_ciphertext,
             "ssh_private_key": good_ciphertext,
         });
@@ -1894,7 +1908,7 @@ mod tests {
     #[test]
     fn decrypt_provider_secrets_decrypts_both_config_and_credentials() {
         let key = test_key();
-        let mut connection_config = json!({ "host": "db.example.com", "shared_password": "s3cr3t" });
+        let mut connection_config = json!({ "host": "db.example.com", "shared_credentials": true, "shared_password": "s3cr3t" });
         finalize_connection_config_secrets(&mut connection_config, None, "postgres", &key).unwrap();
 
         let creds = json!({ "username": "alice", "password": "hunter2" });
