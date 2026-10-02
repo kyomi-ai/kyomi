@@ -299,7 +299,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned Rust toolchain
+        uses: ./.github/actions/setup-rust
 
       - uses: mozilla-actions/sccache-action@v0.0.9
 
@@ -374,10 +375,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev clang poppler-utils
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-          targets: wasm32-unknown-unknown
+      - name: Install pinned Rust toolchain
+        uses: ./.github/actions/setup-rust
 
       - uses: mozilla-actions/sccache-action@v0.0.9
 
@@ -571,9 +570,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev clang
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
+      - name: Install pinned Rust toolchain
+        uses: ./.github/actions/setup-rust
 
       - uses: mozilla-actions/sccache-action@v0.0.9
 
