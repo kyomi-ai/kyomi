@@ -263,6 +263,8 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["r
 indexed_db_futures = { version = "0.6", features = ["serde"] }
 
 [dev-dependencies]
+# Initialize Leptos' executor for actual resource/SSR integration tests.
+any_spawner = { version = "0.3", features = ["tokio"] }
 kyomi-core = { workspace = true, features = ["test-helpers"] }
 kyomi-auth = { workspace = true }
 tokio = { workspace = true }

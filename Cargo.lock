@@ -6532,6 +6532,7 @@ dependencies = [
 name = "kyomi-ui"
 version = "0.1.0"
 dependencies = [
+ "any_spawner",
  "arborium",
  "arborium-theme",
  "arrow-array",

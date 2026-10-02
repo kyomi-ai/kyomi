@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[cfg(feature = "ssr")]
+use super::analytics::load_with_analytics_quota;
+
+#[cfg(feature = "ssr")]
 use super::{AuthenticatedContext, IntoServerFnErrorCore, IntoServerFnErrorSqlx};
 
 /// Workspace row — analytics-bundle-only.
@@ -51,33 +54,27 @@ pub struct UsageData {
     // ── Bundle & analytics fields ──────────────────────────────────
     /// Remaining purchased AI token bundle balance in USD.
     pub ai_bundle_balance_usd: f64,
-    /// Analytics events used this month (from analytics quota tracking).
-    pub analytics_events_used: u64,
-    /// Analytics events included in the Cloud plan (100K).
-    pub analytics_events_included: u64,
-    /// Purchased analytics event bundle balance (non-expiring).
-    pub analytics_bundle_events: i64,
+    /// Cloud analytics quota data; absent on self-hosted deployments.
+    /// Flattening preserves the existing Cloud JSON fields.
+    #[serde(flatten)]
+    pub analytics_events: Option<AnalyticsEventsUsage>,
 }
 
-/// Fetch the AI usage status for the current user's workspace.
-///
-/// Self-hosted mode returns unlimited usage (no billing).
-#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
-pub async fn get_ai_usage_status() -> Result<UsageData, ServerFnError> {
-    let ac = AuthenticatedContext::extract().await?;
+/// Metered analytics usage for a Cloud workspace.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AnalyticsEventsUsage {
+    #[serde(rename = "analytics_events_used")]
+    pub events_used: u64,
+    #[serde(rename = "analytics_events_included")]
+    pub events_included: u64,
+    #[serde(rename = "analytics_bundle_events")]
+    pub bundle_events: i64,
+}
 
-    // Self-hosted: no billing, unlimited AI usage. This branch's
-    // `analytics_events_used: 0` is a hardcoded zero — it returns before
-    // ever reaching the Redis-backed quota lookup below, so it is not
-    // "real" usage data. Unlike `get_analytics_usage`'s sibling self-hosted
-    // short-circuit (server_fns/analytics.rs), this one *is* rendered live
-    // — `UsagePage` shows it via `AnalyticsEventsCard` for every
-    // self-hosted admin — and it reports `analytics_events_included` as
-    // the Cloud plan's 100K constant even though self-hosted has no such
-    // quota. See the note on `get_analytics_usage` for the resulting
-    // cross-path inconsistency.
-    if ac.ctx.config.self_hosted {
-        return Ok(UsageData {
+impl UsageData {
+    /// Self-hosted AI is unlimited and analytics quotas do not apply.
+    pub(crate) fn unmetered() -> Self {
+        Self {
             percentage_used: 0.0,
             warning_level: None,
             allowed: true,
@@ -95,12 +92,27 @@ pub async fn get_ai_usage_status() -> Result<UsageData, ServerFnError> {
                 ("kyomi_watch".to_string(), 0.0),
             ]),
             ai_bundle_balance_usd: 0.0,
-            analytics_events_used: 0,
-            analytics_events_included: kyomi_core::capability::ANALYTICS_EVENTS_INCLUDED,
-            analytics_bundle_events: 0,
-        });
+            analytics_events: None,
+        }
     }
+}
 
+/// Fetch the AI usage status for the current user's workspace.
+///
+/// Self-hosted mode returns unlimited usage (no billing).
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
+pub async fn get_ai_usage_status() -> Result<UsageData, ServerFnError> {
+    let ac = AuthenticatedContext::extract().await?;
+
+    Ok(
+        load_with_analytics_quota(ac.ctx.config.self_hosted, || cloud_ai_usage_status(ac))
+            .await?
+            .unwrap_or_else(UsageData::unmetered),
+    )
+}
+
+#[cfg(feature = "ssr")]
+async fn cloud_ai_usage_status(ac: AuthenticatedContext) -> Result<UsageData, ServerFnError> {
     let billing_service = kyomi_auth::billing_service::BillingService::new();
     let status = billing_service
         .get_ai_usage_status(ac.db(), &ac.ws_id, &ac.auth.user_id)
@@ -150,8 +162,10 @@ pub async fn get_ai_usage_status() -> Result<UsageData, ServerFnError> {
         },
         by_feature: status.by_feature,
         ai_bundle_balance_usd: ai_bundle_remaining_usd,
-        analytics_events_used,
-        analytics_events_included,
-        analytics_bundle_events,
+        analytics_events: Some(AnalyticsEventsUsage {
+            events_used: analytics_events_used,
+            events_included: analytics_events_included,
+            bundle_events: analytics_bundle_events,
+        }),
     })
 }
