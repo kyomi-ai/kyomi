@@ -1688,12 +1688,16 @@ pub fn ChatPage() -> impl IntoView {
                     // Phase 9 — If skip_ai was enabled, reset state and return
                     // (no AI response expected). Matches React: Chat.jsx lines 1147-1151.
                     if response.skip_ai {
-                        // Guard: reset() and set() use RwSignal::set() internally;
-                        // check the state signal is still alive before calling.
-                        if chat_state_inner.state().try_get_untracked().is_some() {
-                            chat_state_inner.reset();
+                        // A retained run may already be sending a newer turn
+                        // when this older HTTP response arrives.
+                        if !chat_state_inner.owns_send(&session_id, &send_token) {
+                            engine_inner.sweep();
+                            return;
                         }
-                        skip_ai_response.try_set(false);
+                        chat_state_inner.reset();
+                        if engine_inner.session_id().try_get_untracked().flatten().as_deref() == Some(session_id.as_str()) {
+                            skip_ai_response.try_set(false);
+                        }
                         // Still need to update session_id if new
                         if is_new_session && engine_inner.session_id().try_get_untracked().flatten().as_deref() == Some(session_id.as_str()) {
                             // M8 — Mark as just-created to skip redundant reload.
@@ -1752,6 +1756,12 @@ pub fn ChatPage() -> impl IntoView {
                     }
                 }
                 Err(err) => {
+                    // Navigation preserves this run, so a cancelled turn's
+                    // delayed HTTP failure must not interrupt a later send.
+                    if !chat_state_inner.owns_send(&session_id, &send_token) {
+                        engine_inner.sweep();
+                        return;
+                    }
                     // M11 — Display actual error text instead of generic message.
                     // React distinguishes budget-exhausted errors, etc.
                     let error_text = err.to_string();
@@ -1776,11 +1786,7 @@ pub fn ChatPage() -> impl IntoView {
                         run.messages.try_set(msgs);
                     }
 
-                    // Guard: set_error() uses RwSignal::set() internally;
-                    // check the state signal is still alive before calling.
-                    if chat_state_inner.state().try_get_untracked().is_some() {
-                        chat_state_inner.set_error(&error_text);
-                    }
+                    chat_state_inner.set_error(&error_text);
                     // Preserve the failed first prompt and its error in a
                     // fresh draft before dropping its unpublished session ID.
                     if is_new_session && engine_inner.return_failed_draft(&session_id) {

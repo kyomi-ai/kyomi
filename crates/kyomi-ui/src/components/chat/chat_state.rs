@@ -117,6 +117,17 @@ impl ChatStateData {
         self.error.read_only()
     }
 
+    /// An HTTP continuation may outlive its view or a cancelled turn. Match
+    /// its dispatch identity without rejecting a current turn whose stream
+    /// arrived before the HTTP response.
+    pub(crate) fn owns_send(&self, session_id: &str, send_token: &str) -> bool {
+        matches!(
+            self.state.get_untracked(),
+            ChatState::Sending | ChatState::Streaming | ChatState::Cancelling
+        ) && self.active_session_id.get_untracked().as_deref() == Some(session_id)
+            && self.sending_token.get_untracked().as_deref() == Some(send_token)
+    }
+
     pub fn expect_assistant(&self, session_id: &str, send_token: &str, message_id: &str) -> bool {
         if self.state.get_untracked() != ChatState::Sending
             || self.active_session_id.get_untracked().as_deref() != Some(session_id)
@@ -297,6 +308,76 @@ impl ChatStateData {
         {
             let _ = (state, active_message_id, reason);
         }
+    }
+}
+
+#[cfg(all(test, feature = "ssr"))]
+mod tests_send_ownership {
+    use super::*;
+
+    #[test]
+    fn retained_http_snapshot_rejects_cancelled_turn_after_view_disposal_and_retry() {
+        let page = Owner::new();
+        let state = page.with(ChatStateData::new);
+        state.start_sending_with_token("session", "first-send");
+        let pending_http = state.clone();
+        page.cleanup();
+        assert!(pending_http.owns_send("session", "first-send"));
+
+        // The returning view and the old HTTP continuation share this data.
+        let returned = state.clone();
+        assert!(returned.request_cancel());
+        assert!(pending_http.owns_send("session", "first-send"));
+        returned.confirm_cancelled();
+        assert!(!pending_http.owns_send("session", "first-send"));
+        // Native tests do not run the browser's cancellation reset timer.
+        returned.reset();
+        returned.start_sending_with_token("session", "second-send");
+
+        assert!(!pending_http.owns_send("session", "first-send"));
+        assert!(pending_http.owns_send("session", "second-send"));
+        assert_eq!(returned.state().get_untracked(), ChatState::Sending);
+        assert_eq!(returned.expected_assistant_id().get_untracked(), None);
+    }
+
+    #[test]
+    fn current_streaming_or_cancelling_send_keeps_ownership_without_mutating_state() {
+        let state = ChatStateData::new();
+        state.start_sending_with_token("session", "current-send");
+        assert!(state.owns_send("session", "current-send"));
+        state.start_streaming("assistant");
+        assert!(state.owns_send("session", "current-send"));
+        assert!(!state.owns_send("other-session", "current-send"));
+        assert!(!state.owns_send("session", "old-send"));
+        assert_eq!(state.state().get_untracked(), ChatState::Streaming);
+        assert_eq!(
+            state.active_message_id().get_untracked().as_deref(),
+            Some("assistant")
+        );
+        assert_eq!(
+            state.expected_assistant_id().get_untracked().as_deref(),
+            Some("assistant")
+        );
+        assert!(state.request_cancel());
+        assert!(state.owns_send("session", "current-send"));
+        assert_eq!(state.state().get_untracked(), ChatState::Cancelling);
+    }
+
+    #[test]
+    fn terminal_states_reject_the_dispatch_even_if_its_identity_remains() {
+        let state = ChatStateData::new();
+        assert!(!state.owns_send("session", "send"));
+        state.start_sending_with_token("session", "send");
+        state.set_error("current send failed");
+        assert!(!state.owns_send("session", "send"));
+        assert_eq!(
+            state.error().get_untracked().as_deref(),
+            Some("current send failed")
+        );
+        state.reset();
+        state.start_sending_with_token("session", "send");
+        state.complete();
+        assert!(!state.owns_send("session", "send"));
     }
 }
 
