@@ -483,6 +483,7 @@ pub fn Layout(children: ChildrenFn) -> impl IntoView {
             fallback=|| view! { <div class="min-h-screen flex items-center justify-center">"Loading..."</div> }
         >
             <WebSocketProvider user_id=ws_user_id.into() workspace_id=ws_workspace_id.into()>
+                <crate::components::chat::chat_run_store::ChatRunStoreProvider workspace_id=ws_workspace_id.into()>
                 // Bridges Layout-level QueryCache to the WS `dashboard_update`
                 // channel so list pages stay fresh without each page owning
                 // its own subscription. See [KYO-9].
@@ -566,6 +567,7 @@ pub fn Layout(children: ChildrenFn) -> impl IntoView {
                     <InvitationStatusBar/>
                 </div>
                 </Show>
+                </crate::components::chat::chat_run_store::ChatRunStoreProvider>
             </WebSocketProvider>
         </Show>
     }

@@ -41,7 +41,12 @@ impl ChatState {
     fn valid_transitions(self) -> &'static [ChatState] {
         match self {
             ChatState::Idle => &[ChatState::Sending],
-            ChatState::Sending => &[ChatState::Streaming, ChatState::Cancelling, ChatState::Error, ChatState::Idle],
+            ChatState::Sending => &[
+                ChatState::Streaming,
+                ChatState::Cancelling,
+                ChatState::Error,
+                ChatState::Idle,
+            ],
             ChatState::Streaming => &[ChatState::Idle, ChatState::Cancelling, ChatState::Error],
             ChatState::Cancelling => &[ChatState::Cancelled, ChatState::Idle, ChatState::Error],
             ChatState::Cancelled => &[ChatState::Idle],
@@ -68,152 +73,50 @@ impl std::fmt::Display for ChatState {
     }
 }
 
-/// Reactive chat state machine — Leptos equivalent of `useChatState()`.
-///
-/// Provides read signals for state, active message/session IDs, and error,
-/// plus computed signals for UI convenience (can_send, is_streaming, etc.).
-///
-/// All mutation happens through methods that enforce valid state transitions.
+/// State owned by a retained chat run. Arc signals survive route disposal and
+/// are freed when the store and any in-flight operation release the run.
 #[derive(Clone)]
-pub struct ChatStateMachine {
-    /// Current chat state.
-    state: RwSignal<ChatState>,
-    /// Read-only handle for `state`, captured ONCE in `new()` rather than
-    /// derived on every `state()` call — see that method's doc comment
-    /// (KYO-781) for why.
-    state_read: ReadSignal<ChatState>,
-    /// The message ID currently being streamed (set in `start_streaming`).
-    active_message_id: RwSignal<Option<String>>,
-    /// Read-only handle for `active_message_id`, captured once — see `state_read`.
-    active_message_id_read: ReadSignal<Option<String>>,
-    /// Server-assigned assistant ID for the send, possibly learned after WS completion.
-    expected_assistant_id: RwSignal<Option<String>>,
-    /// Read-only handle for `expected_assistant_id`, captured once — see `state_read`.
-    expected_assistant_id_read: ReadSignal<Option<String>>,
-    /// Per-send token, independent of optimistic message IDs that can be reused after reset.
-    sending_token: RwSignal<Option<String>>,
-    /// The session ID for the current chat interaction (set in `start_sending`).
-    active_session_id: RwSignal<Option<String>>,
-    /// Read-only handle for `active_session_id`, captured once — see `state_read`.
-    active_session_id_read: ReadSignal<Option<String>>,
-    /// Error message, if any.
-    error: RwSignal<Option<String>>,
-    /// Read-only handle for `error`, captured once — see `state_read`.
-    error_read: ReadSignal<Option<String>>,
-
-    // -- Computed signals (cached, derived from state) --
-
-    /// `true` when `state == Idle` — user can send a new message.
-    pub can_send: Signal<bool>,
-    /// `true` when `state == Sending`.
-    pub is_sending: Signal<bool>,
-    /// `true` when `state == Streaming`.
-    pub is_streaming: Signal<bool>,
-    /// `true` when `state` is `Sending | Streaming | Cancelling` — show stop button.
-    pub show_stop_button: Signal<bool>,
-    /// `true` when `state` is `Sending` or `Streaming`.
-    pub can_cancel: Signal<bool>,
-    /// `true` when `state == Cancelling`.
-    pub is_cancelling: Signal<bool>,
-    /// `true` when `state == Error`.
-    pub has_error: Signal<bool>,
+pub(crate) struct ChatStateData {
+    state: ArcRwSignal<ChatState>,
+    active_message_id: ArcRwSignal<Option<String>>,
+    expected_assistant_id: ArcRwSignal<Option<String>>,
+    sending_token: ArcRwSignal<Option<String>>,
+    active_session_id: ArcRwSignal<Option<String>>,
+    error: ArcRwSignal<Option<String>>,
 }
 
-impl Default for ChatStateMachine {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ChatStateMachine {
-    /// Create a new chat state machine with all reactive signals.
-    pub fn new() -> Self {
-        let state = RwSignal::new(ChatState::Idle);
-        // KYO-781: capture the read-only handles synchronously here, while
-        // this constructor's `Owner` is current — see `ChatEngine::new`'s
-        // `messages_read` comment in chat_engine.rs for the full mechanism.
-        // `RwSignal::read_only()` allocates a fresh arena node under whatever
-        // owner is current AND panics if `self` is already disposed; deferring
-        // that call to a later, possibly-post-disposal `state()`/etc. access
-        // is exactly what let this state machine panic through a caller's
-        // `try_get_untracked()` guard instead of letting it fire.
-        let state_read = state.read_only();
-        let active_message_id = RwSignal::new(None::<String>);
-        let active_message_id_read = active_message_id.read_only();
-        let expected_assistant_id = RwSignal::new(None::<String>);
-        let expected_assistant_id_read = expected_assistant_id.read_only();
-        let sending_token = RwSignal::new(None::<String>);
-        let active_session_id = RwSignal::new(None::<String>);
-        let active_session_id_read = active_session_id.read_only();
-        let error = RwSignal::new(None::<String>);
-        let error_read = error.read_only();
-
-        // Computed signals — matches React's computed properties exactly.
-        let can_send = Signal::derive(move || state.get() == ChatState::Idle);
-        let is_sending = Signal::derive(move || state.get() == ChatState::Sending);
-        let is_streaming = Signal::derive(move || state.get() == ChatState::Streaming);
-        let show_stop_button = Signal::derive(move || {
-            matches!(
-                state.get(),
-                ChatState::Sending | ChatState::Streaming | ChatState::Cancelling
-            )
-        });
-        let can_cancel = Signal::derive(move || {
-            matches!(state.get(), ChatState::Streaming | ChatState::Sending)
-        });
-        let is_cancelling = Signal::derive(move || state.get() == ChatState::Cancelling);
-        let has_error = Signal::derive(move || state.get() == ChatState::Error);
-
+impl ChatStateData {
+    pub(crate) fn new() -> Self {
         Self {
-            state,
-            state_read,
-            active_message_id,
-            active_message_id_read,
-            expected_assistant_id,
-            expected_assistant_id_read,
-            sending_token,
-            active_session_id,
-            active_session_id_read,
-            error,
-            error_read,
-            can_send,
-            is_sending,
-            is_streaming,
-            show_stop_button,
-            can_cancel,
-            is_cancelling,
-            has_error,
+            state: ArcRwSignal::new(ChatState::Idle),
+            active_message_id: ArcRwSignal::new(None),
+            expected_assistant_id: ArcRwSignal::new(None),
+            sending_token: ArcRwSignal::new(None),
+            active_session_id: ArcRwSignal::new(None),
+            error: ArcRwSignal::new(None),
         }
     }
 
-    // -- Read signals --------------------------------------------------------
-
-    /// Read signal for the current chat state.
-    ///
-    /// Returns the handle captured once in `new()` (KYO-781) rather than
-    /// calling `.read_only()` here, which would re-allocate an arena node
-    /// under whatever owner is current AND panic if this state machine's
-    /// owner is already disposed — defeating callers' `try_get_untracked()`
-    /// disposal guards (e.g. `chat_page.rs`'s send handler) before they ever
-    /// run.
-    pub fn state(&self) -> ReadSignal<ChatState> {
-        self.state_read
+    pub(crate) fn state(&self) -> ArcReadSignal<ChatState> {
+        self.state.read_only()
     }
 
-    /// Read signal for the active message ID. See `state()` for why this
-    /// returns the handle captured once in `new()` (KYO-781).
-    pub fn active_message_id(&self) -> ReadSignal<Option<String>> {
-        self.active_message_id_read
+    pub(crate) fn active_message_id(&self) -> ArcReadSignal<Option<String>> {
+        self.active_message_id.read_only()
     }
 
-    /// Read signal for the assistant ID returned by the current send. See
-    /// `state()` for why this returns the handle captured once in `new()`.
-    pub fn expected_assistant_id(&self) -> ReadSignal<Option<String>> {
-        self.expected_assistant_id_read
+    pub(crate) fn expected_assistant_id(&self) -> ArcReadSignal<Option<String>> {
+        self.expected_assistant_id.read_only()
     }
 
-    /// Associate the server-assigned assistant with the current send only.
-    /// A late HTTP response from an abandoned send must not bind the new turn.
+    pub(crate) fn active_session_id(&self) -> ArcReadSignal<Option<String>> {
+        self.active_session_id.read_only()
+    }
+
+    pub(crate) fn error(&self) -> ArcReadSignal<Option<String>> {
+        self.error.read_only()
+    }
+
     pub fn expect_assistant(&self, session_id: &str, send_token: &str, message_id: &str) -> bool {
         if self.state.get_untracked() != ChatState::Sending
             || self.active_session_id.get_untracked().as_deref() != Some(session_id)
@@ -223,18 +126,6 @@ impl ChatStateMachine {
         }
         self.expected_assistant_id.set(Some(message_id.to_string()));
         true
-    }
-
-    /// Read signal for the active session ID. See `state()` for why this
-    /// returns the handle captured once in `new()` (KYO-781).
-    pub fn active_session_id(&self) -> ReadSignal<Option<String>> {
-        self.active_session_id_read
-    }
-
-    /// Read signal for the error message. See `state()` for why this
-    /// returns the handle captured once in `new()` (KYO-781).
-    pub fn error(&self) -> ReadSignal<Option<String>> {
-        self.error_read
     }
 
     // -- State transitions ---------------------------------------------------
@@ -363,20 +254,14 @@ impl ChatStateMachine {
     ///
     /// Matches React's `isActiveMessage(messageId)`.
     pub fn is_active_message(&self, message_id: &str) -> bool {
-        self.active_message_id
-            .get_untracked()
-            .as_deref()
-            == Some(message_id)
+        self.active_message_id.get_untracked().as_deref() == Some(message_id)
     }
 
     /// Check if a session ID matches the current active session.
     ///
     /// Matches React's `isActiveSession(sessionId)`.
     pub fn is_active_session(&self, session_id: &str) -> bool {
-        self.active_session_id
-            .get_untracked()
-            .as_deref()
-            == Some(session_id)
+        self.active_session_id.get_untracked().as_deref() == Some(session_id)
     }
 
     // -- Internal ------------------------------------------------------------
@@ -386,8 +271,8 @@ impl ChatStateMachine {
     /// Matches React's `setTimeout(() => { transition(IDLE); setActiveMessageId(null); }, 100)`.
     fn schedule_auto_reset(&self, reason: &'static str) {
         // Clone the signals we need to move into the closure.
-        let state = self.state;
-        let active_message_id = self.active_message_id;
+        let state = self.state.clone();
+        let active_message_id = self.active_message_id.clone();
 
         // On WASM, use gloo-timers. On SSR, auto-reset is a no-op (no timers).
         #[cfg(target_arch = "wasm32")]
@@ -412,5 +297,174 @@ impl ChatStateMachine {
         {
             let _ = (state, active_message_id, reason);
         }
+    }
+}
+
+/// A mounted view of a run's state. Every read handle is created once in the
+/// view owner; deferred code should capture `snapshot()` before awaiting.
+#[derive(Clone)]
+pub struct ChatStateMachine {
+    data: Signal<ChatStateData>,
+    state_read: Signal<ChatState>,
+    active_message_id_read: Signal<Option<String>>,
+    expected_assistant_id_read: Signal<Option<String>>,
+    active_session_id_read: Signal<Option<String>>,
+    error_read: Signal<Option<String>>,
+    pub can_send: Signal<bool>,
+    pub is_sending: Signal<bool>,
+    pub is_streaming: Signal<bool>,
+    pub show_stop_button: Signal<bool>,
+    pub can_cancel: Signal<bool>,
+    pub is_cancelling: Signal<bool>,
+    pub has_error: Signal<bool>,
+}
+
+impl Default for ChatStateMachine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ChatStateMachine {
+    pub fn new() -> Self {
+        let data = ChatStateData::new();
+        Self::from_source(Signal::derive(move || data.clone()))
+    }
+
+    pub(crate) fn from_source(data: Signal<ChatStateData>) -> Self {
+        let state_read = Signal::derive(move || {
+            data.try_get()
+                .and_then(|data| data.state().try_get())
+                .unwrap_or(ChatState::Idle)
+        });
+        let active_message_id_read = Signal::derive(move || {
+            data.try_get()
+                .and_then(|data| data.active_message_id().try_get())
+                .flatten()
+        });
+        let expected_assistant_id_read = Signal::derive(move || {
+            data.try_get()
+                .and_then(|data| data.expected_assistant_id().try_get())
+                .flatten()
+        });
+        let active_session_id_read = Signal::derive(move || {
+            data.try_get()
+                .and_then(|data| data.active_session_id().try_get())
+                .flatten()
+        });
+        let error_read = Signal::derive(move || {
+            data.try_get()
+                .and_then(|data| data.error().try_get())
+                .flatten()
+        });
+        Self {
+            data,
+            state_read,
+            active_message_id_read,
+            expected_assistant_id_read,
+            active_session_id_read,
+            error_read,
+            can_send: Signal::derive(move || {
+                let s = state_read.try_get();
+                s == Some(ChatState::Idle)
+            }),
+            is_sending: Signal::derive(move || {
+                let s = state_read.try_get();
+                s == Some(ChatState::Sending)
+            }),
+            is_streaming: Signal::derive(move || {
+                let s = state_read.try_get();
+                s == Some(ChatState::Streaming)
+            }),
+            show_stop_button: Signal::derive(move || {
+                let s = state_read.try_get();
+                matches!(
+                    s,
+                    Some(ChatState::Sending | ChatState::Streaming | ChatState::Cancelling)
+                )
+            }),
+            can_cancel: Signal::derive(move || {
+                let s = state_read.try_get();
+                matches!(s, Some(ChatState::Sending | ChatState::Streaming))
+            }),
+            is_cancelling: Signal::derive(move || {
+                let s = state_read.try_get();
+                s == Some(ChatState::Cancelling)
+            }),
+            has_error: Signal::derive(move || {
+                let s = state_read.try_get();
+                s == Some(ChatState::Error)
+            }),
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> ChatStateData {
+        self.data.get_untracked()
+    }
+
+    pub fn state(&self) -> Signal<ChatState> {
+        self.state_read
+    }
+
+    pub fn active_message_id(&self) -> Signal<Option<String>> {
+        self.active_message_id_read
+    }
+
+    pub fn expected_assistant_id(&self) -> Signal<Option<String>> {
+        self.expected_assistant_id_read
+    }
+
+    pub fn active_session_id(&self) -> Signal<Option<String>> {
+        self.active_session_id_read
+    }
+
+    pub fn error(&self) -> Signal<Option<String>> {
+        self.error_read
+    }
+
+    pub fn start_sending(&self, session_id: &str) {
+        self.snapshot().start_sending(session_id)
+    }
+
+    pub fn start_sending_with_token(&self, session_id: &str, send_token: &str) {
+        self.snapshot()
+            .start_sending_with_token(session_id, send_token)
+    }
+
+    pub fn start_streaming(&self, message_id: &str) {
+        self.snapshot().start_streaming(message_id)
+    }
+
+    pub fn expect_assistant(&self, session_id: &str, send_token: &str, message_id: &str) -> bool {
+        self.snapshot()
+            .expect_assistant(session_id, send_token, message_id)
+    }
+
+    pub fn request_cancel(&self) -> bool {
+        self.snapshot().request_cancel()
+    }
+
+    pub fn confirm_cancelled(&self) {
+        self.snapshot().confirm_cancelled()
+    }
+
+    pub fn complete(&self) {
+        self.snapshot().complete()
+    }
+
+    pub fn set_error(&self, msg: &str) {
+        self.snapshot().set_error(msg)
+    }
+
+    pub fn reset(&self) {
+        self.snapshot().reset()
+    }
+
+    pub fn is_active_message(&self, message_id: &str) -> bool {
+        self.snapshot().is_active_message(message_id)
+    }
+
+    pub fn is_active_session(&self, session_id: &str) -> bool {
+        self.snapshot().is_active_session(session_id)
     }
 }
