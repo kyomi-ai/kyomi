@@ -6,6 +6,10 @@ on:
     # 03:17 UTC nightly, away from the UTC workday. This is stable, not nightly Rust.
     - cron: '17 3 * * *'
   workflow_dispatch:
+  # TEMPORARY KYO-402 verification trigger; remove before delivery.
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: read
@@ -17,6 +21,7 @@ concurrency:
 
 jobs:
   clippy:
+    if: github.event_name != 'pull_request' || github.head_ref == 'jason/kyo-402-toolchain-verification'
     name: Latest stable (${{ matrix.configuration }})
     runs-on: ubuntu-latest
     timeout-minutes: 75
@@ -87,6 +92,11 @@ jobs:
           CANARY_CONFIGURATION: ${{ matrix.configuration }}
         run: |
           set -euo pipefail
+          # TEMPORARY KYO-402 failure injection; only this matrix leg exits 42.
+          if [ "$CANARY_CONFIGURATION" = workspace ]; then
+            echo 'KYO-402 INJECTED CANARY FAILURE: workspace configuration; exit 42' | tee clippy.log
+            exit 42
+          fi
           # Derive argv from CI rather than maintaining a fourth copy of the gates.
           python3 - <<'PYTHON' > canary-command.sh
           import os, re
