@@ -124,7 +124,9 @@ pub struct AuthModeConfig {
     /// `true` if this is the default auth mode for the datasource.
     pub is_default: bool,
 
-    /// `true` if workspace can share credentials for this auth mode.
+    /// `true` if the explicit shared username/password toggle resolves all
+    /// required credential fields through the published provider factory.
+    /// Intrinsic workspace service-account auth is independent of this flag.
     pub supports_shared_credentials: bool,
 
     /// Whether this mode can authenticate a *headless* background catalog-indexing
@@ -301,7 +303,9 @@ fn service_account_auth_mode(is_default: bool) -> AuthModeConfig {
         // (kyomi-ui/src/pages/settings/datasources.rs).
         connection_config_fields: vec!["service_account_json".into()],
         is_default,
-        supports_shared_credentials: true,
+        // Intrinsic workspace auth uses service_account_json, independently
+        // of the explicit shared username/password toggle.
+        supports_shared_credentials: false,
         supports_headless_indexing: true,
     }
 }
@@ -768,13 +772,8 @@ static SNOWFLAKE_META: LazyLock<DatasourceTypeMetadata> =
                 // for this mode.
                 connection_config_fields: vec![],
                 is_default: false,
-                // The "Shared credentials (all users)" toggle
-                // (`ProviderCredentialsFields`, `datasources.rs:5908-5920`)
-                // is not excluded for Snowflake's keypair mode — it falls
-                // through to the same generic branch that renders the
-                // toggle for `password` mode. A workspace admin can already
-                // configure one shared key-pair for every member today.
-                supports_shared_credentials: true,
+                // The common resolver copies username/password, never a private key.
+                supports_shared_credentials: false,
                 supports_headless_indexing: true,
             },
         ]),
@@ -812,7 +811,7 @@ static DATABRICKS_META: LazyLock<DatasourceTypeMetadata> =
                 "access_token",
                 "Personal Access Token",
                 "Use a Databricks personal access token for authentication",
-                true,
+                false,
             ),
             oauth_auth_mode(
                 "databricks",
@@ -983,13 +982,9 @@ static SYNAPSE_META: LazyLock<DatasourceTypeMetadata> =
             AuthModeConfig {
                 mode_id: "service_principal".into(),
                 display_name: "Service Principal".into(),
-                // KYO-274: same downgrade as BigQuery's service_account —
-                // "Authenticate using an Azure AD service principal" doesn't
-                // say the client ID/secret is one identity used by the whole
-                // workspace, not a per-user credential (there is exactly one
-                // Client ID/Secret field pair for the datasource; every
-                // connecting user shares it). That's the fact worth stating.
-                description: "All users share a service principal (app registration) identity"
+                // These credentials are personal; the shared resolver does
+                // not copy tenant/client secrets from connection_config.
+                description: "Authenticate using a service principal (app registration) identity"
                     .into(),
                 credential_type: "password".into(),
                 oauth_provider: None,
@@ -1014,7 +1009,7 @@ static SYNAPSE_META: LazyLock<DatasourceTypeMetadata> =
                 // see `inactive_auth_mode_connection_config_fields`'s doc.
                 connection_config_fields: vec![],
                 is_default: false,
-                supports_shared_credentials: true,
+                supports_shared_credentials: false,
                 supports_headless_indexing: true,
             },
             // NOTE: a plain (non-enterprise) `oauth_auth_mode("microsoft", ...)`
@@ -1251,7 +1246,7 @@ mod tests {
         assert_eq!(meta.auth_modes[2].mode_id, "keypair");
         assert_eq!(meta.auth_modes[2].credential_type, "keypair");
         assert!(!meta.auth_modes[2].is_default);
-        assert!(meta.auth_modes[2].supports_shared_credentials);
+        assert!(!meta.auth_modes[2].supports_shared_credentials);
         assert!(meta.auth_modes[2].supports_headless_indexing);
         assert_eq!(
             meta.auth_modes[2].credential_fields,

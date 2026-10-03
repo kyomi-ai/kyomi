@@ -56,6 +56,33 @@ pub fn http_client() -> kyomi_core::Result<reqwest::Client> {
     kyomi_datasource_drivers::http_client().map_err(Into::into)
 }
 
+/// Select an explicitly shared password identity before provider auth selection.
+/// Snowflake prefers OAuth/key-pair fields and Redshift prefers IAM fields, so
+/// retaining personal credentials would let them override the shared identity.
+fn supported_shared_credentials(
+    ds_type: &kyomi_core::datasource_registry::DatasourceType,
+    connection_config: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    if connection_config.get("shared_credentials") != Some(&serde_json::Value::Bool(true)) {
+        return None;
+    }
+    let config = connection_config
+        .as_object()?
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let mode = kyomi_core::datasource_registry::get_metadata(ds_type)
+        .get_active_auth_mode(&config)
+        .ok()
+        .flatten()?;
+    mode.supports_shared_credentials.then(|| {
+        kyomi_datasource_drivers::resolve_shared_credentials(
+            connection_config,
+            &serde_json::json!({}),
+        )
+    })
+}
+
 /// Create a datasource provider from configuration.
 pub async fn create_provider(
     ds_type: &kyomi_core::datasource_registry::DatasourceType,
@@ -63,10 +90,11 @@ pub async fn create_provider(
     credentials: &serde_json::Value,
     user_context: Option<&UserContext>,
 ) -> kyomi_core::Result<Box<dyn DatasourceProvider>> {
+    let shared = supported_shared_credentials(ds_type, connection_config);
     kyomi_datasource_drivers::create_provider(
         ds_type,
         connection_config,
-        credentials,
+        shared.as_ref().unwrap_or(credentials),
         user_context,
     )
     .await
@@ -81,12 +109,21 @@ pub fn resolve_shared_credentials(
     kyomi_datasource_drivers::resolve_shared_credentials(connection_config, credentials)
 }
 
-/// Ensure OAuth credentials are valid (refresh if needed).
+/// Ensure personal OAuth credentials are valid (refresh if needed).
+///
+/// Explicit shared auth bypasses personal refresh and returns the personal blob
+/// unchanged. Shared credentials are selected only when constructing a provider;
+/// they must never become refresh output that callers persist to a personal row.
 pub async fn ensure_valid_oauth_credentials(
     credentials: &serde_json::Value,
     connection_config: &serde_json::Value,
     ds_type: &kyomi_core::datasource_registry::DatasourceType,
 ) -> kyomi_core::Result<serde_json::Value> {
+    if supported_shared_credentials(ds_type, connection_config).is_some() {
+        // This API returns personal credentials and may be persisted by callers.
+        // Shared identity is selected only during provider construction.
+        return Ok(credentials.clone());
+    }
     kyomi_datasource_drivers::ensure_valid_oauth_credentials(
         credentials,
         connection_config,
@@ -180,3 +217,34 @@ pub async fn create_provider_from_parts(
     }
 }
 
+
+#[cfg(test)]
+mod shared_credentials_tests {
+    use super::*;
+    use kyomi_core::datasource_registry::DatasourceType;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn shared_password_identity_excludes_personal_oauth_keypair_and_iam_fields() {
+        let personal = json!({"username": "personal", "password": "personal-password",
+            "oauth_access_token": "personal-token", "oauth_refresh_token": "personal-refresh",
+            "private_key": "personal-key", "iam": true, "oauth_token_expiry": "2000-01-01T00:00:00Z"});
+        for ds_type in [DatasourceType::Snowflake, DatasourceType::Redshift] {
+            let config = json!({"auth_mode": "password", "shared_credentials": true,
+                "shared_username": "workspace-reader", "shared_password": "workspace-secret"});
+            let unchanged = ensure_valid_oauth_credentials(&personal, &config, &ds_type)
+                .await
+                .unwrap();
+            assert_eq!(unchanged, personal);
+            assert_eq!(
+                supported_shared_credentials(&ds_type, &config).unwrap(),
+                json!({"username": "workspace-reader", "password": "workspace-secret"})
+            );
+            let mut disabled = config;
+            disabled["shared_credentials"] = json!(false);
+            assert!(supported_shared_credentials(&ds_type, &disabled).is_none());
+        }
+        let keypair = json!({"auth_mode": "keypair", "shared_credentials": true});
+        assert!(supported_shared_credentials(&DatasourceType::Snowflake, &keypair).is_none());
+    }
+}
