@@ -127,28 +127,14 @@ fn parse_weekdays(field: &str, utc_hour: u32, tz_offset_minutes: i32) -> Option<
     let conversion = utc_to_local_hour(utc_hour, tz_offset_minutes);
     let day_offset = conversion.day_offset;
 
-    let mut days = Vec::new();
-    for range in field.split(',') {
-        if range.contains('-') {
-            let parts: Vec<&str> = range.split('-').collect();
-            if parts.len() != 2 {
-                continue;
-            }
-            if let (Ok(start), Ok(end)) = (parts[0].parse::<i32>(), parts[1].parse::<i32>()) {
-                for i in start..=end {
-                    let adjusted = ((i + day_offset) % 7 + 7) % 7;
-                    if let Some(name) = WEEKDAYS.get(adjusted as usize) {
-                        days.push((*name).to_string());
-                    }
-                }
-            }
-        } else if let Ok(day_num) = range.parse::<i32>() {
-            let adjusted = ((day_num + day_offset) % 7 + 7) % 7;
-            if let Some(name) = WEEKDAYS.get(adjusted as usize) {
-                days.push((*name).to_string());
-            }
-        }
-    }
+    let days = kyomi_types::cron_weekdays::evaluate_weekdays(field).ok()?;
+    let days = days
+        .iter()
+        .map(|&day| {
+            let adjusted = (day as i32 + day_offset).rem_euclid(7);
+            WEEKDAYS[adjusted as usize].to_string()
+        })
+        .collect();
 
     Some(days)
 }
@@ -185,6 +171,13 @@ pub fn describe_cron(cron_expr: &str, tz_offset_minutes: i32) -> CronDescription
         return CronDescription {
             valid: false,
             description: "Invalid characters in cron expression".into(),
+        };
+    }
+
+    if kyomi_types::cron_weekdays::evaluate_weekdays(day_of_week).is_err() {
+        return CronDescription {
+            valid: false,
+            description: "Invalid day-of-week field (use 0 or 7 for Sunday, 1 for Monday)".into(),
         };
     }
 
@@ -391,6 +384,23 @@ fn describe_cron_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cron_weekday_descriptions_share_execution_sets() {
+        assert_eq!(parse_weekdays("0,7", 9, 0).unwrap(), ["Sunday"]);
+        assert!(!describe_cron("0 9 * * 8", 0).valid);
+        assert!(!describe_cron("0 9 * * */0", 0).valid);
+        assert_eq!(
+            parse_weekdays("5-7", 9, 0).unwrap(),
+            ["Sunday", "Friday", "Saturday"]
+        );
+        assert_eq!(
+            parse_weekdays("*/2", 9, 0).unwrap(),
+            ["Sunday", "Tuesday", "Thursday", "Saturday"]
+        );
+        // UTC Sunday 23:00 is local Monday 09:00 at UTC+10.
+        assert_eq!(parse_weekdays("0", 23, -600).unwrap(), ["Monday"]);
+    }
 
     #[test]
     fn test_utc_to_local_hour_positive_offset() {
