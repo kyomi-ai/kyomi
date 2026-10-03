@@ -1150,10 +1150,6 @@ mod tests {
     mod schedule_validation {
         use super::*;
 
-        const EXPECTED_MESSAGE: &str = "Invalid cron expression. Use standard cron format \
-             (5 fields): 'minute hour day-of-month month day-of-week'. \
-             Example: '0 9 * * *' (daily at 9am UTC), '0 15 * * 1-5' (weekdays at 3pm UTC).";
-
         #[test]
         fn schedule_validation_failure_strips_tag_for_wrong_field_count() {
             // 4 fields instead of 5.
@@ -1167,7 +1163,7 @@ mod tests {
             assert_eq!(parsed["success"], serde_json::json!(false), "{payload}");
             assert_eq!(
                 parsed["error"],
-                serde_json::json!(EXPECTED_MESSAGE),
+                serde_json::json!(err.user_message()),
                 "error field must be the user_message() text with no \"bad request:\" tag: {payload}"
             );
         }
@@ -1185,7 +1181,7 @@ mod tests {
             assert_eq!(parsed["success"], serde_json::json!(false), "{payload}");
             assert_eq!(
                 parsed["error"],
-                serde_json::json!(EXPECTED_MESSAGE),
+                serde_json::json!(err.user_message()),
                 "error field must be the user_message() text with no \"bad request:\" tag: {payload}"
             );
         }
@@ -1240,9 +1236,10 @@ mod tests {
                 serde_json::from_str(&result).expect("tool result is JSON");
 
             assert_eq!(parsed["success"], serde_json::json!(false), "{result}");
+            let err = kyomi_auth::watch_service::parse_schedule("0 9 * *").unwrap_err();
             assert_eq!(
                 parsed["error"],
-                serde_json::json!(EXPECTED_MESSAGE),
+                serde_json::json!(err.user_message()),
                 "error field must be the user_message() text with no \"bad request:\" tag: {result}"
             );
         }

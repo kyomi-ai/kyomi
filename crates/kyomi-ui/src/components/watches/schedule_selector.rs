@@ -80,7 +80,26 @@ fn build_cron(
     day_of_month: u32,
     selected_hours: &[u32],
 ) -> String {
-    let tz = get_tz_offset_minutes();
+    build_cron_with_offset(
+        schedule_type,
+        minute,
+        hour,
+        weekdays,
+        day_of_month,
+        selected_hours,
+        get_tz_offset_minutes(),
+    )
+}
+
+fn build_cron_with_offset(
+    schedule_type: &str,
+    minute: u32,
+    hour: u32,
+    weekdays: &[u32],
+    day_of_month: u32,
+    selected_hours: &[u32],
+    tz: i32,
+) -> String {
     let min = minute.to_string();
 
     match schedule_type {
@@ -226,7 +245,7 @@ fn parse_cron_to_selections(cron: &str) -> Option<ParsedCron> {
 
     // Weekly: "N H * * D,D,..."
     if day_of_month_str == "*" && day_of_week_str != "*" {
-        let mut weekdays_list = parse_cron_field(day_of_week_str);
+        let mut weekdays_list = kyomi_types::cron_weekdays::evaluate_weekdays(day_of_week_str).ok()?;
         if weekdays_list.is_empty() {
             return None;
         }
@@ -1003,6 +1022,16 @@ fn DayOfMonthSelect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_cron_monday_local_can_emit_standard_sunday_utc() {
+        assert_eq!(
+            build_cron_with_offset("weekly", 0, 9, &[1], 1, &[], -600),
+            "0 23 * * 0"
+        );
+        let parsed = parse_cron_to_selections("0 9 * * 0,7").unwrap();
+        assert_eq!(parsed.weekdays, vec![0]);
+    }
 
     #[test]
     fn parse_cron_field_single() {
