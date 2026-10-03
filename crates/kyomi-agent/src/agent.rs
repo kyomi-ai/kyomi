@@ -19,10 +19,9 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
-use regex::{Regex, Replacer};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -55,12 +54,14 @@ pub(crate) const CHARTML_VALIDATION_LOG_UPDATE_SQL: &str =
 /// The categories correspond to the `error_type` column and are used for
 /// aggregation in prompt-tuning queries.
 pub(crate) fn classify_chartml_error(error: &str) -> &'static str {
-    if error.contains("invalid YAML") {
+    if error.contains("invalid YAML") || error.contains(" yaml ") {
         "yaml_parse"
     } else if error.contains("missing required key") {
         "missing_key"
-    } else if error.contains("SQL error") || error.contains("sql error") {
+    } else if error.contains("SQL error") || error.contains("sql error") || error.contains(" sql ") {
         "sql_error"
+    } else if error.contains(" schema ") || error.contains(" conversion ") || error.contains(" schema_initialization ") {
+        "schema_error"
     } else {
         "unknown"
     }
@@ -1066,7 +1067,7 @@ impl CustomAgent {
 
     /// Validate ChartML blocks including SQL dry-run against actual datasources.
     ///
-    /// First runs YAML structure validation (required keys). If that passes,
+    /// First validates the authoritative ChartML JSON Schema. If that passes,
     /// extracts SQL queries and datasource slugs from each block and runs a
     /// dry-run against the real provider to catch invalid SQL before the user
     /// sees it.
@@ -1089,8 +1090,8 @@ impl CustomAgent {
     /// the whole response — see [`strip_chartml_blocks`].
     ///
     /// Runs the identical two-step validation as
-    /// [`Self::validate_chartml_blocks`] (YAML structure first, short-
-    /// circuiting before the SQL dry-run on failure — same as that method),
+    /// [`Self::validate_chartml_blocks`] (each block's schema first, followed
+    /// by all SQL sources of schema-valid blocks),
     /// so the two must never diverge in what they consider invalid. Returns
     /// `None` if all blocks are valid; otherwise the 0-based indices of every
     /// failing block (see [`chartml_block_errors`] for the indexing
@@ -1106,13 +1107,8 @@ impl CustomAgent {
             Some((indices, message))
         }
 
-        // Step 1: YAML structure validation (fast, synchronous).
-        let yaml_errors = chartml_block_errors(text);
-        if !yaml_errors.is_empty() {
-            return split(yaml_errors);
-        }
-
-        // Step 2: SQL dry-run via shared utility (same code path as dashboard tools).
+        // Validate every schema-valid block's SQL even if another block fails schema,
+        // so strip-and-degrade never preserves an unchecked SQL chart.
         let sql_errors = crate::tools::query_utils::chartml_sql_block_errors(
             &self.tool_context.query_context(),
             text,
@@ -1238,20 +1234,6 @@ fn has_chartml_blocks(text: &str) -> bool {
     text.contains("```chartml")
 }
 
-/// Compiled regex for extracting ChartML fenced code blocks.
-///
-/// Mirrors `crates/kyomi-agent/src/tools/query_utils.rs`'s `chartml_re()` —
-/// same literal pattern, because [`crate::tools::query_utils::extract_chartml_queries`]
-/// (the SQL dry-run path) must recognize exactly the blocks this module's
-/// validation and stripping both operate on. If the pattern ever needs to
-/// change, it must change in both places together.
-static CHARTML_RE: OnceLock<Regex> = OnceLock::new();
-
-fn chartml_re() -> &'static Regex {
-    CHARTML_RE
-        .get_or_init(|| Regex::new(r"```chartml\s*\n([\s\S]*?)\n```").expect("valid regex literal"))
-}
-
 /// Plain-text note substituted for a ChartML block stripped by
 /// [`strip_chartml_blocks`].
 ///
@@ -1268,59 +1250,22 @@ pub(crate) const CHARTML_STRIPPED_NOTE: &str = "A chart could not be generated f
 /// The primitive both [`validate_chartml_blocks`] (aggregate) and
 /// [`CustomAgent::validate_chartml_blocks_detailed`] (per-block) build on.
 /// Each entry's `usize` is the block's **0-based position** in
-/// `chartml_re()`'s capture-iteration order (`captures_iter(text)
-/// .enumerate()`), regardless of the 1-based block numbers embedded in the
+/// the shared markdown scanner's document order, regardless of the 1-based block numbers embedded in the
 /// human-readable message text. This is the same indexing contract
 /// [`crate::tools::query_utils::chartml_sql_block_errors`] and
 /// [`strip_chartml_blocks`] use — every function in this file and
 /// `query_utils.rs` that produces or consumes a block index agrees on it. A
 /// block that passes validation contributes no entry.
+#[cfg(test)]
 fn chartml_block_errors(text: &str) -> Vec<(usize, String)> {
-    let re = chartml_re();
-    let mut errors = Vec::new();
-
-    for (i, cap) in re.captures_iter(text).enumerate() {
-        let block_content = &cap[1];
-        let mut block_errors = Vec::new();
-
-        // Try to parse as YAML.
-        let parsed: Result<serde_yaml::Value, _> = serde_yaml::from_str(block_content);
-        match parsed {
-            Ok(value) => {
-                // Check for required keys.
-                let mapping = value.as_mapping();
-                let data_key = serde_yaml::Value::String("data".to_string());
-                let visualize_key = serde_yaml::Value::String("visualize".to_string());
-                let has_data = mapping.map(|m| m.contains_key(&data_key)).unwrap_or(false);
-                let has_visualize = mapping
-                    .map(|m| m.contains_key(&visualize_key))
-                    .unwrap_or(false);
-
-                if !has_data {
-                    block_errors.push(format!("Block {}: missing required key 'data'", i + 1));
-                }
-                if !has_visualize {
-                    block_errors
-                        .push(format!("Block {}: missing required key 'visualize'", i + 1));
-                }
-            }
-            Err(e) => {
-                block_errors.push(format!("Block {}: invalid YAML: {}", i + 1, e));
-            }
-        }
-
-        if !block_errors.is_empty() {
-            errors.push((i, block_errors.join("; ")));
-        }
-    }
-
-    errors
+    kyomi_core::chartml_validation::validate_markdown_schema(text)
+        .into_iter().map(|e| (e.block - 1, e.to_string())).collect()
 }
 
 /// Validate ChartML blocks in the text (YAML structure only, no SQL).
 ///
 /// Extracts all ` ```chartml ... ``` ` blocks, parses each as YAML, and
-/// checks for required keys (`data` and `visualize`). Thin aggregate wrapper
+/// validates the authoritative ChartML JSON Schema. Thin aggregate wrapper
 /// over [`chartml_block_errors`] — see that function for the per-block
 /// primitive.
 ///
@@ -1351,35 +1296,10 @@ fn validate_chartml_blocks(text: &str) -> Option<String> {
 /// `strip_chartml_blocks_replacement_is_not_dollar_expanded`) without
 /// depending on [`CHARTML_STRIPPED_NOTE`] staying free of `$` forever.
 ///
-/// `failing_indices` must be 0-based positions in `chartml_re()`'s
-/// capture-iteration order — see [`chartml_block_errors`]'s doc comment for
-/// the shared contract. Passing indices computed under a different ordering
-/// silently strips the wrong block.
-///
-/// The replacement is applied via [`regex::NoExpand`], not passed as a bare
-/// `&str` to `replace_all`. `regex`'s `Replacer` impl for `&str` expands
-/// `$1`/`${name}` capture references, and the pattern here has exactly one
-/// capture group holding the raw (possibly invalid) block content —
-/// passing `replacement` directly would silently reinject that content into
-/// the "sanitized" output the moment `replacement` ever contains a `$`.
-/// `NoExpand` closes that off by construction: it copies its string
-/// verbatim, so no future edit to a replacement string can reopen this bug
-/// without also changing this function.
+/// Indices use the shared scanner's document order. Replacement is copied
+/// literally, including dollar signs, and unclosed trailing blocks are covered.
 fn strip_chartml_blocks_with(text: &str, failing_indices: &[usize], replacement: &str) -> String {
-    let mut index = 0usize;
-    chartml_re()
-        .replace_all(text, |caps: &regex::Captures<'_>| {
-            let this_index = index;
-            index += 1;
-            let mut out = String::new();
-            if failing_indices.contains(&this_index) {
-                regex::NoExpand(replacement).replace_append(caps, &mut out);
-            } else {
-                out.push_str(&caps[0]);
-            }
-            out
-        })
-        .into_owned()
+    kyomi_core::chartml_validation::strip_markdown_blocks(text, failing_indices, replacement)
 }
 
 /// Replace only the ChartML blocks at `failing_indices` with
@@ -1461,7 +1381,7 @@ mod tests {
 
     #[test]
     fn validate_chartml_blocks_valid() {
-        let text = "Chart:\n```chartml\ndata:\n  query: SELECT 1\nvisualize:\n  type: bar\n```";
+        let text = "Chart:\n```chartml\ntype: chart\nversion: 1\ndata:\n  datasource: test\n  query: SELECT 1\nvisualize:\n  type: bar\n```";
         assert!(validate_chartml_blocks(text).is_none());
     }
 
@@ -1470,7 +1390,7 @@ mod tests {
         let text = "Chart:\n```chartml\n{invalid: yaml: [:\n```";
         let result = validate_chartml_blocks(text);
         assert!(result.is_some());
-        assert!(result.unwrap().contains("invalid YAML"));
+        assert!(result.unwrap().contains("yaml"));
     }
 
     #[test]
@@ -1478,15 +1398,15 @@ mod tests {
         let text = "Chart:\n```chartml\nvisualize:\n  type: bar\n```";
         let result = validate_chartml_blocks(text);
         assert!(result.is_some());
-        assert!(result.unwrap().contains("missing required key 'data'"));
+        assert!(result.unwrap().contains("data"));
     }
 
     #[test]
     fn validate_chartml_blocks_missing_visualize_key() {
-        let text = "Chart:\n```chartml\ndata:\n  query: SELECT 1\n```";
+        let text = "Chart:\n```chartml\ntype: chart\nversion: 1\ndata:\n  datasource: test\n  query: SELECT 1\n```";
         let result = validate_chartml_blocks(text);
         assert!(result.is_some());
-        assert!(result.unwrap().contains("missing required key 'visualize'"));
+        assert!(result.unwrap().contains("visualize"));
     }
 
     #[test]
@@ -1495,14 +1415,14 @@ mod tests {
         let result = validate_chartml_blocks(text);
         assert!(result.is_some());
         let err = result.unwrap();
-        assert!(err.contains("missing required key 'data'"));
-        assert!(err.contains("missing required key 'visualize'"));
+        assert!(err.contains("data"));
+        assert!(err.contains("visualize"));
     }
 
     #[test]
     fn validate_chartml_blocks_multiple_blocks_one_invalid() {
         let text = "\
-Chart 1:\n```chartml\ndata:\n  query: SELECT 1\nvisualize:\n  type: bar\n```\n\
+Chart 1:\n```chartml\ntype: chart\nversion: 1\ndata:\n  datasource: test\n  query: SELECT 1\nvisualize:\n  type: bar\n```\n\
 Chart 2:\n```chartml\ntitle: Bad\n```";
         let result = validate_chartml_blocks(text);
         assert!(result.is_some());
@@ -1519,20 +1439,16 @@ Chart 2:\n```chartml\ntitle: Bad\n```";
 
     #[test]
     fn validate_chartml_blocks_partial_closing_fence() {
-        // ```chartml block without a closing ``` — the regex won't match, so
-        // has_chartml_blocks returns true but validate_chartml_blocks finds no
-        // captures and returns None (no error).
-        let text = "Chart:\n```chartml\ndata:\n  query: SELECT 1\nvisualize:\n  type: bar\n";
+        let text = "Chart:\n```chartml\ntype: chart\nversion: 99";
         assert!(has_chartml_blocks(text));
-        // Regex requires `\n` ``` ` so unclosed blocks are not captured.
-        assert!(validate_chartml_blocks(text).is_none());
+        assert!(validate_chartml_blocks(text).is_some());
     }
 
     // -- strip_chartml_blocks tests (KYO-347) --------------------------------
 
     #[test]
     fn strip_chartml_blocks_single_block() {
-        let text = "Before\n```chartml\ndata:\n  x: 1\n```\nAfter";
+        let text = "Before\n```chartml\ntype: chart\nversion: 1\ndata:\n  x: 1\n```\nAfter";
         assert_eq!(
             strip_chartml_blocks(text, &[0]),
             format!("Before\n{CHARTML_STRIPPED_NOTE}\nAfter")
@@ -1583,7 +1499,7 @@ D";
 
     #[test]
     fn strip_chartml_blocks_preserves_surrounding_prose_verbatim() {
-        let text = "Intro paragraph with **markdown**.\n\n```chartml\ndata:\n  x: 1\n```\n\nOutro paragraph.";
+        let text = "Intro paragraph with **markdown**.\n\n```chartml\ntype: chart\nversion: 1\ndata:\n  x: 1\n```\n\nOutro paragraph.";
         let result = strip_chartml_blocks(text, &[0]);
         assert!(
             result.starts_with("Intro paragraph with **markdown**.\n\n"),
@@ -1603,13 +1519,9 @@ D";
     }
 
     #[test]
-    fn strip_chartml_blocks_unterminated_fence_is_unchanged() {
-        // No closing fence -- the same asymmetry as
-        // `validate_chartml_blocks_partial_closing_fence` above: the regex
-        // requires `\n` ``` ` to close a block, so an unterminated fence
-        // never matches and passes through untouched.
-        let text = "```chartml\ndata:\n  x: 1\n";
-        assert_eq!(strip_chartml_blocks(text, &[0]), text);
+    fn strip_chartml_blocks_unterminated_fence_is_stripped() {
+        let text = "Prose\n```chartml\ntype: chart\nversion: 99";
+        assert_eq!(strip_chartml_blocks(text, &[0]), format!("Prose\n{CHARTML_STRIPPED_NOTE}"));
     }
 
     #[test]
@@ -1798,15 +1710,15 @@ D";
     #[test]
     fn validate_chartml_blocks_valid_with_extra_keys() {
         // Additional keys beyond data and visualize are allowed.
-        let text = "Chart:\n```chartml\ntitle: Revenue\ndata:\n  query: SELECT 1\nvisualize:\n  type: bar\nlayout:\n  colSpan: 6\n```";
+        let text = "Chart:\n```chartml\ntype: chart\nversion: 1\ntitle: Revenue\ndata:\n  datasource: test\n  query: SELECT 1\nvisualize:\n  type: bar\nlayout:\n  colSpan: 6\n```";
         assert!(validate_chartml_blocks(text).is_none());
     }
 
     #[test]
     fn validate_chartml_blocks_multiple_valid_blocks() {
         let text = "\
-Chart 1:\n```chartml\ndata:\n  query: SELECT 1\nvisualize:\n  type: bar\n```\n\
-Chart 2:\n```chartml\ndata:\n  query: SELECT 2\nvisualize:\n  type: line\n```";
+Chart 1:\n```chartml\ntype: chart\nversion: 1\ndata:\n  datasource: test\n  query: SELECT 1\nvisualize:\n  type: bar\n```\n\
+Chart 2:\n```chartml\ntype: chart\nversion: 1\ndata:\n  datasource: test\n  query: SELECT 2\nvisualize:\n  type: line\n```";
         assert!(validate_chartml_blocks(text).is_none());
     }
 
@@ -1823,20 +1735,16 @@ Chart 2:\n```chartml\ndata:\n  query: SELECT 2\nvisualize:\n  type: line\n```";
     fn has_chartml_blocks_case_sensitive() {
         // Must be exactly ```chartml, not ```ChartML.
         assert!(!has_chartml_blocks(
-            "```ChartML\ndata:\n  query: SELECT 1\n```"
+            "```ChartML\ndata:\n  datasource: test\n  query: SELECT 1\n```"
         ));
         assert!(!has_chartml_blocks(
-            "```CHARTML\ndata:\n  query: SELECT 1\n```"
+            "```CHARTML\ndata:\n  datasource: test\n  query: SELECT 1\n```"
         ));
     }
 
     #[test]
     fn validate_chartml_blocks_malformed_closing_fence() {
-        // If there is no closing ``` after ```chartml, the regex won't match.
-        let text = "```chartml\ndata:\n  query: SELECT 1\nvisualize:\n  type: bar";
-        let result = validate_chartml_blocks(text);
-        // Should return None (no blocks found by the regex).
-        assert!(result.is_none());
+        assert!(validate_chartml_blocks("```chartml\ntype: chart\nversion: 99").is_some());
     }
 
     // -- Contract: build_llm_context without system prompt -------------------
@@ -2442,7 +2350,7 @@ Chart 2:\n```chartml\ndata:\n  query: SELECT 2\nvisualize:\n  type: line\n```";
         // `validate_chartml_sql` returns `None` without touching a real
         // datasource — this block is valid on structure alone.
         let valid_chartml =
-            "Here is your chart:\n```chartml\ndata:\n  values: []\nvisualize:\n  type: bar\n```\nDone.";
+            "Here is your chart:\n```chartml\ntype: chart\nversion: 1\ndata:\n  provider: inline\n  rows: []\nvisualize:\n  type: bar\n```\nDone.";
         let script = vec![Reply::ToolCall; 2];
         let (mut agent, _calls) =
             scripted_agent(2, script, Reply::Text(valid_chartml.to_string())).await;
@@ -2473,7 +2381,7 @@ Chart 2:\n```chartml\ndata:\n  query: SELECT 2\nvisualize:\n  type: line\n```";
         // `datasource`, so it is valid on structure alone (same reasoning as
         // `wrap_up_response_with_valid_chartml_is_returned_unchanged`).
         // Second block: missing the required `data` key entirely.
-        let mixed_chartml = "First chart:\n```chartml\ndata:\n  values: []\n\
+        let mixed_chartml = "First chart:\n```chartml\ntype: chart\nversion: 1\ndata:\n  provider: inline\n  rows: []\n\
 visualize:\n  type: bar\n```\nSecond chart:\n```chartml\nvisualize:\n  type: line\n```\nDone.";
         let script = vec![Reply::ToolCall; 2];
         let (mut agent, _calls) =
@@ -2485,7 +2393,7 @@ visualize:\n  type: bar\n```\nSecond chart:\n```chartml\nvisualize:\n  type: lin
             .expect("chat should complete — strip-and-degrade, not an error");
 
         let expected = format!(
-            "First chart:\n```chartml\ndata:\n  values: []\nvisualize:\n  type: bar\n```\n\
+            "First chart:\n```chartml\ntype: chart\nversion: 1\ndata:\n  provider: inline\n  rows: []\nvisualize:\n  type: bar\n```\n\
 Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
         );
         assert_eq!(
@@ -2493,6 +2401,56 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
             "the valid first block must survive byte-identically; only the invalid \
              second block becomes the stripped-note text"
         );
+    }
+
+    #[tokio::test]
+    async fn wrap_up_chartml_mixed_schema_failure_still_checks_other_sql_blocks() {
+        let inline = "```chartml\ntype: chart\nversion: 1\ndata: {provider: inline, rows: []}\nvisualize: {type: bar}\n```";
+        let unavailable = "```chartml\ntype: chart\nversion: 1\ndata: {datasource: absent, query: SELECT 1}\nvisualize: {type: bar}\n```";
+        let invalid = "```chartml\ntype: chart\nversion: 1\ndata: {provider: inline, rows: []}\nvisualize: {type: wrong}\n```";
+        let content = format!("{inline}\n{unavailable}\n{invalid}");
+        let (mut agent, _) = scripted_agent(2, vec![Reply::ToolCall; 2], Reply::Text(content)).await;
+        let answer = agent.chat("hello", CancellationToken::new(), None, None, None).await.unwrap();
+        assert_eq!(answer, format!("{inline}\n{CHARTML_STRIPPED_NOTE}\n{CHARTML_STRIPPED_NOTE}"));
+    }
+
+    #[tokio::test]
+    async fn wrap_up_chartml_unclosed_named_query_and_dependencies_are_stripped() {
+        let inline = "```chartml\ntype: chart\nversion: 1\ndata: {provider: inline, rows: []}\nvisualize: {type: bar}\n```";
+        let definition = "```chartml\ntype: source\nversion: 1\nname: shared\ndatasource: absent\nquery: SELECT {{missing}}\n```";
+        let dependent = "```chartml\ntype: chart\nversion: 1\ndata: {query: shared}\nvisualize: {type: bar}\n```";
+        let unclosed = "```chartml\ntype: chart\nversion: 1\ndata: {query: {datasource: absent, query: SELECT 1}}\nvisualize: {type: bar}";
+        let content = format!("{inline}\n{definition}\n{dependent}\n{unclosed}");
+        let (mut agent, _) = scripted_agent(2, vec![Reply::ToolCall; 2], Reply::Text(content)).await;
+        let answer = agent.chat("hello", CancellationToken::new(), None, None, None).await.unwrap();
+        assert_eq!(answer, format!("{inline}\n{CHARTML_STRIPPED_NOTE}\n{CHARTML_STRIPPED_NOTE}\n{CHARTML_STRIPPED_NOTE}"));
+        assert_eq!(agent.state().messages.last().unwrap().content, answer);
+    }
+
+    #[tokio::test]
+    async fn wrap_up_chartml_bare_fence_prefix_and_lost_defaults_are_stripped() {
+        let prefix = "```\n```chartml\ntype: chart\nversion: 99";
+        let (mut agent, _) = scripted_agent(2, vec![Reply::ToolCall; 2], Reply::Text(prefix.into())).await;
+        let answer = agent.chat("hello", CancellationToken::new(), None, None, None).await.unwrap();
+        assert_eq!(answer, format!("```\n{CHARTML_STRIPPED_NOTE}"));
+        let owner = "```chartml\n- type: params\n  version: 1\n  name: defaults\n  params: [{id: amount, type: number, label: Amount, default: 2}]\n- type: source\n  version: 1\n  name: bad\n  datasource: absent\n  query: BAD SQL\n```";
+        let consumer = "```chartml\ntype: chart\nversion: 1\ndata: {datasource: absent, query: 'SELECT {{amount}}'}\nvisualize: {type: table}\n```";
+        let (mut agent, _) = scripted_agent(2, vec![Reply::ToolCall; 2], Reply::Text(format!("{owner}\n{consumer}"))).await;
+        let answer = agent.chat("hello", CancellationToken::new(), None, None, None).await.unwrap();
+        assert_eq!(answer, format!("{CHARTML_STRIPPED_NOTE}\n{CHARTML_STRIPPED_NOTE}"));
+    }
+
+    #[tokio::test]
+    async fn final_chartml_bare_prefix_and_parameter_failures_trigger_retry() {
+        for content in [
+            "```\n```chartml\ntype: chart\nversion: 99",
+            "```chartml\n- type: params\n  version: 1\n  name: defaults\n  params: [{id: amount, type: number, label: Amount, default: 2}]\n- type: source\n  version: 1\n  name: bad\n  datasource: absent\n  query: BAD SQL\n```\n```chartml\ntype: chart\nversion: 1\ndata: {datasource: absent, query: 'SELECT {{amount}}'}\nvisualize: {type: table}\n```"
+        ] {
+            let (mut agent, _) = scripted_agent(6, vec![Reply::Text(content.into()), Reply::Text("Corrected answer".into())], Reply::Text("unused".into())).await;
+            let answer = agent.chat("hello", CancellationToken::new(), None, None, None).await.unwrap();
+            assert_eq!(answer, "Corrected answer");
+            assert_eq!(agent.state().messages.last().unwrap().content, answer);
+        }
     }
 
     #[tokio::test]

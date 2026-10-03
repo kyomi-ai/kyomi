@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 kyomi-core = { workspace = true }
+kyomi-connect-protocol = { workspace = true }
 kyomi-embed = { workspace = true }
 kyomi-types = { workspace = true }
 kyomi-knowledge = { workspace = true }

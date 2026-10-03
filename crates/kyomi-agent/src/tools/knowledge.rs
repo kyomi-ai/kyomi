@@ -629,6 +629,7 @@ impl AgentTool for WriteDocumentTool {
         if let Some(doc) = existing {
             // Update existing document
             let outcome = apply_update(ApplyUpdateParams {
+            validation_context: Some(&ctx.query_context()),
                 db: &ctx.db,
                 dashboard_id: &doc.dashboard_id,
                 workspace_id: &ctx.workspace_id,
@@ -696,6 +697,7 @@ impl AgentTool for WriteDocumentTool {
             // `apply_create` — see that function's doc comment in
             // `tools/document/mod.rs`.
             let dashboard_id = apply_create(ApplyCreateParams {
+            validation_context: Some(&ctx.query_context()),
                 db: &ctx.db,
                 user_id: &ctx.user_id,
                 workspace_id: &ctx.workspace_id,

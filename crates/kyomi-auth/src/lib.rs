@@ -12,6 +12,7 @@
 //! - Cookie helpers
 //! - Redis-backed rate limiting
 
+pub mod chartml_validation;
 pub mod analytics_clickhouse;
 pub mod analytics_notifications;
 pub mod analytics_quota;
