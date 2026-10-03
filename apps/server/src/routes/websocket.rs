@@ -118,6 +118,11 @@ async fn handle_authenticated_ws(
         }
     };
 
+    if claims.require_current_session(user.sessions_valid_from).is_err() {
+        close_with_code(socket, CLOSE_AUTH_REQUIRED, "Session revoked").await;
+        return;
+    }
+
     if !user.active {
         tracing::warn!("WebSocket rejected: user disabled: {jwt_user_id}");
         close_with_code(socket, CLOSE_FORBIDDEN, "Account disabled").await;

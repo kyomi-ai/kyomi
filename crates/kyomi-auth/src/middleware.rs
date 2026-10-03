@@ -151,6 +151,8 @@ where
         })?
         .ok_or_else(|| kyomi_core::Error::Unauthorized("User not found".into()))?;
 
+    token_data.claims.require_current_session(user.sessions_valid_from)?;
+
     if !user.active {
         return Err(kyomi_core::Error::Unauthorized("User account is inactive".into()));
     }
@@ -456,6 +458,260 @@ mod tests {
             is_personal,
             self_hosted: false,
         }
+    }
+
+
+    // KYO-341: signed JWTs through actual normal and allow-lapsed middleware.
+    async fn cutoff_regression(db: &kyomi_core::DbPool, user_id: &str) {
+        use crate::test_support::authenticate_session;
+        use crate::{session, token_refresh, token_service, user_service};
+        let user = user_service::create_user(db, &format!("{user_id}@test.local"), None, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            user.sessions_valid_from, None,
+            "additive migration preserves existing users"
+        );
+        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+        let device = token_service::DeviceInfo {
+            user_agent: None,
+            ip_address: None,
+            country_code: None,
+            oauth_client_id: None,
+        };
+        let initiating = session::create_authenticated_session(db, &kv, SECRET, &user, &device)
+            .await
+            .unwrap();
+        let other = session::create_authenticated_session(db, &kv, SECRET, &user, &device)
+            .await
+            .unwrap();
+        for token in [&initiating.access_token, &other.access_token] {
+            authenticate_session(db, SECRET, token, "/", false)
+                .await
+                .unwrap();
+        }
+        let mcp = jwt::create_mcp_access_token_str(&user.user_id, SECRET, 15, Default::default())
+            .unwrap();
+        // Per-device revocation leaves both access tokens and the other refresh usable.
+        let verified = token_service::verify_refresh_token(db, &initiating.refresh_token)
+            .await
+            .unwrap();
+        let token_service::RefreshTokenVerifyResult::Valid(data) = verified else {
+            panic!("valid token");
+        };
+        token_service::revoke_user_refresh_token(db, &user.user_id, &data.token_id)
+            .await
+            .unwrap();
+        assert!(
+            token_refresh::refresh_tokens(db, SECRET, &initiating.refresh_token, &device)
+                .await
+                .is_err()
+        );
+        for token in [&initiating.access_token, &other.access_token] {
+            authenticate_session(db, SECRET, token, "/", false)
+                .await
+                .unwrap();
+        }
+        let rotated = token_refresh::refresh_tokens(db, SECRET, &other.refresh_token, &device)
+            .await
+            .unwrap();
+        token_service::revoke_all_user_sessions(db, &user.user_id)
+            .await
+            .unwrap();
+        for token in [
+            &initiating.access_token,
+            &other.access_token,
+            &rotated.access_token,
+        ] {
+            for allow_lapsed in [false, true] {
+                assert!(
+                    matches!(
+                        authenticate_session(db, SECRET, token, "/", allow_lapsed).await,
+                        Err(kyomi_core::Error::Unauthorized(_))
+                    ),
+                    "old session must fail next authenticated request"
+                );
+            }
+            assert!(
+                authenticate_session(db, SECRET, token, "/mcp", false)
+                    .await
+                    .is_err(),
+                "browser sessions on MCP are also revoked"
+            );
+        }
+        for refresh in [&other.refresh_token, &rotated.raw_refresh_token] {
+            assert!(
+                token_refresh::refresh_tokens(db, SECRET, refresh, &device)
+                    .await
+                    .is_err()
+            );
+        }
+        authenticate_session(db, SECRET, &mcp, "/mcp", false)
+            .await
+            .unwrap();
+        assert!(
+            authenticate_session(db, SECRET, &mcp, "/", false)
+                .await
+                .is_err(),
+            "MCP cannot gain browser authority"
+        );
+        // A stale pre-event user is deliberately supplied: session creation must reload.
+        let fresh = session::create_authenticated_session(db, &kv, SECRET, &user, &device)
+            .await
+            .unwrap();
+        authenticate_session(db, SECRET, &fresh.access_token, "/", false)
+            .await
+            .unwrap();
+        token_refresh::refresh_tokens(db, SECRET, &fresh.refresh_token, &device)
+            .await
+            .unwrap();
+        let id = &user.user_id;
+        let first = user_service::get_user_by_id(db, id)
+            .await
+            .unwrap()
+            .unwrap()
+            .sessions_valid_from
+            .unwrap();
+        // Concurrent revocations each advance the persisted cutoff.
+        let (a, b) = tokio::join!(
+            token_service::revoke_all_user_sessions(db, id),
+            token_service::revoke_all_user_sessions(db, id)
+        );
+        a.unwrap();
+        b.unwrap();
+        let last = user_service::get_user_by_id(db, id)
+            .await
+            .unwrap()
+            .unwrap()
+            .sessions_valid_from
+            .unwrap();
+        assert!(last >= first + 2);
+        kyomi_core::db_execute!(db, "DELETE FROM refresh_tokens WHERE user_id = $1", id).unwrap();
+        kyomi_core::db_execute!(db, "DELETE FROM users WHERE user_id = $1", id).unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_cutoff_signed_tokens_sqlite() {
+        cutoff_regression(&test_pool().await, "cutoff-sqlite").await;
+    }
+
+    #[tokio::test]
+    async fn session_cutoff_signed_tokens_postgres() {
+        let Some(db) =
+            crate::test_pg::postgres_test_pool_or_skip("session_cutoff_signed_tokens_postgres")
+                .await
+        else {
+            return;
+        };
+        cutoff_regression(&db, &crate::test_pg::unique_test_id("cutoff")).await;
+    }
+
+    #[tokio::test]
+    async fn session_cutoff_same_second_legacy_and_no_refresh_tokens() {
+        use crate::test_support::authenticate_session;
+        let db = test_pool().await;
+        seed_user_with_active(sqlite_pool(&db), "user-1", "legacy@test.local", true).await;
+        let second = Utc::now().timestamp();
+        let cutoff = second * 1_000_000 + 500_000;
+        let signed = |iat: i64, precise: Option<i64>| {
+            let mut payload =
+                serde_json::json!({ "sub": "user-1", "iat": iat, "exp": second + 900 });
+            if let Some(issued) = precise {
+                payload["session_iat_us"] = serde_json::json!(issued);
+            }
+            jsonwebtoken::encode(
+                &jsonwebtoken::Header::default(),
+                &payload,
+                &jsonwebtoken::EncodingKey::from_secret(SECRET.as_bytes()),
+            )
+            .unwrap()
+        };
+        let legacy = signed(second, None);
+        authenticate_session(&db, SECRET, &legacy, "/", false)
+            .await
+            .unwrap();
+        // Seed a future cutoff to deterministically cover clock rollback and repeated events.
+        sqlx::query("UPDATE users SET sessions_valid_from = $1 WHERE user_id = 'user-1'")
+            .bind(cutoff)
+            .execute(sqlite_pool(&db))
+            .await
+            .unwrap();
+        for token in [
+            signed(second, Some(cutoff - 1)),
+            signed(second, Some(cutoff)),
+            legacy,
+        ] {
+            for allow in [false, true] {
+                assert!(
+                    matches!(
+                        authenticate_session(&db, SECRET, &token, "/", allow).await,
+                        Err(kyomi_core::Error::Unauthorized(_))
+                    ),
+                    "same-second old or legacy session must be rejected"
+                );
+            }
+        }
+        authenticate_session(&db, SECRET, &signed(second, Some(cutoff + 1)), "/", false)
+            .await
+            .unwrap();
+        authenticate_session(&db, SECRET, &signed(second + 1, None), "/", false)
+            .await
+            .unwrap();
+        let baseline = cutoff + 10_000_000;
+        sqlx::query("UPDATE users SET sessions_valid_from = $1 WHERE user_id = 'user-1'")
+            .bind(baseline)
+            .execute(sqlite_pool(&db))
+            .await
+            .unwrap();
+        for step in 1..=2 {
+            assert_eq!(
+                crate::token_service::revoke_all_user_sessions(&db, "user-1")
+                    .await
+                    .unwrap(),
+                0
+            );
+            let user = crate::user_service::get_user_by_id(&db, "user-1")
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(user.sessions_valid_from, Some(baseline + step));
+            let fresh = jwt::create_session_access_token_str(
+                "user-1",
+                SECRET,
+                15,
+                Default::default(),
+                user.sessions_valid_from,
+            )
+            .unwrap();
+            authenticate_session(&db, SECRET, &fresh, "/", false)
+                .await
+                .unwrap();
+        }
+        // Restricted recovery claims keep the previous independent cutoff behavior.
+        let recovery = jwt::create_access_token_str(
+            "user-1",
+            SECRET,
+            15,
+            [("scope".into(), serde_json::json!("passkey_recovery"))]
+                .into_iter()
+                .collect(),
+        )
+        .unwrap();
+        let claims = jwt::validate_token(&recovery, SECRET).unwrap().claims;
+        assert!(claims.session_iat_us.is_none());
+        claims.require_current_session(Some(baseline + 2)).unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_cutoff_without_refresh_tokens_rejects_allow_lapsed() {
+        let db = test_pool().await;
+        seed_user_with_active(sqlite_pool(&db), "user-1", "no-refresh@test.local", true).await;
+        let token = mint_token("user-1", None, 15);
+        crate::test_support::authenticate_session(&db, SECRET, &token, "/", true).await.unwrap();
+        assert_eq!(crate::token_service::revoke_all_user_sessions(&db, "user-1").await.unwrap(), 0);
+        let error = crate::test_support::authenticate_session(&db, SECRET, &token, "/", true).await
+            .expect_err("allow-lapsed must reject an old session even without refresh tokens");
+        assert!(matches!(error, kyomi_core::Error::Unauthorized(_)));
     }
 
     // ── Case 1: valid token + active user + active membership ──────────────

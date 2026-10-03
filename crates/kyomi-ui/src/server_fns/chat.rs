@@ -266,12 +266,14 @@ pub async fn get_websocket_config() -> Result<WebSocketConfig, ServerFnError> {
 
     // Short-lived token (15 minutes) — matches the standard access-token
     // expiry used elsewhere (see `jwt.access_token_expire_minutes`).
-    let token = kyomi_auth::jwt::create_access_token_str(
+    let token = kyomi_auth::session::create_user_access_token(
+        &ac.ctx.db,
         &ac.auth.user_id,
         &ac.ctx.config.jwt_secret,
         15,
         extra,
     )
+    .await
     // user_message() (KYO-448) — Display would leak the variant tag
     // (jwt encode failures surface as kyomi_core::Error::Internal).
     .map_err(|e| ServerFnError::new(format!("Failed to create WebSocket token: {}", e.user_message())))?;
