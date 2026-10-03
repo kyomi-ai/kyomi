@@ -8,5 +8,8 @@
   },
   "dependencies": {
     "@tailwindcss/typography": "^0.5.19"
+  },
+  "scripts": {
+    "e2e:regression:discovery-failure-message": "node scripts/e2e-regression/discovery-failure-message.cjs"
   }
 }
