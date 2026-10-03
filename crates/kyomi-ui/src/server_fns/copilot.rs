@@ -221,6 +221,7 @@ pub async fn send_copilot_message(
     let embedding = ac.ctx.embedding.clone();
     let app_config = ac.ctx.config.clone();
     let connect_registry = ac.ctx.connect_registry.clone();
+    let spawn_workspace_id = ac.ws_id.clone();
     let spawn_user_id = ac.auth.user_id.clone();
     let spawn_session_id = session_id.clone();
     let spawn_assistant_message_id = prep.assistant_message_id.clone();
@@ -248,7 +249,7 @@ pub async fn send_copilot_message(
                 // Notify the frontend that the request was cancelled so it can
                 // transition out of Cancelling state. Do NOT call deliver_response.
                 kyomi_auth::websocket::helpers::send_request_cancelled(
-                    &ws_manager,
+                    ws_manager.for_workspace(&spawn_workspace_id),
                     &spawn_user_id,
                     &spawn_session_id,
                     &exec_result.assistant_message_id,
@@ -266,7 +267,7 @@ pub async fn send_copilot_message(
                     exec_result.model.as_deref().unwrap_or("unknown"),
                     exec_result.token_usage,
                     &spawn_context_type,
-                    None,
+                    &spawn_workspace_id,
                     None,
                 )
                 .await;
@@ -280,6 +281,7 @@ pub async fn send_copilot_message(
 
                 kyomi_auth::copilot_service::handle_copilot_agent_error(
                     kyomi_auth::copilot_service::CopilotAgentErrorParams {
+                        workspace_id: &spawn_workspace_id,
                         db: &db,
                         encryption_key: &encryption_key,
                         ws_manager: &ws_manager,

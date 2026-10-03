@@ -2725,6 +2725,7 @@ mod tests {
         );
 
         let tracker = crate::thinking::AgentThinkingTracker::new(crate::thinking::AgentThinkingTrackerConfig {
+            workspace_id: "ws-1".to_string(),
             session_id: session_id.to_string(),
             user_id: "user-a".to_string(),
             message_id: assistant_message_id.to_string(),

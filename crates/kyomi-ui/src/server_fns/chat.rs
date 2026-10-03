@@ -719,7 +719,7 @@ pub async fn send_chat_message(
                 // transition out of Cancelling state. Do NOT call deliver_response
                 // or broadcast — the partial response is discarded.
                 kyomi_auth::websocket::helpers::send_request_cancelled(
-                    &ws_manager,
+                    ws_manager.for_workspace(&spawn_workspace_id),
                     &spawn_user_id,
                     &spawn_session_id,
                     &exec_result.assistant_message_id,
@@ -738,7 +738,7 @@ pub async fn send_chat_message(
                     exec_result.model.as_deref().unwrap_or("unknown"),
                     exec_result.token_usage,
                     &context_type,
-                    None,
+                    &spawn_workspace_id,
                     None,
                 )
                 .await;
@@ -771,6 +771,7 @@ pub async fn send_chat_message(
                 // Persist error message and notify the user. Callout 3 of 3.
                 kyomi_auth::chat_service::save_agent_error(
                     kyomi_auth::chat_service::SaveAgentErrorParams {
+                        workspace_id: &spawn_workspace_id,
                         db: &db,
                         encryption_key: &encryption_key,
                         ws_manager: &ws_manager,

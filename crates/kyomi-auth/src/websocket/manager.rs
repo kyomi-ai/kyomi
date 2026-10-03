@@ -15,8 +15,8 @@
 
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashMap;
 use futures_util::StreamExt;
@@ -84,7 +84,30 @@ pub struct WebSocketManager {
     inner: Arc<Inner>,
 }
 
+/// Explicit origin for user-targeted workspace events, independent of socket scope.
+#[derive(Clone, Copy)]
+pub struct WorkspaceMessageContext<'a> {
+    manager: &'a WebSocketManager,
+    workspace_id: &'a str,
+}
+
+impl WorkspaceMessageContext<'_> {
+    pub async fn send_to_user(&self, user_id: &str, message: WebSocketMessage) {
+        self.manager
+            .send_to_user(user_id, message.with_workspace(self.workspace_id))
+            .await;
+    }
+}
+
 impl WebSocketManager {
+    /// Bind user-targeted events to their originating workspace.
+    pub fn for_workspace<'a>(&'a self, workspace_id: &'a str) -> WorkspaceMessageContext<'a> {
+        WorkspaceMessageContext {
+            manager: self,
+            workspace_id,
+        }
+    }
+
     /// Create a new manager.
     ///
     /// Pass `Some((pool, url))` to enable multi-replica Redis pub/sub mode.
@@ -196,14 +219,17 @@ impl WebSocketManager {
             .remove_if(user_id, |_, conns| conns.is_empty())
             .is_some();
 
-        if removed_last && self.inner.redis.is_some()
+        if removed_last
+            && self.inner.redis.is_some()
             && let Some((_, handle)) = self.inner.subscribers.remove(user_id)
         {
             handle.abort();
         }
     }
 
-    /// Send a message to a user.
+    /// Send an account notice or an already scoped message to a user.
+    /// Workspace emitters should use `for_workspace` to supply their origin;
+    /// the socket outbound boundary rejects workspace messages without it.
     ///
     /// In multi-replica mode (Redis configured): publishes via Redis so all pods receive it.
     /// In single-instance mode (no Redis): delivers directly to local connections.
@@ -243,6 +269,7 @@ impl WebSocketManager {
         message: WebSocketMessage,
         exclude_user_id: Option<&str>,
     ) {
+        let message = message.with_workspace(workspace_id);
         // Query workspace members from DB.
         let members: Vec<(String,)> = match kyomi_core::db_fetch_all!(
             &self.inner.db,
