@@ -190,6 +190,7 @@ pub(crate) async fn read_document(
 
 /// Parameters for [`apply_update`].
 pub(crate) struct ApplyUpdateParams<'a> {
+    pub validation_context: Option<&'a super::QueryContext>,
     pub db: &'a kyomi_core::DbPool,
     pub dashboard_id: &'a str,
     pub workspace_id: &'a str,
@@ -261,6 +262,7 @@ pub(crate) fn enforce_document_scope(
 
 /// Parameters for [`apply_create`].
 pub(crate) struct ApplyCreateParams<'a> {
+    pub validation_context: Option<&'a super::QueryContext>,
     pub db: &'a kyomi_core::DbPool,
     pub user_id: &'a str,
     pub workspace_id: &'a str,
@@ -306,14 +308,13 @@ pub(crate) struct ApplyCreateParams<'a> {
 /// branch already rechunked explicitly on its own; it now goes through this
 /// shared function instead of carrying its own copy of the same two calls.
 pub(crate) async fn apply_create(params: ApplyCreateParams<'_>) -> kyomi_core::Result<String> {
-    let dashboard_id = kyomi_auth::dashboard_service::create_dashboard(
-        params.db,
-        params.user_id,
-        params.workspace_id,
-        params.title,
-        params.content,
-        params.doc_type,
-        None, // rechunk happens synchronously below — see the NOTE above.
+    let dashboard_id = kyomi_auth::dashboard_service::create_dashboard_with_context(
+        kyomi_auth::dashboard_service::CreateDashboardParams {
+            db: params.db, user_id: params.user_id, workspace_id: params.workspace_id,
+            title: params.title, content: params.content, doc_type: params.doc_type,
+            embed: None, // rechunk happens synchronously below
+            validation_context: params.validation_context,
+        },
     )
     .await?;
 
@@ -379,7 +380,7 @@ pub(crate) async fn apply_update(
     // `enforce_document_scope`.
     enforce_document_scope(params.document_scope, params.dashboard_id)?;
 
-    match kyomi_auth::dashboard_service::update_dashboard(
+    match kyomi_auth::dashboard_service::update_dashboard_with_context(
         kyomi_auth::dashboard_service::UpdateDashboardParams {
             db: params.db,
             embed: None,
@@ -391,6 +392,7 @@ pub(crate) async fn apply_update(
             change_summary: params.change_summary,
             expected_content_hash: params.expected_content_hash,
         },
+        params.validation_context,
     )
     .await
     {

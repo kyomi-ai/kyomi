@@ -245,20 +245,19 @@ pub async fn create_dashboard(
     let ac = AuthenticatedContext::extract().await?;
 
     let content = content.unwrap_or_default();
+    let validation_context = chartml_query_context(&ac)?;
 
     // Get embedding service for both embedding generation and rechunking
     let embedding_svc = ac.ctx.embedding.wait_ready().await
         // user_message() (KYO-448) — Display would leak the variant tag.
         .map_err(|e| ServerFnError::new(format!("Embedding service unavailable: {}", e.user_message())))?;
 
-    let dashboard_id = kyomi_auth::dashboard_service::create_dashboard(
-        ac.db(),
-        &ac.auth.user_id,
-        &ac.ws_id,
-        &title,
-        &content,
-        kyomi_core::models::DocType::Dashboard,
-        Some(embedding_svc),
+    let dashboard_id = kyomi_auth::dashboard_service::create_dashboard_with_context(
+        kyomi_auth::dashboard_service::CreateDashboardParams {
+            db: ac.db(), user_id: &ac.auth.user_id, workspace_id: &ac.ws_id,
+            title: &title, content: &content, doc_type: kyomi_core::models::DocType::Dashboard,
+            embed: Some(embedding_svc), validation_context: Some(&validation_context),
+        },
     )
     .await
     .into_sfn_core()?;
@@ -297,12 +296,14 @@ pub async fn update_dashboard(
     // lint-allow: server-fn-callouts=sync broadcast is a separate cross-cutting concern alongside mutation + embedding + re-fetch
     let ac = AuthenticatedContext::extract().await?;
 
+    let validation_context = chartml_query_context(&ac)?;
+
     // Reject no-op updates (matches REST handler validation)
     if title.is_none() && content.is_none() && change_summary.is_none() {
         return Err(ServerFnError::new("No updates provided"));
     }
 
-    kyomi_auth::dashboard_service::update_dashboard(
+    kyomi_auth::dashboard_service::update_dashboard_with_context(
         kyomi_auth::dashboard_service::UpdateDashboardParams {
             db: ac.db(),
             embed: None, // no rechunking from dashboard UI (yet)
@@ -314,6 +315,7 @@ pub async fn update_dashboard(
             change_summary: change_summary.as_deref(),
             expected_content_hash: None, // no CAS for dashboard UI
         },
+        Some(&validation_context),
     )
     .await
     .into_sfn_core()?;
@@ -368,6 +370,7 @@ pub async fn update_dashboard(
 
             kyomi_agent::generate_dashboard_summary(
                 kyomi_agent::DashboardSummaryParams {
+                    validation_context: validation_context.clone(),
                     db: ac.ctx.db.clone(),
                     ws_manager,
                     dashboard_id: dashboard_id.clone(),
@@ -705,3 +708,12 @@ pub async fn set_workspace_default_dashboard(
 use super::{extract_auth, extract_context, AuthenticatedContext, IntoServerFnErrorCore};
 #[cfg(feature = "ssr")]
 use kyomi_types::Permission;
+
+#[cfg(feature = "ssr")]
+fn chartml_query_context(ac: &AuthenticatedContext) -> Result<kyomi_auth::chartml_validation::QueryContext, ServerFnError> {
+    Ok(kyomi_auth::chartml_validation::QueryContext {
+        db: ac.db().clone(), user_id: ac.auth.user_id.clone(), workspace_id: ac.ws_id.clone(),
+        encryption_key: ac.ctx.encryption_key.clone().ok_or_else(|| ServerFnError::new("Datasource validation is unavailable"))?,
+        config: ac.ctx.config.clone(), connect_registry: ac.ctx.connect_registry.clone(),
+    })
+}

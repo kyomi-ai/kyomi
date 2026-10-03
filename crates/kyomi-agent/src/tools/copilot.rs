@@ -124,7 +124,7 @@ impl AgentTool for UpdateChartCopilotTool {
 
         // Validate ChartML content — wrap in a fenced block for the validator
         let fenced = format!("```chartml\n{content}\n```");
-        if let Err(e) = kyomi_auth::dashboard_service::validate_dashboard_content(&fenced) {
+        if let Err(e) = kyomi_auth::chartml_validation::validate_content(&fenced, Some(&ctx.query_context())).await {
             return Ok(validation_failure_result(
                 "ChartML validation failed. Fix these issues and try again:",
                 &e,
@@ -562,7 +562,7 @@ mod tests {
         // Missing the required 'visualize' key.
         let result = UpdateChartCopilotTool
             .execute(
-                serde_json::json!({"content": "data:\n  source: table", "summary": "try a chart"}),
+                serde_json::json!({"content": "type: chart\nversion: 1\ndata: {provider: inline, rows: [{x: 1}]}", "summary": "try a chart"}),
                 &ctx,
             )
             .await
@@ -571,11 +571,20 @@ mod tests {
 
         assert_eq!(parsed["success"], serde_json::json!(false), "{result}");
         assert_eq!(parsed["validation_failed"], serde_json::json!(true), "{result}");
-        assert_eq!(
-            parsed["errors"][0],
-            serde_json::json!("ChartML block missing required 'visualize' key"),
-            "{result}"
-        );
+        assert!(parsed["errors"][0].as_str().unwrap().contains("schema"), "{result}");
+        assert!(parsed["errors"][0].as_str().unwrap().contains("visualize"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn update_chart_copilot_chartml_sql_requires_authorized_dry_run() {
+        let ctx = build_ctx(test_pool().await);
+        let result = UpdateChartCopilotTool.execute(serde_json::json!({
+            "content": "type: chart\nversion: 1\ndata: {datasource: absent, query: SELECT 1}\nvisualize: {type: bar}",
+            "summary": "SQL chart"
+        }), &ctx).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["success"], false, "{result}");
+        assert!(parsed["errors"][0].as_str().unwrap().contains("sql_datasource"), "{result}");
     }
 
     #[tokio::test]
@@ -589,7 +598,7 @@ mod tests {
         let mut ctx = build_ctx(db);
         ctx.ws_manager = manager;
 
-        let content = "data:\n  source: table\nvisualize:\n  type: bar";
+        let content = "type: chart\nversion: 1\ndata: {provider: inline, rows: [{x: 1}]}\nvisualize: {type: bar}";
         let result = UpdateChartCopilotTool
             .execute(
                 serde_json::json!({"content": content, "summary": "Switched to a bar chart"}),

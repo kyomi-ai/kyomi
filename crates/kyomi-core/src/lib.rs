@@ -5,6 +5,7 @@
 //! Provides: configuration, database pool, Redis pool, error types,
 //! structured logging setup, and capability service.
 
+pub mod chartml_validation;
 pub mod ai_budget;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cancel_registry;

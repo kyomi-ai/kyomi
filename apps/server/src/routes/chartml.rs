@@ -2,27 +2,18 @@
 
 //! ChartML validation REST endpoints.
 //!
-//! Provides structural validation for ChartML YAML blocks:
-//! - `GET  /schema`             — return the ChartML JSON schema
-//! - `POST /validate`           — validate a single ChartML YAML block
-//! - `POST /validate-markdown`  — extract and validate all ChartML blocks in markdown
-//!
-//! Validation checks: YAML parse + required `data`/`visualize` keys.
-//! Full JSON Schema validation (discriminator-based) is Python-only for now.
-
-use std::sync::LazyLock;
+//! Uses the shared authoritative JSON Schema and authorized SQL dry-run pipeline.
 
 use axum::{
     routing::{get, post},
+    extract::State,
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
 
-static CHARTML_BLOCK_RE: LazyLock<regex::Regex> =
-    LazyLock::new(|| regex::Regex::new(r"(?s)```chartml\n(.*?)```").expect("valid chartml regex"));
-use serde_json::{json, Value};
+use serde_json::Value;
 
-use kyomi_auth::{dashboard_service, middleware::AuthUser};
+use kyomi_auth::middleware::AuthUser;
 
 use crate::state::AppState;
 
@@ -55,6 +46,8 @@ struct ValidateResponse {
     valid: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    errors: Vec<kyomi_core::chartml_validation::Diagnostic>,
 }
 
 #[derive(Deserialize)]
@@ -71,6 +64,8 @@ struct BlockValidationResult {
     valid: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    errors: Vec<kyomi_core::chartml_validation::Diagnostic>,
 }
 
 #[derive(Serialize)]
@@ -92,149 +87,45 @@ struct ValidateMarkdownResponse {
 async fn get_schema(
     _user: AuthUser,
 ) -> Result<Json<Value>, kyomi_core::Error> {
-    // Return a minimal schema description. The full JSON schema is shipped
-    // with the frontend; this endpoint exists for discoverability.
-    Ok(Json(json!({
-        "description": "ChartML v2 specification",
-        "required_keys": ["data", "visualize"],
-        "optional_keys": ["type", "version", "title", "style", "layout", "transform"],
-        "note": "Full JSON schema available at /static/chartml-spec/chartml_schema.min.json"
-    })))
+    Ok(Json(serde_json::from_str(kyomi_core::chartml_validation::SCHEMA).map_err(|e| kyomi_core::Error::Internal(format!("ChartML schema unavailable: {e}")))?))
 }
 
 // ---------------------------------------------------------------------------
 // POST /validate — Validate a single ChartML YAML block
 // ---------------------------------------------------------------------------
 
-async fn validate_chartml(
-    _user: AuthUser,
-    Json(request): Json<ValidateRequest>,
-) -> Result<Json<ValidateResponse>, kyomi_core::Error> {
-    // Parse YAML
-    let parsed: serde_yaml::Value = match serde_yaml::from_str(&request.chartml) {
-        Ok(v) => v,
-        Err(e) => {
-            return Ok(Json(ValidateResponse {
-                valid: false,
-                error: Some(format!("Invalid YAML: {e}")),
-            }));
-        }
-    };
-
-    // Must be a mapping
-    let mapping = match parsed.as_mapping() {
-        Some(m) => m,
-        None => {
-            return Ok(Json(ValidateResponse {
-                valid: false,
-                error: Some("ChartML must be a YAML mapping".into()),
-            }));
-        }
-    };
-
-    // Check required keys
-    let has_data = mapping.contains_key(serde_yaml::Value::String("data".into()));
-    let has_visualize = mapping.contains_key(serde_yaml::Value::String("visualize".into()));
-
-    if !has_data {
-        return Ok(Json(ValidateResponse {
-            valid: false,
-            error: Some("Missing required 'data' key".into()),
-        }));
+fn query_context(state: &AppState, user: &AuthUser) -> kyomi_agent::tools::QueryContext {
+    kyomi_agent::tools::QueryContext {
+        db: state.db.clone(), user_id: user.user_id.clone(), workspace_id: user.workspace.workspace_id.clone().unwrap_or_default(),
+        encryption_key: state.encryption_key.clone(), config: state.config.clone(), connect_registry: Some(state.connect_registry.clone()),
     }
-    if !has_visualize {
-        return Ok(Json(ValidateResponse {
-            valid: false,
-            error: Some("Missing required 'visualize' key".into()),
-        }));
-    }
-
-    Ok(Json(ValidateResponse {
-        valid: true,
-        error: None,
-    }))
 }
-
-// ---------------------------------------------------------------------------
-// POST /validate-markdown — Validate all ChartML blocks in markdown
-// ---------------------------------------------------------------------------
-
+async fn validate_chartml(
+    State(state): State<AppState>, user: AuthUser, Json(request): Json<ValidateRequest>,
+) -> Result<Json<ValidateResponse>, kyomi_core::Error> {
+    let errors = kyomi_agent::tools::query_utils::validate_chartml_complete(&query_context(&state, &user), &[&request.chartml]).await;
+    Ok(Json(ValidateResponse { valid: errors.is_empty(), error: (!errors.is_empty()).then(|| errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")), errors }))
+}
 async fn validate_markdown(
-    _user: AuthUser,
-    Json(request): Json<ValidateMarkdownRequest>,
+    State(state): State<AppState>, user: AuthUser, Json(request): Json<ValidateMarkdownRequest>,
 ) -> Result<Json<ValidateMarkdownResponse>, kyomi_core::Error> {
-    // Extract ChartML blocks from markdown
-    let mut blocks = Vec::new();
-    let mut all_valid = true;
-
-    for (idx, cap) in CHARTML_BLOCK_RE.captures_iter(&request.content).enumerate() {
-        let yaml_str = &cap[1];
-
-        // Try to parse and validate
-        let result = match serde_yaml::from_str::<serde_yaml::Value>(yaml_str) {
-            Err(e) => BlockValidationResult {
-                block_index: idx,
-                valid: false,
-                error: Some(format!("Invalid YAML: {e}")),
-            },
-            Ok(parsed) => {
-                match parsed.as_mapping() {
-                    None => BlockValidationResult {
-                        block_index: idx,
-                        valid: false,
-                        error: Some("ChartML must be a YAML mapping".into()),
-                    },
-                    Some(mapping) => {
-                        let has_data =
-                            mapping.contains_key(serde_yaml::Value::String("data".into()));
-                        let has_visualize =
-                            mapping.contains_key(serde_yaml::Value::String("visualize".into()));
-
-                        if !has_data {
-                            BlockValidationResult {
-                                block_index: idx,
-                                valid: false,
-                                error: Some("Missing required 'data' key".into()),
-                            }
-                        } else if !has_visualize {
-                            BlockValidationResult {
-                                block_index: idx,
-                                valid: false,
-                                error: Some("Missing required 'visualize' key".into()),
-                            }
-                        } else {
-                            BlockValidationResult {
-                                block_index: idx,
-                                valid: true,
-                                error: None,
-                            }
-                        }
-                    }
-                }
-            }
-        };
-
-        if !result.valid {
-            all_valid = false;
-        }
-        blocks.push(result);
-    }
-
-    // Also validate the overall content (catches early errors)
-    if let Err(_e) = dashboard_service::validate_dashboard_content(&request.content) {
-        all_valid = false;
-    }
-
-    Ok(Json(ValidateMarkdownResponse {
-        valid: all_valid,
-        block_count: blocks.len(),
-        blocks,
-    }))
+    let input = kyomi_core::chartml_validation::markdown_blocks(&request.content);
+    let errors = kyomi_agent::tools::query_utils::validate_chartml_complete(&query_context(&state, &user), &input).await;
+    let blocks = (0..input.len()).map(|idx| {
+        let messages: Vec<_> = errors.iter().filter(|e| e.block == idx + 1).map(ToString::to_string).collect();
+        BlockValidationResult { block_index: idx, valid: messages.is_empty(), error: (!messages.is_empty()).then(|| messages.join("; ")), errors: errors.iter().filter(|e| e.block == idx + 1).cloned().collect() }
+    }).collect();
+    Ok(Json(ValidateMarkdownResponse { valid: errors.is_empty(), block_count: input.len(), blocks }))
 }
 
 // ===========================================================================
 // Tests
 // ===========================================================================
+
+
+#[cfg(test)]
+#[path = "chartml_validation_tests.rs"]
+mod validation_tests;
 
 #[cfg(test)]
 mod tests {
@@ -267,6 +158,7 @@ mod tests {
         let response = ValidateResponse {
             valid: true,
             error: None,
+            errors: vec![],
         };
         let json = serde_json::to_value(&response).unwrap();
         assert!(json["valid"].as_bool().unwrap());
@@ -279,6 +171,7 @@ mod tests {
         let response = ValidateResponse {
             valid: false,
             error: Some("Missing 'data' key".into()),
+            errors: vec![],
         };
         let json = serde_json::to_value(&response).unwrap();
         assert!(!json["valid"].as_bool().unwrap());
@@ -310,11 +203,13 @@ mod tests {
                     block_index: 0,
                     valid: true,
                     error: None,
+            errors: vec![],
                 },
                 BlockValidationResult {
                     block_index: 1,
                     valid: true,
                     error: None,
+            errors: vec![],
                 },
             ],
         };
@@ -334,6 +229,7 @@ mod tests {
                 block_index: 0,
                 valid: false,
                 error: Some("Missing 'visualize' key".into()),
+            errors: vec![],
             }],
         };
 

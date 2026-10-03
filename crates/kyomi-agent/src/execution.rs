@@ -1039,6 +1039,7 @@ async fn generate_title_inner(
 
 /// Parameters for dashboard summary generation.
 pub struct DashboardSummaryParams {
+    pub validation_context: crate::tools::QueryContext,
     pub db: DbPool,
     pub ws_manager: WebSocketManager,
     pub dashboard_id: String,
@@ -1087,6 +1088,7 @@ pub(crate) async fn apply_dashboard_summary(
     workspace_id: &str,
     user_id: &str,
     summary: &str,
+    validation_context: Option<&crate::tools::QueryContext>,
 ) -> kyomi_core::Result<()> {
     let Some(fresh) =
         kyomi_auth::dashboard_service::get_dashboard(db, dashboard_id, workspace_id, user_id).await?
@@ -1105,6 +1107,7 @@ pub(crate) async fn apply_dashboard_summary(
     let new_content = format!("<!-- dashboard-summary: {summary} -->\n{}", fresh.content);
 
     write_dashboard_summary_with_cas(WriteDashboardSummaryParams {
+        validation_context,
         db,
         ws_manager,
         dashboard_id,
@@ -1119,6 +1122,7 @@ pub(crate) async fn apply_dashboard_summary(
 
 /// Parameters for [`write_dashboard_summary_with_cas`].
 pub(crate) struct WriteDashboardSummaryParams<'a> {
+    pub validation_context: Option<&'a crate::tools::QueryContext>,
     pub db: &'a DbPool,
     pub ws_manager: &'a WebSocketManager,
     pub dashboard_id: &'a str,
@@ -1149,6 +1153,7 @@ pub(crate) async fn write_dashboard_summary_with_cas(
     params: WriteDashboardSummaryParams<'_>,
 ) -> kyomi_core::Result<()> {
     let WriteDashboardSummaryParams {
+        validation_context,
         db,
         ws_manager,
         dashboard_id,
@@ -1159,7 +1164,7 @@ pub(crate) async fn write_dashboard_summary_with_cas(
         expected_content_hash,
     } = params;
 
-    match kyomi_auth::dashboard_service::update_dashboard(
+    match kyomi_auth::dashboard_service::update_dashboard_with_context(
         kyomi_auth::dashboard_service::UpdateDashboardParams {
             db,
             embed: None,
@@ -1171,6 +1176,7 @@ pub(crate) async fn write_dashboard_summary_with_cas(
             change_summary: Some("Auto-generated summary"),
             expected_content_hash,
         },
+        validation_context,
     )
     .await
     {
@@ -1205,7 +1211,7 @@ async fn generate_dashboard_summary_inner(
     let DashboardSummaryParams {
         ref db, ref ws_manager, ref dashboard_id, ref user_id,
         ref workspace_id, ref title, ref content, ref app_config,
-        ref doc_type,
+        ref doc_type, ref validation_context,
     } = params;
     if content.trim().is_empty() {
         return Ok(());
@@ -1267,7 +1273,7 @@ async fn generate_dashboard_summary_inner(
     }
     let summary = summary.replace("-->", "\u{2014}");
 
-    apply_dashboard_summary(db, ws_manager, dashboard_id, workspace_id, user_id, &summary).await?;
+    apply_dashboard_summary(db, ws_manager, dashboard_id, workspace_id, user_id, &summary, Some(validation_context)).await?;
 
     // -------------------------------------------------------------------------
     // Collection auto-tagging — evaluate whether the dashboard belongs to any
@@ -1468,7 +1474,7 @@ mod tests {
 
         let ws_manager = kyomi_auth::websocket::WebSocketManager::new(None, db.clone());
 
-        apply_dashboard_summary(&db, &ws_manager, &dashboard_id, "ws-1", "user-a", &summary)
+        apply_dashboard_summary(&db, &ws_manager, &dashboard_id, "ws-1", "user-a", &summary, None)
             .await
             .expect("apply_dashboard_summary");
 
@@ -1608,6 +1614,7 @@ mod tests {
 
         let (log_writer, guard) = capture_logs();
         let result = write_dashboard_summary_with_cas(WriteDashboardSummaryParams {
+            validation_context: None,
             db: &db,
             ws_manager: &ws_manager,
             dashboard_id: &dashboard_id,
