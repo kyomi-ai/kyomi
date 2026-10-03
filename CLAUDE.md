@@ -39,6 +39,20 @@ gitignored, invisible to everyone else, and will drift. Put them in
 `~/repos/kyomi-private/docs/`. Anything describing *unfixed* weaknesses (open
 gaps, vulnerabilities, audit findings) **must** go there: this repo is public.
 
+## Fast backlog handoff
+
+`/backlog-fast` implements, obtains review, opens a PR, and waits and fixes failures
+until the current head's CI is green. It never merges, including under `/loop` and
+cron; it leaves the ticket **In Review**. `/merge-sweeper` owns the merge and the
+**Done** transition, using its documented `/usr/bin/gh` path without a
+test-verification signature for handed-off fast PRs. Invoking `/merge-sweeper`
+authorizes that path. Do not stop mid-loop to ask which merge path to use.
+
+The canonical versioned workflows are
+`~/repos/kyomi-private/skills/backlog-fast/SKILL.md` and
+`~/repos/kyomi-private/skills/merge-sweeper/SKILL.md`. Build and browser QA remain
+batched against `main` after merging.
+
 ## Setup
 
 Run `./scripts/setup-hooks.sh` once per clone — it enables the tracked hooks
