@@ -25,15 +25,41 @@ fi
 # Write private key to temp file
 KEY_FILE=$(mktemp)
 SHA_FILE=$(mktemp)
-trap 'rm -f "$KEY_FILE" "$SHA_FILE"' EXIT
+OPENSSL_ERR_FILE=$(mktemp)
+trap 'rm -f "$KEY_FILE" "$SHA_FILE" "$OPENSSL_ERR_FILE"' EXIT
 echo "$PRIVATE_KEY" > "$KEY_FILE"
 echo -n "$HEAD_SHA" > "$SHA_FILE"
 
-# Sign the SHA with Ed25519
-SIGNATURE=$(openssl pkeyutl -sign -inkey "$KEY_FILE" -in "$SHA_FILE" | base64 -w 0)
+# Sign the SHA with Ed25519.
+#
+# -rawin is REQUIRED, not optional decoration: `pkeyutl -sign` for an
+# Ed25519 key fails outright on OpenSSL 3.0.x (Ubuntu 24.04, i.e.
+# ubuntu-latest, which is what this script's own test suite,
+# scripts/sign-verification-test.sh, runs on in CI) without it —
+# "evp_pkey_signature_init: operation not supported for this keytype" —
+# and only starts working flagless on OpenSSL 3.2+. KYO-712 hit the
+# identical failure in scripts/sign-review.sh (the code-review approval
+# signer) and ~/.local/bin/gh's own verify call; see that script's comment
+# on its own `pkeyutl -sign` line for the measured version matrix
+# (3.5.5 works either way, 3.0.13 only with -rawin, 1.1.1 fails both —
+# pre-existing, not a regression -rawin causes). Signatures produced with
+# and without -rawin are byte-identical and cross-verify in both
+# directions, so this is not a key rotation or a format change — do not
+# remove it as "redundant" on a box where the flagless form happens to
+# work. ~/.local/bin/gh's verify call must carry the same flag (that file
+# lives outside this repo and is not part of this change — see this
+# ticket's PR body for the one-line edit it still needs).
+SIGNATURE=$(openssl pkeyutl -sign -rawin -inkey "$KEY_FILE" -in "$SHA_FILE" 2>"$OPENSSL_ERR_FILE" | base64 -w 0)
 
 if [ -z "$SIGNATURE" ]; then
-    echo "ERROR: Signing failed — check private key format." >&2
+    echo "ERROR: Signing failed." >&2
+    echo "This does not necessarily mean the private key is malformed — check:" >&2
+    echo "  - the key file / private key argument itself" >&2
+    echo "  - the openssl version on this host (Ed25519 pkeyutl needs 3.2+," >&2
+    echo "    or 3.0.x with -rawin, which this script already passes)" >&2
+    echo "  - whether this openssl build supports -rawin at all" >&2
+    echo "openssl's own error output:" >&2
+    cat "$OPENSSL_ERR_FILE" >&2
     exit 1
 fi
 
