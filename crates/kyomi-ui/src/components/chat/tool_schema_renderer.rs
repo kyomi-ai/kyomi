@@ -1950,61 +1950,85 @@ fn render_watch_info(schema: &Value) -> impl IntoView {
 // -- Chart & Misc Renderers (Task 5) --
 
 fn render_validate_chartml(schema: &Value) -> impl IntoView {
-    let input = schema.get("input");
-    let output = schema.get("output");
+    let blocks = schema
+        .get("input")
+        .and_then(|input| array_field(input, "blocks"));
+    let input_view = match blocks {
+        Some(blocks) if blocks.is_empty() => view! {
+            <div class="text-muted-foreground text-xs">"No ChartML blocks supplied (0 blocks)."</div>
+        }.into_any(),
+        Some(blocks) => blocks.iter().enumerate().map(|(index, block)| {
+            let label = format!("ChartML Block {}:", index + 1);
+            view! {
+                <div>
+                    {section_label(&label)}
+                    {match block.as_str() {
+                        Some(code) => code_block(code),
+                        None => warning_block("Unrecognized ChartML input", "Expected a ChartML string for this block.".into()),
+                    }}
+                </div>
+            }
+        }).collect_view().into_any(),
+        None => warning_block("ChartML input unavailable", "Expected a blocks array.".into()),
+    };
+
+    let malformed = || {
+        warning_block(
+            "Unrecognized validation result",
+            "The returned result does not match the ChartML validation format.".into(),
+        )
+    };
+    let result = match schema.get("output").filter(|output| !output.is_null()) {
+        None => view! {
+            <div class="text-muted-foreground text-xs">"Validation pending — no result received."</div>
+        }.into_any(),
+        Some(output) => match bool_field(output, "valid") {
+            Some(true) => match u64_field(output, "blocks_checked") {
+                Some(count) if output.get("errors").is_none_or(|errors| errors.as_array().is_some_and(Vec::is_empty)) => {
+                    let message = match count {
+                        0 => "Validation completed: 0 blocks checked.".to_string(),
+                        1 => "ChartML is valid: 1 block checked.".to_string(),
+                        _ => format!("ChartML is valid: {count} blocks checked."),
+                    };
+                    success_block(message)
+                }
+                _ => malformed(),
+            },
+            Some(false) => match array_field(output, "errors") {
+                Some(errors) if !errors.is_empty() => errors.iter().map(|error| {
+                    match (u64_field(error, "block"), str_field(error, "message")) {
+                        (Some(block), Some(message)) if block > 0 => {
+                            let title = format!("Block {block}: Validation Failed");
+                            view! {
+                                <div class="space-y-1">
+                                    {error_block(&title, message.to_string())}
+                                    {str_field(error, "type").map(|kind| info_row("Type", kind))}
+                                    {str_field(error, "path").map(|path| info_row("Path", path))}
+                                    {str_field(error, "instance_path").map(|path| info_row("Instance path", path))}
+                                    {str_field(error, "schema_path").map(|path| info_row("Schema path", path))}
+                                    {str_field(error, "stage").map(|stage| info_row("Stage", stage))}
+                                    {str_field(error, "component").map(String::from)
+                                        .or_else(|| u64_field(error, "component").map(|component| component.to_string()))
+                                        .map(|component| info_row("Component", &component))}
+                                </div>
+                            }.into_any()
+                        }
+                        _ => malformed(),
+                    }
+                }).collect_view().into_any(),
+                _ => malformed(),
+            },
+            None => malformed(),
+        },
+    };
 
     view! {
         <div class="space-y-2">
-            {input.and_then(|inp| str_field(inp, "chartml").or(Some("No ChartML provided"))).map(|chartml| {
-                view! {
-                    <div>
-                        {section_label("ChartML:")}
-                        {code_block(chartml)}
-                    </div>
-                }
-            })}
-            {output.map(|out| {
-                let success = bool_field(out, "success").unwrap_or(false);
-                if success {
-                    let query_cost = f64_field(out, "query_cost");
-                    let bytes_scanned = u64_field(out, "bytes_scanned");
-                    let has_cost_info = query_cost.is_some() || bytes_scanned.is_some();
-
-                    view! {
-                        <div>
-                            {section_label("Validation Result:")}
-                            <div class="mt-1 space-y-2">
-                                {success_block("ChartML is valid".into())}
-                                {has_cost_info.then(|| {
-                                    view! {
-                                        <div class="grid grid-cols-2 gap-2 text-xs">
-                                            {query_cost.map(|c| metric_card("Query Cost", format!("{:.2} GB", c)))}
-                                            {bytes_scanned.map(|b| {
-                                                let formatted = if b > 1_000_000 {
-                                                    format!("{:.1} MB", b as f64 / 1_000_000.0)
-                                                } else if b > 1_000 {
-                                                    format!("{:.1} KB", b as f64 / 1_000.0)
-                                                } else {
-                                                    format!("{} B", b)
-                                                };
-                                                metric_card("Bytes Scanned", formatted)
-                                            })}
-                                        </div>
-                                    }
-                                })}
-                            </div>
-                        </div>
-                    }.into_any()
-                } else {
-                    let msg = str_field(out, "error_message").unwrap_or("Unknown validation error").to_string();
-                    view! {
-                        <div>
-                            {section_label("Validation Result:")}
-                            <div class="mt-1">{error_block("Validation Failed", msg)}</div>
-                        </div>
-                    }.into_any()
-                }
-            })}
+            {input_view}
+            <div>
+                {section_label("Validation Result:")}
+                <div class="mt-1 space-y-2">{result}</div>
+            </div>
         </div>
     }
 }
@@ -2396,3 +2420,7 @@ mod tests {
         assert_eq!(chartml_spec_content_preview(content), content);
     }
 }
+
+#[cfg(all(test, feature = "ssr"))]
+#[path = "tool_schema_renderer/tests/mod.rs"]
+mod validation_contract_tests;
