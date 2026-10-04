@@ -23,6 +23,7 @@ pub mod billing_service;
 pub mod billing_webhook;
 pub mod catalog;
 pub mod chat_service;
+pub mod conversation_events;
 pub mod collection_service;
 pub mod connect_token;
 pub mod copilot_service;
