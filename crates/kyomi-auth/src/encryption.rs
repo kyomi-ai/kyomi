@@ -87,6 +87,16 @@ pub fn decrypt_json(encrypted: &str, key: &[u8; 32]) -> kyomi_core::Result<serde
         .map_err(|e| kyomi_core::Error::Internal(format!("JSON deserialization failed: {e}")))
 }
 
+/// Derive an opaque repeatable storage key without exposing a guessable content hash.
+pub(crate) fn opaque_storage_key(domain: &str, content: &str, key: &[u8; 32]) -> String {
+    use hmac::{Hmac, Mac};
+    let mut mac = <Hmac<sha2::Sha256> as Mac>::new_from_slice(key).expect("HMAC accepts a 32-byte key");
+    mac.update(domain.as_bytes());
+    mac.update(&[0]);
+    mac.update(content.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
 // A JSON envelope preserves native JSON columns and SQL NULL semantics while
 // marking encrypted values unambiguously. Historical plaintext JSON remains readable.
 const ENCRYPTED_JSON_FIELD: &str = "__kyomi_encrypted_json_v1";

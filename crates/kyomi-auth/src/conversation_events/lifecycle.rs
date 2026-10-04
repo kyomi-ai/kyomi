@@ -723,6 +723,82 @@ impl ConversationStore<'_> {
             Ok(row.0 != "chat")
         })
     }
+    /// Persist a complete iteration checkpoint while its run still owns the lease.
+    /// A repeated older snapshot cannot overwrite a newer accepted checkpoint.
+    pub async fn fenced_thinking_events(
+        &self,
+        conversation: &ConversationId,
+        run: &RunId,
+        lease: &Lease,
+        now: i64,
+        events: &[serde_json::Value],
+    ) -> Result<CommitReceipt> {
+        let clock_started = std::time::Instant::now();
+        let scoped = self.for_lifecycle();
+        transaction!(&scoped, tx, {
+            authorize!(&scoped, tx, conversation.as_str(), true);
+            let row = load_run!(self, tx, conversation.as_str(), run.as_str());
+            let now = self.locked_now(now, clock_started)?;
+            agent_runtime::validate_ownership(&row.snapshot()?, lease, now)?;
+            let body = serde_json::to_string(events)?;
+            let key = IdempotencyKey(encryption::opaque_storage_key(
+                "kyomi:thinking-preview:v1",
+                &format!("{}:{body}", run.as_str()),
+                self.key,
+            ));
+            let existing:Option<(String,i64)> = sqlx::query_as("SELECT event_id,sequence FROM conversation_events WHERE session_id=$1 AND run_id=$2 AND idempotency_key=$3")
+                .bind(conversation.as_str()).bind(run.as_str()).bind(key.as_str()).fetch_optional(&mut *tx).await?;
+            if let Some((event_id, sequence)) = existing {
+                return Ok(CommitReceipt {
+                    event_id: EventId(event_id),
+                    sequence,
+                    duplicate: true,
+                });
+            }
+            let saved:Option<Option<String>> = sqlx::query_scalar("SELECT extra_metadata FROM chat_messages WHERE message_id=$1 AND session_id=$2 AND role='assistant' AND status='in_progress'")
+                .bind(&row.assistant_message_id).bind(conversation.as_str()).fetch_optional(&mut *tx).await?;
+            let mut metadata = saved
+                .ok_or(EventStoreError::MissingProjection)?
+                .as_deref()
+                .map(|value| encryption::decrypt_json(value, self.key))
+                .transpose()?
+                .unwrap_or_else(|| serde_json::json!({}));
+            let fields = metadata
+                .as_object_mut()
+                .ok_or(agent_runtime::PolicyError::InvalidState)?;
+            fields.insert("thinking_events".into(), serde_json::to_value(events)?);
+            let submission: SubmitCommand =
+                serde_json::from_str(&encryption::decrypt(&row.encrypted_submission, self.key)?)?;
+            let mut command = event(
+                &submission,
+                PublicPayload::Planning {
+                    text: Text {
+                        preview: format!("Thinking checkpoint ({} events)", events.len()),
+                        detail: Some(DetailId(uuid::Uuid::new_v4().to_string())),
+                    },
+                },
+                "thinking-preview",
+            );
+            command.idempotency_key = key;
+            command.detail = Some(body);
+            agent_runtime::validate(&command)?;
+            let fingerprint = command_fingerprint(&command)?;
+            let receipt = persist_append!(&scoped, tx, command, fingerprint, false)?;
+            let encrypted = encryption::encrypt_json(&metadata, self.key)?;
+            let updated=sqlx::query("UPDATE chat_messages SET extra_metadata=$1 WHERE message_id=$2 AND session_id=$3 AND role='assistant' AND status='in_progress'")
+                .bind(encrypted).bind(&row.assistant_message_id).bind(conversation.as_str()).execute(&mut *tx).await?;
+            if updated.rows_affected() != 1 {
+                return Err(EventStoreError::MissingProjection);
+            }
+            write_session_sync!(
+                &scoped,
+                tx,
+                conversation.as_str(),
+                kyomi_types::sync::SyncActionType::Update
+            );
+            Ok(receipt)
+        })
+    }
     pub async fn fenced_thinking_details(
         &self,
         conversation: &ConversationId,

@@ -1518,6 +1518,201 @@ async fn lifecycle_review_regressions(db: &DbPool) {
             .is_err()
     );
     assert_eq!(lifecycle_sync_count(db, &sid).await, sync_before_duplicate);
+    let preserved = serde_json::json!({"model":"preview-model","component":"chat","token_usage":{"input_tokens":5}});
+    kyomi_core::db_execute!(
+        db,
+        "UPDATE chat_messages SET extra_metadata=$1 WHERE message_id=$2",
+        encryption::encrypt_json(&preserved, &KEY).unwrap(),
+        receipt.assistant_message_id.as_str()
+    )
+    .unwrap();
+    let preview = vec![
+        serde_json::json!({"event_id":"preview-1","event_type":"llm_thinking","title":"Thinking","description":"SENSITIVE-THINKING-PREVIEW-MARKER","data":{"arguments":"SENSITIVE-PREVIEW-ARGS","result":"SENSITIVE-PREVIEW-RESULT"}}),
+    ];
+    let preview_receipt = store
+        .fenced_thinking_events(&conversation, &receipt.run_id, &lease, 1110, &preview)
+        .await
+        .unwrap();
+    assert!(!preview_receipt.duplicate);
+    let preview_body = serde_json::to_string(&preview).unwrap();
+    let stored_key = kyomi_core::db_fetch_one!(
+        db,
+        (String,),
+        "SELECT idempotency_key FROM conversation_events WHERE event_id=$1",
+        preview_receipt.event_id.as_str()
+    )
+    .unwrap()
+    .0;
+    assert_ne!(
+        stored_key,
+        hex::encode(Sha256::digest(format!(
+            "{}:thinking-preview:{preview_body}",
+            receipt.run_id.as_str()
+        ))),
+        "stored reasoning checkpoint identity must not expose a guessable content hash"
+    );
+    let stored = crate::chat_service::get_session_messages(db, &KEY, &sid, 100)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|item| item.message_id == receipt.assistant_message_id.0)
+        .unwrap();
+    assert_eq!(stored.status, "in_progress");
+    assert_eq!(stored.thinking_events, preview);
+    assert_eq!(stored.metadata["model"], preserved["model"]);
+    assert_eq!(stored.metadata["token_usage"], preserved["token_usage"]);
+    let raw = kyomi_core::db_fetch_one!(
+        db,
+        (String,),
+        "SELECT extra_metadata FROM chat_messages WHERE message_id=$1",
+        receipt.assistant_message_id.as_str()
+    )
+    .unwrap()
+    .0;
+    for marker in [
+        "SENSITIVE-THINKING-PREVIEW-MARKER",
+        "SENSITIVE-PREVIEW-ARGS",
+        "SENSITIVE-PREVIEW-RESULT",
+    ] {
+        assert!(!raw.contains(marker));
+    }
+    assert_lifecycle_sync(db, &sid, &owner, true).await;
+    let mut extended = preview.clone();
+    extended.push(serde_json::json!({"event_id":"preview-2","event_type":"tool_execution_end","description":"Second checkpoint"}));
+    assert!(
+        !store
+            .fenced_thinking_events(&conversation, &receipt.run_id, &lease, 1111, &extended)
+            .await
+            .unwrap()
+            .duplicate
+    );
+    let count_before = count(db, "conversation_events", &sid).await;
+    let detail_before = count(db, "conversation_event_details", &sid).await;
+    let cursor_before = kyomi_core::db_fetch_one!(
+        db,
+        (i64,),
+        "SELECT event_sequence FROM chat_sessions WHERE session_id=$1",
+        &sid
+    )
+    .unwrap()
+    .0;
+    let sync_before = lifecycle_sync_count(db, &sid).await;
+    let current_raw = kyomi_core::db_fetch_one!(
+        db,
+        (String,),
+        "SELECT extra_metadata FROM chat_messages WHERE message_id=$1",
+        receipt.assistant_message_id.as_str()
+    )
+    .unwrap()
+    .0;
+    assert!(
+        store
+            .fenced_thinking_events(&conversation, &receipt.run_id, &lease, 1112, &preview)
+            .await
+            .unwrap()
+            .duplicate,
+        "retrying an earlier checkpoint must not regress its preview"
+    );
+    assert!(
+        store
+            .fenced_thinking_events(&conversation, &receipt.run_id, &lease, 1113, &extended)
+            .await
+            .unwrap()
+            .duplicate
+    );
+    let mut newer = extended.clone();
+    newer.push(serde_json::json!({"event_id":"preview-3","description":"Must not write"}));
+    let mut stale_preview_lease = lease.clone();
+    stale_preview_lease.fence += 1;
+    assert!(
+        store
+            .fenced_thinking_events(
+                &conversation,
+                &receipt.run_id,
+                &stale_preview_lease,
+                1114,
+                &newer
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .fenced_thinking_events(&conversation, &receipt.run_id, &lease, 2000, &newer)
+            .await
+            .is_err()
+    );
+    assert_eq!(count(db, "conversation_events", &sid).await, count_before);
+    assert_eq!(lifecycle_sync_count(db, &sid).await, sync_before);
+    assert_eq!(
+        kyomi_core::db_fetch_one!(
+            db,
+            (String,),
+            "SELECT extra_metadata FROM chat_messages WHERE message_id=$1",
+            receipt.assistant_message_id.as_str()
+        )
+        .unwrap()
+        .0,
+        current_raw
+    );
+    // A native trigger forces the compatibility projection to affect zero rows
+    // after the journal append. Both native transactions must roll back the event,
+    // cursor, lazy detail and sync delta together.
+    let trigger = format!("preview_ignore_{}", uuid::Uuid::new_v4().simple());
+    let assistant_id = receipt.assistant_message_id.as_str();
+    if db.is_postgres() {
+        kyomi_core::db_execute!(db,&format!("CREATE FUNCTION {trigger}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.message_id='{assistant_id}' THEN RETURN NULL; END IF; RETURN NEW; END $$")).unwrap();
+        kyomi_core::db_execute!(db,&format!("CREATE TRIGGER {trigger} BEFORE UPDATE OF extra_metadata ON chat_messages FOR EACH ROW EXECUTE FUNCTION {trigger}()")).unwrap();
+    } else {
+        kyomi_core::db_execute!(db,&format!("CREATE TRIGGER {trigger} BEFORE UPDATE OF extra_metadata ON chat_messages WHEN NEW.message_id='{assistant_id}' BEGIN SELECT RAISE(IGNORE); END")).unwrap();
+    }
+    assert!(matches!(
+        store
+            .fenced_thinking_events(&conversation, &receipt.run_id, &lease, 1115, &newer)
+            .await,
+        Err(EventStoreError::MissingProjection)
+    ));
+    if db.is_postgres() {
+        kyomi_core::db_execute!(db, &format!("DROP TRIGGER {trigger} ON chat_messages")).unwrap();
+        kyomi_core::db_execute!(db, &format!("DROP FUNCTION {trigger}()")).unwrap();
+    } else {
+        kyomi_core::db_execute!(db, &format!("DROP TRIGGER {trigger}")).unwrap();
+    }
+    assert_eq!(count(db, "conversation_events", &sid).await, count_before);
+    assert_eq!(
+        count(db, "conversation_event_details", &sid).await,
+        detail_before
+    );
+    assert_eq!(
+        kyomi_core::db_fetch_one!(
+            db,
+            (i64,),
+            "SELECT event_sequence FROM chat_sessions WHERE session_id=$1",
+            &sid
+        )
+        .unwrap()
+        .0,
+        cursor_before
+    );
+    assert_eq!(lifecycle_sync_count(db, &sid).await, sync_before);
+    assert_eq!(
+        kyomi_core::db_fetch_one!(
+            db,
+            (String,),
+            "SELECT extra_metadata FROM chat_messages WHERE message_id=$1",
+            receipt.assistant_message_id.as_str()
+        )
+        .unwrap()
+        .0,
+        current_raw
+    );
+    let current = crate::chat_service::get_session_messages(db, &KEY, &sid, 100)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|item| item.message_id == receipt.assistant_message_id.0)
+        .unwrap();
+    assert_eq!(current.thinking_events, extended);
     let usage = ApiUsageWrite {
         provider: "anthropic".into(),
         model: "fixture".into(),
@@ -1570,6 +1765,15 @@ async fn lifecycle_review_regressions(db: &DbPool) {
         .await
         .unwrap();
     assert_lifecycle_sync(db, &sid, &owner, true).await;
+    let terminal_sync = lifecycle_sync_count(db, &sid).await;
+    assert!(
+        store
+            .fenced_thinking_events(&conversation, &receipt.run_id, &lease, 1201, &preview)
+            .await
+            .is_err(),
+        "late iteration preview must not overwrite terminal metadata"
+    );
+    assert_eq!(lifecycle_sync_count(db, &sid).await, terminal_sync);
     // A queued successor restores encrypted compaction and tool metadata at claim.
     let successor = lifecycle_submission(&owner, &sid, "restore-context", "next turn", 2);
     let successor_receipt = store.submit(&successor).await.unwrap();
