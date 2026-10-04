@@ -6240,6 +6240,7 @@ dependencies = [
 name = "kyomi-agent"
 version = "0.1.0"
 dependencies = [
+ "agent-runtime",
  "arrow-array",
  "arrow-schema",
  "async-trait",
@@ -6526,6 +6527,7 @@ dependencies = [
 name = "kyomi-server"
 version = "0.1.0"
 dependencies = [
+ "agent-runtime",
  "any_spawner",
  "arrow-ipc",
  "arrow-schema",

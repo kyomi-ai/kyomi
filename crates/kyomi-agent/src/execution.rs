@@ -11,7 +11,7 @@
 //! 6. Handle errors and cancellation
 //! 7. Return the result
 //!
-//! [`deliver_response`] streams the response via WebSocket.
+//! [`deliver_response`] sends the complete response via WebSocket.
 //! [`generate_session_title`] fires a background task to title new sessions.
 
 use std::collections::HashMap;
@@ -654,15 +654,31 @@ pub async fn execute_agent_chat(
         } else {
             (total_cost * AI_COST_MULTIPLIER, None)
         };
-        let now = chrono::Utc::now();
         let provider_str = provider_kind.to_string();
-        if let Err(e) = kyomi_core::db_execute!(
+        if let Some(run) = config.assistant_message_persistence.durable_run() {
+            let usage = kyomi_auth::conversation_events::ApiUsageWrite {
+                provider: provider_str,
+                model: model_name.clone(),
+                input_tokens: input_tokens as i32,
+                output_tokens: output_tokens as i32,
+                total_tokens,
+                cost_estimate: billed_cost,
+                component: config.component.clone(),
+                provider_cost_usd,
+            };
+            kyomi_auth::conversation_events::ConversationStore::new(
+                db, encryption_key, &config.user_id, &config.workspace_id,
+            ).fenced_api_usage(
+                &run.conversation_id, &run.run_id, &run.lease,
+                chrono::Utc::now().timestamp_millis(), &usage,
+            ).await.map_err(|error| kyomi_core::Error::ServiceUnavailable(error.to_string()))?;
+        } else if let Err(e) = kyomi_core::db_execute!(
             db,
             API_USAGE_LOG_INSERT_SQL,
             &config.user_id,
             &config.workspace_id,
             &config.session_id as &str,
-            now,
+            chrono::Utc::now(),
             &provider_str,
             &model_name,
             input_tokens as i32,
@@ -694,7 +710,7 @@ pub async fn execute_agent_chat(
     //     call is the only place it's persisted — the exact gap KYO-493's
     //     ticket describes ("today an in-loop error is streamed to the
     //     client but never persisted").
-    {
+    if config.assistant_message_persistence.durable_run().is_none() {
         let metadata = serde_json::json!({
             "model": model_name,
             "thinking_events": thinking_events,
@@ -728,7 +744,16 @@ pub async fn execute_agent_chat(
     }
 
     // 15b. Persist full (untruncated) reasoning texts for on-demand retrieval.
-    if !full_texts.is_empty()
+    if let Some(run) = config.assistant_message_persistence.durable_run() {
+        kyomi_auth::conversation_events::ConversationStore::new(
+            db, encryption_key, &config.user_id, &config.workspace_id,
+        ).fenced_thinking_details(
+            &run.conversation_id, &run.run_id, &run.lease,
+            chrono::Utc::now().timestamp_millis(), &assistant_message_id, &full_texts,
+        ).await.map_err(|e| kyomi_core::Error::ServiceUnavailable(e.to_string()))?;
+    }
+    if config.assistant_message_persistence.durable_run().is_none()
+        && !full_texts.is_empty()
         && let Err(e) = chat_service::store_thinking_event_details(
             db,
             encryption_key,
@@ -759,25 +784,10 @@ pub async fn execute_agent_chat(
 }
 
 // ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-/// Number of characters per WebSocket streaming chunk.
-const STREAM_CHUNK_SIZE: usize = 50;
-
-/// Delay between WebSocket streaming chunks (milliseconds).
-const STREAM_CHUNK_DELAY_MS: u64 = 20;
-
-// ---------------------------------------------------------------------------
 // Response delivery
 // ---------------------------------------------------------------------------
 
-/// Stream the agent response via WebSocket.
-///
-/// Sends the response in 50-character chunks via `chat_stream` messages,
-/// then sends a `chat_complete` message with the full response.
-///
-/// If the session is shared, broadcasts to all workspace members.
+/// Deliver one complete response after persistence succeeds.
 #[allow(clippy::too_many_arguments)]
 pub async fn deliver_response(
     ws_manager: &WebSocketManager,
@@ -791,50 +801,6 @@ pub async fn deliver_response(
     workspace_id: Option<&str>,
     workspace_user_ids: Option<&[String]>,
 ) {
-    // Stream response in chunks.
-    let chars: Vec<char> = response.chars().collect();
-    let mut offset = 0;
-    let mut byte_offset = 0;
-
-    while offset < chars.len() {
-        let end = (offset + STREAM_CHUNK_SIZE).min(chars.len());
-        let chunk: String = chars[offset..end].iter().collect();
-
-        ws_helpers::send_chat_stream(
-            ws_manager,
-            user_id,
-            session_id,
-            message_id,
-            &chunk,
-            byte_offset,
-            Some(context_type),
-        )
-        .await;
-
-        // Broadcast to shared conversation members if applicable.
-        if let Some(ws_user_ids) = workspace_user_ids {
-            for uid in ws_user_ids {
-                if uid != user_id {
-                    ws_helpers::send_chat_stream(
-                        ws_manager,
-                        uid,
-                        session_id,
-                        message_id,
-                        &chunk,
-                        byte_offset,
-                        Some(context_type),
-                    )
-                    .await;
-                }
-            }
-        }
-
-        offset = end;
-        byte_offset += chunk.len();
-        tokio::time::sleep(tokio::time::Duration::from_millis(STREAM_CHUNK_DELAY_MS)).await;
-    }
-
-    // Send complete message.
     ws_helpers::send_chat_complete(ws_helpers::ChatCompleteParams {
         manager: ws_manager,
         user_id,
@@ -844,11 +810,8 @@ pub async fn deliver_response(
         model,
         usage_stats: usage.clone(),
         context_type: Some(context_type),
-    })
-    .await;
-
-    // Broadcast completion to shared conversation members.
-    if let (Some(wid), Some(_ws_user_ids)) = (workspace_id, workspace_user_ids) {
+    }).await;
+    if let (Some(wid), Some(_)) = (workspace_id, workspace_user_ids) {
         ws_helpers::broadcast_chat_complete(ws_helpers::BroadcastChatCompleteParams {
             manager: ws_manager,
             workspace_id: wid,
@@ -858,8 +821,7 @@ pub async fn deliver_response(
             model,
             usage_stats: usage,
             exclude_user_id: Some(user_id),
-        })
-        .await;
+        }).await;
     }
 }
 
@@ -2001,16 +1963,25 @@ mod tests {
         assert_eq!(status, chat_service::MessageStatus::Error);
     }
 
-    // -- Contract: Streaming constants are reasonable -----------------------
-
-    #[test]
-    fn streaming_chunk_size_is_reasonable() {
-        assert_eq!(STREAM_CHUNK_SIZE, 50);
-    }
-
-    #[test]
-    fn streaming_chunk_delay_is_reasonable() {
-        assert_eq!(STREAM_CHUNK_DELAY_MS, 20);
+    #[tokio::test]
+    async fn response_delivery_sends_one_complete_frame_without_artificial_chunks() {
+        let db = crate::test_support::test_pool().await;
+        let manager = WebSocketManager::new(None, db);
+        let (_id, mut receiver) = manager.connect("user-a").expect("connect test receiver");
+        let answer = "Complete response with Unicode: 世界".repeat(10);
+        deliver_response(&manager, "user-a", "session", "assistant", &answer, "model", None, "chat", None, None).await;
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let frame: serde_json::Value = serde_json::from_str(&receiver.recv().await.expect("complete frame")).expect("json");
+                if frame["type"] != "heartbeat" { break frame; }
+            }
+        }).await.expect("complete response is delivered");
+        assert_eq!(frame["type"], "chat_complete");
+        assert_eq!(frame["data"]["full_content"], answer);
+        while let Ok(frame) = receiver.try_recv() {
+            let frame: serde_json::Value = serde_json::from_str(&frame).expect("json");
+            assert_eq!(frame["type"], "heartbeat", "there are no token or character fragments or duplicate completions");
+        }
     }
 
     // -- Contract: CancellationToken can be created from config defaults ----

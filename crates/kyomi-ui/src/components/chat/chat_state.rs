@@ -129,7 +129,7 @@ impl ChatStateData {
     }
 
     pub fn expect_assistant(&self, session_id: &str, send_token: &str, message_id: &str) -> bool {
-        if self.state.get_untracked() != ChatState::Sending
+        if !matches!(self.state.get_untracked(), ChatState::Sending | ChatState::Cancelling)
             || self.active_session_id.get_untracked().as_deref() != Some(session_id)
             || self.sending_token.get_untracked().as_deref() != Some(send_token)
         {

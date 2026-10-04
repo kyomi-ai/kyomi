@@ -114,14 +114,15 @@ pub struct SessionMessagesResponse {
 
 /// Response from sending a chat message.
 ///
-/// The AI response is delivered asynchronously via WebSocket streaming events
-/// (`chat_stream`, `chat_complete`). This response contains the message IDs
-/// for tracking.
+/// The AI response is delivered asynchronously as a complete WebSocket event.
+/// This response contains durable run and message identities for tracking.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SendMessageResponse {
     pub session_id: String,
     pub user_message_id: String,
     pub assistant_message_id: String,
+    #[serde(default)]
+    pub run_id: Option<String>,
     pub status: String,
     pub thinking_events: Vec<serde_json::Value>,
     pub token_usage: Option<serde_json::Value>,
@@ -499,12 +500,9 @@ pub async fn search_chat_messages(query: String) -> Result<Vec<ChatSessionItem>,
 
 /// Send a user message and trigger AI agent execution.
 ///
-/// Thin wrapper around `chat_service::prepare_chat_dispatch` + agent spawn.
-/// Pre-spawn orchestration (find/create session, skip_ai store, shared
-/// broadcast) lives in the service layer. This function handles only the
-/// Leptos-specific context extraction, agent config construction, and spawn.
-///
-/// The AI response is delivered asynchronously via WebSocket streaming events.
+/// The service atomically accepts a durable turn. Startup workers discover
+/// committed work independently of this request and deliver complete responses.
+/// This function supplies authenticated execution context and handles skip_ai.
 #[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn send_chat_message(
     message: String,
@@ -564,6 +562,12 @@ pub async fn send_chat_message(
     // would silently disagree with what the model actually saw.
     const MESSAGE_SOURCE: &str = "web";
 
+    let execution_context = serde_json::json!({
+        "model_name": model,
+        "workspace_roles": ac.auth.workspace.workspace_roles,
+        "user_display_name": user_display_name,
+    });
+
     // 3–5. Find/create session, handle skip_ai, broadcast user message.
     // Callout 1 of 3.
     let outcome = kyomi_auth::chat_service::prepare_chat_dispatch(
@@ -582,13 +586,14 @@ pub async fn send_chat_message(
             skip_ai,
             client_msg_id: client_msg_id.as_deref(),
             owner_instance: &ac.ctx.process_instance,
+            execution_context: Some(&execution_context),
         },
     )
     .await
     .into_sfn_core()?;
 
     // Early return for skip_ai path (service handled storage).
-    let (session_id, is_new_session, user_message_id, assistant_message_id, is_shared) =
+    let (session_id, is_new_session, user_message_id, assistant_message_id, run_id, duplicate) =
         match outcome {
             kyomi_auth::chat_service::ChatDispatchOutcome::SkippedAi {
                 session_id,
@@ -598,6 +603,7 @@ pub async fn send_chat_message(
                     session_id,
                     user_message_id,
                     assistant_message_id: String::new(),
+                    run_id: None,
                     status: "skipped".to_string(),
                     thinking_events: Vec::new(),
                     token_usage: None,
@@ -609,194 +615,21 @@ pub async fn send_chat_message(
                 is_new_session,
                 user_message_id,
                 assistant_message_id,
-                is_shared,
-            } => (session_id, is_new_session, user_message_id, assistant_message_id, is_shared),
+                run_id,
+                duplicate,
+                ..
+            } => (session_id, is_new_session, user_message_id, assistant_message_id, run_id, duplicate),
         };
 
-    // 6. Build execution config and spawn agent task.
-    // Requires ws_manager and cancel_registry to be provided in ServerContext.
-    let ws_manager = ac.ctx
-        .ws_manager
-        .as_ref()
-        .ok_or_else(|| ServerFnError::new("WebSocket manager not configured"))?
-        .clone();
-
-    let cancel_registry = ac.ctx
-        .cancel_registry
-        .as_ref()
-        .ok_or_else(|| ServerFnError::new("Cancel registry not configured"))?
-        .clone();
-
-    let platforms = ac.ctx
-        .platforms
-        .as_ref()
-        .ok_or_else(|| ServerFnError::new("Platform registry not configured"))?
-        .clone();
-
-    let cancel_token = tokio_util::sync::CancellationToken::new();
-
-    let exec_config = kyomi_agent::AgentExecutionConfig {
-        session_id: session_id.clone(),
-        user_id: ac.auth.user_id.clone(),
-        workspace_id: ac.ws_id.clone(),
-        message: message.clone(),
-        model_name: model,
-        temperature: 0.7,
-        is_shared_conversation: is_shared,
-        context_type: "chat".to_string(),
-        workspace_user_ids: None,
-        cancel_token: cancel_token.clone(),
-        current_time_user_tz: current_time_user_tz.clone(),
-        message_source: Some(MESSAGE_SOURCE.to_string()),
-        system_prompt: None,
-        tools_subset: None,
-        // Main chat: a human is waiting and benefits from the extra room —
-        // real warehouse analysis routinely needs more than 25 round-trips.
-        // Raised from 25 to 50 in KYO-345; the paired duration/token guards
-        // below exist so this higher ceiling cannot double worst-case spend
-        // on a pathological tool loop.
-        max_iterations: 50,
-        max_duration: Some(std::time::Duration::from_secs(15 * 60)),
-        max_total_tokens: Some(1_500_000),
-        // Chat responses routinely include one or more ChartML blocks plus
-        // explanatory prose, which can exceed the library's 4096-token
-        // default on its own — but unlike the dashboard copilot, chat never
-        // has to resend an entire existing document on every turn, so it
-        // doesn't need the copilot's 16384 ceiling (KYO-534).
-        max_tokens: 8192,
-        component: "custom_agent".to_string(),
-        user_message_persistence: kyomi_agent::UserMessagePersistence::CallerPersisted(
-            user_message_id.clone(),
-        ),
-        // KYO-493: prepare_chat_dispatch already pre-inserted an
-        // in_progress placeholder for this id — persist_after_chat must
-        // UPDATE it, never INSERT a second row.
-        assistant_message_persistence: kyomi_agent::AssistantMessagePersistence::CallerPreInserted(
-            assistant_message_id.clone(),
-        ),
-        conversation_history: None,
-        user_display_name: ac.auth.name.clone().unwrap_or_else(|| ac.auth.email.clone()),
-        context_window: 0,
-        workspace_roles: ac.auth.workspace.workspace_roles.clone(),
-        // Main chat has no single open document — see `ToolContext::document_id`.
-        document_id: None,
-    };
-
-    // Register cancel token so WebSocket cancel_request can stop this task.
-    cancel_registry.register(&ac.auth.user_id, &session_id, cancel_token.clone());
-
-    // Spawn async task for AI execution + response delivery.
-    let db = ac.ctx.db.clone();
-    let kv = ac.kv()?;
-
-    let embedding = ac.ctx.embedding.clone();
-    let app_config = ac.ctx.config.clone();
-    let connect_registry = ac.ctx.connect_registry.clone();
-    let spawn_user_id = ac.auth.user_id.clone();
-    let spawn_session_id = session_id.clone();
-    let spawn_assistant_message_id = assistant_message_id.clone();
-    let spawn_workspace_id = ac.ws_id.clone();
-    let spawn_is_shared = is_shared;
-    let context_type = "chat".to_string();
-
-    tokio::spawn(async move {
-        let result = kyomi_agent::execute_agent_chat(
-            exec_config,
-            kyomi_agent::AgentExecutionEnv {
-                db: &db,
-                kv: &kv,
-                encryption_key: &encryption_key,
-                embedding: &embedding,
-                ws_manager: &ws_manager,
-                app_config: &app_config,
-                connect_registry,
-                platforms,
-            },
-        )
-        .await;
-
-        match result {
-            Ok(exec_result) if exec_result.status == "cancelled" => {
-                // Notify the frontend that the request was cancelled so it can
-                // transition out of Cancelling state. Do NOT call deliver_response
-                // or broadcast — the partial response is discarded.
-                kyomi_auth::websocket::helpers::send_request_cancelled(
-                    &ws_manager,
-                    &spawn_user_id,
-                    &spawn_session_id,
-                    &exec_result.assistant_message_id,
-                    Some(&context_type),
-                )
-                .await;
-            }
-            Ok(exec_result) => {
-                // Deliver response via WebSocket.
-                kyomi_agent::deliver_response(
-                    &ws_manager,
-                    &spawn_user_id,
-                    &spawn_session_id,
-                    &exec_result.assistant_message_id,
-                    &exec_result.response_text,
-                    exec_result.model.as_deref().unwrap_or("unknown"),
-                    exec_result.token_usage,
-                    &context_type,
-                    None,
-                    None,
-                )
-                .await;
-
-                // Broadcast assistant message to shared conversation members.
-                // Callout 2 of 3.
-                if spawn_is_shared {
-                    kyomi_auth::websocket::helpers::send_shared_chat_message(
-                        &ws_manager,
-                        &spawn_workspace_id,
-                        &spawn_session_id,
-                        &exec_result.assistant_message_id,
-                        "assistant",
-                        &exec_result.response_text,
-                        &chrono::Utc::now().to_rfc3339(),
-                        None,
-                        None,
-                        None,
-                    )
-                    .await;
-                }
-            }
-            Err(e) => {
-                tracing::error!(
-                    session_id = %spawn_session_id,
-                    error = %e,
-                    "Agent execution failed"
-                );
-
-                // Persist error message and notify the user. Callout 3 of 3.
-                kyomi_auth::chat_service::save_agent_error(
-                    kyomi_auth::chat_service::SaveAgentErrorParams {
-                        db: &db,
-                        encryption_key: &encryption_key,
-                        ws_manager: &ws_manager,
-                        session_id: &spawn_session_id,
-                        user_id: &spawn_user_id,
-                        assistant_message_id: &spawn_assistant_message_id,
-                        context_type: &context_type,
-                        error: e.user_message(),
-                    },
-                )
-                .await;
-            }
-        }
-
-        // Clean up cancel token so it doesn't leak.
-        cancel_registry.remove(&spawn_user_id, &spawn_session_id);
-    });
+    // The startup worker discovers the committed queue independently of this
+    // handler. A successful submission never depends on spawning an execution task.
 
     // 8. Fire-and-forget title generation for new sessions. The spawned task
     // loads WorkspaceAiConfig (Kyomi or BYOK) and logs a warning on failure;
     // no server-side config guard is needed — gating on
     // `resolve_provider_config` would silently skip titles for BYOK-only
     // deployments that never set server Kyomi keys.
-    if is_new_session
+    if is_new_session && !duplicate
         && let Some(ref ws_mgr) = ac.ctx.ws_manager
     {
         kyomi_agent::generate_session_title(
@@ -821,7 +654,8 @@ pub async fn send_chat_message(
         session_id,
         user_message_id,
         assistant_message_id,
-        status: "processing".to_string(),
+        run_id: Some(run_id),
+        status: "queued".to_string(),
         thinking_events: Vec::new(),
         token_usage: None,
         skip_ai: false,

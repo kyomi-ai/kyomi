@@ -35,6 +35,7 @@ pub mod chartml_utils;
 pub mod compaction;
 pub mod d3_format;
 pub mod execution;
+pub mod durable_chat;
 pub mod forecast;
 pub mod gemini;
 pub mod openai;
