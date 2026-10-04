@@ -13,5 +13,5 @@ ALTER TABLE conversation_runs ADD COLUMN queued_at BIGINT;
 ALTER TABLE conversation_runs ADD COLUMN started_at BIGINT;
 ALTER TABLE conversation_runs ADD COLUMN terminal_at BIGINT;
 CREATE UNIQUE INDEX conversation_runs_request ON conversation_runs(workspace_id,actor_id,request_id) WHERE request_id IS NOT NULL;
-CREATE UNIQUE INDEX conversation_runs_active ON conversation_runs(session_id) WHERE state = 'running' AND request_id IS NOT NULL;
+CREATE UNIQUE INDEX conversation_runs_active ON conversation_runs(session_id) WHERE (state = 'running') AND (request_id IS NOT NULL);
 CREATE INDEX conversation_runs_queue ON conversation_runs(state,queued_at) WHERE request_id IS NOT NULL;
