@@ -204,6 +204,7 @@ similar = { workspace = true }
 
 # Date/time (used in both SSR and WASM for date formatting)
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
 
 # HMAC (for trial chat token generation/validation — server-only)
 hmac = { workspace = true, optional = true }

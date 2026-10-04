@@ -175,13 +175,13 @@ This tool drafts the configuration into the user's modal — it does NOT save th
 
 **Mode** is `"alert"` (conditional — only notifies when something noteworthy is detected) or `"report"` (scheduled summary — sends every run regardless of state). When editing an existing watch, preserve the current mode unless the user explicitly asks to change it.
 
-**Schedule** — a 5-field cron expression in UTC (minute hour day-of-month month day-of-week):
+**Schedule** — a 5-field wall-clock cron expression in the named schedule timezone (minute hour day-of-month month day-of-week):
 - `0 9 * * *` — daily at 9am UTC
 - `0 15 * * 1-5` — weekdays at 3pm UTC
 - `0 0 1 * *` — monthly on the 1st at midnight UTC
 - `0 0 * * 0` — weekly on Sunday at midnight UTC
 
-Convert the user's desired time from their local timezone ({user_timezone}) to UTC before building the cron string.
+For local schedules, pass the requested wall-clock cron and a named IANA `timezone`; do not manually convert it to UTC or guess from today's offset. Monday 09:00 Australia/Sydney is `0 9 * * 1` plus `Australia/Sydney`. The user's timezone context is {user_timezone}; a numeric offset is not an IANA name. Preserve the saved schedule timezone while editing, including when the user's browser timezone differs. Omitted timezone on creation means UTC; use `UTC` for an explicitly UTC schedule. A timezone mentioned only in the report prompt governs report/query interpretation, not scheduling. Use `preview_watch` with both schedule and timezone to show the next dated local and UTC execution. DST gaps are skipped; repeated local times run once at their first occurrence.
 
 ## Pre-Determined Queries
 

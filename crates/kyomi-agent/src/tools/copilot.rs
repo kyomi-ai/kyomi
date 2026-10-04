@@ -195,9 +195,13 @@ impl AgentTool for UpdateWatchCopilotTool {
                     "type": "string",
                     "description": "Monitoring instruction for the watch agent"
                 },
+                "timezone": {
+                    "type": "string",
+                    "description": "IANA schedule timezone (e.g. Australia/Sydney). Omission preserves the current zone; use UTC to explicitly switch to UTC."
+                },
                 "schedule": {
                     "type": "string",
-                    "description": "Cron expression in UTC (5 fields: minute hour day-of-month month day-of-week)"
+                    "description": "Wall-clock cron in the saved schedule timezone (5 fields: minute hour day-of-month month day-of-week). Preserve the named zone when editing."
                 },
                 "mode": {
                     "type": "string",
@@ -285,6 +289,12 @@ impl AgentTool for UpdateWatchCopilotTool {
             ));
         }
 
+        if let Some(timezone) = args.get("timezone").and_then(|v| v.as_str())
+            && let Err(error) = kyomi_auth::watch_service::parse_timezone(Some(timezone))
+        {
+            return Ok(validation_failure_result("Watch timezone validation failed:", &error));
+        }
+
         // Validate mode if provided.
         if let Some(mode) = args.get("mode").and_then(|v| v.as_str())
             && let Err(e) = kyomi_auth::watch_service::validate_watch_mode(mode)
@@ -304,6 +314,7 @@ impl AgentTool for UpdateWatchCopilotTool {
             "name",
             "prompt",
             "schedule",
+            "timezone",
             "mode",
             "slack_channel_id",
             "alert_emails",
@@ -416,6 +427,7 @@ mod tests {
             "name",
             "prompt",
             "schedule",
+            "timezone",
             "mode",
             "slack_channel_id",
             "alert_emails",
@@ -652,6 +664,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn timezone_watch_copilot_invalid_zone_returns_validation_failure() {
+        let ctx = build_ctx(test_pool().await);
+        let result = UpdateWatchCopilotTool.execute(serde_json::json!({"timezone": "+11:00", "summary": "Set local schedule"}), &ctx).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["success"], false);
+        assert_eq!(parsed["validation_failed"], true);
+        assert!(parsed["errors"][0].as_str().unwrap().contains("IANA"));
+    }
+
+    #[tokio::test]
     async fn update_watch_copilot_invalid_mode_returns_validation_failure() {
         let ctx = build_ctx(test_pool().await);
         let result = UpdateWatchCopilotTool
@@ -687,6 +709,7 @@ mod tests {
                 serde_json::json!({
                     "name": "Revenue Watch",
                     "schedule": "0 9 * * *",
+                    "timezone": "Australia/Sydney",
                     "summary": "Drafted a daily revenue watch",
                 }),
                 &ctx,
@@ -705,6 +728,7 @@ mod tests {
         let msg_json: serde_json::Value = serde_json::from_str(&msg).expect("valid json");
         assert_eq!(msg_json["type"], serde_json::json!("watch_update"), "{msg}");
         assert_eq!(msg_json["data"]["name"], serde_json::json!("Revenue Watch"), "{msg}");
+        assert_eq!(msg_json["data"]["timezone"], "Australia/Sydney", "{msg}");
         assert_eq!(msg_json["data"]["schedule"], serde_json::json!("0 9 * * *"), "{msg}");
         assert_eq!(
             msg_json["data"]["context_type"],

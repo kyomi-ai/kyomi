@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use kyomi_types::truncate_preview;
 
-use crate::utils::cron::{describe_cron, get_tz_offset_minutes};
+use crate::utils::cron::describe_schedule;
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -277,11 +277,11 @@ fn info_row_mono(label: &str, value: &str) -> AnyView {
     .into_any()
 }
 
-/// Describe a cron schedule using the browser's timezone.
-fn describe_cron_local(schedule: &str) -> String {
-    let offset = get_tz_offset_minutes();
-    let desc = describe_cron(schedule, offset);
-    desc.description
+/// Describe a watch in its saved zone, with UTC for legacy payloads.
+fn describe_watch_schedule(payload: &Value) -> Option<String> {
+    str_field(payload, "schedule").map(|schedule| {
+        describe_schedule(schedule, str_field(payload, "timezone")).description
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1485,7 +1485,7 @@ fn render_create_watch(schema: &Value) -> impl IntoView {
         <div class="space-y-2">
             {input.map(|inp| {
                 let name = str_field(inp, "name").map(String::from);
-                let schedule = str_field(inp, "schedule").map(describe_cron_local);
+                let schedule = describe_watch_schedule(inp);
                 let prompt = str_field(inp, "prompt").map(String::from);
                 let queries = array_field(inp, "queries").cloned().unwrap_or_default();
 
@@ -1530,8 +1530,8 @@ fn render_create_watch(schema: &Value) -> impl IntoView {
                     }
                 } else {
                     let name = str_field(out, "name").map(String::from);
-                    let schedule = str_field(out, "schedule").map(describe_cron_local);
-                    let next_run = str_field(out, "next_run_at").map(String::from);
+                    let schedule = describe_watch_schedule(out);
+                    let next_run = str_field(out, "next_execution").or_else(|| str_field(out, "next_run_at")).map(String::from);
 
                     view! {
                         <div class="bg-success p-2 rounded border border-success-border text-xs">
@@ -1557,7 +1557,7 @@ fn render_preview_watch(schema: &Value) -> impl IntoView {
         <div class="space-y-2">
             {input.map(|inp| {
                 let name = str_field(inp, "name").map(String::from);
-                let schedule = str_field(inp, "schedule").map(describe_cron_local);
+                let schedule = describe_watch_schedule(inp);
                 let prompt = str_field(inp, "prompt").map(String::from);
 
                 view! {
@@ -1575,13 +1575,15 @@ fn render_preview_watch(schema: &Value) -> impl IntoView {
                 if has_error {
                     error_block("Error", str_field(out, "error").unwrap_or("Unknown error").to_string()).into_any()
                 } else {
-                    let preview_schedule = out.get("preview").and_then(|p| str_field(p, "schedule")).map(describe_cron_local);
+                    let preview_schedule = describe_watch_schedule(out).or_else(|| out.get("preview").and_then(describe_watch_schedule));
+                    let next = str_field(out, "next_execution").map(String::from);
                     let msg = str_field(out, "message").map(String::from);
 
                     view! {
                         <div class="bg-primary/10 p-2 rounded border border-primary/20 text-xs">
                             <div class="font-medium text-primary">"Preview Generated"</div>
                             {preview_schedule.map(|s| view! { <div class="mt-1 text-foreground">{format!("Schedule: {}", s)}</div> })}
+                            {next.map(|n| view! { <div class="mt-1 text-foreground">{format!("Next: {n}")}</div> })}
                             {msg.map(|m| view! { <div class="mt-1 text-muted-foreground text-xs">{m}</div> })}
                         </div>
                     }.into_any()
@@ -1602,7 +1604,7 @@ fn render_update_watch(schema: &Value) -> impl IntoView {
             {input.map(|inp| {
                 let watch_id = str_field(inp, "watch_id").map(String::from);
                 let name = str_field(inp, "name").map(String::from);
-                let schedule = str_field(inp, "schedule").map(describe_cron_local);
+                let schedule = describe_watch_schedule(inp);
                 let prompt = str_field(inp, "prompt").map(String::from);
                 let enabled = bool_field(inp, "enabled");
 
@@ -1624,8 +1626,8 @@ fn render_update_watch(schema: &Value) -> impl IntoView {
                     error_block("Error", str_field(out, "error").unwrap_or("Unknown error").to_string()).into_any()
                 } else {
                     let name = str_field(out, "name").map(String::from);
-                    let schedule = str_field(out, "schedule").map(describe_cron_local);
-                    let next_run = str_field(out, "next_run_at").map(String::from);
+                    let schedule = describe_watch_schedule(out);
+                    let next_run = str_field(out, "next_execution").or_else(|| str_field(out, "next_run_at")).map(String::from);
 
                     view! {
                         <div class="bg-success p-2 rounded border border-success-border text-xs">
@@ -1657,7 +1659,7 @@ fn render_update_watch_draft(schema: &Value) -> impl IntoView {
             {input.map(|inp| {
                 let summary = str_field(inp, "summary").map(String::from);
                 let name = str_field(inp, "name").map(String::from);
-                let schedule = str_field(inp, "schedule").map(describe_cron_local);
+                let schedule = describe_watch_schedule(inp);
                 let mode = str_field(inp, "mode").map(String::from);
                 let prompt = str_field(inp, "prompt").map(String::from);
                 let queries_count = array_field(inp, "queries").map(|q| q.len()).unwrap_or(0);
@@ -1753,7 +1755,8 @@ fn render_search_watches(schema: &Value) -> impl IntoView {
                                 {watches.iter().map(|w| {
                                     let name = str_field(w, "name").unwrap_or("").to_string();
                                     let prompt = str_field(w, "prompt").unwrap_or("").to_string();
-                                    let schedule = str_field(w, "schedule").map(describe_cron_local).unwrap_or_default();
+                                    let schedule = describe_watch_schedule(w).unwrap_or_default();
+                    let next = str_field(w, "next_execution").map(String::from);
                                     let status = str_field(w, "status").unwrap_or("").to_string();
                                     let status_class = if status == "active" { "text-success-foreground" } else { "text-muted-foreground" };
                                     let queries_count = array_field(w, "queries").map(|q| q.len()).unwrap_or(0);
@@ -1764,6 +1767,7 @@ fn render_search_watches(schema: &Value) -> impl IntoView {
                                             <div class="text-muted-foreground text-xs mt-1">{prompt}</div>
                                             <div class="text-muted-foreground text-xs mt-1 space-y-0.5">
                                                 <div>{format!("Schedule: {}", schedule)}</div>
+                                        {next.map(|n| view! { <div>{format!("Next: {n}")}</div> })}
                                                 <div>"Status: "<span class=status_class>{status}</span></div>
                                                 {(queries_count > 0).then(|| view! {
                                                     <div class="text-muted-foreground">{format!("{} reference queries", queries_count)}</div>
@@ -1879,7 +1883,8 @@ fn render_watch_info(schema: &Value) -> impl IntoView {
                     let name = str_field(w, "name").unwrap_or("").to_string();
                     let prompt = str_field(w, "prompt").unwrap_or("").to_string();
                     let mode = str_field(w, "mode").unwrap_or("").to_string();
-                    let schedule = str_field(w, "schedule").map(describe_cron_local).unwrap_or_default();
+                    let schedule = describe_watch_schedule(w).unwrap_or_default();
+                    let next = str_field(w, "next_execution").map(String::from);
                     let enabled = bool_field(w, "enabled").unwrap_or(false);
                     let status_class = if enabled { "text-success-foreground" } else { "text-muted-foreground" };
                     let status_text = if enabled { "Active" } else { "Paused" };
@@ -1894,6 +1899,7 @@ fn render_watch_info(schema: &Value) -> impl IntoView {
                                     <div class="text-muted-foreground text-xs space-y-0.5 mt-2">
                                         <div>"Mode: "<span class="font-medium">{mode}</span></div>
                                         <div>{format!("Schedule: {}", schedule)}</div>
+                                        {next.map(|n| view! { <div>{format!("Next: {n}")}</div> })}
                                         <div>"Status: "<span class=status_class>{status_text.to_string()}</span></div>
                                     </div>
                                 </div>
