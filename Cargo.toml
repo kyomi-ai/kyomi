@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/agent-runtime",
     "crates/kyomi-core",
     "crates/kyomi-auth",
     "crates/kyomi-chart-theme",
@@ -128,6 +129,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 # Internal crates
+agent-runtime = { path = "crates/agent-runtime" }
 kyomi-core = { path = "crates/kyomi-core" }
 kyomi-auth = { path = "crates/kyomi-auth" }
 kyomi-embed = { path = "crates/kyomi-embed" }
