@@ -17,7 +17,7 @@ impl AgentTool for ValidateChartmlTool {
     fn description(&self) -> &str {
         "Validate ChartML YAML blocks before including them in your response. \
          Call this tool with the full chartml YAML content (without the ```chartml fences). \
-         The tool checks YAML structure, required keys, and validates SQL queries \
+         The tool validates the complete authoritative JSON Schema and every SQL source \
          against the datasource via dry-run."
     }
 
@@ -64,86 +64,8 @@ impl AgentTool for ValidateChartmlTool {
             .to_string());
         }
 
-        let mut errors: Vec<serde_json::Value> = Vec::new();
-        let query_ctx = ctx.query_context();
-
-        for (i, block_value) in blocks.iter().enumerate() {
-            let block_num = i + 1;
-            let yaml_str = block_value.as_str().ok_or_else(|| {
-                kyomi_core::Error::BadRequest(format!(
-                    "Block {block_num}: expected string, got {block_value}"
-                ))
-            })?;
-
-            let parsed: Result<serde_yaml::Value, _> = serde_yaml::from_str(yaml_str);
-            match parsed {
-                Ok(value) => {
-                    let mapping = value.as_mapping();
-                    let data_key = serde_yaml::Value::String("data".to_string());
-                    let visualize_key = serde_yaml::Value::String("visualize".to_string());
-                    let has_data = mapping
-                        .map(|m| m.contains_key(&data_key))
-                        .unwrap_or(false);
-                    let has_visualize = mapping
-                        .map(|m| m.contains_key(&visualize_key))
-                        .unwrap_or(false);
-
-                    if !has_data {
-                        errors.push(serde_json::json!({
-                            "block": block_num,
-                            "type": "missing_key",
-                            "message": "missing required key 'data'"
-                        }));
-                    }
-                    if !has_visualize {
-                        errors.push(serde_json::json!({
-                            "block": block_num,
-                            "type": "missing_key",
-                            "message": "missing required key 'visualize'"
-                        }));
-                    }
-
-                    if has_data {
-                        let query = value
-                            .get("data")
-                            .and_then(|d| d.get("query"))
-                            .and_then(|v| v.as_str());
-                        let datasource = value
-                            .get("data")
-                            .and_then(|d| d.get("datasource"))
-                            .and_then(|v| v.as_str());
-
-                        if let (Some(sql), Some(slug)) = (query, datasource) {
-                            match crate::tools::query_utils::dry_run_datasource_query(
-                                &query_ctx, slug, sql,
-                            )
-                            .await
-                            {
-                                Ok(()) => {}
-                                Err(e) => {
-                                    if !e.starts_with("Failed to resolve")
-                                        && !e.starts_with("Failed to create")
-                                    {
-                                        errors.push(serde_json::json!({
-                                            "block": block_num,
-                                            "type": "sql_error",
-                                            "message": format!("SQL error: {e}")
-                                        }));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    errors.push(serde_json::json!({
-                        "block": block_num,
-                        "type": "yaml_parse",
-                        "message": format!("invalid YAML: {e}")
-                    }));
-                }
-            }
-        }
+        let blocks: Vec<&str> = blocks.iter().map(|b| b.as_str().ok_or_else(|| kyomi_core::Error::BadRequest("Expected ChartML string".into()))).collect::<kyomi_core::Result<_>>()?;
+        let errors = crate::tools::query_utils::validate_chartml_complete(&ctx.query_context(), &blocks).await;
 
         if errors.is_empty() {
             Ok(serde_json::json!({
@@ -158,5 +80,23 @@ impl AgentTool for ValidateChartmlTool {
             })
             .to_string())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn tool_schema_and_sql_failures_have_stable_locations() {
+        let ctx = crate::test_support::build_ctx(crate::test_support::test_pool().await);
+        let input = "- type: config\n  version: 1\n- type: chart\n  version: 1\n  data: {provider: inline, rows: []}\n  visualize: {type: invalid}";
+        let result: serde_json::Value = serde_json::from_str(&ValidateChartmlTool.execute(serde_json::json!({"blocks": [input]}), &ctx).await.unwrap()).unwrap();
+        assert_eq!(result["valid"], false);
+        assert!(result["errors"].as_array().unwrap().iter().any(|e| e["block"] == 1 && e["component"] == 2 && e["instance_path"] == "/1/visualize/type" && e["stage"] == "schema"));
+        let result: serde_json::Value = serde_json::from_str(&ValidateChartmlTool.execute(serde_json::json!({"blocks": ["type: chart\nversion: 1\ndata: {datasource: absent, query: SELECT 1}\nvisualize: {type: table}"]}), &ctx).await.unwrap()).unwrap();
+        assert_eq!(result["valid"], false);
+        assert_eq!(result["errors"][0]["stage"], "sql_datasource");
+        let result: serde_json::Value = serde_json::from_str(&ValidateChartmlTool.execute(serde_json::json!({"blocks": ["type: config\nversion: 1"]}), &ctx).await.unwrap()).unwrap();
+        assert_eq!(result["valid"], true);
     }
 }
