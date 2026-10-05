@@ -286,3 +286,312 @@ fn complete_tool_message_envelope_does_not_infer_success_or_terminal_state() {
     }
     assert_eq!(validate(&recorded), Err(PolicyError::InvalidIdentity));
 }
+
+// Complete-turn consumer uses only agent-runtime's public ports.
+struct TurnSink<'a> {
+    notebook: &'a Notebook,
+    notifications: AtomicUsize,
+    fail_kind: Option<&'static str>,
+}
+#[async_trait::async_trait]
+impl EventSink for TurnSink<'_> {
+    async fn tool_outcome(
+        &self,
+        _: &ExecutionContext,
+        id: &ToolCallId,
+    ) -> Result<Option<ToolOutcome>, ExecutionError> {
+        let rows = self.notebook.journal.lock().unwrap();
+        Ok(rows.iter().find_map(|row| match &row.payload {
+            Payload::Public(PublicPayload::ToolOutcome {
+                tool_call_id,
+                text,
+                transport,
+                domain,
+            }) if tool_call_id == id => Some(ToolOutcome {
+                transport: transport.clone(),
+                domain: domain.clone(),
+                text: row.detail.clone().unwrap_or_else(|| text.preview.clone()),
+            }),
+            _ => None,
+        }))
+    }
+    async fn commit(&self, command: &AppendCommand) -> Result<SinkReceipt, ExecutionError> {
+        if self.fail_kind.is_some_and(|kind| {
+            matches!(
+                (kind, &command.payload),
+                (
+                    "response",
+                    Payload::Restricted(RestrictedPayload::ProviderResponse { .. })
+                ) | ("result", Payload::Public(PublicPayload::ToolOutcome { .. }))
+            )
+        }) {
+            return Err(ExecutionError::Persistence(
+                "injected writer failure".into(),
+            ));
+        }
+        let receipt = AtomicPersistence::commit(self.notebook, command)
+            .await
+            .map_err(|error| ExecutionError::Persistence(error.to_string()))?;
+        if !receipt.duplicate && matches!(command.payload, Payload::Public(_)) {
+            self.notifications.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(SinkReceipt {
+            receipt,
+            notification_error: None,
+        })
+    }
+}
+struct NotebookProvider;
+#[async_trait::async_trait]
+impl CompleteProvider for NotebookProvider {
+    type Response = String;
+    async fn complete(&self) -> Result<(String, ResponseRecord), ExecutionError> {
+        Ok((
+            "complete response".into(),
+            ResponseRecord {
+                cost: Some(0.001),
+                raw: serde_json::json!({"content":"complete response", "private_signature":"secret"}),
+                continuation: serde_json::json!({"opaque":"continue-this"}),
+                candidate: "complete response".into(),
+                planning: vec![
+                    "Reviewing all notebook records. ".repeat(20),
+                    "Checking totals next".into(),
+                ],
+                usage: Usage {
+                    input_tokens: 42,
+                    output_tokens: 17,
+                },
+            },
+        ))
+    }
+}
+struct NotebookTool<'a> {
+    notebook: &'a Notebook,
+    calls: &'a AtomicUsize,
+}
+#[async_trait::async_trait]
+impl ToolExecution for NotebookTool<'_> {
+    async fn execute(&self) -> ToolOutcome {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let rows = self.notebook.journal.lock().unwrap();
+        assert!(rows.iter().any(|row| matches!(&row.payload, Payload::Restricted(RestrictedPayload::ProviderResponse { continuation, .. }) if continuation["opaque"] == "continue-this")));
+        assert!(rows.iter().any(|row| matches!(&row.payload, Payload::Public(PublicPayload::Planning { text }) if text.detail.is_some()) && row.detail.as_ref().is_some_and(|body| body.len()>200)));
+        assert!(rows.iter().any(|row| matches!(
+            row.payload,
+            Payload::Public(PublicPayload::ToolStarted { .. })
+        )));
+        assert!(!rows.iter().any(|row| matches!(
+            row.payload,
+            Payload::Public(PublicPayload::ApprovedAnswer { .. })
+        )));
+        ToolOutcome {
+            transport: TransportOutcome::Completed,
+            domain: DomainOutcome::Rejected,
+            text: "{\"valid\":false,\"errors\":[\"missing column\"]}".into(),
+        }
+    }
+}
+fn turn() -> ExecutionContext {
+    ExecutionContext {
+        conversation_id: ConversationId("notebook".into()),
+        run_id: RunId("entry".into()),
+    }
+}
+async fn accepted(notebook: &Notebook) {
+    AtomicPersistence::commit(
+        notebook,
+        &command(
+            PublicPayload::Submitted {
+                message_id: MessageId("user".into()),
+                text: Text {
+                    preview: "review notes".into(),
+                    detail: None,
+                },
+            },
+            "submit",
+        ),
+    )
+    .await
+    .unwrap();
+}
+#[tokio::test]
+async fn independent_complete_turn_persists_prerequisites_and_distinct_tool_domain_outcomes() {
+    let notebook = Notebook::default();
+    accepted(&notebook).await;
+    let sink = TurnSink {
+        notebook: &notebook,
+        notifications: AtomicUsize::new(0),
+        fail_kind: None,
+    };
+    let context = turn();
+    let model = ModelCallId("call-1".into());
+    context
+        .complete(&NotebookProvider, &sink, &model)
+        .await
+        .unwrap();
+    // Same model-call ingestion is idempotent, including detail references and usage.
+    context
+        .complete(&NotebookProvider, &sink, &model)
+        .await
+        .unwrap();
+    let calls = AtomicUsize::new(0);
+    let tool = NotebookTool {
+        notebook: &notebook,
+        calls: &calls,
+    };
+    for id in ["lookup-1", "lookup-2"] {
+        let outcome = context
+            .tool(
+                &sink,
+                &tool,
+                ToolCallId(id.into()),
+                "lookup".into(),
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        assert!(!outcome.succeeded());
+        assert_eq!(outcome.transport, TransportOutcome::Completed);
+        assert_eq!(outcome.domain, DomainOutcome::Rejected);
+    }
+    let replayed = context
+        .tool(
+            &sink,
+            &tool,
+            ToolCallId("lookup-1".into()),
+            "lookup".into(),
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(replayed.domain, DomainOutcome::Rejected);
+    let (text, detail) = context.text("answer", "Notebook checked", 200);
+    let answer = context.command(
+        "answer",
+        Payload::Public(PublicPayload::ApprovedAnswer {
+            message_id: MessageId("assistant".into()),
+            text,
+        }),
+        detail,
+    );
+    sink.commit(&answer).await.unwrap();
+    sink.commit(&answer).await.unwrap();
+    let rows = notebook.journal.lock().unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        rows.iter()
+            .filter(|row| matches!(row.payload, Payload::Public(PublicPayload::Usage { .. })))
+            .count(),
+        1
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|row| matches!(
+                row.payload,
+                Payload::Public(PublicPayload::ToolOutcome { .. })
+            ))
+            .count(),
+        2
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|row| matches!(
+                row.payload,
+                Payload::Public(PublicPayload::ApprovedAnswer { .. })
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(rows.iter().filter(|row| matches!(&row.payload, Payload::Public(PublicPayload::Planning { text }) if text.detail.is_none())).count(), 1);
+    assert_eq!(sink.notifications.load(Ordering::SeqCst), 10);
+}
+#[tokio::test]
+async fn complete_response_failure_prevents_dependent_tools_and_public_notifications() {
+    let notebook = Notebook::default();
+    accepted(&notebook).await;
+    let sink = TurnSink {
+        notebook: &notebook,
+        notifications: AtomicUsize::new(0),
+        fail_kind: Some("response"),
+    };
+    let calls = AtomicUsize::new(0);
+    let context = turn();
+    let result = context
+        .complete(&NotebookProvider, &sink, &ModelCallId("model".into()))
+        .await;
+    if result.is_ok() {
+        context
+            .tool(
+                &sink,
+                &NotebookTool {
+                    notebook: &notebook,
+                    calls: &calls,
+                },
+                ToolCallId("write".into()),
+                "write".into(),
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+    }
+    assert!(matches!(result, Err(ExecutionError::Persistence(_))));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(sink.notifications.load(Ordering::SeqCst), 0);
+}
+#[tokio::test]
+async fn side_effect_without_receipt_is_uncertain_and_duplicate_start_never_reexecutes() {
+    let notebook = Notebook::default();
+    accepted(&notebook).await;
+    let context = turn();
+    let sink = TurnSink {
+        notebook: &notebook,
+        notifications: AtomicUsize::new(0),
+        fail_kind: Some("result"),
+    };
+    context
+        .complete(&NotebookProvider, &sink, &ModelCallId("model".into()))
+        .await
+        .unwrap();
+    let calls = AtomicUsize::new(0);
+    let tool = NotebookTool {
+        notebook: &notebook,
+        calls: &calls,
+    };
+    let id = ToolCallId("write-1".into());
+    assert!(matches!(
+        context
+            .tool(
+                &sink,
+                &tool,
+                id.clone(),
+                "write".into(),
+                serde_json::json!({})
+            )
+            .await,
+        Err(ExecutionError::Uncertain(_))
+    ));
+    assert!(matches!(
+        context
+            .tool(&sink, &tool, id, "write".into(), serde_json::json!({}))
+            .await,
+        Err(ExecutionError::Uncertain(_))
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn execution_envelopes_remain_bounded_with_maximum_application_identities() {
+    let context = ExecutionContext {
+        conversation_id: ConversationId("c".repeat(128)),
+        run_id: RunId("r".repeat(128)),
+    };
+    let (text, detail) = context.text(&"k".repeat(512), &"long plan ".repeat(60), 200);
+    let command = context.command(
+        &"k".repeat(512),
+        Payload::Public(PublicPayload::Planning { text }),
+        detail,
+    );
+    validate(&command).unwrap();
+    assert_eq!(command.event_id.as_str().len(), 64);
+    assert_eq!(command.idempotency_key.as_str().len(), 64);
+}

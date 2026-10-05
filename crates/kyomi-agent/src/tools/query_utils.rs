@@ -21,6 +21,15 @@ use tracing;
 
 use super::QueryContext;
 
+/// Unrestricted SQL may commit before a provider reports a timeout/error. Both
+/// transport errors and returned error envelopes lack a rollback guarantee.
+pub(super) fn sql_result_domain_outcome(text: &str) -> agent_runtime::DomainOutcome {
+    match serde_json::from_str::<Value>(text) {
+        Ok(value) if value.get("error").is_none_or(Value::is_null) => agent_runtime::DomainOutcome::Succeeded,
+        _ => agent_runtime::DomainOutcome::Unknown,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Arrow → JSON conversion
 // ---------------------------------------------------------------------------

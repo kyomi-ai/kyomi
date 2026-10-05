@@ -7,8 +7,8 @@ No publication or license change is part of this addition.
 The foundation consists of typed identities, version 1 commands/events, a pure
 transition planner, an atomic persistence port, post-commit notifications and
 public replay DTOs. Responses are complete records; there are no token deltas.
-Provider ingestion, tool execution, client reducers and interface delivery belong
-to subsequent implementation stages. The lifecycle module supplies submission
+Complete-provider ingestion and awaited tool execution are exposed through reusable
+ports. Client reducers and application interface delivery remain adapter responsibilities. The lifecycle module supplies submission
 idempotency, queued ownership, leases/heartbeats/fencing, cancellation and terminal
 projection policy for this stage.
 
@@ -43,7 +43,8 @@ emits no second notification. `AppendOutcome::CommittedButNotNotified` contains
 the durable receipt and delivery error: notification failure never undoes history.
 Direct `commit`/adapter append intentionally provides persistence only.
 
-A payload is bounded to 64 KiB. Full exposed text may use `Text { preview, detail }`
+A public payload is bounded to 64 KiB; complete restricted provider/candidate payloads
+are bounded to 2 MiB. Full exposed text may use `Text { preview, detail }`
 with a detail ID and an associated command detail body up to 2 MiB. Reference and
 body are validated and committed together. A replay batch returns up to 100 scanned
 records and 1 MiB of serialized public events. `scanned_through` includes restricted
@@ -83,3 +84,25 @@ It does not infer tool success, approve an answer or complete a run. The adapter
 commits any corresponding compatibility message in the same fenced event
 transaction. `PublicPayload::Failed` retains truthful failure text in public replay,
 including failures before the first provider response.
+
+The execution module provides `CompleteProvider`, `ToolExecution` and `EventSink`.
+`ExecutionContext::complete` persists complete restricted provider/continuation data,
+the candidate, per-model-call usage and adapter-cleaned exposed planning before
+returning to the caller. A planning preview and its full body use one atomic command;
+short planning has no detail reference. Envelope IDs use bounded deterministic hashes.
+The provider port supplies complete responses only; it exposes no token API.
+
+`ExecutionContext::tool` first recovers a committed result receipt when one exists.
+Otherwise it awaits intent and start commits before exactly one tool invocation, then
+awaits the typed transport/domain outcome. A transport-completed result can have a
+rejected domain outcome. Repeated names have distinct call IDs. A duplicate start
+without a result is uncertain and refuses execution. Retrying result persistence must
+retry the same command, never invoke the action again. `SinkReceipt` distinguishes
+committed history from notification failure without undoing the commit.
+
+This contract cannot promise exactly-once external effects. An adapter that owns a
+local mutation transaction can connect a result receipt to that transaction; a tool
+with an internally owned transaction or a remote action may commit a side effect
+before result persistence fails. Recovery must record that outcome as unknown and
+interrupt the run, preserving the effect and refusing blind retries. Provider and tool
+credentials, product validation and authorization remain application responsibilities.

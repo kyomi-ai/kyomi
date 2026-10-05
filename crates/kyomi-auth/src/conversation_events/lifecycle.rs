@@ -139,6 +139,28 @@ macro_rules! write_terminal {
     ($store:expr,$tx:ident,$submission:expr,$plan:expr) => {{
         let plan = $plan;
         if let Some(projection) = &plan.terminal_projection {
+            // A committed start without a receipt is uncertainty, including a process crash
+            // after a local or remote side effect. Never infer rollback or rerun the action.
+            let outstanding: Vec<(String,)> = sqlx::query_as("SELECT encrypted_payload FROM conversation_events WHERE session_id=$1 AND run_id=$2 AND public=true ORDER BY sequence")
+                .bind($submission.submitted.conversation_id.as_str()).bind($submission.submitted.run_id.as_str()).fetch_all(&mut *$tx).await?;
+            for (encrypted,) in outstanding {
+                let payload: Payload = serde_json::from_str(&encryption::decrypt(&encrypted, $store.key)?)?;
+                if let Payload::Public(PublicPayload::ToolStarted { tool_call_id }) = payload {
+                    let saved: Option<(String,)> = sqlx::query_as("SELECT event_id FROM conversation_tool_receipts WHERE session_id=$1 AND run_id=$2 AND tool_call_id=$3")
+                        .bind($submission.submitted.conversation_id.as_str()).bind($submission.submitted.run_id.as_str()).bind(tool_call_id.as_str()).fetch_optional(&mut *$tx).await?;
+                    if saved.is_none() {
+                        let mut unknown = event($submission, PublicPayload::ToolOutcome {
+                            tool_call_id: tool_call_id.clone(),
+                            text: Text { preview: "Action outcome unknown: execution stopped before a committed result. This action will not be retried automatically.".into(), detail: None },
+                            transport: agent_runtime::TransportOutcome::Unknown,
+                            domain: agent_runtime::DomainOutcome::Unknown,
+                        }, &format!("unknown:{}", tool_call_id.as_str()));
+                        unknown.idempotency_key = IdempotencyKey(hex::encode(Sha256::digest(format!("{}:unknown:{}", $submission.submitted.run_id.as_str(), tool_call_id.as_str()))));
+                        let fingerprint = command_fingerprint(&unknown)?;
+                        persist_append!($store, $tx, unknown, fingerprint, false)?;
+                    }
+                }
+            }
             let text=Text {preview:projection.content.chars().take(8000).collect(),detail:if projection.content.chars().count()>8000 {Some(DetailId(uuid::Uuid::new_v4().to_string()))}else{None}};
             let payload=match plan.snapshot.state {
                 RunState::Completed=>PublicPayload::ApprovedAnswer {message_id:projection.message_id.clone(),text},
@@ -508,6 +530,54 @@ impl ConversationStore<'_> {
         }
         .append(command)
         .await
+    }
+    /// Commit a runtime event and its compatibility progress/detail projection together.
+    /// The progress object is an adapter-owned versioned UI projection, never a second journal.
+    pub async fn fenced_execution_event(
+        &self, command: &AppendCommand, lease: &Lease, progress: Option<&serde_json::Value>,
+    ) -> Result<CommitReceipt> {
+        agent_runtime::validate(command)?;
+        if let Some(progress) = progress {
+            if progress.get("event_id").and_then(serde_json::Value::as_str) != Some(command.event_id.as_str())
+                || !matches!(command.payload, Payload::Public(PublicPayload::Planning { .. } | PublicPayload::ToolStarted { .. } | PublicPayload::ToolOutcome { .. }))
+            { return Err(agent_runtime::PolicyError::InvalidIdentity.into()); }
+            if progress.get("has_full_text").and_then(serde_json::Value::as_bool).unwrap_or(false) != command.detail.is_some() {
+                return Err(agent_runtime::PolicyError::InvalidDetail.into());
+            }
+        }
+        let scoped = ConversationStore { lease: Some(lease), ..self.for_lifecycle() };
+        transaction!(&scoped, tx, {
+            authorize!(&scoped, tx, command.conversation_id.as_str(), true);
+            let row = load_run!(self, tx, command.conversation_id.as_str(), command.run_id.as_str());
+            agent_runtime::validate_ownership(&row.snapshot()?, lease, chrono::Utc::now().timestamp_millis())?;
+            let fingerprint = command_fingerprint(command)?;
+            let receipt = persist_append!(&scoped, tx, command, fingerprint, false)?;
+            if receipt.duplicate { return Ok(receipt); }
+            if let Some(progress) = progress {
+                let saved: Option<Option<String>> = sqlx::query_scalar("SELECT extra_metadata FROM chat_messages WHERE message_id=$1 AND session_id=$2 AND status='in_progress' AND role='assistant'")
+                    .bind(&row.assistant_message_id).bind(command.conversation_id.as_str()).fetch_optional(&mut *tx).await?;
+                let mut metadata = saved.ok_or(EventStoreError::MissingProjection)?.as_deref()
+                    .map(|value| encryption::decrypt_json(value, self.key)).transpose()?
+                    .unwrap_or_else(|| serde_json::json!({}));
+                let fields = metadata.as_object_mut().ok_or(agent_runtime::PolicyError::InvalidState)?;
+                let events = fields.entry("thinking_events").or_insert_with(|| serde_json::json!([]))
+                    .as_array_mut().ok_or(agent_runtime::PolicyError::InvalidState)?;
+                events.push(progress.clone());
+                if let Some(body) = &command.detail {
+                    // Full exposed text uses the exact public event ID for the existing More endpoint.
+                    let encrypted = encryption::encrypt(body, self.key)?;
+                    sqlx::query("INSERT INTO thinking_event_details(id,message_id,event_id,full_text) VALUES($1,$2,$3,$4)")
+                        .bind(uuid::Uuid::new_v4().to_string()).bind(&row.assistant_message_id)
+                        .bind(command.event_id.as_str()).bind(encrypted).execute(&mut *tx).await?;
+                }
+                let encrypted = encryption::encrypt_json(&metadata, self.key)?;
+                let changed = sqlx::query("UPDATE chat_messages SET extra_metadata=$1 WHERE message_id=$2 AND session_id=$3 AND status='in_progress' AND role='assistant'")
+                    .bind(encrypted).bind(&row.assistant_message_id).bind(command.conversation_id.as_str()).execute(&mut *tx).await?;
+                if changed.rows_affected() != 1 { return Err(EventStoreError::MissingProjection); }
+                write_session_sync!(&scoped, tx, command.conversation_id.as_str(), kyomi_types::sync::SyncActionType::Update);
+            }
+            Ok(receipt)
+        })
     }
     pub async fn find_active_run(&self, conversation: &ConversationId) -> Result<Option<RunId>> {
         let scoped = self.for_lifecycle();

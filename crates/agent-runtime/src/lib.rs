@@ -2,6 +2,8 @@
 //! then commit the event, detail, run and compatibility projection atomically.
 //! Complete responses only; this protocol has no token delta events.
 mod lifecycle;
+mod execution;
+pub use execution::*;
 pub use lifecycle::*;
 
 use serde::{Deserialize, Serialize};
@@ -128,9 +130,17 @@ pub enum PublicPayload {
         text: Text,
         succeeded: bool,
     },
+    ToolOutcome {
+        tool_call_id: ToolCallId,
+        text: Text,
+        transport: TransportOutcome,
+        domain: DomainOutcome,
+    },
     Usage {
         model_call_id: ModelCallId,
         usage: Usage,
+        #[serde(default)]
+        cost: Option<f64>,
     },
     Validation {
         passed: bool,
@@ -157,6 +167,7 @@ impl PublicPayload {
             | Self::MessageRecorded { text, .. }
             | Self::Planning { text }
             | Self::ToolResult { text, .. }
+            | Self::ToolOutcome { text, .. }
             | Self::Validation { text, .. }
             | Self::ApprovedAnswer { text, .. }
             | Self::Interrupted { text }
@@ -280,7 +291,7 @@ pub fn validate(command: &AppendCommand) -> Result<(), PolicyError> {
     if serde_json::to_vec(&command.payload)
         .map_err(|e| PolicyError::Serialization(e.to_string()))?
         .len()
-        > MAX_EVENT_BYTES
+        > if matches!(command.payload, Payload::Restricted(_)) { MAX_DETAIL_BYTES } else { MAX_EVENT_BYTES }
     {
         return Err(PolicyError::TooLarge);
     }
@@ -323,7 +334,8 @@ pub fn validate(command: &AppendCommand) -> Result<(), PolicyError> {
             | PublicPayload::Usage { model_call_id, .. } => check_id(model_call_id.as_str())?,
             PublicPayload::ToolIntent { tool_call_id, .. }
             | PublicPayload::ToolStarted { tool_call_id }
-            | PublicPayload::ToolResult { tool_call_id, .. } => check_id(tool_call_id.as_str())?,
+            | PublicPayload::ToolResult { tool_call_id, .. }
+            | PublicPayload::ToolOutcome { tool_call_id, .. } => check_id(tool_call_id.as_str())?,
             _ => {}
         }
     } else if let Payload::Restricted(p) = &command.payload {
@@ -406,6 +418,10 @@ pub fn plan(command: &AppendCommand, current: Option<RunState>) -> Result<Plan, 
             succeeded,
             ..
         } => result.tool_receipt = Some((tool_call_id.clone(), *succeeded)),
+        PublicPayload::ToolOutcome { tool_call_id, transport, domain, .. } => {
+            result.tool_receipt = Some((tool_call_id.clone(),
+                *transport == TransportOutcome::Completed && *domain == DomainOutcome::Succeeded));
+        }
         PublicPayload::Usage { model_call_id, .. } => {
             result.usage_key = Some(model_call_id.clone())
         }

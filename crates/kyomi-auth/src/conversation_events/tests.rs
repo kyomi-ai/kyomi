@@ -221,6 +221,7 @@ async fn conformance(db: &DbPool) {
         &sid,
         &run,
         Payload::Public(P::Usage {
+            cost: None,
             model_call_id: ModelCallId("model-1".into()),
             usage: Usage {
                 input_tokens: 12,
@@ -2210,4 +2211,95 @@ async fn durable_dispatch_acceptance_is_atomic_retryable_and_preserves_long_inpu
         Some(body.as_str())
     );
     assert!(claim.context.messages.is_empty());
+}
+
+async fn execution_sink_conformance(db: &DbPool) {
+    let (owner, _, wid, sid) = seed(db).await;
+    let now = chrono::Utc::now().timestamp_millis();
+    let store = ConversationStore::new(db, &KEY, &owner, &wid).with_deterministic_time();
+    let submission = lifecycle_submission(&owner, &sid, "awaited-sink", "inspect", now);
+    store.submit(&submission).await.unwrap();
+    let run = &submission.submitted.run_id;
+    let conversation = &submission.submitted.conversation_id;
+    let claimed = store.claim(conversation, run, "sink-owner", now, 30_000).await.unwrap();
+    let lease = claimed.snapshot.lease.unwrap();
+    let context = agent_runtime::ExecutionContext { conversation_id: conversation.clone(), run_id: run.clone() };
+    let body = "Inspecting the complete dataset before invoking the delayed tool. ".repeat(12);
+    let (planning, detail) = context.text("long-planning", &body, 200);
+    let long = context.command("long-planning", Payload::Public(P::Planning { text: planning }), detail);
+    let progress = serde_json::json!({"event_id":long.event_id,"event_type":"agent_thought","title":"Planning",
+        "description":body.chars().take(200).collect::<String>(),"has_full_text":true});
+    let before = count(db, "conversation_events", &sid).await;
+    // A failure in the compatibility detail insert rolls back the event and metadata together.
+    let trigger_name = format!("reject_detail_{}", uuid::Uuid::new_v4().simple());
+    if db.is_postgres() {
+        let function = format!("CREATE FUNCTION {trigger_name}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected detail failure'; END $$");
+        kyomi_core::db_execute!(db, &function).unwrap();
+        let trigger = format!("CREATE TRIGGER {trigger_name} BEFORE INSERT ON thinking_event_details FOR EACH ROW WHEN (NEW.message_id='{}') EXECUTE FUNCTION {trigger_name}()", submission.assistant_message_id.as_str());
+        kyomi_core::db_execute!(db, &trigger).unwrap();
+    } else {
+        let trigger = format!("CREATE TRIGGER {trigger_name} BEFORE INSERT ON thinking_event_details WHEN NEW.message_id='{}' BEGIN SELECT RAISE(ABORT,'injected detail failure'); END", submission.assistant_message_id.as_str());
+        kyomi_core::db_execute!(db, &trigger).unwrap();
+    }
+    assert!(store.fenced_execution_event(&long, &lease, Some(&progress)).await.is_err());
+    assert_eq!(count(db, "conversation_events", &sid).await, before);
+    let dropped = if db.is_postgres() { format!("DROP TRIGGER {trigger_name} ON thinking_event_details") } else { format!("DROP TRIGGER {trigger_name}") };
+    kyomi_core::db_execute!(db, &dropped).unwrap();
+    if db.is_postgres() { kyomi_core::db_execute!(db, &format!("DROP FUNCTION {trigger_name}()")).unwrap(); }
+    let saved = store.fenced_execution_event(&long, &lease, Some(&progress)).await.unwrap();
+    assert!(!saved.duplicate);
+    assert!(store.fenced_execution_event(&long, &lease, Some(&progress)).await.unwrap().duplicate);
+    let full = crate::chat_service::get_thinking_event_detail(db, &KEY, submission.assistant_message_id.as_str(), long.event_id.as_str(), &owner, &wid).await.unwrap();
+    assert_eq!(full, Some(body.clone()));
+    let encrypted: (String,) = kyomi_core::db_fetch_one!(db, (String,), "SELECT full_text FROM thinking_event_details WHERE message_id=$1 AND event_id=$2", submission.assistant_message_id.as_str(), long.event_id.as_str()).unwrap();
+    assert!(!encrypted.0.contains("complete dataset"));
+    let (short_text, detail) = context.text("short-planning", "Checking totals next", 200);
+    assert!(detail.is_none());
+    let short = context.command("short-planning", Payload::Public(P::Planning { text: short_text }), detail);
+    store.fenced_execution_event(&short, &lease, Some(&serde_json::json!({"event_id":short.event_id,"event_type":"agent_thought","description":"Checking totals next"}))).await.unwrap();
+    let raw = context.command("model:response", Payload::Restricted(RestrictedPayload::ProviderResponse {
+        model_call_id: ModelCallId("model-1".into()), response: serde_json::json!({"content":"invalid chartml candidate", "signature":"private-sig"}), continuation: serde_json::json!({"opaque":"private-block"}),
+    }), None);
+    store.fenced_execution_event(&raw, &lease, None).await.unwrap();
+    let candidate = context.command("model:candidate", Payload::Restricted(RestrictedPayload::Candidate {
+        model_call_id: ModelCallId("model-1".into()), text: "```chartml\ninvalid chartml candidate\n```".into(),
+    }), None);
+    store.fenced_execution_event(&candidate, &lease, None).await.unwrap();
+    let usage = context.command("model:usage", Payload::Public(P::Usage { cost: None, model_call_id: ModelCallId("model-1".into()), usage: Usage { input_tokens:42, output_tokens:17 } }), None);
+    store.fenced_execution_event(&usage, &lease, None).await.unwrap();
+    assert!(store.fenced_execution_event(&usage, &lease, None).await.unwrap().duplicate);
+    assert_eq!(count(db, "conversation_usage_receipts", &sid).await, 1);
+    for id in ["same-tool-first", "same-tool-second"] {
+        let intent = context.command(&format!("{id}:intent"), Payload::Public(P::ToolIntent { tool_call_id:ToolCallId(id.into()), name:"validate_chartml".into(), arguments:serde_json::json!({}) }), None);
+        store.fenced_execution_event(&intent, &lease, None).await.unwrap();
+        let start = context.command(&format!("{id}:start"), Payload::Public(P::ToolStarted { tool_call_id:ToolCallId(id.into()) }), None);
+        store.fenced_execution_event(&start, &lease, None).await.unwrap();
+        if id == "same-tool-first" {
+            let result = context.command(&format!("{id}:outcome"), Payload::Public(P::ToolOutcome { tool_call_id:ToolCallId(id.into()), text:text("{\"valid\":false}"), transport:agent_runtime::TransportOutcome::Completed, domain:agent_runtime::DomainOutcome::Rejected }), None);
+            store.fenced_execution_event(&result, &lease, None).await.unwrap();
+        }
+    }
+    // Simulate a committed side effect and lost result. Expiry must record unknown, never claim it again.
+    kyomi_core::db_execute!(db, "UPDATE workspaces SET name='side effect happened' WHERE workspace_id=$1", &wid).unwrap();
+    store.expire(conversation, run, now + 30_001).await.unwrap();
+    assert!(store.claim(conversation, run, "replacement", now + 30_002, 30_000).await.is_err());
+    assert!(store.fenced_execution_event(&short, &lease, None).await.is_err());
+    let replay = store.replay(conversation, 0, 100).await.unwrap();
+    let serialized = serde_json::to_string(&replay).unwrap();
+    assert!(!serialized.contains("invalid chartml candidate"));
+    assert!(!serialized.contains("private-sig"));
+    assert!(replay.events.iter().any(|event| matches!(&event.payload, P::ToolOutcome { tool_call_id, transport:agent_runtime::TransportOutcome::Unknown, domain:agent_runtime::DomainOutcome::Unknown, .. } if tool_call_id.as_str()=="same-tool-second")));
+    assert_eq!(replay.events.iter().filter(|event| matches!(event.payload, P::Interrupted { .. })).count(), 1);
+    assert_eq!(count(db, "conversation_tool_receipts", &sid).await, 2);
+    let persisted: (String,) = kyomi_core::db_fetch_one!(db, (String,), "SELECT name FROM workspaces WHERE workspace_id=$1", &wid).unwrap();
+    assert_eq!(persisted.0, "side effect happened");
+}
+#[tokio::test]
+async fn sqlite_awaited_execution_sink_conformance() {
+    execution_sink_conformance(&crate::test_support::test_pool().await).await;
+}
+#[tokio::test]
+async fn postgres_awaited_execution_sink_conformance() {
+    let Some(db) = crate::test_pg::postgres_test_pool_or_skip("postgres_awaited_execution_sink_conformance").await else { return; };
+    execution_sink_conformance(&db).await;
 }

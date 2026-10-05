@@ -21,6 +21,10 @@ pub struct ForecastDataTool;
 
 #[async_trait]
 impl AgentTool for ForecastDataTool {
+    fn result_domain_outcome(&self, text: &str) -> agent_runtime::DomainOutcome {
+        super::query_utils::sql_result_domain_outcome(text)
+    }
+
     fn name(&self) -> &str {
         "forecast_data"
     }

@@ -157,6 +157,8 @@ macro_rules! persist_append {
                 }
                 Payload::Public(agent_runtime::PublicPayload::ToolResult {
                     tool_call_id, ..
+                }) | Payload::Public(agent_runtime::PublicPayload::ToolOutcome {
+                    tool_call_id, ..
                 }) => Some((
                     "conversation_tool_receipts",
                     "tool_call_id",
@@ -412,6 +414,28 @@ impl<'a> ConversationStore<'a> {
             let row: Option<(String,)> = sqlx::query_as("SELECT encrypted_content FROM conversation_event_details WHERE session_id = $1 AND detail_id = $2 AND public = true").bind(conversation.as_str()).bind(detail.as_str()).fetch_optional(&mut *tx).await?;
             row.map(|r| encryption::decrypt(&r.0, self.key).map_err(EventStoreError::from))
                 .transpose()
+        })
+    }
+
+    /// Authorized immutable tool receipt recovery. Reading a receipt never grants a
+    /// new execution lease and cannot turn an uncertain start into a retry.
+    pub async fn tool_outcome(&self, conversation: &ConversationId, run: &agent_runtime::RunId,
+        id: &agent_runtime::ToolCallId) -> Result<Option<agent_runtime::ToolOutcome>> {
+        transaction!(self, tx, {
+            authorize!(self, tx, conversation.as_str(), false);
+            let saved: Option<(String,)> = sqlx::query_as("SELECT e.encrypted_payload FROM conversation_tool_receipts r JOIN conversation_events e ON e.event_id=r.event_id WHERE r.session_id=$1 AND r.run_id=$2 AND r.tool_call_id=$3")
+                .bind(conversation.as_str()).bind(run.as_str()).bind(id.as_str()).fetch_optional(&mut *tx).await?;
+            let Some((encrypted,)) = saved else { return Ok(None); };
+            let payload: Payload = serde_json::from_str(&encryption::decrypt(&encrypted, self.key)?)?;
+            let Payload::Public(agent_runtime::PublicPayload::ToolOutcome { text, transport, domain, .. }) = payload else {
+                return Err(agent_runtime::PolicyError::InvalidState.into());
+            };
+            let body = if let Some(detail) = &text.detail {
+                let row: (String,) = sqlx::query_as("SELECT encrypted_content FROM conversation_event_details WHERE session_id=$1 AND detail_id=$2 AND public=true")
+                    .bind(conversation.as_str()).bind(detail.as_str()).fetch_one(&mut *tx).await?;
+                encryption::decrypt(&row.0, self.key)?
+            } else { text.preview };
+            Ok(Some(agent_runtime::ToolOutcome { transport, domain, text: body }))
         })
     }
 
