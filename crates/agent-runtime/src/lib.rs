@@ -1,6 +1,9 @@
 //! Durable conversation foundation. Adapters authorize and lock state before planning,
 //! then commit the event, detail, run and compatibility projection atomically.
 //! Complete responses only; this protocol has no token delta events.
+mod lifecycle;
+pub use lifecycle::*;
+
 use serde::{Deserialize, Serialize};
 
 pub const VERSION: u16 = 1;
@@ -80,6 +83,12 @@ pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordedRole {
+    Assistant,
+    Tool,
+}
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PublicPayload {
@@ -93,6 +102,15 @@ pub enum PublicPayload {
     ModelResponse {
         model_call_id: ModelCallId,
         text: Text,
+    },
+    /// A complete message recorded by an owner, without inferring tool success.
+    MessageRecorded {
+        message_id: MessageId,
+        role: RecordedRole,
+        text: Text,
+        tool_call_id: Option<ToolCallId>,
+        name: Option<String>,
+        tool_calls: Option<serde_json::Value>,
     },
     Planning {
         text: Text,
@@ -124,6 +142,9 @@ pub enum PublicPayload {
     },
     CancellationRequested,
     Cancelled,
+    Failed {
+        text: Text,
+    },
     Interrupted {
         text: Text,
     },
@@ -133,11 +154,13 @@ impl PublicPayload {
         match self {
             Self::Submitted { text, .. }
             | Self::ModelResponse { text, .. }
+            | Self::MessageRecorded { text, .. }
             | Self::Planning { text }
             | Self::ToolResult { text, .. }
             | Self::Validation { text, .. }
             | Self::ApprovedAnswer { text, .. }
-            | Self::Interrupted { text } => Some(text),
+            | Self::Interrupted { text }
+            | Self::Failed { text } => Some(text),
             _ => None,
         }
     }
@@ -286,6 +309,16 @@ pub fn validate(command: &AppendCommand) -> Result<(), PolicyError> {
         match p {
             PublicPayload::Submitted { message_id, .. }
             | PublicPayload::ApprovedAnswer { message_id, .. } => check_id(message_id.as_str())?,
+            PublicPayload::MessageRecorded {
+                message_id,
+                tool_call_id,
+                ..
+            } => {
+                check_id(message_id.as_str())?;
+                if let Some(id) = tool_call_id {
+                    check_id(id.as_str())?;
+                }
+            }
             PublicPayload::ModelResponse { model_call_id, .. }
             | PublicPayload::Usage { model_call_id, .. } => check_id(model_call_id.as_str())?,
             PublicPayload::ToolIntent { tool_call_id, .. }
@@ -346,7 +379,9 @@ pub fn plan(command: &AppendCommand, current: Option<RunState>) -> Result<Plan, 
     }
     match payload {
         PublicPayload::RunState { state: next } => {
-            if *next == RunState::Queued || (*next == RunState::Completed) {
+            if (*next == RunState::Queued && state != RunState::Queued)
+                || *next == RunState::Completed
+            {
                 return Err(PolicyError::InvalidState);
             }
             result.next_state = *next;
@@ -364,6 +399,7 @@ pub fn plan(command: &AppendCommand, current: Option<RunState>) -> Result<Plan, 
             });
         }
         PublicPayload::Cancelled => result.next_state = RunState::Cancelled,
+        PublicPayload::Failed { .. } => result.next_state = RunState::Failed,
         PublicPayload::Interrupted { .. } => result.next_state = RunState::Interrupted,
         PublicPayload::ToolResult {
             tool_call_id,

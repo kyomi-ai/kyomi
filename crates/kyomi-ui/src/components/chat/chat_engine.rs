@@ -557,7 +557,8 @@ impl ChatEngine {
 
         let session_id = self.session_id.get_untracked().unwrap_or_default();
 
-        let message_id = self.chat_state.active_message_id().get_untracked();
+        let message_id = self.chat_state.active_message_id().get_untracked()
+            .or_else(|| self.chat_state.snapshot().expected_assistant_id().get_untracked());
 
         let mut payload = serde_json::json!({
             "type": "cancel_request",

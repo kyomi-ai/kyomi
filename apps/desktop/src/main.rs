@@ -354,6 +354,19 @@ async fn start_server(
 
     let shutdown_token = CancellationToken::new();
 
+    let _durable_chat_worker = kyomi_agent::durable_chat::DurableChatWorker {
+        db: state.db.clone(),
+        kv: state.kv.clone(),
+        encryption_key: state.encryption_key.clone(),
+        embedding: state.embedding.clone(),
+        ws_manager: state.ws_manager.clone(),
+        app_config: state.config.clone(),
+        connect_registry: Some(state.connect_registry.clone()),
+        platforms: state.platforms.clone(),
+        owner: state.process_instance.clone(),
+        shutdown: shutdown_token.child_token(),
+    }.start();
+
     let watch_scheduler = if enable_schedulers {
         let catalog_scheduler = Arc::new(kyomi_agent::CatalogRefreshScheduler::new(
             db.clone(),

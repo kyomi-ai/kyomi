@@ -192,3 +192,97 @@ async fn independent_adapter_rejects_conflicts_and_scopes_keys() {
         }
     );
 }
+
+#[test]
+fn initial_queued_event_preserves_submission_and_cannot_requeue_owned_work() {
+    let queued = command(
+        PublicPayload::RunState {
+            state: RunState::Queued,
+        },
+        "queued",
+    );
+    assert_eq!(
+        plan(&queued, Some(RunState::Queued))
+            .expect("initial queued event")
+            .next_state,
+        RunState::Queued
+    );
+    assert_eq!(
+        plan(&queued, Some(RunState::Running)),
+        Err(PolicyError::InvalidState)
+    );
+    assert_eq!(
+        plan(&queued, Some(RunState::Completed)),
+        Err(PolicyError::Terminal)
+    );
+}
+
+#[test]
+fn provider_failure_has_truthful_replay_text_and_monotonic_terminal_state() {
+    let failed = command(
+        PublicPayload::Failed {
+            text: Text {
+                preview: "Provider unavailable".into(),
+                detail: None,
+            },
+        },
+        "failed",
+    );
+    assert_eq!(plan(&failed, None), Err(PolicyError::InvalidSubmission));
+    assert_eq!(
+        plan(&failed, Some(RunState::Running))
+            .expect("terminal failure event")
+            .next_state,
+        RunState::Failed
+    );
+    assert_eq!(
+        plan(&failed, Some(RunState::Failed)),
+        Err(PolicyError::Terminal)
+    );
+    let Payload::Public(payload) = &failed.payload else {
+        panic!("public failure event")
+    };
+    assert_eq!(
+        payload.text().expect("exposed failure reason").preview,
+        "Provider unavailable"
+    );
+    let serialized = serde_json::to_string(payload).expect("serializable replay failure");
+    assert!(serialized.contains("Provider unavailable"));
+    assert!(serialized.contains("failed"));
+}
+
+#[test]
+fn complete_tool_message_envelope_does_not_infer_success_or_terminal_state() {
+    let mut recorded = command(
+        PublicPayload::MessageRecorded {
+            message_id: MessageId("tool-message".into()),
+            role: RecordedRole::Tool,
+            text: Text {
+                preview: "tool output".into(),
+                detail: None,
+            },
+            tool_call_id: Some(ToolCallId("tool-call".into())),
+            name: Some("notebook-search".into()),
+            tool_calls: None,
+        },
+        "recorded",
+    );
+    let planned = plan(&recorded, Some(RunState::Running)).expect("owned complete message");
+    assert_eq!(planned.next_state, RunState::Running);
+    assert_eq!(planned.projection, None);
+    assert_eq!(planned.tool_receipt, None);
+    let json = serde_json::to_value(&recorded.payload).expect("complete message envelope");
+    assert_eq!(json["payload"]["role"], "tool");
+    assert!(json["payload"].get("succeeded").is_none());
+    assert_eq!(plan(&recorded, None), Err(PolicyError::InvalidSubmission));
+    assert_eq!(
+        plan(&recorded, Some(RunState::Completed)),
+        Err(PolicyError::Terminal)
+    );
+    if let Payload::Public(PublicPayload::MessageRecorded { tool_call_id, .. }) =
+        &mut recorded.payload
+    {
+        *tool_call_id = Some(ToolCallId(String::new()));
+    }
+    assert_eq!(validate(&recorded), Err(PolicyError::InvalidIdentity));
+}

@@ -7,8 +7,10 @@ No publication or license change is part of this addition.
 The foundation consists of typed identities, version 1 commands/events, a pure
 transition planner, an atomic persistence port, post-commit notifications and
 public replay DTOs. Responses are complete records; there are no token deltas.
-Provider ingestion, worker claims/leases, tool execution, client reducers and
-interface delivery belong to subsequent implementation stages.
+Provider ingestion, tool execution, client reducers and interface delivery belong
+to subsequent implementation stages. The lifecycle module supplies submission
+idempotency, queued ownership, leases/heartbeats/fencing, cancellation and terminal
+projection policy for this stage.
 
 `AppendCommand` names a conversation, run, event and idempotency key. Identity
 newtypes wrap adapter-defined strings (1–128 bytes), allowing existing applications
@@ -16,7 +18,7 @@ to keep stable IDs. `Payload` separates `PublicPayload` from `RestrictedPayload`
 Public replay uses `PublicEvent` and cannot carry a restricted payload. Public
 kinds cover submission, run state, complete model response, exposed planning,
 tool intent/start/result, usage, validation, approved answer, cancellation request,
-cancellation and interruption. Restricted kinds preserve complete provider data
+cancellation, truthful failure and interruption. Restricted kinds preserve complete provider data
 and opaque continuation values, or candidate answers, without reclassifying them
 as planning.
 
@@ -54,3 +56,30 @@ of restricted records passed during a public scan.
 persistence and notification ports with no Kyomi dependency, proving that the API
 can be consumed independently. The Kyomi adapter's actual PostgreSQL and SQLite
 transaction conformance tests live in `kyomi-auth::conversation_events::tests`.
+
+Lifecycle adapters call `plan_submission` against the locked request identity and
+`plan_claim`, `plan_heartbeat`, `plan_cancel`, `plan_finalize` or `plan_expire` against
+locked run/conversation state. `plan_interrupt_queued` lets an adapter terminalize
+queued work whose initiating identity lost authorization. Live owners and already
+terminal runs are left unchanged. `AtomicLifecyclePersistence` commits the resulting
+queue state, timestamps, journal events and compatibility projections together in
+the same persistence infrastructure as `AtomicPersistence`. Request identity
+includes authorized conversation, actor/source, context and exposed body, while
+generated record IDs and server acceptance time may differ on retries. A retry
+returns the original run. Adapters supply clocks in milliseconds and positive
+lease durations; expiration is inclusive. Fences are monotonic integers and all
+owner writes validate current stored expiration under lock. Heartbeats may retain
+the original fence token. Expiry interrupts a running run; it does not reexecute it.
+Cancellation persisted before completion wins, and every terminal plan produces
+one assistant projection even before the first provider response. Terminal plans
+must be committed once; adapters deduplicate committed command retries before
+planning. Authorization, queue discovery and loading committed context at claim
+time remain adapter responsibilities. `tests/lifecycle_consumer.rs` demonstrates
+this contract through an independent notebook queue adapter.
+
+`PublicPayload::MessageRecorded` carries a complete assistant or tool message and
+its original message/tool-call metadata for owned compatibility history writes.
+It does not infer tool success, approve an answer or complete a run. The adapter
+commits any corresponding compatibility message in the same fenced event
+transaction. `PublicPayload::Failed` retains truthful failure text in public replay,
+including failures before the first provider response.

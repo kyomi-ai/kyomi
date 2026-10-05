@@ -443,6 +443,27 @@ fn reconcile_send_reply(
     }
 }
 
+/// A cancellation sent before acceptance has no durable identity yet. Once the
+/// owned reply arrives, retry it against that exact run, including retained views.
+fn cancellation_after_acceptance(
+    state: &crate::components::chat::chat_state::ChatStateData,
+    session_id: &str,
+    send_token: &str,
+    run_id: Option<&str>,
+    assistant_id: &str,
+) -> Option<serde_json::Value> {
+    if state.state().get_untracked() != crate::components::chat::chat_state::ChatState::Cancelling
+        || !state.owns_send(session_id, send_token)
+        || !state.expect_assistant(session_id, send_token, assistant_id)
+    {
+        return None;
+    }
+    Some(serde_json::json!({
+        "type": "cancel_request", "session_id": session_id,
+        "run_id": run_id?, "message_id": assistant_id,
+    }))
+}
+
 /// Format cost for the chat footer — always 2 decimal places.
 fn format_footer_cost(cost: f64) -> String {
     format!("${:.2}", cost)
@@ -1630,6 +1651,7 @@ pub fn ChatPage() -> impl IntoView {
         let chat_state_inner = run.chat_state.clone();
         let navigate_inner = navigate_send.clone();
         let engine_inner = engine_for_send.clone();
+        let ws_for_acceptance = ws_ctx_for_send.clone();
         // C4 — Keep optimistic message ID for updating after server response
         let optimistic_id = user_message_id.clone();
         // M9 — Pass client_msg_id for shared conversation deduplication
@@ -1661,6 +1683,12 @@ pub fn ChatPage() -> impl IntoView {
             .await
             {
                 Ok(response) => {
+                    if let Some(payload) = cancellation_after_acceptance(
+                        &chat_state_inner, &session_id, &send_token,
+                        response.run_id.as_deref(), &response.assistant_message_id,
+                    ) && let Some(ws) = ws_for_acceptance.as_ref() {
+                        ws.send(payload);
+                    }
                     // C4 — Update optimistic user message ID to server-assigned ID.
                     // React does: response.user_message_id → update optimistic msg.
                     if !response.user_message_id.is_empty() {
@@ -2747,6 +2775,29 @@ mod tests {
         state.start_sending("session");
         reconcile_send_reply(&state.snapshot(), "session", "token-a", "assistant-a", &[]);
         assert_eq!(state.expected_assistant_id().get_untracked(), None);
+        owner.cleanup();
+    }
+
+    #[test]
+    fn pending_cancellation_binds_the_accepted_run_and_ignores_replaced_sends() {
+        use crate::components::chat::chat_state::{ChatState, ChatStateData};
+        let owner = leptos::reactive::owner::Owner::new();
+        owner.with(|| {
+            let state = ChatStateData::new();
+            state.start_sending_with_token("session", "first");
+            assert!(state.request_cancel());
+            let retained = state.clone();
+            let payload = cancellation_after_acceptance(&retained, "session", "first", Some("run-first"), "assistant-first").expect("pending cancellation targets accepted run");
+            assert_eq!(payload["run_id"], "run-first");
+            assert_eq!(retained.state().get_untracked(), ChatState::Cancelling);
+            assert_eq!(retained.expected_assistant_id().get_untracked().as_deref(), Some("assistant-first"));
+            retained.reset();
+            retained.start_sending_with_token("session", "second");
+            assert!(retained.request_cancel());
+            assert!(cancellation_after_acceptance(&state, "session", "first", Some("run-first"), "assistant-first").is_none());
+            assert_eq!(retained.expected_assistant_id().get_untracked(), None);
+            assert!(cancellation_after_acceptance(&retained, "session", "second", Some("run-second"), "assistant-second").is_some());
+        });
         owner.cleanup();
     }
 
