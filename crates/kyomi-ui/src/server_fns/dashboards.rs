@@ -562,9 +562,13 @@ pub async fn restore_version(
     version_number: i32,
 ) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
+    let embedding_svc = ac.ctx.embedding.wait_ready().await
+        // user_message() (KYO-448) — Display would leak the variant tag.
+        .map_err(|e| ServerFnError::new(format!("Embedding service unavailable: {}", e.user_message())))?;
 
     kyomi_auth::dashboard_service::restore_version(
         ac.db(),
+        embedding_svc,
         &dashboard_id,
         &ac.ws_id,
         &ac.auth.user_id,
@@ -573,10 +577,7 @@ pub async fn restore_version(
     .await
     .into_sfn_core()?;
 
-    // Re-embed after restore (matches REST handler — propagates error)
-    let embedding_svc = ac.ctx.embedding.wait_ready().await
-        // user_message() (KYO-448) — Display would leak the variant tag.
-        .map_err(|e| ServerFnError::new(format!("Embedding service unavailable: {}", e.user_message())))?;
+    // Refresh the dashboard row embedding after chunks have been restored.
     if let Ok(Some(d)) =
         kyomi_auth::dashboard_service::get_dashboard(ac.db(), &dashboard_id, &ac.ws_id, &ac.auth.user_id).await
     {
