@@ -1674,9 +1674,10 @@ pub async fn diff_versions(
 ///
 /// Creates a version of the current state before restoring, then updates
 /// the dashboard with the old content and creates a new version for the restore.
-/// Returns the new version number.
+/// Refreshes knowledge chunks before returning the new version number.
 pub async fn restore_version(
     db: &DbPool,
+    embed: &EmbeddingService,
     dashboard_id: &str,
     workspace_id: &str,
     user_id: &str,
@@ -1735,6 +1736,8 @@ pub async fn restore_version(
         Some(&format!("Restored from version {version_number}")),
     )
     .await?;
+
+    rechunk_document(db, embed, dashboard_id, &old_version.content, workspace_id).await?;
 
     tracing::info!(
         dashboard_id = %dashboard_id,
@@ -2523,6 +2526,93 @@ visualize:
         );
 
         cleanup_dashboard_embedding_pg(pg, &workspace_id, &owner_id, &dashboard_id).await;
+    }
+}
+
+// ─── Version restore chunk regressions ───────────────────────────────────────
+
+#[cfg(test)]
+mod restore_tests {
+    use super::*;
+    use crate::test_support::{seed_user, seed_workspace, sqlite_pool, test_pool};
+
+    const V2_CONTENT: &str = "# Updated dashboard\nThe second version tracks shipping delays.";
+
+    async fn edited_dashboard(db: &DbPool, embed: &EmbeddingService, v1_content: &str) -> String {
+        let sq = sqlite_pool(db);
+        seed_user(sq, "owner", "owner@test.local").await;
+        seed_workspace(sq, "workspace", "owner").await;
+        // Chunk explicitly so no detached task can race the restore assertions.
+        let id = create_dashboard(
+            db, "owner", "workspace", "Original dashboard", v1_content, DocType::Dashboard, None,
+        ).await.expect("create v1 dashboard");
+        let version = create_version(db, &id, v1_content, "Original dashboard", "owner", None)
+            .await.expect("save v1");
+        assert_eq!(version, 1);
+        rechunk_document(db, embed, &id, v1_content, "workspace").await.expect("chunk v1");
+        update_dashboard(UpdateDashboardParams {
+            db, embed: None, dashboard_id: &id, workspace_id: "workspace", user_id: "owner",
+            title: Some("Updated dashboard"), content: Some(V2_CONTENT), change_summary: None,
+            expected_content_hash: None,
+        }).await.expect("edit to v2");
+        rechunk_document(db, embed, &id, V2_CONTENT, "workspace").await.expect("chunk v2");
+        assert_eq!(chunk_contents(db, &id).await, vec![V2_CONTENT.to_string()]);
+        id
+    }
+
+    async fn chunk_contents(db: &DbPool, dashboard_id: &str) -> Vec<String> {
+        sqlx::query_scalar("SELECT content FROM knowledge_chunks WHERE dashboard_id = $1 ORDER BY chunk_index")
+            .bind(dashboard_id).fetch_all(sqlite_pool(db)).await.expect("read chunks")
+    }
+
+    #[tokio::test]
+    async fn restore_version_refreshes_chunks_before_returning() {
+        let db = test_pool().await;
+        let embed = EmbeddingService::new().expect("load embedding model");
+        let content = "# Original dashboard\nMonthly sales and revenue trends.\n".repeat(45);
+        let id = edited_dashboard(&db, &embed, &content).await;
+
+        let version = restore_version(&db, &embed, &id, "workspace", "owner", 1)
+            .await.expect("restore v1");
+
+        let dashboard = get_dashboard_unchecked(&db, &id, "workspace")
+            .await.expect("read restored dashboard").expect("dashboard exists");
+        assert_eq!(dashboard.content, content);
+        assert_eq!(dashboard.title, "Original dashboard");
+        assert_eq!(version, 3);
+        let expected = kyomi_knowledge::knowledge_files::split_into_chunks(&content, CHUNK_SIZE, CHUNK_OVERLAP);
+        assert!(expected.len() > 1, "fixture must exercise replacing the full chunk set");
+        // Read immediately after restore, with no sleep or eventual-consistency retry.
+        assert_eq!(chunk_contents(&db, &id).await, expected);
+    }
+
+    #[tokio::test]
+    async fn restore_version_to_empty_content_clears_chunks() {
+        let db = test_pool().await;
+        let embed = EmbeddingService::new().expect("load embedding model");
+        let id = edited_dashboard(&db, &embed, "").await;
+
+        restore_version(&db, &embed, &id, "workspace", "owner", 1)
+            .await.expect("restore empty v1");
+
+        assert!(chunk_contents(&db, &id).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn restore_version_propagates_chunk_write_failure() {
+        let db = test_pool().await;
+        let embed = EmbeddingService::new().expect("load embedding model");
+        let id = edited_dashboard(&db, &embed, "# Original dashboard\nMonthly sales.").await;
+        // A real database failure exercises the production chunk transaction.
+        sqlx::query("CREATE TRIGGER reject_restore_chunk BEFORE INSERT ON knowledge_chunks BEGIN SELECT RAISE(ABORT, 'restore chunk write rejected'); END")
+            .execute(sqlite_pool(&db)).await.expect("create failing chunk trigger");
+
+        let err = restore_version(&db, &embed, &id, "workspace", "owner", 1)
+            .await.expect_err("restore must report rechunk failure");
+
+        assert!(err.to_string().contains("failed to insert chunk"), "unexpected error: {err}");
+        assert_eq!(chunk_contents(&db, &id).await, vec![V2_CONTENT.to_string()],
+            "failed rechunk transaction must retain previous chunks");
     }
 }
 
