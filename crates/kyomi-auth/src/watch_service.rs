@@ -13,7 +13,7 @@
 //! - Rate limiting: max 5 manual runs per hour
 //! - Soft-delete for alerts (deleted_at / deleted_by)
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, LocalResult, TimeZone, Utc};
 use cron::Schedule;
 use kyomi_core::sql_compat;
 use kyomi_core::{DbPool, Result};
@@ -84,6 +84,8 @@ pub struct WatchUpdate {
     pub name: Option<String>,
     pub prompt: Option<String>,
     pub schedule: Option<String>,
+    /// Omission preserves the saved zone; use "UTC" to switch to UTC.
+    pub timezone: Option<String>,
     pub mode: Option<String>,
     pub enabled: Option<bool>,
     pub alert_emails: Option<String>,
@@ -367,15 +369,62 @@ pub fn calculate_next_run(cron_expr: &str) -> Result<DateTime<Utc>> {
 /// Calculate the first occurrence strictly after a supplied UTC instant.
 /// Used by execution, deterministic previews/tests and explicit repairs.
 pub fn calculate_next_run_after(cron_expr: &str, after: DateTime<Utc>) -> Result<DateTime<Utc>> {
-    library_schedule(cron_expr)?
-        .after(&after)
-        .next()
-        .ok_or_else(|| {
-            kyomi_core::Error::BadRequest(format!(
-                "Cron expression '{}' has no upcoming fire times",
-                cron_expr.trim()
-            ))
-        })
+    calculate_next_run_in_timezone_after(cron_expr, None, after)
+}
+
+/// Validate a named IANA zone before any schedule is persisted.
+pub fn parse_timezone(timezone: Option<&str>) -> Result<chrono_tz::Tz> {
+    timezone.unwrap_or("UTC").parse().map_err(|_| {
+        kyomi_core::Error::BadRequest("Schedule timezone must be a valid IANA name (for example Australia/Sydney or UTC), not a numeric offset".into())
+    })
+}
+
+/// One recurrence policy for creation, editing, enabling, previews and advancement.
+pub fn calculate_next_run_in_timezone(cron_expr: &str, timezone: Option<&str>) -> Result<DateTime<Utc>> {
+    calculate_next_run_in_timezone_after(cron_expr, timezone, Utc::now())
+}
+
+/// Enumerate wall-clock cron occurrences independently of timezone transitions.
+/// Missing local times are skipped; a fold fires once at its earliest UTC instant.
+/// Filtering that earliest instant also prevents a second firing after the fold's
+/// first occurrence, even when the reference is in the repeated hour.
+pub fn calculate_next_run_in_timezone_after(
+    cron_expr: &str,
+    timezone: Option<&str>,
+    after: DateTime<Utc>,
+) -> Result<DateTime<Utc>> {
+    let zone = parse_timezone(timezone)?;
+    let local_after = after.with_timezone(&zone).naive_local().and_utc();
+    for wall in library_schedule(cron_expr)?.after(&local_after) {
+        let candidate = match zone.from_local_datetime(&wall.naive_utc()) {
+            LocalResult::None => continue,
+            LocalResult::Single(time) => time.with_timezone(&Utc),
+            LocalResult::Ambiguous(first, second) => first.min(second).with_timezone(&Utc),
+        };
+        if candidate > after {
+            return Ok(candidate);
+        }
+    }
+    Err(kyomi_core::Error::BadRequest(format!(
+        "Cron expression '{cron_expr}' has no upcoming fire times"
+    )))
+}
+
+/// Describe the stored wall time in its own zone, never a guessed current offset.
+pub fn describe_cron_in_timezone(cron_expr: &str, timezone: Option<&str>) -> String {
+    let description = describe_cron(cron_expr);
+    let zone = timezone.unwrap_or("UTC");
+    if description.contains("UTC") {
+        description.replace("UTC", zone)
+    } else {
+        format!("{description} ({zone})")
+    }
+}
+
+/// Dated local and UTC execution text for tools and UI previews.
+pub fn describe_execution(instant: DateTime<Utc>, timezone: Option<&str>) -> Result<String> {
+    let zone = parse_timezone(timezone)?;
+    Ok(format!("{} {} / {} UTC", instant.with_timezone(&zone).format("%Y-%m-%d %H:%M %:z"), zone, instant.format("%Y-%m-%d %H:%M")))
 }
 
 /// Explicit maintenance repair for persisted watch fire times. No startup hook
@@ -388,6 +437,7 @@ pub async fn recalculate_watch_next_runs(db: &DbPool, cutoff: DateTime<Utc>) -> 
     struct RepairWatch {
         watch_id: String,
         schedule: String,
+        timezone: Option<String>,
         enabled: bool,
         next_run_at: Option<DateTime<Utc>>,
     }
@@ -400,7 +450,7 @@ pub async fn recalculate_watch_next_runs(db: &DbPool, cutoff: DateTime<Utc>) -> 
             let mut changed = 0;
             for watch in watches {
                 let next = if watch.enabled {
-                    Some(calculate_next_run_after(&watch.schedule, cutoff)?)
+                    Some(calculate_next_run_in_timezone_after(&watch.schedule, watch.timezone.as_deref(), cutoff)?)
                 } else {
                     None
                 };
@@ -421,11 +471,11 @@ pub async fn recalculate_watch_next_runs(db: &DbPool, cutoff: DateTime<Utc>) -> 
     match db {
         DbPool::Postgres(pool) => repair!(
             pool,
-            "SELECT watch_id, schedule, enabled, next_run_at FROM watches ORDER BY watch_id FOR UPDATE"
+            "SELECT watch_id, schedule, timezone, enabled, next_run_at FROM watches ORDER BY watch_id FOR UPDATE"
         ),
         DbPool::Sqlite(pool) => repair!(
             pool,
-            "SELECT watch_id, schedule, enabled, next_run_at FROM watches ORDER BY watch_id"
+            "SELECT watch_id, schedule, timezone, enabled, next_run_at FROM watches ORDER BY watch_id"
         ),
     }
 }
@@ -456,6 +506,7 @@ pub async fn create_watch(
     name: &str,
     prompt: &str,
     schedule: &str,
+    timezone: Option<&str>,
     mode: &str,
     queries: Option<&serde_json::Value>,
     datasource_hints: Option<&serde_json::Value>,
@@ -467,6 +518,7 @@ pub async fn create_watch(
     validate_prompt_length(prompt)?;
     validate_watch_mode(mode)?;
     let cron_schedule = parse_schedule(schedule)?;
+    parse_timezone(timezone)?;
 
     let is_pg = db.is_postgres();
 
@@ -518,7 +570,7 @@ pub async fn create_watch(
     }
 
     // Calculate next run
-    let next_run_at = calculate_next_run(&cron_schedule)?;
+    let next_run_at = calculate_next_run_in_timezone(&cron_schedule, timezone)?;
     let watch_id = generate_watch_id();
     let now = Utc::now();
 
@@ -535,12 +587,12 @@ pub async fn create_watch(
     let sql = format!(
         r#"
         INSERT INTO watches (
-            watch_id, workspace_id, created_by, name, prompt, schedule, mode,
+            watch_id, workspace_id, created_by, name, prompt, schedule, timezone, mode,
             datasource_hints, queries, alert_emails,
             alert_emails_enabled, enabled, next_run_at, created_at, updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, {enabled}, $12, $13, $13)
-        RETURNING watch_id, workspace_id, created_by, name, prompt, schedule,
+        VALUES ($1, $2, $3, $4, $5, $6, $14, $7, $8::jsonb, $9::jsonb, $10, $11, {enabled}, $12, $13, $13)
+        RETURNING watch_id, workspace_id, created_by, name, prompt, schedule, timezone,
                   mode, datasource_hints, queries, alert_emails,
                   alert_emails_enabled, enabled, last_run_at, last_run_status,
                   next_run_at, created_at, updated_at
@@ -564,7 +616,8 @@ pub async fn create_watch(
         alert_emails,
         alert_emails_enabled,
         next_run_at,
-        now
+        now,
+        timezone
     )
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to create watch: {e}")))?;
 
@@ -619,7 +672,7 @@ pub async fn get_watch(
     user_id: &str,
 ) -> Result<Option<kyomi_core::models::Watch>> {
     let sql = r#"
-        SELECT watch_id, workspace_id, created_by, name, prompt, schedule,
+        SELECT watch_id, workspace_id, created_by, name, prompt, schedule, timezone,
                mode, datasource_hints, queries, alert_emails,
                alert_emails_enabled, enabled, last_run_at, last_run_status,
                next_run_at, created_at, updated_at
@@ -653,7 +706,7 @@ pub async fn list_watches(
     user_id: &str,
 ) -> Result<Vec<kyomi_core::models::Watch>> {
     let sql = r#"
-        SELECT watch_id, workspace_id, created_by, name, prompt, schedule,
+        SELECT watch_id, workspace_id, created_by, name, prompt, schedule, timezone,
                mode, datasource_hints, queries, alert_emails,
                alert_emails_enabled, enabled, last_run_at, last_run_status,
                next_run_at, created_at, updated_at
@@ -683,7 +736,7 @@ pub async fn list_watches_for_sync(
     user_id: &str,
 ) -> Result<Vec<serde_json::Value>> {
     let sql = r#"
-        SELECT watch_id, workspace_id, created_by, name, prompt, schedule,
+        SELECT watch_id, workspace_id, created_by, name, prompt, schedule, timezone,
                mode, datasource_hints, queries, alert_emails,
                alert_emails_enabled, enabled, last_run_at, last_run_status,
                next_run_at, created_at, updated_at
@@ -733,7 +786,7 @@ pub async fn list_enabled_watches(db: &DbPool) -> Result<Vec<kyomi_core::models:
     let is_pg = db.is_postgres();
     let sql = format!(
         r#"
-        SELECT watch_id, workspace_id, created_by, name, prompt, schedule,
+        SELECT watch_id, workspace_id, created_by, name, prompt, schedule, timezone,
                mode, datasource_hints, queries, alert_emails,
                alert_emails_enabled, enabled, last_run_at, last_run_status,
                next_run_at, created_at, updated_at
@@ -793,22 +846,16 @@ pub async fn update_watch(
         .map(parse_schedule)
         .transpose()?;
 
-    // Compute next_run_at based on schedule and/or enabled changes
-    let next_run_at: Option<Option<DateTime<Utc>>> =
-        if let Some(ref sched) = parsed_schedule {
-            Some(if updates.enabled.unwrap_or(current.enabled) {
-                Some(calculate_next_run(sched)?)
-            } else { None })
-        } else if let Some(enabled) = updates.enabled {
-        if enabled {
-            // Re-enabling: compute from current schedule
-            Some(Some(calculate_next_run(&current.schedule)?))
+    let timezone = updates.timezone.as_deref().or(current.timezone.as_deref());
+    parse_timezone(timezone)?;
+    let next_run_at = if parsed_schedule.is_some() || updates.timezone.is_some() || updates.enabled.is_some() {
+        Some(if updates.enabled.unwrap_or(current.enabled) {
+            Some(calculate_next_run_in_timezone(parsed_schedule.as_deref().unwrap_or(&current.schedule), timezone)?)
         } else {
-            // Disabling: clear next_run_at
-            Some(None)
-        }
+            None
+        })
     } else {
-        None // No change to next_run_at
+        None
     };
 
     // Build dynamic UPDATE
@@ -825,6 +872,10 @@ pub async fn update_watch(
     }
     if parsed_schedule.is_some() {
         set_parts.push(format!("schedule = ${param_idx}"));
+        param_idx += 1;
+    }
+    if updates.timezone.is_some() {
+        set_parts.push(format!("timezone = ${param_idx}"));
         param_idx += 1;
     }
     if updates.mode.is_some() {
@@ -866,7 +917,7 @@ pub async fn update_watch(
 
     let sql = format!(
         r#"UPDATE watches SET {} WHERE watch_id = $1 AND workspace_id = $2 AND created_by = $3
-           RETURNING watch_id, workspace_id, created_by, name, prompt, schedule, mode,
+           RETURNING watch_id, workspace_id, created_by, name, prompt, schedule, timezone, mode,
                      datasource_hints, queries, alert_emails,
                      alert_emails_enabled, enabled, last_run_at, last_run_status,
                      next_run_at, created_at, updated_at"#,
@@ -887,6 +938,9 @@ pub async fn update_watch(
             }
             if let Some(ref sched) = parsed_schedule {
                 q = q.bind(sched.as_str());
+            }
+            if let Some(ref timezone) = updates.timezone {
+                q = q.bind(timezone.as_str());
             }
             if let Some(ref mode) = updates.mode {
                 q = q.bind(mode.as_str());
@@ -1505,7 +1559,7 @@ pub async fn search_watches(
     let sql = if has_query {
         format!(
             r#"
-            SELECT watch_id, workspace_id, created_by, name, prompt, schedule, mode,
+            SELECT watch_id, workspace_id, created_by, name, prompt, schedule, timezone, mode,
                    datasource_hints, queries, alert_emails,
                    alert_emails_enabled, enabled, last_run_at, last_run_status,
                    next_run_at, created_at, updated_at
@@ -1521,7 +1575,7 @@ pub async fn search_watches(
         )
     } else {
         r#"
-        SELECT watch_id, workspace_id, created_by, name, prompt, schedule, mode,
+        SELECT watch_id, workspace_id, created_by, name, prompt, schedule, timezone, mode,
                datasource_hints, queries, alert_emails,
                alert_emails_enabled, enabled, last_run_at, last_run_status,
                next_run_at, created_at, updated_at
@@ -2803,6 +2857,7 @@ mod privacy_tests {
             name,
             "Check if revenue drops more than 10 percent",
             "0 9 * * *",
+            None,
             "alert",
             None,
             None,
@@ -2850,6 +2905,7 @@ mod privacy_tests {
             "Sunday Watch",
             "Report weekly revenue trends",
             "0 23 * * 0",
+            None,
             "report",
             None,
             None,
@@ -4204,7 +4260,7 @@ mod weekday_repair_tests {
             .connect("sqlite::memory:")
             .await
             .unwrap();
-        sqlx::query("CREATE TABLE watches (watch_id TEXT PRIMARY KEY, schedule TEXT NOT NULL, enabled BOOLEAN NOT NULL, next_run_at TEXT)")
+        sqlx::query("CREATE TABLE watches (watch_id TEXT PRIMARY KEY, schedule TEXT NOT NULL, timezone TEXT, enabled BOOLEAN NOT NULL, next_run_at TEXT)")
             .execute(&pool).await.unwrap();
         assert_repair(&DbPool::Sqlite(pool)).await;
     }
@@ -4224,8 +4280,12 @@ mod weekday_repair_tests {
             .connect_with((*db.pg_pool().connect_options()).clone())
             .await
             .unwrap();
-        sqlx::query("CREATE TEMPORARY TABLE watches (watch_id TEXT PRIMARY KEY, schedule TEXT NOT NULL, enabled BOOLEAN NOT NULL, next_run_at TIMESTAMPTZ)")
+        sqlx::query("CREATE TEMPORARY TABLE watches (watch_id TEXT PRIMARY KEY, schedule TEXT NOT NULL, timezone TEXT, enabled BOOLEAN NOT NULL, next_run_at TIMESTAMPTZ)")
             .execute(&pool).await.unwrap();
         assert_repair(&DbPool::Postgres(pool)).await;
     }
 }
+
+#[cfg(test)]
+#[path = "watch_timezone_tests.rs"]
+mod timezone_tests;

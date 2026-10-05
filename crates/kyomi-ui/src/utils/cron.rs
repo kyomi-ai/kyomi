@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Cron utilities for displaying UTC cron expressions in local time.
+//! Cron utilities for describing schedules.
 //!
-//! Cron expressions are stored in UTC. This module converts them to
-//! human-readable descriptions in the user's local timezone.
+//! Named watch schedules are described in their saved wall-clock timezone.
+//! Legacy offset conversion helpers remain available for explicitly UTC cron.
 //!
 //! Ported from `apps/frontend/src/utils/cronUtils.js`.
 
@@ -488,5 +488,40 @@ mod tests {
     fn test_describe_cron_empty() {
         let result = describe_cron("", 0);
         assert!(!result.valid);
+    }
+}
+
+/// Describe saved schedule wall time without reinterpreting it in the browser zone.
+pub fn describe_schedule(cron: &str, timezone: Option<&str>) -> CronDescription {
+    let mut description = describe_cron(cron, 0);
+    if description.valid {
+        description.description.push_str(&format!(" ({})", timezone.unwrap_or("UTC")));
+    }
+    description
+}
+
+/// Display the actual dated next execution in the saved zone and UTC.
+pub fn format_schedule_execution(next: &str, timezone: Option<&str>) -> String {
+    match (chrono::DateTime::parse_from_rfc3339(next), timezone.unwrap_or("UTC").parse::<chrono_tz::Tz>()) {
+        (Ok(instant), Ok(zone)) => format!("{} {} / {} UTC", instant.with_timezone(&zone).format("%Y-%m-%d %H:%M %:z"), zone, instant.with_timezone(&chrono::Utc).format("%Y-%m-%d %H:%M")),
+        _ => next.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod timezone_tests {
+    use super::*;
+
+    #[test]
+    fn saved_zone_description_and_dated_execution_do_not_use_browser_offsets() {
+        let description = describe_schedule("0 9 * * 1", Some("Australia/Sydney"));
+        assert!(description.valid);
+        assert!(description.description.contains("9:00"));
+        assert!(description.description.contains("Monday"));
+        assert!(description.description.contains("Australia/Sydney"));
+        assert_eq!(format_schedule_execution("2026-10-04T22:00:00Z", Some("Australia/Sydney")),
+            "2026-10-05 09:00 +11:00 Australia/Sydney / 2026-10-04 22:00 UTC");
+        assert_eq!(format_schedule_execution("2026-10-04T23:00:00Z", None),
+            "2026-10-04 23:00 +00:00 UTC / 2026-10-04 23:00 UTC");
     }
 }

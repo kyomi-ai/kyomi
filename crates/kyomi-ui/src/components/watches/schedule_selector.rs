@@ -4,13 +4,12 @@
 //! `apps/frontend/src/components/watches/ScheduleSelector.jsx` exactly.
 //!
 //! Dual-mode schedule editor: a visual UI mode (type/time/day pickers)
-//! and a raw 5-field cron input mode. All times are displayed in local
-//! timezone but stored as UTC cron expressions.
+//! and a raw 5-field cron input mode. Both edit wall time in the saved named zone.
 
 use leptos::prelude::*;
 use phosphor_leptos::Icon;
 use crate::components::{Select, Label, Switch, INPUT_CLASS};
-use crate::utils::cron::{describe_cron, get_tz_offset_minutes, local_hour_to_utc, utc_to_local_hour};
+use crate::utils::cron::{describe_schedule, local_hour_to_utc, utc_to_local_hour};
 
 /// Parse a cron field value that may contain commas and/or ranges.
 ///
@@ -71,7 +70,7 @@ fn adjust_day_of_month(day: u32, day_offset: i32) -> u32 {
 }
 
 /// Build a cron expression from UI selections.
-/// Converts local time to UTC for the cron expression.
+/// Keep wall time intact; timezone is persisted separately.
 fn build_cron(
     schedule_type: &str,
     minute: u32,
@@ -87,7 +86,7 @@ fn build_cron(
         weekdays,
         day_of_month,
         selected_hours,
-        get_tz_offset_minutes(),
+        0,
     )
 }
 
@@ -157,7 +156,7 @@ struct ParsedCron {
 }
 
 /// Parse a cron expression back to UI selections.
-/// Converts UTC times in cron to local time for display.
+/// Parse saved wall time without consulting the browser timezone.
 fn parse_cron_to_selections(cron: &str) -> Option<ParsedCron> {
     let parts: Vec<&str> = cron.split_whitespace().collect();
     if parts.len() != 5 {
@@ -168,7 +167,7 @@ fn parse_cron_to_selections(cron: &str) -> Option<ParsedCron> {
         (parts[0], parts[1], parts[2], parts[3], parts[4]);
 
     let parsed_minute: u32 = minute_str.parse().ok()?;
-    let tz = get_tz_offset_minutes();
+    let tz = 0;
 
     // Every hour pattern: "N * * * *"
     if hour_str == "*" && day_of_month_str == "*" && day_of_week_str == "*" {
@@ -394,6 +393,9 @@ pub fn ScheduleSelector(
     value: Signal<String>,
     /// Called with new cron expression when the schedule changes.
     on_change: Callback<String>,
+    #[prop(into)]
+    timezone: Signal<String>,
+    on_timezone_change: Callback<String>,
 ) -> impl IntoView {
     // Parse the initial value to determine initial UI state
     let initial_value = value.get_untracked();
@@ -569,7 +571,12 @@ pub fn ScheduleSelector(
 
     // Cron description (reactive)
     let cron_description = Memo::new(move |_| {
-        let tz = get_tz_offset_minutes();
+        let Some(zone) = timezone.try_get() else {
+            return crate::types::CronDescription {
+                valid: false,
+                description: String::new(),
+            };
+        };
         let cron = if cron_mode.get() {
             cron_input.get()
         } else {
@@ -582,14 +589,34 @@ pub fn ScheduleSelector(
                 &selected_hours.get(),
             )
         };
-        describe_cron(&cron, tz)
+        describe_schedule(&cron, Some(&zone))
     });
+
+    let preview = Resource::new(
+        move || (value.get(), timezone.get()),
+        |(schedule, timezone)| async move {
+            crate::server_fns::watches::preview_watch_schedule(schedule, Some(timezone)).await
+        },
+    );
 
     // Pre-compute static option lists
     let hour_opts = hour_options();
 
     view! {
         <div class="space-y-4">
+            <div class="space-y-2">
+                <Label html_for="watch-schedule-timezone">"Schedule timezone"</Label>
+                <input id="watch-schedule-timezone" class=INPUT_CLASS type="text" prop:value=move || timezone.get()
+                    placeholder="Australia/Sydney or UTC"
+                    on:change=move |ev| on_timezone_change.run(event_target_value(&ev)) />
+                <p class="text-xs text-muted-foreground">"Use an IANA name. Times below are in this zone; UTC keeps UTC schedules."</p>
+            </div>
+            <Suspense fallback=|| view! { <p class="text-xs text-muted-foreground">"Calculating next execution…"</p> }>
+                {move || preview.get().map(|result| match result {
+                    Ok(next) => view! { <p class="text-xs text-muted-foreground">{format!("Next: {next}")}</p> }.into_any(),
+                    Err(error) => view! { <p class="text-xs text-error-foreground">{error.to_string()}</p> }.into_any(),
+                })}
+            </Suspense>
             // Mode toggle
             <div class="flex items-center justify-between">
                 <Label>
@@ -637,10 +664,10 @@ pub fn ScheduleSelector(
                                 placeholder="0 9 * * *"
                             />
                             <p class="text-xs text-muted-foreground">
-                                "Format: minute hour day-of-month month day-of-week (e.g., 0 9 * * 1-5 for weekdays at 9 AM UTC)"
+                                "Format: minute hour day-of-month month day-of-week (e.g., 0 9 * * 1-5 for weekdays at 9 AM in the selected zone)"
                             </p>
                             <p class="text-xs text-warning-foreground">
-                                "Note: Cron times are in UTC"
+                                "Cron times use the schedule timezone"
                             </p>
                         </div>
                     }.into_any()
@@ -861,11 +888,11 @@ pub fn ScheduleSelector(
                                             {if cm {
                                                 let ci = cron_input.get();
                                                 view! {
-                                                    <span>"Cron: "<code class="bg-muted px-1 rounded-md">{ci}</code>" (UTC)"</span>
+                                                    <span>"Cron: "<code class="bg-muted px-1 rounded-md">{ci}</code>{format!(" ({})", timezone.get())}</span>
                                                 }.into_any()
                                             } else {
                                                 view! {
-                                                    <span>"Times shown in your local timezone"</span>
+                                                    <span>{format!("Times shown in {}", timezone.get())}</span>
                                                 }.into_any()
                                             }}
                                         </div>
@@ -1065,5 +1092,22 @@ mod tests {
         let p = result.unwrap();
         assert_eq!(p.schedule_type, "weekly");
         assert_eq!(p.weekdays, vec![1, 2, 3, 4, 5]);
+    }
+}
+
+#[cfg(test)]
+mod timezone_edit_tests {
+    use super::*;
+
+    #[test]
+    fn editing_saved_wall_time_preserves_cron_hour_and_weekday() {
+        let parsed = parse_cron_to_selections("0 9 * * 1").unwrap();
+        assert_eq!(parsed.hour, 9);
+        assert_eq!(parsed.weekdays, vec![1]);
+        assert_eq!(build_cron(&parsed.schedule_type, 30, parsed.hour, &parsed.weekdays, parsed.day_of_month, &parsed.selected_hours), "30 9 * * 1");
+        let legacy = parse_cron_to_selections("0 23 * * 0").unwrap();
+        assert_eq!(legacy.hour, 23);
+        assert_eq!(legacy.weekdays, vec![0]);
+        assert_eq!(build_cron(&legacy.schedule_type, legacy.minute, legacy.hour, &legacy.weekdays, legacy.day_of_month, &legacy.selected_hours), "0 23 * * 0");
     }
 }

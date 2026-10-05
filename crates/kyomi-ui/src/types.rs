@@ -176,6 +176,8 @@ pub struct WatchListItem {
     pub name: String,
     pub prompt: String,
     pub schedule: String,
+    #[serde(default)]
+    pub timezone: Option<String>,
     pub mode: String,
     pub enabled: bool,
     pub last_run_at: Option<String>,

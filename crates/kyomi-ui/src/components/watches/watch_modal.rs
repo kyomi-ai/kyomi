@@ -137,6 +137,10 @@ pub fn WatchModal(
             .map(|w| w.schedule.clone())
             .unwrap_or_else(|| "0 9 * * 1-5".to_string()),
     );
+    let (timezone, set_timezone) = signal(
+        watch.as_ref().map(|watch| watch.timezone.clone().unwrap_or_else(|| "UTC".into()))
+            .unwrap_or_else(crate::utils::time::get_user_timezone),
+    );
     let (mode, set_mode) = signal(
         watch
             .as_ref()
@@ -214,6 +218,7 @@ pub fn WatchModal(
             "name": name.get(),
             "prompt": prompt.get(),
             "schedule": schedule.get(),
+            "timezone": timezone.try_get(),
             "mode": mode.get(),
             "queries": queries_json,
             "slack_channel_id": slack_channel_id.get(),
@@ -230,6 +235,9 @@ pub fn WatchModal(
         }
         if let Some(v) = data.get("prompt").and_then(|v| v.as_str()) {
             set_prompt.set(v.to_string());
+        }
+        if let Some(v) = data.get("timezone").and_then(|v| v.as_str()) {
+            set_timezone.set(v.to_string());
         }
         if let Some(v) = data.get("schedule").and_then(|v| v.as_str()) {
             set_schedule.set(v.to_string());
@@ -311,6 +319,7 @@ pub fn WatchModal(
             name: name_val.trim().to_string(),
             prompt: prompt_val.trim().to_string(),
             schedule: schedule_val,
+            timezone: Some(timezone.get_untracked()),
             mode: Some(mode_val),
             queries: queries_json,
             slack_channel_id: slack_channel_id_param,
@@ -761,6 +770,8 @@ pub fn WatchModal(
                             <ScheduleSelector
                                 value=Signal::derive(move || schedule.get())
                                 on_change=on_schedule_change
+                                timezone=Signal::derive(move || timezone.try_get().unwrap_or_default())
+                                on_timezone_change=Callback::new(move |zone: String| set_timezone.set(zone))
                             />
 
                             // ── Slack Notifications ─────────────────────────────────
