@@ -318,6 +318,5 @@ crates/kyomi-ui/src/pages/watches/watches_page.rs:93e6b4c8ba39c1703e5baec04e57c0
 crates/kyomi-ui/src/pages/watches/watches_page.rs:bce029f44d502b58194805da7a9ea3cafd2f459232a1605e9c64109b86e11fca:1
 crates/kyomi-ui/src/pages/welcome.rs:594e1f8bfdfe0470363e3fe5ed6a68e718466cd97d098daafca10b8bd4a8a788:1
 crates/kyomi-ui/src/pages/welcome.rs:69ec6227897922ff99da86344851c6335851de431d9b43269d49b687d1ae5346:1
-crates/kyomi-ui/src/query_cache/mod.rs:325e93fa637494b4a504942bba14106b6d1d78c8111ccb9343cdea4d4c5bbbee:1
 crates/kyomi-ui/src/utils/permissions.rs:41ea990db42f97aa25faceee0b8f03c0e46807b09437bea6d3cc095edcc22587:1
 crates/kyomi-ui/src/utils/permissions.rs:6f1dd55fd0f5821e19dd97906a5d01d6c91d7ef602aef64bd399d30c0b8d19b5:1
