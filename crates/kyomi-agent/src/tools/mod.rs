@@ -201,6 +201,22 @@ pub trait AgentTool: Send + Sync {
         None
     }
 
+    /// Product result semantics, separate from successful invocation transport.
+    /// Tools with a textual rejection contract override this explicitly.
+    fn result_domain_outcome(&self, text: &str) -> agent_runtime::DomainOutcome {
+        let rejected = serde_json::from_str::<serde_json::Value>(text).is_ok_and(|value| {
+            ["valid", "success", "saved"].iter().any(|key| value.get(key).and_then(serde_json::Value::as_bool) == Some(false))
+                || value.get("error").is_some_and(|error| !error.is_null())
+        });
+        if rejected { agent_runtime::DomainOutcome::Rejected } else { agent_runtime::DomainOutcome::Succeeded }
+    }
+
+    /// An execution error may follow a committed effect. Metadata annotations are
+    /// advisory; only an audited implementation may override this default.
+    fn failure_domain_outcome(&self) -> agent_runtime::DomainOutcome {
+        agent_runtime::DomainOutcome::Unknown
+    }
+
     /// Execute the tool with the given arguments and context.
     ///
     /// Returns a string result that will be sent back to the LLM as

@@ -105,6 +105,14 @@ pub struct CreateAnalyticsSiteTool;
 
 #[async_trait]
 impl AgentTool for CreateAnalyticsSiteTool {
+    fn result_domain_outcome(&self, text: &str) -> agent_runtime::DomainOutcome {
+        if text.starts_with("Error: ") {
+            agent_runtime::DomainOutcome::Rejected
+        } else {
+            agent_runtime::DomainOutcome::Succeeded
+        }
+    }
+
     fn name(&self) -> &str {
         "create_analytics_site"
     }
@@ -242,6 +250,14 @@ pub struct UpdateAnalyticsSiteTool;
 
 #[async_trait]
 impl AgentTool for UpdateAnalyticsSiteTool {
+    fn result_domain_outcome(&self, text: &str) -> agent_runtime::DomainOutcome {
+        if text.starts_with("Error: ") {
+            agent_runtime::DomainOutcome::Rejected
+        } else {
+            agent_runtime::DomainOutcome::Succeeded
+        }
+    }
+
     fn name(&self) -> &str {
         "update_analytics_site"
     }
@@ -370,6 +386,14 @@ pub struct DeleteAnalyticsSiteTool;
 
 #[async_trait]
 impl AgentTool for DeleteAnalyticsSiteTool {
+    fn result_domain_outcome(&self, text: &str) -> agent_runtime::DomainOutcome {
+        if text.starts_with("Error: ") {
+            agent_runtime::DomainOutcome::Rejected
+        } else {
+            agent_runtime::DomainOutcome::Succeeded
+        }
+    }
+
     fn name(&self) -> &str {
         "delete_analytics_site"
     }

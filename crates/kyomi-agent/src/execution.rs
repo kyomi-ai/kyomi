@@ -552,10 +552,19 @@ pub async fn execute_agent_chat(
     });
     let tracker = Arc::new(tokio::sync::Mutex::new(tracker));
 
-    // Signal agent start.
-    {
-        let mut t = tracker.lock().await;
-        t.agent_started("Analyzing your question", "Starting analysis...").await;
+    // Durable progress is public only after its atomic event/projection commit.
+    if let Some(run) = config.assistant_message_persistence.durable_run() {
+        use agent_runtime::EventSink;
+        let context = agent_runtime::ExecutionContext { conversation_id: run.conversation_id.clone(), run_id: run.run_id.clone() };
+        let sink = crate::runtime_adapter::RuntimeSink {
+            db: db.clone(), key: encryption_key.clone(), user: config.user_id.clone(), workspace: config.workspace_id.clone(),
+            run: run.clone(), tracker: Some(tracker.clone()), tools: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+        };
+        let (text, detail) = context.text("started", "Starting analysis...", 200);
+        sink.commit(&context.command("started", agent_runtime::Payload::Public(agent_runtime::PublicPayload::Planning { text }), detail))
+            .await.map_err(|error| kyomi_core::Error::ServiceUnavailable(error.to_string()))?;
+    } else {
+        tracker.lock().await.agent_started("Analyzing your question", "Starting analysis...").await;
     }
 
     // 11. Wire tracker to adapter.
@@ -577,10 +586,10 @@ pub async fn execute_agent_chat(
     // 13. Handle result.
     let (response_text, status, error_msg) = match result {
         Ok(text) => {
-            // Signal completion.
-            {
-                let mut t = tracker.lock().await;
-                t.agent_completed("success").await;
+            // The durable worker commits the terminal answer/run/projection before
+            // sending completion; the legacy tracker owns completion for other callers.
+            if config.assistant_message_persistence.durable_run().is_none() {
+                tracker.lock().await.agent_completed("success").await;
             }
             (text, "completed".to_string(), None)
         }
@@ -601,10 +610,7 @@ pub async fn execute_agent_chat(
     // 14. Get thinking events and token usage from tracker, and finalize it
     // (KYO-493 review fix). `finalize()` must run inside this same locked
     // critical section, before the events below are read, so that no
-    // incremental flush — including one whose spawned task
-    // (`ChatAgentAdapter::set_thinking_tracker`'s five detached
-    // `tokio::spawn`s) hadn't even run yet when the agent loop returned —
-    // can land after step 15's terminal `extra_metadata` write below and
+    // incremental flush can land after step 15's terminal `extra_metadata` write below and
     // clobber it back down to just `{"thinking_events": [...]}`. See
     // `AgentThinkingTracker::finalize`'s doc for why the ordering
     // (finalize while holding the lock, release, then step 15 writes) is

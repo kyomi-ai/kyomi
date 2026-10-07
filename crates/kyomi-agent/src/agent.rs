@@ -381,8 +381,18 @@ impl AgentState {
 /// All callbacks are optional. They are invoked synchronously from the
 /// async agent loop, so implementations should be fast (e.g., send to
 /// a channel rather than doing I/O).
+pub(crate) enum AgentProgress {
+    Thinking(String),
+    Usage(u32, u32, Option<f64>),
+    ToolStart(String, serde_json::Value),
+    ToolEnd(String, String, bool),
+    Preparing,
+}
+pub(crate) type ProgressCallback = Box<dyn Fn(AgentProgress) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
 #[derive(Default)]
 pub struct AgentCallbacks {
+    pub(crate) on_progress: Option<ProgressCallback>,
     /// Called when the LLM emits thinking/reasoning content.
     pub on_thinking: Option<ThinkingCallback>,
     /// Called after each LLM call with (input_tokens, output_tokens, cost).
@@ -418,6 +428,7 @@ pub struct CustomAgent {
     state: AgentState,
     /// Progress callbacks.
     callbacks: AgentCallbacks,
+    runtime: Option<(agent_runtime::ExecutionContext, Arc<dyn agent_runtime::EventSink>)>,
     /// Tool registry (shared, immutable after construction).
     registry: Arc<ToolRegistry>,
     /// Context passed to tool execution.
@@ -440,6 +451,7 @@ impl CustomAgent {
             config,
             state: AgentState::new(),
             callbacks: AgentCallbacks::default(),
+            runtime: None,
             registry,
             tool_context,
             user_names,
@@ -468,6 +480,35 @@ impl CustomAgent {
     /// Mutable access to the callbacks (for setting up streaming).
     pub fn callbacks_mut(&mut self) -> &mut AgentCallbacks {
         &mut self.callbacks
+    }
+
+    pub(crate) fn set_runtime(&mut self, context: agent_runtime::ExecutionContext, sink: Arc<dyn agent_runtime::EventSink>) {
+        self.runtime = Some((context, sink));
+    }
+    async fn progress(&self, progress: AgentProgress) {
+        if let Some(callback) = &self.callbacks.on_progress { callback(progress).await; }
+    }
+
+    async fn record_validation(&self, passed: bool, diagnostic: &str) -> kyomi_core::Result<()> {
+        if let Some((context, sink)) = &self.runtime {
+            let key = format!("model-{}:validation", self.state.global_iteration);
+            let (text, detail) = context.text(&key, diagnostic, 8000);
+            sink.commit(&context.command(&key, agent_runtime::Payload::Public(agent_runtime::PublicPayload::Validation { passed, text }), detail))
+                .await.map_err(runtime_error)?;
+        }
+        Ok(())
+    }
+
+    async fn preparing(&self) -> kyomi_core::Result<()> {
+        if let Some((context, sink)) = &self.runtime {
+            let key = format!("model-{}:preparing", self.state.global_iteration);
+            let (text, detail) = context.text(&key, "Preparing response", 200);
+            sink.commit(&context.command(&key, agent_runtime::Payload::Public(agent_runtime::PublicPayload::Planning { text }), detail))
+                .await.map_err(runtime_error)?;
+        } else {
+            self.progress(AgentProgress::Preparing).await;
+        }
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -634,6 +675,7 @@ impl CustomAgent {
                 + response.usage.cache_creation_input_tokens
                 + response.usage.cache_read_input_tokens;
             self.state.last_input_tokens = total_input;
+            if self.runtime.is_none() { self.progress(AgentProgress::Usage(total_input, response.usage.output_tokens, response.cost)).await; }
             if let Some(ref cb) = self.callbacks.on_token_usage {
                 cb(
                     total_input,
@@ -661,6 +703,9 @@ impl CustomAgent {
             {
                 cb(thinking);
             }
+            if self.runtime.is_none() && let Some(thinking) = &response.thinking_content {
+                self.progress(AgentProgress::Thinking(thinking.clone())).await;
+            }
 
             // No tool calls -- this is the final response.
             if response.tool_calls.is_none() {
@@ -669,11 +714,13 @@ impl CustomAgent {
                 if let Some(ref cb) = self.callbacks.on_preparing_response {
                     cb();
                 }
+                self.preparing().await?;
 
                 // Validate ChartML blocks if present (YAML + SQL dry-run).
                 if has_chartml_blocks(&content)
                     && let Some(error_msg) = self.validate_chartml_blocks(&content).await
                 {
+                    self.record_validation(false, &error_msg).await?;
                     warn!(error = %error_msg, "ChartML validation failed, asking LLM to fix");
                     // Log validation failure for prompt-tuning analysis.
                     self.log_chartml_validation_error(
@@ -692,6 +739,7 @@ impl CustomAgent {
                     continue;
                 }
 
+                if has_chartml_blocks(&content) { self.record_validation(true, "Response schema and SQL validation passed").await?; }
                 // Validation passed — mark any previous retries for this session as succeeded.
                 if let Some(ref sid) = self.tool_context.session_id
                     && let Err(e) = kyomi_core::db_execute!(
@@ -723,15 +771,22 @@ impl CustomAgent {
             {
                 cb(&response.content);
             }
+            if self.runtime.is_none() && !response.content.is_empty() {
+                self.progress(AgentProgress::Thinking(response.content.clone())).await;
+            }
 
             // Add assistant message with tool calls.
             // Safety: guarded by `response.tool_calls.is_none()` early-return above.
             let tool_calls = response.tool_calls.expect("guarded by is_none check above");
             self.state.messages.push(Message::assistant_with_tool_calls(
-                response.content.clone(),
+                if self.runtime.is_some() && has_chartml_blocks(&response.content) { String::new() } else { response.content.clone() },
                 tool_calls.clone(),
             ));
 
+            // Complete compatibility transcript is visible before the first delayed tool.
+            if self.runtime.is_some() && let Some(callback) = &self.callbacks.on_iteration_boundary {
+                callback(&self.state.messages).await;
+            }
             // Check cancellation before tool execution.
             if cancel_token.is_cancelled() {
                 return Err(kyomi_core::Error::Internal("Request cancelled".into()));
@@ -739,6 +794,9 @@ impl CustomAgent {
 
             // Execute each tool call.
             for tool_call in &tool_calls {
+                if cancel_token.is_cancelled() {
+                    return Err(kyomi_core::Error::Internal("Request cancelled".into()));
+                }
                 // KYO-535: a provider marks `arguments_error` when it could
                 // not parse this call's arguments — almost always a
                 // `max_tokens` cutoff mid-payload. Do NOT execute the tool
@@ -756,7 +814,12 @@ impl CustomAgent {
                 // not malformed; send less), and `continue` the `for` loop
                 // exactly like a normal tool result — the outer `while` loop
                 // then gives the model another iteration to retry smaller.
-                let result = if tool_call.arguments_error.is_some() {
+                let result = if let Some((context, sink)) = &self.runtime {
+                    let tool = RuntimeTool { agent: self, call: tool_call, finish_reason: &response.finish_reason };
+                    context.tool(sink.as_ref(), &tool,
+                        agent_runtime::ToolCallId(context.identity("tool", &format!("call-{}-{}", self.state.global_iteration, tool_call.id))),
+                        tool_call.name.clone(), tool_call.arguments.clone()).await.map_err(runtime_error)?.text
+                } else if tool_call.arguments_error.is_some() {
                     truncated_arguments_message(tool_call, &response.finish_reason)
                 } else {
                     self.execute_tool(tool_call).await
@@ -766,6 +829,9 @@ impl CustomAgent {
                     &tool_call.name,
                     &result,
                 ));
+                if self.runtime.is_some() && let Some(callback) = &self.callbacks.on_iteration_boundary {
+                    callback(&self.state.messages).await;
+                }
             }
 
             // Check cancellation after tool execution.
@@ -790,6 +856,7 @@ impl CustomAgent {
                     // Validation failed — store error as ephemeral retry context.
                     // The assistant message (with tool calls) is already persisted
                     // above, but the error instruction stays ephemeral.
+                    self.record_validation(false, &error_msg).await?;
                     warn!(error = %error_msg, "ChartML validation failed in tool response, asking LLM to fix");
                     // Log validation failure for prompt-tuning analysis.
                     self.log_chartml_validation_error(
@@ -799,6 +866,7 @@ impl CustomAgent {
                         "chat",
                     )
                     .await;
+                    if self.runtime.is_some() { chartml_retry_messages.push(Message::assistant(response.content.clone())); }
                     chartml_retry_messages.push(Message::user(format!(
                         "\u{1f916} SYSTEM: Automatic ChartML validation failed. The user has NOT seen your response yet. \
                          Please fix the following errors and then repeat your FULL response:\n\n{error_msg}"
@@ -806,6 +874,7 @@ impl CustomAgent {
                     continue;
                 }
 
+                self.record_validation(true, "Response schema and SQL validation passed").await?;
                 // Validation passed — mark any previous retries for this session as succeeded.
                 if let Some(ref sid) = self.tool_context.session_id
                     && let Err(e) = kyomi_core::db_execute!(
@@ -823,6 +892,7 @@ impl CustomAgent {
                 if let Some(ref cb) = self.callbacks.on_preparing_response {
                     cb();
                 }
+                self.preparing().await?;
                 self.state
                     .messages
                     .push(Message::assistant(&response.content));
@@ -883,6 +953,7 @@ impl CustomAgent {
         if let Some(ref cb) = self.callbacks.on_preparing_response {
             cb();
         }
+        self.preparing().await?;
 
         // The wrap-up is an LLM call like any other, so it counts.
         self.state.global_iteration += 1;
@@ -920,6 +991,7 @@ impl CustomAgent {
         let content = if has_chartml_blocks(&content) {
             match self.validate_chartml_blocks_detailed(&content).await {
                 Some((failing_indices, error_msg)) => {
+                    self.record_validation(false, &error_msg).await?;
                     warn!(
                         error = %error_msg,
                         "ChartML validation failed on the wrap-up turn — stripping the \
@@ -947,7 +1019,10 @@ impl CustomAgent {
                     // comment for the index contract.
                     strip_chartml_blocks(&content, &failing_indices)
                 }
-                None => content,
+                None => {
+                    self.record_validation(true, "Response schema and SQL validation passed").await?;
+                    content
+                },
             }
         } else {
             content
@@ -967,15 +1042,13 @@ impl CustomAgent {
         messages: &[Message],
         tools: &[Tool],
     ) -> kyomi_core::Result<crate::types::LLMResponse> {
-        self.client
-            .complete(
-                messages,
-                tools,
-                self.config.temperature,
-                self.config.max_tokens,
-                &self.user_names,
-            )
-            .await
+        let provider = RuntimeProvider { agent: self, messages, tools };
+        if let Some((context, sink)) = &self.runtime {
+            context.complete(&provider, sink.as_ref(), &agent_runtime::ModelCallId(format!("model-{}", self.state.global_iteration)))
+                .await.map_err(runtime_error)
+        } else {
+            self.client.complete(messages, tools, self.config.temperature, self.config.max_tokens, &self.user_names).await
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -993,6 +1066,7 @@ impl CustomAgent {
             );
         };
 
+        self.progress(AgentProgress::ToolStart(tool_call.name.clone(), tool_call.arguments.clone())).await;
         if let Some(ref cb) = self.callbacks.on_tool_start {
             cb(&tool_call.name, &tool_call.arguments);
         }
@@ -1002,14 +1076,17 @@ impl CustomAgent {
             .await
         {
             Ok(result) => {
+                let success = tool.result_domain_outcome(&result) == agent_runtime::DomainOutcome::Succeeded;
+                self.progress(AgentProgress::ToolEnd(tool_call.name.clone(), result.clone(), success)).await;
                 if let Some(ref cb) = self.callbacks.on_tool_end {
-                    cb(&tool_call.name, &result, true);
+                    cb(&tool_call.name, &result, success);
                 }
                 result
             }
             Err(e) => {
                 let error_msg = format!("Tool '{}' failed: {}", tool_call.name, e);
                 warn!(tool = %tool_call.name, error = %e, "tool execution failed");
+                self.progress(AgentProgress::ToolEnd(tool_call.name.clone(), error_msg.clone(), false)).await;
                 if let Some(ref cb) = self.callbacks.on_tool_end {
                     cb(&tool_call.name, &error_msg, false);
                 }
@@ -1319,6 +1396,71 @@ fn strip_chartml_blocks(text: &str, failing_indices: &[usize]) -> String {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+fn runtime_error(error: agent_runtime::ExecutionError) -> kyomi_core::Error {
+    kyomi_core::Error::ServiceUnavailable(error.to_string())
+}
+struct RuntimeProvider<'a> {
+    agent: &'a CustomAgent,
+    messages: &'a [Message],
+    tools: &'a [Tool],
+}
+#[async_trait::async_trait]
+impl agent_runtime::CompleteProvider for RuntimeProvider<'_> {
+    type Response = crate::types::LLMResponse;
+    async fn complete(&self) -> Result<(Self::Response, agent_runtime::ResponseRecord), agent_runtime::ExecutionError> {
+        let response = self.agent.client.complete(self.messages, self.tools, self.agent.config.temperature,
+            self.agent.config.max_tokens, &self.agent.user_names).await
+            .map_err(|error| agent_runtime::ExecutionError::Provider(error.to_string()))?;
+        let mut planning = Vec::new();
+        if let Some(thought) = response.thinking_content.as_deref().and_then(crate::thinking::clean_thought) {
+            planning.push(thought.full_text.unwrap_or(thought.display));
+        }
+        // A chart-bearing candidate becomes public only after product schema/SQL validation.
+        if response.tool_calls.is_some() && !has_chartml_blocks(&response.content)
+            && let Some(thought) = crate::thinking::clean_thought(&response.content)
+        {
+            planning.push(thought.full_text.unwrap_or(thought.display));
+        }
+        let raw = if response.raw_response.is_null() {
+            serde_json::to_value(&response).map_err(|error| agent_runtime::ExecutionError::Provider(error.to_string()))?
+        } else { response.raw_response.clone() };
+        let record = agent_runtime::ResponseRecord { continuation: raw.clone(), raw, cost: response.cost,
+            candidate: response.content.clone(), planning,
+            usage: agent_runtime::Usage {
+                input_tokens: u64::from(response.usage.input_tokens) + u64::from(response.usage.cache_creation_input_tokens)
+                    + u64::from(response.usage.cache_read_input_tokens),
+                output_tokens: u64::from(response.usage.output_tokens),
+            },
+        };
+        Ok((response, record))
+    }
+}
+struct RuntimeTool<'a> {
+    agent: &'a CustomAgent,
+    call: &'a ToolCall,
+    finish_reason: &'a str,
+}
+#[async_trait::async_trait]
+impl agent_runtime::ToolExecution for RuntimeTool<'_> {
+    async fn execute(&self) -> agent_runtime::ToolOutcome {
+        use agent_runtime::{DomainOutcome, ToolOutcome, TransportOutcome};
+        if self.call.arguments_error.is_some() {
+            return ToolOutcome { transport: TransportOutcome::Failed, domain: DomainOutcome::Rejected,
+                text: truncated_arguments_message(self.call, self.finish_reason) };
+        }
+        let Some(tool) = self.agent.registry.get_tool(&self.call.name) else {
+            return ToolOutcome { transport: TransportOutcome::Failed, domain: DomainOutcome::Rejected,
+                text: format!("Error: Unknown tool '{}'. Available tools: {}", self.call.name, self.agent.registry.tool_names().join(", ")) };
+        };
+        match tool.execute(self.call.arguments.clone(), &self.agent.tool_context).await {
+            Ok(text) => ToolOutcome { transport: TransportOutcome::Completed,
+                domain: tool.result_domain_outcome(&text), text },
+            Err(error) => ToolOutcome { transport: TransportOutcome::Failed, domain: tool.failure_domain_outcome(),
+                text: format!("Tool '{}' failed: {}", self.call.name, error) },
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

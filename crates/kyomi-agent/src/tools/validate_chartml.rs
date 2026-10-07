@@ -10,6 +10,12 @@ pub struct ValidateChartmlTool;
 
 #[async_trait]
 impl AgentTool for ValidateChartmlTool {
+    /// This implementation parses and validates schema/SQL through dry-run paths;
+    /// it does not execute a product mutation, including on argument failure.
+    fn failure_domain_outcome(&self) -> agent_runtime::DomainOutcome {
+        agent_runtime::DomainOutcome::Rejected
+    }
+
     fn name(&self) -> &str {
         "validate_chartml"
     }
