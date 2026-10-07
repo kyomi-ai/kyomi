@@ -709,6 +709,11 @@ jobs:
   # through real `git commit` invocations — the same review-integrity
   # concern as sign-review-test.sh, one layer down.
   #
+  # scripts/pre-commit-amend-test.sh (KYO-634) runs real linters on staged
+  # and empty-index amendment fixtures, including root commits. It uses no
+  # review approvals and pins the unchanged signature gate with clean controls.
+  # The historical recount below predates this additional suite.
+  #
   # Each suite carries its own self-test assertions (652
   # total, RECOUNTED LIVE on 2026-09-11 (KYO-712 rework) by actually
   # running all thirteen suites and summing their own "Results: N passed"
@@ -873,6 +878,7 @@ jobs:
             scripts/check-agent-run-result-test.sh
             scripts/sign-review-test.sh
             scripts/pre-commit-hook-test.sh
+            scripts/pre-commit-amend-test.sh
           )
           failed=()
           for suite in "${suites[@]}"; do

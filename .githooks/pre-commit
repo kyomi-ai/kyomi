@@ -28,14 +28,41 @@
 
 set -e
 
-# --- Check 1: Reject new lint suppressions in staged files ---
+# Checks 1/2/2b normally inspect the staged delta. Git gives pre-commit no
+# --amend argument, so an empty index delta conservatively rechecks HEAD's
+# changes against its first parent (or the empty tree for a root commit).
+# This catches violations in a hookless commit during an empty-index amend.
+# Review signatures still cover only the staged diff; Check 3 is unchanged.
+lint_diff_args=(--cached)
+if git diff --cached --quiet; then
+    if git rev-parse --verify HEAD >/dev/null 2>&1; then
+        head_parents=$(git rev-list --parents -n 1 HEAD)
+        read -r head_commit lint_base other_parents <<< "$head_parents"
+        if [ -z "$lint_base" ]; then
+            lint_base=$(git hash-object -w -t tree --stdin </dev/null)
+        fi
+        lint_diff_args+=("$lint_base")
+    fi
+else
+    diff_status=$?
+    if [ "$diff_status" -ne 1 ]; then
+        echo "❌ Cannot determine staged changes — commit blocked." >&2
+        exit "$diff_status"
+    fi
+fi
+# Capture before filtering so Git errors cannot become a false clean result.
+lint_changed_files=$(git diff "${lint_diff_args[@]}" --name-only --diff-filter=ACM)
+
+# --- Check 1: Reject new lint suppressions in the selected delta ---
 echo "🔍 Checking for new lint suppressions..."
 
 # Check .rs files for #[allow(...)]
-rs_violations=$(git diff --cached -- '*.rs' | grep '^+' | grep -v '^+++' | grep '#\[allow(' || true)
+rs_patch=$(git diff "${lint_diff_args[@]}" -- '*.rs')
+rs_violations=$(printf '%s\n' "$rs_patch" | grep '^+' | grep -v '^+++' | grep '#\[allow(' || true)
 
 # Check Cargo.toml for = "allow" lint downgrades
-toml_violations=$(git diff --cached -- '*/Cargo.toml' 'Cargo.toml' | grep '^+' | grep -v '^+++' | grep '= "allow"' || true)
+toml_patch=$(git diff "${lint_diff_args[@]}" -- '*/Cargo.toml' 'Cargo.toml')
+toml_violations=$(printf '%s\n' "$toml_patch" | grep '^+' | grep -v '^+++' | grep '= "allow"' || true)
 
 violations="${rs_violations}${toml_violations}"
 
@@ -198,15 +225,16 @@ unstaged_or_untracked_matching() {
 
 # --- Check 2: server_fn / REST divergence lint (KYO-122) ---
 # Runs before clippy because it is orders of magnitude faster (< 200ms)
-# and catches the class of bugs that triggered KYO-115. Lints the staged
-# set whenever staged changes touch `crates/kyomi-ui/src/server_fns/*.rs`,
+# and catches the class of bugs that triggered KYO-115. Lints the selected
+# delta (staged, or HEAD against its parent when empty) whenever it touches
+# `crates/kyomi-ui/src/server_fns/*.rs`,
 # AND, independently and unconditionally (KYO-712 — see this file's header
 # for why "independently" matters), scans for unstaged/untracked files
 # matching the same pattern so a narrowed index can never hide behind a
 # staged sibling.
 echo "🔍 Checking server_fn / REST divergence..."
 
-staged_server_fns=$(git diff --cached --name-only --diff-filter=ACM \
+staged_server_fns=$(printf '%s\n' "$lint_changed_files" \
     | grep '^crates/kyomi-ui/src/server_fns/.*\.rs$' || true)
 
 if [ -n "$staged_server_fns" ]; then
@@ -263,7 +291,7 @@ fi
 
 # --- Check 2b: Leptos signal disposal-safety lint ---
 # Runs before clippy for the same reason as Check 2 (pure bash+awk, ~200ms).
-# Lints the staged set whenever staged changes touch
+# Lints the selected delta whenever it touches
 # `crates/kyomi-ui/src/**/*.rs` — Rule A (bare .set()/.update() in
 # spawn_local/deferred contexts) always blocks; Rule B (bare .get() in
 # Signal::derive/Memo::new) blocks only on findings NOT already recorded in
@@ -275,7 +303,7 @@ fi
 # files matching the same pattern.
 echo "🔍 Checking Leptos signal disposal safety..."
 
-staged_disposal_files=$(git diff --cached --name-only --diff-filter=ACM \
+staged_disposal_files=$(printf '%s\n' "$lint_changed_files" \
     | grep '^crates/kyomi-ui/src/.*\.rs$' || true)
 
 if [ -n "$staged_disposal_files" ]; then
