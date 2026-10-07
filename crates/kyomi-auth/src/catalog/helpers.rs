@@ -1173,7 +1173,10 @@ pub async fn cache_table(params: CacheTableParams<'_>) -> kyomi_core::Result<()>
         "columns": columns_json,
     });
 
-    // Check if table already exists in cache
+    // Keep this lookup unfiltered: an archived table that reappears must reuse its
+    // row and be unarchived, rather than attempting an insert against the unique key.
+    // Pinned by cache_table_resurrects_archived_row_with_unchanged_schema and
+    // cache_table_resurrects_archived_row_with_changed_schema.
     #[derive(sqlx::FromRow)]
     struct ExistingRow {
         id: i32,
@@ -1852,6 +1855,148 @@ mod tests {
         let extracted = extract_schema_signature(&metadata);
 
         assert_eq!(computed, extracted);
+    }
+
+    // ── cache_table resurrection (KYO-625) ─────────────────────────────
+
+    #[tokio::test]
+    async fn cache_table_resurrects_archived_row_with_unchanged_schema() {
+        assert_cache_table_resurrects_archived_row(false).await;
+    }
+
+    #[tokio::test]
+    async fn cache_table_resurrects_archived_row_with_changed_schema() {
+        assert_cache_table_resurrects_archived_row(true).await;
+    }
+
+    async fn assert_cache_table_resurrects_archived_row(schema_changed: bool) {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        let (workspace_id, datasource_config_id, _) =
+            seed_two_datasource_fixture(sq, "resurrection").await;
+        let ctx = IndexerContext {
+            workspace_id,
+            datasource_config_id,
+            connection_config: Value::Null,
+            encryption_key: std::sync::Arc::new([0; 32]),
+        };
+        let old_time = Utc::now() - chrono::Duration::days(1);
+        let stored_metadata = serde_json::json!({
+            "table_name": "orders",
+            "dataset_id": "analytics",
+            "project_id": "project-1",
+            "table_type": "TABLE",
+            "columns": [{"name": "id", "type": "number", "native_type": "INT", "description": ""}],
+        });
+        let cache_id: i32 = sqlx::query_scalar(
+            "INSERT INTO datasource_table_cache \
+             (workspace_id, datasource_config_id, project_id, dataset_id, table_id, \
+              table_metadata, is_archived, last_verified, structure_refreshed_at, updated_at) \
+             VALUES (?, ?, 'project-1', 'analytics', 'orders', ?, 1, ?, ?, ?) RETURNING id",
+        )
+        .bind(&ctx.workspace_id)
+        .bind(&ctx.datasource_config_id)
+        .bind(&stored_metadata)
+        .bind(old_time)
+        .bind(old_time)
+        .bind(old_time)
+        .fetch_one(sq)
+        .await
+        .expect("seed archived table");
+        // A persisted embedding is necessary to reach the unchanged-schema skip.
+        let embedding_id: i64 = sqlx::query_scalar(
+            "INSERT INTO datasource_search_embeddings \
+             (table_cache_id, workspace_id, datasource_config_id, project_id, dataset_id, \
+              table_id, entry_type, text, weight, embedding) \
+             VALUES (?, ?, ?, 'project-1', 'analytics', 'orders', 'table_name', 'orders', 0.9, ?) \
+             RETURNING id",
+        )
+        .bind(cache_id)
+        .bind(&ctx.workspace_id)
+        .bind(&ctx.datasource_config_id)
+        .bind(vec![0u8; 384 * 4])
+        .fetch_one(sq)
+        .await
+        .expect("seed existing search embedding");
+        let columns = [ColumnEntry {
+            name: "id".into(),
+            col_type: Some(if schema_changed { "string" } else { "number" }.into()),
+            native_type: Some(if schema_changed { "VARCHAR" } else { "INT" }.into()),
+            description: None,
+        }];
+        // Real embedded model: no network, credentials, or ambient service required.
+        static EMBEDDING: std::sync::OnceLock<EmbeddingService> = std::sync::OnceLock::new();
+        let embedding = EMBEDDING.get_or_init(|| EmbeddingService::new().expect("load embedded model"));
+        let result = cache_table(CacheTableParams {
+            db: &db,
+            embedding,
+            ctx: &ctx,
+            project_id: "project-1",
+            dataset_id: "analytics",
+            table_name: "orders",
+            table_type: "TABLE",
+            columns: &columns,
+            full_table_id: "project-1.analytics.orders",
+        })
+        .await;
+
+        #[derive(sqlx::FromRow)]
+        struct CachedRow {
+            id: i32,
+            is_archived: bool,
+            last_verified: chrono::DateTime<Utc>,
+            structure_refreshed_at: chrono::DateTime<Utc>,
+            updated_at: chrono::DateTime<Utc>,
+            table_metadata: Value,
+        }
+        let rows: Vec<CachedRow> = sqlx::query_as(
+            "SELECT id, is_archived, last_verified, structure_refreshed_at, updated_at, table_metadata \
+             FROM datasource_table_cache WHERE workspace_id = ? AND datasource_config_id = ? \
+             AND project_id = 'project-1' AND dataset_id = 'analytics' AND table_id = 'orders'",
+        )
+        .bind(&ctx.workspace_id)
+        .bind(&ctx.datasource_config_id)
+        .fetch_all(sq)
+        .await
+        .expect("read resurrected row without hiding archived rows");
+        assert_eq!(rows.len(), 1, "resurrection must not insert a duplicate row");
+        let row = &rows[0];
+        assert_eq!(row.id, cache_id, "resurrection must reuse the archived row");
+        assert!(!row.is_archived, "reappearing tables must become visible again");
+        assert!(row.last_verified > old_time, "resurrection must advance last_verified");
+        if schema_changed {
+            // SQLite rejects pgvector storage AFTER the real UPDATE and embedding
+            // deletion. Pin that downstream error so an insert/constraint failure
+            // cannot masquerade as coverage of the update branch.
+            let error = result.expect_err("SQLite does not support pgvector storage").to_string();
+            assert!(error.contains("failed to store embeddings for analytics.orders"), "{error}");
+            assert!(error.contains("pgvector embeddings are not supported on SQLite"), "{error}");
+        } else {
+            result.expect("unchanged schema skips re-embedding successfully");
+        }
+
+        let embedding_ids: Vec<i64> = sqlx::query_scalar(
+            "SELECT id FROM datasource_search_embeddings WHERE table_cache_id = ?",
+        )
+        .bind(cache_id)
+        .fetch_all(sq)
+        .await
+        .expect("read remaining embeddings");
+        if schema_changed {
+            assert!(row.structure_refreshed_at > old_time);
+            assert!(row.updated_at > old_time);
+            assert_eq!(extract_schema_signature(&row.table_metadata), compute_schema_signature(&columns));
+            assert!(embedding_ids.is_empty(), "update branch must delete stale embeddings");
+        } else {
+            assert_eq!(row.structure_refreshed_at, old_time);
+            assert_eq!(row.updated_at, old_time);
+            assert_eq!(row.table_metadata, stored_metadata);
+            assert_eq!(embedding_ids, vec![embedding_id], "skip branch must preserve embeddings");
+        }
     }
 
     // ── update_datasource_status concurrency (KYO-267) ───────────────────
