@@ -423,6 +423,9 @@ echo
 echo "-- Test 12: committed-range approval expires after a rebase"
 range_sign="$tmpdir/range-sign-review.sh"
 cp "$SIGN" "$range_sign"
+# The copied signer resolves its guard relative to its own directory (KYO-647).
+mkdir -p "$tmpdir/lib"
+cp "$SCRIPT_DIR/lib/stale-tooling-guard.sh" "$tmpdir/lib/stale-tooling-guard.sh"
 test_pub_b64="$(sed -n '2p' "$PUB_PEM")"
 sed -i "s|MCowBQYDK2VwAyEApRtsZODQxaUNP383HB/iqLHSlrf92Fe3UB43Bc2TaG0=|$test_pub_b64|" "$range_sign"
 t12="$tmpdir/t12"

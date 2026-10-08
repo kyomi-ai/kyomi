@@ -185,6 +185,11 @@
 set -e
 set -o pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/stale-tooling-guard.sh
+source "${SCRIPT_DIR}/lib/stale-tooling-guard.sh"
+stale_tooling_guard "${BASH_SOURCE[0]}"
+
 # A committed-range approval is separate from .review-approval: the latter
 # belongs to pre-commit and must continue to describe the staged diff only.
 # `--verify-committed-range` needs no private key and is run immediately before
