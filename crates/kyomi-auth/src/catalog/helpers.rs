@@ -735,13 +735,13 @@ pub fn resolve_run_outcome(
 pub const MAX_MISSING_CONTAINERS_IN_WARNING: usize = 5;
 
 /// The outcome of comparing what a run enumerated against what the
-/// datasource's cache currently believes is live.
+/// datasource's live cache and unverified archived history.
 pub struct ContainerCoverage {
     /// A single warning entry naming the un-enumerated containers (capped at
     /// [`MAX_MISSING_CONTAINERS_IN_WARNING`]), to append to the run's
-    /// `errors`/persisted `warnings`. `None` when every currently-live
-    /// container was enumerated this run (including the common case where
-    /// there is no prior cache to compare against at all).
+    /// `errors`/persisted `warnings`. Includes informational context when
+    /// archived-only containers not enumerated this run dominate the history.
+    /// `None` when there is no live cache, or no coverage concern.
     pub warning: Option<String>,
     /// Whether the shortfall is large enough that the run must not resolve
     /// to `"idle"` — see [`is_material_shortfall`].
@@ -782,7 +782,10 @@ fn is_material_shortfall(enumerated_count: usize, live_count: usize) -> bool {
 /// On a first-ever run (or any datasource with nothing cached yet) the live
 /// count is zero, so there is nothing to fall short of — this always
 /// reports no shortfall in that case, matching `resolve_final_status`'s
-/// existing "empty-but-accessible is not a failure" doctrine.
+/// existing "empty-but-accessible is not a failure" doctrine. With live
+/// cache remaining, mostly archived, unverified history produces an
+/// informational warning: archived rows alone cannot distinguish legitimate
+/// deletion from prior cache damage, so they never make a shortfall material.
 pub async fn check_container_coverage(
     db: &DbPool,
     workspace_id: &str,
@@ -793,17 +796,17 @@ pub async fn check_container_coverage(
     struct ContainerRow {
         project_id: String,
         dataset_id: String,
+        is_archived: bool,
     }
 
     let rows = kyomi_core::db_fetch_all!(
         db,
         ContainerRow,
         r#"
-        SELECT DISTINCT project_id, dataset_id
+        SELECT DISTINCT project_id, dataset_id, is_archived
         FROM datasource_table_cache
         WHERE workspace_id = $1
           AND datasource_config_id = $2
-          AND is_archived = false
         "#,
         workspace_id,
         datasource_config_id
@@ -812,7 +815,20 @@ pub async fn check_container_coverage(
         kyomi_core::Error::Internal(format!("failed to check container coverage: {e}"))
     })?;
 
-    let live_count = rows.len();
+    let mut live = HashSet::new();
+    let mut archived = HashSet::new();
+    for row in rows {
+        let key = (row.project_id, row.dataset_id);
+        if row.is_archived {
+            archived.insert(key);
+        } else {
+            live.insert(key);
+        }
+    }
+    // A container with both live and archived tables is still live; table
+    // churn must not count it twice or imply archived container history.
+    archived.retain(|key| !live.contains(key));
+    let live_count = live.len();
     if live_count == 0 {
         return Ok(ContainerCoverage {
             warning: None,
@@ -825,21 +841,18 @@ pub async fn check_container_coverage(
     // collapse two same-named datasets in different BigQuery projects into
     // one entry, under-counting both the shortfall here and the archive
     // scope in `archive_missing_tables`.
-    let mut missing: Vec<ContainerKey> = rows
-        .into_iter()
-        .map(|r| (r.project_id, r.dataset_id))
-        .filter(|key| !enumerated_containers.contains(key))
+    let missing: HashSet<ContainerKey> = live
+        .difference(enumerated_containers)
+        .cloned()
         .collect();
-
-    if missing.is_empty() {
-        return Ok(ContainerCoverage {
-            warning: None,
-            material: false,
-        });
-    }
-    missing.sort();
-
-    let material = is_material_shortfall(enumerated_containers.len(), live_count);
+    let known_count = live_count + archived.len();
+    archived.retain(|key| !enumerated_containers.contains(key));
+    // At least half the historical containers remain archived and were not
+    // enumerated: enough context to surface, without treating history as live.
+    let mostly_unverified_history = !archived.is_empty()
+        && is_material_shortfall(known_count - archived.len(), known_count);
+    let material = !missing.is_empty()
+        && is_material_shortfall(enumerated_containers.len(), live_count);
 
     // KYO-616: this is the logging half of the KYO-614 material-shortfall
     // check above — reusing `material` (from `is_material_shortfall`)
@@ -859,27 +872,28 @@ pub async fn check_container_coverage(
         );
     }
 
-    let shown_count = missing.len().min(MAX_MISSING_CONTAINERS_IN_WARNING);
-    let remainder = missing.len() - shown_count;
-    let shown = missing[..shown_count]
-        .iter()
-        .map(format_container_key)
-        .collect::<Vec<_>>()
-        .join(", ");
-    let names = if remainder > 0 {
-        format!("{shown} (+{remainder} more)")
-    } else {
-        shown
-    };
-
-    let warning = format!(
-        "Catalog refresh enumerated {} of {live_count} known container(s) this run — \
-         not yet re-verified and left untouched: {names}",
-        enumerated_containers.len()
-    );
+    let mut warnings = Vec::new();
+    if !missing.is_empty() {
+        warnings.push(format!(
+            "Catalog refresh enumerated {} of {live_count} known container(s) this run — \
+             not yet re-verified and left untouched: {}",
+            enumerated_containers.len(),
+            format_container_keys_capped(&missing)
+        ));
+    }
+    if mostly_unverified_history {
+        warnings.push(format!(
+            "Catalog refresh has {} archived container(s) not re-verified this run out of \
+             {known_count} historical container(s), with {live_count} live container(s) remaining — \
+             archived history may reflect deletion or incomplete prior coverage: {}",
+            archived.len(),
+            format_container_keys_capped(&archived)
+        ));
+    }
+    let warning = (!warnings.is_empty()).then(|| warnings.join("; "));
 
     Ok(ContainerCoverage {
-        warning: Some(warning),
+        warning,
         material,
     })
 }
@@ -2537,7 +2551,7 @@ mod tests {
     /// triples, all inserted non-archived — `project_id` is explicit (KYO-614
     /// follow-up) rather than a constant baked into this helper, so a test
     /// can seed two different projects sharing a dataset name.
-    async fn seed_container_scoped_fixture(
+    pub(super) async fn seed_container_scoped_fixture(
         sq: &sqlx::SqlitePool,
         suffix: &str,
         rows: &[(&str, &str, &str)],
@@ -3487,3 +3501,7 @@ mod tests {
         assert!(errors.is_empty());
     }
 }
+
+#[cfg(test)]
+#[path = "helpers_archived_coverage_tests.rs"]
+mod archived_coverage_tests;
