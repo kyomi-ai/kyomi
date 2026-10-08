@@ -655,9 +655,9 @@ jobs:
   # not because it shares the other six suites' ticket-lifecycle purpose.
   # scripts/lib/stale-tooling-guard-test.sh (KYO-632) is also different in
   # kind, and for the same reason: it is the self-test for
-  # scripts/lib/stale-tooling-guard.sh, the guard that six of these scripts
-  # — plus scripts/mine-review-logs.sh, which has no self-test suite of its
-  # own — now source so that a stale local copy of themselves is loud
+  # scripts/lib/stale-tooling-guard.sh, the guard that twelve production
+  # scripts now source, including the quality and signature gates added
+  # by KYO-647, so that a stale local copy of themselves is loud
   # instead of silent. That is also why this job is named "Worktree
   # Lifecycle & Script Self-Tests" below, rather than just "Worktree
   # Lifecycle Self-Tests". scripts/lint/check-real-identifiers-test.sh
@@ -712,47 +712,23 @@ jobs:
   # scripts/pre-commit-amend-test.sh (KYO-634) runs real linters on staged
   # and empty-index amendment fixtures, including root commits. It uses no
   # review approvals and pins the unchanged signature gate with clean controls.
-  # The historical recount below predates this additional suite.
   #
-  # Each suite carries its own self-test assertions (652
-  # total, RECOUNTED LIVE on 2026-09-11 (KYO-712 rework) by actually
-  # running all thirteen suites and summing their own "Results: N passed"
-  # lines (check-real-identifiers-test.sh's own summary line reads "N
-  # checks, N failed" instead, counted the same way):
-  # check-ticket-in-flight-test.sh 119 + mark-worktree-stranded-test.sh 32 +
-  # mark-branch-stranded-test.sh 78 + append-review-log-test.sh 11 +
-  # audit-agent-run-deaths-test.sh 43 + reconcile-merged-tickets-test.sh 99 +
-  # preflight-clippy-test.sh 43 + stale-tooling-guard-test.sh 35 +
-  # check-real-identifiers-test.sh 41 +
-  # repro-headless-subagent-survival-test.sh 20 +
-  # check-agent-run-result-test.sh 71 + sign-review-test.sh 37 +
-  # pre-commit-hook-test.sh 23
-  # = 652. This recount folds in every suite the array below runs,
-  # including repro-headless-subagent-survival-test.sh — every recount
-  # before this one had either included it (origin/main's most recent,
-  # 592) or explicitly disclosed omitting it (this branch's most recent,
-  # 561); that disclosure no longer applies, it is included below like
-  # every other suite. The two figures this comment carried immediately
-  # before this recount — 592 (origin/main, dated 2026-09-11, eleven
-  # suites) and 561 (this branch, dated 2026-09-11, ten suites plus the
-  # two KYO-712 additions) — were each independent live recounts of
-  # partially-overlapping suite sets that diverged after a shared 501/521
-  # base (KYO-712's own chain read 526, then 536, then 561 from that base;
-  # KYO-710's chain read 521 corrected, then 592); this recount is the
-  # first to run all thirteen suites the merged array now contains in one
-  # pass, superseding both. As before, this was a live recount, as was the
-  # 460 before the shared base, the 425 before that, the 382 before that,
-  # the 287 before that, and all of them ultimately corrections of a stale
-  # 197 that undercounted the then-five suites by 86 assertions. Note per
-  # KYO-609 this tally is still hand-maintained and will re-rot on the
-  # next suite change; that is a known, separately-filed gap, not
-  # something this recount or this job fixes — the recount only makes
-  # today's number true, it does not make
-  # tomorrow's number self-maintaining. KYO-679 is exactly that predicted
-  # rot: it adds a fourteenth suite,
-  # scripts/lint/check-disposal-safety-test.sh, to the array below without
-  # redoing this live recount — per KYO-609 that is the known, accepted gap,
-  # not a new one), but until this job existed none of
+  # Each suite carries its own self-test assertions (841 total, RECOUNTED
+  # LIVE on 2026-10-08 (KYO-647) by running all sixteen suites below and
+  # summing their own "Results: N passed" lines; check-real-identifiers-test.sh
+  # reports "N checks, N failed" instead and is counted the same way:
+  # check-ticket-in-flight-test.sh 144 + mark-worktree-stranded-test.sh 32 +
+  # retire-worktree-test.sh 52 + mark-branch-stranded-test.sh 78 +
+  # append-review-log-test.sh 11 + audit-agent-run-deaths-test.sh 43 +
+  # reconcile-merged-tickets-test.sh 99 + preflight-clippy-test.sh 59 +
+  # stale-tooling-guard-test.sh 47 + check-real-identifiers-test.sh 41 +
+  # check-disposal-safety-test.sh 63 + repro-headless-subagent-survival-test.sh 20 +
+  # check-agent-run-result-test.sh 71 + sign-review-test.sh 45 +
+  # pre-commit-hook-test.sh 23 + pre-commit-amend-test.sh 13 = 841.
+  # All sixteen suites passed with zero failed assertions. Per KYO-609,
+  # this hand-maintained tally will drift on the next suite change; this
+  # recount verifies today's number rather than making it self-maintaining.
+  # Before this job existed none of
   # the original scripts ran anywhere except when a human or agent remembered
   # to invoke it by hand — a load-bearing check that never runs in CI is a
   # fail-open shape this workflow has already been bitten by twice (KYO-511,
@@ -839,9 +815,9 @@ jobs:
     timeout-minutes: 30
     steps:
       # fetch-depth: 0 (KYO-632, same reason lint-policy above uses it):
-      # scripts/lib/stale-tooling-guard.sh — sourced by seven production
-      # scripts, six of which have a suite in the array below (the seventh,
-      # scripts/mine-review-logs.sh, has none of its own) — determines
+      # scripts/lib/stale-tooling-guard.sh — sourced by twelve production
+      # scripts, ten of which have a suite in the array below (mine-review-logs.sh
+      # and sign-verification.sh have none of their own) — determines
       # staleness by comparing the calling script's on-disk content
       # against the LOCAL `origin/main` ref
       # (`git show origin/main:<path>`, no `git fetch`). The default
