@@ -1,0 +1,48 @@
+name: Install repository Rust toolchain
+description: Read the exact release from rust-toolchain.toml, install it and log versions.
+outputs:
+  toolchain:
+    description: Exact release read from the repository pin
+    value: ${{ steps.pin.outputs.toolchain }}
+runs:
+  using: composite
+  steps:
+    - id: pin
+      shell: bash
+      run: |
+        python3 - <<'PYTHON'
+        import os, re, tomllib
+        with open("rust-toolchain.toml", "rb") as source:
+            toolchain = tomllib.load(source)["toolchain"]
+        channel = toolchain["channel"]
+        if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", channel):
+            raise SystemExit("rust-toolchain.toml must pin an exact stable release")
+        with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+            print(f"toolchain={channel}", file=output)
+            print("components=" + ",".join(toolchain.get("components", [])), file=output)
+            print("targets=" + ",".join(toolchain.get("targets", [])), file=output)
+        with open(os.environ["GITHUB_ENV"], "a") as output:
+            print(f"RUSTUP_TOOLCHAIN={channel}", file=output)
+            print(f"SCCACHE_GHA_VERSION=pinned-{channel}-{os.environ['GITHUB_JOB']}", file=output)
+        PYTHON
+    # @stable would supply its own rolling channel, overriding the repo pin.
+    - uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ steps.pin.outputs.toolchain }}
+        components: ${{ steps.pin.outputs.components }}
+        targets: ${{ steps.pin.outputs.targets }}
+    - name: Log effective Rust versions and cache namespace
+      shell: bash
+      run: |
+        rustup show active-toolchain
+        rustc --version --verbose
+        cargo --version --verbose
+        echo "sccache namespace: $SCCACHE_GHA_VERSION"
+        {
+          echo '### Pinned Rust toolchain'
+          echo '```text'
+          rustc --version
+          cargo --version
+          echo "sccache namespace: $SCCACHE_GHA_VERSION"
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
