@@ -66,7 +66,21 @@ All scripts are organized by environment. **Every script is environment-specific
   the head ref only — never PR body or title, see the script header for
   why that was tried and reverted, KYO-471), local worktrees
   (`git worktree list`), and local branches (`git branch --list`). The
-  last two exist because a worker whose run dies between `git commit` and
+  **Scope (KYO-910):** when invoked from a known project origin, all
+  checks sweep `kyomi-ai/kyomi`, `kyomi-ai/kyomi-connect`,
+  `kyomi-ai/kyomi-private`, `chartml/chartml`, and `kyomi-ai/kode`.
+  Canonical clones live under `${KYOMI_REPOS_ROOT:-$HOME/repos}`; this
+  explicit root also works from linked worktrees under `/tmp`. The invoking
+  clone is included even when separate from its canonical clone. Every
+  declared clone must exist with the expected origin identity; missing,
+  mismatched, unreachable, or unreadable siblings make the sweep exit `3`.
+  The root override relocates the whole scope and cannot omit repositories.
+  Other project origins retain visibly announced single-repository behavior.
+  Evidence is grouped by repository identity and checkout path. Self and
+  ignored-branch exclusions apply only within the invoking repository;
+  identically named sibling branches remain evidence. Recycled-key,
+  rework-target and tombstone classification is isolated per repository.
+  The last two exist because a worker whose run dies between `git commit` and
   `git push` leaves a complete implementation visible only locally
   (KYO-471). Run it **twice** per ticket: once at pickup, and again
   immediately before dispatching code review — the second call is what
