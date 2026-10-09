@@ -1170,7 +1170,8 @@ pub async fn rechunk_document(
     // Embed BEFORE deleting old chunks — if embedding fails, old chunks remain intact
     let chunk_refs: Vec<&str> = chunks.iter().map(|s| s.as_str()).collect();
     let embeddings = embed
-        .embed_passages(&chunk_refs)
+        .embed_passages_chunked(&chunk_refs)
+        .await
         .map_err(|e| kyomi_core::Error::Internal(format!("embedding failed: {e}")))?;
 
     if embeddings.len() != chunks.len() {
@@ -1768,7 +1769,7 @@ async fn store_dashboard_embedding(
     content: &str,
 ) -> Result<()> {
     let text = format!("{title}\n{content}");
-    let vec = match embedding_svc.embed_one(&text) {
+    let vec = match embedding_svc.embed_passage_offloaded(&text).await {
         Ok(vec) => vec,
         Err(e) => {
             tracing::error!(dashboard_id = %dashboard_id, error = %e, "Failed to generate dashboard embedding");
