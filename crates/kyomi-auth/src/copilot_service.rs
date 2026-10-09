@@ -152,6 +152,7 @@ pub async fn prepare_copilot_message(
         None,
         None,
         None,
+        crate::chat_service::MessageStatus::Complete,
     )
     .await?;
 
@@ -218,18 +219,30 @@ pub async fn handle_copilot_agent_error(params: CopilotAgentErrorParams<'_>) {
     });
 
     // Try update first (persist_after_chat may have already saved a row).
+    // KYO-493: copilot deliberately never pre-inserts a placeholder
+    // (KYO-572), so this update usually affects zero rows — but if
+    // persist_after_chat DID already write a row (a later error, after the
+    // loop produced at least one message), mark it status='error' rather
+    // than leaving the column at its 'complete' default.
     let updated = crate::chat_service::update_message(
         db,
         encryption_key,
         assistant_message_id,
         Some(&error_text),
         Some(&error_metadata),
+        Some(crate::chat_service::MessageStatus::Error),
     )
     .await
     .unwrap_or(false);
 
     // If no row existed, insert a new one so the user sees the error in the
-    // conversation instead of losing it silently.
+    // conversation instead of losing it silently. This is copilot's COMMON
+    // error path — `AdapterInserts` never pre-inserts a placeholder, so
+    // `updated` above is false on essentially every copilot error. status=
+    // Error at INSERT time (KYO-493 code review) — not INSERT-then-UPDATE —
+    // so this row is never briefly (or, on a crash between the two writes,
+    // permanently) mislabeled with the 'complete' default despite holding
+    // error content.
     if !updated
         && let Err(e) = crate::chat_service::add_message(
             db,
@@ -245,6 +258,7 @@ pub async fn handle_copilot_agent_error(params: CopilotAgentErrorParams<'_>) {
             None,
             None,
             None,
+            crate::chat_service::MessageStatus::Error,
         )
         .await
     {
@@ -265,4 +279,89 @@ pub async fn handle_copilot_agent_error(params: CopilotAgentErrorParams<'_>) {
         Some(context_type),
     )
     .await;
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{seed_user, seed_workspace, sqlite_pool, test_key, test_pool};
+
+    // KYO-493 code review: `handle_copilot_agent_error`'s INSERT-fallback
+    // branch is copilot's COMMON error path, not a rare corner case —
+    // `AdapterInserts` never pre-inserts a placeholder (KYO-572), so
+    // `update_message` above affects zero rows on essentially every copilot
+    // error, and this INSERT is what actually persists it. Before this fix,
+    // `add_message` had no `status` parameter, so this row silently
+    // defaulted to `status = 'complete'` despite holding error text.
+    #[tokio::test]
+    async fn handle_copilot_agent_error_insert_fallback_persists_error_status() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        let key = test_key();
+        seed_user(sq, "user-a", "user-a@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+        crate::chat_service::create_session_with_id(
+            &db,
+            "user-a",
+            "ws-1",
+            "sess-copilot-err",
+            None,
+            "dashboard_copilot",
+            None,
+        )
+        .await
+        .expect("create session");
+
+        let manager = crate::websocket::WebSocketManager::new(None, db.clone());
+        let assistant_message_id = "msg-copilot-err-1";
+
+        // No placeholder pre-inserted for assistant_message_id — exactly
+        // copilot's real state, since prepare_copilot_message mints the id
+        // without writing a row for it (KYO-572).
+        handle_copilot_agent_error(CopilotAgentErrorParams {
+            db: &db,
+            encryption_key: &key,
+            ws_manager: &manager,
+            user_id: "user-a",
+            session_id: "sess-copilot-err",
+            assistant_message_id,
+            context_type: "dashboard_copilot",
+            error: "workspace AI config could not be loaded",
+        })
+        .await;
+
+        let (status, _owner) =
+            crate::chat_service::get_message_status(&db, assistant_message_id)
+                .await
+                .expect("get_message_status should succeed")
+                .expect("the INSERT fallback must have written a row for assistant_message_id");
+        assert_eq!(
+            status,
+            crate::chat_service::MessageStatus::Error,
+            "copilot's error-fallback INSERT must set status=error at insert time — not \
+             leave the row at add_message's complete default, and not require a second \
+             UPDATE write to fix it up afterward"
+        );
+
+        let messages =
+            crate::chat_service::get_session_messages(&db, &key, "sess-copilot-err", 100)
+                .await
+                .expect("get_session_messages should succeed");
+        assert_eq!(
+            messages.len(),
+            1,
+            "exactly one assistant row for this turn's error"
+        );
+        assert!(
+            messages[0]
+                .content
+                .contains("workspace AI config could not be loaded"),
+            "the fallback row must hold the real error text; got {:?}",
+            messages[0].content
+        );
+    }
 }

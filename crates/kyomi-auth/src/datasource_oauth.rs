@@ -171,6 +171,16 @@ pub struct ProviderConfig {
 impl ProviderConfig {
     /// Extract provider config from a datasource's `connection_config` JSON.
     ///
+    /// `config` is the **raw, encrypted-at-rest** `connection_config` as read
+    /// from the database — `oauth_client_secret` is a `COMMON_SENSITIVE`
+    /// field (KYO-786) and is decrypted internally via
+    /// [`crate::credential_service::decrypt_connection_config_secrets`]
+    /// before it's read. Taking `key` here rather than requiring callers to
+    /// decrypt first closes the class of bug KYO-786 fixed: there were two
+    /// production call sites reading `connection_config` straight off a
+    /// `SELECT` and handing it to this function, both silently treating a
+    /// ciphertext client secret as if it were plaintext.
+    ///
     /// For Microsoft Enterprise, falls back to `MICROSOFT_OAUTH_CLIENT_ID` and
     /// `MICROSOFT_OAUTH_CLIENT_SECRET` env vars when per-datasource credentials
     /// are not configured. This matches the Python implementation where Kyomi
@@ -179,7 +189,11 @@ impl ProviderConfig {
     pub fn from_connection_config(
         provider: OAuthProvider,
         config: &serde_json::Value,
+        key: &[u8; 32],
     ) -> kyomi_core::Result<Self> {
+        let config = crate::credential_service::decrypt_connection_config_secrets(config, key)?;
+        let config = &config;
+
         // Read per-datasource client credentials from connection_config
         let config_client_id = config
             .get("oauth_client_id")
@@ -1166,10 +1180,34 @@ mod tests {
             "oauth_client_id": "my-client",
             "oauth_client_secret": "my-secret",
         });
-        let pc = ProviderConfig::from_connection_config(OAuthProvider::Snowflake, &config).unwrap();
+        let pc = ProviderConfig::from_connection_config(OAuthProvider::Snowflake, &config, &test_key()).unwrap();
         assert_eq!(pc.client_id, "my-client");
         assert_eq!(pc.client_secret, "my-secret");
         assert_eq!(pc.account_or_host, "xy12345.us-east-1");
+    }
+
+    #[test]
+    fn extract_snowflake_config_decrypts_an_encrypted_client_secret() {
+        // KYO-786 regression guard: `connection_config` as read from the
+        // database has oauth_client_secret encrypted at rest
+        // (COMMON_SENSITIVE). Without `from_connection_config` decrypting
+        // internally, `client_secret` here would be the raw ciphertext blob
+        // — which Snowflake's token endpoint would reject as `invalid_client`
+        // rather than authenticating with the real secret.
+        let key = test_key();
+        let ciphertext = crate::encryption::encrypt("my-real-secret", &key).unwrap();
+        let config = json!({
+            "account": "xy12345.us-east-1",
+            "oauth_client_id": "my-client",
+            "oauth_client_secret": ciphertext,
+        });
+
+        let pc = ProviderConfig::from_connection_config(OAuthProvider::Snowflake, &config, &key).unwrap();
+
+        assert_eq!(
+            pc.client_secret, "my-real-secret",
+            "from_connection_config must decrypt oauth_client_secret before returning it"
+        );
     }
 
     #[test]
@@ -1177,7 +1215,7 @@ mod tests {
         let config = json!({
             "oauth_client_id": "my-client",
         });
-        let result = ProviderConfig::from_connection_config(OAuthProvider::Snowflake, &config);
+        let result = ProviderConfig::from_connection_config(OAuthProvider::Snowflake, &config, &test_key());
         assert!(result.is_err());
     }
 
@@ -1189,7 +1227,7 @@ mod tests {
             "oauth_client_secret": "db-secret",
         });
         let pc =
-            ProviderConfig::from_connection_config(OAuthProvider::Databricks, &config).unwrap();
+            ProviderConfig::from_connection_config(OAuthProvider::Databricks, &config, &test_key()).unwrap();
         assert_eq!(pc.client_id, "db-client");
         assert_eq!(pc.account_or_host, "dbc-abc123.cloud.databricks.com");
     }
@@ -1204,6 +1242,7 @@ mod tests {
         let pc = ProviderConfig::from_connection_config(
             OAuthProvider::BigqueryEnterprise,
             &config,
+            &test_key(),
         )
         .unwrap();
         assert_eq!(pc.client_id, "google-client");
@@ -1220,6 +1259,7 @@ mod tests {
         let pc = ProviderConfig::from_connection_config(
             OAuthProvider::MicrosoftEnterprise,
             &config,
+            &test_key(),
         )
         .unwrap();
         assert_eq!(pc.account_or_host, "my-tenant-guid");
@@ -1233,6 +1273,7 @@ mod tests {
         let pc = ProviderConfig::from_connection_config(
             OAuthProvider::MicrosoftEnterprise,
             &config,
+            &test_key(),
         )
         .unwrap();
         assert_eq!(pc.account_or_host, "common");
@@ -1251,6 +1292,7 @@ mod tests {
         let pc = ProviderConfig::from_connection_config(
             OAuthProvider::MicrosoftEnterprise,
             &config,
+            &test_key(),
         )
         .unwrap();
         assert_eq!(pc.client_id, "env-ms-client");
@@ -1272,6 +1314,7 @@ mod tests {
         let pc = ProviderConfig::from_connection_config(
             OAuthProvider::MicrosoftEnterprise,
             &config,
+            &test_key(),
         )
         .unwrap();
         assert_eq!(pc.client_id, "ds-client");
@@ -1290,6 +1333,7 @@ mod tests {
         let result = ProviderConfig::from_connection_config(
             OAuthProvider::MicrosoftEnterprise,
             &config,
+            &test_key(),
         );
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
@@ -1302,7 +1346,7 @@ mod tests {
     #[test]
     fn missing_client_id_errors() {
         let config = json!({"account": "test"});
-        let result = ProviderConfig::from_connection_config(OAuthProvider::Snowflake, &config);
+        let result = ProviderConfig::from_connection_config(OAuthProvider::Snowflake, &config, &test_key());
         assert!(result.is_err());
     }
 

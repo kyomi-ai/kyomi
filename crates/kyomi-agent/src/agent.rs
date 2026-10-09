@@ -17,10 +17,11 @@
 //! 5. If tool calls: execute each tool, add results, continue loop
 
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
-use regex::{Regex, Replacer};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -53,12 +54,14 @@ pub(crate) const CHARTML_VALIDATION_LOG_UPDATE_SQL: &str =
 /// The categories correspond to the `error_type` column and are used for
 /// aggregation in prompt-tuning queries.
 pub(crate) fn classify_chartml_error(error: &str) -> &'static str {
-    if error.contains("invalid YAML") {
+    if error.contains("invalid YAML") || error.contains(" yaml ") {
         "yaml_parse"
     } else if error.contains("missing required key") {
         "missing_key"
-    } else if error.contains("SQL error") || error.contains("sql error") {
+    } else if error.contains("SQL error") || error.contains("sql error") || error.contains(" sql ") {
         "sql_error"
+    } else if error.contains(" schema ") || error.contains(" conversion ") || error.contains(" schema_initialization ") {
+        "schema_error"
     } else {
         "unknown"
     }
@@ -252,6 +255,25 @@ type ToolStartCallback = Box<dyn Fn(&str, &serde_json::Value) + Send + Sync>;
 /// Callback for tool end: `(tool_name, result, success)`.
 type ToolEndCallback = Box<dyn Fn(&str, &str, bool) + Send + Sync>;
 
+/// Callback fired at each agent-loop iteration boundary (KYO-493 phase 3),
+/// with the full message history so far (`&self.state.messages`).
+///
+/// Unlike the callbacks above, this one is awaited directly and in-line in
+/// the loop — never a detached `tokio::spawn` — so invocations are strictly
+/// sequential with no risk of the out-of-order completion the other
+/// callbacks' fire-and-forget spawns accept (see
+/// `ChatAgentAdapter::set_thinking_tracker`'s doc). That's what lets the
+/// adapter track a persisted-up-to index safely: a callback body can commit
+/// to "everything before index N is durably written" without a concurrent,
+/// still-running earlier call being able to invalidate it.
+///
+/// The `for<'a>` HRTB lets the closure borrow the messages slice rather
+/// than requiring the caller to clone the whole history every iteration —
+/// the returned future is free to hold that borrow across its own awaits,
+/// same as `async-trait`'s desugaring.
+pub(crate) type IterationBoundaryCallback =
+    Box<dyn for<'a> Fn(&'a [Message]) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> + Send + Sync>;
+
 // ---------------------------------------------------------------------------
 // AgentConfig
 // ---------------------------------------------------------------------------
@@ -359,8 +381,18 @@ impl AgentState {
 /// All callbacks are optional. They are invoked synchronously from the
 /// async agent loop, so implementations should be fast (e.g., send to
 /// a channel rather than doing I/O).
+pub(crate) enum AgentProgress {
+    Thinking(String),
+    Usage(u32, u32, Option<f64>),
+    ToolStart(String, serde_json::Value),
+    ToolEnd(String, String, bool),
+    Preparing,
+}
+pub(crate) type ProgressCallback = Box<dyn Fn(AgentProgress) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
 #[derive(Default)]
 pub struct AgentCallbacks {
+    pub(crate) on_progress: Option<ProgressCallback>,
     /// Called when the LLM emits thinking/reasoning content.
     pub on_thinking: Option<ThinkingCallback>,
     /// Called after each LLM call with (input_tokens, output_tokens, cost).
@@ -371,6 +403,12 @@ pub struct AgentCallbacks {
     pub on_tool_end: Option<ToolEndCallback>,
     /// Called when the agent is preparing its final response.
     pub on_preparing_response: Option<Box<dyn Fn() + Send + Sync>>,
+    /// Called at each agent-loop iteration boundary — after a tool-call
+    /// round's results are all appended to `state.messages`, before the
+    /// next LLM call — with the full message history so far (KYO-493 phase
+    /// 3). See [`IterationBoundaryCallback`] for why this one is awaited
+    /// in-line rather than spawned like the callbacks above.
+    pub on_iteration_boundary: Option<IterationBoundaryCallback>,
 }
 
 // ---------------------------------------------------------------------------
@@ -390,6 +428,7 @@ pub struct CustomAgent {
     state: AgentState,
     /// Progress callbacks.
     callbacks: AgentCallbacks,
+    runtime: Option<(agent_runtime::ExecutionContext, Arc<dyn agent_runtime::EventSink>)>,
     /// Tool registry (shared, immutable after construction).
     registry: Arc<ToolRegistry>,
     /// Context passed to tool execution.
@@ -412,6 +451,7 @@ impl CustomAgent {
             config,
             state: AgentState::new(),
             callbacks: AgentCallbacks::default(),
+            runtime: None,
             registry,
             tool_context,
             user_names,
@@ -440,6 +480,35 @@ impl CustomAgent {
     /// Mutable access to the callbacks (for setting up streaming).
     pub fn callbacks_mut(&mut self) -> &mut AgentCallbacks {
         &mut self.callbacks
+    }
+
+    pub(crate) fn set_runtime(&mut self, context: agent_runtime::ExecutionContext, sink: Arc<dyn agent_runtime::EventSink>) {
+        self.runtime = Some((context, sink));
+    }
+    async fn progress(&self, progress: AgentProgress) {
+        if let Some(callback) = &self.callbacks.on_progress { callback(progress).await; }
+    }
+
+    async fn record_validation(&self, passed: bool, diagnostic: &str) -> kyomi_core::Result<()> {
+        if let Some((context, sink)) = &self.runtime {
+            let key = format!("model-{}:validation", self.state.global_iteration);
+            let (text, detail) = context.text(&key, diagnostic, 8000);
+            sink.commit(&context.command(&key, agent_runtime::Payload::Public(agent_runtime::PublicPayload::Validation { passed, text }), detail))
+                .await.map_err(runtime_error)?;
+        }
+        Ok(())
+    }
+
+    async fn preparing(&self) -> kyomi_core::Result<()> {
+        if let Some((context, sink)) = &self.runtime {
+            let key = format!("model-{}:preparing", self.state.global_iteration);
+            let (text, detail) = context.text(&key, "Preparing response", 200);
+            sink.commit(&context.command(&key, agent_runtime::Payload::Public(agent_runtime::PublicPayload::Planning { text }), detail))
+                .await.map_err(runtime_error)?;
+        } else {
+            self.progress(AgentProgress::Preparing).await;
+        }
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -606,6 +675,7 @@ impl CustomAgent {
                 + response.usage.cache_creation_input_tokens
                 + response.usage.cache_read_input_tokens;
             self.state.last_input_tokens = total_input;
+            if self.runtime.is_none() { self.progress(AgentProgress::Usage(total_input, response.usage.output_tokens, response.cost)).await; }
             if let Some(ref cb) = self.callbacks.on_token_usage {
                 cb(
                     total_input,
@@ -633,6 +703,9 @@ impl CustomAgent {
             {
                 cb(thinking);
             }
+            if self.runtime.is_none() && let Some(thinking) = &response.thinking_content {
+                self.progress(AgentProgress::Thinking(thinking.clone())).await;
+            }
 
             // No tool calls -- this is the final response.
             if response.tool_calls.is_none() {
@@ -641,11 +714,13 @@ impl CustomAgent {
                 if let Some(ref cb) = self.callbacks.on_preparing_response {
                     cb();
                 }
+                self.preparing().await?;
 
                 // Validate ChartML blocks if present (YAML + SQL dry-run).
                 if has_chartml_blocks(&content)
                     && let Some(error_msg) = self.validate_chartml_blocks(&content).await
                 {
+                    self.record_validation(false, &error_msg).await?;
                     warn!(error = %error_msg, "ChartML validation failed, asking LLM to fix");
                     // Log validation failure for prompt-tuning analysis.
                     self.log_chartml_validation_error(
@@ -664,6 +739,7 @@ impl CustomAgent {
                     continue;
                 }
 
+                if has_chartml_blocks(&content) { self.record_validation(true, "Response schema and SQL validation passed").await?; }
                 // Validation passed — mark any previous retries for this session as succeeded.
                 if let Some(ref sid) = self.tool_context.session_id
                     && let Err(e) = kyomi_core::db_execute!(
@@ -695,15 +771,22 @@ impl CustomAgent {
             {
                 cb(&response.content);
             }
+            if self.runtime.is_none() && !response.content.is_empty() {
+                self.progress(AgentProgress::Thinking(response.content.clone())).await;
+            }
 
             // Add assistant message with tool calls.
             // Safety: guarded by `response.tool_calls.is_none()` early-return above.
             let tool_calls = response.tool_calls.expect("guarded by is_none check above");
             self.state.messages.push(Message::assistant_with_tool_calls(
-                response.content.clone(),
+                if self.runtime.is_some() && has_chartml_blocks(&response.content) { String::new() } else { response.content.clone() },
                 tool_calls.clone(),
             ));
 
+            // Complete compatibility transcript is visible before the first delayed tool.
+            if self.runtime.is_some() && let Some(callback) = &self.callbacks.on_iteration_boundary {
+                callback(&self.state.messages).await;
+            }
             // Check cancellation before tool execution.
             if cancel_token.is_cancelled() {
                 return Err(kyomi_core::Error::Internal("Request cancelled".into()));
@@ -711,6 +794,9 @@ impl CustomAgent {
 
             // Execute each tool call.
             for tool_call in &tool_calls {
+                if cancel_token.is_cancelled() {
+                    return Err(kyomi_core::Error::Internal("Request cancelled".into()));
+                }
                 // KYO-535: a provider marks `arguments_error` when it could
                 // not parse this call's arguments — almost always a
                 // `max_tokens` cutoff mid-payload. Do NOT execute the tool
@@ -728,7 +814,12 @@ impl CustomAgent {
                 // not malformed; send less), and `continue` the `for` loop
                 // exactly like a normal tool result — the outer `while` loop
                 // then gives the model another iteration to retry smaller.
-                let result = if tool_call.arguments_error.is_some() {
+                let result = if let Some((context, sink)) = &self.runtime {
+                    let tool = RuntimeTool { agent: self, call: tool_call, finish_reason: &response.finish_reason };
+                    context.tool(sink.as_ref(), &tool,
+                        agent_runtime::ToolCallId(context.identity("tool", &format!("call-{}-{}", self.state.global_iteration, tool_call.id))),
+                        tool_call.name.clone(), tool_call.arguments.clone()).await.map_err(runtime_error)?.text
+                } else if tool_call.arguments_error.is_some() {
                     truncated_arguments_message(tool_call, &response.finish_reason)
                 } else {
                     self.execute_tool(tool_call).await
@@ -738,11 +829,25 @@ impl CustomAgent {
                     &tool_call.name,
                     &result,
                 ));
+                if self.runtime.is_some() && let Some(callback) = &self.callbacks.on_iteration_boundary {
+                    callback(&self.state.messages).await;
+                }
             }
 
             // Check cancellation after tool execution.
             if cancel_token.is_cancelled() {
                 return Err(kyomi_core::Error::Internal("Request cancelled".into()));
+            }
+
+            // Iteration boundary (KYO-493 phase 3): the assistant
+            // tool-calls message and every tool-result message this
+            // iteration produced are now in `state.messages`. Fire before
+            // the ChartML check below, which can return early with a
+            // terminal assistant message of its own — that message must
+            // never be visible to this callback (it isn't durable yet;
+            // `persist_after_chat`/`execute_agent_chat`'s step 15 own it).
+            if let Some(ref cb) = self.callbacks.on_iteration_boundary {
+                cb(&self.state.messages).await;
             }
 
             // Check if assistant content has ChartML blocks -> validate (YAML + SQL) -> return if valid.
@@ -751,6 +856,7 @@ impl CustomAgent {
                     // Validation failed — store error as ephemeral retry context.
                     // The assistant message (with tool calls) is already persisted
                     // above, but the error instruction stays ephemeral.
+                    self.record_validation(false, &error_msg).await?;
                     warn!(error = %error_msg, "ChartML validation failed in tool response, asking LLM to fix");
                     // Log validation failure for prompt-tuning analysis.
                     self.log_chartml_validation_error(
@@ -760,6 +866,7 @@ impl CustomAgent {
                         "chat",
                     )
                     .await;
+                    if self.runtime.is_some() { chartml_retry_messages.push(Message::assistant(response.content.clone())); }
                     chartml_retry_messages.push(Message::user(format!(
                         "\u{1f916} SYSTEM: Automatic ChartML validation failed. The user has NOT seen your response yet. \
                          Please fix the following errors and then repeat your FULL response:\n\n{error_msg}"
@@ -767,6 +874,7 @@ impl CustomAgent {
                     continue;
                 }
 
+                self.record_validation(true, "Response schema and SQL validation passed").await?;
                 // Validation passed — mark any previous retries for this session as succeeded.
                 if let Some(ref sid) = self.tool_context.session_id
                     && let Err(e) = kyomi_core::db_execute!(
@@ -784,6 +892,7 @@ impl CustomAgent {
                 if let Some(ref cb) = self.callbacks.on_preparing_response {
                     cb();
                 }
+                self.preparing().await?;
                 self.state
                     .messages
                     .push(Message::assistant(&response.content));
@@ -844,6 +953,7 @@ impl CustomAgent {
         if let Some(ref cb) = self.callbacks.on_preparing_response {
             cb();
         }
+        self.preparing().await?;
 
         // The wrap-up is an LLM call like any other, so it counts.
         self.state.global_iteration += 1;
@@ -881,6 +991,7 @@ impl CustomAgent {
         let content = if has_chartml_blocks(&content) {
             match self.validate_chartml_blocks_detailed(&content).await {
                 Some((failing_indices, error_msg)) => {
+                    self.record_validation(false, &error_msg).await?;
                     warn!(
                         error = %error_msg,
                         "ChartML validation failed on the wrap-up turn — stripping the \
@@ -908,7 +1019,10 @@ impl CustomAgent {
                     // comment for the index contract.
                     strip_chartml_blocks(&content, &failing_indices)
                 }
-                None => content,
+                None => {
+                    self.record_validation(true, "Response schema and SQL validation passed").await?;
+                    content
+                },
             }
         } else {
             content
@@ -928,15 +1042,13 @@ impl CustomAgent {
         messages: &[Message],
         tools: &[Tool],
     ) -> kyomi_core::Result<crate::types::LLMResponse> {
-        self.client
-            .complete(
-                messages,
-                tools,
-                self.config.temperature,
-                self.config.max_tokens,
-                &self.user_names,
-            )
-            .await
+        let provider = RuntimeProvider { agent: self, messages, tools };
+        if let Some((context, sink)) = &self.runtime {
+            context.complete(&provider, sink.as_ref(), &agent_runtime::ModelCallId(format!("model-{}", self.state.global_iteration)))
+                .await.map_err(runtime_error)
+        } else {
+            self.client.complete(messages, tools, self.config.temperature, self.config.max_tokens, &self.user_names).await
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -954,6 +1066,7 @@ impl CustomAgent {
             );
         };
 
+        self.progress(AgentProgress::ToolStart(tool_call.name.clone(), tool_call.arguments.clone())).await;
         if let Some(ref cb) = self.callbacks.on_tool_start {
             cb(&tool_call.name, &tool_call.arguments);
         }
@@ -963,14 +1076,17 @@ impl CustomAgent {
             .await
         {
             Ok(result) => {
+                let success = tool.result_domain_outcome(&result) == agent_runtime::DomainOutcome::Succeeded;
+                self.progress(AgentProgress::ToolEnd(tool_call.name.clone(), result.clone(), success)).await;
                 if let Some(ref cb) = self.callbacks.on_tool_end {
-                    cb(&tool_call.name, &result, true);
+                    cb(&tool_call.name, &result, success);
                 }
                 result
             }
             Err(e) => {
                 let error_msg = format!("Tool '{}' failed: {}", tool_call.name, e);
                 warn!(tool = %tool_call.name, error = %e, "tool execution failed");
+                self.progress(AgentProgress::ToolEnd(tool_call.name.clone(), error_msg.clone(), false)).await;
                 if let Some(ref cb) = self.callbacks.on_tool_end {
                     cb(&tool_call.name, &error_msg, false);
                 }
@@ -1028,7 +1144,7 @@ impl CustomAgent {
 
     /// Validate ChartML blocks including SQL dry-run against actual datasources.
     ///
-    /// First runs YAML structure validation (required keys). If that passes,
+    /// First validates the authoritative ChartML JSON Schema. If that passes,
     /// extracts SQL queries and datasource slugs from each block and runs a
     /// dry-run against the real provider to catch invalid SQL before the user
     /// sees it.
@@ -1051,8 +1167,8 @@ impl CustomAgent {
     /// the whole response — see [`strip_chartml_blocks`].
     ///
     /// Runs the identical two-step validation as
-    /// [`Self::validate_chartml_blocks`] (YAML structure first, short-
-    /// circuiting before the SQL dry-run on failure — same as that method),
+    /// [`Self::validate_chartml_blocks`] (each block's schema first, followed
+    /// by all SQL sources of schema-valid blocks),
     /// so the two must never diverge in what they consider invalid. Returns
     /// `None` if all blocks are valid; otherwise the 0-based indices of every
     /// failing block (see [`chartml_block_errors`] for the indexing
@@ -1068,13 +1184,8 @@ impl CustomAgent {
             Some((indices, message))
         }
 
-        // Step 1: YAML structure validation (fast, synchronous).
-        let yaml_errors = chartml_block_errors(text);
-        if !yaml_errors.is_empty() {
-            return split(yaml_errors);
-        }
-
-        // Step 2: SQL dry-run via shared utility (same code path as dashboard tools).
+        // Validate every schema-valid block's SQL even if another block fails schema,
+        // so strip-and-degrade never preserves an unchecked SQL chart.
         let sql_errors = crate::tools::query_utils::chartml_sql_block_errors(
             &self.tool_context.query_context(),
             text,
@@ -1200,20 +1311,6 @@ fn has_chartml_blocks(text: &str) -> bool {
     text.contains("```chartml")
 }
 
-/// Compiled regex for extracting ChartML fenced code blocks.
-///
-/// Mirrors `crates/kyomi-agent/src/tools/query_utils.rs`'s `chartml_re()` —
-/// same literal pattern, because [`crate::tools::query_utils::extract_chartml_queries`]
-/// (the SQL dry-run path) must recognize exactly the blocks this module's
-/// validation and stripping both operate on. If the pattern ever needs to
-/// change, it must change in both places together.
-static CHARTML_RE: OnceLock<Regex> = OnceLock::new();
-
-fn chartml_re() -> &'static Regex {
-    CHARTML_RE
-        .get_or_init(|| Regex::new(r"```chartml\s*\n([\s\S]*?)\n```").expect("valid regex literal"))
-}
-
 /// Plain-text note substituted for a ChartML block stripped by
 /// [`strip_chartml_blocks`].
 ///
@@ -1230,59 +1327,22 @@ pub(crate) const CHARTML_STRIPPED_NOTE: &str = "A chart could not be generated f
 /// The primitive both [`validate_chartml_blocks`] (aggregate) and
 /// [`CustomAgent::validate_chartml_blocks_detailed`] (per-block) build on.
 /// Each entry's `usize` is the block's **0-based position** in
-/// `chartml_re()`'s capture-iteration order (`captures_iter(text)
-/// .enumerate()`), regardless of the 1-based block numbers embedded in the
+/// the shared markdown scanner's document order, regardless of the 1-based block numbers embedded in the
 /// human-readable message text. This is the same indexing contract
 /// [`crate::tools::query_utils::chartml_sql_block_errors`] and
 /// [`strip_chartml_blocks`] use — every function in this file and
 /// `query_utils.rs` that produces or consumes a block index agrees on it. A
 /// block that passes validation contributes no entry.
+#[cfg(test)]
 fn chartml_block_errors(text: &str) -> Vec<(usize, String)> {
-    let re = chartml_re();
-    let mut errors = Vec::new();
-
-    for (i, cap) in re.captures_iter(text).enumerate() {
-        let block_content = &cap[1];
-        let mut block_errors = Vec::new();
-
-        // Try to parse as YAML.
-        let parsed: Result<serde_yaml::Value, _> = serde_yaml::from_str(block_content);
-        match parsed {
-            Ok(value) => {
-                // Check for required keys.
-                let mapping = value.as_mapping();
-                let data_key = serde_yaml::Value::String("data".to_string());
-                let visualize_key = serde_yaml::Value::String("visualize".to_string());
-                let has_data = mapping.map(|m| m.contains_key(&data_key)).unwrap_or(false);
-                let has_visualize = mapping
-                    .map(|m| m.contains_key(&visualize_key))
-                    .unwrap_or(false);
-
-                if !has_data {
-                    block_errors.push(format!("Block {}: missing required key 'data'", i + 1));
-                }
-                if !has_visualize {
-                    block_errors
-                        .push(format!("Block {}: missing required key 'visualize'", i + 1));
-                }
-            }
-            Err(e) => {
-                block_errors.push(format!("Block {}: invalid YAML: {}", i + 1, e));
-            }
-        }
-
-        if !block_errors.is_empty() {
-            errors.push((i, block_errors.join("; ")));
-        }
-    }
-
-    errors
+    kyomi_core::chartml_validation::validate_markdown_schema(text)
+        .into_iter().map(|e| (e.block - 1, e.to_string())).collect()
 }
 
 /// Validate ChartML blocks in the text (YAML structure only, no SQL).
 ///
 /// Extracts all ` ```chartml ... ``` ` blocks, parses each as YAML, and
-/// checks for required keys (`data` and `visualize`). Thin aggregate wrapper
+/// validates the authoritative ChartML JSON Schema. Thin aggregate wrapper
 /// over [`chartml_block_errors`] — see that function for the per-block
 /// primitive.
 ///
@@ -1313,35 +1373,10 @@ fn validate_chartml_blocks(text: &str) -> Option<String> {
 /// `strip_chartml_blocks_replacement_is_not_dollar_expanded`) without
 /// depending on [`CHARTML_STRIPPED_NOTE`] staying free of `$` forever.
 ///
-/// `failing_indices` must be 0-based positions in `chartml_re()`'s
-/// capture-iteration order — see [`chartml_block_errors`]'s doc comment for
-/// the shared contract. Passing indices computed under a different ordering
-/// silently strips the wrong block.
-///
-/// The replacement is applied via [`regex::NoExpand`], not passed as a bare
-/// `&str` to `replace_all`. `regex`'s `Replacer` impl for `&str` expands
-/// `$1`/`${name}` capture references, and the pattern here has exactly one
-/// capture group holding the raw (possibly invalid) block content —
-/// passing `replacement` directly would silently reinject that content into
-/// the "sanitized" output the moment `replacement` ever contains a `$`.
-/// `NoExpand` closes that off by construction: it copies its string
-/// verbatim, so no future edit to a replacement string can reopen this bug
-/// without also changing this function.
+/// Indices use the shared scanner's document order. Replacement is copied
+/// literally, including dollar signs, and unclosed trailing blocks are covered.
 fn strip_chartml_blocks_with(text: &str, failing_indices: &[usize], replacement: &str) -> String {
-    let mut index = 0usize;
-    chartml_re()
-        .replace_all(text, |caps: &regex::Captures<'_>| {
-            let this_index = index;
-            index += 1;
-            let mut out = String::new();
-            if failing_indices.contains(&this_index) {
-                regex::NoExpand(replacement).replace_append(caps, &mut out);
-            } else {
-                out.push_str(&caps[0]);
-            }
-            out
-        })
-        .into_owned()
+    kyomi_core::chartml_validation::strip_markdown_blocks(text, failing_indices, replacement)
 }
 
 /// Replace only the ChartML blocks at `failing_indices` with
@@ -1361,6 +1396,71 @@ fn strip_chartml_blocks(text: &str, failing_indices: &[usize]) -> String {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+fn runtime_error(error: agent_runtime::ExecutionError) -> kyomi_core::Error {
+    kyomi_core::Error::ServiceUnavailable(error.to_string())
+}
+struct RuntimeProvider<'a> {
+    agent: &'a CustomAgent,
+    messages: &'a [Message],
+    tools: &'a [Tool],
+}
+#[async_trait::async_trait]
+impl agent_runtime::CompleteProvider for RuntimeProvider<'_> {
+    type Response = crate::types::LLMResponse;
+    async fn complete(&self) -> Result<(Self::Response, agent_runtime::ResponseRecord), agent_runtime::ExecutionError> {
+        let response = self.agent.client.complete(self.messages, self.tools, self.agent.config.temperature,
+            self.agent.config.max_tokens, &self.agent.user_names).await
+            .map_err(|error| agent_runtime::ExecutionError::Provider(error.to_string()))?;
+        let mut planning = Vec::new();
+        if let Some(thought) = response.thinking_content.as_deref().and_then(crate::thinking::clean_thought) {
+            planning.push(thought.full_text.unwrap_or(thought.display));
+        }
+        // A chart-bearing candidate becomes public only after product schema/SQL validation.
+        if response.tool_calls.is_some() && !has_chartml_blocks(&response.content)
+            && let Some(thought) = crate::thinking::clean_thought(&response.content)
+        {
+            planning.push(thought.full_text.unwrap_or(thought.display));
+        }
+        let raw = if response.raw_response.is_null() {
+            serde_json::to_value(&response).map_err(|error| agent_runtime::ExecutionError::Provider(error.to_string()))?
+        } else { response.raw_response.clone() };
+        let record = agent_runtime::ResponseRecord { continuation: raw.clone(), raw, cost: response.cost,
+            candidate: response.content.clone(), planning,
+            usage: agent_runtime::Usage {
+                input_tokens: u64::from(response.usage.input_tokens) + u64::from(response.usage.cache_creation_input_tokens)
+                    + u64::from(response.usage.cache_read_input_tokens),
+                output_tokens: u64::from(response.usage.output_tokens),
+            },
+        };
+        Ok((response, record))
+    }
+}
+struct RuntimeTool<'a> {
+    agent: &'a CustomAgent,
+    call: &'a ToolCall,
+    finish_reason: &'a str,
+}
+#[async_trait::async_trait]
+impl agent_runtime::ToolExecution for RuntimeTool<'_> {
+    async fn execute(&self) -> agent_runtime::ToolOutcome {
+        use agent_runtime::{DomainOutcome, ToolOutcome, TransportOutcome};
+        if self.call.arguments_error.is_some() {
+            return ToolOutcome { transport: TransportOutcome::Failed, domain: DomainOutcome::Rejected,
+                text: truncated_arguments_message(self.call, self.finish_reason) };
+        }
+        let Some(tool) = self.agent.registry.get_tool(&self.call.name) else {
+            return ToolOutcome { transport: TransportOutcome::Failed, domain: DomainOutcome::Rejected,
+                text: format!("Error: Unknown tool '{}'. Available tools: {}", self.call.name, self.agent.registry.tool_names().join(", ")) };
+        };
+        match tool.execute(self.call.arguments.clone(), &self.agent.tool_context).await {
+            Ok(text) => ToolOutcome { transport: TransportOutcome::Completed,
+                domain: tool.result_domain_outcome(&text), text },
+            Err(error) => ToolOutcome { transport: TransportOutcome::Failed, domain: tool.failure_domain_outcome(),
+                text: format!("Tool '{}' failed: {}", self.call.name, error) },
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1423,7 +1523,7 @@ mod tests {
 
     #[test]
     fn validate_chartml_blocks_valid() {
-        let text = "Chart:\n```chartml\ndata:\n  query: SELECT 1\nvisualize:\n  type: bar\n```";
+        let text = "Chart:\n```chartml\ntype: chart\nversion: 1\ndata:\n  datasource: test\n  query: SELECT 1\nvisualize:\n  type: bar\n```";
         assert!(validate_chartml_blocks(text).is_none());
     }
 
@@ -1432,7 +1532,7 @@ mod tests {
         let text = "Chart:\n```chartml\n{invalid: yaml: [:\n```";
         let result = validate_chartml_blocks(text);
         assert!(result.is_some());
-        assert!(result.unwrap().contains("invalid YAML"));
+        assert!(result.unwrap().contains("yaml"));
     }
 
     #[test]
@@ -1440,15 +1540,15 @@ mod tests {
         let text = "Chart:\n```chartml\nvisualize:\n  type: bar\n```";
         let result = validate_chartml_blocks(text);
         assert!(result.is_some());
-        assert!(result.unwrap().contains("missing required key 'data'"));
+        assert!(result.unwrap().contains("data"));
     }
 
     #[test]
     fn validate_chartml_blocks_missing_visualize_key() {
-        let text = "Chart:\n```chartml\ndata:\n  query: SELECT 1\n```";
+        let text = "Chart:\n```chartml\ntype: chart\nversion: 1\ndata:\n  datasource: test\n  query: SELECT 1\n```";
         let result = validate_chartml_blocks(text);
         assert!(result.is_some());
-        assert!(result.unwrap().contains("missing required key 'visualize'"));
+        assert!(result.unwrap().contains("visualize"));
     }
 
     #[test]
@@ -1457,14 +1557,14 @@ mod tests {
         let result = validate_chartml_blocks(text);
         assert!(result.is_some());
         let err = result.unwrap();
-        assert!(err.contains("missing required key 'data'"));
-        assert!(err.contains("missing required key 'visualize'"));
+        assert!(err.contains("data"));
+        assert!(err.contains("visualize"));
     }
 
     #[test]
     fn validate_chartml_blocks_multiple_blocks_one_invalid() {
         let text = "\
-Chart 1:\n```chartml\ndata:\n  query: SELECT 1\nvisualize:\n  type: bar\n```\n\
+Chart 1:\n```chartml\ntype: chart\nversion: 1\ndata:\n  datasource: test\n  query: SELECT 1\nvisualize:\n  type: bar\n```\n\
 Chart 2:\n```chartml\ntitle: Bad\n```";
         let result = validate_chartml_blocks(text);
         assert!(result.is_some());
@@ -1481,20 +1581,16 @@ Chart 2:\n```chartml\ntitle: Bad\n```";
 
     #[test]
     fn validate_chartml_blocks_partial_closing_fence() {
-        // ```chartml block without a closing ``` — the regex won't match, so
-        // has_chartml_blocks returns true but validate_chartml_blocks finds no
-        // captures and returns None (no error).
-        let text = "Chart:\n```chartml\ndata:\n  query: SELECT 1\nvisualize:\n  type: bar\n";
+        let text = "Chart:\n```chartml\ntype: chart\nversion: 99";
         assert!(has_chartml_blocks(text));
-        // Regex requires `\n` ``` ` so unclosed blocks are not captured.
-        assert!(validate_chartml_blocks(text).is_none());
+        assert!(validate_chartml_blocks(text).is_some());
     }
 
     // -- strip_chartml_blocks tests (KYO-347) --------------------------------
 
     #[test]
     fn strip_chartml_blocks_single_block() {
-        let text = "Before\n```chartml\ndata:\n  x: 1\n```\nAfter";
+        let text = "Before\n```chartml\ntype: chart\nversion: 1\ndata:\n  x: 1\n```\nAfter";
         assert_eq!(
             strip_chartml_blocks(text, &[0]),
             format!("Before\n{CHARTML_STRIPPED_NOTE}\nAfter")
@@ -1545,7 +1641,7 @@ D";
 
     #[test]
     fn strip_chartml_blocks_preserves_surrounding_prose_verbatim() {
-        let text = "Intro paragraph with **markdown**.\n\n```chartml\ndata:\n  x: 1\n```\n\nOutro paragraph.";
+        let text = "Intro paragraph with **markdown**.\n\n```chartml\ntype: chart\nversion: 1\ndata:\n  x: 1\n```\n\nOutro paragraph.";
         let result = strip_chartml_blocks(text, &[0]);
         assert!(
             result.starts_with("Intro paragraph with **markdown**.\n\n"),
@@ -1565,13 +1661,9 @@ D";
     }
 
     #[test]
-    fn strip_chartml_blocks_unterminated_fence_is_unchanged() {
-        // No closing fence -- the same asymmetry as
-        // `validate_chartml_blocks_partial_closing_fence` above: the regex
-        // requires `\n` ``` ` to close a block, so an unterminated fence
-        // never matches and passes through untouched.
-        let text = "```chartml\ndata:\n  x: 1\n";
-        assert_eq!(strip_chartml_blocks(text, &[0]), text);
+    fn strip_chartml_blocks_unterminated_fence_is_stripped() {
+        let text = "Prose\n```chartml\ntype: chart\nversion: 99";
+        assert_eq!(strip_chartml_blocks(text, &[0]), format!("Prose\n{CHARTML_STRIPPED_NOTE}"));
     }
 
     #[test]
@@ -1760,15 +1852,15 @@ D";
     #[test]
     fn validate_chartml_blocks_valid_with_extra_keys() {
         // Additional keys beyond data and visualize are allowed.
-        let text = "Chart:\n```chartml\ntitle: Revenue\ndata:\n  query: SELECT 1\nvisualize:\n  type: bar\nlayout:\n  colSpan: 6\n```";
+        let text = "Chart:\n```chartml\ntype: chart\nversion: 1\ntitle: Revenue\ndata:\n  datasource: test\n  query: SELECT 1\nvisualize:\n  type: bar\nlayout:\n  colSpan: 6\n```";
         assert!(validate_chartml_blocks(text).is_none());
     }
 
     #[test]
     fn validate_chartml_blocks_multiple_valid_blocks() {
         let text = "\
-Chart 1:\n```chartml\ndata:\n  query: SELECT 1\nvisualize:\n  type: bar\n```\n\
-Chart 2:\n```chartml\ndata:\n  query: SELECT 2\nvisualize:\n  type: line\n```";
+Chart 1:\n```chartml\ntype: chart\nversion: 1\ndata:\n  datasource: test\n  query: SELECT 1\nvisualize:\n  type: bar\n```\n\
+Chart 2:\n```chartml\ntype: chart\nversion: 1\ndata:\n  datasource: test\n  query: SELECT 2\nvisualize:\n  type: line\n```";
         assert!(validate_chartml_blocks(text).is_none());
     }
 
@@ -1785,20 +1877,16 @@ Chart 2:\n```chartml\ndata:\n  query: SELECT 2\nvisualize:\n  type: line\n```";
     fn has_chartml_blocks_case_sensitive() {
         // Must be exactly ```chartml, not ```ChartML.
         assert!(!has_chartml_blocks(
-            "```ChartML\ndata:\n  query: SELECT 1\n```"
+            "```ChartML\ndata:\n  datasource: test\n  query: SELECT 1\n```"
         ));
         assert!(!has_chartml_blocks(
-            "```CHARTML\ndata:\n  query: SELECT 1\n```"
+            "```CHARTML\ndata:\n  datasource: test\n  query: SELECT 1\n```"
         ));
     }
 
     #[test]
     fn validate_chartml_blocks_malformed_closing_fence() {
-        // If there is no closing ``` after ```chartml, the regex won't match.
-        let text = "```chartml\ndata:\n  query: SELECT 1\nvisualize:\n  type: bar";
-        let result = validate_chartml_blocks(text);
-        // Should return None (no blocks found by the regex).
-        assert!(result.is_none());
+        assert!(validate_chartml_blocks("```chartml\ntype: chart\nversion: 99").is_some());
     }
 
     // -- Contract: build_llm_context without system prompt -------------------
@@ -1958,189 +2046,19 @@ Chart 2:\n```chartml\ndata:\n  query: SELECT 2\nvisualize:\n  type: line\n```";
     // Iteration budget: scripted-provider harness
     // -----------------------------------------------------------------------
 
-    use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
-    use async_trait::async_trait;
     use serde_json::json;
 
-    use crate::tools::AgentTool;
-    use crate::types::{AgentTokenUsage, LLMResponse, MessageRole};
+    use crate::types::{AgentTokenUsage, MessageRole};
 
-    /// Name of the single tool registered by [`scripted_agent`].
-    const NOOP_TOOL_NAME: &str = "noop";
-
-    /// A tool that does nothing, registered so the tool slice the agent hands
-    /// to the LLM during the loop is non-empty — without it, "the wrap-up call
-    /// passes no tools" would hold vacuously.
-    struct NoopTool;
-
-    #[async_trait]
-    impl AgentTool for NoopTool {
-        fn name(&self) -> &str {
-            NOOP_TOOL_NAME
-        }
-
-        fn description(&self) -> &str {
-            "Does nothing."
-        }
-
-        fn parameters_schema(&self) -> serde_json::Value {
-            json!({"type": "object", "properties": {}})
-        }
-
-        async fn execute(
-            &self,
-            _args: serde_json::Value,
-            _ctx: &ToolContext,
-        ) -> kyomi_core::Result<String> {
-            Ok("noop".to_string())
-        }
-    }
-
-    /// What [`ScriptedProvider`] returns for one `complete` call.
-    #[derive(Clone)]
-    enum Reply {
-        /// A plain text answer — ends the agent loop. Carries the default
-        /// (zero) token usage; use `TextWithUsage` when a test needs to
-        /// drive `max_total_tokens`.
-        Text(String),
-        /// A single tool call — drives the loop into another iteration.
-        /// Carries the default (zero) token usage; use `ToolCallWithUsage`
-        /// when a test needs to drive `max_total_tokens`.
-        ToolCall,
-        /// A single tool call carrying explicit token usage — needed by the
-        /// token-ceiling and cache-read tests, which must control exactly
-        /// how many billable tokens each iteration contributes.
-        ToolCallWithUsage(AgentTokenUsage),
-        /// A single tool call preceded by `tokio::time::sleep(duration)` —
-        /// needed by the deadline test, which drives the wall-clock guard
-        /// under a paused tokio clock (`#[tokio::test(start_paused =
-        /// true)]`) rather than a real sleep.
-        SlowToolCall(Duration),
-        /// A provider failure.
-        Failure(String),
-        /// A single tool call whose arguments the provider could not parse
-        /// (KYO-535) — carries `finish_reason: "max_tokens"`, matching the
-        /// truncation-mid-payload shape the ticket traces to. Drives the
-        /// loop into another iteration, same as `ToolCall`, but the noop
-        /// tool must NOT be executed for it.
-        TruncatedToolCall,
-    }
-
-    /// Build a single-tool-call [`LLMResponse`] carrying the given usage.
-    ///
-    /// Shared by the `ToolCall`, `ToolCallWithUsage`, and `SlowToolCall`
-    /// branches of [`ScriptedProvider::complete`] so the noop-tool-call
-    /// shape (id, name, empty arguments) is defined exactly once.
-    fn tool_call_response(usage: AgentTokenUsage) -> LLMResponse {
-        LLMResponse {
-            content: String::new(),
-            finish_reason: "tool_use".to_string(),
-            usage,
-            tool_calls: Some(vec![ToolCall {
-                id: "tc_1".to_string(),
-                name: NOOP_TOOL_NAME.to_string(),
-                arguments: json!({}),
-                arguments_error: None,
-            }]),
-            cost: None,
-            thinking_content: None,
-        }
-    }
-
-    /// One recorded `LLMProvider::complete` invocation.
-    #[derive(Debug)]
-    struct RecordedCall {
-        messages: Vec<Message>,
-        tools: Vec<Tool>,
-    }
-
-    impl RecordedCall {
-        /// Messages in this call that carry an iteration-budget notice.
-        fn budget_notices(&self) -> Vec<&Message> {
-            self.messages
-                .iter()
-                .filter(|m| m.content.contains(BUDGET_NOTICE_PREFIX))
-                .collect()
-        }
-    }
-
-    /// An [`LLMProvider`] that records every call it receives and replays a
-    /// fixed script of replies.
-    struct ScriptedProvider {
-        script: Mutex<VecDeque<Reply>>,
-        /// Replayed once the script runs out (e.g. "keeps calling tools").
-        after_script: Reply,
-        calls: Arc<Mutex<Vec<RecordedCall>>>,
-    }
-
-    #[async_trait]
-    impl LLMProvider for ScriptedProvider {
-        async fn complete(
-            &self,
-            messages: &[Message],
-            tools: &[Tool],
-            _temperature: Option<f32>,
-            _max_tokens: u32,
-            _user_names: &HashMap<String, String>,
-        ) -> kyomi_core::Result<LLMResponse> {
-            self.calls
-                .lock()
-                .expect("call log mutex")
-                .push(RecordedCall {
-                    messages: messages.to_vec(),
-                    tools: tools.to_vec(),
-                });
-
-            let reply = self
-                .script
-                .lock()
-                .expect("script mutex")
-                .pop_front()
-                .unwrap_or_else(|| self.after_script.clone());
-
-            match reply {
-                Reply::Text(content) => Ok(LLMResponse {
-                    content,
-                    finish_reason: "end_turn".to_string(),
-                    usage: AgentTokenUsage::default(),
-                    tool_calls: None,
-                    cost: None,
-                    thinking_content: None,
-                }),
-                Reply::ToolCall => Ok(tool_call_response(AgentTokenUsage::default())),
-                Reply::ToolCallWithUsage(usage) => Ok(tool_call_response(usage)),
-                Reply::SlowToolCall(duration) => {
-                    tokio::time::sleep(duration).await;
-                    Ok(tool_call_response(AgentTokenUsage::default()))
-                }
-                Reply::Failure(message) => Err(kyomi_core::Error::Internal(message)),
-                Reply::TruncatedToolCall => Ok(LLMResponse {
-                    content: String::new(),
-                    finish_reason: "max_tokens".to_string(),
-                    usage: AgentTokenUsage::default(),
-                    tool_calls: Some(vec![ToolCall {
-                        id: "tc_truncated".to_string(),
-                        name: NOOP_TOOL_NAME.to_string(),
-                        arguments: json!({}),
-                        arguments_error: Some(
-                            "arguments could not be parsed as JSON (finish_reason=max_tokens): \
-                             EOF while parsing an object"
-                                .to_string(),
-                        ),
-                    }]),
-                    cost: None,
-                    thinking_content: None,
-                }),
-            }
-        }
-
-        fn model(&self) -> &str {
-            "scripted-model"
-        }
-    }
+    // ScriptedProvider, Reply, NoopTool, RecordedCall — extracted to
+    // `crate::test_support` (KYO-493 phase 3) so `adapter.rs`'s tests can
+    // drive the same ToolCall-then-Text scripting through a full
+    // `ChatAgentAdapter::chat()` turn without a second copy. See that
+    // module's doc comment on the extraction.
+    use crate::test_support::{NoopTool, RecordedCall, Reply, ScriptedProvider};
 
     /// Build a `ToolContext` over an in-memory sqlite pool and in-memory KV
     /// store. `session_id: None` keeps the agent off the ChartML validation
@@ -2574,7 +2492,7 @@ Chart 2:\n```chartml\ndata:\n  query: SELECT 2\nvisualize:\n  type: line\n```";
         // `validate_chartml_sql` returns `None` without touching a real
         // datasource — this block is valid on structure alone.
         let valid_chartml =
-            "Here is your chart:\n```chartml\ndata:\n  values: []\nvisualize:\n  type: bar\n```\nDone.";
+            "Here is your chart:\n```chartml\ntype: chart\nversion: 1\ndata:\n  provider: inline\n  rows: []\nvisualize:\n  type: bar\n```\nDone.";
         let script = vec![Reply::ToolCall; 2];
         let (mut agent, _calls) =
             scripted_agent(2, script, Reply::Text(valid_chartml.to_string())).await;
@@ -2605,7 +2523,7 @@ Chart 2:\n```chartml\ndata:\n  query: SELECT 2\nvisualize:\n  type: line\n```";
         // `datasource`, so it is valid on structure alone (same reasoning as
         // `wrap_up_response_with_valid_chartml_is_returned_unchanged`).
         // Second block: missing the required `data` key entirely.
-        let mixed_chartml = "First chart:\n```chartml\ndata:\n  values: []\n\
+        let mixed_chartml = "First chart:\n```chartml\ntype: chart\nversion: 1\ndata:\n  provider: inline\n  rows: []\n\
 visualize:\n  type: bar\n```\nSecond chart:\n```chartml\nvisualize:\n  type: line\n```\nDone.";
         let script = vec![Reply::ToolCall; 2];
         let (mut agent, _calls) =
@@ -2617,7 +2535,7 @@ visualize:\n  type: bar\n```\nSecond chart:\n```chartml\nvisualize:\n  type: lin
             .expect("chat should complete — strip-and-degrade, not an error");
 
         let expected = format!(
-            "First chart:\n```chartml\ndata:\n  values: []\nvisualize:\n  type: bar\n```\n\
+            "First chart:\n```chartml\ntype: chart\nversion: 1\ndata:\n  provider: inline\n  rows: []\nvisualize:\n  type: bar\n```\n\
 Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
         );
         assert_eq!(
@@ -2625,6 +2543,56 @@ Second chart:\n{CHARTML_STRIPPED_NOTE}\nDone."
             "the valid first block must survive byte-identically; only the invalid \
              second block becomes the stripped-note text"
         );
+    }
+
+    #[tokio::test]
+    async fn wrap_up_chartml_mixed_schema_failure_still_checks_other_sql_blocks() {
+        let inline = "```chartml\ntype: chart\nversion: 1\ndata: {provider: inline, rows: []}\nvisualize: {type: bar}\n```";
+        let unavailable = "```chartml\ntype: chart\nversion: 1\ndata: {datasource: absent, query: SELECT 1}\nvisualize: {type: bar}\n```";
+        let invalid = "```chartml\ntype: chart\nversion: 1\ndata: {provider: inline, rows: []}\nvisualize: {type: wrong}\n```";
+        let content = format!("{inline}\n{unavailable}\n{invalid}");
+        let (mut agent, _) = scripted_agent(2, vec![Reply::ToolCall; 2], Reply::Text(content)).await;
+        let answer = agent.chat("hello", CancellationToken::new(), None, None, None).await.unwrap();
+        assert_eq!(answer, format!("{inline}\n{CHARTML_STRIPPED_NOTE}\n{CHARTML_STRIPPED_NOTE}"));
+    }
+
+    #[tokio::test]
+    async fn wrap_up_chartml_unclosed_named_query_and_dependencies_are_stripped() {
+        let inline = "```chartml\ntype: chart\nversion: 1\ndata: {provider: inline, rows: []}\nvisualize: {type: bar}\n```";
+        let definition = "```chartml\ntype: source\nversion: 1\nname: shared\ndatasource: absent\nquery: SELECT {{missing}}\n```";
+        let dependent = "```chartml\ntype: chart\nversion: 1\ndata: {query: shared}\nvisualize: {type: bar}\n```";
+        let unclosed = "```chartml\ntype: chart\nversion: 1\ndata: {query: {datasource: absent, query: SELECT 1}}\nvisualize: {type: bar}";
+        let content = format!("{inline}\n{definition}\n{dependent}\n{unclosed}");
+        let (mut agent, _) = scripted_agent(2, vec![Reply::ToolCall; 2], Reply::Text(content)).await;
+        let answer = agent.chat("hello", CancellationToken::new(), None, None, None).await.unwrap();
+        assert_eq!(answer, format!("{inline}\n{CHARTML_STRIPPED_NOTE}\n{CHARTML_STRIPPED_NOTE}\n{CHARTML_STRIPPED_NOTE}"));
+        assert_eq!(agent.state().messages.last().unwrap().content, answer);
+    }
+
+    #[tokio::test]
+    async fn wrap_up_chartml_bare_fence_prefix_and_lost_defaults_are_stripped() {
+        let prefix = "```\n```chartml\ntype: chart\nversion: 99";
+        let (mut agent, _) = scripted_agent(2, vec![Reply::ToolCall; 2], Reply::Text(prefix.into())).await;
+        let answer = agent.chat("hello", CancellationToken::new(), None, None, None).await.unwrap();
+        assert_eq!(answer, format!("```\n{CHARTML_STRIPPED_NOTE}"));
+        let owner = "```chartml\n- type: params\n  version: 1\n  name: defaults\n  params: [{id: amount, type: number, label: Amount, default: 2}]\n- type: source\n  version: 1\n  name: bad\n  datasource: absent\n  query: BAD SQL\n```";
+        let consumer = "```chartml\ntype: chart\nversion: 1\ndata: {datasource: absent, query: 'SELECT {{amount}}'}\nvisualize: {type: table}\n```";
+        let (mut agent, _) = scripted_agent(2, vec![Reply::ToolCall; 2], Reply::Text(format!("{owner}\n{consumer}"))).await;
+        let answer = agent.chat("hello", CancellationToken::new(), None, None, None).await.unwrap();
+        assert_eq!(answer, format!("{CHARTML_STRIPPED_NOTE}\n{CHARTML_STRIPPED_NOTE}"));
+    }
+
+    #[tokio::test]
+    async fn final_chartml_bare_prefix_and_parameter_failures_trigger_retry() {
+        for content in [
+            "```\n```chartml\ntype: chart\nversion: 99",
+            "```chartml\n- type: params\n  version: 1\n  name: defaults\n  params: [{id: amount, type: number, label: Amount, default: 2}]\n- type: source\n  version: 1\n  name: bad\n  datasource: absent\n  query: BAD SQL\n```\n```chartml\ntype: chart\nversion: 1\ndata: {datasource: absent, query: 'SELECT {{amount}}'}\nvisualize: {type: table}\n```"
+        ] {
+            let (mut agent, _) = scripted_agent(6, vec![Reply::Text(content.into()), Reply::Text("Corrected answer".into())], Reply::Text("unused".into())).await;
+            let answer = agent.chat("hello", CancellationToken::new(), None, None, None).await.unwrap();
+            assert_eq!(answer, "Corrected answer");
+            assert_eq!(agent.state().messages.last().unwrap().content, answer);
+        }
     }
 
     #[tokio::test]

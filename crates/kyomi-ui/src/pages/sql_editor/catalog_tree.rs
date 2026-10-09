@@ -18,7 +18,7 @@ use leptos::prelude::*;
 use phosphor_leptos::Icon;
 use crate::components::{Button, ButtonSize, ButtonVariant, Skeleton};
 use crate::pages::sql_editor::types::{CatalogNode, CatalogNodeType};
-use crate::query_cache::use_query;
+use crate::query_cache::use_optional_query;
 use crate::server_fns::sql_editor::get_catalog_tree;
 
 // ─── Main component ────────────────────────────────────────────────────────
@@ -53,20 +53,9 @@ pub fn CatalogTree(
     // Track expanded nodes by their full name / ID.
     let (expanded_nodes, set_expanded_nodes) = signal(HashSet::<String>::new());
 
-    // Fetch catalog tree reactively when datasource or refresh trigger changes.
-    // Deps are (slug, trigger) — both Serialize. Empty slug is passed through
-    // to the server fn which will return an error; the view handles the
-    // "no datasource" case by checking for an empty slug before showing data.
-    let catalog_data = use_query(
-        "catalog",
-        move || {
-            (
-                datasource_slug.try_get().flatten().unwrap_or_default(),
-                refresh_trigger.try_get().unwrap_or(0),
-            )
-        },
-        |(slug, _trigger)| get_catalog_tree(slug, true),
-    );
+    let catalog_data = use_catalog_query(datasource_slug, refresh_trigger, |(slug, _)| {
+        get_catalog_tree(slug, true)
+    });
 
     // Reset expanded nodes when datasource changes.
     Effect::new(move |_| {
@@ -146,6 +135,31 @@ pub fn CatalogTree(
             }
         }}
     }
+}
+
+/// Both catalog surfaces share this fetch path. Capture owned dependencies
+/// before fetching so cached refetches never read component-owned signals.
+fn use_catalog_query<T, F, Fut>(
+    datasource_slug: Signal<Option<String>>,
+    refresh_trigger: Signal<u32>,
+    fetcher: F,
+) -> Signal<Option<Result<T, ServerFnError>>>
+where
+    T: Clone + Send + Sync + 'static,
+    F: Fn((String, u32)) -> Fut + Copy + 'static,
+    Fut: std::future::Future<Output = Result<T, ServerFnError>> + 'static,
+{
+    use_optional_query(
+        "catalog",
+        move || {
+            // Read both dependencies even while disabled, so selecting a
+            // datasource and refreshing keep the query reactive.
+            let slug = datasource_slug.try_get().flatten();
+            let refresh = refresh_trigger.try_get().unwrap_or(0);
+            slug.filter(|slug| !slug.is_empty()).map(|slug| (slug, refresh))
+        },
+        fetcher,
+    )
 }
 
 // ─── Loading skeleton ───────────────────────────────────────────────────────
@@ -482,4 +496,230 @@ fn node_matches_search(node: &CatalogNode, query: &str) -> bool {
     node.children
         .iter()
         .any(|child| node_matches_search(child, query))
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod catalog_query_tests {
+    use super::*;
+    use crate::query_cache::provide_query_cache;
+
+    // Drive the production hook, including its synchronous initial cache
+    // lookup. The fetch seam records calls before returning a real result.
+    #[tokio::test]
+    async fn initial_missing_datasource_never_invokes_the_catalog_fetcher() {
+        let _ = any_spawner::Executor::init_tokio();
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                for initial in [None, Some(String::new())] {
+                    let owner = Owner::new();
+                    let (calls, data) = owner.with(|| {
+                        provide_query_cache();
+                        let calls = RwSignal::new(0);
+                        let data = use_catalog_query(
+                            Signal::stored(initial),
+                            Signal::stored(0),
+                            move |(slug, _)| {
+                                calls.update(|calls| *calls += 1);
+                                std::future::ready(Ok::<_, ServerFnError>(slug))
+                            },
+                        );
+                        (calls, data)
+                    });
+                    any_spawner::Executor::tick().await;
+                    assert_eq!(calls.get_untracked(), 0);
+                    assert!(data.get_untracked().is_none());
+                    owner.cleanup();
+                }
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn initial_selected_catalog_fetch_completes_after_unmount_and_is_cached() {
+        let _ = any_spawner::Executor::init_tokio();
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let layout = Owner::new();
+                layout.with(provide_query_cache);
+                let page = layout.child();
+                let data = page.with(|| {
+                    use_catalog_query(
+                        Signal::stored(Some("selected".to_string())),
+                        Signal::stored(7),
+                        |deps| async move {
+                            tokio::task::yield_now().await;
+                            Ok(deps)
+                        },
+                    )
+                });
+                assert!(data.get_untracked().is_none());
+                // The request is already in flight. Its cache entry owns Arc
+                // signals and copied dependencies, so component cleanup is safe.
+                page.cleanup();
+                for _ in 0..4 {
+                    any_spawner::Executor::tick().await;
+                }
+                let remount = layout.child();
+                let cached = remount.with(|| {
+                    use_catalog_query(
+                        Signal::stored(Some("selected".to_string())),
+                        Signal::stored(7),
+                        |deps| std::future::ready(Ok(deps)),
+                    )
+                });
+                assert_eq!(
+                    cached.get_untracked().unwrap().unwrap(),
+                    ("selected".into(), 7)
+                );
+                remount.cleanup();
+                any_spawner::Executor::tick().await;
+                layout.cleanup();
+            })
+            .await;
+    }
+
+    #[cfg(feature = "ssr")]
+    #[tokio::test]
+    async fn catalog_component_keeps_select_a_datasource_state() {
+        let _ = any_spawner::Executor::init_tokio();
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let owner = Owner::new();
+                let html = owner.with(|| {
+                    provide_query_cache();
+                    view! {
+                        <CatalogTree
+                            datasource_slug=Signal::stored(None::<String>)
+                            search_query=Signal::stored(String::new())
+                            refresh_trigger=Signal::stored(0)
+                            on_table_click=Callback::new(|_| {})
+                            on_column_click=Callback::new(|_| {})
+                        />
+                    }
+                    .to_html()
+                });
+                assert!(html.contains("Select a datasource"));
+                assert!(html.contains("Choose a datasource to browse its catalog"));
+                assert!(!html.contains("Failed to load catalog"));
+                owner.cleanup();
+            })
+            .await;
+    }
+
+    #[cfg(feature = "hydrate")]
+    #[tokio::test]
+    async fn initial_dependency_changes_before_first_effect_tick_are_honored() {
+        let _ = any_spawner::Executor::init_tokio();
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                for next in [None, Some("second".to_string())] {
+                    let owner = Owner::new();
+                    let (slug, calls, data) = owner.with(|| {
+                        provide_query_cache();
+                        let slug = RwSignal::new(Some("first".to_string()));
+                        let calls = RwSignal::new(Vec::new());
+                        let data = use_catalog_query(slug.into(), Signal::stored(0), move |deps| {
+                            calls.update(|calls| calls.push(deps.clone()));
+                            std::future::ready(Ok::<_, ServerFnError>(deps))
+                        });
+                        (slug, calls, data)
+                    });
+                    assert_eq!(calls.get_untracked(), vec![("first".into(), 0)]);
+                    slug.set(next.clone());
+                    for _ in 0..4 {
+                        any_spawner::Executor::tick().await;
+                    }
+                    if let Some(next) = next {
+                        assert_eq!(data.get_untracked().unwrap().unwrap(), (next, 0));
+                        assert_eq!(
+                            calls.get_untracked(),
+                            vec![("first".into(), 0), ("second".into(), 0)]
+                        );
+                    } else {
+                        assert!(data.get_untracked().is_none());
+                        assert_eq!(calls.get_untracked(), vec![("first".into(), 0)]);
+                    }
+                    owner.cleanup();
+                }
+            })
+            .await;
+    }
+
+    // Native hydration enables the same reactive Effect used in the
+    // browser. SSR deliberately does not run client query effects.
+    #[cfg(feature = "hydrate")]
+    #[tokio::test]
+    async fn selection_switch_refresh_disable_and_disposal_preserve_query_results() {
+        let _ = any_spawner::Executor::init_tokio();
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let layout = Owner::new();
+                let (cache, calls, recorder) = layout.with(|| {
+                    provide_query_cache();
+                    let calls = ArcRwSignal::new(Vec::<(String, u32)>::new());
+                    let recorder = StoredValue::new(calls.clone());
+                    (
+                        expect_context::<crate::query_cache::QueryCache>(),
+                        calls,
+                        recorder,
+                    )
+                });
+                let page = layout.child();
+                let (slug, refresh, data) = page.with(|| {
+                    let slug = RwSignal::new(None::<String>);
+                    let refresh = RwSignal::new(0);
+                    let data = use_catalog_query(slug.into(), refresh.into(), move |deps| {
+                        recorder.with_value(|calls| calls.update(|calls| calls.push(deps.clone())));
+                        std::future::ready(if deps.0 == "broken" {
+                            Err(ServerFnError::new("catalog failed"))
+                        } else {
+                            Ok(deps)
+                        })
+                    });
+                    (slug, refresh, data)
+                });
+                // Exercise selection before the first Effect tick, as
+                // happens when a parent selector initializes reactively.
+                assert!(calls.get_untracked().is_empty());
+                slug.set(Some("first".into()));
+                any_spawner::Executor::tick().await;
+                assert_eq!(data.get_untracked().unwrap().unwrap(), ("first".into(), 0));
+                slug.set(Some("second".into()));
+                any_spawner::Executor::tick().await;
+                assert_eq!(data.get_untracked().unwrap().unwrap(), ("second".into(), 0));
+                refresh.set(1);
+                any_spawner::Executor::tick().await;
+                assert_eq!(data.get_untracked().unwrap().unwrap(), ("second".into(), 1));
+                slug.set(None);
+                any_spawner::Executor::tick().await;
+                assert!(
+                    data.get_untracked().is_none(),
+                    "disabled query must not return stale data"
+                );
+                refresh.set(2);
+                slug.set(Some(String::new()));
+                any_spawner::Executor::tick().await;
+                assert_eq!(calls.get_untracked().len(), 3);
+                slug.set(Some("broken".into()));
+                any_spawner::Executor::tick().await;
+                assert_eq!(
+                    data.get_untracked().unwrap().unwrap_err().to_string(),
+                    "error running server function: catalog failed"
+                );
+                assert_eq!(
+                    calls.get_untracked(),
+                    vec![
+                        ("first".into(), 0),
+                        ("second".into(), 0),
+                        ("second".into(), 1),
+                        ("broken".into(), 2),
+                    ]
+                );
+                page.cleanup();
+                cache.invalidate("catalog");
+                any_spawner::Executor::tick().await;
+                layout.cleanup();
+            })
+            .await;
+    }
 }

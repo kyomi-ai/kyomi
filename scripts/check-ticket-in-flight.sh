@@ -108,7 +108,7 @@
 # The fix is to remove the ceiling rather than to raise it, so there is no
 # truncation condition left to detect:
 #
-#   `gh api --paginate 'repos/{owner}/{repo}/pulls?state=all&per_page=100'`
+#   `gh api --paginate "$PR_ENDPOINT"`
 #
 # follows the REST Link header to exhaustion. A run that exits 0 has walked
 # the whole corpus by construction — there is no N for it to stop at — and a
@@ -288,6 +288,17 @@
 # Do not generalize this further. A local file may not suppress a remote
 # branch; a remote ref may. Neither may ever suppress a PR.
 #
+# THAT LAST SENTENCE IS ABOUT TOMBSTONES SPECIFICALLY, AND STILL HOLDS —
+# READ THIS BEFORE READING IT AS CONTRADICTED BY REWORK TARGETS (KYO-778,
+# BELOW). STRANDED.md and a `stranded/` rename are markers created by
+# something OTHER than the PR's own consumer, and neither may ever suppress
+# or hide a PR (check 2) — that is unchanged. A `rework-requested` PR label is
+# a different kind of thing: it is applied to a PR by that PR's OWN consumer
+# (/merge-sweeper) and it never hides the PR — an open, labelled PR is still
+# printed on every verdict, exactly like the tombstones above, just under its
+# own heading. It RECLASSIFIES a PR the same party already owns; it does not
+# suppress evidence someone else created. See REWORK TARGETS below.
+#
 # RECYCLED TICKET KEYS (KYO-607) — READ THIS BEFORE "FIXING" IT BACK
 #
 # Trakkt's ticket-key numbering was RESTARTED in May 2026, so nine keys are
@@ -370,6 +381,110 @@
 #     timestamp is treated as NOT pre-restart and stays a HIT. An
 #     unclassifiable PR blocks; it does not get the benefit of the doubt.
 #
+# REWORK TARGETS (KYO-778) — READ THIS BEFORE "FIXING" IT BACK
+#
+# /merge-sweeper deliberately leaves a rejected PR OPEN when it routes a
+# ticket back to Backlog for rework ("fix on the existing branch `<branch>`
+# and push, or open a replacement PR. **The old PR stays open.**"). Check 2
+# matches PRs on head ref only (KYO-471 above), so that deliberately preserved
+# PR — and its still-live remote head branch (check 1) — is itself an
+# in-flight hit on EVERY rework ticket, by construction. The question this
+# script exists to answer ("is anyone else already working on this?") and the
+# question that situation actually asks ("did my own prior attempt get routed
+# back?") are different questions, and checks 1/2 could not tell them apart.
+#
+# THE SIGNAL IS A GITHUB PR LABEL: `rework-requested` (REWORK_LABEL below).
+# /merge-sweeper applies it in the same step that routes a PR back for rework
+# (its own Step 6 — a change to that skill, not this script). The rework
+# worker removes the label the moment it claims the ticket —
+# REMOVING THE LABEL *IS* THE CLAIM, so a second worker who checks afterward
+# sees an ordinary open PR with no label and gets exit 1, exactly as today.
+#
+# WHY A LABEL, NOT THE THREE ALTERNATIVES THAT LOOK CHEAPER:
+#
+#   - Ticket status ("PR open + ticket back in Backlog") is not readable from
+#     this shell at all: Trakkt is reachable only as an OAuth MCP endpoint,
+#     with no CLI and no API token this script could use — the identical
+#     constraint that ruled out "ask Trakkt for created_at" in RECYCLED TICKET
+#     KEYS above. Even if it were readable it would be ambiguous: a ticket can
+#     sit in Backlog for reasons that have nothing to do with this exact PR.
+#   - `mergeStateStatus` (e.g. DIRTY) only covers the conflict case. A PR
+#     routed back for a FAILING CHECK — red CI, not a merge conflict —
+#     reports a perfectly clean mergeStateStatus, so this signal would
+#     silently miss the more common rework reason.
+#   - A label lives ON THE PR ITSELF, is remote, and can only be applied or
+#     removed by something with the same push/API access the PR required to
+#     exist in the first place — the same durability bar a `stranded/` ref
+#     clears above. Exactly one thing is meant to write it (/merge-sweeper)
+#     and exactly one thing is meant to remove it (the worker claiming the
+#     rework), both self-documenting from the label's own name.
+#
+# THIS IS A RECLASSIFICATION, NOT A SUPPRESSION — see the note appended to
+# "Do not generalize this further" above. An OPEN PR carrying the label is
+# still printed on EVERY verdict, under its own "REWORK TARGET(S)" heading,
+# exactly like PRESERVED STRANDED WORK and PRE-RESTART KEY REUSE above. What
+# changes is only which bucket it counts in — HITS versus REWORK_TARGETS —
+# never whether it is shown. A PR is never made invisible by anything in this
+# script; this feature does not weaken that, it only lets the PR's own
+# consumer reclassify a PR it already owns.
+#
+# CLOSED AND MERGED PRs ARE UNAFFECTED, EVEN IF LABELLED. A rework target is
+# by definition still open and still awaiting a fix. A closed or merged PR
+# that happens to carry a stale `rework-requested` label (forgotten cleanup,
+# or a branch reused for something else after closing) is handled exactly as
+# it always was: it stays a HIT (or RECYCLED, if pre-restart), never a rework
+# target. The state check is `pr_state = OPEN`, evaluated ahead of the label.
+#
+# THE REMOTE HEAD BRANCH OF A REWORK-TARGET PR IS ALSO A REWORK TARGET (check
+# 1) — the same extension `stranded/` makes from a local tombstone to a
+# remote branch above: the label is remote and at least as durable as the
+# branch it heads, so classifying the PR without also classifying its own
+# branch would leave that branch blocking the ticket on its own, the same gap
+# RECYCLED_BRANCHES exists to close for pre-restart keys. Check 2 is the only
+# check that can see a PR's labels, exactly as it is the only one that can see
+# a PR's creation date (RECYCLED TICKET KEYS above), so this follows the SAME
+# mechanism: REWORK_TARGET_BRANCHES, populated only by check 2, is consulted
+# by check 1. This is a second consumer of the ordering constraint described
+# in WHAT IT CHECKS above (check 2 must physically run first); it does not
+# change that ordering, only adds a second reason it is required.
+#
+# LOCAL WORKTREES AND LOCAL BRANCHES (checks 3 and 4) ARE DELIBERATELY **NOT**
+# SUPPRESSED BY THE LABEL, even one with the identical branch name. A remote
+# label describes the PR /merge-sweeper looked at; it says nothing about what
+# is sitting on THIS machine's disk right now. A local worktree or local
+# branch matching the ticket is independent evidence of a worker physically
+# present on this box — exactly the KYO-471 concern checks 3/4 exist for —
+# and a remote label must never hide that. Do not extend
+# REWORK_TARGET_BRANCHES-style reclassification to checks 3/4; self-exclusion
+# via cwd/`--self`/`--ignore-branch` remains the only thing that may exclude
+# local evidence, unchanged by this feature.
+#
+# FAIL CLOSED, SAME AS EVERYWHERE ELSE IN THIS SCRIPT. The PR listing's `--jq`
+# filter now emits a 5th column: the literal string "1" if the PR carries
+# REWORK_LABEL, "0" otherwise (`(.labels // [])[]?.name` guards a missing or
+# null `labels` field so an odd REST payload cannot crash the filter). A row
+# that does not split into exactly five fields, OR whose 5th field is
+# anything other than the literal "0" or "1", is a row this check COULD NOT
+# READ — it goes to FAILURES (exit 3), same as an empty headRefName does
+# above. A malformed label field must never be read as "not labelled": that
+# would silently re-admit a genuine rework-target PR as an ordinary HIT
+# (overcautious, at best) and could just as easily hide a real problem in the
+# fetch behind a plausible-looking "0" (KYO-511's fail-OPEN species, by a new
+# route). Fail closed instead: an unrecognised label field means the PR check
+# could not be completed, full stop — it does not get the benefit of the
+# doubt any more than an unparseable createdAt does above.
+#
+# SIBLING SCOPE (KYO-910)
+# Known project origins sweep kyomi, kyomi-connect, kyomi-private, chartml
+# and kode under ${KYOMI_REPOS_ROOT:-$HOME/repos}, plus the invoking clone.
+# GitHub identities: kyomi-ai/{kyomi,kyomi-connect,kyomi-private,kode},
+# chartml/chartml (verified against canonical clones, not assumed by name).
+# Missing checkouts or mismatched origins fail closed (exit 3). Unknown
+# origins retain reusable single-repository behavior and announce that scope.
+# --self, cwd and --ignore-branch exclusions apply only to the invoking
+# repository identity; sibling branches with the same name remain evidence.
+# Every repository has isolated rework/recycled/tombstone classification.
+#
 # USAGE
 #
 #   check-ticket-in-flight.sh <TICKET> [--remote <name>] [--ignore-branch <name>]... [--self <branch>]
@@ -396,10 +511,12 @@
 #       that does not match the ticket — see SELF-EXCLUSION above — or a
 #       malformed KEY_RESTART_CUTOFF in the environment).
 #   3 — a check could not be completed (remote unreachable, `gh` missing,
-#       failing, or dying partway through paginating the PR listing, or a
-#       PR row that did not split into four usable fields). Treat exactly
-#       like exit 1: do not claim. --self never turns this into exit 0 —
-#       the FAILURES check still runs before the HITS check, unchanged.
+#       failing, or dying partway through paginating the PR listing, a
+#       PR row that did not split into five usable fields, or a PR row
+#       whose rework-label flag (5th field) was anything other than the
+#       literal "0"/"1" — KYO-778). Treat exactly like exit 1: do not
+#       claim. --self never turns this into exit 0 — the FAILURES check
+#       still runs before the HITS check, unchanged.
 #  42 — this script's own on-disk content is stale relative to origin/main
 #       AND KYOMI_STALE_TOOLING_STRICT=1 is set. See
 #       scripts/lib/stale-tooling-guard.sh (KYO-632) — by default this is a
@@ -441,6 +558,14 @@ stale_tooling_guard "${BASH_SOURCE[0]}"
 # values to exercise both sides of the comparison cheaply.
 KEY_RESTART_CUTOFF="${KEY_RESTART_CUTOFF:-2026-05-12T00:00:00Z}"
 
+# The GitHub PR label that is the sole signal a PR is a rework target rather
+# than a claim (KYO-778 — see REWORK TARGETS in the header above for the full
+# rationale). Defined once, here, so the classification in check 2, the
+# branch propagation to check 1, and the verdict text all agree with each
+# other and with /merge-sweeper's own Step 6 — the only thing that ever
+# applies this label. The rework worker removes it to claim the ticket.
+REWORK_LABEL="rework-requested"
+
 usage() {
     cat >&2 <<EOF
 Usage: $SCRIPT_NAME <TICKET> [--remote <name>] [--ignore-branch <name>]... [--self <branch>]
@@ -453,6 +578,8 @@ Usage: $SCRIPT_NAME <TICKET> [--remote <name>] [--ignore-branch <name>]... [--se
                            against TICKET (must be given at most once)
 
 Environment:
+  KYOMI_REPOS_ROOT         canonical project clones root (default: $HOME/repos);
+                           all declared siblings remain mandatory
   KEY_RESTART_CUTOFF       ISO-8601 Z instant (YYYY-MM-DDTHH:MM:SSZ) at which
                            Trakkt's ticket-key numbering restarted (default:
                            2026-05-12T00:00:00Z). PRs created before it belong
@@ -627,17 +754,26 @@ tombstone_names_ticket() {
     return 1
 }
 
+# Each repository runs in a subshell: PR classifications and tombstones must
+# never leak to an identically named branch in a different repository.
+check_repository() (
+cd "$1" || { echo "RESULT: COULD NOT COMPLETE ALL CHECKS — cannot enter $1"; exit 3; }
+REPO_ID="$2"
+ALLOW_SELF="$3"
+# Only the invoking checkout can identify self through its current branch.
+# Explicit self/ignore names may also apply to another clone of that repo.
+echo "Repository: ${REPO_ID:-single repository} ($1)"
 # ---- self-exclusion set -----------------------------------------------------
 CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)"
 
 declare -a EXCLUDE=()
-if [ "$CURRENT_BRANCH" != "HEAD" ] && [ "$CURRENT_BRANCH" != "main" ]; then
+if [ "$4" = 1 ] && [ "$CURRENT_BRANCH" != "HEAD" ] && [ "$CURRENT_BRANCH" != "main" ]; then
     EXCLUDE+=("$CURRENT_BRANCH")
 fi
-if [ -n "$SELF_BRANCH_SET" ]; then
+if [ "$ALLOW_SELF" = 1 ] && [ -n "$SELF_BRANCH_SET" ]; then
     EXCLUDE+=("$SELF_BRANCH")
 fi
-if [ "${#IGNORE_BRANCHES[@]}" -gt 0 ]; then
+if [ "$ALLOW_SELF" = 1 ] && [ "${#IGNORE_BRANCHES[@]}" -gt 0 ]; then
     EXCLUDE+=("${IGNORE_BRANCHES[@]}")
 fi
 
@@ -668,6 +804,8 @@ declare -a TOMBSTONED=()          # printable "path (branch X)" entries (KYO-529
 declare -a TOMBSTONED_BRANCHES=() # branch names check 4 must not re-flag
 declare -a RECYCLED=()            # printable pre-restart entries (KYO-607)
 declare -a RECYCLED_BRANCHES=()   # branch names checks 1/3/4 classify as pre-restart
+declare -a REWORK_TARGETS=()          # printable rework-target entries (KYO-778)
+declare -a REWORK_TARGET_BRANCHES=()  # branch names check 1 classifies as rework targets too
 
 is_tombstoned_branch() {
     local name="$1" b
@@ -700,6 +838,25 @@ is_recycled_branch() {
     return 1
 }
 
+# is_rework_target_branch <name> — true iff this exact branch name is the
+# head of an OPEN PR that check 2 already classified as a rework target
+# (KYO-778 — see the header above). Populated only by check 2, for the same
+# reason is_recycled_branch is: check 2 is the only check that can see a PR's
+# labels, so it must run first, and if check 2 failed the array is empty and
+# every branch match stays a HIT — the fail-closed path is unchanged.
+is_rework_target_branch() {
+    local name="$1" b
+    if [ "${#REWORK_TARGET_BRANCHES[@]}" -eq 0 ]; then
+        return 1
+    fi
+    for b in "${REWORK_TARGET_BRANCHES[@]}"; do
+        if [ "$name" = "$b" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 # ---- Check 2: pull requests (head branch ref only — see KYO-471 above) ---
 # RUNS FIRST, ahead of conceptual check 1 — see the WHAT IT CHECKS note in the
 # header. This is the only check that can see a creation date, so it is the
@@ -716,7 +873,7 @@ is_recycled_branch() {
 # `pr_lines` — verified against a stub server, see the header.
 #
 # THE ROW SHAPE IS DELIBERATELY UNCHANGED, so everything downstream of the
-# fetch — the four-field parse, the RECYCLED classification, the verdict text,
+# fetch — the five-field parse, the RECYCLED classification, the verdict text,
 # and the self-test's `pr_row` helper — is the same code it was under
 # `gh pr list`. REST reports a merged PR as `state: "closed"` with a non-null
 # `merged_at`, where `gh pr list --json state` reports `MERGED`, so the `--jq`
@@ -744,27 +901,52 @@ is_recycled_branch() {
 # newlines and reading with `readarray -t` therefore yields exactly one array
 # element per column, empty ones included.
 #
-# A row that does not split into exactly four usable fields is a row this check
-# COULD NOT READ, so it goes to FAILURES (exit 3) rather than being skipped —
-# same rule as a `gh` that failed outright, and the reason the collapsing bug
-# above could not have been silent under this parser either.
+# A row that does not split into exactly five usable fields is a row this
+# check COULD NOT READ, so it goes to FAILURES (exit 3) rather than being
+# skipped — same rule as a `gh` that failed outright, and the reason the
+# collapsing bug above could not have been silent under this parser either.
+#
+# THE 5TH COLUMN (KYO-778) is the rework-target signal: the literal string
+# "1" if the PR carries the REWORK_LABEL, "0" otherwise. `(.labels // [])`
+# guards a missing or null `labels` field so an odd REST payload cannot crash
+# the filter; `[]?.name` then tolerates a non-object element in that array the
+# same way. Built as a variable, rather than inlined into the `gh api` call
+# below, only so the string interpolation of REWORK_LABEL (a fixed script
+# constant, not user input, so plain interpolation is safe) doesn't collide
+# with the surrounding single-quoted jq literal.
+pr_jq_filter=".[] | [.number, (if .merged_at then \"MERGED\" elif .state == \"closed\" then \"CLOSED\" else \"OPEN\" end), .created_at, .head.ref, (if ([(.labels // [])[]?.name] | index(\"$REWORK_LABEL\")) then \"1\" else \"0\" end)] | @tsv"
+PR_ENDPOINT="repos/{owner}/{repo}/pulls?state=all&per_page=100"
+if [ -n "$REPO_ID" ]; then PR_ENDPOINT="repos/$REPO_ID/pulls?state=all&per_page=100"; fi
 gh_stderr_file="$(mktemp)"
-if pr_lines="$(gh api --paginate 'repos/{owner}/{repo}/pulls?state=all&per_page=100' \
-    --jq '.[] | [.number, (if .merged_at then "MERGED" elif .state == "closed" then "CLOSED" else "OPEN" end), .created_at, .head.ref] | @tsv' 2>"$gh_stderr_file")"; then
+if pr_lines="$(gh api --paginate "$PR_ENDPOINT" \
+    --jq "$pr_jq_filter" 2>"$gh_stderr_file")"; then
     declare -a pr_fields=()
     while IFS= read -r pr_line; do
         # A zero-PR listing is the empty string, which a herestring still
         # feeds through as one empty line. That is not a row.
         [ -n "$pr_line" ] || continue
         readarray -t pr_fields <<<"${pr_line//$'\t'/$'\n'}"
-        if [ "${#pr_fields[@]}" -ne 4 ] || [ -z "${pr_fields[3]}" ]; then
-            FAILURES+=("PR listing: could not read row '$pr_line' as number/state/createdAt/headRefName — the PR check is incomplete, so no verdict can be given")
+        if [ "${#pr_fields[@]}" -ne 5 ] || [ -z "${pr_fields[3]}" ]; then
+            FAILURES+=("PR listing: could not read row '$pr_line' as number/state/createdAt/headRefName/reworkLabel — the PR check is incomplete, so no verdict can be given")
             continue
         fi
         pr_number="${pr_fields[0]}"
         pr_state="${pr_fields[1]}"
         pr_created="${pr_fields[2]}"
         pr_branch="${pr_fields[3]}"
+        pr_rework_flag="${pr_fields[4]}"
+        # FAIL CLOSED on an unrecognised label flag (KYO-778 — see the header):
+        # anything other than the literal "0"/"1" must never be read as "not
+        # labelled", which would fail OPEN by re-admitting a genuine
+        # rework-target PR as an ordinary HIT. Same rule, same exit code, as
+        # the field-count check just above.
+        case "$pr_rework_flag" in
+            0 | 1) ;;
+            *)
+                FAILURES+=("PR listing: row '$pr_line' has an unrecognised rework-label flag '$pr_rework_flag' (expected 0 or 1) — the PR check is incomplete, so no verdict can be given")
+                continue
+                ;;
+        esac
         is_excluded "$pr_branch" && continue
         if matches_ticket "$pr_branch"; then
             # A pre-restart PR is classified, never dropped: it is still
@@ -774,6 +956,13 @@ if pr_lines="$(gh api --paginate 'repos/{owner}/{repo}/pulls?state=all&per_page=
             if is_pre_restart "$pr_created"; then
                 RECYCLED+=("PR #${pr_number} (${pr_state}) branch ${pr_branch} — created ${pr_created}, before the ${KEY_RESTART_CUTOFF} key restart")
                 RECYCLED_BRANCHES+=("$pr_branch")
+            elif [ "$pr_state" = "OPEN" ] && [ "$pr_rework_flag" = "1" ]; then
+                # Rework target (KYO-778 — see header): routed back by
+                # /merge-sweeper, not a claim. Closed/merged PRs never reach
+                # this arm regardless of the label — see CLOSED AND MERGED
+                # PRs ARE UNAFFECTED above.
+                REWORK_TARGETS+=("PR #${pr_number} (${pr_state}) branch ${pr_branch} — labelled ${REWORK_LABEL}, routed back by /merge-sweeper")
+                REWORK_TARGET_BRANCHES+=("$pr_branch")
             else
                 HITS+=("PR #${pr_number} (${pr_state}) branch ${pr_branch}")
             fi
@@ -797,6 +986,12 @@ rm -f "$gh_stderr_file"
 # instead of HITS. Each of the nine colliding keys has BOTH a merged
 # pre-restart PR and that PR's surviving remote branch, so classifying only
 # the PR would leave the branch blocking the ticket on its own.
+#
+# A branch that heads an OPEN, `rework-requested`-labelled PR (KYO-778 — see
+# header) is reported in REWORK_TARGETS the same way, for the same reason:
+# the label lives on the PR, not the branch, so check 1 must consult
+# REWORK_TARGET_BRANCHES (populated by check 2) rather than re-derive the
+# classification itself.
 remote_stderr_file="$(mktemp)"
 if remote_refs="$(git ls-remote --heads "$REMOTE" 2>"$remote_stderr_file")"; then
     while IFS=$'\t' read -r _sha ref; do
@@ -815,6 +1010,8 @@ if remote_refs="$(git ls-remote --heads "$REMOTE" 2>"$remote_stderr_file")"; the
                 if matches_ticket "$branch"; then
                     if is_recycled_branch "$branch"; then
                         RECYCLED+=("remote branch $REMOTE/$branch")
+                    elif is_rework_target_branch "$branch"; then
+                        REWORK_TARGETS+=("remote branch $REMOTE/$branch — head of the rework-target PR above")
                     else
                         HITS+=("remote branch: $REMOTE/$branch")
                     fi
@@ -859,6 +1056,7 @@ flush_worktree_entry() {
     wt_path=""
     wt_branch=""
 }
+if wt_lines="$(git worktree list --porcelain 2>&1)"; then
 while IFS= read -r line; do
     case "$line" in
         "worktree "*) wt_path="${line#worktree }" ;;
@@ -866,8 +1064,11 @@ while IFS= read -r line; do
         "") flush_worktree_entry ;;
         *) ;;
     esac
-done < <(git worktree list --porcelain)
+done <<<"$wt_lines"
 flush_worktree_entry # in case the porcelain output has no trailing blank line
+else
+    FAILURES+=("local worktrees: $wt_lines")
+fi
 
 # ---- Check 4: local branches ------------------------------------------------
 # Same `stranded/` handling as check 1, for the symmetric local rename
@@ -885,6 +1086,7 @@ flush_worktree_entry # in case the porcelain output has no trailing blank line
 # its branch never enters TOMBSTONED_BRANCHES and is no longer skipped here.
 # The extra line is more evidence, not less, so the direction is safe.) The
 # tombstone skip above exists for a different reason and is left as it was.
+if local_branches="$(git branch --list --format='%(refname:short)' 2>&1)"; then
 while IFS= read -r branch; do
     [ -n "$branch" ] || continue
     case "$branch" in
@@ -908,7 +1110,10 @@ while IFS= read -r branch; do
             fi
             ;;
     esac
-done < <(git branch --list --format='%(refname:short)')
+done <<<"$local_branches"
+else
+    FAILURES+=("local branches: $local_branches")
+fi
 
 # ---- verdict -----------------------------------------------------------------
 echo
@@ -938,6 +1143,21 @@ if [ "${#RECYCLED[@]}" -gt 0 ]; then
     echo
 fi
 
+if [ "${#REWORK_TARGETS[@]}" -gt 0 ]; then
+    # Printed on every verdict, not only exit 0 — same rule as PRESERVED
+    # STRANDED WORK and PRE-RESTART KEY REUSE above: a PR is never made
+    # invisible. See REWORK TARGETS (KYO-778) in the header for why a label
+    # on the PR itself, not ticket status or mergeStateStatus, is the signal,
+    # and why removing the label IS the claim (a second check afterward sees
+    # an ordinary open PR with no label, and exits 1 like any other hit).
+    echo "REWORK TARGET(S) — routed back by /merge-sweeper (label \`${REWORK_LABEL}\`), not a claim:"
+    for r in "${REWORK_TARGETS[@]}"; do
+        echo "  ~ $r"
+    done
+    echo "  Remove the label when you claim: gh pr edit <N> --remove-label ${REWORK_LABEL}"
+    echo
+fi
+
 if [ "${#FAILURES[@]}" -gt 0 ]; then
     echo "RESULT: COULD NOT COMPLETE ALL CHECKS — failing closed, do not claim KYO-${ticket_num}"
     for f in "${FAILURES[@]}"; do
@@ -963,3 +1183,101 @@ fi
 
 echo "RESULT: CLEAR — nothing in flight for KYO-${ticket_num}"
 exit 0
+
+)
+
+# CLAUDE.md's "Sibling repositories" table defines this scope. Use explicit
+# canonical roots, never the parent of a linked /tmp worktree. A relocation
+# changes the root, not the list of repositories that must be checked.
+REPOS_ROOT="${KYOMI_REPOS_ROOT:-$HOME/repos}"
+SCOPE=(kyomi-ai/kyomi kyomi-ai/kyomi-connect kyomi-ai/kyomi-private chartml/chartml kyomi-ai/kode)
+repo_identity() {
+    local url scheme authority host user path
+    url="$(git -C "$1" config --get "remote.origin.url")" || return 1
+    # Parse URI authorities and SCP-style SSH origins separately. Validate
+    # the host after extracting user information, rather than matching an
+    # entire transport-specific origin prefix.
+    case "$url" in
+        *://*)
+            scheme="${url%%://*}"
+            url="${url#*://}"
+            authority="${url%%/*}"
+            path="${url#*/}"
+            ;;
+        *:*)
+            scheme=ssh
+            authority="${url%%:*}"
+            path="${url#*:}"
+            ;;
+        *) return 1 ;;
+    esac
+    host="${authority##*@}"
+    user="${authority%@*}"
+    case "$scheme" in
+        https) [ "$authority" = "$host" ] || return 1 ;;
+        ssh) [ "$user" = git ] && [ "$authority" != "$host" ] || return 1 ;;
+        *) return 1 ;;
+    esac
+    [ "$host" = github.com ] || return 1
+    case "$path" in
+        */*) ;;
+        *) return 1 ;;
+    esac
+    printf '%s' "${path%.git}"
+}
+invoking_path="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+    echo "RESULT: COULD NOT COMPLETE ALL CHECKS — not in a repository"; exit 3;
+}
+invoking_id="$(repo_identity "$invoking_path")" || invoking_id=""
+in_scope=0
+for repo in "${SCOPE[@]}"; do
+    if [ "$invoking_id" = "$repo" ] || [ "$invoking_path" = "$REPOS_ROOT/${repo##*/}" ]; then in_scope=1; fi
+done
+if [ "$in_scope" = 0 ]; then
+    echo "Scope: single repository (origin is not a known Kyomi project repository)"
+    check_repository "$invoking_path" "$invoking_id" 1 1
+    exit $?
+fi
+
+if [ -z "$invoking_id" ]; then
+    echo "RESULT: COULD NOT COMPLETE ALL CHECKS — invoking project origin is unreadable or unsupported"
+    exit 3
+fi
+echo "Scope: ${SCOPE[*]}; local roots: $REPOS_ROOT"
+overall_status=0
+record_status() {
+    case "$1" in
+        0) ;;
+        1) if [ "$overall_status" = 0 ]; then overall_status=1; fi ;;
+        *) overall_status=3 ;;
+    esac
+}
+# Always include the invoking checkout, even if it is a separate clone.
+if check_repository "$invoking_path" "$invoking_id" 1 1; then :; else record_status "$?"; fi
+invoking_common="$(git -C "$invoking_path" rev-parse --path-format=absolute --git-common-dir)" || {
+    echo "Cannot identify invoking clone"; overall_status=3;
+}
+for repo in "${SCOPE[@]}"; do
+    path="$REPOS_ROOT/${repo##*/}"
+    expected="$repo"
+    if ! actual="$(repo_identity "$path")" || [ "$actual" != "$expected" ]; then
+        echo "Repository: $expected ($path) — missing/unreadable checkout or origin identity mismatch"
+        overall_status=3
+        continue
+    fi
+    if ! common="$(git -C "$path" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"; then
+        echo "Repository: $expected ($path) — could not identify clone"
+        overall_status=3
+        continue
+    fi
+    [ "$common" != "$invoking_common" ] || continue
+    allow_self=0
+    [ "$expected" != "$invoking_id" ] || allow_self=1
+    if check_repository "$path" "$expected" "$allow_self" 0; then :; else record_status "$?"; fi
+done
+case "$overall_status" in
+    0) echo "SIBLING SWEEP RESULT: CLEAR — all in-scope repositories checked" ;;
+    1) echo "SIBLING SWEEP RESULT: IN FLIGHT — do not claim KYO-$ticket_num" ;;
+    3) echo "SIBLING SWEEP RESULT: COULD NOT COMPLETE ALL CHECKS — failing closed, do not claim KYO-$ticket_num" ;;
+esac
+exit "$overall_status"

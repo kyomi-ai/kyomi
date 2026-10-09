@@ -28,7 +28,7 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, IntoServerFnErrorCore};
+use super::{extract_auth, extract_auth_allow_lapsed, extract_context, IntoServerFnErrorCore};
 
 /// TOTP status returned by `get_totp_status()`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -44,7 +44,7 @@ pub struct TotpSetup {
 }
 
 /// Check whether the current user has a password set.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn has_password() -> Result<bool, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -59,7 +59,7 @@ pub async fn has_password() -> Result<bool, ServerFnError> {
 /// Validation rules:
 /// - Password must be at least 8 characters.
 /// - User must NOT already have a password.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn set_password(new_password: String) -> Result<String, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -76,7 +76,7 @@ pub async fn set_password(new_password: String) -> Result<String, ServerFnError>
 /// Validation rules:
 /// - New password must be at least 8 characters.
 /// - Current password must be verified first.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn change_password(
     current_password: String,
     new_password: String,
@@ -107,7 +107,7 @@ pub async fn change_password(
 // ---------------------------------------------------------------------------
 
 /// Check whether the current user has TOTP 2FA enabled.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_totp_status() -> Result<TotpStatus, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -123,7 +123,7 @@ pub async fn get_totp_status() -> Result<TotpStatus, ServerFnError> {
 ///
 /// The secret is stored in Redis (10 min TTL) until the user confirms with
 /// a verification code via `enable_totp()`.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn setup_totp() -> Result<TotpSetup, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -148,7 +148,7 @@ pub async fn setup_totp() -> Result<TotpSetup, ServerFnError> {
 ///
 /// On success the secret is persisted in `user_auth_methods`. On failure the
 /// pending secret is re-stored in Redis so the user can retry.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn enable_totp(code: String) -> Result<String, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -169,7 +169,7 @@ pub async fn enable_totp(code: String) -> Result<String, ServerFnError> {
 ///
 /// Deliberately does not require re-entering a TOTP code — it simply
 /// removes the auth method for the already-authenticated user.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn disable_totp() -> Result<String, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -214,7 +214,7 @@ pub struct SessionEntry {
 ///
 /// Determines the current session by comparing the refresh token cookie's
 /// family_id against each session's family_id.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_sessions() -> Result<Vec<SessionEntry>, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -254,9 +254,10 @@ pub async fn get_sessions() -> Result<Vec<SessionEntry>, ServerFnError> {
 
 /// Revoke a specific session by token ID.
 ///
+/// Existing access tokens retain their validity until expiry (up to 15 minutes).
 /// Revokes the entire token family so rotated tokens in the same session are
 /// also invalidated.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn revoke_session(token_id: String) -> Result<String, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -282,7 +283,7 @@ pub async fn revoke_session(token_id: String) -> Result<String, ServerFnError> {
 ///
 /// Does NOT require `extract_auth()` — the token may already be invalid
 /// (e.g. if the access token expired) but we still want to clear cookies.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn logout() -> Result<(), ServerFnError> {
     let ctx = extract_context()?;
 
@@ -310,14 +311,19 @@ pub async fn logout() -> Result<(), ServerFnError> {
     Ok(())
 }
 
-/// Log out from all devices by revoking every refresh token for the user.
-#[server(prefix = "/leptos-api")]
+/// Log out from all devices by immediately invalidating browser access sessions
+/// and revoking every refresh token for the user (KYO-341).
+///
+/// Uses `extract_auth_allow_lapsed()` (KYO-805) — a lapsed workspace must
+/// still be able to log out everywhere; billing status is orthogonal to
+/// "does this session get to keep existing."
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn logout_all_sessions() -> Result<String, ServerFnError> {
-    let auth = extract_auth().await?;
+    let auth = extract_auth_allow_lapsed().await?;
     let ctx = extract_context()?;
 
     let revoked_count =
-        kyomi_auth::token_service::revoke_all_user_refresh_tokens(&ctx.db, &auth.user_id)
+        kyomi_auth::token_service::revoke_all_user_sessions(&ctx.db, &auth.user_id)
             .await
             .into_sfn_core()?;
 
@@ -350,7 +356,7 @@ pub struct PasskeyInfo {
 }
 
 /// List all passkeys for the authenticated user.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn list_passkeys() -> Result<Vec<PasskeyInfo>, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -386,7 +392,7 @@ pub async fn list_passkeys() -> Result<Vec<PasskeyInfo>, ServerFnError> {
 ///
 /// Returns a JSON string containing the challenge_id and WebAuthn options
 /// that the browser needs for `navigator.credentials.create()`.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn start_passkey_registration(
     device_name: String,
 ) -> Result<String, ServerFnError> {
@@ -431,7 +437,7 @@ pub async fn start_passkey_registration(
 /// Complete passkey registration by verifying the browser credential.
 ///
 /// Receives the challenge_id and the PublicKeyCredential JSON from the browser.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn complete_passkey_registration(
     credential_json: String,
 ) -> Result<String, ServerFnError> {
@@ -476,7 +482,7 @@ pub async fn complete_passkey_registration(
 }
 
 /// Delete a passkey for the authenticated user.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn delete_passkey(credential_id: String) -> Result<String, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -495,7 +501,7 @@ pub async fn delete_passkey(credential_id: String) -> Result<String, ServerFnErr
 }
 
 /// Rename a passkey for the authenticated user.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn rename_passkey(
     credential_id: String,
     name: String,

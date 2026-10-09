@@ -42,6 +42,16 @@ pub enum MessageType {
     SyncAction,
     SyncComplete,
     SyncReset,
+    // Billing broadcast (Rust-only, KYO-807): pushed to every workspace
+    // member — including a currently-lapsed workspace's members, since
+    // `connect` is never billing-gated (only `sync_bootstrap`/`sync_delta`
+    // are) — whenever a server-side write changes the workspace's billing
+    // state. Carries no status in `data` beyond `workspace_id`; the client
+    // always refetches `get_sidebar_user`/`get_user_context` rather than
+    // trusting a status embedded in the push, so the DB stays the single
+    // source of truth. See `kyomi_auth::websocket::helpers::broadcast_billing_status_changed`
+    // for the emitter.
+    BillingStatusChanged,
 }
 
 impl std::fmt::Display for MessageType {

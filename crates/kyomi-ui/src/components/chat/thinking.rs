@@ -101,7 +101,10 @@ pub fn process_thinking_event(
     new_event: ThinkingEvent,
 ) -> Vec<ThinkingEvent> {
     // Check if this event_id already exists
-    if let Some(idx) = existing.iter().position(|e| e.event_id == new_event.event_id) {
+    if let Some(idx) = existing
+        .iter()
+        .position(|e| e.event_id == new_event.event_id)
+    {
         // Event exists — update it in place
         let mut updated = existing.to_vec();
         updated[idx] = new_event;
@@ -115,28 +118,21 @@ pub fn process_thinking_event(
     }
 }
 
-/// Reactive thinking state manager — Leptos equivalent of `useAgentThinking()`.
-///
-/// Stores per-message thinking state in a `HashMap<String, ThinkingState>`
-/// keyed by message_id. Provides methods matching the React hook's API.
+/// Reference-counted reasoning state owned by a chat run.
 #[derive(Clone)]
-pub struct ThinkingManager {
-    /// Per-message thinking state.
-    state: RwSignal<HashMap<String, ThinkingState>>,
+pub(crate) struct ThinkingData {
+    state: ArcRwSignal<HashMap<String, ThinkingState>>,
 }
 
-impl Default for ThinkingManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ThinkingManager {
-    /// Create a new thinking manager with empty state.
-    pub fn new() -> Self {
+impl ThinkingData {
+    pub(crate) fn new() -> Self {
         Self {
-            state: RwSignal::new(HashMap::new()),
+            state: ArcRwSignal::new(HashMap::new()),
         }
+    }
+
+    pub(crate) fn state(&self) -> ArcReadSignal<HashMap<String, ThinkingState>> {
+        self.state.read_only()
     }
 
     /// Handle an incoming thinking event for a message.
@@ -155,10 +151,7 @@ impl ThinkingManager {
     ) {
         let message_id = message_id.to_string();
         self.state.update(|map| {
-            let current = map
-                .get(&message_id)
-                .cloned()
-                .unwrap_or_default();
+            let current = map.get(&message_id).cloned().unwrap_or_default();
 
             // Don't process if message was cancelled — matches React.
             if current.cancelled {
@@ -247,11 +240,70 @@ impl ThinkingManager {
             .cloned()
             .unwrap_or_default()
     }
+}
 
-    /// Read signal for the full thinking state map.
-    ///
-    /// Useful for reactive access to the entire map (e.g., in derived signals).
-    pub fn state(&self) -> ReadSignal<HashMap<String, ThinkingState>> {
-        self.state.read_only()
+/// Page-owned projection of the selected run's reasoning state.
+#[derive(Clone)]
+pub struct ThinkingManager {
+    data: Signal<ThinkingData>,
+    state_read: Signal<HashMap<String, ThinkingState>>,
+}
+
+impl Default for ThinkingManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ThinkingManager {
+    pub fn new() -> Self {
+        let data = ThinkingData::new();
+        Self::from_source(Signal::derive(move || data.clone()))
+    }
+
+    pub(crate) fn from_source(data: Signal<ThinkingData>) -> Self {
+        let state_read = Signal::derive(move || {
+            data.try_get()
+                .and_then(|data| data.state().try_get())
+                .unwrap_or_default()
+        });
+        Self { data, state_read }
+    }
+
+    pub fn state(&self) -> Signal<HashMap<String, ThinkingState>> {
+        self.state_read
+    }
+
+    pub fn handle_thinking_event(
+        &self,
+        message_id: &str,
+        event: ThinkingEvent,
+        token_usage: Option<TokenUsage>,
+    ) {
+        self.data
+            .get_untracked()
+            .handle_thinking_event(message_id, event, token_usage)
+    }
+
+    pub fn complete_thinking(&self, message_id: &str) {
+        self.data.get_untracked().complete_thinking(message_id)
+    }
+
+    pub fn cancel_thinking(&self, message_id: &str) {
+        self.data.get_untracked().cancel_thinking(message_id)
+    }
+
+    pub fn update_token_usage(&self, message_id: &str, usage: TokenUsage) {
+        self.data
+            .get_untracked()
+            .update_token_usage(message_id, usage)
+    }
+
+    pub fn clear_all(&self) {
+        self.data.get_untracked().clear_all()
+    }
+
+    pub fn get_for_message(&self, message_id: &str) -> ThinkingState {
+        self.data.get_untracked().get_for_message(message_id)
     }
 }

@@ -95,6 +95,12 @@ pub struct QueryDatasourceTool;
 
 #[async_trait]
 impl AgentTool for QueryDatasourceTool {
+    /// Provider query errors can follow a committed mutation (including timeout).
+    /// A returned error envelope establishes no rollback guarantee.
+    fn result_domain_outcome(&self, text: &str) -> agent_runtime::DomainOutcome {
+        super::query_utils::sql_result_domain_outcome(text)
+    }
+
     fn name(&self) -> &str {
         "query_datasource"
     }
@@ -159,7 +165,10 @@ impl AgentTool for QueryDatasourceTool {
                 .await
                 .map_err(kyomi_core::Error::Internal)?;
 
-        let result = provider.execute_query(sql, Some(20), None, false, None).await?;
+        let result = provider
+            .execute_query(sql, Some(20), None, false, None)
+            .await
+            .map_err(super::query_utils::sanitize_query_transport_error)?;
         provider.close().await;
 
         match result.status {
@@ -297,7 +306,10 @@ impl AgentTool for ValidateSqlTool {
                 .await
                 .map_err(kyomi_core::Error::Internal)?;
 
-        let result = provider.dry_run(sql).await?;
+        let driver_result = provider.dry_run(sql).await;
+        super::query_utils::log_dry_run_issue(&driver_result);
+        let result = super::query_utils::sanitize_dry_run_result(driver_result)
+            .map_err(kyomi_core::Error::Internal)?;
         provider.close().await;
 
         let mut response = serde_json::json!({

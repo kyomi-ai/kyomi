@@ -67,7 +67,4 @@ pub struct AgentLearning {
 
     /// ID of the learning that supersedes (replaces) this one.
     pub superseded_by: Option<String>,
-
-    /// Whether this learning has been superseded by another.
-    pub is_superseded: bool,
 }

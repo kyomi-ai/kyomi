@@ -1177,10 +1177,10 @@ You're receiving this because someone signed up for Kyomi with this email addres
     /// email.
     ///
     /// This is the one channel allowed to say "you already have an
-    /// account": `signup_start_service` and `passkey_signup_start_service`
-    /// return the identical `VerificationRequired` result for a new email,
-    /// an unverified email, and a verified email, to prevent email
-    /// enumeration — but that constrains the HTTP response only. Only the
+    /// account": `signup_start_service` returns the identical
+    /// `VerificationRequired` result for a new email, an unverified email,
+    /// and a verified email, to prevent email enumeration — but that
+    /// constrains the HTTP response only. Only the
     /// mailbox owner can read this email, so it's safe to be specific here.
     /// Lists the account's active sign-in methods (`auth_methods`, raw
     /// `user_auth_methods.auth_type` values) so the recipient isn't left

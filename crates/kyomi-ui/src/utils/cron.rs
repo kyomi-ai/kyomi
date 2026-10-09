@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Cron utilities for displaying UTC cron expressions in local time.
+//! Cron utilities for describing schedules.
 //!
-//! Cron expressions are stored in UTC. This module converts them to
-//! human-readable descriptions in the user's local timezone.
+//! Named watch schedules are described in their saved wall-clock timezone.
+//! Legacy offset conversion helpers remain available for explicitly UTC cron.
 //!
 //! Ported from `apps/frontend/src/utils/cronUtils.js`.
 
@@ -127,28 +127,14 @@ fn parse_weekdays(field: &str, utc_hour: u32, tz_offset_minutes: i32) -> Option<
     let conversion = utc_to_local_hour(utc_hour, tz_offset_minutes);
     let day_offset = conversion.day_offset;
 
-    let mut days = Vec::new();
-    for range in field.split(',') {
-        if range.contains('-') {
-            let parts: Vec<&str> = range.split('-').collect();
-            if parts.len() != 2 {
-                continue;
-            }
-            if let (Ok(start), Ok(end)) = (parts[0].parse::<i32>(), parts[1].parse::<i32>()) {
-                for i in start..=end {
-                    let adjusted = ((i + day_offset) % 7 + 7) % 7;
-                    if let Some(name) = WEEKDAYS.get(adjusted as usize) {
-                        days.push((*name).to_string());
-                    }
-                }
-            }
-        } else if let Ok(day_num) = range.parse::<i32>() {
-            let adjusted = ((day_num + day_offset) % 7 + 7) % 7;
-            if let Some(name) = WEEKDAYS.get(adjusted as usize) {
-                days.push((*name).to_string());
-            }
-        }
-    }
+    let days = kyomi_types::cron_weekdays::evaluate_weekdays(field).ok()?;
+    let days = days
+        .iter()
+        .map(|&day| {
+            let adjusted = (day as i32 + day_offset).rem_euclid(7);
+            WEEKDAYS[adjusted as usize].to_string()
+        })
+        .collect();
 
     Some(days)
 }
@@ -185,6 +171,13 @@ pub fn describe_cron(cron_expr: &str, tz_offset_minutes: i32) -> CronDescription
         return CronDescription {
             valid: false,
             description: "Invalid characters in cron expression".into(),
+        };
+    }
+
+    if kyomi_types::cron_weekdays::evaluate_weekdays(day_of_week).is_err() {
+        return CronDescription {
+            valid: false,
+            description: "Invalid day-of-week field (use 0 or 7 for Sunday, 1 for Monday)".into(),
         };
     }
 
@@ -393,6 +386,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cron_weekday_descriptions_share_execution_sets() {
+        assert_eq!(parse_weekdays("0,7", 9, 0).unwrap(), ["Sunday"]);
+        assert!(!describe_cron("0 9 * * 8", 0).valid);
+        assert!(!describe_cron("0 9 * * */0", 0).valid);
+        assert_eq!(
+            parse_weekdays("5-7", 9, 0).unwrap(),
+            ["Sunday", "Friday", "Saturday"]
+        );
+        assert_eq!(
+            parse_weekdays("*/2", 9, 0).unwrap(),
+            ["Sunday", "Tuesday", "Thursday", "Saturday"]
+        );
+        // UTC Sunday 23:00 is local Monday 09:00 at UTC+10.
+        assert_eq!(parse_weekdays("0", 23, -600).unwrap(), ["Monday"]);
+    }
+
+    #[test]
     fn test_utc_to_local_hour_positive_offset() {
         // UTC+11 (e.g., Sydney) — offset = -660
         let result = utc_to_local_hour(9, -660);
@@ -478,5 +488,40 @@ mod tests {
     fn test_describe_cron_empty() {
         let result = describe_cron("", 0);
         assert!(!result.valid);
+    }
+}
+
+/// Describe saved schedule wall time without reinterpreting it in the browser zone.
+pub fn describe_schedule(cron: &str, timezone: Option<&str>) -> CronDescription {
+    let mut description = describe_cron(cron, 0);
+    if description.valid {
+        description.description.push_str(&format!(" ({})", timezone.unwrap_or("UTC")));
+    }
+    description
+}
+
+/// Display the actual dated next execution in the saved zone and UTC.
+pub fn format_schedule_execution(next: &str, timezone: Option<&str>) -> String {
+    match (chrono::DateTime::parse_from_rfc3339(next), timezone.unwrap_or("UTC").parse::<chrono_tz::Tz>()) {
+        (Ok(instant), Ok(zone)) => format!("{} {} / {} UTC", instant.with_timezone(&zone).format("%Y-%m-%d %H:%M %:z"), zone, instant.with_timezone(&chrono::Utc).format("%Y-%m-%d %H:%M")),
+        _ => next.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod timezone_tests {
+    use super::*;
+
+    #[test]
+    fn saved_zone_description_and_dated_execution_do_not_use_browser_offsets() {
+        let description = describe_schedule("0 9 * * 1", Some("Australia/Sydney"));
+        assert!(description.valid);
+        assert!(description.description.contains("9:00"));
+        assert!(description.description.contains("Monday"));
+        assert!(description.description.contains("Australia/Sydney"));
+        assert_eq!(format_schedule_execution("2026-10-04T22:00:00Z", Some("Australia/Sydney")),
+            "2026-10-05 09:00 +11:00 Australia/Sydney / 2026-10-04 22:00 UTC");
+        assert_eq!(format_schedule_execution("2026-10-04T23:00:00Z", None),
+            "2026-10-04 23:00 +00:00 UTC / 2026-10-04 23:00 UTC");
     }
 }

@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Dashboard PDF export endpoint.
+//! Dashboard REST endpoints.
 //!
-//! This route returns binary PDF content and cannot be a Leptos server_fn,
-//! so it is kept as a dedicated REST endpoint.
+//! The PDF export returns binary content and cannot be a Leptos server_fn.
+//! The list endpoint supplies JSON to API clients.
 //!
 //! ## Endpoint
 //!
+//! - `GET /` — List dashboards visible to the current user
 //! - `GET /{dashboard_id}/export/pdf` — Export dashboard as PDF
 
 use axum::{
@@ -29,9 +30,11 @@ use crate::state::AppState;
 // Router
 // ===========================================================================
 
-/// Build the `/dashboards` router with the PDF export endpoint.
+/// Build the `/dashboards` router.
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/{dashboard_id}/export/pdf", get(export_pdf))
+    Router::new()
+        .route("/", get(list_dashboards))
+        .route("/{dashboard_id}/export/pdf", get(export_pdf))
 }
 
 // ===========================================================================
@@ -47,6 +50,25 @@ struct ExportPdfParams {
 // ===========================================================================
 // Handler
 // ===========================================================================
+
+// GET / — List dashboards visible in the authenticated workspace.
+async fn list_dashboards(
+    State(state): State<AppState>,
+    user: AuthUser,
+) -> Result<Json<Vec<Value>>, kyomi_core::Error> {
+    let workspace_id = user
+        .workspace
+        .workspace_id
+        .as_deref()
+        .ok_or_else(|| kyomi_core::Error::BadRequest("Workspace context required".into()))?;
+    let dashboards = dashboard_service::list_dashboards_for_sync(
+        &state.db,
+        workspace_id,
+        &user.user_id,
+    )
+    .await?;
+    Ok(Json(dashboards))
+}
 
 // ---------------------------------------------------------------------------
 // GET /{dashboard_id}/export/pdf — Export dashboard as PDF

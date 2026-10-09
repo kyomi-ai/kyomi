@@ -1,9 +1,9 @@
 # WASM-specific build configuration.
 #
 # rustflags apply to all wasm32 builds (debug and release).
-# build-std is NOT configured here — it only works with nightly and
-# crashes the linker in debug mode. Instead, release builds pass it
-# via environment variables in rebuild-leptos.sh.
+# All normal builds use rust-toolchain.toml's stable release. build-std
+# requires nightly and is not used: kyomi-ui/src/wasm_math_shims.rs forwards
+# the WASM target's unresolved C math symbols to libm for release builds.
 
 # BEGIN_LOCAL_DEV_LINKER
 [target.x86_64-unknown-linux-gnu]

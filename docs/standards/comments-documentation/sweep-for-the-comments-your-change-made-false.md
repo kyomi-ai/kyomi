@@ -29,8 +29,8 @@ that pulled `README.md` in."*
 
 **Rule:** After a change that removes a symbol, a branch, a call site, or a guarantee, run two
 sweeps before requesting review. First, grep every identifier you removed across `apps/`,
-`crates/`, `enterprise/`, `scripts/` and the sibling repos — including places the name
-legitimately survives, because that is where a comparison *to* it now lies. Second, grep the
+`crates/`, `enterprise/`, `scripts/`, `.github/` and the sibling repos — including places the
+name legitimately survives, because that is where a comparison *to* it now lies. Second, grep the
 consumers of what you changed for the words that quantify or relate: `both`, `each`, `the two`,
 `the three`, `always`, `never`, `only`, `same as`, `mirrors`, `unlike`. Every hit is a sentence
 that was true about a population your diff resized. Fix what you falsified in the same PR, and

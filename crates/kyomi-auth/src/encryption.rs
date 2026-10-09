@@ -48,7 +48,9 @@ pub fn decrypt(encrypted: &str, key: &[u8; 32]) -> kyomi_core::Result<String> {
         .map_err(|e| kyomi_core::Error::BadRequest(format!("bad base64: {e}")))?;
 
     if data.len() < 1 + NONCE_SIZE + 16 {
-        return Err(kyomi_core::Error::BadRequest("encrypted data too short".into()));
+        return Err(kyomi_core::Error::BadRequest(
+            "encrypted data too short".into(),
+        ));
     }
 
     if data[0] != VERSION_AES256_GCM {
@@ -85,6 +87,68 @@ pub fn decrypt_json(encrypted: &str, key: &[u8; 32]) -> kyomi_core::Result<serde
         .map_err(|e| kyomi_core::Error::Internal(format!("JSON deserialization failed: {e}")))
 }
 
+/// Derive an opaque repeatable storage key without exposing a guessable content hash.
+pub(crate) fn opaque_storage_key(domain: &str, content: &str, key: &[u8; 32]) -> String {
+    use hmac::{Hmac, Mac};
+    let mut mac = <Hmac<sha2::Sha256> as Mac>::new_from_slice(key).expect("HMAC accepts a 32-byte key");
+    mac.update(domain.as_bytes());
+    mac.update(&[0]);
+    mac.update(content.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
+// A JSON envelope preserves native JSON columns and SQL NULL semantics while
+// marking encrypted values unambiguously. Historical plaintext JSON remains readable.
+const ENCRYPTED_JSON_FIELD: &str = "__kyomi_encrypted_json_v1";
+
+pub fn protect_json_field(
+    value: &serde_json::Value,
+    key: &[u8; 32],
+) -> kyomi_core::Result<serde_json::Value> {
+    Ok(serde_json::json!({ ENCRYPTED_JSON_FIELD: encrypt_json(value, key)? }))
+}
+
+pub fn restore_json_field(
+    value: &serde_json::Value,
+    key: &[u8; 32],
+) -> kyomi_core::Result<serde_json::Value> {
+    match value.get(ENCRYPTED_JSON_FIELD) {
+        None => Ok(value.clone()),
+        Some(ciphertext) => decrypt_json(
+            ciphertext.as_str().ok_or_else(|| {
+                kyomi_core::Error::BadRequest("invalid encrypted JSON envelope".into())
+            })?,
+            key,
+        ),
+    }
+}
+
+/// Encrypt the compaction summary while leaving non-sensitive session settings usable.
+pub fn protect_chat_config(
+    value: &serde_json::Value,
+    key: &[u8; 32],
+) -> kyomi_core::Result<serde_json::Value> {
+    let mut config = value.clone();
+    if let Some(summary) = config.pointer_mut("/agent_state/compacted_summary")
+        && !summary.is_null()
+    {
+        *summary = protect_json_field(summary, key)?;
+    }
+    Ok(config)
+}
+
+/// Restore encrypted compaction state, accepting historical plaintext summaries.
+pub fn restore_chat_config(
+    value: &serde_json::Value,
+    key: &[u8; 32],
+) -> kyomi_core::Result<serde_json::Value> {
+    let mut config = value.clone();
+    if let Some(summary) = config.pointer_mut("/agent_state/compacted_summary") {
+        *summary = restore_json_field(summary, key)?;
+    }
+    Ok(config)
+}
+
 /// Derive the 32-byte encryption key from the base64url-encoded env var.
 pub fn derive_key(encryption_key_b64: &str) -> kyomi_core::Result<[u8; 32]> {
     let bytes = URL_SAFE
@@ -114,7 +178,10 @@ pub fn derive_key(encryption_key_b64: &str) -> kyomi_core::Result<[u8; 32]> {
 /// Returns the plaintext token string. Tokens are stored encrypted in
 /// `workspace_integrations.config` and `workspace_user_integrations.config`
 /// JSONB fields.
-pub fn decrypt_slack_token(encrypted: &str, encryption_key: &[u8; 32]) -> kyomi_core::Result<String> {
+pub fn decrypt_slack_token(
+    encrypted: &str,
+    encryption_key: &[u8; 32],
+) -> kyomi_core::Result<String> {
     decrypt(encrypted, encryption_key)
 }
 
@@ -123,7 +190,10 @@ pub fn decrypt_slack_token(encrypted: &str, encryption_key: &[u8; 32]) -> kyomi_
 /// Returns AES-256-GCM ciphertext as a base64url string. Encrypted tokens
 /// are stored in `workspace_integrations.config` and
 /// `workspace_user_integrations.config` JSONB fields.
-pub fn encrypt_slack_token(plaintext: &str, encryption_key: &[u8; 32]) -> kyomi_core::Result<String> {
+pub fn encrypt_slack_token(
+    plaintext: &str,
+    encryption_key: &[u8; 32],
+) -> kyomi_core::Result<String> {
     encrypt(plaintext, encryption_key)
 }
 

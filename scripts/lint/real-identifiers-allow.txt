@@ -47,3 +47,5 @@ gcp-service-account:scripts/lint/check-real-identifiers-test.sh:Deliberate gcp-s
 email-address:scripts/lint/check-real-identifiers-test.sh:Deliberate email-address-shaped fixture used to prove the rule fires
 public-ipv4:scripts/lint/check-real-identifiers-test.sh:Deliberate public-ipv4-shaped fixture used to prove the rule fires
 credential-token:scripts/lint/check-real-identifiers-test.sh:Deliberate credential-token-shaped fixture used to prove the rule fires
+
+gcp-service-account:scripts/e2e-regression/discovery-failure-message.cjs:Fabricated GCP service-account fixture for discovery failure-message E2E spec (trivy-secret.yaml id: gcp-fixture-discovery-failure-message-e2e-spec)

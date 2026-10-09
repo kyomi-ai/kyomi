@@ -51,11 +51,16 @@
 //!   succeeded) must call `.connect(user_id)` itself and read from the
 //!   returned receiver, as `tools/watch.rs`'s `broadcast_routing` tests do.
 
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
+use serde_json::json;
 use sqlx::sqlite::SqlitePoolOptions;
 
-use crate::tools::ToolContext;
+use crate::provider::LLMProvider;
+use crate::tools::{AgentTool, ToolContext};
+use crate::types::{AgentTokenUsage, LLMResponse, Message, Tool, ToolCall};
 
 /// Build a migrated in-memory SQLite [`kyomi_core::DbPool`] for tests.
 ///
@@ -163,4 +168,192 @@ pub(crate) async fn seed_user_and_workspace(db: &kyomi_core::DbPool) {
     .execute(sq)
     .await
     .expect("insert workspace_users user-a");
+}
+
+// ---------------------------------------------------------------------------
+// ScriptedProvider — a fake LLMProvider driven by a fixed reply script
+// ---------------------------------------------------------------------------
+//
+// Originally private to `agent.rs`'s own test module. Extracted here (KYO-493
+// phase 3) once `adapter.rs`'s tests needed the same ToolCall-then-Text
+// scripting to drive a full `ChatAgentAdapter::chat()` turn — see
+// `docs/standards/code-organization/third-copy-of-test-helper-is-extraction-trigger.md`.
+// `agent.rs`'s own tests (which exercise `CustomAgent` directly, not through
+// the adapter) now import these from here too, rather than each crate module
+// keeping its own copy.
+
+/// Name of the single tool [`ScriptedProvider`]'s tool-call replies target.
+pub(crate) const NOOP_TOOL_NAME: &str = "noop";
+
+/// A tool that does nothing, registered so the tool slice the agent hands to
+/// the LLM during the loop is non-empty.
+pub(crate) struct NoopTool;
+
+#[async_trait]
+impl AgentTool for NoopTool {
+    fn name(&self) -> &str {
+        NOOP_TOOL_NAME
+    }
+
+    fn description(&self) -> &str {
+        "Does nothing."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        json!({"type": "object", "properties": {}})
+    }
+
+    async fn execute(
+        &self,
+        _args: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> kyomi_core::Result<String> {
+        Ok("noop".to_string())
+    }
+}
+
+/// What [`ScriptedProvider`] returns for one `complete` call.
+#[derive(Clone)]
+pub(crate) enum Reply {
+    /// A plain text answer — ends the agent loop. Carries the default
+    /// (zero) token usage; use `TextWithUsage` when a test needs to drive
+    /// `max_total_tokens`.
+    Text(String),
+    /// A single tool call — drives the loop into another iteration. Carries
+    /// the default (zero) token usage; use `ToolCallWithUsage` when a test
+    /// needs to drive `max_total_tokens`.
+    ToolCall,
+    /// A single tool call carrying explicit token usage — needed by tests
+    /// that must control exactly how many billable tokens each iteration
+    /// contributes.
+    ToolCallWithUsage(AgentTokenUsage),
+    /// A single tool call preceded by `tokio::time::sleep(duration)` —
+    /// needed by tests that drive a wall-clock guard under a paused tokio
+    /// clock (`#[tokio::test(start_paused = true)]`) rather than a real
+    /// sleep.
+    SlowToolCall(std::time::Duration),
+    /// A provider failure.
+    Failure(String),
+    /// A single tool call whose arguments the provider could not parse
+    /// (KYO-535) — carries `finish_reason: "max_tokens"`, matching the
+    /// truncation-mid-payload shape the ticket traces to. Drives the loop
+    /// into another iteration, same as `ToolCall`, but the noop tool must
+    /// NOT be executed for it.
+    TruncatedToolCall,
+}
+
+/// Build a single-tool-call [`LLMResponse`] carrying the given usage.
+///
+/// Shared by the `ToolCall`, `ToolCallWithUsage`, and `SlowToolCall`
+/// branches of [`ScriptedProvider::complete`] so the noop-tool-call shape
+/// (id, name, empty arguments) is defined exactly once.
+pub(crate) fn tool_call_response(usage: AgentTokenUsage) -> LLMResponse {
+    LLMResponse {
+        raw_response: serde_json::Value::Null,
+        content: String::new(),
+        finish_reason: "tool_use".to_string(),
+        usage,
+        tool_calls: Some(vec![ToolCall {
+            id: "tc_1".to_string(),
+            name: NOOP_TOOL_NAME.to_string(),
+            arguments: json!({}),
+            arguments_error: None,
+        }]),
+        cost: None,
+        thinking_content: None,
+    }
+}
+
+/// One recorded `LLMProvider::complete` invocation.
+#[derive(Debug)]
+pub(crate) struct RecordedCall {
+    pub messages: Vec<Message>,
+    pub tools: Vec<Tool>,
+}
+
+impl RecordedCall {
+    /// Messages in this call that carry an iteration-budget notice.
+    pub(crate) fn budget_notices(&self) -> Vec<&Message> {
+        self.messages
+            .iter()
+            .filter(|m| m.content.contains(crate::agent::BUDGET_NOTICE_PREFIX))
+            .collect()
+    }
+}
+
+/// An [`LLMProvider`] that records every call it receives and replays a
+/// fixed script of replies.
+pub(crate) struct ScriptedProvider {
+    pub script: Mutex<VecDeque<Reply>>,
+    /// Replayed once the script runs out (e.g. "keeps calling tools").
+    pub after_script: Reply,
+    pub calls: Arc<Mutex<Vec<RecordedCall>>>,
+}
+
+#[async_trait]
+impl LLMProvider for ScriptedProvider {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        tools: &[Tool],
+        _temperature: Option<f32>,
+        _max_tokens: u32,
+        _user_names: &HashMap<String, String>,
+    ) -> kyomi_core::Result<LLMResponse> {
+        self.calls
+            .lock()
+            .expect("call log mutex")
+            .push(RecordedCall {
+                messages: messages.to_vec(),
+                tools: tools.to_vec(),
+            });
+
+        let reply = self
+            .script
+            .lock()
+            .expect("script mutex")
+            .pop_front()
+            .unwrap_or_else(|| self.after_script.clone());
+
+        match reply {
+            Reply::Text(content) => Ok(LLMResponse {
+        raw_response: serde_json::Value::Null,
+                content,
+                finish_reason: "end_turn".to_string(),
+                usage: AgentTokenUsage::default(),
+                tool_calls: None,
+                cost: None,
+                thinking_content: None,
+            }),
+            Reply::ToolCall => Ok(tool_call_response(AgentTokenUsage::default())),
+            Reply::ToolCallWithUsage(usage) => Ok(tool_call_response(usage)),
+            Reply::SlowToolCall(duration) => {
+                tokio::time::sleep(duration).await;
+                Ok(tool_call_response(AgentTokenUsage::default()))
+            }
+            Reply::Failure(message) => Err(kyomi_core::Error::Internal(message)),
+            Reply::TruncatedToolCall => Ok(LLMResponse {
+        raw_response: serde_json::Value::Null,
+                content: String::new(),
+                finish_reason: "max_tokens".to_string(),
+                usage: AgentTokenUsage::default(),
+                tool_calls: Some(vec![ToolCall {
+                    id: "tc_truncated".to_string(),
+                    name: NOOP_TOOL_NAME.to_string(),
+                    arguments: json!({}),
+                    arguments_error: Some(
+                        "arguments could not be parsed as JSON (finish_reason=max_tokens): \
+                         EOF while parsing an object"
+                            .to_string(),
+                    ),
+                }]),
+                cost: None,
+                thinking_content: None,
+            }),
+        }
+    }
+
+    fn model(&self) -> &str {
+        "scripted-model"
+    }
 }

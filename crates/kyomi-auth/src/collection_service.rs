@@ -111,6 +111,84 @@ async fn row_exists(db: &DbPool, sql: &str, binds: &[&str]) -> Result<bool> {
     })
 }
 
+/// Authorize a collection mutation before any reads that could produce sync
+/// events. Public collections remain collaborative among active workspace
+/// members; a private collection is writable only by its creator. Visibility
+/// changes are creator-only even while a collection is public.
+async fn authorize_collection_mutation(
+    db: &DbPool,
+    collection_id: &str,
+    workspace_id: &str,
+    actor_id: &str,
+    visibility_change: bool,
+) -> Result<()> {
+    let member = row_exists(
+        db,
+        "SELECT 1 FROM workspace_users WHERE workspace_id = $1 AND user_id = $2 AND active = TRUE",
+        &[workspace_id, actor_id],
+    )
+    .await?;
+    if !member {
+        return Err(kyomi_core::Error::Forbidden(
+            "Not authorized to modify this collection".into(),
+        ));
+    }
+    let collection: Option<(String, bool)> = db_fetch_optional!(
+        db,
+        (String, bool),
+        "SELECT created_by, is_public FROM collections WHERE id = $1 AND workspace_id = $2",
+        collection_id,
+        workspace_id
+    )
+    .map_err(|e| kyomi_core::Error::Internal(format!("failed to authorize collection: {e}")))?;
+    let Some((creator, is_public)) = collection else {
+        return Err(kyomi_core::Error::NotFound("Collection not found".into()));
+    };
+    if creator != actor_id && (!is_public || visibility_change) {
+        return Err(kyomi_core::Error::Forbidden(
+            "Not authorized to modify this collection".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Lock and authorize a PostgreSQL collection mutation in its transaction.
+/// Visibility updates and junction writes take this same row lock, so a
+/// public-to-private update cannot commit between a collaborator's check
+/// and their junction write.
+async fn lock_collection_for_mutation_pg(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    collection_id: &str,
+    workspace_id: &str,
+    actor_id: &str,
+    visibility_change: bool,
+) -> Result<bool> {
+    let member: Option<i32> = sqlx::query_scalar(
+        "SELECT 1 FROM workspace_users WHERE workspace_id = $1 AND user_id = $2 AND active = TRUE FOR SHARE",
+    )
+    .bind(workspace_id)
+    .bind(actor_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if member.is_none() {
+        return Err(kyomi_core::Error::Forbidden("Not authorized to modify this collection".into()));
+    }
+    let collection: Option<(String, bool)> = sqlx::query_as(
+        "SELECT created_by, is_public FROM collections WHERE id = $1 AND workspace_id = $2 FOR UPDATE",
+    )
+    .bind(collection_id)
+    .bind(workspace_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((creator, is_public)) = collection else {
+        return Err(kyomi_core::Error::NotFound("Collection not found".into()));
+    };
+    if creator != actor_id && (!is_public || visibility_change) {
+        return Err(kyomi_core::Error::Forbidden("Not authorized to modify this collection".into()));
+    }
+    Ok(is_public)
+}
+
 // ─── Create collection ──────────────────────────────────────────────────────
 
 /// Parameters for creating a new collection.
@@ -756,6 +834,7 @@ pub async fn update_collection(
     db: &DbPool,
     collection_id: &str,
     workspace_id: &str,
+    actor_id: &str,
     updates: &CollectionUpdates,
     ws_manager: Option<&WebSocketManager>,
 ) -> Result<bool> {
@@ -766,12 +845,11 @@ pub async fn update_collection(
     if let Some(ref color) = updates.color {
         validate_color(color)?;
     }
+    authorize_collection_mutation(db, collection_id, workspace_id, actor_id, updates.is_public.is_some()).await?;
 
-    // Capture the pre-update is_public value when a transition might occur.
-    // `db_fetch_optional!` (not `_scalar!`, which uses `fetch_one`) so a
-    // nonexistent collection_id falls through to the existing
-    // rows_affected() == 0 / NotFound handling below, unchanged.
-    let old_is_public: Option<bool> = if updates.is_public.is_some() {
+    // SQLite captures visibility before the update. PostgreSQL reads it
+    // under the collection row lock in the transaction below.
+    let mut old_is_public: Option<bool> = if updates.is_public.is_some() && db.is_sqlite() {
         db_fetch_optional!(
             db,
             (bool,),
@@ -816,15 +894,23 @@ pub async fn update_collection(
         return Ok(false);
     }
 
+    let actor_param = param_idx + 1;
+    let public_edit = if updates.is_public.is_some() {
+        String::new()
+    } else {
+        format!(" OR is_public = {}", sql_compat::bool_true(db.is_postgres()))
+    };
     let sql = format!(
-        "UPDATE collections SET {} WHERE id = $1 AND workspace_id = $2",
+        "UPDATE collections SET {} WHERE id = $1 AND workspace_id = $2 \
+         AND EXISTS (SELECT 1 FROM workspace_users WHERE workspace_id = $2 AND user_id = ${actor_param} AND active = TRUE) \
+         AND (created_by = ${actor_param}{public_edit})",
         set_parts.join(", ")
     );
 
     let now = chrono::Utc::now();
-    // Dynamic SQL with variable bind count — identical for both backends.
-    let rows_affected = kyomi_core::db_with_pool!(db, |p| {
-        let mut query = sqlx::query(&sql).bind(collection_id).bind(workspace_id);
+    macro_rules! bind_update {
+        ($query:expr) => {{
+        let mut query = $query.bind(collection_id).bind(workspace_id);
         if let Some(ref name) = updates.name {
             query = query.bind(name.trim());
         }
@@ -837,14 +923,30 @@ pub async fn update_collection(
         if let Some(is_public) = updates.is_public {
             query = query.bind(is_public);
         }
-        query = query.bind(now);
-        query.execute(p).await.map(|r| r.rows_affected())
-    })
-    .map_err(|e| {
-        kyomi_core::Error::Internal(format!("failed to update collection: {e}"))
-    })?;
+        query.bind(now).bind(actor_id)
+        }};
+    }
+    let rows_affected = match db {
+        DbPool::Postgres(pg) => {
+            let mut tx = pg.begin().await?;
+            let locked_visibility = lock_collection_for_mutation_pg(
+                &mut tx, collection_id, workspace_id, actor_id, updates.is_public.is_some(),
+            ).await?;
+            if updates.is_public.is_some() {
+                old_is_public = Some(locked_visibility);
+            }
+            let rows = bind_update!(sqlx::query(&sql)).execute(&mut *tx).await?
+                .rows_affected();
+            tx.commit().await?;
+            rows
+        }
+        DbPool::Sqlite(sq) => bind_update!(sqlx::query(&sql)).execute(sq).await
+            .map_err(|e| kyomi_core::Error::Internal(format!("failed to update collection: {e}")))?
+            .rows_affected(),
+    };
 
     if rows_affected == 0 {
+        authorize_collection_mutation(db, collection_id, workspace_id, actor_id, updates.is_public.is_some()).await?;
         return Err(kyomi_core::Error::NotFound(format!(
             "Collection {collection_id} not found"
         )));
@@ -882,10 +984,11 @@ pub async fn delete_collection(
     db: &DbPool,
     collection_id: &str,
     workspace_id: &str,
+    actor_id: &str,
     ws_manager: Option<&WebSocketManager>,
 ) -> Result<bool> {
     let (deleted, _handle) =
-        delete_collection_inner(db, collection_id, workspace_id, ws_manager).await?;
+        delete_collection_inner(db, collection_id, workspace_id, actor_id, ws_manager).await?;
     Ok(deleted)
 }
 
@@ -903,10 +1006,12 @@ async fn delete_collection_inner(
     db: &DbPool,
     collection_id: &str,
     workspace_id: &str,
+    actor_id: &str,
     ws_manager: Option<&WebSocketManager>,
 ) -> Result<(bool, Option<tokio::task::JoinHandle<()>>)> {
     uuid::Uuid::parse_str(collection_id)
         .map_err(|e| kyomi_core::Error::BadRequest(format!("Invalid collection_id: {e}")))?;
+    authorize_collection_mutation(db, collection_id, workspace_id, actor_id, false).await?;
 
     // Capture the pre-delete is_public value, mirroring `update_collection`'s
     // capture above. `db_fetch_optional!` (not `_scalar!`, which uses
@@ -942,15 +1047,17 @@ async fn delete_collection_inner(
         None
     };
 
-    let result = db_execute!(
-        db,
-        "DELETE FROM collections WHERE id = $1 AND workspace_id = $2",
-        collection_id,
-        workspace_id
-    )
+    let delete_sql = format!(
+        "DELETE FROM collections WHERE id = $1 AND workspace_id = $2 \
+         AND EXISTS (SELECT 1 FROM workspace_users WHERE workspace_id = $2 AND user_id = $3 AND active = TRUE) \
+         AND (created_by = $3 OR is_public = {})",
+        sql_compat::bool_true(db.is_postgres())
+    );
+    let result = db_execute!(db, &delete_sql, collection_id, workspace_id, actor_id)
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to delete collection: {e}")))?;
 
     if result.rows_affected() == 0 {
+        authorize_collection_mutation(db, collection_id, workspace_id, actor_id, false).await?;
         return Err(kyomi_core::Error::NotFound(format!(
             "Collection {collection_id} not found"
         )));
@@ -999,6 +1106,7 @@ pub async fn add_dashboard(
 ) -> Result<Option<DashboardVisibilityTransition>> {
     uuid::Uuid::parse_str(collection_id)
         .map_err(|e| kyomi_core::Error::BadRequest(format!("Invalid collection_id: {e}")))?;
+    authorize_collection_mutation(db, collection_id, workspace_id, user_id, false).await?;
 
     // Verify collection exists and belongs to workspace
     let exists = row_exists(
@@ -1086,12 +1194,39 @@ pub async fn add_dashboard(
     let sql = format!(
         r#"
         INSERT INTO collection_dashboards (collection_id, dashboard_id, position, added_at)
-        VALUES ($1, $2, $3, {now_expr})
+        SELECT $1, $2, $3, {now_expr}
+        WHERE EXISTS (
+            SELECT 1 FROM collections c JOIN workspace_users wu
+              ON wu.workspace_id = c.workspace_id AND wu.user_id = $5 AND wu.active = TRUE
+            WHERE c.id = $1 AND c.workspace_id = $4
+              AND (c.created_by = $5 OR c.is_public = {})
+        )
         "#
+        , sql_compat::bool_true(is_pg)
     );
 
-    db_execute!(db, &sql, collection_id, dashboard_id, &pos)
-        .map_err(|e| kyomi_core::Error::Internal(format!("failed to add dashboard to collection: {e}")))?;
+    let inserted = match db {
+        DbPool::Postgres(pg) => {
+            let mut tx = pg.begin().await?;
+            lock_collection_for_mutation_pg(
+                &mut tx, collection_id, workspace_id, user_id, false,
+            ).await?;
+            let result = sqlx::query(
+                "INSERT INTO collection_dashboards (collection_id, dashboard_id, position, added_at) \
+                 VALUES ($1, $2, $3, NOW())",
+            )
+            .bind(collection_id).bind(dashboard_id).bind(pos)
+            .execute(&mut *tx).await?;
+            tx.commit().await?;
+            result.rows_affected()
+        }
+        DbPool::Sqlite(_) => db_execute!(db, &sql, collection_id, dashboard_id, &pos, workspace_id, user_id)
+            .map_err(|e| kyomi_core::Error::Internal(format!("failed to add dashboard to collection: {e}")))?
+            .rows_affected(),
+    };
+    if inserted == 0 {
+        return Err(kyomi_core::Error::Forbidden("Not authorized to modify this collection".into()));
+    }
 
     tracing::info!(
         collection_id = %collection_id,
@@ -1116,9 +1251,11 @@ pub async fn remove_dashboard(
     collection_id: &str,
     dashboard_id: &str,
     workspace_id: &str,
+    actor_id: &str,
 ) -> Result<Option<DashboardVisibilityTransition>> {
     uuid::Uuid::parse_str(collection_id)
         .map_err(|e| kyomi_core::Error::BadRequest(format!("Invalid collection_id: {e}")))?;
+    authorize_collection_mutation(db, collection_id, workspace_id, actor_id, false).await?;
 
     // Verify collection exists and belongs to workspace
     let exists = row_exists(
@@ -1139,19 +1276,34 @@ pub async fn remove_dashboard(
     // delete, so an `Err` here aborts with nothing done yet.
     let was_visible = dashboard_service::is_doc_publicly_visible(db, dashboard_id).await?;
 
-    let result = db_execute!(
-        db,
-        "DELETE FROM collection_dashboards WHERE collection_id = $1 AND dashboard_id = $2",
-        collection_id,
-        dashboard_id
-    )
-    .map_err(|e| {
-        kyomi_core::Error::Internal(format!(
-            "failed to remove dashboard from collection: {e}"
-        ))
-    })?;
+    let remove_sql = format!(
+        "DELETE FROM collection_dashboards WHERE collection_id = $1 AND dashboard_id = $2 \
+         AND EXISTS (SELECT 1 FROM collections c JOIN workspace_users wu \
+         ON wu.workspace_id = c.workspace_id AND wu.user_id = $4 AND wu.active = TRUE \
+         WHERE c.id = $1 AND c.workspace_id = $3 AND (c.created_by = $4 OR c.is_public = {}))",
+        sql_compat::bool_true(db.is_postgres())
+    );
+    let removed = match db {
+        DbPool::Postgres(pg) => {
+            let mut tx = pg.begin().await?;
+            lock_collection_for_mutation_pg(
+                &mut tx, collection_id, workspace_id, actor_id, false,
+            ).await?;
+            let result = sqlx::query(
+                "DELETE FROM collection_dashboards WHERE collection_id = $1 AND dashboard_id = $2",
+            )
+            .bind(collection_id).bind(dashboard_id)
+            .execute(&mut *tx).await?;
+            tx.commit().await?;
+            result.rows_affected()
+        }
+        DbPool::Sqlite(_) => db_execute!(db, &remove_sql, collection_id, dashboard_id, workspace_id, actor_id)
+            .map_err(|e| kyomi_core::Error::Internal(format!("failed to remove dashboard from collection: {e}")))?
+            .rows_affected(),
+    };
 
-    if result.rows_affected() == 0 {
+    if removed == 0 {
+        authorize_collection_mutation(db, collection_id, workspace_id, actor_id, false).await?;
         return Err(kyomi_core::Error::NotFound(
             "Dashboard not found in collection".into(),
         ));
@@ -1414,6 +1566,209 @@ mod tests {
         cleanup_created_by_test_pg(pg, &workspace_id, &owner_id).await;
     }
 
+    #[tokio::test]
+    async fn postgres_private_collection_authorizes_creator_not_admin() {
+        let test_name = "postgres_private_collection_authorizes_creator_not_admin";
+        let Some(db) = crate::test_pg::postgres_test_pool_or_skip(test_name).await else {
+            return;
+        };
+        let pg = crate::test_pg::postgres_pool(&db);
+        let workspace_id = crate::test_pg::unique_test_id("ws");
+        let owner_id = crate::test_pg::unique_test_id("owner");
+        let admin_id = crate::test_pg::unique_test_id("admin");
+        let member_id = crate::test_pg::unique_test_id("member");
+        let outsider_id = crate::test_pg::unique_test_id("outsider");
+        crate::test_pg::seed_user_pg(pg, &owner_id, &format!("{owner_id}@example.invalid")).await;
+        crate::test_pg::seed_user_pg(pg, &admin_id, &format!("{admin_id}@example.invalid")).await;
+        crate::test_pg::seed_user_pg(pg, &member_id, &format!("{member_id}@example.invalid")).await;
+        crate::test_pg::seed_user_pg(pg, &outsider_id, &format!("{outsider_id}@example.invalid")).await;
+        crate::test_pg::seed_workspace_pg(pg, &workspace_id, &owner_id).await;
+        for (user_id, role) in [(&owner_id, "workspace_admin"), (&admin_id, "workspace_admin"), (&member_id, "workspace_user")] {
+            sqlx::query("INSERT INTO workspace_users (workspace_id, user_id, role, active) VALUES ($1, $2, $3, TRUE)")
+                .bind(&workspace_id).bind(user_id).bind(role).execute(pg).await
+                .expect("seed Postgres workspace member");
+        }
+        let collection = create_collection(NewCollectionParams {
+            db: &db, workspace_id: &workspace_id, name: "Private", description: None,
+            color: None, is_public: false, doc_type: "dashboard", created_by: &owner_id,
+        }).await.expect("create Postgres private collection");
+        let dashboard_id = create_test_dashboard(&db, &owner_id, &workspace_id, "Owner dashboard").await;
+        let member_dashboard = create_test_dashboard(&db, &member_id, &workspace_id, "Member dashboard").await;
+        add_dashboard(&db, &collection.id, &dashboard_id, &workspace_id, &owner_id, Some(7))
+            .await.expect("creator can add to private collection");
+        let cursor = sync_log_service::get_latest_sync_id(&db, &workspace_id).await.unwrap();
+
+        for actor in [&admin_id, &member_id, &outsider_id] {
+            for updates in [
+                CollectionUpdates { name: Some("Denied".into()), ..Default::default() },
+                CollectionUpdates { is_public: Some(true), ..Default::default() },
+            ] {
+                assert!(matches!(
+                    update_collection(&db, &collection.id, &workspace_id, actor, &updates, None).await,
+                    Err(kyomi_core::Error::Forbidden(_))
+                ));
+            }
+            assert!(matches!(delete_collection(&db, &collection.id, &workspace_id, actor, None).await,
+                Err(kyomi_core::Error::Forbidden(_))));
+            assert!(matches!(add_dashboard(&db, &collection.id, &member_dashboard, &workspace_id, actor, Some(0)).await,
+                Err(kyomi_core::Error::Forbidden(_))));
+            assert!(matches!(remove_dashboard(&db, &collection.id, &dashboard_id, &workspace_id, actor).await,
+                Err(kyomi_core::Error::Forbidden(_))));
+        }
+        let after = get_collection(&db, &collection.id, &workspace_id, &owner_id)
+            .await.unwrap().unwrap();
+        assert_eq!(after.name, "Private");
+        assert!(!after.is_public);
+        assert_eq!(after.dashboards.len(), 1);
+        assert_eq!(after.dashboards[0].position, 7);
+        assert!(sync_log_service::get_entries_since(&db, &workspace_id, cursor, &owner_id, 50)
+            .await.unwrap().is_empty());
+        update_collection(&db, &collection.id, &workspace_id, &owner_id, &CollectionUpdates {
+            name: Some("Owner edit".into()), ..Default::default()
+        }, None).await.expect("Postgres creator can edit private collection");
+        let after = get_collection(&db, &collection.id, &workspace_id, &owner_id)
+            .await.unwrap().unwrap();
+        assert_eq!(after.name, "Owner edit");
+
+        update_collection(&db, &collection.id, &workspace_id, &owner_id, &CollectionUpdates {
+            is_public: Some(true), ..Default::default()
+        }, None).await.expect("creator makes collection public");
+        add_dashboard(&db, &collection.id, &member_dashboard, &workspace_id, &member_id, Some(2))
+            .await.expect("member adds own dashboard to public collection");
+        remove_dashboard(&db, &collection.id, &member_dashboard, &workspace_id, &member_id)
+            .await.expect("member removes from public collection");
+        update_collection(&db, &collection.id, &workspace_id, &member_id, &CollectionUpdates {
+            name: Some("Collaborative".into()), ..Default::default()
+        }, None).await.expect("member can rename public collection");
+        assert!(matches!(update_collection(&db, &collection.id, &workspace_id, &member_id,
+            &CollectionUpdates { is_public: Some(false), ..Default::default() }, None).await,
+            Err(kyomi_core::Error::Forbidden(_))));
+        update_collection(&db, &collection.id, &workspace_id, &owner_id,
+            &CollectionUpdates { is_public: Some(false), ..Default::default() }, None)
+            .await.expect("creator makes collection private again");
+        assert!(matches!(update_collection(&db, &collection.id, &workspace_id, &member_id,
+            &CollectionUpdates { is_public: Some(true), ..Default::default() }, None).await,
+            Err(kyomi_core::Error::Forbidden(_))));
+        assert!(!get_collection(&db, &collection.id, &workspace_id, &owner_id)
+            .await.unwrap().unwrap().is_public);
+
+        sqlx::query("DELETE FROM collections WHERE id = $1").bind(&collection.id)
+            .execute(pg).await.expect("cleanup collection");
+        sqlx::query("DELETE FROM dashboards WHERE workspace_id = $1")
+            .bind(&workspace_id).execute(pg).await.expect("cleanup dashboards");
+        sqlx::query("DELETE FROM workspace_users WHERE workspace_id = $1")
+            .bind(&workspace_id).execute(pg).await.expect("cleanup workspace members");
+        crate::test_pg::cleanup_workspace_and_users_pg(pg, &workspace_id,
+            &[&owner_id, &admin_id, &member_id, &outsider_id]).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_visibility_change_serializes_with_member_add() {
+        let test_name = "postgres_visibility_change_serializes_with_member_add";
+        let Some(db) = crate::test_pg::postgres_test_pool_or_skip(test_name).await else {
+            return;
+        };
+        let pg = crate::test_pg::postgres_pool(&db);
+        let workspace_id = crate::test_pg::unique_test_id("ws");
+        let owner_id = crate::test_pg::unique_test_id("owner");
+        let member_id = crate::test_pg::unique_test_id("member");
+        crate::test_pg::seed_user_pg(pg, &owner_id, &format!("{owner_id}@example.invalid")).await;
+        crate::test_pg::seed_user_pg(pg, &member_id, &format!("{member_id}@example.invalid")).await;
+        crate::test_pg::seed_workspace_pg(pg, &workspace_id, &owner_id).await;
+        for user_id in [&owner_id, &member_id] {
+            sqlx::query("INSERT INTO workspace_users (workspace_id, user_id, role, active) VALUES ($1, $2, 'workspace_user', TRUE)")
+                .bind(&workspace_id).bind(user_id).execute(pg).await.expect("seed membership");
+        }
+        let collection = create_collection(NewCollectionParams {
+            db: &db, workspace_id: &workspace_id, name: "Public", description: None,
+            color: None, is_public: true, doc_type: "dashboard", created_by: &owner_id,
+        }).await.expect("create public collection");
+        let dashboard_id = create_test_dashboard(&db, &member_id, &workspace_id, "Member dashboard").await;
+        let cursor = sync_log_service::get_latest_sync_id(&db, &workspace_id).await.unwrap();
+
+        let mut creator_tx = pg.begin().await.expect("begin creator visibility update");
+        let creator_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *creator_tx).await.expect("creator backend PID");
+        sqlx::query("UPDATE collections SET is_public = FALSE WHERE id = $1")
+            .bind(&collection.id).execute(&mut *creator_tx).await
+            .expect("uncommitted creator visibility update locks collection");
+        let add_db = db.clone();
+        let add_collection = collection.id.clone();
+        let add_dashboard_id = dashboard_id.clone();
+        let add_workspace = workspace_id.clone();
+        let add_member = member_id.clone();
+        let add_task = tokio::spawn(async move {
+            add_dashboard(&add_db, &add_collection, &add_dashboard_id, &add_workspace, &add_member, Some(9)).await
+        });
+        // Wait until the add is actually blocked on our collection row lock;
+        // a timer alone could pass before the add reaches its critical section.
+        let blocked = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity a \
+                     WHERE $1 = ANY(pg_blocking_pids(a.pid)) AND a.query LIKE '%FOR UPDATE%')",
+                ).bind(creator_pid).fetch_one(pg).await.expect("inspect blocked writer");
+                if waiting { break true; }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }).await.unwrap_or(false);
+        assert!(blocked, "member add must reach the collection row lock before creator commits");
+        creator_tx.commit().await.expect("commit private transition");
+        assert!(matches!(add_task.await.expect("add task"), Err(kyomi_core::Error::Forbidden(_))),
+            "member must see private visibility after the row lock is released");
+        let after = get_collection(&db, &collection.id, &workspace_id, &owner_id)
+            .await.unwrap().unwrap();
+        assert!(!after.is_public);
+        assert!(after.dashboards.is_empty(), "denied add must not write a junction row");
+        assert!(sync_log_service::get_entries_since(&db, &workspace_id, cursor, &owner_id, 50)
+            .await.unwrap().is_empty(), "denied add must not write sync events");
+
+        sqlx::query("UPDATE collections SET is_public = TRUE WHERE id = $1")
+            .bind(&collection.id).execute(pg).await.expect("reset public visibility");
+        add_dashboard(&db, &collection.id, &dashboard_id, &workspace_id, &member_id, Some(9))
+            .await.expect("seed member's public membership");
+        let remove_cursor = sync_log_service::get_latest_sync_id(&db, &workspace_id).await.unwrap();
+        let mut creator_tx = pg.begin().await.expect("begin second visibility update");
+        let creator_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *creator_tx).await.expect("creator backend PID");
+        sqlx::query("UPDATE collections SET is_public = FALSE WHERE id = $1")
+            .bind(&collection.id).execute(&mut *creator_tx).await.expect("lock collection for private transition");
+        let remove_db = db.clone();
+        let remove_collection = collection.id.clone();
+        let remove_dashboard_id = dashboard_id.clone();
+        let remove_workspace = workspace_id.clone();
+        let remove_member = member_id.clone();
+        let remove_task = tokio::spawn(async move {
+            remove_dashboard(&remove_db, &remove_collection, &remove_dashboard_id, &remove_workspace, &remove_member).await
+        });
+        let blocked = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity a \
+                     WHERE $1 = ANY(pg_blocking_pids(a.pid)) AND a.query LIKE '%FOR UPDATE%')",
+                ).bind(creator_pid).fetch_one(pg).await.expect("inspect blocked remover");
+                if waiting { break true; }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }).await.unwrap_or(false);
+        assert!(blocked, "member remove must reach the collection row lock before creator commits");
+        creator_tx.commit().await.expect("commit second private transition");
+        assert!(matches!(remove_task.await.expect("remove task"), Err(kyomi_core::Error::Forbidden(_))));
+        let after = get_collection(&db, &collection.id, &workspace_id, &owner_id)
+            .await.unwrap().unwrap();
+        assert_eq!(after.dashboards.len(), 1, "denied remove must preserve junction row");
+        assert!(sync_log_service::get_entries_since(&db, &workspace_id, remove_cursor, &owner_id, 50)
+            .await.unwrap().is_empty(), "denied remove must not write sync events");
+
+        sqlx::query("DELETE FROM collections WHERE id = $1").bind(&collection.id)
+            .execute(pg).await.expect("cleanup collection");
+        sqlx::query("DELETE FROM dashboards WHERE workspace_id = $1")
+            .bind(&workspace_id).execute(pg).await.expect("cleanup dashboard");
+        sqlx::query("DELETE FROM workspace_users WHERE workspace_id = $1")
+            .bind(&workspace_id).execute(pg).await.expect("cleanup members");
+        crate::test_pg::cleanup_workspace_and_users_pg(pg, &workspace_id, &[&owner_id, &member_id]).await;
+    }
+
     /// Delete everything a Postgres created_by-constraint test in this
     /// module inserted, scoped by `workspace_id` — repeated local runs
     /// against this worktree's persistent test database must not
@@ -1548,7 +1903,7 @@ mod tests {
         rx_a.try_recv().expect("heartbeat for user-a");
         rx_b.try_recv().expect("heartbeat for user-b");
 
-        let transition = remove_dashboard(&db, &collection.id, &dashboard_id, "ws-1")
+        let transition = remove_dashboard(&db, &collection.id, &dashboard_id, "ws-1", "user-a")
             .await
             .expect("remove_dashboard")
             .expect("removing from the only public collection must report a transition");
@@ -1669,6 +2024,7 @@ mod tests {
         let sq = sqlite_pool(&db);
         seed_user(sq, "user-a", "a@test.local").await;
         seed_workspace(sq, "ws-1", "user-a").await;
+        crate::test_support::seed_membership(sq, "ws-1", "user-a", "workspace_admin", true).await;
 
         let d1 = create_test_dashboard(&db, "user-a", "ws-1", "Dash One").await;
         let collection = create_collection(NewCollectionParams {
@@ -1696,7 +2052,7 @@ mod tests {
             is_public: Some(true), // same as the stored value — not a transition
             ..Default::default()
         };
-        update_collection(&db, &collection.id, "ws-1", &updates, None)
+        update_collection(&db, &collection.id, "ws-1", "user-a", &updates, None)
             .await
             .expect("update_collection");
 
@@ -1794,7 +2150,7 @@ mod tests {
             .await
             .expect("cursor");
 
-        remove_dashboard(&db, &collection.id, &dashboard_id, "ws-1")
+        remove_dashboard(&db, &collection.id, &dashboard_id, "ws-1", "user-a")
             .await
             .expect("remove_dashboard")
             .expect("transition expected");
@@ -1873,7 +2229,7 @@ mod tests {
             .await
             .expect("cursor");
 
-        let (deleted, handle) = delete_collection_inner(&db, &collection.id, "ws-1", None)
+        let (deleted, handle) = delete_collection_inner(&db, &collection.id, "ws-1", "user-a", None)
             .await
             .expect("delete_collection_inner");
         assert!(deleted);
@@ -1964,7 +2320,7 @@ mod tests {
             .await
             .expect("cursor");
 
-        let (deleted, handle) = delete_collection_inner(&db, &collection_1.id, "ws-1", None)
+        let (deleted, handle) = delete_collection_inner(&db, &collection_1.id, "ws-1", "user-a", None)
             .await
             .expect("delete_collection_inner");
         assert!(deleted);
@@ -2018,7 +2374,7 @@ mod tests {
         rx_b.try_recv().expect("heartbeat for user-b");
 
         let (deleted, handle) =
-            delete_collection_inner(&db, &collection.id, "ws-1", Some(&manager))
+            delete_collection_inner(&db, &collection.id, "ws-1", "user-a", Some(&manager))
                 .await
                 .expect("delete_collection_inner");
         assert!(deleted);
@@ -2090,7 +2446,7 @@ mod tests {
             .await
             .expect("cursor");
 
-        let (deleted, handle) = delete_collection_inner(&db, &collection.id, "ws-1", None)
+        let (deleted, handle) = delete_collection_inner(&db, &collection.id, "ws-1", "user-a", None)
             .await
             .expect("delete_collection_inner");
         assert!(deleted);
@@ -2340,5 +2696,103 @@ mod tests {
             entry.data.is_some(),
             "sync_log row for a dashboard that fetched successfully must have non-null data: {entry:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn private_collection_rejects_member_admin_and_outsider_mutations_without_writes() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        seed_two_users_one_workspace(sq, "a@test.local", "b@test.local").await;
+        seed_user(sq, "user-admin", "admin@test.local").await;
+        crate::test_support::seed_membership(sq, "ws-1", "user-admin", "workspace_admin", true).await;
+        seed_user(sq, "user-outsider", "outsider@test.local").await;
+        let dashboard_id = create_test_dashboard(&db, "user-a", "ws-1", "Private dashboard").await;
+        let collection = create_collection(NewCollectionParams {
+            db: &db, workspace_id: "ws-1", name: "Private", description: None,
+            color: None, is_public: false, doc_type: "dashboard", created_by: "user-a",
+        }).await.expect("create collection");
+        add_dashboard(&db, &collection.id, &dashboard_id, "ws-1", "user-a", Some(7))
+            .await.expect("owner adds dashboard at explicit position");
+        let cursor = sync_log_service::get_latest_sync_id(&db, "ws-1").await.expect("cursor");
+
+        for actor in ["user-b", "user-admin", "user-outsider"] {
+            for updates in [
+                CollectionUpdates { name: Some("Hijacked".into()), ..Default::default() },
+                CollectionUpdates { is_public: Some(true), ..Default::default() },
+            ] {
+                assert!(matches!(
+                    update_collection(&db, &collection.id, "ws-1", actor, &updates, None).await,
+                    Err(kyomi_core::Error::Forbidden(_))
+                ), "{actor} must not update a private collection");
+            }
+            assert!(matches!(
+                delete_collection(&db, &collection.id, "ws-1", actor, None).await,
+                Err(kyomi_core::Error::Forbidden(_))
+            ), "{actor} must not delete a private collection");
+            assert!(matches!(
+                add_dashboard(&db, &collection.id, &dashboard_id, "ws-1", actor, Some(0)).await,
+                Err(kyomi_core::Error::Forbidden(_))
+            ), "{actor} must not reorder or add a private collection dashboard");
+            assert!(matches!(
+                remove_dashboard(&db, &collection.id, &dashboard_id, "ws-1", actor).await,
+                Err(kyomi_core::Error::Forbidden(_))
+            ), "{actor} must not remove a private collection dashboard");
+        }
+
+        let after = get_collection(&db, &collection.id, "ws-1", "user-a").await.unwrap().unwrap();
+        assert_eq!(after.name, "Private");
+        assert!(!after.is_public);
+        assert_eq!(after.dashboards.len(), 1);
+        assert_eq!(after.dashboards[0].position, 7);
+        assert!(sync_log_service::get_entries_since(&db, "ws-1", cursor, "user-a", 50)
+            .await.unwrap().is_empty(), "denied mutations must not write sync entries");
+    }
+
+    #[tokio::test]
+    async fn public_collection_collaboration_cannot_change_visibility_or_republish() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        seed_two_users_one_workspace(sq, "a@test.local", "b@test.local").await;
+        let collection = create_collection(NewCollectionParams {
+            db: &db, workspace_id: "ws-1", name: "Public", description: None,
+            color: None, is_public: true, doc_type: "dashboard", created_by: "user-a",
+        }).await.expect("create collection");
+        let b_dashboard = create_test_dashboard(&db, "user-b", "ws-1", "B's dashboard").await;
+        add_dashboard(&db, &collection.id, &b_dashboard, "ws-1", "user-b", Some(3))
+            .await.expect("member can add own dashboard to public collection");
+        update_collection(&db, &collection.id, "ws-1", "user-b", &CollectionUpdates {
+            name: Some("Collaborative".into()), ..Default::default()
+        }, None).await.expect("member can rename public collection");
+        remove_dashboard(&db, &collection.id, &b_dashboard, "ws-1", "user-b")
+            .await.expect("member can remove from public collection");
+        add_dashboard(&db, &collection.id, &b_dashboard, "ws-1", "user-b", Some(3))
+            .await.expect("member can add back to public collection");
+        assert!(matches!(
+            update_collection(&db, &collection.id, "ws-1", "user-b", &CollectionUpdates {
+                is_public: Some(false), ..Default::default()
+            }, None).await,
+            Err(kyomi_core::Error::Forbidden(_))
+        ));
+        update_collection(&db, &collection.id, "ws-1", "user-a", &CollectionUpdates {
+            is_public: Some(false), ..Default::default()
+        }, None).await.expect("creator can make collection private");
+        assert!(matches!(
+            update_collection(&db, &collection.id, "ws-1", "user-b", &CollectionUpdates {
+                is_public: Some(true), ..Default::default()
+            }, None).await,
+            Err(kyomi_core::Error::Forbidden(_))
+        ), "previous public viewer must not republish the collection");
+        let after = get_collection(&db, &collection.id, "ws-1", "user-a").await.unwrap().unwrap();
+        assert_eq!(after.name, "Collaborative");
+        assert!(!after.is_public);
+        assert_eq!(after.dashboards[0].position, 3);
+
+        let other = create_collection(NewCollectionParams {
+            db: &db, workspace_id: "ws-1", name: "Other public", description: None,
+            color: None, is_public: true, doc_type: "dashboard", created_by: "user-a",
+        }).await.expect("create second public collection");
+        delete_collection(&db, &other.id, "ws-1", "user-b", None)
+            .await.expect("member can delete public collection");
+        assert!(get_collection(&db, &other.id, "ws-1", "user-a").await.unwrap().is_none());
     }
 }

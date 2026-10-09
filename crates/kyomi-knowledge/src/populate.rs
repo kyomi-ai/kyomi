@@ -480,7 +480,7 @@ pub async fn populate_learning_embedding(
         }
     };
 
-    let embedding = embed.embed_passage(&row.insight)?;
+    let embedding = embed.embed_passage_offloaded(&row.insight).await?;
 
     match db {
         DbPool::Postgres(pg) => {
@@ -557,7 +557,7 @@ pub async fn populate_workspace(
 
     let learning_sql = format!(
         "SELECT CAST(learning_id AS TEXT) as learning_id FROM agent_learnings \
-         WHERE workspace_id = $1 AND enabled = {bool_true} AND is_superseded = {bool_false} \
+         WHERE workspace_id = $1 AND enabled = {bool_true} AND superseded_by IS NULL \
            AND embedding IS NULL"
     );
     let learning_rows = kyomi_core::db_fetch_all!(
