@@ -169,6 +169,11 @@ column = "version_id"
 reason = "Postgres SERIAL vs SQLite INTEGER PRIMARY KEY AUTOINCREMENT — see the SERIAL/AUTOINCREMENT note above this section."
 
 [[entry]]
+table = "datasource_container_cache"
+column = "id"
+reason = "Postgres SERIAL PRIMARY KEY (apps/server/migrations/20260905000000_add_datasource_container_cache.sql:57) vs SQLite INTEGER PRIMARY KEY AUTOINCREMENT (apps/server/migrations-sqlite/00046_add_datasource_container_cache.sql:13) — the same pairing as its sibling datasource_table_cache.id below; see the SERIAL/AUTOINCREMENT note above this section."
+
+[[entry]]
 table = "datasource_search_embeddings"
 column = "id"
 reason = "Postgres SERIAL vs SQLite INTEGER PRIMARY KEY AUTOINCREMENT — see the SERIAL/AUTOINCREMENT note above this section."
