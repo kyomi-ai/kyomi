@@ -811,6 +811,15 @@ async fn handle_refresh_token(
         ));
     }
 
+    // Renewal belongs to the issuing client. Keep the existing browser-token
+    // rejection above; broader client-binding changes are tracked by KYO-840.
+    if user_data.oauth_client_id.as_deref() != Some(params.client_id.as_str()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid_grant: client_id mismatch"})),
+        ));
+    }
+
     // Verify user still exists and is active
     let user = user_service::get_user_by_id(&state.db, &user_data.user_id)
         .await
@@ -870,6 +879,30 @@ async fn handle_refresh_token(
             Json(json!({"error": "internal_error"})),
         )
     })?;
+
+    // Only a fully validated grant with a successfully minted access token
+    // earns another inactivity window. Recheck persisted grant state so an
+    // intervening expiry, rotation past grace, or revocation cannot revive it.
+    let renewed = token_service::renew_oauth_refresh_token(
+        &state.db,
+        &user_data.token_id,
+        &params.client_id,
+        Utc::now() + Duration::days(jwt_config.refresh_token_expire_days),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "Failed to renew OAuth refresh token");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "internal_error"})),
+        )
+    })?;
+    if !renewed {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid_grant: refresh token invalid or expired"})),
+        ));
+    }
 
     tracing::info!(
         user_id = %user.user_id,
