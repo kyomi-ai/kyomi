@@ -4193,11 +4193,23 @@ mod tests {
 
         // AFTER: dataset_a's row is archived, so it drops out of coverage's
         // live count entirely — full coverage with dataset_b alone.
+        //
+        // That means the *shortfall* warning ("enumerated X of Y known
+        // container(s)") must be gone, because `missing` is empty: dataset_a
+        // is no longer live, so there is nothing the run failed to enumerate.
+        // A different warning may still be present, and is expected to be:
+        // #614 deliberately surfaces archived history this run did not
+        // re-verify, which is a separate signal about *archived* rows, not
+        // about the live count this test is pinning. That warning has its
+        // own coverage in `helpers_archived_coverage_tests`.
         let after = check_container_coverage(&db, &workspace_id, &ds, &enumerated_b_only)
             .await
             .expect("check_container_coverage (after)");
         assert!(
-            after.warning.is_none(),
+            after
+                .warning
+                .as_deref()
+                .is_none_or(|w| !w.contains("known container(s) this run")),
             "the reclaimed container must drop out of the live-container count \
              entirely, got: {:?}",
             after.warning
