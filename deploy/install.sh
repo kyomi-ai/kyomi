@@ -243,6 +243,11 @@ write_env() {
 
     _envfile="${INSTALL_DIR}/.env"
 
+    # Create/truncate without secrets, then restrict even an existing file
+    # before writing configuration. Do not change the caller's umask.
+    : > "$_envfile"
+    chmod 600 "$_envfile"
+
     # Use printf for each line to avoid shell interpretation of special chars
     # in generated secrets or user-provided API keys.
     cat > "$_envfile" <<'ENVHEADER'
@@ -282,9 +287,6 @@ ENVHEADER
 # See .env.example for all available options including:
 #   SMTP, Web Push, Google OAuth
 ENVFOOTER
-
-    # Restrict permissions — file contains secrets
-    chmod 600 "$_envfile"
 
     ok "Configuration written"
 }

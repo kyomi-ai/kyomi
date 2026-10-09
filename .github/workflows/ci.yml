@@ -846,6 +846,7 @@ jobs:
             scripts/sign-review-test.sh
             scripts/pre-commit-hook-test.sh
             scripts/pre-commit-amend-test.sh
+            scripts/install-env-test.sh
           )
           failed=()
           for suite in "${suites[@]}"; do
