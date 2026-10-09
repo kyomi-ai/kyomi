@@ -11,7 +11,7 @@
 #
 # What running this enables:
 #   pre-commit — blocks new lint suppressions, the server_fn/REST divergence
-#                lint (KYO-122), and unsigned/stale code-review approvals.
+#                lint (KYO-122), signal disposal safety, and real-world identifiers.
 #   pre-push   — blocks direct pushes to main (matches the remote ref being
 #                updated, see .githooks/pre-push for why).
 #
