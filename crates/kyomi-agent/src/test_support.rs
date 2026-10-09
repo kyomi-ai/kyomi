@@ -249,6 +249,7 @@ pub(crate) enum Reply {
 /// (id, name, empty arguments) is defined exactly once.
 pub(crate) fn tool_call_response(usage: AgentTokenUsage) -> LLMResponse {
     LLMResponse {
+        raw_response: serde_json::Value::Null,
         content: String::new(),
         finish_reason: "tool_use".to_string(),
         usage,
@@ -316,6 +317,7 @@ impl LLMProvider for ScriptedProvider {
 
         match reply {
             Reply::Text(content) => Ok(LLMResponse {
+        raw_response: serde_json::Value::Null,
                 content,
                 finish_reason: "end_turn".to_string(),
                 usage: AgentTokenUsage::default(),
@@ -331,6 +333,7 @@ impl LLMProvider for ScriptedProvider {
             }
             Reply::Failure(message) => Err(kyomi_core::Error::Internal(message)),
             Reply::TruncatedToolCall => Ok(LLMResponse {
+        raw_response: serde_json::Value::Null,
                 content: String::new(),
                 finish_reason: "max_tokens".to_string(),
                 usage: AgentTokenUsage::default(),

@@ -7,6 +7,7 @@ pub mod agent_thinking;
 pub mod chat_engine;
 pub mod chat_input;
 pub mod chat_state;
+pub mod chat_run_store;
 pub mod copilot_chat;
 pub mod inline_editable_title;
 pub mod thinking;

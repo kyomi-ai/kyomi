@@ -387,6 +387,7 @@ mod reconciliation_tests {
             name: format!("Watch {id}"),
             prompt: "Check something".to_string(),
             schedule: "0 9 * * *".to_string(),
+            timezone: None,
             mode: "alert".to_string(),
             enabled: true,
             last_run_at: None,
