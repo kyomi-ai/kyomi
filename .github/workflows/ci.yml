@@ -787,11 +787,9 @@ jobs:
   # produces, pre-commit-hook-test.sh to generate its own throwaway
   # keypair (substituted into the copied hook in place of the production
   # public key) and to call the real scripts/sign-review.sh with it. No
-  # other suite in this job needs it. pre-commit-hook-test.sh also reads
-  # origin/main:scripts/sign-review.sh (Test 6, the backward-compatibility
-  # case) via `git show`, not `git fetch`, riding the same fetch-depth: 0
-  # checkout below that stale-tooling-guard-test.sh's guard already needs
-  # a populated `origin/main` for.
+  # other suite in this job needs it. pre-commit-hook-test.sh's Test 6
+  # uses a checked-in historical signer fixture for the backward-compatibility
+  # case, independent of origin/main's evolving signer and checkout history.
   #
   # Deliberately no `paths:` filter, unlike the ticket's original wording of
   # "on push/PR touching scripts/**" — two reasons:
@@ -827,11 +825,6 @@ jobs:
       # not silent, but the check the guard exists to perform would never
       # actually run in CI. fetch-depth: 0 fetches every branch, which is
       # what gives the guard a real origin/main to compare against here.
-      # scripts/pre-commit-hook-test.sh (KYO-712 Part E) rides the same
-      # fetch: its Test 6 reads origin/main:scripts/sign-review.sh (also
-      # via `git show`, never `git fetch`) to prove a 2-line approval
-      # written by the pre-KYO-712 signer still verifies under the fixed
-      # hook — that ref would be just as absent without this.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
