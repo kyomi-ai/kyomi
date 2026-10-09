@@ -70,6 +70,18 @@ cat >"$STUB_BIN/gh" <<'STUB'
 # whatever the test harness staged in GH_STDOUT_FILE / GH_STDERR_FILE /
 # GH_EXIT_FILE. Ships only inside this test's own $tmpdir/bin, first on
 # PATH for the duration of the run — never touches the real `gh` or network.
+if [ -n "${GH_REPO_FIXTURES:-}" ]; then
+    case "$3" in
+        repos/kyomi-ai/kyomi/pulls* | repos/kyomi-ai/kyomi-connect/pulls* | repos/kyomi-ai/kyomi-private/pulls* | repos/chartml/chartml/pulls* | repos/kyomi-ai/kode/pulls*) ;;
+        *) echo "Unqualified or unexpected endpoint: $3" >&2; exit 1 ;;
+    esac
+    repo="${3#repos/}"
+    repo="${repo#*/}"
+    repo="${repo%%/*}"
+    cat "$GH_REPO_FIXTURES/$repo.out"
+    cat "$GH_REPO_FIXTURES/$repo.err" >&2
+    exit "$(cat "$GH_REPO_FIXTURES/$repo.exit")"
+fi
 cat "$GH_STDOUT_FILE"
 cat "$GH_STDERR_FILE" >&2
 exit "$(cat "$GH_EXIT_FILE")"
@@ -1241,6 +1253,156 @@ assert_exit "a label flag that is not 0 or 1 is a check that could not be comple
 assert_contains "names the unrecognised flag" "unrecognised rework-label flag 'yes'"
 gh_ok_empty
 echo
+
+# KYO-910: real independent clones and remotes; only GitHub is synthetic.
+# URL rewrites keep actual git ls-remote/push local while origins carry the
+# identities the production sweep must validate and route explicitly.
+echo "-- Sibling repository sweep (KYO-910)"
+export KYOMI_REPOS_ROOT="$tmpdir/sibling-root"
+export GH_REPO_FIXTURES="$tmpdir/sibling-gh"
+mkdir -p "$KYOMI_REPOS_ROOT" "$GH_REPO_FIXTURES"
+for repo in kyomi kyomi-connect kyomi-private chartml kode; do
+    bare="$(new_bare_remote "$tmpdir/$repo.git")"
+    seed_main "$bare"
+    clone_repo "$bare" "$KYOMI_REPOS_ROOT/$repo"
+    owner=kyomi-ai
+    [ "$repo" != chartml ] || owner=chartml
+    git -C "$KYOMI_REPOS_ROOT/$repo" config "url.$bare.insteadOf" "https://github.com/$owner/$repo.git"
+    git -C "$KYOMI_REPOS_ROOT/$repo" remote set-url origin "https://github.com/$owner/$repo.git"
+    : >"$GH_REPO_FIXTURES/$repo.out"
+    : >"$GH_REPO_FIXTURES/$repo.err"
+    echo 0 >"$GH_REPO_FIXTURES/$repo.exit"
+done
+primary="$KYOMI_REPOS_ROOT/kyomi"
+sibling="$KYOMI_REPOS_ROOT/kyomi-connect"
+branch="jason/kyo-910-sibling"
+run_check "$primary" 910
+assert_exit "all declared repositories clean" 0
+pr_row 21 OPEN "$POST_RESTART_TS" "$branch" >"$GH_REPO_FIXTURES/kyomi-connect.out"
+run_check "$primary" 910
+assert_exit "sibling PR reproduces false CLEAR" 1
+assert_contains "names sibling repository" "Repository: kyomi-ai/kyomi-connect"
+assert_contains "reports sibling PR" "PR #21 (OPEN) branch $branch"
+run_check "$primary" 910 --self "$branch" --ignore-branch "$branch"
+assert_exit "self and ignore names cannot hide sibling PR" 1
+: >"$GH_REPO_FIXTURES/kyomi-connect.out"
+git -C "$sibling" branch "$branch"
+run_check "$primary" 910
+assert_exit "sibling local branch" 1
+git -C "$sibling" worktree add -q "$tmpdir/sibling-worktree" "$branch"
+run_check "$primary" 910
+assert_exit "sibling local worktree" 1
+assert_contains "reports sibling worktree" "local worktree at $tmpdir/sibling-worktree"
+# Even the sibling's current branch is somebody else's evidence.
+git -C "$sibling" worktree remove "$tmpdir/sibling-worktree"
+git -C "$sibling" checkout -q "$branch"
+run_check "$primary" 910
+assert_exit "sibling current branch is not caller self" 1
+git -C "$sibling" push -q origin "$branch"
+git -C "$sibling" checkout -q main
+git -C "$sibling" branch -D "$branch" >/dev/null
+run_check "$primary" 910
+assert_exit "sibling pushed branch" 1
+assert_contains "reports remote evidence" "remote branch: origin/$branch"
+# A recycled PR in one repo cannot retire another repo's identical branch.
+pr_row 99 MERGED "$PRE_RESTART_TS" "$branch" >"$GH_REPO_FIXTURES/kyomi.out"
+run_check "$primary" 910
+assert_exit "recycled classification does not leak across identities" 1
+: >"$GH_REPO_FIXTURES/kyomi.out"
+pr_row 21 OPEN "$POST_RESTART_TS" "$branch" 1 >"$GH_REPO_FIXTURES/kyomi-connect.out"
+run_check "$primary" 910
+assert_exit "sibling rework target and remote retain existing rules" 0
+git -C "$sibling" branch "$branch"
+run_check "$primary" 910
+assert_exit "rework label cannot hide sibling local branch" 1
+git -C "$sibling" worktree add -q "$tmpdir/sibling-worktree" "$branch"
+printf 'Stranded KYO-910\n' >"$tmpdir/sibling-worktree/STRANDED.md"
+run_check "$primary" 910
+assert_exit "sibling tombstone suppresses only local evidence" 0
+assert_contains "preserved sibling work is visible" "worktree $tmpdir/sibling-worktree"
+: >"$GH_REPO_FIXTURES/kyomi-connect.out"
+run_check "$primary" 910
+assert_exit "local tombstone cannot suppress sibling remote" 1
+git -C "$sibling" push -q origin ":$branch"
+git -C "$sibling" worktree remove --force "$tmpdir/sibling-worktree"
+git -C "$sibling" branch -D "$branch" >/dev/null
+printf 'network error\n' >"$GH_REPO_FIXTURES/chartml.err"
+echo 1 >"$GH_REPO_FIXTURES/chartml.exit"
+run_check "$primary" 910
+assert_exit "sibling GitHub failure fails closed" 3
+assert_contains "failed repository is named" "Repository: chartml/chartml"
+echo 0 >"$GH_REPO_FIXTURES/chartml.exit"
+: >"$GH_REPO_FIXTURES/chartml.err"
+git -C "$sibling" config "url.$tmpdir/missing.git.insteadOf" "https://github.com/kyomi-ai/kyomi-connect.git"
+git -C "$sibling" config --unset "url.$tmpdir/kyomi-connect.git.insteadOf"
+run_check "$primary" 910
+assert_exit "unreachable sibling remote fails closed" 3
+git -C "$sibling" config --unset "url.$tmpdir/missing.git.insteadOf"
+git -C "$sibling" config "url.$tmpdir/kyomi-connect.git.insteadOf" "https://github.com/kyomi-ai/kyomi-connect.git"
+git -C "$sibling" remote set-url origin https://github.com/kyomi-ai/kode.git
+run_check "$primary" 910
+assert_exit "wrong repository in sibling directory fails closed" 3
+git -C "$sibling" remote set-url origin https://github.com/kyomi-ai/kyomi-connect.git
+mv "$KYOMI_REPOS_ROOT/kode" "$tmpdir/missing-kode"
+run_check "$primary" 910
+assert_exit "missing sibling checkout fails closed" 3
+mv "$tmpdir/missing-kode" "$KYOMI_REPOS_ROOT/kode"
+# Force failures of the local git reads. Process substitution used to hide
+# these exit statuses and could return CLEAR from incomplete local evidence.
+export TEST_REAL_GIT="$(command -v git)"
+export TEST_GIT_FAILURE_DIR="$sibling"
+cat >"$STUB_BIN/git" <<'GIT_STUB'
+#!/usr/bin/env bash
+if [ "$PWD" = "$TEST_GIT_FAILURE_DIR" ]; then
+    if [ "${TEST_GIT_FAILURE_KIND:-}" = worktree ] && [ "${1:-}" = worktree ] && [ "${2:-}" = list ]; then
+        echo "worktree read failed" >&2; exit 1
+    fi
+    if [ "${TEST_GIT_FAILURE_KIND:-}" = branch ] && [ "${1:-}" = branch ] && [ "${2:-}" = --list ]; then
+        echo "branch read failed" >&2; exit 1
+    fi
+fi
+exec "$TEST_REAL_GIT" "$@"
+GIT_STUB
+chmod +x "$STUB_BIN/git"
+export TEST_GIT_FAILURE_KIND=worktree
+run_check "$primary" 910
+assert_exit "failed sibling worktree listing fails closed" 3
+assert_contains "worktree failure is visible" "worktree read failed"
+export TEST_GIT_FAILURE_KIND=branch
+run_check "$primary" 910
+assert_exit "failed sibling branch listing fails closed" 3
+assert_contains "branch failure is visible" "branch read failed"
+rm "$STUB_BIN/git"
+unset TEST_REAL_GIT TEST_GIT_FAILURE_DIR TEST_GIT_FAILURE_KIND
+# Running from a linked /tmp tree must still resolve the declared root.
+git -C "$primary" worktree add -q -b jason/kyo-910-own "$tmpdir/invoking-worktree"
+run_check "$tmpdir/invoking-worktree" 910 --self jason/kyo-910-own
+assert_exit "linked invoking worktree keeps canonical sibling scope" 0
+# A separate invoking clone must not hide the canonical clone's current
+# branch merely because both clones have the same repository identity.
+clone_repo "$tmpdir/kyomi.git" "$tmpdir/separate-invoking"
+git -C "$tmpdir/separate-invoking" config "url.$tmpdir/kyomi.git.insteadOf" https://github.com/kyomi-ai/kyomi.git
+git -C "$tmpdir/separate-invoking" remote set-url origin https://github.com/kyomi-ai/kyomi.git
+git -C "$primary" checkout -q -b jason/kyo-910-other-worker
+run_check "$tmpdir/separate-invoking" 910
+assert_exit "canonical current branch is evidence from a separate clone" 1
+# Failures have precedence even if another repository already supplied hits.
+echo 1 >"$GH_REPO_FIXTURES/chartml.exit"
+run_check "$tmpdir/separate-invoking" 910
+assert_exit "sibling failure dominates confirmed work elsewhere" 3
+echo 0 >"$GH_REPO_FIXTURES/chartml.exit"
+# Real Git reads remain local for each supported SSH transport shape.
+# Build authorities from their user and host components, as the parser does.
+ssh_user=git
+ssh_host=github.com
+for ssh_origin in "$ssh_user@$ssh_host:kyomi-ai/kyomi.git" "ssh://$ssh_user@$ssh_host/kyomi-ai/kyomi.git"; do
+    git -C "$tmpdir/separate-invoking" config "url.$tmpdir/kyomi.git.insteadOf" "$ssh_origin"
+    git -C "$tmpdir/separate-invoking" remote set-url origin "$ssh_origin"
+    run_check "$tmpdir/separate-invoking" 910
+    assert_exit "SSH origin retains full sibling scope: $ssh_origin" 1
+    assert_contains "SSH authority resolves project identity" "Scope: kyomi-ai/kyomi"
+done
+unset KYOMI_REPOS_ROOT GH_REPO_FIXTURES
 
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
