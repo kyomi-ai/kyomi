@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+pub mod billing;
+pub mod cron_weekdays;
 pub mod datasource_contracts;
 pub mod feedback;
 pub mod permission;
 pub mod sync;
 pub mod text;
 pub mod websocket;
+pub use billing::{BillingLapseReason, PAYMENT_REQUIRED_CODE};
 pub use datasource_contracts::{
-    DatasourceOAuthDisconnectResult, DatasourceOAuthStatus, GeneratedSshKey,
+    DatasourceOAuthDisconnectResult, DatasourceOAuthRevocationOutcome, DatasourceOAuthStatus,
+    GeneratedSshKey,
     GoogleOAuthDisconnectResult, GoogleOAuthProjectsResult, GoogleOAuthStatus, GoogleProject,
 };
 pub use feedback::FEEDBACK_TYPE_VALUES;
@@ -69,7 +73,9 @@ pub struct CredentialStatusItem {
     /// For OAuth providers: `"google"` | `"snowflake"` | `"microsoft"` | `"databricks"`
     pub oauth_provider: Option<String>,
     /// The `auth_mode` from the datasource `connection_config`.
-    /// For BigQuery: `"kyomi_oauth"` | `"enterprise_oauth"` | `"service_account"`
+    /// For BigQuery: `"service_account"` (default) | `"enterprise_oauth"` |
+    /// `"kyomi_oauth"` (retired, KYO-704 — only ever seen on a pre-KYO-704
+    /// row that still names it explicitly)
     pub auth_mode: Option<String>,
     /// True if the user needs to take action (missing or expired).
     pub needs_action: bool,

@@ -9,6 +9,7 @@
 //! Design system: `DESIGN.md`
 
 // ── App-specific modules (not in kyomi-ui-components) ──────────────────────
+pub mod billing_paywall;
 pub mod chat;
 pub mod dashboard;
 pub mod documents;
@@ -69,6 +70,7 @@ pub use kyomi_ui_components::components::{
 };
 
 // App-specific re-exports
+pub use billing_paywall::BillingPaywall;
 pub use feedback_modal::FeedbackModal;
 pub use invitation_status_bar::InvitationStatusBar;
 pub use layout::Layout;

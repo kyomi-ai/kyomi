@@ -44,6 +44,10 @@ pub struct RenderChartTool;
 
 #[async_trait]
 impl AgentTool for RenderChartTool {
+    fn result_domain_outcome(&self, text: &str) -> agent_runtime::DomainOutcome {
+        super::query_utils::sql_result_domain_outcome(text)
+    }
+
     fn name(&self) -> &str {
         "render_chart"
     }

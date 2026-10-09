@@ -1,0 +1,24 @@
+#!/bin/bash
+# commit-msg hook: blocks real-world identifiers in the commit message
+# itself (KYO-662). Git invokes a commit-msg hook with the path to a file
+# containing the message as $1 — see githooks(5).
+#
+# This is the fast local signal only; CI's own scan of the PR's commit
+# messages (via `--messages <range>`) is the gate that actually matters,
+# since core.hooksPath is per-clone and cannot be committed — a contributor
+# or agent working in a fresh worktree with no hooks installed still gets
+# caught there. See scripts/lint/check-real-identifiers.sh's own header for
+# the full rule set this enforces.
+
+set -e
+
+echo "🔍 Checking commit message for real-world identifiers..."
+
+if ! ./scripts/lint/check-real-identifiers.sh --message-file "$1"; then
+    echo ""
+    echo "❌ Real-identifier lint failed on the commit message — commit blocked."
+    echo "   Remove the flagged identifier from the commit message."
+    exit 1
+fi
+
+echo "✅ Commit message clean."

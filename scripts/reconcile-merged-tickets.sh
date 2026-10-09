@@ -149,13 +149,17 @@
 # one trades a tested, documented comparison for an external service's
 # undocumented granularity and consistency guarantees.
 #
-# THE PR-LISTING LIMIT IS LOAD-BEARING, THE SAME WAY IT IS IN
-# check-ticket-in-flight.sh: `gh pr list` silently truncates at `--limit`
-# (default 30). `PR_LIST_LIMIT` (env-overridable, same name and convention as
-# check-ticket-in-flight.sh's own guard) bounds the request, and a listing
-# that comes back at >= that many rows is treated as POSSIBLY TRUNCATED and
-# fails closed (exit 3) rather than silently reporting only part of the
-# window. Now that the fetch itself is window-bounded (see above), hitting
+# THE PR-LISTING LIMIT IS LOAD-BEARING HERE: `gh pr list` silently truncates
+# at `--limit` (default 30). `PR_LIST_LIMIT` (env-overridable) bounds the
+# request, and a listing that comes back at >= that many rows is treated as
+# POSSIBLY TRUNCATED and fails closed (exit 3) rather than silently reporting
+# only part of the window.
+#
+# This guard is local to THIS script. check-ticket-in-flight.sh had a
+# similarly-named one and KYO-703 deleted it outright: its fetch is unbounded
+# (the whole PR corpus), so the ceiling became a cliff the moment the repo
+# reached it. Do not "restore parity" by copying either script's choice to
+# the other. Because the fetch here is window-bounded (see above), hitting
 # this guard means "more PRs merged in this window than we asked `gh` for" —
 # a real, actionable condition — rather than "the repo has grown past an
 # arbitrary constant". Raising the number alone is still not a substitute for

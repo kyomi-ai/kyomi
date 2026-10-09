@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/agent-runtime",
     "crates/kyomi-core",
     "crates/kyomi-auth",
     "crates/kyomi-chart-theme",
@@ -66,6 +67,12 @@ memmap2 = "0.9"
 # (distributed via trust-manager's SSL_CERT_FILE bundle).
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream"] }
 
+# HTTP mocking for dev-dependency use (KYO-623) — stands up a local HTTP
+# server so a crate whose code makes real `reqwest` calls to an external API
+# (e.g. kyomi-auth's BigQuery REST client) can be tested against real
+# request/response traffic without a network call to the real service.
+wiremock = "0.6"
+
 # WebAuthn (passkeys)
 webauthn-rs = { version = "=0.6.1-dev", features = ["danger-allow-state-serialisation", "conditional-ui"] }
 webauthn-rs-proto = "=0.6.1-dev"
@@ -122,6 +129,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 # Internal crates
+agent-runtime = { path = "crates/agent-runtime" }
 kyomi-core = { path = "crates/kyomi-core" }
 kyomi-auth = { path = "crates/kyomi-auth" }
 kyomi-embed = { path = "crates/kyomi-embed" }
@@ -175,7 +183,7 @@ sqlparser = { version = "0.55", features = ["visitor"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 
 # Async trait
-async-trait = "0.1"
+async-trait = "0.1.92"
 
 # Concurrent data structures
 dashmap = "6"

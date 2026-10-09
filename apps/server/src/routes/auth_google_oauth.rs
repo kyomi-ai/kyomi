@@ -125,6 +125,11 @@ async fn google_login(
         google_oauth::LOGIN_SCOPES,
         false, // don't force consent for login
         false, // no offline access
+        // KYO-700: must NOT request every previously granted scope back —
+        // otherwise a user who disconnected BigQuery (which revokes the
+        // grant at Google) would have it silently re-granted on their next
+        // plain sign-in.
+        false,
     );
 
     // Store state in Redis
@@ -488,44 +493,43 @@ async fn accept_terms(
 // GET /auth/google-oauth/connect (authenticated — BigQuery linking)
 // ---------------------------------------------------------------------------
 
-async fn google_oauth_connect(
-    State(state): State<AppState>,
-    user: AuthUser,
-) -> Result<impl IntoResponse, kyomi_core::Error> {
-    let (client_id, _) = get_oauth_credentials(&state)?;
+async fn google_oauth_connect(user: AuthUser) -> Result<(), kyomi_core::Error> {
+    // KYO-704: this endpoint used to redirect straight to Google requesting
+    // `google_oauth::BIGQUERY_SCOPES` with force-consent + offline access —
+    // the exact account-wide credential escalation the retired `kyomi_oauth`
+    // auth mode performed, and exactly what retiring it exists to stop.
+    //
+    // Audited every caller that used to reach this URL:
+    // - `oauth_url_for_datasource` / `get_oauth_connect_url` (the two places
+    //   that build this URL for the settings modal, the datasource list, and
+    //   the onboarding checklist) now only ever produce it for BigQuery's
+    //   `enterprise_oauth` mode, which is a different, slug-scoped endpoint —
+    //   neither can reach this handler for `service_account` (the new
+    //   default) or for an absent `auth_mode`.
+    // - The one caller that still can is a datasource whose *stored*
+    //   `connection_config.auth_mode` is still the now-retired `kyomi_oauth`
+    //   (a pre-KYO-704 row nobody has re-saved) — the settings modal's
+    //   legacy OAuth panel still renders for that row so the user can see
+    //   its state, and its Connect button still points here.
+    //
+    // For that last, genuinely-reachable case, redirecting to Google and
+    // granting the scopes anyway would be silently doing the exact thing
+    // this ticket exists to stop. Report the same named, actionable error
+    // `DatasourceTypeMetadata::get_active_auth_mode` already returns for
+    // that row everywhere else, instead of a silent redirect.
+    let (_, reason) = kyomi_core::datasource_registry::RETIRED_AUTH_MODES
+        .iter()
+        .find(|(id, _)| *id == "kyomi_oauth")
+        .expect("kyomi_oauth is a permanent entry in RETIRED_AUTH_MODES");
 
-    let csrf_state = redis_ops::generate_token();
-
-    let state_data = serde_json::json!({
-        "user_id": user.user_id,
-        "action": "link_account",
-        "workspace_id": user.workspace.workspace_id,
-        "timestamp": chrono::Utc::now().to_rfc3339(),
-    });
-    redis_ops::store_oauth_state(&state.kv, "google_link", &csrf_state, &state_data).await?;
-
-    let redirect_uri = format!(
-        "{}/auth/google/link-callback",
-        state.config.frontend_url.trim_end_matches('/')
-    );
-
-    let authorization_url = google_oauth::build_authorization_url(
-        &client_id,
-        &redirect_uri,
-        &csrf_state,
-        google_oauth::BIGQUERY_SCOPES,
-        true,  // force consent to get refresh token
-        true,  // offline access for refresh token
-    );
-
-    tracing::info!(
+    tracing::warn!(
         user_email = %user.email,
-        authorization_url = %authorization_url,
-        "Starting Google account linking (BigQuery OAuth) — redirecting to Google"
+        "Rejected Google account linking (BigQuery kyomi_oauth) — auth mode is retired"
     );
 
-    // 302 Found — matches Python's RedirectResponse(status_code=302)
-    Ok((axum::http::StatusCode::FOUND, [(axum::http::header::LOCATION, authorization_url)]))
+    Err(kyomi_core::Error::BadRequest(format!(
+        "datasource type 'bigquery': {reason}"
+    )))
 }
 
 // ---------------------------------------------------------------------------
@@ -591,48 +595,32 @@ async fn google_oauth_disconnect(
     State(state): State<AppState>,
     user: AuthUser,
 ) -> Result<Json<serde_json::Value>, kyomi_core::Error> {
-    let db_user = user_service::get_user_by_id(&state.db, &user.user_id)
-        .await?
-        .ok_or_else(|| kyomi_core::Error::NotFound("User not found".into()))?;
-
-    let existing_oauth = google_oauth::parse_oauth_data(
-        db_user.oauth_data.as_deref(),
+    // KYO-700: this used to duplicate `google_oauth_disconnect_service`'s
+    // logic inline (clear-tokens-only, no revocation at Google) — a second
+    // copy that would have needed the same revoke-before-clear fix applied
+    // twice. Delegating to the shared service means this route and the
+    // Leptos server_fn (`disconnect_google_oauth`) can no longer drift, and
+    // both now revoke the grant at Google before clearing local state. A
+    // revocation failure propagates as an `Err` here — the pre-existing
+    // `IntoResponse for kyomi_core::Error` impl turns that into a non-2xx
+    // response, so a REST caller sees that disconnect did not happen instead
+    // of a false "disconnected" response.
+    let result = google_oauth::google_oauth_disconnect_service(
+        &state.db,
+        &user.user_id,
         &state.encryption_key,
-    )?;
+    )
+    .await?;
 
-    // Check if connected
-    let has_tokens = existing_oauth
-        .as_ref()
-        .and_then(|o| o.google_oauth_tokens.as_ref())
-        .is_some();
-
-    if !has_tokens {
+    if result.already_disconnected {
         return Ok(Json(serde_json::json!({
             "already_disconnected": true,
         })));
     }
 
-    let disconnected_email = existing_oauth
-        .as_ref()
-        .and_then(|o| o.google_oauth_tokens.as_ref())
-        .and_then(|t| t.email.clone())
-        .unwrap_or_default();
-
-    // Clear oauth data (keep picture if available)
-    let cleared_oauth = OAuthData {
-        picture: existing_oauth.and_then(|o| o.picture),
-        ..Default::default()
-    };
-
-    let encrypted = google_oauth::build_oauth_data(&cleared_oauth, &state.encryption_key)?;
-    user_service::update_user_oauth_data(&state.db, &user.user_id, Some(&encrypted)).await?;
-
-    // Remove auth method
-    user_service::remove_auth_method(&state.db, &user.user_id, "google_oauth").await?;
-
     Ok(Json(serde_json::json!({
         "message": "Google account disconnected successfully",
-        "disconnected_account": disconnected_email,
+        "disconnected_account": result.disconnected_email.unwrap_or_default(),
         "bigquery_access": "disabled",
         "disconnected_at": chrono::Utc::now().to_rfc3339(),
     })))

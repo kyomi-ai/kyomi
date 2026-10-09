@@ -7,8 +7,14 @@
 //! button, resize handle, mobile overlay — lives in `RightPanel`.
 //!
 //! Context-aware wiring kept here:
-//! - Subscription to the `dashboard_update` WebSocket event so the AI can push
-//!   markdown edits directly into the document via `on_apply_content`.
+//! - `dashboard_id` is threaded through as `CopilotChat::document_id`, so
+//!   the copilot's tool calls are scoped server-side to this document
+//!   (`ToolContext::document_id`, KYO-536) — the copilot writes the
+//!   document directly (`modify_dashboard`/`edit_knowledge_file`/
+//!   `write_knowledge_file`) and the write is saved immediately, not a
+//!   draft. There is no more bespoke `dashboard_update` WebSocket bridge:
+//!   the editor reflects a copilot write the same way it reflects any
+//!   other save.
 //! - Context content (markdown) passed to the chat engine.
 //! - `context_name` prop drives all UI copy (placeholder, empty state) and the
 //!   backend context type so the agent receives the correct system prompt.
@@ -16,7 +22,7 @@
 use leptos::prelude::*;
 use phosphor_leptos::{Icon, IconWeight};
 
-use crate::components::chat::CopilotChat;
+use crate::components::chat::{BeforeSendHook, CopilotChat};
 use crate::components::RightPanel;
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -39,7 +45,10 @@ const DEFAULT_WIDTH: f64 = 384.0;
 /// - `"document"` → document-centric placeholder + `knowledge_copilot` session type
 #[component]
 pub fn CopilotSidebar(
-    /// Dashboard ID to associate the copilot session with.
+    /// Dashboard/knowledge document ID this copilot session is scoped to.
+    /// Threaded through to `ToolContext::document_id` so the copilot's
+    /// write tools can never target a different document (KYO-536).
+    #[prop(into)]
     dashboard_id: String,
     /// Current content (markdown) — injected as context with messages.
     #[prop(into)]
@@ -49,14 +58,15 @@ pub fn CopilotSidebar(
     open: Signal<bool>,
     /// Callback to close the sidebar.
     on_close: Callback<()>,
-    /// Callback when the AI pushes new content via the `dashboard_update` WS event.
-    on_apply_content: Callback<String>,
+    /// Invoked immediately before every copilot message is sent, to commit
+    /// the caller's editor buffer first — the copilot always edits the
+    /// *saved* document (KYO-536). See `BeforeSendHook`.
+    before_send: BeforeSendHook,
     /// Context name that drives UI copy and the backend agent prompt.
     /// Use `"dashboard"` (default) for dashboards, `"document"` for knowledge docs.
     #[prop(into, default = "dashboard".to_string())]
     context_name: String,
 ) -> impl IntoView {
-    let _dashboard_id = StoredValue::new(dashboard_id);
     let width = RwSignal::new(DEFAULT_WIDTH);
 
     // Derive context-sensitive strings from `context_name` at construction time.
@@ -79,14 +89,6 @@ pub fn CopilotSidebar(
                 "I can help you improve charts, suggest changes, or make edits directly.",
             ),
         };
-
-    // Custom WS event handler: the AI can apply changes directly to the
-    // document by emitting a `dashboard_update` event with a `content` field.
-    let on_custom_ws = Callback::new(move |(_event_name, data): (String, serde_json::Value)| {
-        if let Some(content) = data.get("content").and_then(|v| v.as_str()) {
-            on_apply_content.run(content.to_string());
-        }
-    });
 
     view! {
         <RightPanel
@@ -117,8 +119,8 @@ pub fn CopilotSidebar(
                 })
                 empty_title=empty_title
                 empty_description=empty_description
-                custom_ws_events=vec!["dashboard_update".to_string()]
-                on_custom_ws_event=on_custom_ws
+                document_id=dashboard_id.clone()
+                before_send=before_send.clone()
             />
         </RightPanel>
     }

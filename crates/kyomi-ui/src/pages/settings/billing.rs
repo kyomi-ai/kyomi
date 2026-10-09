@@ -81,28 +81,18 @@ struct CheckoutContext {
     checkout_handle: StoredValue<Option<send_wrapper::SendWrapper<crate::utils::stripe::EmbeddedCheckoutHandle>>>,
 }
 
-/// Fetch the Stripe publishable key, mount the embedded checkout form,
-/// and wire up the onComplete callback.
+/// Mount the embedded checkout form and wire up the onComplete callback.
+///
+/// The publishable-key fetch, DOM-mount-target wait, and `mount_embedded_checkout`
+/// call are shared with `components/billing_paywall.rs` (KYO-806) via
+/// `crate::utils::stripe::fetch_key_and_mount_embedded_checkout` — only this
+/// page's own completion handling (poll `get_checkout_session_status`) is
+/// specific to this call site.
 async fn open_embedded_checkout(
     client_secret: &str,
     session_id: &str,
     ctx: CheckoutContext,
 ) {
-    // Fetch the publishable key from the server
-    let pk = match get_stripe_publishable_key().await {
-        Ok(Some(pk)) => pk,
-        Ok(None) => {
-            ctx.set_error.set(Some("Stripe is not configured.".into()));
-            ctx.set_checkout_loading.set(false);
-            return;
-        }
-        Err(e) => {
-            ctx.set_error.set(Some(format!("Failed to load Stripe config: {e}")));
-            ctx.set_checkout_loading.set(false);
-            return;
-        }
-    };
-
     // Store session ID for the onComplete callback
     let sid = session_id.to_string();
     ctx.set_checkout_session_id.set(Some(sid.clone()));
@@ -114,11 +104,7 @@ async fn open_embedded_checkout(
     {
         let client_secret = client_secret.to_string();
         leptos::task::spawn_local(async move {
-            // Wait for the mount target to appear in DOM
-            gloo_timers::future::TimeoutFuture::new(50).await;
-
-            let result = crate::utils::stripe::mount_embedded_checkout(
-                &pk,
+            let result = crate::utils::stripe::fetch_key_and_mount_embedded_checkout(
                 &client_secret,
                 "#stripe-checkout-mount",
                 move || {
@@ -184,7 +170,6 @@ async fn open_embedded_checkout(
             ctx.set_error,
             ctx.set_sub_version,
             ctx.checkout_handle,
-            pk,
         );
     }
 }
@@ -491,13 +476,19 @@ pub fn BillingPage() -> impl IntoView {
                             })}
                         </Transition>
 
-                        // Confirm Dialog
+                        // Confirm Dialog — pass the signals through so
+                        // `ConfirmDialog` re-reads them reactively when it
+                        // opens (KYO-726). The click handlers below set
+                        // these signals right before flipping `dialog_open`,
+                        // so `.get_untracked()` here would freeze the
+                        // title/message/confirm_text/destructive at the
+                        // defaults they held at initial render.
                         <ConfirmDialog
                             open=Signal::from(dialog_open)
-                            title=dialog_title.get_untracked()
-                            message=dialog_message.get_untracked()
-                            confirm_text=dialog_confirm_text.get_untracked()
-                            destructive=dialog_destructive.get_untracked()
+                            title=dialog_title
+                            message=dialog_message
+                            confirm_text=dialog_confirm_text
+                            destructive=dialog_destructive
                             on_confirm=on_confirm
                             on_cancel=on_cancel_dialog
                         />
@@ -519,6 +510,38 @@ enum ConfirmAction {
 // ─────────────────────────────────────────────────────────────────────────────
 // Billing content (rendered after subscription info loads)
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// "Manage Billing" button — opens the Stripe customer portal.
+///
+/// Extracted as its own component (KYO-793) so the double-submit guard
+/// (`disabled` tracking `checkout_loading` reactively, so the button
+/// actually disables once a portal/checkout request is in flight instead
+/// of staying clickable forever) can be pinned by a focused render test
+/// without constructing all of `BillingContent`/`BillingPage`, which need
+/// live `UserContext`/`Resource` plumbing this button itself doesn't.
+#[component]
+fn ManageBillingButton(
+    /// Reactive loading state. Must be passed as a signal, not
+    /// `.get_untracked()`'d into a plain `bool` — `Button`'s `disabled` prop
+    /// is a `MaybeProp<bool>` that re-reads on every render, so a snapshot
+    /// here would freeze the button enabled forever regardless of later
+    /// `.set()` calls (KYO-793).
+    #[prop(into)]
+    loading: Signal<bool>,
+    on_click: Callback<()>,
+) -> impl IntoView {
+    view! {
+        <Button
+            variant=ButtonVariant::Outline
+            size=ButtonSize::Sm
+            disabled=loading
+            on:click=move |_| on_click.run(())
+        >
+            <Icon icon=phosphor_leptos::CREDIT_CARD size="16px" attr:class="mr-2"/>
+            "Manage Billing"
+        </Button>
+    }
+}
 
 #[component]
 fn BillingContent(
@@ -598,15 +621,10 @@ fn BillingContent(
                             })}
                             // Manage Billing Button
                             {is_subscribed.then(|| view! {
-                                <Button
-                                    variant=ButtonVariant::Outline
-                                    size=ButtonSize::Sm
-                                    disabled=checkout_loading.get_untracked()
-                                    on:click=move |_| { handle_manage_billing.dispatch(()); }
-                                >
-                                    <Icon icon=phosphor_leptos::CREDIT_CARD size="16px" attr:class="mr-2"/>
-                                    "Manage Billing"
-                                </Button>
+                                <ManageBillingButton
+                                    loading=checkout_loading
+                                    on_click=Callback::new(move |()| { handle_manage_billing.dispatch(()); })
+                                />
                             })}
                         </div>
                     </div>
@@ -710,7 +728,7 @@ fn BillingContent(
                                 <div class="mt-4">
                                     <Button
                                         variant=ButtonVariant::Default
-                                        disabled=checkout_loading.get_untracked()
+                                        disabled=checkout_loading
                                         on:click=move |_| {
                                             handle_subscribe.dispatch(1);
                                         }
@@ -729,7 +747,7 @@ fn BillingContent(
                                 <div class="mt-4">
                                     <Button
                                         variant=ButtonVariant::Default
-                                        disabled=checkout_loading.get_untracked()
+                                        disabled=checkout_loading
                                         on:click=move |_| { handle_manage_billing.dispatch(()); }
                                     >
                                         <Icon icon=phosphor_leptos::CREDIT_CARD size="16px" attr:class="mr-2"/>
@@ -776,7 +794,7 @@ fn BillingContent(
                                     {(status_cl == "past_due").then(|| view! {
                                         <Button
                                             variant=ButtonVariant::Default
-                                            disabled=checkout_loading.get_untracked()
+                                            disabled=checkout_loading
                                             on:click=move |_| { handle_manage_billing.dispatch(()); }
                                         >
                                             "Update Payment Method"
@@ -1240,5 +1258,108 @@ fn InvoicesSection(
                 }
             })}}
         </Transition>
+    }
+}
+
+// Rendering to HTML (`RenderHtml::to_html`) panics unless the shared
+// `leptos`/`tachys` `ssr` feature is active for this build — mirrors
+// `kyomi-ui-components`' own convention for its KYO-487 (switch.rs) and
+// KYO-726 (confirm_dialog.rs) reactive-prop tests: `cargo test -p kyomi-ui`
+// alone skips this module cleanly; `--features ssr` is required to run it.
+#[cfg(all(test, feature = "ssr"))]
+mod reactive_prop_tests {
+    use super::*;
+
+    /// Whether the rendered `<button>`'s HTML carries the boolean `disabled`
+    /// attribute — as opposed to merely containing the substring
+    /// `"disabled"`, which `Button`'s own static `disabled:*` Tailwind
+    /// utilities in `BASE` always do, regardless of the actual disabled
+    /// state. Leptos serializes a `true` boolean attribute as a bare
+    /// `disabled` token immediately before the next attribute, and omits it
+    /// entirely when `false` — so slicing off everything from `class="`
+    /// onward and checking the token immediately preceding it is the
+    /// precise way to read the real attribute state back out of the
+    /// markup. Mirrors `switch.rs`'s identical `button_html_is_disabled`
+    /// helper for its KYO-487 test.
+    fn button_html_is_disabled(html: &str) -> bool {
+        let (before_class, _) = html
+            .split_once("class=\"")
+            .expect("Button's <button> always renders a class attribute");
+        before_class.trim_end().ends_with("disabled")
+    }
+
+    /// KYO-793 — the billing double-submit guard: `ManageBillingButton`'s
+    /// `disabled` must be reactive, not a value snapshotted once at
+    /// construction time. Before this fix, `billing.rs` passed
+    /// `checkout_loading.get_untracked()` as the `disabled` prop argument,
+    /// which — since `checkout_loading` starts `false` and is only flipped
+    /// to `true` inside the click handler's in-flight request — froze the
+    /// button permanently enabled and let a user click "Manage Billing"
+    /// (or "Subscribe", "Add Payment Method", "Update Payment Method")
+    /// repeatedly while a request was already in flight.
+    ///
+    /// This builds the `<ManageBillingButton>` view *before* flipping the
+    /// bound signal, then renders it to HTML *after* the flip — asserting
+    /// on the rendered `disabled` attribute itself, not on the prop value
+    /// that was passed in. Against the pre-fix `.get_untracked()` shape,
+    /// the value would have been copied into `Button`'s `MaybeProp` at
+    /// construction time (the moment the `view!` macro runs, eagerly) — so
+    /// this render, happening strictly after the flip, would still show
+    /// the stale (enabled) value. A component whose callsite genuinely
+    /// passes the signal through cannot fail this.
+    #[test]
+    fn disabled_attribute_reflects_checkout_loading_flip_after_construction() {
+        let owner = Owner::new();
+        owner.set();
+
+        let (checkout_loading, set_checkout_loading) = signal(false);
+
+        let view = view! {
+            <ManageBillingButton
+                loading=checkout_loading
+                on_click=Callback::new(|()| {})
+            />
+        };
+
+        // Flip strictly after the view value above was constructed — exactly
+        // what a real "Manage Billing" click handler's in-flight request does
+        // to `set_checkout_loading` in `BillingPage`.
+        set_checkout_loading.set(true);
+
+        let html = view.to_html();
+        assert!(
+            button_html_is_disabled(&html),
+            "expected the rendered Manage Billing button to carry a \
+             `disabled` attribute after checkout_loading flipped to true \
+             (the double-submit guard), but it did not — this is the \
+             KYO-793 regression (rendered html: {html})"
+        );
+    }
+
+    /// Mirror of the above in the other direction — rules out a component
+    /// that renders `disabled` unconditionally regardless of the signal.
+    #[test]
+    fn disabled_attribute_clears_when_checkout_loading_flips_to_false_after_construction() {
+        let owner = Owner::new();
+        owner.set();
+
+        let (checkout_loading, set_checkout_loading) = signal(true);
+
+        let view = view! {
+            <ManageBillingButton
+                loading=checkout_loading
+                on_click=Callback::new(|()| {})
+            />
+        };
+
+        set_checkout_loading.set(false);
+
+        let html = view.to_html();
+        assert!(
+            !button_html_is_disabled(&html),
+            "expected no `disabled` attribute on the Manage Billing button \
+             after checkout_loading flipped to false, but the render still \
+             carried one (rendered html: {html})"
+        );
     }
 }

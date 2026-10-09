@@ -20,19 +20,29 @@ trap 'rm -rf "$tmpdir"' EXIT
 # Usage: expect_violations <fixture_name> <expected_A_count> <expected_B_warn_count> <<'RUST'
 #   ... Rust code ...
 # RUST
+#
+# KYO-679: also pins DISPOSAL_BASELINE_FILE to a scratch path that is never
+# created, so every Rule B match in these fixtures is deterministically
+# "not in the baseline" and therefore reported as ERROR:B, never WARN:B —
+# these tests exist to pin Rule B's pattern-matching (what fires and what
+# doesn't), not its baseline status, and forcing an always-empty baseline
+# here decouples that from whatever scripts/lint/disposal-safety-baseline.txt
+# happens to contain (it would otherwise default to the real checked-in
+# baseline, which never matches these /tmp fixture paths anyway — but
+# relying on that non-overlap by accident is worse than making it explicit).
 run_test() {
     local name="$1" expected_a="$2" expected_b="$3"
     local fixture="$tmpdir/$name.rs"
 
     cat > "$fixture"
 
-    # Point the linter at our temp dir.
+    # Point the linter at our temp dir, and at a baseline that never exists.
     local output
-    output="$(DISPOSAL_LINT_DIR="$tmpdir" "$LINTER" "$fixture" 2>&1)" || true
+    output="$(DISPOSAL_LINT_DIR="$tmpdir" DISPOSAL_BASELINE_FILE="$tmpdir/.no-baseline.txt" "$LINTER" "$fixture" 2>&1)" || true
 
     local got_a got_b
     got_a="$(echo "$output" | grep -c ":A " || true)"
-    got_b="$(echo "$output" | grep -c ":WARN:B " || true)"
+    got_b="$(echo "$output" | grep -c ":ERROR:B " || true)"
 
     if [ "$got_a" -eq "$expected_a" ] && [ "$got_b" -eq "$expected_b" ]; then
         printf "  ✓ %s (A=%d B=%d)\n" "$name" "$got_a" "$got_b"
@@ -552,6 +562,317 @@ mod the_module {
     }
 }
 RUST
+
+# ─── KYO-679 regression tests: the Rule B baseline ratchet ─────────────────
+#
+# Everything above exercises check-disposal-safety.sh's pattern-matching via
+# raw A/B counts. These tests exercise the layer KYO-679 added on top of
+# Rule B: scripts/lint/disposal-safety-baseline.txt, and the exit-code /
+# ERROR:B behaviour that baseline gates. Every test below overrides BOTH
+# DISPOSAL_LINT_DIR (as above) AND DISPOSAL_BASELINE_FILE, so none of them
+# ever reads or writes the real checked-in baseline.
+echo
+echo "Running Rule B baseline ratchet tests (KYO-679)..."
+echo
+
+kyo679dir="$tmpdir/kyo679"
+mkdir -p "$kyo679dir"
+
+# Runs the linter with the given hermetic DISPOSAL_LINT_DIR / baseline file,
+# capturing both output and exit code. A plain `out="$(cmd)"` assignment
+# would trip this script's own `set -e` on a non-zero exit (that failure
+# happens outside any tested context) — bracket it in set +e/-e instead of
+# masking the exit code entirely the way the run_test() helper above does
+# with `|| true`, since these tests need the real exit code.
+run_linter() {
+    local lintdir="$1" baseline="$2"
+    shift 2
+    set +e
+    BL_OUTPUT="$(DISPOSAL_LINT_DIR="$lintdir" DISPOSAL_BASELINE_FILE="$baseline" "$LINTER" "$@" 2>&1)"
+    BL_RC=$?
+    set -e
+}
+
+assert_rc() {
+    local desc="$1" expected="$2" actual="$3"
+    if [ "$actual" -eq "$expected" ]; then
+        printf "  ✓ %s (rc=%d)\n" "$desc" "$actual"
+        PASS=$((PASS + 1))
+    else
+        printf "  ✗ %s — expected rc=%d, got rc=%d\n" "$desc" "$expected" "$actual"
+        echo "    output:"
+        echo "$BL_OUTPUT" | sed 's/^/    | /'
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+assert_contains() {
+    local desc="$1" needle="$2"
+    if printf '%s' "$BL_OUTPUT" | grep -qF -- "$needle"; then
+        printf "  ✓ %s\n" "$desc"
+        PASS=$((PASS + 1))
+    else
+        printf "  ✗ %s — expected output to contain: %s\n" "$desc" "$needle"
+        echo "    output:"
+        echo "$BL_OUTPUT" | sed 's/^/    | /'
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+assert_not_contains() {
+    local desc="$1" needle="$2"
+    if printf '%s' "$BL_OUTPUT" | grep -qF -- "$needle"; then
+        printf "  ✗ %s — expected output NOT to contain: %s\n" "$desc" "$needle"
+        echo "    output:"
+        echo "$BL_OUTPUT" | sed 's/^/    | /'
+        FAIL=$((FAIL + 1))
+    else
+        printf "  ✓ %s\n" "$desc"
+        PASS=$((PASS + 1))
+    fi
+}
+
+assert_line_count() {
+    local desc="$1" file="$2" expected="$3" actual
+    if [ -f "$file" ]; then
+        actual="$(wc -l < "$file" | tr -d ' ')"
+    else
+        actual=0
+    fi
+    if [ "$actual" -eq "$expected" ]; then
+        printf "  ✓ %s (lines=%d)\n" "$desc" "$actual"
+        PASS=$((PASS + 1))
+    else
+        printf "  ✗ %s — expected %d lines, got %d\n" "$desc" "$expected" "$actual"
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+assert_files_identical() {
+    local desc="$1" f1="$2" f2="$3"
+    if diff -q "$f1" "$f2" >/dev/null 2>&1; then
+        printf "  ✓ %s\n" "$desc"
+        PASS=$((PASS + 1))
+    else
+        printf "  ✗ %s — files differ\n" "$desc"
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+# ─── Criterion 1: a newly introduced bare .get() in a Signal::derive, in a
+# file not previously baselined, exits non-zero — both in full-tree mode
+# (no file args, what CI runs) and file-scoped mode (what pre-commit runs).
+t1="$kyo679dir/t1"
+mkdir -p "$t1"
+cat > "$t1/new_site.rs" <<'RUST'
+fn my_component() {
+    let filtered = Signal::derive(move || {
+        let items = store_signal.get();
+        items
+    });
+}
+RUST
+# No baseline file at all (not even empty) — must be treated as zero entries.
+run_linter "$t1" "$t1/baseline.txt"
+assert_rc "criterion 1: brand-new site, full-tree, no baseline file" 1 "$BL_RC"
+assert_contains "criterion 1: full-tree reports ERROR:B" "ERROR:B"
+
+t1b="$kyo679dir/t1b"
+mkdir -p "$t1b"
+cp "$t1/new_site.rs" "$t1b/new_site.rs"
+: > "$t1b/baseline.txt"
+t1b_abs="$(cd "$t1b" && pwd)/new_site.rs"
+run_linter "$t1b" "$t1b/baseline.txt" "$t1b_abs"
+assert_rc "criterion 1: brand-new site, file-scoped, empty baseline" 1 "$BL_RC"
+assert_contains "criterion 1: file-scoped reports ERROR:B" "ERROR:B"
+
+# ─── Criterion 2: existing baselined sites do not fail the build. Generates
+# the baseline via --update-baseline (round-tripping the real mechanism
+# rather than the test hand-computing its own hash) and reruns.
+t2="$kyo679dir/t2"
+mkdir -p "$t2"
+cat > "$t2/existing_site.rs" <<'RUST'
+fn my_component() {
+    let filtered = Signal::derive(move || {
+        let items = store_signal.get();
+        items
+    });
+}
+RUST
+: > "$t2/baseline.txt"
+run_linter "$t2" "$t2/baseline.txt" --update-baseline
+assert_rc "criterion 2: --update-baseline succeeds" 0 "$BL_RC"
+assert_line_count "criterion 2: baseline has exactly one entry" "$t2/baseline.txt" 1
+
+run_linter "$t2" "$t2/baseline.txt"
+assert_rc "criterion 2: baselined site does not fail a normal run" 0 "$BL_RC"
+assert_not_contains "criterion 2: baselined site produces no ERROR:B" "ERROR:B"
+assert_not_contains "criterion 2: baselined site produces no WARN:B (silent by default)" "WARN:B"
+
+# --show-baselined smoke test: the covered finding should reappear, tagged.
+run_linter "$t2" "$t2/baseline.txt" --show-baselined
+assert_rc "--show-baselined: still exits 0" 0 "$BL_RC"
+assert_contains "--show-baselined: prints the covered finding as BASELINED:B" "BASELINED:B"
+
+# ─── Criterion 3: moving a baselined site within its file (line-number
+# churn from unrelated lines inserted above it) does not trip the ratchet —
+# the baseline hashes content, not line number.
+t3="$kyo679dir/t3"
+mkdir -p "$t3"
+cat > "$t3/moved_site.rs" <<'RUST'
+fn my_component() {
+    let filtered = Signal::derive(move || {
+        let items = store_signal.get();
+        items
+    });
+}
+RUST
+: > "$t3/baseline.txt"
+run_linter "$t3" "$t3/baseline.txt" --update-baseline
+assert_rc "criterion 3: baseline generated before the move" 0 "$BL_RC"
+
+cat > "$t3/moved_site.rs" <<'RUST'
+fn my_component() {
+    // an unrelated comment
+    // a second unrelated comment, pushing the flagged line further down
+    let filtered = Signal::derive(move || {
+        let items = store_signal.get();
+        items
+    });
+}
+RUST
+run_linter "$t3" "$t3/baseline.txt"
+assert_rc "criterion 3: same content at a new line number still passes" 0 "$BL_RC"
+assert_not_contains "criterion 3: no ERROR:B after the move" "ERROR:B"
+
+# ─── Criterion 4: annotating a baselined site with the escape hatch removes
+# it from the warning output entirely, and regenerating drops it from the
+# baseline.
+t4="$kyo679dir/t4"
+mkdir -p "$t4"
+cat > "$t4/escape_site.rs" <<'RUST'
+fn my_component() {
+    let filtered = Signal::derive(move || {
+        let items = store_signal.get();
+        items
+    });
+}
+RUST
+: > "$t4/baseline.txt"
+run_linter "$t4" "$t4/baseline.txt" --update-baseline
+assert_line_count "criterion 4: baseline has one entry before the escape hatch" "$t4/baseline.txt" 1
+
+cat > "$t4/escape_site.rs" <<'RUST'
+fn my_component() {
+    let filtered = Signal::derive(move || {
+        let items = store_signal.get(); // lint-allow: disposal-safe=reads only this component's own scope
+        items
+    });
+}
+RUST
+# File-scoped (the file is passed explicitly), not full-tree: a plain
+# full-tree run here would correctly report this as a STALE baseline entry
+# (the debt really did go down, and full-tree mode is where that becomes an
+# error — see the header NOTE and the full-tree companion assertion under
+# criterion 5 below). File-scoped mode is where "I just fixed this one
+# file locally" is expected to pass cleanly.
+t4_abs="$(cd "$t4" && pwd)/escape_site.rs"
+run_linter "$t4" "$t4/baseline.txt" "$t4_abs"
+assert_rc "criterion 4: escape-hatched site passes (file-scoped)" 0 "$BL_RC"
+assert_not_contains "criterion 4: escape-hatched site produces no B finding at all" ":B "
+
+run_linter "$t4" "$t4/baseline.txt" --update-baseline
+assert_line_count "criterion 4: regenerating drops the escape-hatched site from the baseline" "$t4/baseline.txt" 0
+
+# ─── Criterion 5 (the trap most likely to regress): file-scoped mode must
+# NOT report an unscanned file's baseline entry as stale — including the
+# adversarial case where that file's underlying content is genuinely gone,
+# which looks identical to "fixed" from the baseline's point of view.
+t5="$kyo679dir/t5"
+mkdir -p "$t5"
+cat > "$t5/file_a.rs" <<'RUST'
+fn a() {
+    let x = Signal::derive(move || sig_a.get());
+}
+RUST
+cat > "$t5/file_b.rs" <<'RUST'
+fn b() {
+    let x = Signal::derive(move || sig_b.get());
+}
+RUST
+: > "$t5/baseline.txt"
+run_linter "$t5" "$t5/baseline.txt" --update-baseline
+assert_line_count "criterion 5: baseline covers both files before the scoped run" "$t5/baseline.txt" 2
+
+rm "$t5/file_b.rs"
+t5a_abs="$(cd "$t5" && pwd)/file_a.rs"
+run_linter "$t5" "$t5/baseline.txt" "$t5a_abs"
+assert_rc "criterion 5: file-scoped run over file_a only does not fail on file_b's now-vanished entry" 0 "$BL_RC"
+assert_not_contains "criterion 5: no stale-baseline ERROR for the unscanned file" "ERROR:"
+
+# ─── Companion to criterion 5: full-tree mode DOES treat the same situation
+# as stale (this is the asymmetry the design deliberately introduces, and
+# it needs its own coverage — a full-tree run sees file_b really is gone).
+run_linter "$t5" "$t5/baseline.txt"
+assert_rc "full-tree companion: a genuinely-fixed/vanished baselined site fails as stale" 1 "$BL_RC"
+assert_contains "full-tree companion: mentions --update-baseline" "--update-baseline"
+
+# ─── Criterion 6: --update-baseline combined with file arguments exits 2
+# and does not write the baseline (a partial write would silently erase
+# every unscanned file's recorded debt).
+t6="$kyo679dir/t6"
+mkdir -p "$t6"
+cat > "$t6/f.rs" <<'RUST'
+fn f() {
+    let x = Signal::derive(move || sig.get());
+}
+RUST
+printf 'sentinel-line-should-survive-untouched\n' > "$t6/baseline.txt"
+cp "$t6/baseline.txt" "$t6/baseline.before"
+t6_abs="$(cd "$t6" && pwd)/f.rs"
+run_linter "$t6" "$t6/baseline.txt" --update-baseline "$t6_abs"
+assert_rc "criterion 6: --update-baseline with file args is a usage error" 2 "$BL_RC"
+assert_files_identical "criterion 6: baseline file is untouched" "$t6/baseline.txt" "$t6/baseline.before"
+
+# ─── Criterion 7: adding a duplicate of an already-baselined identical line
+# (exceeding the recorded occurrence count) fails, even though the hash
+# alone would still match an entry in the baseline.
+t7="$kyo679dir/t7"
+mkdir -p "$t7"
+# Both flagged lines must be textually IDENTICAL (same hash) for this test —
+# matching the real crates/kyomi-ui/src/cache/store.rs case this criterion
+# is modeled on, where all 6 flagged lines are the literal same text. A
+# per-line-unique binding name would hash differently and defeat the point.
+cat > "$t7/dup.rs" <<'RUST'
+fn f() {
+    Signal::derive(move || sig.get());
+    Signal::derive(move || sig.get());
+}
+RUST
+: > "$t7/baseline.txt"
+run_linter "$t7" "$t7/baseline.txt" --update-baseline
+if grep -q ':2$' "$t7/baseline.txt"; then
+    printf "  ✓ %s\n" "criterion 7: baseline records count=2 for the duplicated line"
+    PASS=$((PASS + 1))
+else
+    printf "  ✗ %s — baseline contents:\n" "criterion 7: baseline records count=2 for the duplicated line"
+    sed 's/^/    | /' "$t7/baseline.txt"
+    FAIL=$((FAIL + 1))
+fi
+
+run_linter "$t7" "$t7/baseline.txt"
+assert_rc "criterion 7: exactly 2 copies matches the baselined count" 0 "$BL_RC"
+
+cat > "$t7/dup.rs" <<'RUST'
+fn f() {
+    Signal::derive(move || sig.get());
+    Signal::derive(move || sig.get());
+    Signal::derive(move || sig.get());
+}
+RUST
+run_linter "$t7" "$t7/baseline.txt"
+assert_rc "criterion 7: a 3rd copy exceeds the baselined count of 2" 1 "$BL_RC"
+assert_contains "criterion 7: 3rd copy reports ERROR:B" "ERROR:B"
 
 echo
 echo "Results: $PASS passed, $FAIL failed"

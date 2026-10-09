@@ -11,7 +11,7 @@
 //! 6. Handle errors and cancellation
 //! 7. Return the result
 //!
-//! [`deliver_response`] streams the response via WebSocket.
+//! [`deliver_response`] sends the complete response via WebSocket.
 //! [`generate_session_title`] fires a background task to title new sessions.
 
 use std::collections::HashMap;
@@ -29,7 +29,7 @@ use kyomi_core::enums::WorkspaceRole;
 use kyomi_core::{DbPool, KVPool};
 use kyomi_embed::LazyEmbedding;
 
-use crate::adapter::{ChatAgentAdapter, UserMessagePersistence};
+use crate::adapter::{AssistantMessagePersistence, ChatAgentAdapter, UserMessagePersistence};
 
 /// SQL used to persist a row to `api_usage_log` after an agent turn.
 ///
@@ -107,7 +107,11 @@ pub struct AgentExecutionConfig {
     /// each enforces. Threaded into
     /// [`ChatParams::user_message_persistence`](crate::adapter::ChatParams::user_message_persistence).
     pub user_message_persistence: UserMessagePersistence,
-    pub assistant_message_id: Option<String>,
+    /// How the assistant's reply for this execution reaches the database —
+    /// see [`AssistantMessagePersistence`] for the two arms and the
+    /// contract each enforces. Threaded into
+    /// [`ChatParams::assistant_message_persistence`](crate::adapter::ChatParams::assistant_message_persistence).
+    pub assistant_message_persistence: AssistantMessagePersistence,
     /// Optional conversation history for multi-turn conversations.
     /// Each entry is a (role, content) pair where role is "user" or "assistant".
     pub conversation_history: Option<Vec<(String, String)>>,
@@ -126,6 +130,13 @@ pub struct AgentExecutionConfig {
     /// interpreted as "not an admin", so leaving it empty for a real user
     /// produces a false denial, not a safe default.
     pub workspace_roles: Vec<WorkspaceRole>,
+    /// The single document (dashboard or knowledge file) this execution is
+    /// scoped to, if any. Threaded into
+    /// [`crate::tools::ToolContext::document_id`] — see that field's doc
+    /// comment for the enforcement it drives. Only the dashboard and
+    /// knowledge copilot call sites populate this; chat, MCP, Slack, and
+    /// watch execution leave it `None` (KYO-536).
+    pub document_id: Option<String>,
 }
 
 impl Default for AgentExecutionConfig {
@@ -154,13 +165,14 @@ impl Default for AgentExecutionConfig {
             max_tokens: 4096,
             component: "custom_agent".into(),
             user_message_persistence: UserMessagePersistence::AdapterPersists(None),
-            assistant_message_id: None,
+            assistant_message_persistence: AssistantMessagePersistence::AdapterInserts(None),
             conversation_history: None,
             user_display_name: "Unknown".to_string(),
             context_window: 0,
             // Test/placeholder default only — see field doc. Production call
             // sites must pass the attributed user's real workspace roles.
             workspace_roles: Vec::new(),
+            document_id: None,
         }
     }
 }
@@ -193,7 +205,7 @@ pub struct AgentExecutionResult {
 /// contain `"cancelled"`, so this choice doesn't change behavior today, but
 /// `Display` is the more conservative substring to key off because it can
 /// only gain content relative to `user_message()`, never lose it.
-fn classify_agent_failure(error: &kyomi_core::Error) -> (&'static str, String) {
+pub(crate) fn classify_agent_failure(error: &kyomi_core::Error) -> (&'static str, String) {
     let is_cancelled = error.to_string().contains("cancelled");
     if is_cancelled {
         ("cancelled", "Request was cancelled.".to_string())
@@ -205,6 +217,39 @@ fn classify_agent_failure(error: &kyomi_core::Error) -> (&'static str, String) {
                 error.user_message()
             ),
         )
+    }
+}
+
+/// Map an execution outcome to the `content`/`status` step 15 of
+/// [`execute_agent_chat`] should write to the assistant row (KYO-493).
+///
+/// Pure — no I/O — so the terminal-state mapping can be unit-tested without
+/// driving the full LLM loop (`execute_agent_chat` resolves a real,
+/// network-calling LLM provider from workspace config, which makes it
+/// impractical to exercise directly in a unit test; this mirrors
+/// [`build_tool_context`] / [`build_agent_config`] pulling the parts of
+/// that function that *can* be pure out into their own testable units).
+///
+/// `exec_status` is `AgentExecutionResult::status`'s wire vocabulary
+/// ("completed" | "error" | "cancelled" — anything else is treated as
+/// "error", since `classify_agent_failure` only ever produces those two
+/// non-"completed" values and a third value would itself be a bug worth
+/// surfacing as an error status rather than silently falling through).
+///
+/// - "completed": `content` is `None` — the real answer was already
+///   written by `persist_after_chat()` (either an UPDATE of chat's
+///   pre-inserted placeholder, or a plain INSERT for copilot/Slack/watch).
+/// - "error" / "cancelled": `content` is `Some(response_text)` — nothing
+///   else ever persists this text (see the call site's doc), so this is
+///   the only write for it.
+pub(crate) fn finalize_terminal_write<'a>(
+    exec_status: &str,
+    response_text: &'a str,
+) -> (Option<&'a str>, chat_service::MessageStatus) {
+    match exec_status {
+        "completed" => (None, chat_service::MessageStatus::Complete),
+        "cancelled" => (Some(response_text), chat_service::MessageStatus::Cancelled),
+        _ => (Some(response_text), chat_service::MessageStatus::Error),
     }
 }
 
@@ -254,6 +299,7 @@ fn build_tool_context(config: &AgentExecutionConfig, env: &AgentExecutionEnv<'_>
         connect_registry: env.connect_registry.clone(),
         platforms: env.platforms.clone(),
         user_display_name: config.user_display_name.clone(),
+        document_id: config.document_id.clone(),
     }
 }
 
@@ -460,12 +506,18 @@ pub async fn execute_agent_chat(
         encryption_key.clone(),
     );
 
-    // 9. Generate assistant message ID (no DB placeholder).
-    //    The adapter's persist_after_chat() saves the actual assistant response
-    //    with the correct content. This avoids empty placeholder rows.
+    // 9. Resolve the assistant message id.
+    //    `AssistantMessagePersistence::tag_id()` covers both arms: for
+    //    `CallerPreInserted` (chat — KYO-493) this is the id of the
+    //    placeholder row `prepare_chat_dispatch` already wrote; for
+    //    `AdapterInserts` (copilot, Slack, watch) it's either the caller's
+    //    chosen id or, if none, freshly generated here — either way no row
+    //    exists for it yet, and `persist_after_chat()` INSERTs the real
+    //    response under it once the loop produces one.
     let assistant_message_id = config
-        .assistant_message_id
-        .clone()
+        .assistant_message_persistence
+        .tag_id()
+        .map(str::to_string)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     // 10. Create thinking tracker.
@@ -476,21 +528,43 @@ pub async fn execute_agent_chat(
     } else {
         provider_context_window
     };
-    let tracker = AgentThinkingTracker::new(
-        config.session_id.clone(),
-        config.user_id.clone(),
-        assistant_message_id.clone(),
-        ws_manager.clone(),
-        config.workspace_user_ids.clone(),
-        Some(config.context_type.clone()),
-        resolved_context_window,
-    );
+    // Only a `CallerPreInserted` assistant row (chat) has a placeholder a
+    // mid-run read can already see — copilot/Slack/watch (`AdapterInserts`)
+    // have no row to flush into until `persist_after_chat` inserts one at
+    // the end (KYO-493 phase 3).
+    let incremental_flush = matches!(
+        config.assistant_message_persistence,
+        AssistantMessagePersistence::CallerPreInserted(_)
+    )
+    .then(|| crate::thinking::IncrementalFlushTarget {
+        db: db.clone(),
+        encryption_key: encryption_key.clone(),
+    });
+    let tracker = AgentThinkingTracker::new(crate::thinking::AgentThinkingTrackerConfig {
+        session_id: config.session_id.clone(),
+        user_id: config.user_id.clone(),
+        message_id: assistant_message_id.clone(),
+        ws_manager: ws_manager.clone(),
+        workspace_user_ids: config.workspace_user_ids.clone(),
+        context_type: Some(config.context_type.clone()),
+        context_window: resolved_context_window,
+        incremental_flush,
+    });
     let tracker = Arc::new(tokio::sync::Mutex::new(tracker));
 
-    // Signal agent start.
-    {
-        let mut t = tracker.lock().await;
-        t.agent_started("Analyzing your question", "Starting analysis...").await;
+    // Durable progress is public only after its atomic event/projection commit.
+    if let Some(run) = config.assistant_message_persistence.durable_run() {
+        use agent_runtime::EventSink;
+        let context = agent_runtime::ExecutionContext { conversation_id: run.conversation_id.clone(), run_id: run.run_id.clone() };
+        let sink = crate::runtime_adapter::RuntimeSink {
+            db: db.clone(), key: encryption_key.clone(), user: config.user_id.clone(), workspace: config.workspace_id.clone(),
+            run: run.clone(), tracker: Some(tracker.clone()), tools: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+        };
+        let (text, detail) = context.text("started", "Starting analysis...", 200);
+        sink.commit(&context.command("started", agent_runtime::Payload::Public(agent_runtime::PublicPayload::Planning { text }), detail))
+            .await.map_err(|error| kyomi_core::Error::ServiceUnavailable(error.to_string()))?;
+    } else {
+        tracker.lock().await.agent_started("Analyzing your question", "Starting analysis...").await;
     }
 
     // 11. Wire tracker to adapter.
@@ -505,17 +579,17 @@ pub async fn execute_agent_chat(
             message_source: config.message_source.as_deref(),
             user_id: Some(&config.user_id),
             user_message_persistence: &config.user_message_persistence,
-            assistant_message_id: Some(&assistant_message_id),
+            assistant_message_persistence: &config.assistant_message_persistence,
         })
         .await;
 
     // 13. Handle result.
     let (response_text, status, error_msg) = match result {
         Ok(text) => {
-            // Signal completion.
-            {
-                let mut t = tracker.lock().await;
-                t.agent_completed("success").await;
+            // The durable worker commits the terminal answer/run/projection before
+            // sending completion; the legacy tracker owns completion for other callers.
+            if config.assistant_message_persistence.durable_run().is_none() {
+                tracker.lock().await.agent_completed("success").await;
             }
             (text, "completed".to_string(), None)
         }
@@ -533,9 +607,17 @@ pub async fn execute_agent_chat(
         }
     };
 
-    // 14. Get thinking events and token usage from tracker.
+    // 14. Get thinking events and token usage from tracker, and finalize it
+    // (KYO-493 review fix). `finalize()` must run inside this same locked
+    // critical section, before the events below are read, so that no
+    // incremental flush can land after step 15's terminal `extra_metadata` write below and
+    // clobber it back down to just `{"thinking_events": [...]}`. See
+    // `AgentThinkingTracker::finalize`'s doc for why the ordering
+    // (finalize while holding the lock, release, then step 15 writes) is
+    // what makes the terminal write strictly win.
     let (thinking_events, full_texts, token_usage, input_tokens, output_tokens, total_cost) = {
-        let t = tracker.lock().await;
+        let mut t = tracker.lock().await;
+        t.finalize();
         let events = t.get_events_for_storage();
         let ft = t.full_texts_for_storage().clone();
         let inp = t.total_input_tokens();
@@ -578,15 +660,31 @@ pub async fn execute_agent_chat(
         } else {
             (total_cost * AI_COST_MULTIPLIER, None)
         };
-        let now = chrono::Utc::now();
         let provider_str = provider_kind.to_string();
-        if let Err(e) = kyomi_core::db_execute!(
+        if let Some(run) = config.assistant_message_persistence.durable_run() {
+            let usage = kyomi_auth::conversation_events::ApiUsageWrite {
+                provider: provider_str,
+                model: model_name.clone(),
+                input_tokens: input_tokens as i32,
+                output_tokens: output_tokens as i32,
+                total_tokens,
+                cost_estimate: billed_cost,
+                component: config.component.clone(),
+                provider_cost_usd,
+            };
+            kyomi_auth::conversation_events::ConversationStore::new(
+                db, encryption_key, &config.user_id, &config.workspace_id,
+            ).fenced_api_usage(
+                &run.conversation_id, &run.run_id, &run.lease,
+                chrono::Utc::now().timestamp_millis(), &usage,
+            ).await.map_err(|error| kyomi_core::Error::ServiceUnavailable(error.to_string()))?;
+        } else if let Err(e) = kyomi_core::db_execute!(
             db,
             API_USAGE_LOG_INSERT_SQL,
             &config.user_id,
             &config.workspace_id,
             &config.session_id as &str,
-            now,
+            chrono::Utc::now(),
             &provider_str,
             &model_name,
             input_tokens as i32,
@@ -600,33 +698,68 @@ pub async fn execute_agent_chat(
         }
     }
 
-    // 15. Attach metadata to the assistant message (model, thinking events, token usage).
-    //     The message content was already saved by persist_after_chat();
-    //     we only update the extra_metadata column here.
-    {
+    // 15. Finalize the assistant message: attach metadata (model, thinking
+    //     events, token usage) and, via `MessageStatus`, the turn's
+    //     terminal outcome (KYO-493) — this is the single place that runs
+    //     for every outcome (`status` is always one of "completed" /
+    //     "error" / "cancelled" here; a pre-loop failure never reaches this
+    //     function at all — see `save_agent_error`), so it is also the
+    //     single place `status` is finalized.
+    //
+    //     On a successful completion the real answer was already written
+    //     by `persist_after_chat()` — via `AssistantMessagePersistence`,
+    //     either UPDATEing chat's pre-inserted placeholder or INSERTing a
+    //     fresh row for copilot/Slack/watch — so `content` stays `None`
+    //     here. On an in-loop error or cancellation, nothing else ever
+    //     writes `response_text` anywhere (`classify_agent_failure`'s
+    //     output lives only in this function's local variables), so this
+    //     call is the only place it's persisted — the exact gap KYO-493's
+    //     ticket describes ("today an in-loop error is streamed to the
+    //     client but never persisted").
+    if config.assistant_message_persistence.durable_run().is_none() {
         let metadata = serde_json::json!({
             "model": model_name,
             "thinking_events": thinking_events,
             "token_usage": token_usage,
             "component": config.component,
         });
+        let (content, message_status) = finalize_terminal_write(&status, &response_text);
 
-        // Non-fatal: content is already saved by persist_after_chat, this only attaches metadata.
-        if let Err(e) = chat_service::update_message(
-            db,
-            encryption_key,
-            &assistant_message_id,
-            None, // content already saved by persist_after_chat
-            Some(&metadata),
-        )
-        .await
+        // Non-fatal by design (mirrors persist_after_chat's own error
+        // handling): `response_text` is what was already delivered to the
+        // caller (WebSocket / SendMessageResponse), so failing this turn
+        // now would report success as failure without giving the user
+        // anything back. Logged at error level when it carries content —
+        // unlike a metadata-only failure, that loses the only durable copy
+        // of an error/cancellation turn's outcome.
+        if let Err(e) =
+            chat_service::update_message(db, encryption_key, &assistant_message_id, content, Some(&metadata), Some(message_status))
+                .await
         {
-            tracing::warn!(error = %e, "Failed to attach metadata to assistant message (non-fatal)");
+            if content.is_some() {
+                error!(
+                    session_id = %config.session_id,
+                    assistant_message_id = %assistant_message_id,
+                    error = %e,
+                    "Failed to finalize assistant message — terminal content/status may be lost"
+                );
+            } else {
+                tracing::warn!(error = %e, "Failed to attach metadata to assistant message (non-fatal)");
+            }
         }
     }
 
     // 15b. Persist full (untruncated) reasoning texts for on-demand retrieval.
-    if !full_texts.is_empty()
+    if let Some(run) = config.assistant_message_persistence.durable_run() {
+        kyomi_auth::conversation_events::ConversationStore::new(
+            db, encryption_key, &config.user_id, &config.workspace_id,
+        ).fenced_thinking_details(
+            &run.conversation_id, &run.run_id, &run.lease,
+            chrono::Utc::now().timestamp_millis(), &assistant_message_id, &full_texts,
+        ).await.map_err(|e| kyomi_core::Error::ServiceUnavailable(e.to_string()))?;
+    }
+    if config.assistant_message_persistence.durable_run().is_none()
+        && !full_texts.is_empty()
         && let Err(e) = chat_service::store_thinking_event_details(
             db,
             encryption_key,
@@ -657,25 +790,10 @@ pub async fn execute_agent_chat(
 }
 
 // ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-/// Number of characters per WebSocket streaming chunk.
-const STREAM_CHUNK_SIZE: usize = 50;
-
-/// Delay between WebSocket streaming chunks (milliseconds).
-const STREAM_CHUNK_DELAY_MS: u64 = 20;
-
-// ---------------------------------------------------------------------------
 // Response delivery
 // ---------------------------------------------------------------------------
 
-/// Stream the agent response via WebSocket.
-///
-/// Sends the response in 50-character chunks via `chat_stream` messages,
-/// then sends a `chat_complete` message with the full response.
-///
-/// If the session is shared, broadcasts to all workspace members.
+/// Deliver one complete response after persistence succeeds.
 #[allow(clippy::too_many_arguments)]
 pub async fn deliver_response(
     ws_manager: &WebSocketManager,
@@ -689,46 +807,6 @@ pub async fn deliver_response(
     workspace_id: Option<&str>,
     workspace_user_ids: Option<&[String]>,
 ) {
-    // Stream response in chunks.
-    let chars: Vec<char> = response.chars().collect();
-    let mut offset = 0;
-
-    while offset < chars.len() {
-        let end = (offset + STREAM_CHUNK_SIZE).min(chars.len());
-        let chunk: String = chars[offset..end].iter().collect();
-
-        ws_helpers::send_chat_stream(
-            ws_manager,
-            user_id,
-            session_id,
-            message_id,
-            &chunk,
-            Some(context_type),
-        )
-        .await;
-
-        // Broadcast to shared conversation members if applicable.
-        if let Some(ws_user_ids) = workspace_user_ids {
-            for uid in ws_user_ids {
-                if uid != user_id {
-                    ws_helpers::send_chat_stream(
-                        ws_manager,
-                        uid,
-                        session_id,
-                        message_id,
-                        &chunk,
-                        Some(context_type),
-                    )
-                    .await;
-                }
-            }
-        }
-
-        offset = end;
-        tokio::time::sleep(tokio::time::Duration::from_millis(STREAM_CHUNK_DELAY_MS)).await;
-    }
-
-    // Send complete message.
     ws_helpers::send_chat_complete(ws_helpers::ChatCompleteParams {
         manager: ws_manager,
         user_id,
@@ -738,11 +816,8 @@ pub async fn deliver_response(
         model,
         usage_stats: usage.clone(),
         context_type: Some(context_type),
-    })
-    .await;
-
-    // Broadcast completion to shared conversation members.
-    if let (Some(wid), Some(_ws_user_ids)) = (workspace_id, workspace_user_ids) {
+    }).await;
+    if let (Some(wid), Some(_)) = (workspace_id, workspace_user_ids) {
         ws_helpers::broadcast_chat_complete(ws_helpers::BroadcastChatCompleteParams {
             manager: ws_manager,
             workspace_id: wid,
@@ -752,8 +827,7 @@ pub async fn deliver_response(
             model,
             usage_stats: usage,
             exclude_user_id: Some(user_id),
-        })
-        .await;
+        }).await;
     }
 }
 
@@ -933,6 +1007,7 @@ async fn generate_title_inner(
 
 /// Parameters for dashboard summary generation.
 pub struct DashboardSummaryParams {
+    pub validation_context: crate::tools::QueryContext,
     pub db: DbPool,
     pub ws_manager: WebSocketManager,
     pub dashboard_id: String,
@@ -981,6 +1056,7 @@ pub(crate) async fn apply_dashboard_summary(
     workspace_id: &str,
     user_id: &str,
     summary: &str,
+    validation_context: Option<&crate::tools::QueryContext>,
 ) -> kyomi_core::Result<()> {
     let Some(fresh) =
         kyomi_auth::dashboard_service::get_dashboard(db, dashboard_id, workspace_id, user_id).await?
@@ -999,6 +1075,7 @@ pub(crate) async fn apply_dashboard_summary(
     let new_content = format!("<!-- dashboard-summary: {summary} -->\n{}", fresh.content);
 
     write_dashboard_summary_with_cas(WriteDashboardSummaryParams {
+        validation_context,
         db,
         ws_manager,
         dashboard_id,
@@ -1013,6 +1090,7 @@ pub(crate) async fn apply_dashboard_summary(
 
 /// Parameters for [`write_dashboard_summary_with_cas`].
 pub(crate) struct WriteDashboardSummaryParams<'a> {
+    pub validation_context: Option<&'a crate::tools::QueryContext>,
     pub db: &'a DbPool,
     pub ws_manager: &'a WebSocketManager,
     pub dashboard_id: &'a str,
@@ -1043,6 +1121,7 @@ pub(crate) async fn write_dashboard_summary_with_cas(
     params: WriteDashboardSummaryParams<'_>,
 ) -> kyomi_core::Result<()> {
     let WriteDashboardSummaryParams {
+        validation_context,
         db,
         ws_manager,
         dashboard_id,
@@ -1053,7 +1132,7 @@ pub(crate) async fn write_dashboard_summary_with_cas(
         expected_content_hash,
     } = params;
 
-    match kyomi_auth::dashboard_service::update_dashboard(
+    match kyomi_auth::dashboard_service::update_dashboard_with_context(
         kyomi_auth::dashboard_service::UpdateDashboardParams {
             db,
             embed: None,
@@ -1065,6 +1144,7 @@ pub(crate) async fn write_dashboard_summary_with_cas(
             change_summary: Some("Auto-generated summary"),
             expected_content_hash,
         },
+        validation_context,
     )
     .await
     {
@@ -1099,7 +1179,7 @@ async fn generate_dashboard_summary_inner(
     let DashboardSummaryParams {
         ref db, ref ws_manager, ref dashboard_id, ref user_id,
         ref workspace_id, ref title, ref content, ref app_config,
-        ref doc_type,
+        ref doc_type, ref validation_context,
     } = params;
     if content.trim().is_empty() {
         return Ok(());
@@ -1161,7 +1241,7 @@ async fn generate_dashboard_summary_inner(
     }
     let summary = summary.replace("-->", "\u{2014}");
 
-    apply_dashboard_summary(db, ws_manager, dashboard_id, workspace_id, user_id, &summary).await?;
+    apply_dashboard_summary(db, ws_manager, dashboard_id, workspace_id, user_id, &summary, Some(validation_context)).await?;
 
     // -------------------------------------------------------------------------
     // Collection auto-tagging — evaluate whether the dashboard belongs to any
@@ -1362,7 +1442,7 @@ mod tests {
 
         let ws_manager = kyomi_auth::websocket::WebSocketManager::new(None, db.clone());
 
-        apply_dashboard_summary(&db, &ws_manager, &dashboard_id, "ws-1", "user-a", &summary)
+        apply_dashboard_summary(&db, &ws_manager, &dashboard_id, "ws-1", "user-a", &summary, None)
             .await
             .expect("apply_dashboard_summary");
 
@@ -1502,6 +1582,7 @@ mod tests {
 
         let (log_writer, guard) = capture_logs();
         let result = write_dashboard_summary_with_cas(WriteDashboardSummaryParams {
+            validation_context: None,
             db: &db,
             ws_manager: &ws_manager,
             dashboard_id: &dashboard_id,
@@ -1647,7 +1728,10 @@ mod tests {
         assert_eq!(config.max_total_tokens, Some(1_500_000));
         assert_eq!(config.max_tokens, 4096);
         assert_eq!(config.component, "custom_agent");
-        assert!(config.assistant_message_id.is_none());
+        assert!(matches!(
+            config.assistant_message_persistence,
+            AssistantMessagePersistence::AdapterInserts(None)
+        ));
         assert_eq!(config.context_window, 0);
         // Empty is the correct *test/placeholder* default (see field doc) —
         // production call sites must never rely on this default; they must
@@ -1679,7 +1763,9 @@ mod tests {
             max_total_tokens: Some(500_000),
             max_tokens: 8_000,
             component: "watch_agent".into(),
-            assistant_message_id: Some("msg-pre-created".into()),
+            assistant_message_persistence: AssistantMessagePersistence::CallerPreInserted(
+                "msg-pre-created".into(),
+            ),
             user_message_persistence: UserMessagePersistence::CallerPersisted(
                 "msg-user-123".into(),
             ),
@@ -1690,9 +1776,11 @@ mod tests {
             user_display_name: "Test User".to_string(),
             context_window: 200_000,
             workspace_roles: vec![WorkspaceRole::WorkspaceAdmin],
+            document_id: Some("dashboard-abc".into()),
         };
 
         assert_eq!(config.session_id, "sess-123");
+        assert_eq!(config.document_id.as_deref(), Some("dashboard-abc"));
         assert_eq!(config.model_name.as_deref(), Some("claude-haiku-4-5-20251001"));
         assert!(config.is_shared_conversation);
         assert_eq!(config.context_type, "copilot");
@@ -1830,16 +1918,76 @@ mod tests {
         assert!(!response_text.contains("internal:"));
     }
 
-    // -- Contract: Streaming constants are reasonable -----------------------
+    // -- Contract: finalize_terminal_write (KYO-493) -------------------------
+    //
+    // The three terminal-status tests the ticket asks for, as unit tests of
+    // the pure mapping `execute_agent_chat`'s step 15 uses — see that
+    // function's doc for why the full loop can't be driven directly here.
 
     #[test]
-    fn streaming_chunk_size_is_reasonable() {
-        assert_eq!(STREAM_CHUNK_SIZE, 50);
+    fn finalize_terminal_write_completed_leaves_content_to_persist_after_chat() {
+        let (content, status) = finalize_terminal_write("completed", "The answer is 42.");
+        assert_eq!(
+            content, None,
+            "a completed turn's content was already written by persist_after_chat — \
+             writing it again here would just be redundant, not wrong, but None proves \
+             this function doesn't do it"
+        );
+        assert_eq!(status, chat_service::MessageStatus::Complete);
     }
 
     #[test]
-    fn streaming_chunk_delay_is_reasonable() {
-        assert_eq!(STREAM_CHUNK_DELAY_MS, 20);
+    fn finalize_terminal_write_error_persists_the_error_text() {
+        let (content, status) = finalize_terminal_write(
+            "error",
+            "I encountered an error while processing your request: boom",
+        );
+        assert_eq!(
+            content,
+            Some("I encountered an error while processing your request: boom"),
+            "an in-loop error's response text must be written here — nothing else \
+             persists it (KYO-493's reported gap)"
+        );
+        assert_eq!(status, chat_service::MessageStatus::Error);
+    }
+
+    #[test]
+    fn finalize_terminal_write_cancelled_persists_the_cancellation_notice() {
+        let (content, status) = finalize_terminal_write("cancelled", "Request was cancelled.");
+        assert_eq!(content, Some("Request was cancelled."));
+        assert_eq!(status, chat_service::MessageStatus::Cancelled);
+    }
+
+    #[test]
+    fn finalize_terminal_write_treats_an_unknown_status_as_error() {
+        // classify_agent_failure only ever produces "error" or "cancelled"
+        // for a non-completed run — an unrecognised third value would
+        // itself be a bug, and this function surfaces it as a visible
+        // status='error' row rather than silently matching neither arm.
+        let (content, status) = finalize_terminal_write("something-unexpected", "text");
+        assert_eq!(content, Some("text"));
+        assert_eq!(status, chat_service::MessageStatus::Error);
+    }
+
+    #[tokio::test]
+    async fn response_delivery_sends_one_complete_frame_without_artificial_chunks() {
+        let db = crate::test_support::test_pool().await;
+        let manager = WebSocketManager::new(None, db);
+        let (_id, mut receiver) = manager.connect("user-a").expect("connect test receiver");
+        let answer = "Complete response with Unicode: 世界".repeat(10);
+        deliver_response(&manager, "user-a", "session", "assistant", &answer, "model", None, "chat", None, None).await;
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let frame: serde_json::Value = serde_json::from_str(&receiver.recv().await.expect("complete frame")).expect("json");
+                if frame["type"] != "heartbeat" { break frame; }
+            }
+        }).await.expect("complete response is delivered");
+        assert_eq!(frame["type"], "chat_complete");
+        assert_eq!(frame["data"]["full_content"], answer);
+        while let Ok(frame) = receiver.try_recv() {
+            let frame: serde_json::Value = serde_json::from_str(&frame).expect("json");
+            assert_eq!(frame["type"], "heartbeat", "there are no token or character fragments or duplicate completions");
+        }
     }
 
     // -- Contract: CancellationToken can be created from config defaults ----
@@ -1968,6 +2116,26 @@ mod tests {
         let ctx = test_tool_context_for_roles(vec![]).await;
         assert!(!ctx.is_workspace_admin());
         assert!(ctx.workspace_roles.is_empty());
+    }
+
+    /// KYO-536: chat, MCP, Slack, and watch execution must never be scoped
+    /// to a single document — only the dashboard/knowledge copilot call
+    /// sites populate `AgentExecutionConfig::document_id`. Every other
+    /// production caller goes through `AgentExecutionConfig::default()`
+    /// (directly, or via `..Default::default()`), so pinning the default
+    /// here is sufficient to cover all of them.
+    #[test]
+    fn agent_execution_config_default_has_no_document_scope() {
+        assert_eq!(AgentExecutionConfig::default().document_id, None);
+    }
+
+    #[tokio::test]
+    async fn build_tool_context_default_config_has_no_document_scope() {
+        let ctx = test_tool_context_for_roles(vec![]).await;
+        assert_eq!(
+            ctx.document_id, None,
+            "chat/MCP/Slack/watch execution must not be scoped to a document"
+        );
     }
 
     // -- Contract: build_agent_config mirrors execution guards onto AgentConfig

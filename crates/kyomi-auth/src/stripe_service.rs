@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use stripe::{Client, StripeError};
 use stripe_billing::{
-    invoice::ListInvoice,
+    invoice::{ListInvoice, PayInvoice, RetrieveInvoice},
     subscription::{
         CancelSubscription, CreateSubscription, CreateSubscriptionItems, RetrieveSubscription,
         UpdateSubscription,
@@ -20,15 +20,15 @@ use stripe_billing::{
 use stripe_checkout::checkout_session::{
     CreateCheckoutSession, CreateCheckoutSessionAutomaticTax, CreateCheckoutSessionCustomText,
     CreateCheckoutSessionCustomerUpdate, CreateCheckoutSessionLineItems,
-    CreateCheckoutSessionPaymentMethodTypes, CreateCheckoutSessionSubscriptionData,
-    CreateCheckoutSessionTaxIdCollection, CreateCheckoutSessionCustomerUpdateName,
-    CreateCheckoutSessionCustomerUpdateAddress, CustomTextPositionParam,
-    RetrieveCheckoutSession,
+    CreateCheckoutSessionPaymentMethodTypes, CreateCheckoutSessionSetupIntentData,
+    CreateCheckoutSessionSubscriptionData, CreateCheckoutSessionTaxIdCollection,
+    CreateCheckoutSessionCustomerUpdateName, CreateCheckoutSessionCustomerUpdateAddress,
+    CustomTextPositionParam, RetrieveCheckoutSession,
 };
 use stripe_checkout::CheckoutSessionMode;
-use stripe_core::customer::CreateCustomer;
+use stripe_core::customer::{CreateCustomer, UpdateCustomer, UpdateCustomerInvoiceSettings};
 use stripe_shared::{
-    Subscription, SubscriptionStatus,
+    CheckoutSession, Invoice, InvoiceStatus, Subscription, SubscriptionStatus,
 };
 use stripe_types::Expandable;
 use stripe_webhook::Webhook;
@@ -88,6 +88,15 @@ pub struct EmbeddedCheckoutParams {
     pub workspace_id: String,
     pub quantity: u64,
     pub trial_days: u32,
+}
+
+/// Parameters for creating an embedded Setup-mode Checkout Session used to
+/// recover a `past_due` subscription (KYO-806 A3) — the customer adds or
+/// updates a card without a second subscription ever being created.
+#[derive(Debug)]
+pub struct RecoverySetupSessionParams {
+    pub customer_id: String,
+    pub workspace_id: String,
 }
 
 /// Parameters for creating an embedded payment checkout session (bundle purchases).
@@ -151,6 +160,76 @@ fn is_stripe_transient(e: &StripeError) -> bool {
             kyomi_core::retry::is_transient_http_status(*status)
         }
         StripeError::JSONDeserialize(_) | StripeError::ConfigError(_) => false,
+    }
+}
+
+// ─── Subscription status mapping ────────────────────────────────────────────
+
+/// Map a Stripe subscription status to Kyomi's own [`kyomi_core::enums::SubscriptionStatus`].
+///
+/// Pure and unit-testable without a Stripe client — every known Stripe
+/// variant gets its own arm, and both `Unknown` and the mandatory `_` arm
+/// (required because `stripe_shared::SubscriptionStatus` is
+/// `#[non_exhaustive]`, so a match on it from outside `async-stripe-shared`
+/// can never itself be exhaustive) fail **closed**: they map to
+/// [`kyomi_core::enums::SubscriptionStatus::Cancelled`], never `Active`, and
+/// log the raw status so a Stripe-side status this mapping doesn't know
+/// about is visible instead of silently granting access.
+///
+/// Mapping, with reasoning:
+/// - `Active` → `Active`.
+/// - `Trialing` → `Trialing`.
+/// - `PastDue` → `PastDue` — a subscription exists and payment is overdue.
+/// - `Incomplete` → `PastDue`. A subscription object exists and its first
+///   invoice hasn't been paid, which is the same "money owed, must pay"
+///   shape as `past_due` — never `active`. (`create_subscription` above,
+///   which is the only place this codebase creates a Stripe subscription,
+///   never sets `payment_behavior` and always passes `trial_period_days`,
+///   so the flows here don't put a fresh subscription into `incomplete` at
+///   creation time; this arm exists for subscriptions that reach
+///   `incomplete` by some other route, e.g. a future non-trial or
+///   Checkout-created subscription whose first payment didn't complete.)
+/// - `Canceled`, `Unpaid`, `Paused`, `IncompleteExpired` → `Cancelled`. Each
+///   means Stripe itself has stopped trying to collect payment on this
+///   subscription.
+/// - `Unknown(_)` (Stripe sent a status string this crate version doesn't
+///   recognise) and the mandatory `_` arm (a future variant added to
+///   `stripe_shared::SubscriptionStatus`) → `Cancelled`, with the raw status
+///   logged via `tracing::error!`.
+///
+/// The `cancel_at_period_end` override (the subscription is scheduled to
+/// cancel but Stripe still reports it `active` until the period ends) is
+/// handled by the caller, [`StripeService::parse_subscription_data`], before
+/// this function is reached — this function only maps Stripe's `status`
+/// field itself.
+fn map_stripe_status(status: &SubscriptionStatus) -> kyomi_core::enums::SubscriptionStatus {
+    use kyomi_core::enums::SubscriptionStatus as KyomiStatus;
+
+    match status {
+        SubscriptionStatus::Active => KyomiStatus::Active,
+        SubscriptionStatus::Trialing => KyomiStatus::Trialing,
+        SubscriptionStatus::PastDue => KyomiStatus::PastDue,
+        SubscriptionStatus::Incomplete => KyomiStatus::PastDue,
+        SubscriptionStatus::Canceled => KyomiStatus::Cancelled,
+        SubscriptionStatus::Unpaid => KyomiStatus::Cancelled,
+        SubscriptionStatus::Paused => KyomiStatus::Cancelled,
+        SubscriptionStatus::IncompleteExpired => KyomiStatus::Cancelled,
+        SubscriptionStatus::Unknown(raw) => {
+            tracing::error!(
+                raw_status = %raw,
+                "Unrecognized Stripe subscription status (explicit Unknown variant) — \
+                 treating billing as lapsed rather than silently granting access"
+            );
+            KyomiStatus::Cancelled
+        }
+        _ => {
+            tracing::error!(
+                raw_status = status.as_str(),
+                "Unrecognized Stripe subscription status (new variant added upstream) — \
+                 treating billing as lapsed rather than silently granting access"
+            );
+            KyomiStatus::Cancelled
+        }
     }
 }
 
@@ -679,18 +758,15 @@ impl StripeService {
         // always unlimited rather than the subscription item quantity.
         let user_limit = kyomi_core::capability::UNLIMITED_USER_LIMIT;
 
-        // Determine status
+        // Determine status. `cancel_at_period_end` overrides the raw Stripe
+        // status — the subscription is still technically active with Stripe
+        // until the period end, but the workspace has already elected to
+        // cancel, so we treat it as cancelled immediately (existing,
+        // out-of-scope-for-KYO-804 behaviour).
         let status = if subscription.cancel_at_period_end {
             "cancelled".to_string()
         } else {
-            match subscription.status {
-                SubscriptionStatus::Trialing => "trialing".to_string(),
-                SubscriptionStatus::Active => "active".to_string(),
-                SubscriptionStatus::PastDue => "past_due".to_string(),
-                SubscriptionStatus::Canceled => "cancelled".to_string(),
-                SubscriptionStatus::Unpaid => "cancelled".to_string(),
-                _ => "active".to_string(),
-            }
+            map_stripe_status(&subscription.status).to_string()
         };
 
         // Get period dates from the first subscription item
@@ -922,6 +998,209 @@ impl StripeService {
         })
     }
 
+    // ── Payment recovery (KYO-806 A3/A4) ─────────────────────────────────
+
+    /// Create an embedded Setup-mode Checkout Session for an existing Stripe
+    /// customer, used to recover a `past_due` subscription.
+    ///
+    /// Unlike [`Self::create_embedded_checkout_session`] (mode
+    /// `subscription`), this never creates a subscription — it only
+    /// collects/updates a card via a `SetupIntent`. Stripe does not
+    /// automatically apply the resulting payment method to any existing
+    /// subscription or pay any open invoice for a `setup`-mode session;
+    /// `crate::payment_recovery` does both explicitly once the session
+    /// completes.
+    ///
+    /// Metadata carrying `workspace_id`, `app`, `brand`, and the recovery
+    /// purpose marker is set on both the session itself (what
+    /// [`Self::retrieve_checkout_session_with_setup_intent`] reads back) and
+    /// the resulting `SetupIntent` (via `setup_intent_data`, for parity with
+    /// every other object this codebase tags and so the purpose is visible
+    /// directly on the SetupIntent in the Stripe dashboard).
+    ///
+    /// `currency` is intentionally omitted: per the crate's own doc comment
+    /// on `CreateCheckoutSession::currency` ("Required in `setup` mode when
+    /// `payment_method_types` is not set"), it's only mandatory when
+    /// `payment_method_types` is absent, and this call always sets it to
+    /// `[Card]`.
+    pub async fn create_recovery_setup_session(
+        &self,
+        params: &RecoverySetupSessionParams,
+    ) -> Result<EmbeddedCheckoutResult, StripeError> {
+        let metadata: std::collections::HashMap<String, String> = [
+            ("workspace_id".to_string(), params.workspace_id.clone()),
+            ("app".to_string(), "kyomi".to_string()),
+            ("brand".to_string(), "kyomi".to_string()),
+            (
+                "purpose".to_string(),
+                crate::payment_recovery::RECOVERY_PURPOSE_MARKER.to_string(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+
+        let setup_intent_data = CreateCheckoutSessionSetupIntentData {
+            metadata: Some(metadata.clone()),
+            ..Default::default()
+        };
+
+        let session = CreateCheckoutSession::new()
+            .customer(&params.customer_id)
+            .mode(CheckoutSessionMode::Setup)
+            .ui_mode(stripe_shared::CheckoutSessionUiMode::Embedded)
+            .redirect_on_completion(stripe_shared::CheckoutSessionRedirectOnCompletion::Never)
+            .payment_method_types(vec![CreateCheckoutSessionPaymentMethodTypes::Card])
+            .setup_intent_data(setup_intent_data)
+            .metadata(metadata)
+            .send(&self.client)
+            .await?;
+
+        tracing::info!(
+            session_id = %session.id,
+            workspace_id = %params.workspace_id,
+            "Created payment-recovery setup session"
+        );
+
+        let client_secret = session.client_secret.ok_or_else(|| {
+            StripeError::ClientError(
+                "Recovery setup session created but no client_secret returned".into(),
+            )
+        })?;
+
+        Ok(EmbeddedCheckoutResult {
+            session_id: session.id.to_string(),
+            client_secret,
+        })
+    }
+
+    /// Retrieve a Checkout Session with its `setup_intent` expanded — the
+    /// read side of [`Self::create_recovery_setup_session`]. Needed to learn
+    /// the `SetupIntent`'s status and the payment method it collected.
+    pub async fn retrieve_checkout_session_with_setup_intent(
+        &self,
+        session_id: &str,
+    ) -> Result<CheckoutSession, StripeError> {
+        RetrieveCheckoutSession::new(session_id.to_string())
+            .expand(vec!["setup_intent".to_string()])
+            .send(&self.client)
+            .await
+    }
+
+    /// Retrieve a Checkout Session with its `subscription` expanded — used
+    /// by `sync_checkout_subscription` (KYO-806 A4) to learn the
+    /// subscription a completed `subscription`-mode session created,
+    /// without waiting for the `customer.subscription.created` webhook.
+    pub async fn retrieve_checkout_session_with_subscription(
+        &self,
+        session_id: &str,
+    ) -> Result<CheckoutSession, StripeError> {
+        RetrieveCheckoutSession::new(session_id.to_string())
+            .expand(vec!["subscription".to_string()])
+            .send(&self.client)
+            .await
+    }
+
+    /// Retrieve a subscription by ID.
+    ///
+    /// Public wrapper around the same retry-classified retrieval
+    /// [`Self::update_subscription`] and [`Self::update_seat_count`] already
+    /// perform internally — exposed here for `crate::payment_recovery`,
+    /// which needs the freshly-retrieved `Subscription` object to
+    /// re-`parse_subscription_data` after paying the open invoice(s).
+    pub async fn retrieve_subscription(
+        &self,
+        subscription_id: &str,
+    ) -> Result<Subscription, StripeError> {
+        kyomi_core::retry::retry_with_backoff_classified(
+            || async { RetrieveSubscription::new(subscription_id).send(&self.client).await },
+            is_stripe_transient,
+        )
+        .await
+    }
+
+    /// Set `payment_method_id` as the default payment method on both the
+    /// customer (`invoice_settings.default_payment_method`, used for future
+    /// invoices in general) and the subscription (`default_payment_method`,
+    /// which takes precedence for that subscription's own invoices) —
+    /// KYO-806 A3 step 2. Both must be set: the customer-level default is
+    /// what a *new* subscription or a portal-driven change would otherwise
+    /// fall back to, but the subscription-level default is what
+    /// [`Self::pay_invoice`] (and Stripe's own automatic retry) prefers for
+    /// this specific subscription's invoices.
+    pub async fn set_default_payment_method(
+        &self,
+        customer_id: &str,
+        subscription_id: &str,
+        payment_method_id: &str,
+    ) -> Result<(), StripeError> {
+        UpdateCustomer::new(customer_id)
+            .invoice_settings(UpdateCustomerInvoiceSettings {
+                default_payment_method: Some(payment_method_id.to_string()),
+                ..Default::default()
+            })
+            .send(&self.client)
+            .await?;
+
+        UpdateSubscription::new(subscription_id)
+            .default_payment_method(payment_method_id)
+            .send(&self.client)
+            .await?;
+
+        tracing::info!(
+            customer_id,
+            subscription_id,
+            "Set default payment method on customer and subscription after recovery"
+        );
+
+        Ok(())
+    }
+
+    /// List a subscription's `open` invoices — the ones payment recovery
+    /// must pay. Returns the raw `stripe_shared::Invoice` objects (not the
+    /// `InvoiceData` DTO [`Self::list_invoices`] returns) because recovery
+    /// needs the invoice `id` to pay it and `hosted_invoice_url` /
+    /// `status` for outcome classification, none of which `InvoiceData`
+    /// carries.
+    pub async fn list_open_invoices(
+        &self,
+        subscription_id: &str,
+    ) -> Result<Vec<Invoice>, StripeError> {
+        let invoices = ListInvoice::new()
+            .subscription(subscription_id)
+            .status(InvoiceStatus::Open)
+            .send(&self.client)
+            .await?;
+
+        Ok(invoices.data)
+    }
+
+    /// Attempt to pay a single invoice with a specific payment method.
+    ///
+    /// Returns the updated `Invoice` on success. Stripe rejects the call
+    /// with an error (rather than returning a still-open invoice) for a
+    /// declined card or a payment that requires additional authentication —
+    /// `crate::payment_recovery` classifies both the `Ok` and `Err` cases.
+    pub async fn pay_invoice(
+        &self,
+        invoice_id: &str,
+        payment_method_id: &str,
+    ) -> Result<Invoice, StripeError> {
+        PayInvoice::new(invoice_id.to_string())
+            .payment_method(payment_method_id)
+            .send(&self.client)
+            .await
+    }
+
+    /// Retrieve an invoice's current state — used by `crate::payment_recovery`
+    /// to check whether an invoice [`Self::pay_invoice`] errored on was
+    /// actually already paid by a concurrent webhook-driven attempt (the
+    /// server-fn completion call and the webhook backstop can race).
+    pub async fn retrieve_invoice(&self, invoice_id: &str) -> Result<Invoice, StripeError> {
+        RetrieveInvoice::new(invoice_id.to_string())
+            .send(&self.client)
+            .await
+    }
+
     // ── Billing Portal ───────────────────────────────────────────────────
 
     /// Create a Stripe Customer Portal session.
@@ -1008,6 +1287,72 @@ mod tests {
         assert_eq!(json["tier"], "cloud");
         assert_eq!(json["status"], "active");
         assert_eq!(json["user_limit"], 3);
+    }
+
+    // -- Stripe subscription status mapping -----------------------------------
+    //
+    // One assertion per `stripe_shared::SubscriptionStatus` variant (the
+    // registry the mapping is keyed on), plus `Unknown`, so a variant added
+    // upstream with no corresponding arm/test fails loudly rather than
+    // silently falling through the mandatory `_` arm unnoticed. See
+    // docs/standards/testing/enumerate-the-variant-registry.md.
+
+    use kyomi_core::enums::SubscriptionStatus as KyomiStatus;
+
+    #[test]
+    fn stripe_active_maps_to_active() {
+        assert_eq!(map_stripe_status(&SubscriptionStatus::Active), KyomiStatus::Active);
+    }
+
+    #[test]
+    fn stripe_trialing_maps_to_trialing() {
+        assert_eq!(map_stripe_status(&SubscriptionStatus::Trialing), KyomiStatus::Trialing);
+    }
+
+    #[test]
+    fn stripe_past_due_maps_to_past_due() {
+        assert_eq!(map_stripe_status(&SubscriptionStatus::PastDue), KyomiStatus::PastDue);
+    }
+
+    #[test]
+    fn stripe_canceled_maps_to_cancelled() {
+        assert_eq!(map_stripe_status(&SubscriptionStatus::Canceled), KyomiStatus::Cancelled);
+    }
+
+    #[test]
+    fn stripe_unpaid_maps_to_cancelled_not_active() {
+        // The exact regression this ticket exists to fix: an unpaid
+        // subscription must never be read back as a paid, active one.
+        assert_eq!(map_stripe_status(&SubscriptionStatus::Unpaid), KyomiStatus::Cancelled);
+    }
+
+    #[test]
+    fn stripe_paused_maps_to_cancelled_not_active() {
+        assert_eq!(map_stripe_status(&SubscriptionStatus::Paused), KyomiStatus::Cancelled);
+    }
+
+    #[test]
+    fn stripe_incomplete_maps_to_past_due_not_active() {
+        // A subscription with an unpaid first invoice must route to billing
+        // (past_due is lapsed), not be granted access as active.
+        assert_eq!(map_stripe_status(&SubscriptionStatus::Incomplete), KyomiStatus::PastDue);
+    }
+
+    #[test]
+    fn stripe_incomplete_expired_maps_to_cancelled_not_active() {
+        assert_eq!(
+            map_stripe_status(&SubscriptionStatus::IncompleteExpired),
+            KyomiStatus::Cancelled
+        );
+    }
+
+    #[test]
+    fn stripe_unknown_status_fails_closed_not_active() {
+        // A brand new Stripe status this mapping has never seen (the
+        // catch-all this ticket's premise correction is about) must fail
+        // closed, not silently become the old `_ => "active"` grant.
+        let unknown = SubscriptionStatus::Unknown("some_future_status".to_string());
+        assert_eq!(map_stripe_status(&unknown), KyomiStatus::Cancelled);
     }
 
     // -- Stripe retry classification -----------------------------------------

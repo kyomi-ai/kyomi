@@ -186,7 +186,7 @@ pub async fn get_datasource_by_slug(
 /// Resolution order:
 /// 1. Try slug match first (most common case)
 /// 2. If identifier starts with `"ds-"`, try UUID match
-/// 3. If not found, return error with available slugs
+/// 3. If not found, return a workspace-scoped error without listing other datasources
 ///
 /// When `include_inactive` is false, inactive datasources are excluded.
 pub async fn resolve_datasource(
@@ -271,16 +271,8 @@ pub async fn resolve_datasource(
         }
     }
 
-    // Not found — build error with available slugs
-    let slugs = list_datasource_slugs(pool, workspace_id).await?;
-    let available = if slugs.is_empty() {
-        String::new()
-    } else {
-        format!(" Available: {}", slugs.join(", "))
-    };
-
     Err(kyomi_core::Error::NotFound(format!(
-        "Datasource '{identifier}' not found in this workspace.{available}"
+        "Datasource '{identifier}' not found in this workspace."
     )))
 }
 
@@ -372,9 +364,20 @@ pub async fn create_datasource(
         encryption_key,
     } = params;
 
+    // KYO-702: strip any connection_config field owned by an auth mode
+    // other than the one this config's own `auth_mode` names, before
+    // finalize_connection_config_secrets runs. On create there is no prior
+    // stored config to have leaked from, but the client can still submit a
+    // connection_config assembled from stale form state (e.g. a copy/paste
+    // or a race between two in-flight auth-mode switches in the same
+    // session) — enforcing this here as well as on update keeps both write
+    // paths identical rather than trusting create's freshness.
+    credential_service::strip_inactive_auth_mode_fields(&mut connection_config, ds_type);
+
     credential_service::finalize_connection_config_secrets(
         &mut connection_config,
         None,
+        ds_type,
         encryption_key,
     )?;
 
@@ -524,9 +527,24 @@ pub async fn update_datasource(
     // before being persisted.
     let final_config = match connection_config {
         Some(mut cfg) => {
+            // KYO-702: strip any connection_config field owned by an auth
+            // mode other than the one *this* update's `auth_mode` names,
+            // before finalize_connection_config_secrets runs. This is the
+            // case the bug lived in: switching BigQuery from
+            // enterprise_oauth to service_account (or back) previously left
+            // the old mode's oauth_client_id/oauth_client_secret or
+            // service_account_json sitting in `existing.connection_config`
+            // forever, because build_connection_config's wholesale replace
+            // only omits fields the *client* knows to omit — it cannot see
+            // what an earlier save under a different mode persisted.
+            credential_service::strip_inactive_auth_mode_fields(
+                &mut cfg,
+                existing.datasource_type.as_ref(),
+            );
             credential_service::finalize_connection_config_secrets(
                 &mut cfg,
                 Some(&existing.connection_config),
+                existing.datasource_type.as_ref(),
                 encryption_key,
             )?;
             cfg
@@ -1427,6 +1445,15 @@ pub async fn prepare_manual_catalog_refresh(
     let ds_type: kyomi_core::datasource_registry::DatasourceType =
         p.datasource.datasource_type.into();
 
+    // `p.datasource.connection_config` came straight from the database and
+    // may hold encrypted COMMON_SENSITIVE fields (e.g. `oauth_client_secret`,
+    // KYO-786) — `ensure_valid_oauth_credentials` needs plaintext to refresh
+    // against the provider's token endpoint.
+    let decrypted_connection_config = credential_service::decrypt_connection_config_secrets(
+        &p.datasource.connection_config,
+        p.encryption_key,
+    )?;
+
     // Refresh OAuth credentials if needed. This runs directly here (before
     // `build_provider_for_datasource` below), so an OAuth-refresh failure
     // surfaces from this call rather than from `create_provider_from_parts`.
@@ -1435,7 +1462,7 @@ pub async fn prepare_manual_catalog_refresh(
     // prefix-free, exactly like the connect/timeout failures.
     let credentials = kyomi_datasource_server::ensure_valid_oauth_credentials(
         &credentials,
-        &p.datasource.connection_config,
+        &decrypted_connection_config,
         &ds_type,
     )
     .await
@@ -1628,7 +1655,19 @@ pub async fn list_datasources_with_status(
 
             let has_credentials = cred_result.credential_status == "valid"
                 || cred_result.credential_status == "shared";
-            let can_enable = has_credentials || user_enabled;
+            // KYO-704: a retired auth mode (kyomi_oauth) is classified
+            // "shared" by shape (see `is_shared_auth`'s doc), so a row with
+            // no preference row yet would otherwise default `user_enabled`
+            // to true and report `can_enable = true` — offering an Enable
+            // action `toggle_datasource_enabled` now refuses, and (worse)
+            // making the row pass the SQL editor's
+            // `can_enable && user_enabled` selectability filter for a
+            // datasource that can never actually authenticate.
+            // `check_credential_status` already surfaces this as the named
+            // "retired_auth_mode" status above; reuse that signal rather
+            // than re-deriving it.
+            let is_retired = cred_result.credential_status == "retired_auth_mode";
+            let can_enable = !is_retired && (has_credentials || user_enabled);
             (cred_result, user_enabled, can_enable)
         };
 
@@ -1884,7 +1923,26 @@ pub async fn toggle_datasource_enabled(
 
     if enabled {
         if is_shared || is_connect {
-            // Shared auth or Connect — always allow enabling via preference
+            // Shared auth or Connect — allow enabling via preference, but
+            // first refuse a retired auth mode (KYO-704). `is_shared_auth`
+            // deliberately still classifies a retired mode (kyomi_oauth) as
+            // shared by *credential shape* (see its doc) — that
+            // classification alone must not be enough to let the row be
+            // switched on, since a retired mode can never actually
+            // authenticate. `get_active_auth_mode` is the single canonical
+            // place retired-mode detection lives (`RETIRED_AUTH_MODES`);
+            // its `Err` is already the named, actionable message this
+            // refusal needs, so it's propagated as-is rather than
+            // re-derived with a second `== "kyomi_oauth"` check. Connect
+            // datasources have no `auth_mode` concept and are exempt.
+            // Disabling is never gated this way — see the `else` branch
+            // below, which always allows it.
+            if !is_connect {
+                crate::datasource_auth_service::get_active_auth_mode(
+                    ds_type_str,
+                    connection_config,
+                )?;
+            }
             upsert_user_preference(pool, user_id, &ds.id, true).await?;
         } else {
             // Personal auth — check credential status before enabling
@@ -1956,6 +2014,88 @@ fn client_safe_user_settings(full: &Value) -> Value {
     Value::Object(out)
 }
 
+/// Extract the BigQuery service-account client email from `connection_config`,
+/// when the active auth mode is `service_account`.
+///
+/// Extracted to a pure function so it's unit-testable without a `DbPool`,
+/// mirroring `bigquery_oauth_status` below.
+///
+/// KYO-442/KYO-704: a null/absent `auth_mode` resolves to `service_account`
+/// (the registry's new default), so it must take the same branch as an
+/// explicit `auth_mode: "service_account"` here — the same inconsistency
+/// `bigquery_oauth_status` was extracted to fix for `has_bigquery_scopes`,
+/// left unfixed one field over until this function existed.
+fn service_account_email_from(
+    auth_mode: Option<&str>,
+    connection_config: &Value,
+) -> Option<String> {
+    if !matches!(auth_mode, Some("service_account") | None) {
+        return None;
+    }
+    connection_config
+        .get("service_account_json")
+        .and_then(|v| v.as_str())
+        .and_then(|json_str| serde_json::from_str::<Value>(json_str).ok())
+        .and_then(|v| {
+            v.get("client_email")
+                .and_then(|e| e.as_str())
+                .map(|s| s.to_string())
+        })
+}
+
+/// Compute `(has_oauth, oauth_email, has_bigquery_scopes,
+/// needs_bigquery_connect)` for a BigQuery datasource's settings-detail view.
+///
+/// Extracted to a pure function so it's unit-testable without a `DbPool` —
+/// `get_datasource_settings_detail` (the only caller) already has everything
+/// this needs decrypted/resolved by the time it's called.
+///
+/// KYO-442/KYO-704: a null/absent `auth_mode` now resolves to
+/// `service_account` (the registry's new default — `kyomi_oauth` was
+/// retired), so it must take the **same** branch as an explicit
+/// `auth_mode: "service_account"` here. Before this fix, both landed in the
+/// catch-all arm, which read `cred_result_status` — the *previous* default's
+/// (`kyomi_oauth`'s) global-OAuth-status signal — giving a null-`auth_mode`
+/// BigQuery row a different, wrong answer for `has_bigquery_scopes` once
+/// `kyomi_oauth` stopped being the thing `cred_result` actually reflected.
+/// The catch-all arm now only covers a retired (`kyomi_oauth`) or otherwise
+/// unrecognised `auth_mode`, where `cred_result_status` correctly reports
+/// `"retired_auth_mode"` (see `check_credential_status`) rather than
+/// "valid"/"shared" — so `has_bigquery_scopes` correctly comes back `false`
+/// instead of silently granting access.
+fn bigquery_oauth_status(
+    auth_mode: Option<&str>,
+    user_settings: &Value,
+    cred_result_status: &str,
+) -> (bool, Option<String>, bool, bool) {
+    match auth_mode {
+        Some("service_account") | None => (true, None, true, false),
+        Some("enterprise_oauth") => {
+            let has_o =
+                user_settings.get("auth_type").and_then(|v| v.as_str()) == Some("oauth");
+            let o_email = if has_o {
+                user_settings
+                    .get("oauth_email")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            } else {
+                None
+            };
+            (has_o, o_email, has_o, !has_o)
+        }
+        _ => {
+            // Retired (kyomi_oauth) or unrecognised auth_mode: never assume
+            // access. `cred_result_status` will be "retired_auth_mode" for
+            // the kyomi_oauth case specifically (never "valid"/"shared"), so
+            // has_o is false here rather than silently granting the
+            // BigQuery scopes the retired mode was removed to stop
+            // escalating.
+            let has_o = cred_result_status == "valid" || cred_result_status == "shared";
+            (has_o, None, has_o, !has_o)
+        }
+    }
+}
+
 /// Load full datasource settings for the edit modal.
 ///
 /// Combines the datasource config with the user's decrypted credential data
@@ -1991,7 +2131,20 @@ pub async fn get_datasource_settings_detail(
         None => serde_json::json!({}),
     };
 
-    let connection_config = &ds.connection_config;
+    // `ds.connection_config` came straight from the database and may hold
+    // an encrypted `service_account_json` (COMMON_SENSITIVE, KYO-786) —
+    // `service_account_email_from` below needs the plaintext key file to
+    // read `client_email` out of it. Decrypted once here and reused for
+    // every read below, including `mask_connection_config`: masking a
+    // decrypted config is still correct because masking is presence-based
+    // (any non-empty string becomes `MASKED_VALUE`, ciphertext or plaintext
+    // alike) — this is not a leak, just a single canonical config value for
+    // the rest of this function instead of two.
+    let connection_config = credential_service::decrypt_connection_config_secrets(
+        &ds.connection_config,
+        encryption_key,
+    )?;
+    let connection_config = &connection_config;
     let cred_result = crate::datasource_auth_service::check_credential_status(
         ds.datasource_type.as_ref(),
         connection_config,
@@ -2021,47 +2174,17 @@ pub async fn get_datasource_settings_detail(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let service_account_email = if auth_mode.as_deref() == Some("service_account") {
-        connection_config
-            .get("service_account_json")
-            .and_then(|v| v.as_str())
-            .and_then(|json_str| serde_json::from_str::<Value>(json_str).ok())
-            .and_then(|v| {
-                v.get("client_email")
-                    .and_then(|e| e.as_str())
-                    .map(|s| s.to_string())
-            })
-    } else {
-        None
-    };
+    let service_account_email =
+        service_account_email_from(auth_mode.as_deref(), connection_config);
 
     // BigQuery OAuth status
     let (has_oauth, oauth_email, has_bigquery_scopes, needs_bigquery_connect) =
         if ds.datasource_type.as_ref() == "bigquery" {
-            match auth_mode.as_deref() {
-                Some("service_account") => (true, None, true, false),
-                Some("enterprise_oauth") => {
-                    let has_o = user_settings
-                        .get("auth_type")
-                        .and_then(|v| v.as_str())
-                        == Some("oauth");
-                    let o_email = if has_o {
-                        user_settings
-                            .get("oauth_email")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string())
-                    } else {
-                        None
-                    };
-                    (has_o, o_email, has_o, !has_o)
-                }
-                _ => {
-                    // kyomi_oauth — use global OAuth status from cred_result
-                    let has_o = cred_result.credential_status == "valid"
-                        || cred_result.credential_status == "shared";
-                    (has_o, None, has_o, !has_o)
-                }
-            }
+            bigquery_oauth_status(
+                auth_mode.as_deref(),
+                &user_settings,
+                &cred_result.credential_status,
+            )
         } else {
             (false, None, false, false)
         };
@@ -2108,6 +2231,68 @@ mod tests {
     use serde_json::json;
 
     use crate::test_support::{seed_user, seed_workspace, sqlite_pool, test_key, test_pool};
+
+    #[tokio::test]
+    async fn resolve_datasource_missing_lookup_does_not_disclose_other_slugs() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        let key = test_key();
+        seed_user(sq, "user-a", "a@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+        seed_workspace(sq, "ws-2", "user-a").await;
+        let ds = create_datasource(
+            &db,
+            CreateDatasourceParams {
+                workspace_id: "ws-1",
+                name: "Private datasource",
+                slug: Some("private-workspace-slug"),
+                ds_type: "postgres",
+                connection_config: json!({}),
+                connection_type: None,
+                encryption_key: &key,
+            },
+        )
+        .await
+        .expect("create datasource fixture");
+
+        // The fixture is resolvable by both supported identifiers.
+        for identifier in [ds.slug.as_str(), ds.id.as_str()] {
+            assert_eq!(
+                resolve_datasource(&db, identifier, "ws-1", false)
+                    .await
+                    .expect("existing datasource")
+                    .id,
+                ds.id
+            );
+        }
+        for include_inactive in [false, true] {
+            for identifier in ["", "missing", "ds-missing"] {
+                let error = resolve_datasource(&db, identifier, "ws-1", include_inactive)
+                    .await
+                    .expect_err("missing identifiers must still be rejected");
+                assert!(matches!(error, kyomi_core::Error::NotFound(_)));
+                assert_eq!(
+                    error.to_string(),
+                    format!("not found: Datasource '{identifier}' not found in this workspace.")
+                );
+            }
+        }
+        assert!(
+            matches!(
+                resolve_datasource(&db, &ds.id, "ws-2", true).await,
+                Err(kyomi_core::Error::NotFound(_))
+            ),
+            "UUID resolution must remain workspace-scoped"
+        );
+        sq.close().await;
+        assert!(
+            matches!(
+                resolve_datasource(&db, "missing", "ws-1", false).await,
+                Err(kyomi_core::Error::Sqlx(_))
+            ),
+            "a failed database lookup must preserve its genuine error"
+        );
+    }
 
     // -- generate_slug tests --
 
@@ -2282,6 +2467,220 @@ mod tests {
         assert_eq!(obj.len(), 3);
     }
 
+    // -- bigquery_oauth_status tests (KYO-704) --
+
+    #[test]
+    fn bigquery_oauth_status_null_auth_mode_matches_service_account() {
+        // KYO-442/KYO-704 acceptance criterion: a null/absent auth_mode is
+        // service_account now, and must produce exactly the same result as
+        // an explicit "service_account" — including when cred_result_status
+        // is something that would have flipped the old kyomi_oauth-driven
+        // catch-all arm's answer (e.g. "missing"), proving this isn't
+        // falling into that arm anymore.
+        let explicit = bigquery_oauth_status(Some("service_account"), &json!({}), "missing");
+        let null_mode = bigquery_oauth_status(None, &json!({}), "missing");
+        assert_eq!(explicit, null_mode);
+        assert_eq!(null_mode, (true, None, true, false));
+    }
+
+    // -- service_account_email_from tests (KYO-704) --
+
+    #[test]
+    fn service_account_email_from_null_auth_mode_matches_service_account() {
+        // Same acceptance criterion as bigquery_oauth_status_null_auth_mode_-
+        // matches_service_account above, one field over: a null/absent
+        // auth_mode is service_account now, so a row with service_account_json
+        // present must surface the service account email exactly as it would
+        // for an explicit auth_mode: "service_account".
+        let connection_config = json!({
+            "service_account_json": "{\"client_email\": \"test-service-account@test-project\"}"
+        });
+        let explicit = service_account_email_from(Some("service_account"), &connection_config);
+        let null_mode = service_account_email_from(None, &connection_config);
+        assert_eq!(explicit, null_mode);
+        assert_eq!(
+            null_mode.as_deref(),
+            Some("test-service-account@test-project")
+        );
+    }
+
+    #[test]
+    fn service_account_email_from_retired_kyomi_oauth_returns_none() {
+        // A row still naming the retired kyomi_oauth mode must not surface a
+        // service account email just because service_account_json happens to
+        // be present on the row.
+        let connection_config = json!({
+            "service_account_json": "{\"client_email\": \"test-service-account@test-project\"}"
+        });
+        assert_eq!(
+            service_account_email_from(Some("kyomi_oauth"), &connection_config),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn get_datasource_settings_detail_extracts_service_account_email_from_encrypted_json() {
+        // KYO-786 regression guard: before the fix, `service_account_json`
+        // was stored at rest as plaintext and `get_datasource_settings_detail`
+        // read `ds.connection_config` raw. Now that it's encrypted
+        // (COMMON_SENSITIVE), a caller that forgot to decrypt first would
+        // hand `service_account_email_from` ciphertext — `from_str(ciphertext)`
+        // fails, `.ok()` swallows the error, and `service_account_email`
+        // silently comes back `None` instead of erroring or the real email.
+        // This seeds a real datasource through `create_datasource` (so
+        // `service_account_json` is genuinely encrypted at rest, not just
+        // plaintext dressed up as a test fixture) and proves the email still
+        // comes back correctly.
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        let key = test_key();
+        seed_user(sq, "user-a", "a@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+
+        let ds = create_datasource(
+            &db,
+            CreateDatasourceParams {
+                workspace_id: "ws-1",
+                name: "BQ",
+                slug: Some("bq-settings-test"),
+                ds_type: "bigquery",
+                connection_config: json!({
+                    "auth_mode": "service_account",
+                    "service_account_json": "{\"type\":\"service_account\",\"client_email\":\"test-service-account@test-project\"}"
+                }),
+                connection_type: None,
+                encryption_key: &key,
+            },
+        )
+        .await
+        .expect("create_datasource");
+
+        // Sanity: the stored value really is ciphertext, not the plaintext
+        // JSON the test above supplied — otherwise this test wouldn't be
+        // exercising the KYO-786 fix at all.
+        let stored = ds.connection_config["service_account_json"]
+            .as_str()
+            .expect("service_account_json stored as a string");
+        assert!(
+            credential_service::looks_encrypted(stored),
+            "test fixture sanity: service_account_json must be encrypted at rest, got: {stored}"
+        );
+
+        let detail = get_datasource_settings_detail(&db, &ds.id, "ws-1", "user-a", true, &key)
+            .await
+            .expect("get_datasource_settings_detail");
+
+        assert_eq!(
+            detail.service_account_email.as_deref(),
+            Some("test-service-account@test-project"),
+            "service_account_email must be extracted from the decrypted service_account_json"
+        );
+        // The response sent to the browser must still be masked, never the
+        // decrypted plaintext this function now holds internally.
+        assert_eq!(detail.connection_config["service_account_json"], credential_service::MASKED_VALUE);
+    }
+
+    #[tokio::test]
+    async fn prepare_manual_catalog_refresh_errors_when_connection_config_cannot_be_decrypted() {
+        // KYO-786 regression guard: `p.datasource.connection_config` may
+        // hold an encrypted `oauth_client_secret`. Before the fix, this
+        // function handed it raw to `ensure_valid_oauth_credentials`, which
+        // would attempt an OAuth refresh using ciphertext as if it were the
+        // real client secret. It must now decrypt first and fail loudly on
+        // a corrupted/mismatched-key config rather than attempting a
+        // refresh with garbage credentials — the success path (a real
+        // refresh against a live OAuth provider) can't be exercised without
+        // a live/mocked external service, but the decrypt-and-fail-fast
+        // wiring is directly testable this way.
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        let key = test_key();
+        seed_user(sq, "user-a", "a@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+
+        let mut ds = create_datasource(
+            &db,
+            CreateDatasourceParams {
+                workspace_id: "ws-1",
+                name: "BQ",
+                slug: Some("bq-refresh-test"),
+                ds_type: "bigquery",
+                connection_config: json!({ "auth_mode": "enterprise_oauth" }),
+                connection_type: None,
+                encryption_key: &key,
+            },
+        )
+        .await
+        .expect("create_datasource");
+
+        // Corrupt the in-memory config with ciphertext encrypted under a
+        // different key — a guaranteed decrypt failure, not the
+        // legacy-plaintext passthrough.
+        let wrong_key = [7u8; 32];
+        let bogus = encryption::encrypt("bogus-secret", &wrong_key).unwrap();
+        ds.connection_config["oauth_client_secret"] = json!(bogus);
+
+        let result = prepare_manual_catalog_refresh(PrepareManualRefreshParams {
+            db: &db,
+            user_id: "user-a",
+            email: "a@test.local".to_string(),
+            ws_id: "ws-1",
+            datasource: &ds,
+            encryption_key: &key,
+            connect_registry: None,
+            google_oauth_client_id: None,
+            google_oauth_client_secret: None,
+            guard_minutes: 60,
+            connect_timeout: std::time::Duration::from_secs(5),
+        })
+        .await;
+
+        let err = match result {
+            Ok(_) => panic!("an undecryptable connection_config must error, not proceed"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(err, kyomi_core::Error::CredentialDecryptionFailed(_)),
+            "expected CredentialDecryptionFailed, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn bigquery_oauth_status_retired_kyomi_oauth_denies_scopes() {
+        // A row still naming the retired kyomi_oauth mode must not be
+        // granted BigQuery scopes just because it once would have been --
+        // check_credential_status now reports "retired_auth_mode" for it,
+        // which this function treats as "no access" (not "valid"/"shared").
+        let (has_oauth, oauth_email, has_scopes, needs_connect) =
+            bigquery_oauth_status(Some("kyomi_oauth"), &json!({}), "retired_auth_mode");
+        assert!(!has_oauth);
+        assert_eq!(oauth_email, None);
+        assert!(!has_scopes);
+        assert!(needs_connect);
+    }
+
+    #[test]
+    fn bigquery_oauth_status_enterprise_oauth_reads_user_settings() {
+        // KYO-704 A3: enterprise_oauth is untouched by the retirement.
+        let settings = json!({"auth_type": "oauth", "oauth_email": "user@example.com"});
+        let (has_oauth, oauth_email, has_scopes, needs_connect) =
+            bigquery_oauth_status(Some("enterprise_oauth"), &settings, "missing");
+        assert!(has_oauth);
+        assert_eq!(oauth_email.as_deref(), Some("user@example.com"));
+        assert!(has_scopes);
+        assert!(!needs_connect);
+    }
+
+    #[test]
+    fn bigquery_oauth_status_enterprise_oauth_without_oauth_settings() {
+        let (has_oauth, oauth_email, has_scopes, needs_connect) =
+            bigquery_oauth_status(Some("enterprise_oauth"), &json!({}), "missing");
+        assert!(!has_oauth);
+        assert_eq!(oauth_email, None);
+        assert!(!has_scopes);
+        assert!(needs_connect);
+    }
+
     // -- fetch_catalog_statuses (KYO-201: N+1 -> single grouped query) --
 
     /// Build an in-memory SQLite pool with migrations applied.
@@ -2319,6 +2718,35 @@ mod tests {
         .expect("insert datasource");
     }
 
+    /// Insert a datasource with an explicit `datasource_type` and
+    /// `connection_config`, for tests that need a specific auth mode (e.g.
+    /// BigQuery's retired `kyomi_oauth` vs `service_account`) rather than
+    /// [`seed_datasource`]'s hardcoded `postgres`/`{}`.
+    async fn seed_datasource_with_config(
+        pool: &DbPool,
+        id: &str,
+        workspace_id: &str,
+        slug: &str,
+        datasource_type: &str,
+        connection_config: &str,
+    ) {
+        let sq = sqlite_pool(pool);
+        sqlx::query(
+            "INSERT INTO datasource_configs \
+             (id, workspace_id, name, datasource_type, connection_config, slug) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )
+        .bind(id)
+        .bind(workspace_id)
+        .bind(format!("Datasource {id}"))
+        .bind(datasource_type)
+        .bind(connection_config)
+        .bind(slug)
+        .execute(sq)
+        .await
+        .expect("insert datasource");
+    }
+
     async fn seed_table_cache_row(
         pool: &DbPool,
         datasource_config_id: &str,
@@ -2342,6 +2770,221 @@ mod tests {
         .execute(sq)
         .await
         .expect("insert table cache row");
+    }
+
+    // -- toggle_datasource_enabled retired-auth-mode guard (KYO-704) --
+
+    #[tokio::test]
+    async fn toggle_datasource_enabled_refuses_enable_on_retired_auth_mode() {
+        // A BigQuery row still naming the retired `kyomi_oauth` mode is
+        // classified "shared" by `is_shared_auth` (deliberately, by
+        // credential shape — see its doc), so it takes
+        // `toggle_datasource_enabled`'s shared-auth branch. Before this
+        // fix, that branch unconditionally upserted the preference and
+        // never consulted retired-mode detection at all — this test would
+        // fail (`.unwrap()` would panic instead of `unwrap_err()`
+        // succeeding) against that code.
+        let pool = test_pool().await;
+        seed_workspace_and_owner(&pool, "ws-1", "user-1").await;
+        seed_datasource_with_config(
+            &pool,
+            "ds-retired",
+            "ws-1",
+            "ds-retired",
+            "bigquery",
+            r#"{"auth_mode": "kyomi_oauth"}"#,
+        )
+        .await;
+
+        let key = test_key();
+        let err = toggle_datasource_enabled(&pool, "ds-retired", "ws-1", "user-1", true, &key)
+            .await
+            .expect_err("enabling a retired auth mode must be refused");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("retired") || message.contains("service account"),
+            "error must name the retired mode and how to fix it, got: {message}"
+        );
+
+        // Refusing the enable must not have written a preference row at all
+        // — an absent preference is exactly the "not enabled" default, so
+        // this also confirms the refusal didn't half-apply.
+        let pref = get_user_preference(&pool, "user-1", "ds-retired")
+            .await
+            .expect("query must succeed");
+        assert!(
+            pref.is_none(),
+            "a refused enable must not create a preference row"
+        );
+    }
+
+    #[tokio::test]
+    async fn toggle_datasource_enabled_allows_disable_on_retired_auth_mode() {
+        // The enable-side refusal above must never extend to disabling —
+        // a user must always be able to turn a retired datasource off.
+        let pool = test_pool().await;
+        seed_workspace_and_owner(&pool, "ws-1", "user-1").await;
+        seed_datasource_with_config(
+            &pool,
+            "ds-retired",
+            "ws-1",
+            "ds-retired",
+            "bigquery",
+            r#"{"auth_mode": "kyomi_oauth"}"#,
+        )
+        .await;
+
+        let key = test_key();
+        toggle_datasource_enabled(&pool, "ds-retired", "ws-1", "user-1", false, &key)
+            .await
+            .expect("disabling a retired auth mode must always succeed");
+
+        let pref = get_user_preference(&pool, "user-1", "ds-retired")
+            .await
+            .expect("query must succeed")
+            .expect("disable must upsert a preference row");
+        assert!(!pref.enabled);
+    }
+
+    #[tokio::test]
+    async fn toggle_datasource_enabled_allows_enable_on_service_account() {
+        // The retired-mode guard must not over-fire on a live auth mode.
+        let pool = test_pool().await;
+        seed_workspace_and_owner(&pool, "ws-1", "user-1").await;
+        seed_datasource_with_config(
+            &pool,
+            "ds-sa",
+            "ws-1",
+            "ds-sa",
+            "bigquery",
+            r#"{"auth_mode": "service_account"}"#,
+        )
+        .await;
+
+        let key = test_key();
+        toggle_datasource_enabled(&pool, "ds-sa", "ws-1", "user-1", true, &key)
+            .await
+            .expect("service_account is not retired and must be enable-able");
+
+        let pref = get_user_preference(&pool, "user-1", "ds-sa")
+            .await
+            .expect("query must succeed")
+            .expect("enable must upsert a preference row");
+        assert!(pref.enabled);
+    }
+
+    // -- list_datasources_with_status can_enable retired-auth-mode guard (KYO-704) --
+
+    #[tokio::test]
+    async fn list_datasources_with_status_reports_can_enable_false_for_retired_auth_mode() {
+        // A BigQuery row still naming the retired `kyomi_oauth` mode, with
+        // no preference row yet (the default state for a datasource nobody
+        // has touched since retirement). Before this fix, `can_enable` fell
+        // back to `user_enabled`'s no-preference-row default of `true` —
+        // reporting the row as enable-able (and, via the SQL editor's
+        // `can_enable && user_enabled` selectability filter, query-able)
+        // even though it can never authenticate.
+        let pool = test_pool().await;
+        seed_workspace_and_owner(&pool, "ws-1", "user-1").await;
+        seed_datasource_with_config(
+            &pool,
+            "ds-retired",
+            "ws-1",
+            "ds-retired",
+            "bigquery",
+            r#"{"auth_mode": "kyomi_oauth"}"#,
+        )
+        .await;
+
+        let key = test_key();
+        let list = list_datasources_with_status(&pool, "ws-1", "user-1", &key)
+            .await
+            .expect("list must succeed");
+        let ds = list
+            .iter()
+            .find(|d| d.id == "ds-retired")
+            .expect("seeded datasource must be listed");
+
+        assert_eq!(ds.credential_status, "retired_auth_mode");
+        assert!(
+            !ds.can_enable,
+            "a retired auth mode must never report can_enable = true"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_datasources_with_status_reports_can_enable_true_for_service_account() {
+        // The retired-mode guard must not over-fire on a live shared-auth
+        // mode: service_account has no preference row either, and must
+        // still default to can_enable = true.
+        let pool = test_pool().await;
+        seed_workspace_and_owner(&pool, "ws-1", "user-1").await;
+        seed_datasource_with_config(
+            &pool,
+            "ds-sa",
+            "ws-1",
+            "ds-sa",
+            "bigquery",
+            r#"{"auth_mode": "service_account"}"#,
+        )
+        .await;
+
+        let key = test_key();
+        let list = list_datasources_with_status(&pool, "ws-1", "user-1", &key)
+            .await
+            .expect("list must succeed");
+        let ds = list
+            .iter()
+            .find(|d| d.id == "ds-sa")
+            .expect("seeded datasource must be listed");
+
+        assert!(ds.can_enable);
+    }
+
+    #[tokio::test]
+    async fn toggle_datasource_enabled_allows_enable_on_enterprise_oauth() {
+        // enterprise_oauth is untouched by the kyomi_oauth retirement
+        // (KYO-704 A3) and must keep enabling normally. Unlike
+        // service_account, enterprise_oauth is *personal* auth
+        // (`preference_tracking: "credential"`), so it never reaches this
+        // ticket's new shared-branch guard at all — it takes
+        // `toggle_datasource_enabled`'s pre-existing personal-auth branch,
+        // which requires an actual valid credential to enable. Seed one so
+        // this proves "still enables normally", not just "isn't blocked by
+        // the retired-mode guard it was never going to hit".
+        let pool = test_pool().await;
+        seed_workspace_and_owner(&pool, "ws-1", "user-1").await;
+        seed_datasource_with_config(
+            &pool,
+            "ds-eo",
+            "ws-1",
+            "ds-eo",
+            "bigquery",
+            r#"{"auth_mode": "enterprise_oauth"}"#,
+        )
+        .await;
+
+        let key = test_key();
+        seed_encrypted_credential(
+            &pool,
+            "user-1",
+            "ds-eo",
+            "ws-1",
+            &json!({"oauth_access_token": "test-access-token"}),
+            &key,
+        )
+        .await;
+
+        toggle_datasource_enabled(&pool, "ds-eo", "ws-1", "user-1", true, &key)
+            .await
+            .expect("enterprise_oauth with a valid credential must be enable-able");
+
+        let cred = get_user_credential(&pool, "user-1", "ds-eo")
+            .await
+            .expect("query must succeed")
+            .expect("credential row must still exist");
+        assert!(cred.enabled);
     }
 
     #[tokio::test]

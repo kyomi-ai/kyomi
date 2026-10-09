@@ -60,16 +60,38 @@ with open(outfile, "w") as f:
 ' "$outfile" "$@"
 }
 
-# A recent-past and a far-past timestamp. FUTUREPROOF_TS is a FIXED string —
-# safe for every test that runs under the script's default 336h (14-day)
-# lookback, since it only needs to stay within two weeks of "now", which is
-# true for a long time after this file is written. Test 13 below exercises a
-# much NARROWER window (24h) and cannot use a fixed string for its "recent"
-# fixture without the suite eventually rotting as real time moves past it —
-# it computes RECENT_TS from the real clock instead. ANCIENT_TS is always
-# outside any realistic lookback either way.
-FUTUREPROOF_TS='2026-09-01T00:00:00Z' # within 336h (14d) of "now" for a long time
-ANCIENT_TS='2015-01-01T00:00:00Z'     # always outside any realistic lookback
+# A recent-past and a far-past timestamp, used as merge-time fixtures across
+# most of this suite (including Test 1, which relies on the script's DEFAULT
+# 336h/14-day lookback — no --lookback-hours override — so this is the fixture
+# that actually exercises the production code path).
+#
+# FUTUREPROOF_TS used to be the fixed string '2026-09-01T00:00:00Z', on the
+# claim that it would "stay within two weeks of now for a long time after
+# this file is written". That claim was false the moment it was written: a
+# fixed past timestamp only ever moves TOWARD the lookback cutoff as real
+# time advances, never away from it, so "safe for a long time" was a
+# countdown wearing the clothes of an invariant. By 2026-09-15 it had aged
+# past the 336h cutoff, every fixture using it was filtered out before
+# extraction ran, and 19 of this suite's assertions silently returned zero
+# rows — the "Worktree Lifecycle & Script Self-Tests" CI job went red on
+# every PR in the repo (KYO-792). FUTUREPROOF_TS is now computed from the
+# real clock at test time, the same way RECENT_TS below already was — with a
+# -7-day offset, which leaves 168h of margin inside the 336h default window
+# on both sides (it can't go negative-into-the-future, and it can't age past
+# the cutoff without 168h passing, comfortably more than clock skew or a slow
+# test run can eat). Do NOT replace this with a literal again — recomputing
+# it here is the fix, not a workaround for one.
+#
+# ANCIENT_TS stays a hardcoded literal ON PURPOSE: it's deliberately outside
+# ANY realistic --lookback-hours value, and moving the clock forward only
+# ever pushes it further outside that window, never closer — the asymmetry
+# with FUTUREPROOF_TS above is intentional, not an oversight.
+#
+# Test 13 below exercises a much NARROWER window (24h) and needs its own
+# "recent" fixture computed from the real clock for the same reason
+# FUTUREPROOF_TS now is: RECENT_TS.
+FUTUREPROOF_TS="$(date -u -d '-7 days' +%Y-%m-%dT%H:%M:%SZ)" # always inside the default 336h (14d) window, 168h margin either side
+ANCIENT_TS='2015-01-01T00:00:00Z'     # always outside any realistic lookback — see comment above
 RECENT_TS="$(date -u -d '-1 hour' +%Y-%m-%dT%H:%M:%SZ)" # always within a 24h window
 
 # ─── invoke the script under test, capturing stdout/stderr SEPARATELY ───────

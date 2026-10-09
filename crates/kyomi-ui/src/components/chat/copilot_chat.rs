@@ -76,6 +76,18 @@ pub fn CopilotChat(
     #[prop(optional)]
     assistant_message_action:
         Option<std::sync::Arc<dyn Fn(String) -> AnyView + Send + Sync>>,
+
+    /// Id of the dashboard/knowledge document this copilot is open against,
+    /// if any — threaded to `ToolContext::document_id` (see
+    /// `ChatEngineConfig::document_id`). `None` for copilot types with no
+    /// single open document (chart builder, watch).
+    #[prop(into, optional)]
+    document_id: Option<String>,
+
+    /// See `chat_engine::BeforeSendHook`. `None` for copilot types with
+    /// nothing to autosave (chart builder, watch).
+    #[prop(optional)]
+    before_send: Option<super::chat_engine::BeforeSendHook>,
 ) -> impl IntoView {
     // ── Create the ChatEngine in Ephemeral mode ───────────────────────
     let engine = ChatEngine::new(ChatEngineConfig {
@@ -88,6 +100,8 @@ pub fn CopilotChat(
         on_custom_ws_event,
         context_content: Some(context_content),
         context_label: Some(context_label),
+        document_id,
+        before_send,
     });
 
     // ── Store rendering props ─────────────────────────────────────────

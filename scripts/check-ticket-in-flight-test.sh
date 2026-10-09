@@ -22,6 +22,14 @@
 # the exact same fixture, so the fix — not an unrelated setup change — is
 # what flips the verdict.
 #
+# Tests 13-15 (KYO-703) cover the removal of the PR-listing ceiling. The old
+# `gh pr list --limit N` fetch treated a listing that came back at exactly N
+# rows as possibly truncated and exited 3; the repo reached exactly N=500 PRs
+# on 2026-09-09, so every ticket exited 3 and every backlog run reported a
+# clean pass while claiming nothing. Test 13 is that outage reproduced, test 14
+# proves the fix did not simply blind the PR check, and test 15 is the
+# fail-closed property that had to survive both.
+#
 # Tests 32-39 (KYO-607) cover recycled ticket keys: Trakkt's numbering
 # restarted in May 2026, so nine keys are shared between a retired ticket and
 # a current one, and the merged PR (plus its surviving remote branch) of the
@@ -82,13 +90,18 @@ PRE_RESTART_TS='2026-05-08T12:00:00Z'
 POST_RESTART_TS='2026-08-21T09:00:00Z'
 
 pr_row() {
-    # pr_row <number> <state> <createdAt> <headRefName> — one PR row in the
-    # exact 4-column TSV shape check-ticket-in-flight.sh asks `gh` to produce
-    # via `--jq '.[] | [.number, .state, .createdAt, .headRefName] | @tsv'`.
-    # A helper rather than a `$'...\t...'` literal at each call site because
-    # createdAt is usually one of the two named constants above, and `$'...'`
-    # does not interpolate.
-    printf '%s\t%s\t%s\t%s' "$1" "$2" "$3" "$4"
+    # pr_row <number> <state> <createdAt> <headRefName> [reworkLabelFlag] —
+    # one PR row in the exact 5-column TSV shape check-ticket-in-flight.sh
+    # asks `gh` to produce. A helper rather than a `$'...\t...'` literal at
+    # each call site because createdAt is usually one of the two named
+    # constants above, and `$'...'` does not interpolate.
+    #
+    # reworkLabelFlag (KYO-778) is the 5th column added when the script
+    # started asking `gh` whether the PR carries `rework-requested`: "1" if
+    # it does, "0" otherwise. It defaults to "0" so every call site written
+    # before KYO-778 keeps meaning "not labelled" without being touched —
+    # only the KYO-778 test block below passes it explicitly.
+    printf '%s\t%s\t%s\t%s\t%s' "$1" "$2" "$3" "$4" "${5:-0}"
 }
 
 gh_ok_empty() { : >"$GH_STDOUT_FILE"; : >"$GH_STDERR_FILE"; echo 0 >"$GH_EXIT_FILE"; }
@@ -103,16 +116,15 @@ gh_ok_prs_n() {
     # gh_ok_prs_n <count> [<extra row>...] — stage <count> filler PR rows, then
     # any extra rows given verbatim. Filler branches are jason/kyo-90<i>-filler,
     # which no ticket number any test asks about can match, so a row's only
-    # contribution is to the row COUNT — which is what the PR_LIST_LIMIT
-    # truncation guard keys off. Lets a test reach the limit in three rows
-    # instead of five hundred. Fillers are dated POST_RESTART_TS so they are
-    # never classified as pre-restart either; a filler must influence nothing
-    # but the count.
+    # contribution is to the row COUNT. Fillers are dated POST_RESTART_TS so
+    # they are never classified as pre-restart either; a filler must influence
+    # nothing but the count. Used by the KYO-703 tests to build a listing
+    # larger than the retired 500-row ceiling.
     local count="$1" i
     shift
     : >"$GH_STDOUT_FILE"
     for ((i = 1; i <= count; i++)); do
-        printf '%d\tMERGED\t%s\tjason/kyo-90%d-filler\n' "$((9000 + i))" "$POST_RESTART_TS" "$i" >>"$GH_STDOUT_FILE"
+        printf '%d\tMERGED\t%s\tjason/kyo-90%d-filler\t0\n' "$((9000 + i))" "$POST_RESTART_TS" "$i" >>"$GH_STDOUT_FILE"
     done
     if [ "$#" -gt 0 ]; then
         printf '%s\n' "$@" >>"$GH_STDOUT_FILE"
@@ -123,6 +135,21 @@ gh_ok_prs_n() {
 gh_fail() {
     : >"$GH_STDOUT_FILE"
     printf '%s\n' "$1" >"$GH_STDERR_FILE"
+    echo 1 >"$GH_EXIT_FILE"
+}
+gh_fail_partial() {
+    # gh_fail_partial <stderr line> <row>... — stage rows on stdout AND a
+    # non-zero exit, reproducing what `gh api --paginate` actually does when a
+    # page fails partway through: rows already fetched are on stdout, and the
+    # process THEN exits non-zero (KYO-703 — verified 2026-09-09 against a stub
+    # HTTP server serving one page with a rel="next" Link and a 500 on page 2).
+    # The rows staged here deliberately include a genuine match, so a script
+    # that read the partial output would report a verdict from an incomplete
+    # listing instead of failing closed.
+    local err="$1"
+    shift
+    printf '%s\n' "$@" >"$GH_STDOUT_FILE"
+    printf '%s\n' "$err" >"$GH_STDERR_FILE"
     echo 1 >"$GH_EXIT_FILE"
 }
 gh_ok_empty # default: no PRs, until a test says otherwise
@@ -353,7 +380,8 @@ clone_repo "$bare9" "$t9/workerB"
 gh_fail "gh: authentication required (stub failure)"
 run_check "$t9/workerB" 422
 assert_exit "a failing gh must exit 3, never 0" 3
-assert_contains "names the failing check" "gh pr list"
+assert_contains "names the failing check" "PR listing (gh api --paginate .../pulls)"
+assert_contains "reports the underlying gh error" "authentication required"
 gh_ok_empty
 echo
 
@@ -381,10 +409,6 @@ CHECK_OUTPUT="$out"
 assert_exit "no argument" 2
 run_check "$tmpdir" "not-a-ticket"
 assert_exit "unparseable ticket" 2
-PR_LIST_LIMIT="not-a-number" run_check "$tmpdir" 422
-assert_exit "non-numeric PR_LIST_LIMIT override" 2
-PR_LIST_LIMIT=0 run_check "$tmpdir" 422
-assert_exit "zero PR_LIST_LIMIT override" 2
 echo
 
 # ─── Test 12: input forms — KYO-422 / kyo-422 / 422 all identical ───────────
@@ -406,52 +430,85 @@ for form in KYO-422 kyo-422 422; do
 done
 echo
 
-# ─── Test 13: fail closed — a PR listing that may be truncated ──────────────
-# THE FAIL-CLOSED PROOF for `gh pr list --limit`. The script shipped with a
-# hardcoded --limit 200 against a repo that already had 411 PRs, so every
-# duplicate older than PR #212 was invisible and reported CLEAR — the KYO-511
-# fail-open species by another route. A bigger number alone would not have
-# caught it, so the guard is what is under test here: exactly PR_LIST_LIMIT
-# rows come back, NONE of them matching the ticket, so an implementation that
-# ignored the row count would confidently say "clear" (exit 0). It must say
-# "could not complete this check" (exit 3) instead.
-echo "-- Test 13: fail closed, PR listing at PR_LIST_LIMIT"
+# ─── Tests 13-15: the PR listing has NO ceiling (KYO-703) ───────────────────
+#
+# The check used to ask `gh pr list` for a fixed `--limit N` and treat a
+# listing that came back at exactly N rows as possibly truncated, exiting 3.
+# On 2026-09-09 the repo reached exactly 500 PRs, the default N, so `rows >= N`
+# was true on EVERY invocation: every ticket exited 3, and since exit 0 is the
+# only code that permits claiming, every backlog run reported a clean pass
+# while claiming nothing. The fetch is now `gh api --paginate`, which walks the
+# Link header to exhaustion, so there is no N and nothing to detect.
+#
+# These three pin the whole contract that replaced the guard, and they are
+# meant to be read together — 13 and 14 are the two verdicts that must survive
+# a listing bigger than the retired ceiling, and 15 is the fail-closed half
+# that must NOT be traded away to get them. Removing the ceiling by simply
+# ignoring `gh`'s exit status would pass 13 and 14 and fail 15.
+#
+# `PR_LIST_LIMIT` is gone with the guard; these tests set no environment at
+# all, which is the point — the real script must behave this way at its own
+# defaults, exactly as it does against the live repo.
+CEILINGLESS_ROWS=600 # > the retired 500-row default, and > any raise of it
+
+# ─── Test 13: a listing past the old ceiling, no match → CLEAR ──────────────
+# THE OUTAGE ITSELF, reproduced: a listing of more rows than the retired
+# ceiling, none of them matching the ticket. Under the row-count guard this
+# was exit 3 ("may be truncated") for every ticket on the board. It must be
+# exit 0 — and it must reach that verdict having actually read all the rows,
+# not by skipping the PR check.
+echo "-- Test 13: a listing past the retired ceiling with no match is CLEAR (KYO-703)"
 t13="$tmpdir/t13"
 mkdir -p "$t13"
 bare13="$(new_bare_remote "$t13/remote.git")"
 seed_main "$bare13"
 clone_repo "$bare13" "$t13/workerB"
-gh_ok_prs_n 3
-PR_LIST_LIMIT=3 run_check "$t13/workerB" 422
-assert_exit "a listing at the limit must exit 3, never 0" 3
-assert_contains "names the limit it hit" "PR_LIST_LIMIT of 3"
-assert_contains "tells the operator to raise it" "re-run with a higher PR_LIST_LIMIT"
+gh_ok_prs_n "$CEILINGLESS_ROWS"
+run_check "$t13/workerB" 422
+assert_exit "a $CEILINGLESS_ROWS-row listing with no match is CLEAR, not a failure" 0
+assert_not_contains "does not claim the listing may be truncated" "may be truncated"
+assert_not_contains "does not fail closed on listing size" "COULD NOT COMPLETE ALL CHECKS"
 echo
 
-# ─── Test 14: just under the limit, no match — the guard must not fire ──────
-echo "-- Test 14: just under PR_LIST_LIMIT, no match"
+# ─── Test 14: the same listing, with a match → IN FLIGHT ────────────────────
+# The other half, and the one that proves the outage was not "fixed" by
+# blinding the PR check: the match sits at the END of a listing longer than
+# the retired ceiling, so it is exactly the row a `--limit`-truncated fetch
+# would have dropped. It must still be found and named.
+echo "-- Test 14: a match past the retired ceiling is still found (KYO-703)"
 t14="$tmpdir/t14"
 mkdir -p "$t14"
 bare14="$(new_bare_remote "$t14/remote.git")"
 seed_main "$bare14"
 clone_repo "$bare14" "$t14/workerB"
-gh_ok_prs_n 2
-PR_LIST_LIMIT=3 run_check "$t14/workerB" 422
-assert_exit "a complete listing with no match is still CLEAR" 0
-assert_not_contains "does not claim truncation" "PR_LIST_LIMIT of 3"
+gh_ok_prs_n "$CEILINGLESS_ROWS" "$(pr_row 503 OPEN "$POST_RESTART_TS" jason/kyo-422-guard)"
+run_check "$t14/workerB" 422
+assert_exit "a match beyond the retired ceiling is IN FLIGHT" 1
+assert_contains "names the matching PR" "PR #503 (OPEN) branch jason/kyo-422-guard"
 echo
 
-# ─── Test 15: just under the limit, with a match — real verdict survives ────
-echo "-- Test 15: just under PR_LIST_LIMIT, with a match"
+# ─── Test 15: a pagination that dies partway still fails CLOSED ─────────────
+# THE FAIL-CLOSED REPLACEMENT for the truncation guard, and the reason removing
+# the ceiling is safe. `gh api --paginate` emits the pages it already fetched on
+# stdout and THEN exits non-zero when a later page fails (verified 2026-09-09
+# against a stub HTTP server serving a rel="next" Link and then a 500). Those
+# partial rows here include a genuine match, so this distinguishes the three
+# possible implementations: reading partial output would exit 1, ignoring gh's
+# exit status entirely would exit 0 once the match were dropped, and only
+# discarding the output and recording a FAILURE gives exit 3.
+echo "-- Test 15: a partial (failed) pagination exits 3 and its rows are not used (KYO-703)"
 t15="$tmpdir/t15"
 mkdir -p "$t15"
 bare15="$(new_bare_remote "$t15/remote.git")"
 seed_main "$bare15"
 clone_repo "$bare15" "$t15/workerB"
-gh_ok_prs_n 1 "$(pr_row 503 OPEN "$POST_RESTART_TS" jason/kyo-422-guard)"
-PR_LIST_LIMIT=3 run_check "$t15/workerB" 422
-assert_exit "a complete listing with a match is IN FLIGHT" 1
-assert_contains "names the matching PR" "PR #503 (OPEN) branch jason/kyo-422-guard"
+gh_fail_partial "gh: Internal Server Error (HTTP 500)" \
+    "$(pr_row 9001 MERGED "$POST_RESTART_TS" jason/kyo-903-filler)" \
+    "$(pr_row 503 OPEN "$POST_RESTART_TS" jason/kyo-422-guard)"
+run_check "$t15/workerB" 422
+assert_exit "a partial pagination is a check we could not complete" 3
+assert_contains "reports the underlying gh failure" "Internal Server Error"
+assert_not_contains "does not report a verdict from the partial rows" "PR #503"
 echo
 
 gh_ok_empty
@@ -955,10 +1012,10 @@ for bad in "not-a-timestamp" "2026-05-12" "2026-05-12T00:00:00+00:00" "2026-05-1
     KEY_RESTART_CUTOFF="$bad" run_check "$t37/workerB" 299
     assert_exit "KEY_RESTART_CUTOFF='$bad' is a usage error" 2
 done
-# An EXPLICITLY EMPTY override is not an error — it falls back to the built-in
-# default, the same `${VAR:-default}` semantics PR_LIST_LIMIT already has.
-# Pinned so the distinction between "unset/empty" and "set to nonsense" can't
-# be lost in a later refactor.
+# An EXPLICITLY EMPTY override is not an error — the `${VAR:-default}` capture
+# in the script falls back to the built-in default. Pinned so the distinction
+# between "unset/empty" and "set to nonsense" can't be lost in a later
+# refactor.
 KEY_RESTART_CUTOFF="" run_check "$t37/workerB" 299
 assert_exit "an empty KEY_RESTART_CUTOFF falls back to the default, not an error" 0
 echo
@@ -989,7 +1046,7 @@ assert_not_contains "does not classify it as pre-restart" "$RECYCLED_HEADING"
 gh_ok_empty
 echo
 
-# ─── Test 39: a PR row that cannot be split into four fields exits 3 ────────
+# ─── Test 39: a PR row that cannot be split into five fields exits 3 ────────
 # The reason check 2 stopped splitting rows with `IFS=$'\t' read` (KYO-607):
 # tab is an IFS *whitespace* character, so that form collapses `a\tb\t\td` to
 # three fields and silently moved the branch name into the createdAt slot,
@@ -998,7 +1055,8 @@ echo
 # 3 like any other incomplete check rather than being skipped.
 #
 # Test 38's empty-createdAt row is the one that used to hit this path by
-# accident; the rows here are short and long by construction. Both use a
+# accident; the rows here are short and long by construction (KYO-778 added a
+# 5th column, so "long" is now six fields rather than five). Both use a
 # BRANCH THAT MATCHES the ticket where a branch is present, so an
 # implementation that skipped the row would report CLEAR — the fail-open this
 # pins shut.
@@ -1013,13 +1071,174 @@ run_check "$t39/workerB" 299
 assert_exit "a three-field row is a check that could not be completed" 3
 assert_contains "says which row it could not read" "could not read row"
 
-gh_ok_prs "$(printf '42\tMERGED\t%s\tjason/kyo-299-extra\tstray' "$POST_RESTART_TS")"
+gh_ok_prs "$(printf '42\tMERGED\t%s\tjason/kyo-299-extra\tstray\t0' "$POST_RESTART_TS")"
 run_check "$t39/workerB" 299
-assert_exit "a five-field row is a check that could not be completed" 3
+assert_exit "a six-field row is a check that could not be completed" 3
 
 gh_ok_prs "$(pr_row 43 MERGED "$POST_RESTART_TS" '')"
 run_check "$t39/workerB" 299
 assert_exit "a row with an empty headRefName is a check that could not be completed" 3
+gh_ok_empty
+echo
+
+# ─── Tests 40-46: rework targets (KYO-778) ───────────────────────────────────
+#
+# /merge-sweeper deliberately leaves a rejected PR OPEN when it routes a
+# ticket back for rework, so that PR (and its still-live remote head branch)
+# was previously an unconditional in-flight hit on every rework ticket, by
+# construction. The `rework-requested` PR label is the fix: /merge-sweeper's
+# Step 6 applies it when it routes a PR back, and the rework worker removes
+# it — removing the label IS the claim — when it picks the ticket back up.
+#
+# Fixtures use ticket 778 so they read as the case they were written for.
+REWORK_HEADING="REWORK TARGET(S)"
+
+# ─── Test 40: THE KYO-778 ACCEPTANCE CRITERION ──────────────────────────────
+# An open, labelled PR plus its own remote head branch, and nothing else,
+# must together be CLEAR — the label reclassifies both, and neither is a HIT.
+echo "-- Test 40: open PR with rework-requested + its remote head branch alone is CLEAR (KYO-778 acceptance criterion)"
+t40="$tmpdir/t40"
+mkdir -p "$t40"
+bare40="$(new_bare_remote "$t40/remote.git")"
+seed_main "$bare40"
+clone_repo "$bare40" "$t40/helper"
+git -C "$t40/helper" push -q origin main:refs/heads/jason/kyo-778-guard
+clone_repo "$bare40" "$t40/workerB"
+gh_ok_prs "$(pr_row 600 OPEN "$POST_RESTART_TS" jason/kyo-778-guard 1)"
+run_check "$t40/workerB" 778
+assert_exit "a labelled open PR and its own head branch alone are CLEAR" 0
+assert_contains "under the rework-target heading" "$REWORK_HEADING"
+assert_contains "names the PR" "PR #600 (OPEN) branch jason/kyo-778-guard"
+assert_contains "names the remote branch as a rework target too" "remote branch origin/jason/kyo-778-guard — head of the rework-target PR above"
+assert_contains "gives the label-removal claim instruction" "gh pr edit <N> --remove-label rework-requested"
+echo
+
+# ─── Test 41: open PR WITHOUT the label — unchanged, still IN FLIGHT ───────
+# The durability guard from KYO-471 must be completely unaffected by the
+# label's mere existence as a feature: no label means no reclassification.
+echo "-- Test 41: open PR without the label is IN FLIGHT, unchanged"
+t41="$tmpdir/t41"
+mkdir -p "$t41"
+bare41="$(new_bare_remote "$t41/remote.git")"
+seed_main "$bare41"
+clone_repo "$bare41" "$t41/helper"
+git -C "$t41/helper" push -q origin main:refs/heads/jason/kyo-778-guard
+clone_repo "$bare41" "$t41/workerB"
+gh_ok_prs "$(pr_row 601 OPEN "$POST_RESTART_TS" jason/kyo-778-guard 0)"
+run_check "$t41/workerB" 778
+assert_exit "an open PR without the label is IN FLIGHT" 1
+assert_not_contains "not classified as a rework target" "$REWORK_HEADING"
+assert_contains "counted as an ordinary hit" "  - PR #601 (OPEN) branch jason/kyo-778-guard"
+echo
+
+# ─── Test 42: labelled PR, plus a DIFFERENT remote branch for the ticket ───
+# The label only reclassifies the PR's own head branch. A second, genuinely
+# different branch for the same ticket is still a real hit, and the rework
+# target is still printed alongside it — a PR is never made invisible.
+echo "-- Test 42: labelled PR plus a different remote branch is IN FLIGHT, rework target still printed"
+t42="$tmpdir/t42"
+mkdir -p "$t42"
+bare42="$(new_bare_remote "$t42/remote.git")"
+seed_main "$bare42"
+clone_repo "$bare42" "$t42/helper"
+git -C "$t42/helper" push -q origin main:refs/heads/jason/kyo-778-guard
+git -C "$t42/helper" push -q origin main:refs/heads/jason/kyo-778-other
+clone_repo "$bare42" "$t42/workerB"
+gh_ok_prs "$(pr_row 602 OPEN "$POST_RESTART_TS" jason/kyo-778-guard 1)"
+run_check "$t42/workerB" 778
+assert_exit "a different remote branch for the same ticket still blocks" 1
+assert_contains "names the other branch as an ordinary hit" "remote branch: origin/jason/kyo-778-other"
+assert_not_contains "does not count the PR's own branch as a hit" "remote branch: origin/jason/kyo-778-guard"
+assert_contains "still reports the rework target" "$REWORK_HEADING"
+assert_contains "still names the labelled PR" "PR #602 (OPEN) branch jason/kyo-778-guard"
+echo
+
+# ─── Test 43: labelled PR, plus LOCAL evidence of the same name ────────────
+# Local worktrees/branches are never suppressed by a remote label, even when
+# the name matches exactly — a remote label describes what /merge-sweeper
+# saw, not what is physically on this machine.
+echo "-- Test 43: labelled PR does not suppress local worktree/branch evidence"
+t43="$tmpdir/t43"
+mkdir -p "$t43"
+bare43="$(new_bare_remote "$t43/remote.git")"
+seed_main "$bare43"
+clone_repo "$bare43" "$t43/workerB"
+git -C "$t43/workerB" worktree add -q -b jason/kyo-778-guard "$t43/wt-live"
+gh_ok_prs "$(pr_row 603 OPEN "$POST_RESTART_TS" jason/kyo-778-guard 1)"
+run_check "$t43/workerB" 778
+assert_exit "a same-named local worktree still blocks despite the label" 1
+assert_contains "names the local worktree as an ordinary hit" "local worktree at $t43/wt-live (branch jason/kyo-778-guard)"
+assert_contains "still reports the rework target" "$REWORK_HEADING"
+echo
+
+# ─── Test 44: closed/merged PR with the label — unchanged ─────────────────
+# A rework target is by definition still open. A closed or merged PR that
+# happens to carry a stale label is handled exactly as if it had none.
+echo "-- Test 44: closed/merged PR with the label is handled exactly as without it"
+t44="$tmpdir/t44"
+mkdir -p "$t44"
+bare44="$(new_bare_remote "$t44/remote.git")"
+seed_main "$bare44"
+clone_repo "$bare44" "$t44/workerB"
+gh_ok_prs "$(pr_row 604 MERGED "$POST_RESTART_TS" jason/kyo-778-merged 1)"
+run_check "$t44/workerB" 778
+CHECK_OUTPUT_LABELLED="$CHECK_OUTPUT"
+CHECK_STATUS_LABELLED="$CHECK_STATUS"
+gh_ok_prs "$(pr_row 604 MERGED "$POST_RESTART_TS" jason/kyo-778-merged 0)"
+run_check "$t44/workerB" 778
+assert_exit "a merged PR with the label still blocks" 1
+assert_exit "a merged PR without the label also blocks (sanity)" "$CHECK_STATUS_LABELLED"
+assert_not_contains "a merged, labelled PR is not a rework target" "$REWORK_HEADING"
+if [ "$CHECK_OUTPUT_LABELLED" = "$CHECK_OUTPUT" ]; then
+    printf "  \xe2\x9c\x93 %s\n" "output is byte-identical whether or not a closed/merged PR carries the label"
+    PASS=$((PASS + 1))
+else
+    printf "  \xe2\x9c\x97 %s\n" "output differs between a labelled and unlabelled merged PR"
+    printf '    labelled:\n%s\n    unlabelled:\n%s\n' "$CHECK_OUTPUT_LABELLED" "$CHECK_OUTPUT" | sed 's/^/    | /'
+    FAIL=$((FAIL + 1))
+fi
+echo
+
+# ─── Test 45: removing the label IS the claim — simulated double pickup ───
+# The KYO-778 analogue of Test 2: a rework worker claims the ticket by
+# removing the label from the SAME PR, and a second check right after must
+# see an ordinary open PR with no label and report IN FLIGHT — exactly the
+# double-pickup guard this whole script exists for.
+echo "-- Test 45: removing the label is the claim; a second check afterward is IN FLIGHT"
+t45="$tmpdir/t45"
+mkdir -p "$t45"
+bare45="$(new_bare_remote "$t45/remote.git")"
+seed_main "$bare45"
+clone_repo "$bare45" "$t45/helper"
+git -C "$t45/helper" push -q origin main:refs/heads/jason/kyo-778-guard
+clone_repo "$bare45" "$t45/workerB"
+gh_ok_prs "$(pr_row 605 OPEN "$POST_RESTART_TS" jason/kyo-778-guard 1)"
+run_check "$t45/workerB" 778
+assert_exit "before the label is removed, the rework target is CLEAR to claim" 0
+
+# The rework worker claims the ticket by removing the label from PR #605.
+gh_ok_prs "$(pr_row 605 OPEN "$POST_RESTART_TS" jason/kyo-778-guard 0)"
+run_check "$t45/workerB" 778
+assert_exit "after the label is removed, a second check sees an ordinary open PR" 1
+assert_contains "counts it as a hit now" "  - PR #605 (OPEN) branch jason/kyo-778-guard"
+echo
+
+# ─── Test 46: a malformed rework-label field fails CLOSED ─────────────────
+# The asymmetry from FAIL CLOSED above applies to the new 5th column too: a
+# label flag that is not exactly "0" or "1" must never be read as "not
+# labelled" (which would fail OPEN by re-admitting a genuine rework target
+# as an ordinary hit and silently hide a problem in the fetch behind a
+# plausible-looking "0"). It is a row the check could not read.
+echo "-- Test 46: a malformed rework-label field is a check that could not be completed"
+t46="$tmpdir/t46"
+mkdir -p "$t46"
+bare46="$(new_bare_remote "$t46/remote.git")"
+seed_main "$bare46"
+clone_repo "$bare46" "$t46/workerB"
+gh_ok_prs "$(pr_row 606 OPEN "$POST_RESTART_TS" jason/kyo-778-guard yes)"
+run_check "$t46/workerB" 778
+assert_exit "a label flag that is not 0 or 1 is a check that could not be completed" 3
+assert_contains "names the unrecognised flag" "unrecognised rework-label flag 'yes'"
 gh_ok_empty
 echo
 

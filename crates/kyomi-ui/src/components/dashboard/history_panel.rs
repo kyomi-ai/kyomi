@@ -186,6 +186,9 @@ fn VersionListSkeleton() -> impl IntoView {
 pub fn HistoryPanel(
     /// Dashboard ID to show history for.
     dashboard_id: String,
+    /// Incremented when a persisted update arrives while the panel is open.
+    #[prop(optional)]
+    refresh_revision: Option<ReadSignal<u64>>,
     /// Whether the panel is open.
     #[prop(into)]
     open: Signal<bool>,
@@ -211,6 +214,7 @@ pub fn HistoryPanel(
     let (fetch_trigger, set_fetch_trigger) = signal(0u32);
     Effect::new(move |_| {
         if open.get() {
+            if let Some(revision) = refresh_revision { revision.get(); }
             set_fetch_trigger.update(|n| *n += 1);
         }
     });

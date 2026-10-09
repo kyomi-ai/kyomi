@@ -129,7 +129,7 @@ pub struct CurrentVersion {
 /// When `query` is provided, searches by title/content. Otherwise lists all.
 /// `sort_by` accepts "popularity", "recent" (default), or "created".
 /// `limit` defaults to 50, clamped to [1, 100].
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn list_dashboards(
     query: Option<String>,
     sort_by: Option<String>,
@@ -193,7 +193,7 @@ pub(crate) fn map_search_result_to_list_item(
 ///
 /// Records a view for popularity tracking (fire-and-forget).
 /// Returns a 404-equivalent error if the dashboard is not found.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_dashboard(dashboard_id: String) -> Result<DashboardDetail, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -237,7 +237,7 @@ pub async fn get_dashboard(dashboard_id: String) -> Result<DashboardDetail, Serv
 ///
 /// The service layer enforces free-tier dashboard limits (5 per workspace).
 /// After creation, fires off background embedding generation.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn create_dashboard(
     title: String,
     content: Option<String>,
@@ -245,20 +245,19 @@ pub async fn create_dashboard(
     let ac = AuthenticatedContext::extract().await?;
 
     let content = content.unwrap_or_default();
+    let validation_context = chartml_query_context(&ac)?;
 
     // Get embedding service for both embedding generation and rechunking
     let embedding_svc = ac.ctx.embedding.wait_ready().await
         // user_message() (KYO-448) — Display would leak the variant tag.
         .map_err(|e| ServerFnError::new(format!("Embedding service unavailable: {}", e.user_message())))?;
 
-    let dashboard_id = kyomi_auth::dashboard_service::create_dashboard(
-        ac.db(),
-        &ac.auth.user_id,
-        &ac.ws_id,
-        &title,
-        &content,
-        kyomi_core::models::DocType::Dashboard,
-        Some(embedding_svc),
+    let dashboard_id = kyomi_auth::dashboard_service::create_dashboard_with_context(
+        kyomi_auth::dashboard_service::CreateDashboardParams {
+            db: ac.db(), user_id: &ac.auth.user_id, workspace_id: &ac.ws_id,
+            title: &title, content: &content, doc_type: kyomi_core::models::DocType::Dashboard,
+            embed: Some(embedding_svc), validation_context: Some(&validation_context),
+        },
     )
     .await
     .into_sfn_core()?;
@@ -287,7 +286,7 @@ pub async fn create_dashboard(
 ///
 /// Rejects no-op updates where all fields are `None`.
 /// Re-embeds the dashboard if title or content changed.
-#[server(prefix = "/leptos-api", input = server_fn::codec::Json)]
+#[server(prefix = "/leptos-api", input = server_fn::codec::Json, client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn update_dashboard(
     dashboard_id: String,
     title: Option<String>,
@@ -297,12 +296,14 @@ pub async fn update_dashboard(
     // lint-allow: server-fn-callouts=sync broadcast is a separate cross-cutting concern alongside mutation + embedding + re-fetch
     let ac = AuthenticatedContext::extract().await?;
 
+    let validation_context = chartml_query_context(&ac)?;
+
     // Reject no-op updates (matches REST handler validation)
     if title.is_none() && content.is_none() && change_summary.is_none() {
         return Err(ServerFnError::new("No updates provided"));
     }
 
-    kyomi_auth::dashboard_service::update_dashboard(
+    kyomi_auth::dashboard_service::update_dashboard_with_context(
         kyomi_auth::dashboard_service::UpdateDashboardParams {
             db: ac.db(),
             embed: None, // no rechunking from dashboard UI (yet)
@@ -314,6 +315,7 @@ pub async fn update_dashboard(
             change_summary: change_summary.as_deref(),
             expected_content_hash: None, // no CAS for dashboard UI
         },
+        Some(&validation_context),
     )
     .await
     .into_sfn_core()?;
@@ -368,6 +370,7 @@ pub async fn update_dashboard(
 
             kyomi_agent::generate_dashboard_summary(
                 kyomi_agent::DashboardSummaryParams {
+                    validation_context: validation_context.clone(),
                     db: ac.ctx.db.clone(),
                     ws_manager,
                     dashboard_id: dashboard_id.clone(),
@@ -394,7 +397,7 @@ pub async fn update_dashboard(
 }
 
 /// Delete a dashboard by ID.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn delete_dashboard(dashboard_id: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -426,7 +429,7 @@ pub async fn delete_dashboard(dashboard_id: String) -> Result<(), ServerFnError>
 /// Returns the current live dashboard content as `current_version`
 /// (with `version_number = max + 1`) alongside historical snapshots.
 /// Matches the Python/REST API contract.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn list_versions(dashboard_id: String) -> Result<VersionListResult, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -474,7 +477,7 @@ pub async fn list_versions(dashboard_id: String) -> Result<VersionListResult, Se
 }
 
 /// Get a specific version's full content.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_version(
     dashboard_id: String,
     version_number: i32,
@@ -514,7 +517,7 @@ pub async fn get_version(
 /// Handles the "current version" case: if either version number equals
 /// `max_version + 1`, reads content from the live `dashboards` table
 /// instead of `dashboard_versions`. Matches the Python/REST API contract.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn diff_versions(
     dashboard_id: String,
     from_version: i32,
@@ -553,15 +556,19 @@ pub async fn diff_versions(
 ///
 /// Creates a snapshot of the current state, then replaces the dashboard
 /// content with the specified version's content.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn restore_version(
     dashboard_id: String,
     version_number: i32,
 ) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
+    let embedding_svc = ac.ctx.embedding.wait_ready().await
+        // user_message() (KYO-448) — Display would leak the variant tag.
+        .map_err(|e| ServerFnError::new(format!("Embedding service unavailable: {}", e.user_message())))?;
 
     kyomi_auth::dashboard_service::restore_version(
         ac.db(),
+        embedding_svc,
         &dashboard_id,
         &ac.ws_id,
         &ac.auth.user_id,
@@ -570,10 +577,7 @@ pub async fn restore_version(
     .await
     .into_sfn_core()?;
 
-    // Re-embed after restore (matches REST handler — propagates error)
-    let embedding_svc = ac.ctx.embedding.wait_ready().await
-        // user_message() (KYO-448) — Display would leak the variant tag.
-        .map_err(|e| ServerFnError::new(format!("Embedding service unavailable: {}", e.user_message())))?;
+    // Refresh the dashboard row embedding after chunks have been restored.
     if let Ok(Some(d)) =
         kyomi_auth::dashboard_service::get_dashboard(ac.db(), &dashboard_id, &ac.ws_id, &ac.auth.user_id).await
     {
@@ -598,7 +602,7 @@ pub async fn restore_version(
 ///
 /// Reads from `users.extra_metadata.default_dashboard_id`.
 /// Returns `None` if no default is set.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_user_default_dashboard() -> Result<Option<String>, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -622,7 +626,7 @@ pub async fn get_user_default_dashboard() -> Result<Option<String>, ServerFnErro
 ///
 /// Writes to `users.extra_metadata.default_dashboard_id`.
 /// Pass `None` or empty string to clear the default.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn set_user_default_dashboard(dashboard_id: Option<String>) -> Result<(), ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -643,7 +647,7 @@ pub async fn set_user_default_dashboard(dashboard_id: Option<String>) -> Result<
 ///
 /// Reads from `workspaces.settings.default_dashboard_id` (top-level, not custom_settings).
 /// Returns `None` if no default is set.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_workspace_default_dashboard() -> Result<Option<String>, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -666,7 +670,7 @@ pub async fn get_workspace_default_dashboard() -> Result<Option<String>, ServerF
 ///
 /// Writes to `workspaces.settings.default_dashboard_id` (top-level).
 /// Pass `None` or empty string to clear the default.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn set_workspace_default_dashboard(
     dashboard_id: Option<String>,
 ) -> Result<(), ServerFnError> {
@@ -705,3 +709,12 @@ pub async fn set_workspace_default_dashboard(
 use super::{extract_auth, extract_context, AuthenticatedContext, IntoServerFnErrorCore};
 #[cfg(feature = "ssr")]
 use kyomi_types::Permission;
+
+#[cfg(feature = "ssr")]
+fn chartml_query_context(ac: &AuthenticatedContext) -> Result<kyomi_auth::chartml_validation::QueryContext, ServerFnError> {
+    Ok(kyomi_auth::chartml_validation::QueryContext {
+        db: ac.db().clone(), user_id: ac.auth.user_id.clone(), workspace_id: ac.ws_id.clone(),
+        encryption_key: ac.ctx.encryption_key.clone().ok_or_else(|| ServerFnError::new("Datasource validation is unavailable"))?,
+        config: ac.ctx.config.clone(), connect_registry: ac.ctx.connect_registry.clone(),
+    })
+}

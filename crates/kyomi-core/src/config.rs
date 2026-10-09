@@ -52,6 +52,100 @@ impl KyomiMode {
     }
 }
 
+/// The three SMTP environment variables, in the order an operator sets them.
+///
+/// One list, so [`SmtpSettings::classify`]'s presence check and every
+/// diagnostic derived from it can never name a different set of variables.
+static SMTP_ENV_VARS: [&str; 3] = ["SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD"];
+
+/// Completeness of the SMTP settings — the single definition of "can this
+/// deployment send mail?".
+///
+/// The mailer (`kyomi_auth::email_service::EmailService`) is the authoritative
+/// reader: it is the thing that actually opens the SMTP connection, and it
+/// authenticates with lettre's `Credentials::new(user, password)` before it can
+/// submit a message. All three of host, user and password are therefore
+/// required — a host/user pair with no password cannot deliver anything,
+/// however much the rest of the app would like to believe otherwise.
+///
+/// [`Config::smtp_configured`] and `EmailService::is_configured()` both route
+/// through this type, and neither may re-spell the conjunction. They had
+/// drifted (KYO-685): the config flag required two variables and the mailer
+/// three, so an install with `SMTP_HOST` and `SMTP_USER` set but
+/// `SMTP_PASSWORD` unset reported `smtp_configured = true` while the mailer
+/// refused to send. Self-hosted signup took the SaaS "we emailed you a
+/// verification link" branch instead of `signup_smtp_less_new_user` and no
+/// account could be created at all — with nothing said at boot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SmtpSettings {
+    /// Host, user and password are all present: mail can be sent.
+    Complete,
+    /// None of the three is set. A supported deployment, not an error — a
+    /// self-hosted install with no mail server runs the SMTP-less signup and
+    /// recovery paths.
+    Absent,
+    /// Some are set and some are not. Always operator error; `missing` names
+    /// the variables still needed, in [`SMTP_ENV_VARS`] order.
+    Incomplete { missing: Vec<&'static str> },
+}
+
+impl SmtpSettings {
+    /// Classify the three SMTP parts by presence.
+    ///
+    /// Pure: takes the values rather than reading the environment, so both
+    /// readers — and their tests — can share it without mutating process env.
+    pub fn classify(host: Option<&str>, user: Option<&str>, password: Option<&str>) -> Self {
+        let missing: Vec<&'static str> = SMTP_ENV_VARS
+            .iter()
+            .zip([host.is_some(), user.is_some(), password.is_some()])
+            .filter_map(|(name, present)| (!present).then_some(*name))
+            .collect();
+
+        if missing.is_empty() {
+            Self::Complete
+        } else if missing.len() == SMTP_ENV_VARS.len() {
+            Self::Absent
+        } else {
+            Self::Incomplete { missing }
+        }
+    }
+
+    /// Whether mail can be sent — the predicate [`Config::smtp_configured`]
+    /// and `EmailService::is_configured()` share.
+    pub fn can_send(&self) -> bool {
+        matches!(self, Self::Complete)
+    }
+
+    /// The environment variables that still need setting: empty when
+    /// [`Complete`](Self::Complete), all three when [`Absent`](Self::Absent).
+    pub fn missing_vars(&self) -> &[&'static str] {
+        match self {
+            Self::Complete => &[],
+            Self::Absent => &SMTP_ENV_VARS,
+            Self::Incomplete { missing } => missing,
+        }
+    }
+
+    /// The boot-time diagnostic an operator must see, or `None` when there is
+    /// nothing unambiguous to report.
+    ///
+    /// Only a *partial* configuration warrants this: all three set works, none
+    /// set is a deliberate choice, but some-but-not-all is always a mistake —
+    /// and it is otherwise invisible until a user fails to sign up.
+    pub fn startup_warning(&self) -> Option<String> {
+        match self {
+            Self::Complete | Self::Absent => None,
+            Self::Incomplete { missing } => Some(format!(
+                "SMTP is only partially configured: {} not set. Email sending stays \
+                 disabled, so verification, recovery, invitation and alert emails will \
+                 not be delivered. Set the missing variable(s), or unset the SMTP \
+                 variables entirely to run without email.",
+                missing.join(", ")
+            )),
+        }
+    }
+}
+
 /// Central application configuration.
 ///
 /// Mirrors the Python `KyomiAPIConfig` — loaded from environment variables.
@@ -93,8 +187,14 @@ pub struct Config {
     pub mode: KyomiMode,
 
     /// Whether SMTP is configured at startup time.
-    /// True when both `SMTP_HOST` and `SMTP_USER` env vars are set.
-    /// Matches `EmailService::is_configured()` logic.
+    ///
+    /// True only when all three of `SMTP_HOST`, `SMTP_USER` and
+    /// `SMTP_PASSWORD` are set: the mailer authenticates before it can submit
+    /// a message, so two of the three is not enough to send anything.
+    ///
+    /// Computed by [`SmtpSettings::classify`] — the same predicate
+    /// `EmailService::is_configured()` calls — so this flag cannot disagree
+    /// with the mailer about whether mail can be sent (KYO-685).
     pub smtp_configured: bool,
 
     // ── Auth Methods ─────────────────────────────────────────────────────
@@ -323,6 +423,22 @@ impl Config {
             }
         };
 
+        // One classification of the SMTP settings, used for both the boot
+        // diagnostic and the `smtp_configured` flag every downstream reader
+        // consumes. This is the only startup-path read of these three
+        // variables, so the warning fires exactly once per process (KYO-685);
+        // the mailer's own per-construction warning in
+        // `EmailService::from_env` reports the same classification at the
+        // moment an email is actually skipped.
+        let smtp = SmtpSettings::classify(
+            env::var("SMTP_HOST").ok().as_deref(),
+            env::var("SMTP_USER").ok().as_deref(),
+            env::var("SMTP_PASSWORD").ok().as_deref(),
+        );
+        if let Some(warning) = smtp.startup_warning() {
+            tracing::warn!("{warning}");
+        }
+
         Self {
             database_url: required_env("DATABASE_URL"),
             redis_url: env::var("REDIS_URL").ok(),
@@ -343,7 +459,7 @@ impl Config {
             self_hosted: mode.self_hosted(),
             edition: mode.edition(),
             mode,
-            smtp_configured: env::var("SMTP_HOST").is_ok() && env::var("SMTP_USER").is_ok(),
+            smtp_configured: smtp.can_send(),
             passkeys_enabled: env::var("PASSKEYS_ENABLED")
                 .unwrap_or_else(|_| "true".into())
                 .parse()
@@ -517,3 +633,68 @@ impl Config {
 fn required_env(key: &str) -> String {
     env::var(key).unwrap_or_else(|_| panic!("{key} environment variable is required"))
 }
+
+/// Resolve this process's identity for owning `chat_messages` rows that are
+/// `in_progress` (KYO-493's `owner_instance` column — see
+/// `kyomi_auth::chat_service::prepare_chat_dispatch`).
+///
+/// Called exactly once, at server startup (`apps/server/src/main.rs`,
+/// building `AppState`) — not lazily on a caller's first chat message — so
+/// that a misconfigured `HOSTNAME` fails the server at boot instead of
+/// panicking mid-request. The result is stored on `AppState`/`ServerContext`
+/// for `send_chat_message` (and, later, KYO-493 Phase 4's startup sweep) to
+/// read; nothing else in this crate re-derives it, and `HOSTNAME` is read
+/// from the environment exactly here — never a second time.
+///
+/// - **SaaS and self-hosted (server) modes:** `"{hostname}:{port}"`. Both
+///   Kubernetes and Docker set `HOSTNAME` automatically to the pod/container
+///   name, but `HOSTNAME` alone collides on a single dev machine running
+///   several server processes against the same Postgres on the same host —
+///   dev.kyomi.ai on `:3000` plus per-worktree verifier servers on
+///   `:3100+`. Appending `port` (`Config::port`, i.e. the same `PORT` this
+///   process is actually listening on — read from nowhere else) makes the
+///   identity unique per process while staying stable across restarts of
+///   *that same* instance, which the later stuck-row sweep (KYO-493 Phase 4)
+///   needs: a restart must recognize its own prior `in_progress` rows, not
+///   treat every restart as a brand-new, indistinguishable owner. It also
+///   still differs correctly between real Kubernetes pods (different `hostname`,
+///   typically the same `port`). A missing `hostname` is not a
+///   degraded-but-usable case to paper over with an invented name —
+///   inventing one would make every row from this process indistinguishable
+///   from every other unconfigured process's rows, which defeats the
+///   column's entire purpose. So this panics instead, exactly like
+///   [`required_env`] does for the handful of env vars this module already
+///   treats as mandatory.
+/// - **Personal (desktop) mode:** [`Config::is_personal`] is a structural,
+///   compile-time-knowable deployment fact, not an ambient environment
+///   accident, and personal mode is by definition a single local process —
+///   never more than one instance that could contend for a row, so `port`
+///   is irrelevant. A fixed literal, `"desktop"`, is therefore the correct
+///   identity for it, not a fallback for a value that happens to be
+///   missing.
+///
+/// Pure — takes `hostname` as an explicit parameter rather than reading
+/// `env::var` itself — per
+/// `docs/standards/testing/a-tests-verdict-must-not-depend-on-the-ambient-environment.md`
+/// ("prefer a parameter over a lookup"), so the personal-vs-server branch,
+/// the `"{hostname}:{port}"` format, and the panic condition are all
+/// unit-testable without depending on whatever the process environment
+/// happens to hold.
+pub fn resolve_process_instance(config: &Config, hostname: Option<&str>, port: u16) -> String {
+    if config.is_personal() {
+        "desktop".to_string()
+    } else {
+        let hostname = hostname.unwrap_or_else(|| {
+            panic!(
+                "HOSTNAME environment variable is required outside personal mode — it \
+                 identifies this process as the owner of in_progress chat_messages rows \
+                 (owner_instance). Kubernetes and Docker set it automatically; if this \
+                 process runs as neither, set HOSTNAME explicitly."
+            )
+        });
+        format!("{hostname}:{port}")
+    }
+}
+
+#[cfg(test)]
+mod tests;

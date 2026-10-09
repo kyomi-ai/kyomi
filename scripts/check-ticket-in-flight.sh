@@ -19,7 +19,8 @@
 # WHAT IT CHECKS (KYO-422, extended by KYO-471 — see below)
 #
 #   1. Remote branches   — `git ls-remote --heads <remote>`
-#   2. Pull requests     — `gh pr list`, matched on `headRefName` ONLY
+#   2. Pull requests     — `gh api --paginate .../pulls`, matched on the head
+#                          branch ref ONLY
 #   3. Local worktrees   — `git worktree list --porcelain`
 #   4. Local branches    — `git branch --list`
 #
@@ -52,8 +53,9 @@
 # "KYO-B" and "KYO-C" as deferred follow-ups in the same body. Searching
 # bodies for "Closes KYO-<N>" produced false "in flight" hits for KYO-411,
 # KYO-413, and KYO-406 — every one of them a merged PR that merely *listed*
-# that ticket as a deferral, never touched it. Branch name
-# (`headRefName`) is the reliable signal instead: a worker pushes
+# that ticket as a deferral, never touched it. The PR's head branch name
+# (`.head.ref` in the REST payload; `headRefName` in gh's own `--json`
+# vocabulary) is the reliable signal instead: a worker pushes
 # `jason/kyo-<NN>-<slug>` before it opens anything, and a branch name is not
 # reused across unrelated tickets the way a body's prose references are.
 #
@@ -84,32 +86,63 @@
 # `if var="$(cmd 2>stderr_file)"; then ... else ... fi` — the `if` inspects
 # that command's own exit status directly, with nothing downstream of it to
 # swallow it. Do not introduce a pipe into `wc -l`/`grep -c`/`head` on the
-# output of `git ls-remote` or `gh pr list` — that reintroduces KYO-511.
+# output of `git ls-remote` or `gh api` — that reintroduces KYO-511.
 #
-# A TRUNCATED LISTING IS ALSO A CHECK WE DID NOT COMPLETE (same rule)
+# THERE IS NO PR-LISTING CEILING ANY MORE — READ THIS BEFORE ADDING ONE BACK
+# (KYO-703)
 #
-# `gh pr list --limit N` silently returns at most N rows. This script shipped
-# with `--limit 200` while the repo already had 411 PRs, so it saw back only
-# as far as PR #212 and reported CLEAR for every duplicate older than that —
-# the identical fail-open species as KYO-511, reached by a different route.
-# The suite passed only by luck, because the PRs it asserts on (#367/#368)
-# happen to be recent.
+# `gh pr list --limit N` silently returns at most N rows, so this check used
+# to ask for a fixed N and then treat a listing that came back at exactly N
+# rows as possibly truncated — a check it could not complete — and exit 3.
+# That guard was correct about the risk and wrong as a design: N is a cliff,
+# and the corpus walks into it. It shipped at `--limit 200` against a repo
+# that already had 411 PRs (so it saw back only to PR #212 and reported CLEAR
+# for every older duplicate — the KYO-511 fail-open species by another
+# route), was raised to 500, and on 2026-09-09 the repo reached exactly 500
+# PRs. From that moment `rows >= limit` was true on EVERY invocation: the
+# script exited 3 for every ticket, and since exit 0 is the only code that
+# permits claiming, every backlog run reported a clean, uneventful pass while
+# doing nothing at all. Raising the number again just moves the cliff and
+# hides it until the next time.
 #
-# Raising the number on its own does not fix this; it moves the cliff to the
-# next round number and hides it again. So both halves are required, and both
-# are load-bearing:
+# The fix is to remove the ceiling rather than to raise it, so there is no
+# truncation condition left to detect:
 #
-#   1. the limit is a named, env-overridable constant, PR_LIST_LIMIT below;
-#   2. the number of rows actually returned is compared against it, and a
-#      listing that comes back with >= PR_LIST_LIMIT rows is treated as
-#      possibly truncated — i.e. the PR check could not be completed — and
-#      exits 3, the same as a `gh` that failed outright.
+#   `gh api --paginate 'repos/{owner}/{repo}/pulls?state=all&per_page=100'`
 #
-# Do not "fix" that back to a plain exit 0 on the theory that a full page is
-# a complete answer; it is exactly the case where it may not be. Raise
-# PR_LIST_LIMIT instead. The row count is accumulated inside the same loop
-# that already walks the one captured fetch — one `gh` call, and no pipe into
-# `wc -l`, per the rule above.
+# follows the REST Link header to exhaustion. A run that exits 0 has walked
+# the whole corpus by construction — there is no N for it to stop at — and a
+# run that cannot is a plain non-zero exit, already handled by the same
+# `if var="$(cmd)"` capture as every other command here. VERIFIED, not
+# assumed (2026-09-09, against a stub HTTP server serving one page with a
+# `rel="next"` Link and then a 500 on page 2): gh emits page 1's rows on
+# stdout and THEN exits 1. So a partial pagination is indistinguishable from
+# an outright failure to this script, which is exactly right — the `else`
+# branch records a FAILURE and never reads `pr_lines`. Do not "improve" that
+# by consuming partial output.
+#
+# WHY NOT A BOUNDED QUERY (the ticket's own first proposal). `gh pr list
+# --search "head:jason/kyo-<NN>"` is bounded and fast (~0.6s vs ~8s), and it
+# is a FAIL-OPEN narrowing of the match. Measured 2026-09-09 against this
+# repo: GitHub's `head:` qualifier is PREFIX-ANCHORED, not a substring match.
+# `head:jason/kyo-677` finds PR #498; `head:kyo-677` and
+# `head:kyo-677-leptos-debuginfo` both return zero rows, and `head:jason/k`
+# matches. So the search can only find branches that START with the string
+# given, while `matches_ticket` below deliberately matches `kyo-<NN>-`
+# ANYWHERE in the ref and assumes no `jason/` prefix. Hard-coding one
+# branch-naming convention into the fetch, where nothing else in this script
+# assumes one, narrows what the check can see — and it narrows it invisibly,
+# since every normally-named branch still resolves. That is the one direction
+# this script must never move.
+#
+# No PR in the current corpus would be missed by that narrowing: of 500 PR
+# head refs, the 39 that do not start with `jason/` (`fix/*`, `dependabot/*`,
+# …) contain no `kyo-<NN>-` key at all. The objection is that the fetch would
+# then be correct only for as long as that convention holds, enforced by
+# nothing, while `matches_ticket` deliberately assumes the opposite. Do not
+# reach for the `stranded/jason/kyo-*` refs as a counter-example either:
+# `mark-branch-stranded.sh` refuses to tombstone a branch that has a PR in
+# any state, so those refs are unreachable by any PR listing by construction.
 #
 # SELF-EXCLUSION (KYO-593 — READ THIS BEFORE "FIXING" IT BACK)
 #
@@ -255,6 +288,17 @@
 # Do not generalize this further. A local file may not suppress a remote
 # branch; a remote ref may. Neither may ever suppress a PR.
 #
+# THAT LAST SENTENCE IS ABOUT TOMBSTONES SPECIFICALLY, AND STILL HOLDS —
+# READ THIS BEFORE READING IT AS CONTRADICTED BY REWORK TARGETS (KYO-778,
+# BELOW). STRANDED.md and a `stranded/` rename are markers created by
+# something OTHER than the PR's own consumer, and neither may ever suppress
+# or hide a PR (check 2) — that is unchanged. A `rework-requested` PR label is
+# a different kind of thing: it is applied to a PR by that PR's OWN consumer
+# (/merge-sweeper) and it never hides the PR — an open, labelled PR is still
+# printed on every verdict, exactly like the tombstones above, just under its
+# own heading. It RECLASSIFIES a PR the same party already owns; it does not
+# suppress evidence someone else created. See REWORK TARGETS below.
+#
 # RECYCLED TICKET KEYS (KYO-607) — READ THIS BEFORE "FIXING" IT BACK
 #
 # Trakkt's ticket-key numbering was RESTARTED in May 2026, so nine keys are
@@ -330,12 +374,105 @@
 #
 # FAIL CLOSED IS UNCHANGED (KYO-511), IN BOTH DIRECTIONS:
 #
-#   - If `gh pr list` fails, RECYCLED_BRANCHES is empty, so every branch
+#   - If the PR listing fails, RECYCLED_BRANCHES is empty, so every branch
 #     match stays a HIT and the FAILURES check still forces exit 3. A broken
 #     PR listing can never launder a branch into "recycled".
 #   - A PR row whose createdAt is empty or is not a well-formed ISO-8601 Z
 #     timestamp is treated as NOT pre-restart and stays a HIT. An
 #     unclassifiable PR blocks; it does not get the benefit of the doubt.
+#
+# REWORK TARGETS (KYO-778) — READ THIS BEFORE "FIXING" IT BACK
+#
+# /merge-sweeper deliberately leaves a rejected PR OPEN when it routes a
+# ticket back to Backlog for rework ("fix on the existing branch `<branch>`
+# and push, or open a replacement PR. **The old PR stays open.**"). Check 2
+# matches PRs on head ref only (KYO-471 above), so that deliberately preserved
+# PR — and its still-live remote head branch (check 1) — is itself an
+# in-flight hit on EVERY rework ticket, by construction. The question this
+# script exists to answer ("is anyone else already working on this?") and the
+# question that situation actually asks ("did my own prior attempt get routed
+# back?") are different questions, and checks 1/2 could not tell them apart.
+#
+# THE SIGNAL IS A GITHUB PR LABEL: `rework-requested` (REWORK_LABEL below).
+# /merge-sweeper applies it in the same step that routes a PR back for rework
+# (its own Step 6 — a change to that skill, not this script). The rework
+# worker removes the label the moment it claims the ticket —
+# REMOVING THE LABEL *IS* THE CLAIM, so a second worker who checks afterward
+# sees an ordinary open PR with no label and gets exit 1, exactly as today.
+#
+# WHY A LABEL, NOT THE THREE ALTERNATIVES THAT LOOK CHEAPER:
+#
+#   - Ticket status ("PR open + ticket back in Backlog") is not readable from
+#     this shell at all: Trakkt is reachable only as an OAuth MCP endpoint,
+#     with no CLI and no API token this script could use — the identical
+#     constraint that ruled out "ask Trakkt for created_at" in RECYCLED TICKET
+#     KEYS above. Even if it were readable it would be ambiguous: a ticket can
+#     sit in Backlog for reasons that have nothing to do with this exact PR.
+#   - `mergeStateStatus` (e.g. DIRTY) only covers the conflict case. A PR
+#     routed back for a FAILING CHECK — red CI, not a merge conflict —
+#     reports a perfectly clean mergeStateStatus, so this signal would
+#     silently miss the more common rework reason.
+#   - A label lives ON THE PR ITSELF, is remote, and can only be applied or
+#     removed by something with the same push/API access the PR required to
+#     exist in the first place — the same durability bar a `stranded/` ref
+#     clears above. Exactly one thing is meant to write it (/merge-sweeper)
+#     and exactly one thing is meant to remove it (the worker claiming the
+#     rework), both self-documenting from the label's own name.
+#
+# THIS IS A RECLASSIFICATION, NOT A SUPPRESSION — see the note appended to
+# "Do not generalize this further" above. An OPEN PR carrying the label is
+# still printed on EVERY verdict, under its own "REWORK TARGET(S)" heading,
+# exactly like PRESERVED STRANDED WORK and PRE-RESTART KEY REUSE above. What
+# changes is only which bucket it counts in — HITS versus REWORK_TARGETS —
+# never whether it is shown. A PR is never made invisible by anything in this
+# script; this feature does not weaken that, it only lets the PR's own
+# consumer reclassify a PR it already owns.
+#
+# CLOSED AND MERGED PRs ARE UNAFFECTED, EVEN IF LABELLED. A rework target is
+# by definition still open and still awaiting a fix. A closed or merged PR
+# that happens to carry a stale `rework-requested` label (forgotten cleanup,
+# or a branch reused for something else after closing) is handled exactly as
+# it always was: it stays a HIT (or RECYCLED, if pre-restart), never a rework
+# target. The state check is `pr_state = OPEN`, evaluated ahead of the label.
+#
+# THE REMOTE HEAD BRANCH OF A REWORK-TARGET PR IS ALSO A REWORK TARGET (check
+# 1) — the same extension `stranded/` makes from a local tombstone to a
+# remote branch above: the label is remote and at least as durable as the
+# branch it heads, so classifying the PR without also classifying its own
+# branch would leave that branch blocking the ticket on its own, the same gap
+# RECYCLED_BRANCHES exists to close for pre-restart keys. Check 2 is the only
+# check that can see a PR's labels, exactly as it is the only one that can see
+# a PR's creation date (RECYCLED TICKET KEYS above), so this follows the SAME
+# mechanism: REWORK_TARGET_BRANCHES, populated only by check 2, is consulted
+# by check 1. This is a second consumer of the ordering constraint described
+# in WHAT IT CHECKS above (check 2 must physically run first); it does not
+# change that ordering, only adds a second reason it is required.
+#
+# LOCAL WORKTREES AND LOCAL BRANCHES (checks 3 and 4) ARE DELIBERATELY **NOT**
+# SUPPRESSED BY THE LABEL, even one with the identical branch name. A remote
+# label describes the PR /merge-sweeper looked at; it says nothing about what
+# is sitting on THIS machine's disk right now. A local worktree or local
+# branch matching the ticket is independent evidence of a worker physically
+# present on this box — exactly the KYO-471 concern checks 3/4 exist for —
+# and a remote label must never hide that. Do not extend
+# REWORK_TARGET_BRANCHES-style reclassification to checks 3/4; self-exclusion
+# via cwd/`--self`/`--ignore-branch` remains the only thing that may exclude
+# local evidence, unchanged by this feature.
+#
+# FAIL CLOSED, SAME AS EVERYWHERE ELSE IN THIS SCRIPT. The PR listing's `--jq`
+# filter now emits a 5th column: the literal string "1" if the PR carries
+# REWORK_LABEL, "0" otherwise (`(.labels // [])[]?.name` guards a missing or
+# null `labels` field so an odd REST payload cannot crash the filter). A row
+# that does not split into exactly five fields, OR whose 5th field is
+# anything other than the literal "0" or "1", is a row this check COULD NOT
+# READ — it goes to FAILURES (exit 3), same as an empty headRefName does
+# above. A malformed label field must never be read as "not labelled": that
+# would silently re-admit a genuine rework-target PR as an ordinary HIT
+# (overcautious, at best) and could just as easily hide a real problem in the
+# fetch behind a plausible-looking "0" (KYO-511's fail-OPEN species, by a new
+# route). Fail closed instead: an unrecognised label field means the PR check
+# could not be completed, full stop — it does not get the benefit of the
+# doubt any more than an unparseable createdAt does above.
 #
 # USAGE
 #
@@ -361,12 +498,14 @@
 #   2 — usage error (missing/unparseable ticket argument, unknown flag,
 #       --self given more than once, --self with no value, a --self value
 #       that does not match the ticket — see SELF-EXCLUSION above — or a
-#       malformed PR_LIST_LIMIT / KEY_RESTART_CUTOFF in the environment).
-#   3 — a check could not be completed (remote unreachable, `gh` missing or
-#       failing, or the PR listing came back at PR_LIST_LIMIT rows and may
-#       therefore be truncated). Treat exactly like exit 1: do not claim.
-#       --self never turns this into exit 0 — the FAILURES check still runs
-#       before the HITS check, unchanged.
+#       malformed KEY_RESTART_CUTOFF in the environment).
+#   3 — a check could not be completed (remote unreachable, `gh` missing,
+#       failing, or dying partway through paginating the PR listing, a
+#       PR row that did not split into five usable fields, or a PR row
+#       whose rework-label flag (5th field) was anything other than the
+#       literal "0"/"1" — KYO-778). Treat exactly like exit 1: do not
+#       claim. --self never turns this into exit 0 — the FAILURES check
+#       still runs before the HITS check, unchanged.
 #  42 — this script's own on-disk content is stale relative to origin/main
 #       AND KYOMI_STALE_TOOLING_STRICT=1 is set. See
 #       scripts/lib/stale-tooling-guard.sh (KYO-632) — by default this is a
@@ -375,8 +514,8 @@
 #       to "blocks every run" as its own default.
 #
 # Pure bash + git + gh. No Rust toolchain, no jq binary — the one JSON
-# extraction needed (from `gh pr list`) uses gh's own built-in `--jq`, since
-# gh bundles its own jq evaluator and this script should not gain a
+# extraction needed (from the PR listing) uses gh's own built-in `--jq`,
+# since gh bundles its own jq evaluator and this script should not gain a
 # dependency the box might not have.
 # ------------------------------------------------------------------------------
 
@@ -387,21 +526,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/stale-tooling-guard.sh
 source "${SCRIPT_DIR}/lib/stale-tooling-guard.sh"
 stale_tooling_guard "${BASH_SOURCE[0]}"
-
-# How many PRs to ask `gh pr list` for. This MUST exceed the repo's total PR
-# count: `gh pr list` caps the listing at `--limit` (and defaults to 30), so
-# anything older than the newest N PRs is simply not looked at. Measured
-# 2026-08-24: `gh pr list --state all --limit 1000 --json number --jq 'length'`
-# returned 411, while the then-current `--limit 200` reached back only to PR
-# #212. The same trap is written up in `.claude/build-test.md` under "Before
-# Claiming a Ticket — check the remote, not just Trakkt".
-#
-# A big number alone is not the fix — see the truncation section of the header
-# above. It is env-overridable for two reasons: an operator hitting the guard
-# can raise it without editing this file, and the self-test drives it down to
-# a handful of rows so it can exercise the truncation path cheaply against a
-# stub `gh`.
-PR_LIST_LIMIT="${PR_LIST_LIMIT:-500}"
 
 # The instant Trakkt's ticket-key numbering restarted (KYO-607 — the full
 # evidence is in the RECYCLED TICKET KEYS section of the header above, read it
@@ -418,11 +542,18 @@ PR_LIST_LIMIT="${PR_LIST_LIMIT:-500}"
 # which would silently change meaning every day and eventually discard
 # genuine merged PRs for current tickets.
 #
-# Env-overridable for the same two reasons PR_LIST_LIMIT is: an operator can
-# probe a different boundary without editing this file, and the self-test
-# drives it to fixture-local values to exercise both sides of the comparison
-# cheaply.
+# Env-overridable for two reasons: an operator can probe a different boundary
+# without editing this file, and the self-test drives it to fixture-local
+# values to exercise both sides of the comparison cheaply.
 KEY_RESTART_CUTOFF="${KEY_RESTART_CUTOFF:-2026-05-12T00:00:00Z}"
+
+# The GitHub PR label that is the sole signal a PR is a rework target rather
+# than a claim (KYO-778 — see REWORK TARGETS in the header above for the full
+# rationale). Defined once, here, so the classification in check 2, the
+# branch propagation to check 1, and the verdict text all agree with each
+# other and with /merge-sweeper's own Step 6 — the only thing that ever
+# applies this label. The rework worker removes it to claim the ticket.
+REWORK_LABEL="rework-requested"
 
 usage() {
     cat >&2 <<EOF
@@ -436,9 +567,6 @@ Usage: $SCRIPT_NAME <TICKET> [--remote <name>] [--ignore-branch <name>]... [--se
                            against TICKET (must be given at most once)
 
 Environment:
-  PR_LIST_LIMIT            how many PRs to fetch (default: 500). Must exceed
-                           the repo's total PR count; a listing that comes
-                           back at this many rows may be truncated and exits 3.
   KEY_RESTART_CUTOFF       ISO-8601 Z instant (YYYY-MM-DDTHH:MM:SSZ) at which
                            Trakkt's ticket-key numbering restarted (default:
                            2026-05-12T00:00:00Z). PRs created before it belong
@@ -449,19 +577,11 @@ Exit codes:
   0  clear — nothing in flight (the only code that permits claiming)
   1  work in flight found — do not claim
   2  usage error (including --self given twice, with no value, or naming a
-     branch that doesn't match TICKET; or a malformed PR_LIST_LIMIT or
-     KEY_RESTART_CUTOFF)
-  3  a check could not be completed (including a possibly-truncated PR
-     listing) — treat like exit 1, do not claim
+     branch that doesn't match TICKET; or a malformed KEY_RESTART_CUTOFF)
+  3  a check could not be completed (including a PR listing that failed
+     partway through pagination) — treat like exit 1, do not claim
 EOF
 }
-
-case "$PR_LIST_LIMIT" in
-    '' | *[!0-9]* | 0)
-        echo "ERROR: PR_LIST_LIMIT must be a positive integer, got '$PR_LIST_LIMIT'" >&2
-        exit 2
-        ;;
-esac
 
 # is_iso8601_z <string> — true iff the string is EXACTLY the canonical shape
 # `gh` emits for createdAt: YYYY-MM-DDTHH:MM:SSZ, fixed width, UTC, no
@@ -481,8 +601,8 @@ is_iso8601_z() {
     return 1
 }
 
-# Validated here, beside PR_LIST_LIMIT's own validation and before any work,
-# so a typo'd override is a usage error (exit 2) rather than a value that
+# Validated here, before any work is done, so a typo'd override is a usage
+# error (exit 2) rather than a value that
 # silently classifies every PR as pre-restart or none of them. A cutoff that
 # is not of the canonical shape cannot be ordered against `gh`'s timestamps,
 # so there is no safe way to continue with one.
@@ -662,6 +782,8 @@ declare -a TOMBSTONED=()          # printable "path (branch X)" entries (KYO-529
 declare -a TOMBSTONED_BRANCHES=() # branch names check 4 must not re-flag
 declare -a RECYCLED=()            # printable pre-restart entries (KYO-607)
 declare -a RECYCLED_BRANCHES=()   # branch names checks 1/3/4 classify as pre-restart
+declare -a REWORK_TARGETS=()          # printable rework-target entries (KYO-778)
+declare -a REWORK_TARGET_BRANCHES=()  # branch names check 1 classifies as rework targets too
 
 is_tombstoned_branch() {
     local name="$1" b
@@ -694,16 +816,48 @@ is_recycled_branch() {
     return 1
 }
 
-# ---- Check 2: pull requests (headRefName only — see KYO-471 note above) ---
+# is_rework_target_branch <name> — true iff this exact branch name is the
+# head of an OPEN PR that check 2 already classified as a rework target
+# (KYO-778 — see the header above). Populated only by check 2, for the same
+# reason is_recycled_branch is: check 2 is the only check that can see a PR's
+# labels, so it must run first, and if check 2 failed the array is empty and
+# every branch match stays a HIT — the fail-closed path is unchanged.
+is_rework_target_branch() {
+    local name="$1" b
+    if [ "${#REWORK_TARGET_BRANCHES[@]}" -eq 0 ]; then
+        return 1
+    fi
+    for b in "${REWORK_TARGET_BRANCHES[@]}"; do
+        if [ "$name" = "$b" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# ---- Check 2: pull requests (head branch ref only — see KYO-471 above) ---
 # RUNS FIRST, ahead of conceptual check 1 — see the WHAT IT CHECKS note in the
 # header. This is the only check that can see a creation date, so it is the
 # only one that can decide which branch names belong to the retired ticket-key
 # numbering (KYO-607); checks 1, 3 and 4 read that decision out of
 # RECYCLED_BRANCHES below, and so must run after it.
 #
-# Rows are counted in this same loop, over the SAME single captured fetch, so
-# the truncation guard below costs no second `gh` call and nothing is piped
-# into `wc -l` (see the KYO-511 note in the header).
+# THE FETCH IS `gh api --paginate`, NOT `gh pr list --limit N` (KYO-703 — read
+# the "THERE IS NO PR-LISTING CEILING ANY MORE" section of the header before
+# changing it back). `--paginate` follows the REST Link header to exhaustion,
+# so there is no row ceiling to hit and no truncation to detect; a pagination
+# that dies partway exits non-zero with only partial rows on stdout, which the
+# `if var="$(cmd)"` capture below routes to FAILURES without ever reading
+# `pr_lines` — verified against a stub server, see the header.
+#
+# THE ROW SHAPE IS DELIBERATELY UNCHANGED, so everything downstream of the
+# fetch — the five-field parse, the RECYCLED classification, the verdict text,
+# and the self-test's `pr_row` helper — is the same code it was under
+# `gh pr list`. REST reports a merged PR as `state: "closed"` with a non-null
+# `merged_at`, where `gh pr list --json state` reports `MERGED`, so the `--jq`
+# filter reconstructs gh's own three-valued OPEN/CLOSED/MERGED vocabulary.
+# Verified 2026-09-09: the two commands' output over all 500 PRs of this repo
+# is byte-identical after sorting.
 #
 # DO NOT SPLIT THIS WITH `IFS=$'\t' read` — READ THIS BEFORE "FIXING" IT BACK
 #
@@ -725,29 +879,50 @@ is_recycled_branch() {
 # newlines and reading with `readarray -t` therefore yields exactly one array
 # element per column, empty ones included.
 #
-# A row that does not split into exactly four usable fields is a row this check
-# COULD NOT READ, so it goes to FAILURES (exit 3) rather than being skipped —
-# same rule as a `gh` that failed outright, and the reason the collapsing bug
-# above could not have been silent under this parser either.
+# A row that does not split into exactly five usable fields is a row this
+# check COULD NOT READ, so it goes to FAILURES (exit 3) rather than being
+# skipped — same rule as a `gh` that failed outright, and the reason the
+# collapsing bug above could not have been silent under this parser either.
+#
+# THE 5TH COLUMN (KYO-778) is the rework-target signal: the literal string
+# "1" if the PR carries the REWORK_LABEL, "0" otherwise. `(.labels // [])`
+# guards a missing or null `labels` field so an odd REST payload cannot crash
+# the filter; `[]?.name` then tolerates a non-object element in that array the
+# same way. Built as a variable, rather than inlined into the `gh api` call
+# below, only so the string interpolation of REWORK_LABEL (a fixed script
+# constant, not user input, so plain interpolation is safe) doesn't collide
+# with the surrounding single-quoted jq literal.
+pr_jq_filter=".[] | [.number, (if .merged_at then \"MERGED\" elif .state == \"closed\" then \"CLOSED\" else \"OPEN\" end), .created_at, .head.ref, (if ([(.labels // [])[]?.name] | index(\"$REWORK_LABEL\")) then \"1\" else \"0\" end)] | @tsv"
 gh_stderr_file="$(mktemp)"
-if pr_lines="$(gh pr list --state all --limit "$PR_LIST_LIMIT" --json number,state,createdAt,headRefName \
-    --jq '.[] | [.number, .state, .createdAt, .headRefName] | @tsv' 2>"$gh_stderr_file")"; then
-    pr_row_count=0
+if pr_lines="$(gh api --paginate 'repos/{owner}/{repo}/pulls?state=all&per_page=100' \
+    --jq "$pr_jq_filter" 2>"$gh_stderr_file")"; then
     declare -a pr_fields=()
     while IFS= read -r pr_line; do
         # A zero-PR listing is the empty string, which a herestring still
         # feeds through as one empty line. That is not a row.
         [ -n "$pr_line" ] || continue
-        pr_row_count=$((pr_row_count + 1))
         readarray -t pr_fields <<<"${pr_line//$'\t'/$'\n'}"
-        if [ "${#pr_fields[@]}" -ne 4 ] || [ -z "${pr_fields[3]}" ]; then
-            FAILURES+=("gh pr list: could not read row '$pr_line' as number/state/createdAt/headRefName — the PR check is incomplete, so no verdict can be given")
+        if [ "${#pr_fields[@]}" -ne 5 ] || [ -z "${pr_fields[3]}" ]; then
+            FAILURES+=("PR listing: could not read row '$pr_line' as number/state/createdAt/headRefName/reworkLabel — the PR check is incomplete, so no verdict can be given")
             continue
         fi
         pr_number="${pr_fields[0]}"
         pr_state="${pr_fields[1]}"
         pr_created="${pr_fields[2]}"
         pr_branch="${pr_fields[3]}"
+        pr_rework_flag="${pr_fields[4]}"
+        # FAIL CLOSED on an unrecognised label flag (KYO-778 — see the header):
+        # anything other than the literal "0"/"1" must never be read as "not
+        # labelled", which would fail OPEN by re-admitting a genuine
+        # rework-target PR as an ordinary HIT. Same rule, same exit code, as
+        # the field-count check just above.
+        case "$pr_rework_flag" in
+            0 | 1) ;;
+            *)
+                FAILURES+=("PR listing: row '$pr_line' has an unrecognised rework-label flag '$pr_rework_flag' (expected 0 or 1) — the PR check is incomplete, so no verdict can be given")
+                continue
+                ;;
+        esac
         is_excluded "$pr_branch" && continue
         if matches_ticket "$pr_branch"; then
             # A pre-restart PR is classified, never dropped: it is still
@@ -757,16 +932,23 @@ if pr_lines="$(gh pr list --state all --limit "$PR_LIST_LIMIT" --json number,sta
             if is_pre_restart "$pr_created"; then
                 RECYCLED+=("PR #${pr_number} (${pr_state}) branch ${pr_branch} — created ${pr_created}, before the ${KEY_RESTART_CUTOFF} key restart")
                 RECYCLED_BRANCHES+=("$pr_branch")
+            elif [ "$pr_state" = "OPEN" ] && [ "$pr_rework_flag" = "1" ]; then
+                # Rework target (KYO-778 — see header): routed back by
+                # /merge-sweeper, not a claim. Closed/merged PRs never reach
+                # this arm regardless of the label — see CLOSED AND MERGED
+                # PRs ARE UNAFFECTED above.
+                REWORK_TARGETS+=("PR #${pr_number} (${pr_state}) branch ${pr_branch} — labelled ${REWORK_LABEL}, routed back by /merge-sweeper")
+                REWORK_TARGET_BRANCHES+=("$pr_branch")
             else
                 HITS+=("PR #${pr_number} (${pr_state}) branch ${pr_branch}")
             fi
         fi
     done <<<"$pr_lines"
-    if [ "$pr_row_count" -ge "$PR_LIST_LIMIT" ]; then
-        FAILURES+=("gh pr list: returned $pr_row_count rows, at the PR_LIST_LIMIT of $PR_LIST_LIMIT — the listing may be truncated, so any older PR went unchecked; re-run with a higher PR_LIST_LIMIT (e.g. PR_LIST_LIMIT=$((PR_LIST_LIMIT * 2)))")
-    fi
 else
-    FAILURES+=("gh pr list: $(cat "$gh_stderr_file")")
+    # Covers both an outright failure and a pagination that died partway
+    # through: gh exits non-zero for either, and any rows it had already
+    # emitted are in $pr_lines and are deliberately never read (KYO-703).
+    FAILURES+=("PR listing (gh api --paginate .../pulls): $(cat "$gh_stderr_file")")
 fi
 rm -f "$gh_stderr_file"
 
@@ -780,6 +962,12 @@ rm -f "$gh_stderr_file"
 # instead of HITS. Each of the nine colliding keys has BOTH a merged
 # pre-restart PR and that PR's surviving remote branch, so classifying only
 # the PR would leave the branch blocking the ticket on its own.
+#
+# A branch that heads an OPEN, `rework-requested`-labelled PR (KYO-778 — see
+# header) is reported in REWORK_TARGETS the same way, for the same reason:
+# the label lives on the PR, not the branch, so check 1 must consult
+# REWORK_TARGET_BRANCHES (populated by check 2) rather than re-derive the
+# classification itself.
 remote_stderr_file="$(mktemp)"
 if remote_refs="$(git ls-remote --heads "$REMOTE" 2>"$remote_stderr_file")"; then
     while IFS=$'\t' read -r _sha ref; do
@@ -798,6 +986,8 @@ if remote_refs="$(git ls-remote --heads "$REMOTE" 2>"$remote_stderr_file")"; the
                 if matches_ticket "$branch"; then
                     if is_recycled_branch "$branch"; then
                         RECYCLED+=("remote branch $REMOTE/$branch")
+                    elif is_rework_target_branch "$branch"; then
+                        REWORK_TARGETS+=("remote branch $REMOTE/$branch — head of the rework-target PR above")
                     else
                         HITS+=("remote branch: $REMOTE/$branch")
                     fi
@@ -918,6 +1108,21 @@ if [ "${#RECYCLED[@]}" -gt 0 ]; then
     for r in "${RECYCLED[@]}"; do
         echo "  ~ $r"
     done
+    echo
+fi
+
+if [ "${#REWORK_TARGETS[@]}" -gt 0 ]; then
+    # Printed on every verdict, not only exit 0 — same rule as PRESERVED
+    # STRANDED WORK and PRE-RESTART KEY REUSE above: a PR is never made
+    # invisible. See REWORK TARGETS (KYO-778) in the header for why a label
+    # on the PR itself, not ticket status or mergeStateStatus, is the signal,
+    # and why removing the label IS the claim (a second check afterward sees
+    # an ordinary open PR with no label, and exits 1 like any other hit).
+    echo "REWORK TARGET(S) — routed back by /merge-sweeper (label \`${REWORK_LABEL}\`), not a claim:"
+    for r in "${REWORK_TARGETS[@]}"; do
+        echo "  ~ $r"
+    done
+    echo "  Remove the label when you claim: gh pr edit <N> --remove-label ${REWORK_LABEL}"
     echo
 fi
 

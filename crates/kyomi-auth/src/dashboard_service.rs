@@ -163,52 +163,12 @@ fn validate_title(title: &str) -> Result<()> {
 /// Validate dashboard content by extracting and parsing ChartML fenced blocks.
 ///
 /// - Content with no ChartML blocks is valid (pure markdown).
-/// - Each `chartml` fenced block must be valid YAML with `data` and `visualize` keys.
+/// - Every component must satisfy the authoritative JSON Schema. SQL requires the context-aware save API.
 pub fn validate_dashboard_content(content: &str) -> Result<()> {
-    for cap in CHARTML_BLOCK_PATTERN.captures_iter(content) {
-        let yaml_str = &cap[1];
-        let parsed: serde_yaml::Value = serde_yaml::from_str(yaml_str).map_err(|e| {
-            kyomi_core::Error::BadRequest(format!("Invalid ChartML YAML: {e}"))
-        })?;
-
-        // A chartml block can be a single chart (mapping) or multiple charts (sequence)
-        let charts: Vec<&serde_yaml::Mapping> = if let Some(mapping) = parsed.as_mapping() {
-            vec![mapping]
-        } else if let Some(sequence) = parsed.as_sequence() {
-            sequence
-                .iter()
-                .map(|item| {
-                    item.as_mapping().ok_or_else(|| {
-                        kyomi_core::Error::BadRequest(
-                            "Each chart in a ChartML block must be a YAML mapping".into(),
-                        )
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?
-        } else {
-            return Err(kyomi_core::Error::BadRequest(
-                "ChartML block must be a YAML mapping or a list of mappings".into(),
-            ));
-        };
-
-        for mapping in charts {
-            let has_data = mapping.contains_key(serde_yaml::Value::String("data".into()));
-            let has_visualize =
-                mapping.contains_key(serde_yaml::Value::String("visualize".into()));
-
-            if !has_data {
-                return Err(kyomi_core::Error::BadRequest(
-                    "ChartML block missing required 'data' key".into(),
-                ));
-            }
-            if !has_visualize {
-                return Err(kyomi_core::Error::BadRequest(
-                    "ChartML block missing required 'visualize' key".into(),
-                ));
-            }
-        }
+    let errors = kyomi_core::chartml_validation::validate_markdown_schema(content);
+    if errors.is_empty() { Ok(()) } else {
+        Err(kyomi_core::Error::BadRequest(errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")))
     }
-    Ok(())
 }
 
 // ─── Summary extraction ──────────────────────────────────────────────────────
@@ -374,11 +334,30 @@ pub async fn create_dashboard(
     doc_type: DocType,
     embed: Option<&EmbeddingService>,
 ) -> Result<String> {
+    create_dashboard_with_context(CreateDashboardParams { db, user_id, workspace_id, title, content, doc_type, embed, validation_context: None }).await
+}
+
+pub struct CreateDashboardParams<'a> {
+    pub db: &'a DbPool,
+    pub user_id: &'a str,
+    pub workspace_id: &'a str,
+    pub title: &'a str,
+    pub content: &'a str,
+    pub doc_type: DocType,
+    pub embed: Option<&'a EmbeddingService>,
+    pub validation_context: Option<&'a crate::chartml_validation::QueryContext>,
+}
+
+pub async fn create_dashboard_with_context(params: CreateDashboardParams<'_>) -> Result<String> {
+    let CreateDashboardParams { db, user_id, workspace_id, title, content, doc_type, embed, validation_context } = params;
     validate_title(title)?;
+    if let Some(ctx) = validation_context && (ctx.user_id != user_id || ctx.workspace_id != workspace_id) {
+        return Err(kyomi_core::Error::Forbidden("ChartML validation context does not match document owner and workspace".into()));
+    }
 
     // Dashboards: validate ChartML and enforce free tier limit
     if doc_type.is_dashboard() {
-        validate_dashboard_content(content)?;
+        crate::chartml_validation::validate_content(content, validation_context).await?;
 
         #[derive(sqlx::FromRow)]
         struct TierRow { subscription_tier: String }
@@ -604,6 +583,13 @@ pub struct UpdateDashboardParams<'a> {
 pub async fn update_dashboard(
     params: UpdateDashboardParams<'_>,
 ) -> Result<bool> {
+    update_dashboard_with_context(params, None).await
+}
+
+pub async fn update_dashboard_with_context(
+    params: UpdateDashboardParams<'_>,
+    validation_context: Option<&crate::chartml_validation::QueryContext>,
+) -> Result<bool> {
     let UpdateDashboardParams {
         db,
         embed,
@@ -638,6 +624,10 @@ pub async fn update_dashboard(
         }
     }
 
+    if let Some(ctx) = validation_context && (ctx.user_id != user_id || ctx.workspace_id != workspace_id) {
+        return Err(kyomi_core::Error::Forbidden("ChartML validation context does not match document owner and workspace".into()));
+    }
+
     // Validate new values
     if let Some(t) = title {
         validate_title(t)?;
@@ -647,7 +637,7 @@ pub async fn update_dashboard(
     if let Some(c) = content
         && current_doc_type.is_dashboard()
     {
-        validate_dashboard_content(c)?;
+        crate::chartml_validation::validate_content(c, validation_context).await?;
     }
 
     // Create version of old state before updating
@@ -1684,9 +1674,10 @@ pub async fn diff_versions(
 ///
 /// Creates a version of the current state before restoring, then updates
 /// the dashboard with the old content and creates a new version for the restore.
-/// Returns the new version number.
+/// Refreshes knowledge chunks before returning the new version number.
 pub async fn restore_version(
     db: &DbPool,
+    embed: &EmbeddingService,
     dashboard_id: &str,
     workspace_id: &str,
     user_id: &str,
@@ -1745,6 +1736,8 @@ pub async fn restore_version(
         Some(&format!("Restored from version {version_number}")),
     )
     .await?;
+
+    rechunk_document(db, embed, dashboard_id, &old_version.content, workspace_id).await?;
 
     tracing::info!(
         dashboard_id = %dashboard_id,
@@ -2038,6 +2031,8 @@ mod tests {
         let content = r#"# Dashboard
 
 ```chartml
+type: chart
+version: 1
 data:
   datasource: my-db
   query: "SELECT 1"
@@ -2056,12 +2051,14 @@ visualize:
         let result = validate_dashboard_content(content);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("Invalid ChartML YAML"), "got: {err}");
+        assert!(err.contains("yaml"), "got: {err}");
     }
 
     #[test]
     fn test_validate_missing_visualize_fails() {
         let content = r#"```chartml
+type: chart
+version: 1
 data:
   datasource: my-db
   query: "SELECT 1"
@@ -2532,6 +2529,93 @@ visualize:
     }
 }
 
+// ─── Version restore chunk regressions ───────────────────────────────────────
+
+#[cfg(test)]
+mod restore_tests {
+    use super::*;
+    use crate::test_support::{seed_user, seed_workspace, sqlite_pool, test_pool};
+
+    const V2_CONTENT: &str = "# Updated dashboard\nThe second version tracks shipping delays.";
+
+    async fn edited_dashboard(db: &DbPool, embed: &EmbeddingService, v1_content: &str) -> String {
+        let sq = sqlite_pool(db);
+        seed_user(sq, "owner", "owner@test.local").await;
+        seed_workspace(sq, "workspace", "owner").await;
+        // Chunk explicitly so no detached task can race the restore assertions.
+        let id = create_dashboard(
+            db, "owner", "workspace", "Original dashboard", v1_content, DocType::Dashboard, None,
+        ).await.expect("create v1 dashboard");
+        let version = create_version(db, &id, v1_content, "Original dashboard", "owner", None)
+            .await.expect("save v1");
+        assert_eq!(version, 1);
+        rechunk_document(db, embed, &id, v1_content, "workspace").await.expect("chunk v1");
+        update_dashboard(UpdateDashboardParams {
+            db, embed: None, dashboard_id: &id, workspace_id: "workspace", user_id: "owner",
+            title: Some("Updated dashboard"), content: Some(V2_CONTENT), change_summary: None,
+            expected_content_hash: None,
+        }).await.expect("edit to v2");
+        rechunk_document(db, embed, &id, V2_CONTENT, "workspace").await.expect("chunk v2");
+        assert_eq!(chunk_contents(db, &id).await, vec![V2_CONTENT.to_string()]);
+        id
+    }
+
+    async fn chunk_contents(db: &DbPool, dashboard_id: &str) -> Vec<String> {
+        sqlx::query_scalar("SELECT content FROM knowledge_chunks WHERE dashboard_id = $1 ORDER BY chunk_index")
+            .bind(dashboard_id).fetch_all(sqlite_pool(db)).await.expect("read chunks")
+    }
+
+    #[tokio::test]
+    async fn restore_version_refreshes_chunks_before_returning() {
+        let db = test_pool().await;
+        let embed = EmbeddingService::new().expect("load embedding model");
+        let content = "# Original dashboard\nMonthly sales and revenue trends.\n".repeat(45);
+        let id = edited_dashboard(&db, &embed, &content).await;
+
+        let version = restore_version(&db, &embed, &id, "workspace", "owner", 1)
+            .await.expect("restore v1");
+
+        let dashboard = get_dashboard_unchecked(&db, &id, "workspace")
+            .await.expect("read restored dashboard").expect("dashboard exists");
+        assert_eq!(dashboard.content, content);
+        assert_eq!(dashboard.title, "Original dashboard");
+        assert_eq!(version, 3);
+        let expected = kyomi_knowledge::knowledge_files::split_into_chunks(&content, CHUNK_SIZE, CHUNK_OVERLAP);
+        assert!(expected.len() > 1, "fixture must exercise replacing the full chunk set");
+        // Read immediately after restore, with no sleep or eventual-consistency retry.
+        assert_eq!(chunk_contents(&db, &id).await, expected);
+    }
+
+    #[tokio::test]
+    async fn restore_version_to_empty_content_clears_chunks() {
+        let db = test_pool().await;
+        let embed = EmbeddingService::new().expect("load embedding model");
+        let id = edited_dashboard(&db, &embed, "").await;
+
+        restore_version(&db, &embed, &id, "workspace", "owner", 1)
+            .await.expect("restore empty v1");
+
+        assert!(chunk_contents(&db, &id).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn restore_version_propagates_chunk_write_failure() {
+        let db = test_pool().await;
+        let embed = EmbeddingService::new().expect("load embedding model");
+        let id = edited_dashboard(&db, &embed, "# Original dashboard\nMonthly sales.").await;
+        // A real database failure exercises the production chunk transaction.
+        sqlx::query("CREATE TRIGGER reject_restore_chunk BEFORE INSERT ON knowledge_chunks BEGIN SELECT RAISE(ABORT, 'restore chunk write rejected'); END")
+            .execute(sqlite_pool(&db)).await.expect("create failing chunk trigger");
+
+        let err = restore_version(&db, &embed, &id, "workspace", "owner", 1)
+            .await.expect_err("restore must report rechunk failure");
+
+        assert!(err.to_string().contains("failed to insert chunk"), "unexpected error: {err}");
+        assert_eq!(chunk_contents(&db, &id).await, vec![V2_CONTENT.to_string()],
+            "failed rechunk transaction must retain previous chunks");
+    }
+}
+
 // ─── Contract tests ─────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -2545,6 +2629,8 @@ mod contract_tests {
         let content = r#"# Dashboard
 
 ```chartml
+type: chart
+version: 1
 data:
   datasource: db1
   query: "SELECT 1"
@@ -2557,6 +2643,8 @@ visualize:
 Some text between charts.
 
 ```chartml
+type: chart
+version: 1
 data:
   datasource: db2
   query: "SELECT 2"
@@ -2574,6 +2662,8 @@ visualize:
         let content = r#"# Dashboard
 
 ```chartml
+type: chart
+version: 1
 data:
   datasource: db1
   query: "SELECT 1"
@@ -2584,6 +2674,8 @@ visualize:
 ```
 
 ```chartml
+type: chart
+version: 1
 data:
   datasource: db2
   query: "SELECT 2"
@@ -2599,6 +2691,8 @@ data:
     #[test]
     fn validate_chartml_with_nested_yaml() {
         let content = r#"```chartml
+type: chart
+version: 1
 data:
   datasource: my-db
   query: |
@@ -2614,7 +2708,7 @@ visualize:
       label: "Revenue ($)"
       format: "$,.0f"
   style:
-    title: "Revenue by Region"
+    height: 300
 ```"#;
         assert!(validate_dashboard_content(content).is_ok());
     }
@@ -2833,7 +2927,7 @@ visualize:
     // is scoped the same way, rather than counting every row in the
     // workspace regardless of ownership or collection membership.
 
-    use crate::test_support::{seed_user, seed_workspace, sqlite_pool, test_pool};
+    use crate::test_support::{seed_membership, seed_user, seed_workspace, sqlite_pool, test_pool};
 
     /// Seeds `ws-1` with two members: `user-a` (workspace owner) and
     /// `user-b`, a member who owns nothing shared with them by default.
@@ -2842,6 +2936,8 @@ visualize:
         seed_user(sq, "user-a", "a@test.local").await;
         seed_user(sq, "user-b", "b@test.local").await;
         seed_workspace(sq, "ws-1", "user-a").await;
+        seed_membership(sq, "ws-1", "user-a", "workspace_admin", true).await;
+        seed_membership(sq, "ws-1", "user-b", "workspace_user", true).await;
     }
 
     /// Makes `doc_id` workspace-visible by putting it in a fresh public

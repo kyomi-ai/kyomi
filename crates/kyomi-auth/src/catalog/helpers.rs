@@ -494,6 +494,79 @@ pub async fn update_datasource_status(
     Ok(())
 }
 
+/// Append one warning to the already-persisted catalog-refresh envelope,
+/// without disturbing the `status`, `error`, or `progress` that an earlier
+/// [`update_datasource_status`] call already wrote for this run (KYO-658
+/// follow-up: `populate_embeddings_after_indexing` runs after
+/// `index_catalog`'s own terminal status write, so a shortfall there must
+/// not clobber it).
+///
+/// A naive second `update_datasource_status(..., "completed", ...)` call
+/// from that later stage would be wrong on two counts: `"completed"` is not
+/// a value `catalog_refresh_status` ever holds — every call site in this
+/// module writes only `"running"` / `"idle"` / `"failed"`, matching the
+/// `CatalogRefreshStatus` enum (`kyomi_core::enums`) the UI decodes the
+/// column into — and it would silently overwrite a legitimate `"failed"`
+/// (e.g. the KYO-614 container-coverage shortfall) with a false idle-shaped
+/// status. So this reads the row back and re-writes the same
+/// status/error/progress, only extending `warnings`.
+///
+/// Read-modify-write, not transactional — but the concurrent-run guard
+/// (`index_started_within`) means nothing else is writing this datasource's
+/// status mid-run, so there is no writer to race in practice. If the
+/// datasource row is gone (deleted between the indexer's own write and this
+/// call), there is nothing to append to and this is a no-op.
+pub async fn append_catalog_status_warning(
+    db: &DbPool,
+    workspace_id: &str,
+    datasource_config_id: &str,
+    warning: &str,
+) -> Result<()> {
+    #[derive(sqlx::FromRow)]
+    struct StatusRow {
+        catalog_refresh_status: Option<String>,
+        catalog_refresh_progress: Option<Value>,
+    }
+
+    let row = kyomi_core::db_fetch_optional!(
+        db,
+        StatusRow,
+        "SELECT catalog_refresh_status, catalog_refresh_progress FROM datasource_configs \
+         WHERE id = $1 AND workspace_id = $2",
+        datasource_config_id,
+        workspace_id
+    )
+    .map_err(|e| {
+        kyomi_core::Error::Internal(format!("failed to read datasource status: {e}"))
+    })?;
+
+    let Some(row) = row else {
+        return Ok(());
+    };
+
+    let status = row.catalog_refresh_status.unwrap_or_else(|| "idle".to_string());
+    let envelope = row.catalog_refresh_progress.unwrap_or(Value::Null);
+    let error = envelope.get("error").and_then(Value::as_str).map(str::to_string);
+    let progress = envelope.get("progress").cloned().filter(|v| !v.is_null());
+    let mut warnings: Vec<String> = envelope
+        .get("warnings")
+        .and_then(Value::as_array)
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    warnings.push(warning.to_string());
+
+    update_datasource_status(
+        db,
+        workspace_id,
+        datasource_config_id,
+        &status,
+        progress,
+        error.as_deref(),
+        &warnings,
+    )
+    .await
+}
+
 /// Build the JSON envelope stored in `datasource_configs.catalog_refresh_progress`.
 ///
 /// Extracted from [`update_datasource_status`] so the shape — in particular,
@@ -662,13 +735,13 @@ pub fn resolve_run_outcome(
 pub const MAX_MISSING_CONTAINERS_IN_WARNING: usize = 5;
 
 /// The outcome of comparing what a run enumerated against what the
-/// datasource's cache currently believes is live.
+/// datasource's live cache and unverified archived history.
 pub struct ContainerCoverage {
     /// A single warning entry naming the un-enumerated containers (capped at
     /// [`MAX_MISSING_CONTAINERS_IN_WARNING`]), to append to the run's
-    /// `errors`/persisted `warnings`. `None` when every currently-live
-    /// container was enumerated this run (including the common case where
-    /// there is no prior cache to compare against at all).
+    /// `errors`/persisted `warnings`. Includes informational context when
+    /// archived-only containers not enumerated this run dominate the history.
+    /// `None` when there is no live cache, or no coverage concern.
     pub warning: Option<String>,
     /// Whether the shortfall is large enough that the run must not resolve
     /// to `"idle"` — see [`is_material_shortfall`].
@@ -709,7 +782,10 @@ fn is_material_shortfall(enumerated_count: usize, live_count: usize) -> bool {
 /// On a first-ever run (or any datasource with nothing cached yet) the live
 /// count is zero, so there is nothing to fall short of — this always
 /// reports no shortfall in that case, matching `resolve_final_status`'s
-/// existing "empty-but-accessible is not a failure" doctrine.
+/// existing "empty-but-accessible is not a failure" doctrine. With live
+/// cache remaining, mostly archived, unverified history produces an
+/// informational warning: archived rows alone cannot distinguish legitimate
+/// deletion from prior cache damage, so they never make a shortfall material.
 pub async fn check_container_coverage(
     db: &DbPool,
     workspace_id: &str,
@@ -720,17 +796,17 @@ pub async fn check_container_coverage(
     struct ContainerRow {
         project_id: String,
         dataset_id: String,
+        is_archived: bool,
     }
 
     let rows = kyomi_core::db_fetch_all!(
         db,
         ContainerRow,
         r#"
-        SELECT DISTINCT project_id, dataset_id
+        SELECT DISTINCT project_id, dataset_id, is_archived
         FROM datasource_table_cache
         WHERE workspace_id = $1
           AND datasource_config_id = $2
-          AND is_archived = false
         "#,
         workspace_id,
         datasource_config_id
@@ -739,7 +815,20 @@ pub async fn check_container_coverage(
         kyomi_core::Error::Internal(format!("failed to check container coverage: {e}"))
     })?;
 
-    let live_count = rows.len();
+    let mut live = HashSet::new();
+    let mut archived = HashSet::new();
+    for row in rows {
+        let key = (row.project_id, row.dataset_id);
+        if row.is_archived {
+            archived.insert(key);
+        } else {
+            live.insert(key);
+        }
+    }
+    // A container with both live and archived tables is still live; table
+    // churn must not count it twice or imply archived container history.
+    archived.retain(|key| !live.contains(key));
+    let live_count = live.len();
     if live_count == 0 {
         return Ok(ContainerCoverage {
             warning: None,
@@ -752,21 +841,18 @@ pub async fn check_container_coverage(
     // collapse two same-named datasets in different BigQuery projects into
     // one entry, under-counting both the shortfall here and the archive
     // scope in `archive_missing_tables`.
-    let mut missing: Vec<ContainerKey> = rows
-        .into_iter()
-        .map(|r| (r.project_id, r.dataset_id))
-        .filter(|key| !enumerated_containers.contains(key))
+    let missing: HashSet<ContainerKey> = live
+        .difference(enumerated_containers)
+        .cloned()
         .collect();
-
-    if missing.is_empty() {
-        return Ok(ContainerCoverage {
-            warning: None,
-            material: false,
-        });
-    }
-    missing.sort();
-
-    let material = is_material_shortfall(enumerated_containers.len(), live_count);
+    let known_count = live_count + archived.len();
+    archived.retain(|key| !enumerated_containers.contains(key));
+    // At least half the historical containers remain archived and were not
+    // enumerated: enough context to surface, without treating history as live.
+    let mostly_unverified_history = !archived.is_empty()
+        && is_material_shortfall(known_count - archived.len(), known_count);
+    let material = !missing.is_empty()
+        && is_material_shortfall(enumerated_containers.len(), live_count);
 
     // KYO-616: this is the logging half of the KYO-614 material-shortfall
     // check above — reusing `material` (from `is_material_shortfall`)
@@ -786,27 +872,28 @@ pub async fn check_container_coverage(
         );
     }
 
-    let shown_count = missing.len().min(MAX_MISSING_CONTAINERS_IN_WARNING);
-    let remainder = missing.len() - shown_count;
-    let shown = missing[..shown_count]
-        .iter()
-        .map(format_container_key)
-        .collect::<Vec<_>>()
-        .join(", ");
-    let names = if remainder > 0 {
-        format!("{shown} (+{remainder} more)")
-    } else {
-        shown
-    };
-
-    let warning = format!(
-        "Catalog refresh enumerated {} of {live_count} known container(s) this run — \
-         not yet re-verified and left untouched: {names}",
-        enumerated_containers.len()
-    );
+    let mut warnings = Vec::new();
+    if !missing.is_empty() {
+        warnings.push(format!(
+            "Catalog refresh enumerated {} of {live_count} known container(s) this run — \
+             not yet re-verified and left untouched: {}",
+            enumerated_containers.len(),
+            format_container_keys_capped(&missing)
+        ));
+    }
+    if mostly_unverified_history {
+        warnings.push(format!(
+            "Catalog refresh has {} archived container(s) not re-verified this run out of \
+             {known_count} historical container(s), with {live_count} live container(s) remaining — \
+             archived history may reflect deletion or incomplete prior coverage: {}",
+            archived.len(),
+            format_container_keys_capped(&archived)
+        ));
+    }
+    let warning = (!warnings.is_empty()).then(|| warnings.join("; "));
 
     Ok(ContainerCoverage {
-        warning: Some(warning),
+        warning,
         material,
     })
 }
@@ -1441,7 +1528,10 @@ pub async fn cache_table(params: CacheTableParams<'_>) -> kyomi_core::Result<()>
         "columns": columns_json,
     });
 
-    // Check if table already exists in cache
+    // Keep this lookup unfiltered: an archived table that reappears must reuse its
+    // row and be unarchived, rather than attempting an insert against the unique key.
+    // Pinned by cache_table_resurrects_archived_row_with_unchanged_schema and
+    // cache_table_resurrects_archived_row_with_changed_schema.
     #[derive(sqlx::FromRow)]
     struct ExistingRow {
         id: i32,
@@ -2122,6 +2212,148 @@ mod tests {
         assert_eq!(computed, extracted);
     }
 
+    // ── cache_table resurrection (KYO-625) ─────────────────────────────
+
+    #[tokio::test]
+    async fn cache_table_resurrects_archived_row_with_unchanged_schema() {
+        assert_cache_table_resurrects_archived_row(false).await;
+    }
+
+    #[tokio::test]
+    async fn cache_table_resurrects_archived_row_with_changed_schema() {
+        assert_cache_table_resurrects_archived_row(true).await;
+    }
+
+    async fn assert_cache_table_resurrects_archived_row(schema_changed: bool) {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        let (workspace_id, datasource_config_id, _) =
+            seed_two_datasource_fixture(sq, "resurrection").await;
+        let ctx = IndexerContext {
+            workspace_id,
+            datasource_config_id,
+            connection_config: Value::Null,
+            encryption_key: std::sync::Arc::new([0; 32]),
+        };
+        let old_time = Utc::now() - chrono::Duration::days(1);
+        let stored_metadata = serde_json::json!({
+            "table_name": "orders",
+            "dataset_id": "analytics",
+            "project_id": "project-1",
+            "table_type": "TABLE",
+            "columns": [{"name": "id", "type": "number", "native_type": "INT", "description": ""}],
+        });
+        let cache_id: i32 = sqlx::query_scalar(
+            "INSERT INTO datasource_table_cache \
+             (workspace_id, datasource_config_id, project_id, dataset_id, table_id, \
+              table_metadata, is_archived, last_verified, structure_refreshed_at, updated_at) \
+             VALUES (?, ?, 'project-1', 'analytics', 'orders', ?, 1, ?, ?, ?) RETURNING id",
+        )
+        .bind(&ctx.workspace_id)
+        .bind(&ctx.datasource_config_id)
+        .bind(&stored_metadata)
+        .bind(old_time)
+        .bind(old_time)
+        .bind(old_time)
+        .fetch_one(sq)
+        .await
+        .expect("seed archived table");
+        // A persisted embedding is necessary to reach the unchanged-schema skip.
+        let embedding_id: i64 = sqlx::query_scalar(
+            "INSERT INTO datasource_search_embeddings \
+             (table_cache_id, workspace_id, datasource_config_id, project_id, dataset_id, \
+              table_id, entry_type, text, weight, embedding) \
+             VALUES (?, ?, ?, 'project-1', 'analytics', 'orders', 'table_name', 'orders', 0.9, ?) \
+             RETURNING id",
+        )
+        .bind(cache_id)
+        .bind(&ctx.workspace_id)
+        .bind(&ctx.datasource_config_id)
+        .bind(vec![0u8; 384 * 4])
+        .fetch_one(sq)
+        .await
+        .expect("seed existing search embedding");
+        let columns = [ColumnEntry {
+            name: "id".into(),
+            col_type: Some(if schema_changed { "string" } else { "number" }.into()),
+            native_type: Some(if schema_changed { "VARCHAR" } else { "INT" }.into()),
+            description: None,
+        }];
+        // Real embedded model: no network, credentials, or ambient service required.
+        static EMBEDDING: std::sync::OnceLock<EmbeddingService> = std::sync::OnceLock::new();
+        let embedding = EMBEDDING.get_or_init(|| EmbeddingService::new().expect("load embedded model"));
+        let result = cache_table(CacheTableParams {
+            db: &db,
+            embedding,
+            ctx: &ctx,
+            project_id: "project-1",
+            dataset_id: "analytics",
+            table_name: "orders",
+            table_type: "TABLE",
+            columns: &columns,
+            full_table_id: "project-1.analytics.orders",
+        })
+        .await;
+
+        #[derive(sqlx::FromRow)]
+        struct CachedRow {
+            id: i32,
+            is_archived: bool,
+            last_verified: chrono::DateTime<Utc>,
+            structure_refreshed_at: chrono::DateTime<Utc>,
+            updated_at: chrono::DateTime<Utc>,
+            table_metadata: Value,
+        }
+        let rows: Vec<CachedRow> = sqlx::query_as(
+            "SELECT id, is_archived, last_verified, structure_refreshed_at, updated_at, table_metadata \
+             FROM datasource_table_cache WHERE workspace_id = ? AND datasource_config_id = ? \
+             AND project_id = 'project-1' AND dataset_id = 'analytics' AND table_id = 'orders'",
+        )
+        .bind(&ctx.workspace_id)
+        .bind(&ctx.datasource_config_id)
+        .fetch_all(sq)
+        .await
+        .expect("read resurrected row without hiding archived rows");
+        assert_eq!(rows.len(), 1, "resurrection must not insert a duplicate row");
+        let row = &rows[0];
+        assert_eq!(row.id, cache_id, "resurrection must reuse the archived row");
+        assert!(!row.is_archived, "reappearing tables must become visible again");
+        assert!(row.last_verified > old_time, "resurrection must advance last_verified");
+        if schema_changed {
+            // SQLite rejects pgvector storage AFTER the real UPDATE and embedding
+            // deletion. Pin that downstream error so an insert/constraint failure
+            // cannot masquerade as coverage of the update branch.
+            let error = result.expect_err("SQLite does not support pgvector storage").to_string();
+            assert!(error.contains("failed to store embeddings for analytics.orders"), "{error}");
+            assert!(error.contains("pgvector embeddings are not supported on SQLite"), "{error}");
+        } else {
+            result.expect("unchanged schema skips re-embedding successfully");
+        }
+
+        let embedding_ids: Vec<i64> = sqlx::query_scalar(
+            "SELECT id FROM datasource_search_embeddings WHERE table_cache_id = ?",
+        )
+        .bind(cache_id)
+        .fetch_all(sq)
+        .await
+        .expect("read remaining embeddings");
+        if schema_changed {
+            assert!(row.structure_refreshed_at > old_time);
+            assert!(row.updated_at > old_time);
+            assert_eq!(extract_schema_signature(&row.table_metadata), compute_schema_signature(&columns));
+            assert!(embedding_ids.is_empty(), "update branch must delete stale embeddings");
+        } else {
+            assert_eq!(row.structure_refreshed_at, old_time);
+            assert_eq!(row.updated_at, old_time);
+            assert_eq!(row.table_metadata, stored_metadata);
+            assert_eq!(embedding_ids, vec![embedding_id], "skip branch must preserve embeddings");
+        }
+    }
+
     // ── update_datasource_status concurrency (KYO-267) ───────────────────
 
     /// Seeds one workspace with two datasource rows, `datasource_config_id`s
@@ -2254,6 +2486,170 @@ mod tests {
         assert_eq!(reason_a, Some("connection timed out".to_string()));
         assert_eq!(status_b, "idle", "A's later failure must not clobber B's earlier success");
         assert_eq!(reason_b, None);
+    }
+
+    // ── append_catalog_status_warning (KYO-658 follow-up) ────────────────
+    //
+    // `populate_embeddings_after_indexing` (kyomi-agent) runs *after*
+    // `index_catalog`'s own terminal `update_datasource_status` write.
+    // Before this fix, a `Some(failure)` from it only ever reached
+    // `CatalogIndexResult.errors` -- a field no production caller reads on
+    // the "completed" branch -- so a real column-embedding shortfall was
+    // computed, logged, and otherwise invisible: the "third variant"
+    // `docs/standards/error-handling/one-outcome-one-report.md` warns
+    // about. These tests prove the fix the way that standard demands: that
+    // a reported failure actually lands in the *persisted* envelope
+    // `get_catalog_refresh_status` / the Settings page poll read, without
+    // disturbing the status/error the indexer's own write already made.
+
+    /// Reads back `(status, error, warnings)` for a single datasource --
+    /// the full slice of the envelope `append_catalog_status_warning` must
+    /// both preserve (`status`, `error`) and extend (`warnings`).
+    async fn read_datasource_envelope(
+        sq: &sqlx::SqlitePool,
+        datasource_config_id: &str,
+    ) -> (String, Option<String>, Vec<String>) {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            catalog_refresh_status: Option<String>,
+            catalog_refresh_progress: Option<String>,
+        }
+
+        let row: Row = sqlx::query_as(
+            "SELECT catalog_refresh_status, catalog_refresh_progress FROM datasource_configs WHERE id = ?",
+        )
+        .bind(datasource_config_id)
+        .fetch_one(sq)
+        .await
+        .expect("read datasource envelope");
+
+        let envelope: Option<Value> = row
+            .catalog_refresh_progress
+            .as_deref()
+            .and_then(|p| serde_json::from_str(p).ok());
+
+        let error = envelope
+            .as_ref()
+            .and_then(|v| v.get("error"))
+            .and_then(|e| e.as_str())
+            .map(str::to_string);
+        let warnings = envelope
+            .as_ref()
+            .and_then(|v| v.get("warnings"))
+            .and_then(|w| w.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .unwrap_or_default();
+
+        (
+            row.catalog_refresh_status.unwrap_or_else(|| "idle".to_string()),
+            error,
+            warnings,
+        )
+    }
+
+    /// A datasource that finished successfully (status `"idle"`) with one
+    /// pre-existing indexing-time warning must keep both that status and
+    /// that warning when a later column-embedding shortfall appends a
+    /// second one -- this is the exact KYO-658 follow-up wiring:
+    /// `populate_embeddings_after_indexing`'s `Some(failure)` must reach
+    /// this envelope, not just `CatalogIndexResult.errors`.
+    #[tokio::test]
+    async fn append_catalog_status_warning_preserves_idle_status_and_merges_warnings() {
+        let db = crate::test_support::test_pool().await;
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        let (workspace_id, ds_a, _ds_b) = seed_two_datasource_fixture(sq, "warn-idle").await;
+
+        update_datasource_status(
+            &db,
+            &workspace_id,
+            &ds_a,
+            "idle",
+            None,
+            None,
+            &["3 containers were not re-enumerated this run".to_string()],
+        )
+        .await
+        .expect("seed the indexer's own terminal write");
+
+        append_catalog_status_warning(
+            &db,
+            &workspace_id,
+            &ds_a,
+            "2 of 9 column embeddings were skipped -- their table_cache row no longer existed at write time",
+        )
+        .await
+        .expect("append column-embedding shortfall warning");
+
+        let (status, error, warnings) = read_datasource_envelope(sq, &ds_a).await;
+
+        assert_eq!(status, "idle", "must not overwrite the indexer's own terminal status");
+        assert_eq!(error, None);
+        assert_eq!(
+            warnings,
+            vec![
+                "3 containers were not re-enumerated this run".to_string(),
+                "2 of 9 column embeddings were skipped -- their table_cache row no longer existed at write time"
+                    .to_string(),
+            ],
+            "must extend the existing warnings, not replace them"
+        );
+    }
+
+    /// Companion covering the clobber the review specifically flagged: a
+    /// `"failed"` status (e.g. a KYO-614 container-coverage shortfall)
+    /// must survive a later column-embedding shortfall too -- a naive
+    /// `update_datasource_status(..., "completed", ...)` call from the
+    /// later stage would both invent a status value `catalog_refresh_status`
+    /// never holds (only `"running"`/`"idle"`/`"failed"` are ever written)
+    /// and silently flip a real failure to a false idle-flavoured one.
+    #[tokio::test]
+    async fn append_catalog_status_warning_preserves_failed_status_and_reason() {
+        let db = crate::test_support::test_pool().await;
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("expected sqlite pool");
+        };
+        let (workspace_id, ds_a, _ds_b) = seed_two_datasource_fixture(sq, "warn-failed").await;
+
+        update_datasource_status(
+            &db,
+            &workspace_id,
+            &ds_a,
+            "failed",
+            None,
+            Some("un-enumerated containers exceeded the coverage threshold"),
+            &[],
+        )
+        .await
+        .expect("seed the indexer's own terminal write");
+
+        append_catalog_status_warning(
+            &db,
+            &workspace_id,
+            &ds_a,
+            "1 of 4 column embeddings were skipped -- their table_cache row no longer existed at write time",
+        )
+        .await
+        .expect("append column-embedding shortfall warning");
+
+        let (status, error, warnings) = read_datasource_envelope(sq, &ds_a).await;
+
+        assert_eq!(
+            status, "failed",
+            "must not silently flip a real failure to idle/completed"
+        );
+        assert_eq!(
+            error,
+            Some("un-enumerated containers exceeded the coverage threshold".to_string())
+        );
+        assert_eq!(
+            warnings,
+            vec![
+                "1 of 4 column embeddings were skipped -- their table_cache row no longer existed at write time"
+                    .to_string()
+            ],
+        );
     }
 
     // ── fold_table_outcomes (KYO-324, moved from user_dataset.rs for KYO-365
@@ -2496,7 +2892,7 @@ mod tests {
     /// triples, all inserted non-archived — `project_id` is explicit (KYO-614
     /// follow-up) rather than a constant baked into this helper, so a test
     /// can seed two different projects sharing a dataset name.
-    async fn seed_container_scoped_fixture(
+    pub(super) async fn seed_container_scoped_fixture(
         sq: &sqlx::SqlitePool,
         suffix: &str,
         rows: &[(&str, &str, &str)],
@@ -3809,3 +4205,7 @@ mod tests {
         assert!(!after.material);
     }
 }
+
+#[cfg(test)]
+#[path = "helpers_archived_coverage_tests.rs"]
+mod archived_coverage_tests;

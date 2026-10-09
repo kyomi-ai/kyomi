@@ -313,7 +313,13 @@ impl AgentTool for BrowseCatalogTool {
         );
         let mut rows: Vec<CatalogBrowseLiteRow> =
             kyomi_core::db_fetch_all!(ctx.db, CatalogBrowseLiteRow, &sql, &ds.id, &schema_filter)
-                .unwrap_or_default();
+                .inspect_err(|e| {
+                    tracing::warn!(
+                        error = %e,
+                        datasource = %ds.slug,
+                        "failed to fetch datasource catalog rows for browse_catalog"
+                    );
+                })?;
 
         // BigQuery public datasets: include if enabled (absent key defaults
         // to disabled — see kyomi_core::json_utils::bigquery_include_public).
@@ -338,7 +344,13 @@ impl AgentTool for BrowseCatalogTool {
                 PUBLIC_DATA_WORKSPACE_ID,
                 &schema_filter
             )
-            .unwrap_or_default();
+            .inspect_err(|e| {
+                tracing::warn!(
+                    error = %e,
+                    datasource = %ds.slug,
+                    "failed to fetch BigQuery public catalog rows for browse_catalog"
+                );
+            })?;
             rows.extend(public_rows);
         }
 
@@ -615,6 +627,161 @@ mod tests {
         .execute(sq)
         .await
         .expect("insert public table cache row");
+    }
+
+    #[derive(Clone, Default)]
+    struct CatalogWarnings(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CatalogWarnings {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if *event.metadata().level() == tracing::Level::WARN {
+                self.0
+                    .lock()
+                    .expect("warning log mutex")
+                    .push(format!("{event:?}"));
+            }
+        }
+    }
+
+    async fn assert_catalog_row_failure(public: bool) {
+        use tracing::instrument::WithSubscriber;
+        use tracing_subscriber::prelude::*;
+
+        let db = test_pool().await;
+        seed_bigquery_datasource(&db, r#"{"include_public_datasets": true}"#).await;
+        let sq = match &db {
+            kyomi_core::DbPool::Sqlite(sq) => sq,
+            _ => unreachable!("test pool is always sqlite"),
+        };
+        let poisoned_workspace = if public {
+            PUBLIC_DATA_WORKSPACE_ID
+        } else {
+            "ws-1"
+        };
+        // SQLite accepts invalid JSON text, but the real browse SELECT's
+        // json_extract projection fails when it reaches this row. Counts
+        // remain readable, reproducing the original contradictory payload.
+        sqlx::query("UPDATE datasource_table_cache SET table_metadata = 'invalid JSON' WHERE workspace_id = ?")
+            .bind(poisoned_workspace)
+            .execute(sq)
+            .await
+            .expect("poison exactly one catalog source");
+        let counts =
+            kyomi_auth::datasource_service::fetch_table_counts(&db, &["ds-1".to_string()], None)
+                .await
+                .expect("own count still succeeds");
+        assert_eq!(counts.get("ds-1"), Some(&1));
+        assert_eq!(
+            kyomi_auth::datasource_service::count_tables_for_workspace(
+                &db,
+                PUBLIC_DATA_WORKSPACE_ID,
+                None,
+            )
+            .await
+            .expect("public count still succeeds"),
+            1,
+        );
+        let ctx = build_ctx(db);
+        // On the public failure fixture, prove the own query still works.
+        if public {
+            let own = BrowseCatalogTool
+                .execute(
+                    serde_json::json!({"datasource": "bq", "schema": "sales"}),
+                    &ctx,
+                )
+                .await
+                .expect("own rows remain readable");
+            let own: serde_json::Value = serde_json::from_str(&own).expect("own JSON response");
+            assert_eq!(own["returned"], 1);
+            assert_eq!(own["total_tables"], 1);
+        }
+        let warnings = CatalogWarnings::default();
+        let subscriber = tracing_subscriber::registry().with(warnings.clone());
+        let result = BrowseCatalogTool
+            .execute(serde_json::json!({"datasource": "bq"}), &ctx)
+            .with_subscriber(subscriber)
+            .await;
+        let error =
+            result.expect_err("a failed row fetch must not return an empty or partial success");
+        assert!(
+            matches!(error, kyomi_core::Error::Sqlx(_)),
+            "original database error must propagate: {error}"
+        );
+        assert!(
+            error.to_string().contains("malformed JSON"),
+            "query failure detail must survive: {error}"
+        );
+        let captured = warnings.0.lock().expect("warning log mutex");
+        assert_eq!(
+            captured.len(),
+            1,
+            "exactly the failed row query must warn: {captured:?}"
+        );
+        let message = if public {
+            "failed to fetch BigQuery public catalog rows for browse_catalog"
+        } else {
+            "failed to fetch datasource catalog rows for browse_catalog"
+        };
+        assert!(
+            captured[0].contains(message),
+            "failed source must be logged: {captured:?}"
+        );
+        assert!(
+            captured[0].contains("malformed JSON"),
+            "database error must be logged: {captured:?}"
+        );
+        assert!(
+            captured[0].contains("bq"),
+            "datasource must be logged: {captured:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn browse_catalog_own_row_failure_is_error_and_warns() {
+        assert_catalog_row_failure(false).await;
+    }
+
+    #[tokio::test]
+    async fn browse_catalog_public_row_failure_is_error_and_warns() {
+        assert_catalog_row_failure(true).await;
+    }
+
+    #[tokio::test]
+    async fn browse_catalog_empty_success_is_distinct_from_row_failure() {
+        use tracing::instrument::WithSubscriber;
+        use tracing_subscriber::prelude::*;
+
+        let db = test_pool().await;
+        seed_bigquery_datasource(&db, r#"{"include_public_datasets": true}"#).await;
+        let sq = match &db {
+            kyomi_core::DbPool::Sqlite(sq) => sq,
+            _ => unreachable!("test pool is always sqlite"),
+        };
+        sqlx::query("DELETE FROM datasource_table_cache")
+            .execute(sq)
+            .await
+            .expect("empty both catalog sources");
+        let ctx = build_ctx(db);
+        let warnings = CatalogWarnings::default();
+        let subscriber = tracing_subscriber::registry().with(warnings.clone());
+        let result = BrowseCatalogTool
+            .execute(serde_json::json!({"datasource": "bq"}), &ctx)
+            .with_subscriber(subscriber)
+            .await
+            .expect("a genuinely empty catalog succeeds");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("catalog JSON response");
+        assert_eq!(parsed["total_tables"], 0);
+        assert_eq!(parsed["returned"], 0);
+        assert_eq!(parsed["schemas"], serde_json::json!([]));
+        assert!(
+            warnings.0.lock().expect("warning log mutex").is_empty(),
+            "empty success must not warn"
+        );
     }
 
     /// Full table names (`project.dataset.table`) present in a

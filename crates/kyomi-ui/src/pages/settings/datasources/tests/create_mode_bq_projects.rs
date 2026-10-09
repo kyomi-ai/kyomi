@@ -736,9 +736,12 @@ fn datasource_disconnect_resets_all_three_bq_projects_signals_via_the_shared_hel
         "// ── SSH tunnel keypair generation",
     );
     assert!(
-        arm.contains("Account disconnected"),
+        arm.contains("datasource_disconnect_message(result.revocation)"),
         "sanity check on the extraction bounds: this must be the \
-         datasource_disconnect_action Effect: {arm}"
+         datasource_disconnect_action Effect. KYO-714 moved the literal \
+         \"Account disconnected\" out of this arm and into \
+         `datasource_disconnect_message`, so the toast call is now what \
+         identifies it: {arm}"
     );
     assert!(
         arm.contains(

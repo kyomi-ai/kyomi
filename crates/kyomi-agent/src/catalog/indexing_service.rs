@@ -15,7 +15,7 @@ use kyomi_embed::EmbeddingService;
 use serde_json::Value;
 use std::str::FromStr;
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 /// Row type for loading a datasource config.
 #[derive(sqlx::FromRow)]
@@ -34,7 +34,7 @@ struct DsConfigIdRow {
 
 use super::indexers;
 use super::traits::CatalogIndexer;
-use kyomi_auth::catalog::helpers::{can_refresh_now, IndexerContext};
+use kyomi_auth::catalog::helpers::{append_catalog_status_warning, can_refresh_now, IndexerContext};
 use kyomi_auth::catalog::types::CatalogIndexResult;
 
 // ─── Indexer factory ───────────────────────────────────────────────────────────
@@ -249,6 +249,46 @@ impl CatalogIndexingService {
             );
         }
 
+        // `connection_config` came straight off the SELECT above and may
+        // hold encrypted `COMMON_SENSITIVE` fields — `shared_password`,
+        // `ssh_private_key`, `ssh_passphrase`, and (KYO-786)
+        // `oauth_client_secret`/`service_account_json`. Decrypt once here so
+        // every `CatalogIndexer` impl gets plaintext via
+        // `IndexerContext.connection_config`, rather than each one needing
+        // its own decrypt call. This is what makes `index_catalog_sql`'s own
+        // decrypt (`traits.rs`) redundant — removed there — and incidentally
+        // fixes `resolve_indexing_credentials`'s pass-through of
+        // `ctx.connection_config` to `resolve_shared_credentials`, which read
+        // the same raw ciphertext.
+        //
+        // A decrypt failure is reported as a `"failed"` status with an
+        // actionable reason before this indexer ever starts, mirroring how
+        // `BigQueryIndexer::record_failure` (KYO-449) skips straight to
+        // `"failed"` on its own early validation failures rather than first
+        // writing `"running"`. Nothing before this point has done any work
+        // worth showing as `"running"`, so this keeps every indexer's
+        // early-failure behavior consistent rather than diverging by type.
+        let connection_config = match kyomi_auth::credential_service::decrypt_connection_config_secrets(
+            &connection_config,
+            &encryption_key,
+        ) {
+            Ok(config) => config,
+            Err(e) => {
+                let msg = format!("Failed to decrypt connection_config: {e}");
+                let _ = kyomi_auth::catalog::helpers::update_datasource_status(
+                    db,
+                    workspace_id,
+                    datasource_config_id,
+                    "failed",
+                    None,
+                    Some(&msg),
+                    &[],
+                )
+                .await;
+                return CatalogIndexResult::error(&msg);
+            }
+        };
+
         let ctx = IndexerContext {
             workspace_id: workspace_id.to_string(),
             datasource_config_id: datasource_config_id.to_string(),
@@ -265,16 +305,51 @@ impl CatalogIndexingService {
             "starting catalog indexing"
         );
 
-        let result = indexer
+        let mut result = indexer
             .index_catalog(&ctx, db, embedding, user_email, credentials, max_tables_per_dataset)
             .await;
 
         // Populate embeddings after successful indexing so the AI agent can
         // search catalog data. This runs for all callers (scheduler, manual
         // refresh, post-create) — a single code path.
-        if result.status == "completed" && result.tables_indexed > 0 {
-            populate_embeddings_after_indexing(db, embedding, workspace_id, datasource_config_id)
-                .await;
+        //
+        // Indexing itself already succeeded by this point (`status ==
+        // "completed"`), so a failure here doesn't flip that -- but it must
+        // not vanish either (KYO-658). `result.errors` alone is not enough:
+        // no production caller reads `result.errors` on the "completed"
+        // branch (every real caller of `index_datasource` /
+        // `spawn_post_create` / `spawn_analytics_post_create` logs only
+        // `status`/`tables_indexed`), so a shortfall folded only there is
+        // computed and unit-tested but never surfaced to a user or
+        // operator — the "third variant"
+        // `docs/standards/error-handling/one-outcome-one-report.md` warns
+        // about. `append_catalog_status_warning` routes it through the
+        // existing, already-polled `warnings` channel on
+        // `datasource_configs.catalog_refresh_progress` instead (the same
+        // envelope `get_catalog_refresh_status` / the Settings page poll
+        // read), without disturbing the status/error/progress `index_catalog`
+        // itself already wrote moments earlier.
+        if result.status == "completed"
+            && result.tables_indexed > 0
+            && let Some(failure) =
+                populate_embeddings_after_indexing(db, embedding, workspace_id, datasource_config_id)
+                    .await
+        {
+            if let Err(e) =
+                append_catalog_status_warning(db, workspace_id, datasource_config_id, &failure)
+                    .await
+            {
+                error!(
+                    workspace_id,
+                    datasource_config_id,
+                    error = %e,
+                    "failed to persist column-embedding shortfall as a catalog-status warning"
+                );
+            }
+
+            let mut errors = result.errors.take().unwrap_or_default();
+            errors.push(failure);
+            result.errors = Some(errors);
         }
 
         result
@@ -465,14 +540,22 @@ impl CatalogIndexingService {
 
 /// Generate embeddings for freshly indexed catalog data.
 ///
-/// Failures are logged as warnings — they never fail the indexing response.
+/// Indexing itself already completed by the time this runs — this never
+/// flips `CatalogIndexResult.status` back to failed. But a failure here is
+/// not nothing: it means the datasource ships with table embeddings and no
+/// (or partial) column embeddings, invisibly, until KYO-658. So this
+/// returns `Some(message)` on anything short of a fully clean run — a total
+/// failure of either pass, or a [`kyomi_knowledge::populate::ColumnEmbeddingOutcome`]
+/// with a non-zero skip count — and the caller folds that into
+/// `result.errors` rather than discarding it. `None` means every table and
+/// column that could be embedded, was.
 async fn populate_embeddings_after_indexing(
     db: &DbPool,
     embedding: &EmbeddingService,
     workspace_id: &str,
     datasource_config_id: &str,
-) {
-    match kyomi_knowledge::populate::populate_table_embeddings(
+) -> Option<String> {
+    let table_count = match kyomi_knowledge::populate::populate_table_embeddings(
         db,
         embedding,
         workspace_id,
@@ -480,31 +563,55 @@ async fn populate_embeddings_after_indexing(
     )
     .await
     {
-        Ok(table_count) => {
-            match kyomi_knowledge::populate::populate_column_embeddings(
-                db,
-                embedding,
+        Ok(n) => n,
+        Err(e) => {
+            error!(
                 workspace_id,
                 datasource_config_id,
-            )
-            .await
-            {
-                Ok(col_count) => {
-                    info!(
-                        workspace_id,
-                        datasource_config_id,
-                        tables = table_count,
-                        columns = col_count,
-                        "Embeddings populated after catalog indexing"
-                    );
-                }
-                Err(e) => {
-                    warn!(error = %e, "Column embedding population failed, continuing");
-                }
+                error = %e,
+                "Table embedding population failed after catalog indexing"
+            );
+            return Some(format!("table embedding population failed: {e}"));
+        }
+    };
+
+    match kyomi_knowledge::populate::populate_column_embeddings(
+        db,
+        embedding,
+        workspace_id,
+        datasource_config_id,
+    )
+    .await
+    {
+        Ok(outcome) => {
+            info!(
+                workspace_id,
+                datasource_config_id,
+                tables = table_count,
+                columns_embedded = outcome.embedded,
+                columns_skipped = outcome.skipped,
+                "Embeddings populated after catalog indexing"
+            );
+            if let Some(message) = outcome.failure_message() {
+                error!(
+                    workspace_id,
+                    datasource_config_id,
+                    columns_embedded = outcome.embedded,
+                    columns_skipped = outcome.skipped,
+                    "Column embedding population did not fully succeed after catalog indexing"
+                );
+                return Some(message);
             }
+            None
         }
         Err(e) => {
-            warn!(error = %e, "Table embedding population failed, continuing");
+            error!(
+                workspace_id,
+                datasource_config_id,
+                error = %e,
+                "Column embedding population failed after catalog indexing"
+            );
+            Some(format!("column embedding population failed: {e}"))
         }
     }
 }
@@ -525,5 +632,143 @@ mod tests {
         assert!(get_indexer(&DatasourceType::Synapse).is_some());
         assert!(get_indexer(&DatasourceType::BigQuery).is_some());
         assert!(get_indexer(&DatasourceType::FlareDb).is_some());
+    }
+
+    // -- populate_embeddings_after_indexing -- KYO-658 ------------------------
+    //
+    // The FK-violation-guard and "did this run fully succeed" logic are
+    // pinned directly against a real in-memory-SQLite FK constraint in
+    // `kyomi_knowledge::populate` (`write_column_embeddings_with_fk_guard_*`
+    // and `column_embedding_outcome_*`) -- see that crate's tests for the
+    // deterministic race reproduction. Forcing a real skip through this
+    // *entire* async pipeline (config load -> table SELECT -> embed ->
+    // column SELECT -> embed -> insert) deterministically would need either
+    // a live concurrent delete timed against the embedding call (exactly
+    // the kind of scheduler-dependent test
+    // `docs/standards/testing/nondeterministic-verdict-is-a-failing-test.md`
+    // rules out) or a test-only hook into production code. This test
+    // instead pins the one thing that *is* safe to assert here
+    // deterministically: a clean run, with nothing vanishing, must not be
+    // misreported as a failure.
+    #[tokio::test]
+    async fn populate_embeddings_after_indexing_reports_none_on_a_clean_run() {
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let lazy_embedding = crate::test_support::loaded_embedding();
+        let embed = lazy_embedding
+            .wait_ready()
+            .await
+            .expect("embedding model is already loaded by loaded_embedding()");
+
+        let sq = match &db {
+            DbPool::Sqlite(pool) => pool,
+            DbPool::Postgres(_) => unreachable!("test pool is always sqlite"),
+        };
+        sqlx::query(
+            "INSERT INTO datasource_configs (id, workspace_id, name, datasource_type, slug) \
+             VALUES ('ds-1', 'ws-1', 'Test DS', 'postgres', 'test-ds')",
+        )
+        .execute(sq)
+        .await
+        .expect("seed datasource_configs");
+        sqlx::query(
+            "INSERT INTO datasource_table_cache \
+                 (workspace_id, datasource_config_id, project_id, dataset_id, table_id, table_metadata) \
+             VALUES ('ws-1', 'ds-1', 'proj', 'dataset', 'orders', $1)",
+        )
+        .bind(serde_json::json!({"columns": [{"name": "id", "type": "INTEGER"}]}).to_string())
+        .execute(sq)
+        .await
+        .expect("seed datasource_table_cache");
+
+        let report = populate_embeddings_after_indexing(&db, embed, "ws-1", "ds-1").await;
+        assert_eq!(
+            report, None,
+            "a clean run with nothing vanishing must not be reported as a failure"
+        );
+    }
+
+    // -- KYO-786: decrypt happens once, at IndexerContext construction -------
+
+    /// A `connection_config` `COMMON_SENSITIVE` field that looks like Kyomi
+    /// ciphertext but was encrypted with a different key must fail to
+    /// decrypt — proving `index_datasource` actually calls
+    /// `decrypt_connection_config_secrets` before dispatching to an indexer,
+    /// rather than silently handing ciphertext through.
+    #[tokio::test]
+    async fn index_datasource_reports_failed_status_when_connection_config_cannot_be_decrypted() {
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+
+        let sq = match &db {
+            DbPool::Sqlite(pool) => pool,
+            DbPool::Postgres(_) => unreachable!("test pool is always sqlite"),
+        };
+
+        // Ciphertext encrypted with a key other than the one passed to
+        // `index_datasource` below — `looks_encrypted` recognizes the
+        // format, so this is a guaranteed decrypt failure, not the
+        // legacy-plaintext passthrough.
+        let wrong_key = [7u8; 32];
+        let bogus_ciphertext =
+            kyomi_auth::encryption::encrypt("irrelevant", &wrong_key).expect("encrypt fixture");
+        let connection_config =
+            serde_json::json!({ "shared_password": bogus_ciphertext }).to_string();
+
+        sqlx::query(
+            "INSERT INTO datasource_configs \
+                 (id, workspace_id, name, datasource_type, slug, connection_config) \
+             VALUES ('ds-decrypt-fail', 'ws-1', 'Test DS', 'postgres', 'test-ds-decrypt-fail', $1)",
+        )
+        .bind(connection_config)
+        .execute(sq)
+        .await
+        .expect("seed datasource_configs");
+
+        let lazy_embedding = crate::test_support::loaded_embedding();
+        let embed = lazy_embedding
+            .wait_ready()
+            .await
+            .expect("embedding model is already loaded by loaded_embedding()");
+
+        let result = CatalogIndexingService::index_datasource(IndexDatasourceParams {
+            db: &db,
+            encryption_key: Arc::new([0u8; 32]),
+            embedding: embed,
+            workspace_id: "ws-1",
+            datasource_config_id: "ds-decrypt-fail",
+            user_email: None,
+            credentials: None,
+            max_tables_per_dataset: None,
+            force: false,
+            connect_registry: None,
+        })
+        .await;
+
+        assert_eq!(
+            result.status, "error",
+            "a decrypt failure must be reported as an error result, not silently swallowed"
+        );
+        let errors = result.errors.expect("error result must carry a reason");
+        assert!(
+            errors.iter().any(|e| e.contains("Failed to decrypt connection_config")),
+            "errors must name the decrypt failure, got: {errors:?}"
+        );
+
+        // The datasource's own persisted status must be "failed" — the
+        // observable status behaviour KYO-786 requires stays correct even
+        // though the decrypt now runs before any indexer-specific status
+        // write (e.g. the generic SQL path's old "running" write).
+        #[derive(sqlx::FromRow)]
+        struct StatusRow {
+            catalog_refresh_status: Option<String>,
+        }
+        let row: StatusRow = sqlx::query_as(
+            "SELECT catalog_refresh_status FROM datasource_configs WHERE id = 'ds-decrypt-fail'",
+        )
+        .fetch_one(sq)
+        .await
+        .expect("fetch status row");
+        assert_eq!(row.catalog_refresh_status.as_deref(), Some("failed"));
     }
 }

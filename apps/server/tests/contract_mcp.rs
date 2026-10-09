@@ -380,10 +380,13 @@ async fn tools_list_includes_render_chart() {
         "render_chart should have correct resourceUri"
     );
 
-    // update_dashboard (copilot-only) should NOT be present
+    // update_chart (copilot-only) should NOT be present. Was
+    // update_dashboard before KYO-536 deleted that tool entirely — the
+    // dashboard copilot now writes through the shared, non-copilot-only
+    // `modify_dashboard`.
     assert!(
-        !tool_names.contains(&"update_dashboard"),
-        "update_dashboard (copilot-only) should NOT be in MCP tools"
+        !tool_names.contains(&"update_chart"),
+        "update_chart (copilot-only) should NOT be in MCP tools"
     );
 
     cleanup_test_user(&ctx.db, "mcp-test-tools-render@contract-test.local").await;
@@ -768,12 +771,6 @@ async fn tools_list_hides_copilot_only_tools() {
         .iter()
         .map(|t| t["name"].as_str().unwrap_or(""))
         .collect();
-
-    // update_dashboard is copilot-only and should NOT appear in MCP tools/list
-    assert!(
-        !tool_names.contains(&"update_dashboard"),
-        "update_dashboard (copilot-only) should not appear in MCP tools/list"
-    );
 
     // update_chart is copilot-only and should NOT appear in MCP tools/list
     assert!(

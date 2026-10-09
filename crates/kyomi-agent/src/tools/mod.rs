@@ -45,8 +45,13 @@ use crate::types::{Tool, ToolAnnotations};
 // ---------------------------------------------------------------------------
 
 /// Tools only available in copilot mode (embedded in dashboards).
-pub const COPILOT_ONLY_TOOLS: &[&str] =
-    &["update_dashboard", "update_chart", "update_watch_draft", "preview_watch"];
+///
+/// `update_dashboard` (a WebSocket-only draft push, no document identity) is
+/// gone as of KYO-536 — the dashboard and knowledge copilots now write
+/// directly through the real document tools (`modify_dashboard`,
+/// `edit_knowledge_file`, `write_knowledge_file`), which are shared with
+/// chat/MCP and are therefore not copilot-only.
+pub const COPILOT_ONLY_TOOLS: &[&str] = &["update_chart", "update_watch_draft", "preview_watch"];
 
 /// Tools only exposed via MCP.
 pub const MCP_ONLY_TOOLS: &[&str] = &[
@@ -79,22 +84,7 @@ pub const WATCH_TOOLS: &[&str] = &[
 ///
 /// Extracted from [`ToolContext`] so lightweight callers (e.g., email chart
 /// rendering) can resolve chart data without the full agent context.
-#[derive(Clone)]
-pub struct QueryContext {
-    /// PostgreSQL connection pool.
-    pub db: kyomi_core::DbPool,
-    /// ID of the user making the request.
-    pub user_id: String,
-    /// ID of the user's active workspace.
-    pub workspace_id: String,
-    /// AES-256-GCM encryption key for credential decryption.
-    pub encryption_key: Arc<[u8; 32]>,
-    /// Application configuration (needed for Google OAuth client credentials).
-    pub config: Arc<kyomi_core::Config>,
-    /// Connect registry for routing queries through Kyomi Connect instances.
-    /// `None` when Connect is not available (e.g., lightweight callers).
-    pub connect_registry: Option<kyomi_datasource_server::ConnectRegistry>,
-}
+pub use kyomi_auth::chartml_validation::QueryContext;
 
 // ---------------------------------------------------------------------------
 // ToolContext
@@ -138,6 +128,23 @@ pub struct ToolContext {
     /// Display name for the current user (name or email fallback).
     /// Used for WebSocket event attribution (e.g., "changed_by_name" in dashboard updates).
     pub user_display_name: String,
+    /// The single document (dashboard *or* knowledge file — both are
+    /// `dashboards` rows, see [`kyomi_core::models::DocType`]) this
+    /// execution is scoped to, if any.
+    ///
+    /// Set only for dashboard/knowledge copilot executions, which are
+    /// opened against exactly one document and must never be able to write
+    /// a different one (KYO-536). `None` for chat, MCP, Slack, and watch
+    /// execution — those have no single open document and are unaffected.
+    ///
+    /// This is an *additional* restriction layered on top of each tool's
+    /// own ownership/visibility checks, never a replacement for them: a
+    /// document-scoped write is enforced centrally in
+    /// [`document::apply_update`](crate::tools::document) via
+    /// `ApplyUpdateParams::document_scope`, so no future document-mutating
+    /// tool can forget the check by simply not calling it — extending
+    /// `ApplyUpdateParams` requires every caller to decide what to pass.
+    pub document_id: Option<String>,
 }
 
 impl ToolContext {
@@ -192,6 +199,22 @@ pub trait AgentTool: Send + Sync {
     /// Optional MCP-compatible annotations for the tool.
     fn annotations(&self) -> Option<ToolAnnotations> {
         None
+    }
+
+    /// Product result semantics, separate from successful invocation transport.
+    /// Tools with a textual rejection contract override this explicitly.
+    fn result_domain_outcome(&self, text: &str) -> agent_runtime::DomainOutcome {
+        let rejected = serde_json::from_str::<serde_json::Value>(text).is_ok_and(|value| {
+            ["valid", "success", "saved"].iter().any(|key| value.get(key).and_then(serde_json::Value::as_bool) == Some(false))
+                || value.get("error").is_some_and(|error| !error.is_null())
+        });
+        if rejected { agent_runtime::DomainOutcome::Rejected } else { agent_runtime::DomainOutcome::Succeeded }
+    }
+
+    /// An execution error may follow a committed effect. Metadata annotations are
+    /// advisory; only an audited implementation may override this default.
+    fn failure_domain_outcome(&self) -> agent_runtime::DomainOutcome {
+        agent_runtime::DomainOutcome::Unknown
     }
 
     /// Execute the tool with the given arguments and context.
@@ -313,99 +336,17 @@ impl Default for ToolRegistry {
 ///   Returns empty credentials — the factory's `resolve_shared_credentials()` extracts
 ///   `shared_username`/`shared_password` from `connection_config`.
 /// - **Personal auth**: Decrypts per-user credentials and refreshes OAuth tokens if needed.
-pub async fn resolve_credentials(
-    ctx: &QueryContext,
-    ds: &kyomi_core::models::datasource::DatasourceConfig,
-    ds_type: &kyomi_core::datasource_registry::DatasourceType,
-) -> kyomi_core::Result<serde_json::Value> {
-    let is_shared = kyomi_auth::datasource_auth_service::is_shared_auth(
-        ds_type.as_str(),
-        &ds.connection_config,
-    );
-
-    if is_shared {
-        // Shared auth: credentials live in connection_config.
-        // The factory's resolve_shared_credentials() will extract them.
-        //
-        // Special case: BigQuery kyomi_oauth needs the user's Google OAuth token
-        // from users.oauth_data (not from datasource credentials). Use centralized
-        // token resolution which handles expiry checking and refresh.
-        let auth_mode = ds
-            .connection_config
-            .get("auth_mode")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-
-        if ds_type.as_str() == "bigquery" && auth_mode == "kyomi_oauth"
-            && let (Some(client_id), Some(client_secret)) = (
-                ctx.config.google_oauth_client_id.as_deref(),
-                ctx.config.google_oauth_client_secret.as_deref(),
-            ) {
-                let tokens = kyomi_auth::google_oauth::ensure_valid_google_token(
-                    &ctx.db,
-                    &ctx.user_id,
-                    &ctx.encryption_key,
-                    client_id,
-                    client_secret,
-                )
-                .await?;
-                let oauth_data = kyomi_auth::google_oauth::OAuthData {
-                    google_oauth_tokens: Some(tokens),
-                    ..Default::default()
-                };
-
-                // Also load per-user credentials so that billing_project is
-                // available to resolve_billing_project() downstream. Without
-                // this, the per-user billing project stored in
-                // user_datasource_credentials is invisible to the BigQuery
-                // factory and the query fails.
-                let mut result = if let Some(cred) =
-                    kyomi_auth::datasource_service::get_user_credential(
-                        &ctx.db,
-                        &ctx.user_id,
-                        &ds.id,
-                    )
-                    .await?
-                {
-                    kyomi_auth::encryption::decrypt_json(
-                        &cred.credentials,
-                        &ctx.encryption_key,
-                    )?
-                } else {
-                    serde_json::json!({})
-                };
-
-                result["oauth_data"] = serde_json::json!(oauth_data);
-                return Ok(result);
-            }
-
-        Ok(serde_json::json!({}))
-    } else {
-        // Personal auth: decrypt per-user credentials
-        let cred =
-            kyomi_auth::datasource_service::get_user_credential(&ctx.db, &ctx.user_id, &ds.id)
-                .await?
-                .ok_or_else(|| {
-                    kyomi_core::Error::NotFound(
-                        "No credentials found for this datasource".into(),
-                    )
-                })?;
-        let decrypted = kyomi_auth::encryption::decrypt_json(
-            &cred.credentials,
-            &ctx.encryption_key,
-        )?;
-
-        // OAuth refresh if needed
-        let refreshed = kyomi_datasource_server::oauth_refresh::ensure_valid_oauth_credentials(
-            &decrypted,
-            &ds.connection_config,
-            ds_type,
-        )
-        .await?;
-
-        Ok(refreshed)
-    }
-}
+///
+/// `connection_config` must be the **already-decrypted** connection config
+/// (via [`kyomi_auth::credential_service::decrypt_connection_config_secrets`])
+/// — not `ds.connection_config`, which is ciphertext-at-rest for
+/// `COMMON_SENSITIVE` fields (`oauth_client_secret`, KYO-786). Taking it as a
+/// parameter, rather than decrypting `ds.connection_config` internally, means
+/// this function never touches the raw encrypted value at all, and the one
+/// caller ([`crate::tools::query_utils::create_provider_for_datasource`])
+/// decrypts exactly once and reuses the result for both this OAuth-refresh
+/// step and provider construction.
+pub use kyomi_auth::chartml_validation::resolve_credentials;
 
 /// Create the default tool registry with all built-in tools.
 pub fn create_default_registry() -> ToolRegistry {
@@ -455,13 +396,16 @@ pub fn create_default_registry() -> ToolRegistry {
     // Forecast tools
     registry.register(Arc::new(forecast::ForecastDataTool));
 
-    // Copilot tools — draft/broadcast variants used by dashboard, chart, and
-    // watch copilots. Dashboard and chart have no DB-mutating equivalent, so
-    // their copilot tools own the `update_dashboard` / `update_chart` names.
-    // Watch DOES have a DB-mutating `UpdateWatchTool` (registered above) used
-    // by MCP and chat, so the copilot variant uses a distinct name
-    // (`update_watch_draft`) and coexists with it in the registry.
-    registry.register(Arc::new(copilot::UpdateDashboardCopilotTool));
+    // Copilot tools — draft/broadcast variants used by chart and watch
+    // copilots. Chart has no DB-mutating equivalent, so its copilot tool
+    // owns the `update_chart` name. Watch DOES have a DB-mutating
+    // `UpdateWatchTool` (registered above) used by MCP and chat, so the
+    // copilot variant uses a distinct name (`update_watch_draft`) and
+    // coexists with it in the registry. The dashboard copilot's equivalent,
+    // `UpdateDashboardCopilotTool`, was deleted in KYO-536 — the dashboard
+    // and knowledge copilots now write through the real document tools
+    // above (`modify_dashboard`, `document::DocumentEditTool`,
+    // `knowledge::WriteDocumentTool`) instead of a copilot-only draft push.
     registry.register(Arc::new(copilot::UpdateChartCopilotTool));
     registry.register(Arc::new(copilot::UpdateWatchCopilotTool));
 
@@ -701,7 +645,7 @@ mod tests {
         let registry = create_default_registry();
         let filter = ToolFilter::default();
         let tools = registry.get_tools(&filter);
-        assert_eq!(tools.len(), 36);
+        assert_eq!(tools.len(), 35);
 
         // Verify all expected tools are registered
         let expected = [
@@ -723,7 +667,6 @@ mod tests {
             "create_dashboard",
             "modify_dashboard",
             "delete_dashboard",
-            "update_dashboard",
             "update_chart",
             "create_watch",
             "preview_watch",
@@ -764,13 +707,16 @@ mod tests {
     #[test]
     fn constants_are_defined() {
         // Verify constants exist and have expected values.
-        assert!(COPILOT_ONLY_TOOLS.contains(&"update_dashboard"));
         assert!(COPILOT_ONLY_TOOLS.contains(&"update_chart"));
         assert!(COPILOT_ONLY_TOOLS.contains(&"update_watch_draft"));
         assert!(COPILOT_ONLY_TOOLS.contains(&"preview_watch"));
         // The real DB-mutating update_watch must NOT be copilot-only — chat
         // and MCP agents rely on it for actual watch persistence.
         assert!(!COPILOT_ONLY_TOOLS.contains(&"update_watch"));
+        // update_dashboard was deleted in KYO-536 — the dashboard copilot
+        // now writes through the shared `modify_dashboard` tool, which is
+        // not copilot-only.
+        assert!(!COPILOT_ONLY_TOOLS.contains(&"update_dashboard"));
         assert!(MCP_ONLY_TOOLS.contains(&"render_chart"));
         assert!(WATCH_TOOLS.contains(&"browse_catalog"));
         assert!(WATCH_TOOLS.contains(&"list_knowledge_files"));
@@ -814,8 +760,8 @@ mod contract_tests {
         let tools = registry.get_tools(&ToolFilter::default());
         assert_eq!(
             tools.len(),
-            36,
-            "Expected 36 tools, got {}. Names: {:?}",
+            35,
+            "Expected 35 tools, got {}. Names: {:?}",
             tools.len(),
             tools.iter().map(|t| t.name()).collect::<Vec<_>>()
         );
@@ -842,7 +788,6 @@ mod contract_tests {
             "create_dashboard",
             "modify_dashboard",
             "delete_dashboard",
-            "update_dashboard",
             "update_chart",
             "create_watch",
             "preview_watch",
@@ -1071,7 +1016,6 @@ mod contract_tests {
             "create_dashboard",
             "modify_dashboard",
             "delete_dashboard",
-            "update_dashboard",
             "update_chart",
             "create_watch",
             "update_watch",
@@ -1207,8 +1151,8 @@ mod contract_tests {
             );
         }
 
-        // Chat context should exclude 4 copilot + 5 MCP = 9 tools
-        assert_eq!(tools.len(), 36 - 9);
+        // Chat context should exclude 3 copilot + 5 MCP = 8 tools
+        assert_eq!(tools.len(), 35 - 8);
     }
 
     #[test]
@@ -1235,7 +1179,7 @@ mod contract_tests {
                 "Copilot filter should not include MCP tool '{mcp_name}'"
             );
         }
-        assert_eq!(tools.len(), 36 - 5); // Only MCP excluded
+        assert_eq!(tools.len(), 35 - 5); // Only MCP excluded
     }
 
     #[test]
@@ -1261,7 +1205,7 @@ mod contract_tests {
                 "MCP filter should not include copilot tool '{copilot_name}'"
             );
         }
-        assert_eq!(tools.len(), 36 - 4); // Only copilot excluded
+        assert_eq!(tools.len(), 35 - 3); // Only copilot excluded
 
         // Regression guard for KYO-15: the real DB-mutating `update_watch`
         // must stay visible to MCP, and the draft-only copilot variant must
@@ -1351,7 +1295,7 @@ mod contract_tests {
         let filter = ToolFilter::default();
         let definitions = registry.get_tool_definitions(&filter);
 
-        assert_eq!(definitions.len(), 36);
+        assert_eq!(definitions.len(), 35);
         for def in &definitions {
             assert!(!def.name.is_empty(), "Tool definition has empty name");
             assert!(

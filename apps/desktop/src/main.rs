@@ -318,6 +318,16 @@ async fn start_server(
     let registry = kyomi_core::platform::PlatformRegistry::new();
     let platforms = Arc::new(registry);
 
+    // KYO-493: resolved once at startup — see the doc on
+    // `resolve_process_instance` for why. `config_arc.is_personal()` is
+    // always true on this boot path, so this always resolves to the fixed
+    // "desktop" literal regardless of HOSTNAME/port.
+    let process_instance = kyomi_core::resolve_process_instance(
+        &config_arc,
+        std::env::var("HOSTNAME").ok().as_deref(),
+        config_arc.port,
+    );
+
     let state = kyomi_server::state::AppState {
         db: db.clone(),
         kv: kv.clone(),
@@ -333,9 +343,29 @@ async fn start_server(
         connect_token: None,
         connect_registry: connect_registry.clone(),
         platforms: platforms.clone(),
+        // No periodic re-check here (KYO-716 only wires that into
+        // apps/server/src/main.rs) — `Default` is still truthful at this
+        // instant: `db` above just finished `DbPool::connect`, which always
+        // migrates before returning successfully, so drift is zero here by
+        // construction.
+        schema_drift: kyomi_server::schema_drift::SchemaDriftStatus::default(),
+        process_instance: process_instance.clone(),
     };
 
     let shutdown_token = CancellationToken::new();
+
+    let _durable_chat_worker = kyomi_agent::durable_chat::DurableChatWorker {
+        db: state.db.clone(),
+        kv: state.kv.clone(),
+        encryption_key: state.encryption_key.clone(),
+        embedding: state.embedding.clone(),
+        ws_manager: state.ws_manager.clone(),
+        app_config: state.config.clone(),
+        connect_registry: Some(state.connect_registry.clone()),
+        platforms: state.platforms.clone(),
+        owner: state.process_instance.clone(),
+        shutdown: shutdown_token.child_token(),
+    }.start();
 
     let watch_scheduler = if enable_schedulers {
         let catalog_scheduler = Arc::new(kyomi_agent::CatalogRefreshScheduler::new(
@@ -344,13 +374,14 @@ async fn start_server(
             encryption_key_arc.clone(),
             embedding.clone(),
             shutdown_token.child_token(),
+            config_arc.clone(),
         ));
         let _ = catalog_scheduler.start();
         tracing::info!("Catalog refresh scheduler started");
 
         let scheduler = Arc::new(kyomi_agent::WatchScheduler::new(
             kyomi_agent::WatchSchedulerDeps {
-                db,
+                db: db.clone(),
                 kv,
                 encryption_key: encryption_key_arc,
                 embedding,
@@ -370,6 +401,26 @@ async fn start_server(
 
     let router = kyomi_server::build_router(state, kyomi_server::ServerExtras::default());
     let app = kyomi_server::wrap_service(router);
+    // KYO-493 Phase 4: startup sweep — in personal mode this process is
+    // the fixed `"desktop"` identity, so this reclaims any `in_progress`
+    // chat row a previous run of the app left behind, plus rows past the
+    // hard-timeout age bound. Best-effort: a sweep failure must not keep
+    // the app from starting.
+    match kyomi_auth::chat_service::sweep_interrupted_rows(
+        &db,
+        &process_instance,
+        kyomi_auth::chat_service::IN_PROGRESS_HARD_TIMEOUT,
+    )
+    .await
+    {
+        Ok(n) if n > 0 => tracing::info!(
+            count = n,
+            "startup sweep: marked stranded in_progress chat rows as interrupted"
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("startup sweep of in_progress chat rows failed: {e}"),
+    }
+
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}")).await?;
 
     tracing::info!(port, "Kyomi backend listening");
@@ -378,6 +429,27 @@ async fn start_server(
     shutdown_token.cancel();
     if let Some(scheduler) = watch_scheduler {
         scheduler.shutdown().await;
+    }
+
+    // KYO-493 Phase 4: graceful-shutdown sweep — runs still `in_progress`
+    // when the app exits are about to lose their process, so their rows
+    // become `interrupted` now instead of waiting for the next launch. A
+    // detached run that still lands its final write after this sweep
+    // simply overwrites the status with its true terminal state
+    // (`update_message` writes status unconditionally).
+    match kyomi_auth::chat_service::sweep_interrupted_rows(
+        &db,
+        &process_instance,
+        kyomi_auth::chat_service::IN_PROGRESS_HARD_TIMEOUT,
+    )
+    .await
+    {
+        Ok(n) if n > 0 => tracing::info!(
+            count = n,
+            "shutdown sweep: marked unfinished chat rows as interrupted"
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("shutdown sweep of in_progress chat rows failed: {e}"),
     }
 
     tracing::info!("Kyomi backend shutdown complete");

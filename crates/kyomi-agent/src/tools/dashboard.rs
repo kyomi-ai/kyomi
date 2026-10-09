@@ -7,7 +7,8 @@ use async_trait::async_trait;
 use kyomi_auth::websocket::helpers as ws_helpers;
 
 use crate::tools::document::{
-    apply_update, ApplyUpdateOutcome, ApplyUpdateParams, DocumentDeleteTool, DocumentReadTool,
+    apply_create, apply_update, ApplyCreateParams, ApplyUpdateOutcome, ApplyUpdateParams,
+    DocumentDeleteTool, DocumentReadTool,
 };
 use crate::tools::{AgentTool, ToolContext};
 use crate::types::ToolAnnotations;
@@ -301,15 +302,23 @@ impl AgentTool for CreateDashboardTool {
             .to_string());
         }
 
-        let dashboard_id = match kyomi_auth::dashboard_service::create_dashboard(
-            &ctx.db,
-            &ctx.user_id,
-            &ctx.workspace_id,
+        // KYO-776: resolved once, up front, for `apply_create`'s synchronous
+        // `knowledge_chunks` population below — the same pattern
+        // `ModifyDashboardTool` already uses for `apply_update` (see its own
+        // `embed` resolution above the `apply_update` call further down in
+        // this file).
+        let embed = ctx.embedding.wait_ready().await?;
+
+        let dashboard_id = match apply_create(ApplyCreateParams {
+            validation_context: Some(&ctx.query_context()),
+            db: &ctx.db,
+            user_id: &ctx.user_id,
+            workspace_id: &ctx.workspace_id,
             title,
             content,
-            kyomi_core::models::DocType::Dashboard,
-            None, // Embedding generation handled separately below
-        )
+            doc_type: kyomi_core::models::DocType::Dashboard,
+            embed,
+        })
         .await
         {
             Ok(id) => id,
@@ -332,11 +341,14 @@ impl AgentTool for CreateDashboardTool {
             Err(e) => return Err(e),
         };
 
-        // Spawn background embedding generation for non-trivial content
+        // Spawn background embedding generation for non-trivial content.
+        // This writes the row-level `dashboards.embedding` column (nothing
+        // reads it today — see KYO-777), a separate concern from the
+        // `knowledge_chunks` population `apply_create` just did above.
         if content.len() >= 50 {
             kyomi_auth::dashboard_service::spawn_embedding_generation(
                 ctx.db.clone(),
-                ctx.embedding.wait_ready().await?.clone(),
+                embed.clone(),
                 dashboard_id.clone(),
                 ctx.workspace_id.clone(),
                 title.trim().to_string(),
@@ -350,6 +362,7 @@ impl AgentTool for CreateDashboardTool {
         {
             crate::execution::generate_dashboard_summary(
                 crate::execution::DashboardSummaryParams {
+                    validation_context: ctx.query_context(),
                     db: ctx.db.clone(),
                     ws_manager: ctx.ws_manager.clone(),
                     dashboard_id: dashboard_id.clone(),
@@ -531,7 +544,16 @@ impl AgentTool for ModifyDashboardTool {
             .to_string());
         }
 
+        // KYO-541: resolved here (rather than only inside the length-gated
+        // background-embedding branch below, as before) because
+        // `apply_update` now rechunks `knowledge_chunks` synchronously for
+        // every content-changing write, including this tool's — previously
+        // the only one of the three "replace a document's content" tools
+        // that never refreshed chunks at all.
+        let embed = ctx.embedding.wait_ready().await?;
+
         match apply_update(ApplyUpdateParams {
+            validation_context: Some(&ctx.query_context()),
             db: &ctx.db,
             dashboard_id,
             workspace_id: &ctx.workspace_id,
@@ -540,6 +562,8 @@ impl AgentTool for ModifyDashboardTool {
             content,
             change_summary,
             expected_content_hash: existing.as_ref().and_then(|d| d.content_hash.as_deref()),
+            document_scope: ctx.document_id.as_deref(),
+            embed,
         })
         .await
         {
@@ -583,7 +607,7 @@ impl AgentTool for ModifyDashboardTool {
                 .unwrap_or_default();
             kyomi_auth::dashboard_service::spawn_embedding_generation(
                 ctx.db.clone(),
-                ctx.embedding.wait_ready().await?.clone(),
+                embed.clone(),
                 dashboard_id.to_string(),
                 ctx.workspace_id.clone(),
                 effective_title.clone(),
@@ -594,6 +618,7 @@ impl AgentTool for ModifyDashboardTool {
             if kyomi_auth::dashboard_service::extract_summary(c).is_none() {
                 crate::execution::generate_dashboard_summary(
                     crate::execution::DashboardSummaryParams {
+                    validation_context: ctx.query_context(),
                         db: ctx.db.clone(),
                         ws_manager: ctx.ws_manager.clone(),
                         dashboard_id: dashboard_id.to_string(),
@@ -695,7 +720,7 @@ mod tests {
     use super::*;
     use kyomi_auth::websocket::WebSocketManager;
 
-    use crate::test_support::{build_ctx, seed_user_and_workspace, test_pool};
+    use crate::test_support::{build_ctx, loaded_embedding, seed_user_and_workspace, test_pool};
 
     /// Insert a second user, `"user-b"`, into workspace `"ws-1"` alongside
     /// the `"user-a"` owner `seed_user_and_workspace` sets up. Used by the
@@ -1051,6 +1076,9 @@ mod tests {
 
         let mut ctx = build_ctx(db);
         ctx.ws_manager = manager;
+        // KYO-776: `apply_create` resolves an embedding reference for every
+        // create this tool makes, to populate `knowledge_chunks`.
+        ctx.embedding = loaded_embedding();
 
         let result = CreateDashboardTool
             .execute(
@@ -1097,7 +1125,10 @@ mod tests {
             .await
             .expect("seed pre-existing dashboard");
         }
-        let ctx = build_ctx(db);
+        let mut ctx = build_ctx(db);
+        // KYO-776: `apply_create` resolves `embed` before the free-tier
+        // limit check inside `create_dashboard` runs.
+        ctx.embedding = loaded_embedding();
 
         let result = CreateDashboardTool
             .execute(
@@ -1113,6 +1144,62 @@ mod tests {
         assert!(
             parsed["error"].as_str().unwrap_or_default().contains("Free tier is limited to 5"),
             "{result}"
+        );
+    }
+
+    /// KYO-776, the load-bearing regression test. Before this ticket,
+    /// `CreateDashboardTool` never called `rechunk_document` at all — only
+    /// `spawn_embedding_generation` (the row-level `dashboards.embedding`
+    /// column nothing reads — KYO-777), never the `knowledge_chunks` table
+    /// `search_knowledge_chunks` actually queries. A dashboard created
+    /// through the agent therefore had zero `knowledge_chunks` rows until
+    /// its first edit, so `search_knowledge` could not find it at all in
+    /// the interval — see `apply_create`'s doc comment in
+    /// `tools/document/mod.rs`.
+    ///
+    /// Confirmed by mutation: commenting out the `rechunk_document(...)
+    /// .await?;` call `apply_create` added and re-running this test fails
+    /// with `left: Vec::new()`, `right: ["Q3 numbers land here."]` — the
+    /// exact bug this ticket fixes.
+    #[tokio::test]
+    async fn create_dashboard_populates_knowledge_chunks_before_any_edit() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let mut ctx = build_ctx(db);
+        ctx.embedding = loaded_embedding();
+
+        let result = CreateDashboardTool
+            .execute(
+                serde_json::json!({
+                    "title": "Q3 Report",
+                    "content": "Q3 numbers land here.",
+                    "verified_no_duplicates": true,
+                }),
+                &ctx,
+            )
+            .await
+            .expect("execute");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+        assert_eq!(parsed["success"], serde_json::json!(true), "{result}");
+        let dashboard_id = parsed["dashboard_id"].as_str().expect("dashboard_id").to_string();
+
+        let sq = match &ctx.db {
+            kyomi_core::DbPool::Sqlite(sq) => sq,
+            kyomi_core::DbPool::Postgres(_) => unreachable!("test pool is always sqlite"),
+        };
+        let chunk_contents: Vec<String> = sqlx::query_scalar(
+            "SELECT content FROM knowledge_chunks WHERE dashboard_id = ? ORDER BY chunk_index",
+        )
+        .bind(&dashboard_id)
+        .fetch_all(sq)
+        .await
+        .expect("read back knowledge_chunks");
+
+        assert_eq!(
+            chunk_contents,
+            vec!["Q3 numbers land here.".to_string()],
+            "create_dashboard must populate knowledge_chunks with the created content before \
+             any edit, not leave it empty until the first edit: {chunk_contents:?}"
         );
     }
 
@@ -1195,7 +1282,11 @@ mod tests {
         )
         .await
         .expect("seed non-empty dashboard");
-        let ctx = build_ctx(db);
+        let mut ctx = build_ctx(db);
+        // KYO-541: `apply_update` now resolves an embedding reference for
+        // every write this tool makes, including title-only renames — see
+        // `ApplyUpdateParams::embed`'s doc comment.
+        ctx.embedding = loaded_embedding();
 
         let result = ModifyDashboardTool
             .execute(
@@ -1215,7 +1306,10 @@ mod tests {
 
     #[tokio::test]
     async fn modify_dashboard_not_found_returns_error_json() {
-        let ctx = build_ctx(test_pool().await);
+        let mut ctx = build_ctx(test_pool().await);
+        // KYO-541: `apply_update` resolves `embed` before it knows the
+        // dashboard doesn't exist.
+        ctx.embedding = loaded_embedding();
         let result = ModifyDashboardTool
             .execute(
                 serde_json::json!({"dashboard_id": "nope", "title": "x"}),
@@ -1241,7 +1335,10 @@ mod tests {
         )
         .await
         .expect("seed dashboard owned by user-b");
-        let ctx = build_ctx(db); // build_ctx defaults to user-a
+        let mut ctx = build_ctx(db); // build_ctx defaults to user-a
+        // KYO-541: `apply_update` resolves `embed` before the ownership
+        // check inside `update_dashboard` runs.
+        ctx.embedding = loaded_embedding();
 
         let result = ModifyDashboardTool
             .execute(
@@ -1285,7 +1382,10 @@ mod tests {
         )
         .await
         .expect("seed dashboard");
-        let ctx = build_ctx(db);
+        let mut ctx = build_ctx(db);
+        // KYO-541: both writes below carry `content`, so `apply_update`
+        // rechunks `knowledge_chunks` synchronously after each.
+        ctx.embedding = loaded_embedding();
 
         // First writer's call: reads the current (pre-existing) hash and
         // writes against it.
@@ -1379,7 +1479,10 @@ mod tests {
         .await
         .expect("advance content_hash");
 
+        let embedding = loaded_embedding();
+        let embed = embedding.wait_ready().await.expect("loaded_embedding is pre-loaded");
         let outcome = apply_update(ApplyUpdateParams {
+            validation_context: None,
             db: &db,
             dashboard_id: &dashboard_id,
             workspace_id: "ws-1",
@@ -1388,6 +1491,8 @@ mod tests {
             content: Some("v3, from a writer holding the stale v1 hash"),
             change_summary: None,
             expected_content_hash: Some("0000000000000000-not-the-real-hash"),
+            document_scope: None,
+            embed,
         })
         .await
         .expect("apply_update");
@@ -1427,6 +1532,9 @@ mod tests {
 
         let mut ctx = build_ctx(db);
         ctx.ws_manager = manager;
+        // KYO-541: the write below carries `content`, so `apply_update`
+        // rechunks `knowledge_chunks` synchronously.
+        ctx.embedding = loaded_embedding();
 
         let result = ModifyDashboardTool
             .execute(
@@ -1455,6 +1563,205 @@ mod tests {
         assert!(msg1.contains("\"action\":\"updated\""), "{msg1}");
         let msg2 = rx.try_recv().expect("sync_action broadcast");
         assert!(msg2.contains("sync_action"), "{msg2}");
+    }
+
+    /// KYO-541, the load-bearing regression test. Before this ticket,
+    /// `modify_dashboard` never called `rechunk_document` at all — only
+    /// `edit_knowledge_file`/`write_knowledge_file` did (see
+    /// `tools/document/mod.rs`'s pre-KYO-541 `NOTE`, quoted in the ticket) —
+    /// so a `DocType::Dashboard` row's `knowledge_chunks` rows went stale
+    /// on every edit made through this tool and nothing ever refreshed
+    /// them again. That is a real, user-visible bug:
+    /// `search_knowledge_chunks` (`tools/knowledge.rs`) joins
+    /// `knowledge_chunks` and applies a `doc_type` filter only when the
+    /// caller supplies one — `search_knowledge`'s tool description tells
+    /// the model "Omit to search everything", so the normal, unfiltered
+    /// case reads dashboard-typed chunks too, and they never reflected a
+    /// post-edit dashboard.
+    ///
+    /// The chunk row seeded below stands in for whatever `knowledge_chunks`
+    /// state existed before this edit. Against pre-KYO-541
+    /// `modify_dashboard`, this assertion cannot pass: that code path never
+    /// calls `rechunk_document`, so the seeded pre-edit content reads back
+    /// unchanged. Confirmed by mutation: commenting out the `if let
+    /// Some(content) = params.content { rechunk_document(...).await?; }`
+    /// block this ticket added to `apply_update`
+    /// (`tools/document/mod.rs`) and re-running this test fails with
+    /// `left: ["stale pre-edit content"], right: ["fresh post-edit \
+    /// content, via modify_dashboard"]` — the exact bug this ticket fixes.
+    #[tokio::test]
+    async fn modify_dashboard_refreshes_knowledge_chunks_for_dashboard_doc_type() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let dashboard_id = kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Q3 Report", "stale pre-edit content",
+            kyomi_core::models::DocType::Dashboard, None,
+        )
+        .await
+        .expect("seed dashboard");
+
+        // Seed a chunk row reflecting the *pre-edit* content — the state a
+        // prior (correctly-chunking) edit would have left behind, and which
+        // the KYO-541 bug left permanently stale because nothing ever
+        // refreshed it again.
+        let embedding = loaded_embedding();
+        let embed = embedding.wait_ready().await.expect("loaded_embedding is pre-loaded");
+        kyomi_auth::dashboard_service::rechunk_document(
+            &db, embed, &dashboard_id, "stale pre-edit content", "ws-1",
+        )
+        .await
+        .expect("seed stale chunk");
+
+        let mut ctx = build_ctx(db);
+        ctx.embedding = loaded_embedding();
+
+        let result = ModifyDashboardTool
+            .execute(
+                serde_json::json!({
+                    "dashboard_id": dashboard_id,
+                    "content": "fresh post-edit content, via modify_dashboard",
+                }),
+                &ctx,
+            )
+            .await
+            .expect("execute");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+        assert_eq!(parsed["success"], serde_json::json!(true), "{result}");
+
+        let sq = match &ctx.db {
+            kyomi_core::DbPool::Sqlite(sq) => sq,
+            kyomi_core::DbPool::Postgres(_) => unreachable!("test pool is always sqlite"),
+        };
+        let chunk_contents: Vec<String> = sqlx::query_scalar(
+            "SELECT content FROM knowledge_chunks WHERE dashboard_id = ? ORDER BY chunk_index",
+        )
+        .bind(&dashboard_id)
+        .fetch_all(sq)
+        .await
+        .expect("read back knowledge_chunks");
+
+        assert_eq!(
+            chunk_contents,
+            vec!["fresh post-edit content, via modify_dashboard".to_string()],
+            "modify_dashboard must refresh knowledge_chunks to the new content, not leave the \
+             pre-edit chunk in place: {chunk_contents:?}"
+        );
+    }
+
+    // -- ModifyDashboardTool via a document-scoped copilot (KYO-536) --------
+    //
+    // These two replace the `UpdateDashboardCopilotTool` KYO-537 pins that
+    // used to live in `tools/copilot.rs` — see the note left there. The
+    // dashboard copilot now writes through this real tool, scoped to the
+    // open document via `ToolContext::document_id`.
+
+    /// KYO-536 deliberately flips KYO-537's
+    /// `update_dashboard_copilot_writes_nothing_to_db_only_sends_websocket`
+    /// pin: a copilot edit now persists to the database (and, since every
+    /// `update_dashboard` call creates a version row first, produces a
+    /// version too) rather than only ever pushing a WebSocket draft.
+    #[tokio::test]
+    async fn modify_dashboard_copilot_scoped_write_persists_and_versions() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let dashboard_id = kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Original", "v1", kyomi_core::models::DocType::Dashboard, None,
+        )
+        .await
+        .expect("seed dashboard");
+
+        let mut ctx = build_ctx(db);
+        // The copilot is scoped to the document it was opened against —
+        // here, the same dashboard being edited.
+        ctx.document_id = Some(dashboard_id.clone());
+        // KYO-541: the write below carries `content`, so `apply_update`
+        // rechunks `knowledge_chunks` synchronously.
+        ctx.embedding = loaded_embedding();
+
+        let versions_before = kyomi_auth::dashboard_service::get_version_count(&ctx.db, &dashboard_id)
+            .await
+            .expect("version count before");
+
+        let result = ModifyDashboardTool
+            .execute(
+                serde_json::json!({
+                    "dashboard_id": dashboard_id,
+                    "content": "v2, written by the copilot",
+                }),
+                &ctx,
+            )
+            .await
+            .expect("a scoped write to the open document must succeed");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+        assert_eq!(parsed["success"], serde_json::json!(true), "{result}");
+
+        let dash = kyomi_auth::dashboard_service::get_dashboard(&ctx.db, &dashboard_id, "ws-1", "user-a")
+            .await
+            .expect("lookup")
+            .expect("exists");
+        assert_eq!(dash.content, "v2, written by the copilot", "the write must be saved, not draft-only");
+
+        let versions_after = kyomi_auth::dashboard_service::get_version_count(&ctx.db, &dashboard_id)
+            .await
+            .expect("version count after");
+        assert_eq!(
+            versions_after,
+            versions_before + 1,
+            "a copilot edit must create a version row like any other update_dashboard call"
+        );
+    }
+
+    /// A copilot scoped to one open document must not be able to write a
+    /// different document, even if the model is confused (or manipulated
+    /// via prompt injection in the content it read) into naming one.
+    #[tokio::test]
+    async fn modify_dashboard_copilot_scope_refuses_other_document() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let open_id = kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Open Document", "open content", kyomi_core::models::DocType::Dashboard, None,
+        )
+        .await
+        .expect("seed open dashboard");
+        let other_id = kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Other Document", "other content", kyomi_core::models::DocType::Dashboard, None,
+        )
+        .await
+        .expect("seed other dashboard");
+
+        let mut ctx = build_ctx(db);
+        ctx.document_id = Some(open_id.clone());
+        // KYO-541: `apply_update` resolves `embed` before the scope check
+        // inside it runs.
+        ctx.embedding = loaded_embedding();
+
+        // ModifyDashboardTool converts `apply_update`'s `Err(Forbidden)` into
+        // a structured `Ok` result — same treatment it already gives an
+        // ownership-forbidden write — rather than a raw `Err`.
+        let result = ModifyDashboardTool
+            .execute(
+                serde_json::json!({
+                    "dashboard_id": other_id,
+                    "content": "hijacked content",
+                }),
+                &ctx,
+            )
+            .await
+            .expect("a scope violation is a structured result, not an Err");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+        assert!(
+            parsed["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("scoped to a single open document"),
+            "{result}"
+        );
+
+        let other = kyomi_auth::dashboard_service::get_dashboard(&ctx.db, &other_id, "ws-1", "user-a")
+            .await
+            .expect("lookup")
+            .expect("exists");
+        assert_eq!(other.content, "other content", "the out-of-scope document must be untouched");
     }
 
     // -- DeleteDashboardTool --------------------------------------------------
@@ -1549,5 +1856,39 @@ mod tests {
             .await
             .expect("lookup");
         assert!(gone.is_none(), "the dashboard row must actually be gone");
+    }
+
+    /// KYO-536 defense-in-depth: no copilot is granted `delete_dashboard`
+    /// today, but deletion is a write like any other — a copilot scoped to
+    /// one open document must not be able to delete a *different* one
+    /// either, so a future tool grant doesn't silently reopen this hole.
+    #[tokio::test]
+    async fn delete_dashboard_copilot_scope_refuses_other_document() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let open_id = kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Open", "open content", kyomi_core::models::DocType::Dashboard, None,
+        )
+        .await
+        .expect("seed open dashboard");
+        let other_id = kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Other", "other content", kyomi_core::models::DocType::Dashboard, None,
+        )
+        .await
+        .expect("seed other dashboard");
+
+        let mut ctx = build_ctx(db);
+        ctx.document_id = Some(open_id);
+
+        let err = DeleteDashboardTool
+            .execute(serde_json::json!({"dashboard_id": other_id}), &ctx)
+            .await
+            .expect_err("a delete outside the copilot's scope must be refused");
+        assert!(matches!(err, kyomi_core::Error::Forbidden(_)), "got: {err:?}");
+
+        let still_there = kyomi_auth::dashboard_service::get_dashboard(&ctx.db, &other_id, "ws-1", "user-a")
+            .await
+            .expect("lookup");
+        assert!(still_there.is_some(), "the out-of-scope document must not be deleted");
     }
 }

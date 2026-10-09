@@ -12,12 +12,12 @@
 
 use serde_json::Value;
 
-/// Get the base URL — either from env (for Python) or start a Rust server.
-async fn base_url() -> String {
-    if let Ok(url) = std::env::var("CONTRACT_TEST_BASE_URL") {
-        return url;
-    }
-
+/// Build a fresh `AppState` against this worktree's private test database —
+/// the shared core of every Rust-target test in this file. Split out of
+/// [`base_url`] so [`base_url_with_schema_drift`] (KYO-716) can inject a
+/// migration-drift value into `schema_drift` before the server starts,
+/// without duplicating this ~30-line setup a second time.
+async fn build_state() -> kyomi_server::state::AppState {
     // Load shared constants (idempotent — OnceLock ignores second call)
     if let Ok(path) = kyomi_core::constants::find_constants_file() {
         let _ = kyomi_core::constants::load(&path);
@@ -48,7 +48,7 @@ async fn base_url() -> String {
         None, db.clone(),
     );
 
-    let state = kyomi_server::state::AppState {
+    kyomi_server::state::AppState {
         db,
         kv: kv.clone(),
         redis: None,
@@ -63,8 +63,13 @@ async fn base_url() -> String {
         connect_token: None,
         connect_registry: kyomi_server::connect::registry::ConnectRegistry::new_local(),
         platforms: std::sync::Arc::new(kyomi_core::platform::PlatformRegistry::new()),
-    };
+        schema_drift: kyomi_server::schema_drift::SchemaDriftStatus::default(),
+        process_instance: "test-instance:0".to_string(),
+    }
+}
 
+/// Start `state`'s router on a random local port and return its base URL.
+async fn start_server(state: kyomi_server::state::AppState) -> String {
     let app = kyomi_server::build_service(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -79,6 +84,31 @@ async fn base_url() -> String {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     format!("http://{addr}")
+}
+
+/// Get the base URL — either from env (for Python) or start a Rust server.
+async fn base_url() -> String {
+    if let Ok(url) = std::env::var("CONTRACT_TEST_BASE_URL") {
+        return url;
+    }
+
+    start_server(build_state().await).await
+}
+
+/// Like [`base_url`], but seeds `schema_drift` with `missing_versions` before
+/// the server starts — for pinning KYO-716's health-endpoint contract: a
+/// distinct `services.schema` key without touching `status`, so drift can
+/// never trip the readiness/liveness probes that key off it. Rust-target
+/// only: skipped (not failed) under `CONTRACT_TEST_BASE_URL` since there is
+/// no equivalent hook into the Python backend's process state.
+async fn base_url_with_schema_drift(missing_versions: Vec<i64>) -> Option<String> {
+    if std::env::var("CONTRACT_TEST_BASE_URL").is_ok() {
+        return None;
+    }
+
+    let state = build_state().await;
+    state.schema_drift.set(missing_versions);
+    Some(start_server(state).await)
 }
 
 fn client() -> reqwest::Client {
@@ -163,6 +193,54 @@ async fn health_status_reflects_service_health() {
         status == "healthy" || status == "degraded",
         "unexpected status: {status}"
     );
+}
+
+// ─── Migration schema drift (KYO-716) ────────────────────────────────────────
+//
+// The health endpoint backs the `kyomi-api` deployment's startup, readiness,
+// AND liveness probes — see `kyomi-private/k8s/kyomi-api.yaml`. Drift must be
+// alertable (a `services.schema` entry) without ever changing `status`,
+// because a restart is exactly the operation that fails when the schema is
+// ahead of this binary: flipping `status` here would make the probes cause
+// the very outage this ticket exists to prevent.
+
+#[tokio::test]
+async fn health_schema_key_reports_current_when_no_drift() {
+    let Some(base) = base_url_with_schema_drift(Vec::new()).await else {
+        return; // CONTRACT_TEST_BASE_URL target — no hook into its process state
+    };
+    let resp = client().get(format!("{base}/api/health")).send().await.unwrap();
+
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["services"]["schema"].as_str(), Some("current"));
+}
+
+#[tokio::test]
+async fn health_schema_key_names_drifted_versions_without_changing_status() {
+    let missing_versions = vec![20260823000000_i64, 20260829000000_i64];
+    let Some(base) = base_url_with_schema_drift(missing_versions.clone()).await else {
+        return; // CONTRACT_TEST_BASE_URL target — no hook into its process state
+    };
+    let resp = client().get(format!("{base}/api/health")).send().await.unwrap();
+
+    let body: Value = resp.json().await.unwrap();
+    let schema = body["services"]["schema"].as_str().expect("services.schema must be a string");
+    assert_ne!(schema, "current", "drift must not report as current");
+    for version in &missing_versions {
+        assert!(
+            schema.contains(&version.to_string()),
+            "services.schema must name {version}; got: {schema}"
+        );
+    }
+
+    // The load-bearing invariant (KYO-716): drift is alertable via the
+    // `services` map, but `status` — read by the startup, readiness, AND
+    // liveness probes — is untouched by it, and stays one of the two values
+    // `contract_health.rs`'s own schema has always allowed. A third value or
+    // a drift-triggered "degraded" would risk the probes restarting this
+    // process, which is exactly the operation that fails under drift.
+    let status = body["status"].as_str().unwrap();
+    assert_eq!(status, "healthy", "drift must not change status");
 }
 
 // ─── /api/v1/health alias ────────────────────────────────────────────────────
@@ -335,6 +413,96 @@ async fn has_security_headers() {
         Some("1; mode=block"),
         "missing or wrong X-XSS-Protection"
     );
+}
+
+/// Exercise the two real HTML paths that serve the shared Trunk shell: the
+/// static SPA route and the SSR-rendered login route. Every inline script
+/// must carry the same nonce authorized by that response's CSP header.
+#[tokio::test]
+async fn frontend_csp_nonce_matches_shell_and_ssr_inline_scripts() {
+    // This is a Rust middleware contract; CONTRACT_TEST_BASE_URL targets the
+    // separate Python server, whose frontend is not served by this router.
+    if std::env::var("CONTRACT_TEST_BASE_URL").is_ok() {
+        return;
+    }
+
+    let embedded_index = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../crates/kyomi-ui/dist/index.html");
+    if !embedded_index.is_file() {
+        eprintln!(
+            "skipping frontend CSP route check: generated frontend index is absent at {} (this job does not run Trunk)",
+            embedded_index.display()
+        );
+        return;
+    }
+
+    let base = base_url().await;
+    for path in ["/signup/complete", "/login"] {
+        let response = client()
+            .get(format!("{base}{path}"))
+            .send()
+            .await
+            .expect("frontend request should succeed");
+        assert_eq!(response.status(), 200, "{path} should serve HTML");
+
+        let csp = response
+            .headers()
+            .get("content-security-policy")
+            .expect("frontend response should include CSP")
+            .to_str()
+            .expect("CSP should be valid ASCII")
+            .to_owned();
+        let script_src = csp
+            .split(';')
+            .find(|directive| directive.trim_start().starts_with("script-src "))
+            .expect("frontend CSP should define script-src");
+        assert!(!script_src.contains("'unsafe-inline'"), "{path}: {csp}");
+        assert!(!script_src.contains("'unsafe-eval'"), "{path}: {csp}");
+        assert!(script_src.contains("'wasm-unsafe-eval'"), "{path}: {csp}");
+        assert!(script_src.contains("https://js.stripe.com"), "{path}: {csp}");
+        assert!(
+            script_src.contains("https://static.cloudflareinsights.com"),
+            "{path}: {csp}"
+        );
+        let style_src = csp
+            .split(';')
+            .find(|directive| directive.trim_start().starts_with("style-src "))
+            .expect("frontend CSP should define style-src");
+        assert!(style_src.contains("'unsafe-inline'"), "{path}: {csp}");
+
+        let nonce = script_src
+            .split_whitespace()
+            .find_map(|source| source.strip_prefix("'nonce-")?.strip_suffix('\''))
+            .expect("frontend CSP should include a nonce source");
+        let html = response.text().await.expect("frontend body should be text");
+        assert!(
+            !html.contains("__KYOMI_CSP_NONCE__"),
+            "{path}: shell nonce was not substituted"
+        );
+        if path == "/login" {
+            assert!(html.contains("<body data-ssr"), "login should use the SSR path");
+        }
+
+        let mut rest = html.as_str();
+        let mut inline_script_count = 0;
+        while let Some(start) = rest.find("<script") {
+            rest = &rest[start..];
+            let end = rest.find('>').expect("script opening tag should close");
+            let tag = &rest[..=end];
+            if !tag.contains("src=") {
+                inline_script_count += 1;
+                assert!(
+                    tag.contains(&format!("nonce=\"{nonce}\"")),
+                    "{path}: inline script did not carry CSP nonce: {tag}"
+                );
+            }
+            rest = &rest[end + 1..];
+        }
+        assert!(
+            inline_script_count > 0,
+            "{path}: expected inline frontend scripts"
+        );
+    }
 }
 
 // KYO-257: HSTS is gated on two independent conditions — non-demo mode

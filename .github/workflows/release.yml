@@ -96,6 +96,7 @@ jobs:
       - name: Strip local-dev linker and trunk profile
         run: |
           sed -i '/# BEGIN_LOCAL_DEV_LINKER/,/# END_LOCAL_DEV_LINKER/d' .cargo/config.toml
+          sed -i '/# BEGIN_LOCAL_DEV_DEBUGINFO/,/# END_LOCAL_DEV_DEBUGINFO/d' .cargo/config.toml
           sed -i '/cargo_profile/d' crates/kyomi-ui/Trunk.toml
 
       - name: Install brotli (Trunk post_build hook dependency)
@@ -258,6 +259,7 @@ jobs:
       - name: Strip local-dev linker and trunk profile
         run: |
           ${{ matrix.sed_inplace }} '/# BEGIN_LOCAL_DEV_LINKER/,/# END_LOCAL_DEV_LINKER/d' .cargo/config.toml
+          ${{ matrix.sed_inplace }} '/# BEGIN_LOCAL_DEV_DEBUGINFO/,/# END_LOCAL_DEV_DEBUGINFO/d' .cargo/config.toml
           ${{ matrix.sed_inplace }} '/cargo_profile/d' crates/kyomi-ui/Trunk.toml
 
       - name: Install brotli (Trunk post_build hook dependency)

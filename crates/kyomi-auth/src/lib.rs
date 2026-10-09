@@ -12,14 +12,18 @@
 //! - Cookie helpers
 //! - Redis-backed rate limiting
 
+pub mod chartml_validation;
 pub mod analytics_clickhouse;
 pub mod analytics_notifications;
 pub mod analytics_quota;
 pub mod analytics_site_service;
 pub mod auth_service;
+pub mod billing_gate;
 pub mod billing_service;
+pub mod billing_webhook;
 pub mod catalog;
 pub mod chat_service;
+pub mod conversation_events;
 pub mod collection_service;
 pub mod connect_token;
 pub mod copilot_service;
@@ -42,6 +46,7 @@ pub mod middleware;
 pub mod notifications;
 pub mod onboarding_service;
 pub mod password;
+pub mod payment_recovery;
 pub mod permissions;
 pub mod push_service;
 pub mod rate_limiter;

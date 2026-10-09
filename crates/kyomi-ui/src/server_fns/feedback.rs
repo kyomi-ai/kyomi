@@ -23,7 +23,7 @@ pub struct FeedbackResponse {
 ///
 /// Delegates entirely to `kyomi_auth::feedback_service::submit_feedback`,
 /// which owns persistence, rate limiting, and notification side effects.
-#[server(prefix = "/leptos-api", endpoint = "submit_feedback")]
+#[server(prefix = "/leptos-api", endpoint = "submit_feedback", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn submit_feedback(
     feedback_type: String,
     description: String,

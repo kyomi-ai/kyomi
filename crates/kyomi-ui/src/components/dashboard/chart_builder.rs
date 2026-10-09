@@ -39,6 +39,7 @@ use crate::components::Spinner;
 use crate::pages::sql_editor::catalog_tree::CatalogTree;
 use crate::pages::sql_editor::results_table::ResultsTable;
 use crate::pages::sql_editor::types::QueryResult;
+use crate::pages::sql_editor::SqlCodeEditor;
 use crate::server_fns::datasources::list_datasources;
 
 use crate::chartml_provider::configured_chartml;
@@ -523,6 +524,98 @@ fn ast_set_series(ast: &mut Value, series: &[SeriesEntry]) {
     vis_map.insert(Value::String("rows".to_string()), Value::Sequence(rows));
 }
 
+// ─── Keyboard shortcut: ⌘K opens the catalog sidebar ────────────────────────
+
+/// Sets up a document-level `keydown` listener for Cmd/Ctrl+K that toggles the
+/// modal's own catalog sidebar (`catalog_open`).
+///
+/// `SqlCodeEditor` (`pages/sql_editor/code_editor.rs:485`) always shows the
+/// "press ⌘K to browse the catalog" placeholder, but only the SQL editor
+/// *page* installs a shortcut that makes it do anything
+/// (`pages/sql_editor/mod.rs:390-400`) — inside this modal the shortcut
+/// previously did nothing (KYO-725). Mirrors that page handler's shape:
+/// document-level listener, `Closure` kept alive via `SendWrapper` and
+/// removed in `on_cleanup` rather than leaked with `.forget()` — same
+/// established pattern as `code_editor.rs`'s `use_run_shortcut`.
+///
+/// **Registered in the CAPTURE phase, not bubble — this is load-bearing.**
+/// `ChartBuilderModal` is reachable from two places: `results_container.rs:429`
+/// mounts it as an overlay directly inside `SqlEditorPage`, and that page
+/// installs its own unconditional bubble-phase `document` ⌘K listener
+/// (`pages/sql_editor/mod.rs:393-400`) that toggles `state.active_right_tab`
+/// with no guard for an overlay being open. Two bubble-phase listeners on the
+/// same `document` target both fire for one keypress — the page's handler
+/// would silently flip its own sidebar tab underneath the modal every time
+/// this one opens the catalog. Capture-phase listeners on a target run before
+/// bubble-phase ones regardless of registration order, so this handler runs
+/// first and calls `stop_propagation()` once it decides to act, which keeps
+/// the page's listener from ever seeing the event. Only the keys this handler
+/// actually handles are stopped — everything else passes through untouched.
+/// Same nesting trap as the `EditorHandle` context collision fixed in #509.
+///
+/// `open` is checked at keydown time (not read reactively) so a modal that
+/// stays mounted-but-closed doesn't steal ⌘K from the SQL editor page it can
+/// be rendered alongside.
+#[cfg(target_arch = "wasm32")]
+fn use_catalog_shortcut(
+    open: Signal<bool>,
+    catalog_open: ReadSignal<bool>,
+    set_catalog_open: WriteSignal<bool>,
+) {
+    use wasm_bindgen::closure::Closure;
+    use wasm_bindgen::JsCast;
+
+    Effect::new(move |_| {
+        let Some(window) = web_sys::window() else { return };
+        let Some(document) = window.document() else { return };
+
+        let closure = Closure::wrap(Box::new(move |ev: web_sys::KeyboardEvent| {
+            if !open.get_untracked() {
+                return;
+            }
+            let is_meta = ev.meta_key() || ev.ctrl_key();
+            if is_meta && ev.key().eq_ignore_ascii_case("k") {
+                // Stop the page's own bubble-phase ⌘K listener
+                // (pages/sql_editor/mod.rs:393-400) from also firing for this
+                // keypress — see the capture-phase note on this fn's doc
+                // comment. Only stopped for the key this handler actually
+                // handles; every other keydown passes through untouched.
+                ev.prevent_default();
+                ev.stop_propagation();
+                let is_open = catalog_open.try_get_untracked().unwrap_or(false);
+                set_catalog_open.try_set(!is_open);
+            }
+        }) as Box<dyn FnMut(web_sys::KeyboardEvent)>);
+
+        // `use_capture = true` — see the capture-phase note on this fn's doc
+        // comment. The matching `remove_event_listener_with_callback_and_bool`
+        // below must pass the same `true`; a bubble-phase removal call would
+        // silently fail to remove a capture-phase listener, leaking it across
+        // every modal open/close cycle.
+        let _ = document.add_event_listener_with_callback_and_bool(
+            "keydown",
+            closure.as_ref().unchecked_ref(),
+            true,
+        );
+
+        // Move the Closure into the cleanup callback so it stays alive as long as
+        // the listener exists, and is properly dropped when the component unmounts
+        // (instead of closure.forget(), which permanently leaks memory).
+        // SendWrapper is required because Closure is !Send but on_cleanup needs Send+Sync.
+        let document_clone = document.clone();
+        let closure_ref = closure.as_ref().unchecked_ref::<js_sys::Function>().clone();
+        let closure_wrapper = send_wrapper::SendWrapper::new(closure);
+        on_cleanup(move || {
+            let _ = document_clone.remove_event_listener_with_callback_and_bool(
+                "keydown",
+                &closure_ref,
+                true,
+            );
+            drop(closure_wrapper);
+        });
+    });
+}
+
 // ─── Component ──────────────────────────────────────────────────────────────
 
 /// Chart Builder Modal — create or edit a ChartML chart.
@@ -579,6 +672,13 @@ pub fn ChartBuilderModal(
         .unwrap_or_else(|| serialize_ast(&initial_ast_val));
     let yaml_text = RwSignal::new(initial_yaml_text);
 
+    // ── Text buffer for the SQL editor ──────────────────────────────────
+    // Tracks what the user is typing; never clobbered by an AST write.
+    // `SqlCodeEditor` two-way binds this, so it must be owned, not derived
+    // from the AST — a derived value is replaced underneath the cursor on
+    // every keystroke (KYO-725).
+    let sql_text = RwSignal::new(ast_get_query(&initial_ast_val));
+
     // Inline parse error for the YAML editor; None = clean.
     let yaml_parse_error = RwSignal::new(None::<String>);
 
@@ -614,9 +714,12 @@ pub fn ChartBuilderModal(
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or_else(|| serialize_ast(&new_ast));
 
+            let new_sql = ast_get_query(&new_ast);
+
             let _ = ast.try_set(new_ast);
             let _ = visual_series.try_set(new_visual_series);
             let _ = yaml_text.try_set(text);
+            let _ = sql_text.try_set(new_sql);
             let _ = yaml_parse_error.try_set(None);
         }
     });
@@ -656,7 +759,44 @@ pub fn ChartBuilderModal(
     // can fire during the <Show> teardown cascade.
     let title_sig = Memo::new(move |_| ast.try_with(ast_get_title).unwrap_or_default());
     let datasource_slug_sig = Memo::new(move |_| ast.try_with(ast_get_datasource).unwrap_or_default());
+    // `Memo -> Signal` via `.into()` allocates a NEW arena node, owned by
+    // whatever Owner is current at the call site. Converting here — in
+    // ChartBuilder's own component body — makes this Signal ChartBuilder-owned,
+    // so it outlives any child subtree (e.g. the `<Select>` below) that reads
+    // it. Converting inline at the read site would instead tie its lifetime
+    // to that subtree's Owner, disposing it out from under any reader that
+    // survives the subtree's teardown (KYO-676).
+    let datasource_value: Signal<String> = datasource_slug_sig.into();
+    // Catalog sidebar's datasource filter — `None` when no datasource is
+    // selected so `CatalogTree` and `SqlCodeEditor` both read the same
+    // signal instead of each deriving their own copy inline.
+    let catalog_slug_signal = Signal::derive(move || {
+        let slug = datasource_slug_sig.get();
+        if slug.is_empty() { None } else { Some(slug) }
+    });
     let sql_sig = Memo::new(move |_| ast.try_with(ast_get_query).unwrap_or_default());
+    // The footer is a `ChildrenFn` invoked inside `Modal`'s `<Show>` children
+    // context, so a signal read directly in that closure's body (not inside
+    // its own nested `move ||`) subscribes THAT context — re-running the
+    // entire modal subtree and remounting both code editors when it fires.
+    // Reading `sql_sig` there directly rebuilt the editors on every keystroke
+    // (KYO-725), but only once a datasource was selected, because the
+    // no-datasource branch short-circuits before `sql_sig` is ever read.
+    //
+    // This `Memo` only reduces HOW OFTEN that would fire (once, when the
+    // disabled boolean actually flips) — it does not by itself fix WHERE it
+    // is read. `footer_view` reads `save_disabled` inside the `disabled`
+    // attribute's own `move ||` closure, not here in the component body, so
+    // the subscription is scoped to that one attribute instead of the
+    // Show's children context. See `footer_view` below for why that
+    // placement is what actually matters.
+    let save_disabled = Memo::new(move |_| {
+        if datasource_slug_sig.try_get().unwrap_or_default().is_empty() {
+            false // inline chart — no SQL required
+        } else {
+            sql_sig.try_get().unwrap_or_default().trim().is_empty() // remote chart — SQL is required
+        }
+    });
     let chart_type_sig = Memo::new(move |_| ast.try_with(ast_get_chart_type).unwrap_or_else(|| "bar".to_string()));
     let x_field_sig = Memo::new(move |_| ast.try_with(ast_get_x_field).unwrap_or_default());
     let orientation_sig = Memo::new(move |_| ast.try_with(ast_get_orientation).unwrap_or_default());
@@ -680,6 +820,23 @@ pub fn ChartBuilderModal(
         yaml_text.set(ast.with_untracked(serialize_ast));
         yaml_parse_error.set(None);
     }
+
+    // ── SQL buffer → AST ────────────────────────────────────────────────
+    // `SqlCodeEditor` writes the user's text straight into `sql_text`, so
+    // this is where it reaches the AST. The equality guard is what keeps
+    // the *programmatic* re-seeds below (load-back, YAML tab, AI tab,
+    // catalog inserts) from re-entering `mutate_ast` and re-serialising
+    // `yaml_text` — which would destroy the raw saved YAML the load-back
+    // effect deliberately preserves. It does NOT diff the editor's own
+    // content; the editor is written unconditionally.
+    Effect::new(move |_| {
+        let text = sql_text.get();
+        if ast.with_untracked(ast_get_query) != text {
+            mutate_ast(ast, yaml_text, yaml_parse_error, move |a| {
+                ast_set_query(a, &text);
+            });
+        }
+    });
 
     // ── Series management ───────────────────────────────────────────────
     // Adds / removes operate on `visual_series` first, then propagate the
@@ -749,15 +906,21 @@ pub fn ChartBuilderModal(
         let insert_class = insert_class_clone.clone();
 
         // Disable insert: inline charts are always saveable, but remote charts
-        // (datasource selected) require SQL to be useful.
-        // Use try_get so this ChildrenFn gracefully handles disposal — it can
-        // be called by Modal during the <Show> teardown cascade.
-        let is_disabled = if datasource_slug_sig.try_get().unwrap_or_default().is_empty() {
-            false // inline chart — no SQL required
-        } else {
-            sql_sig.try_get().unwrap_or_default().trim().is_empty() // remote chart — SQL is required
-        };
-
+        // (datasource selected) require SQL to be useful. This whole closure
+        // body — everything up to the `view!` call — runs inside `Modal`'s
+        // `<Show>` children context (`crates/kyomi-ui-components/src/
+        // components/modal.rs:229`), so reading a signal directly HERE (not
+        // inside a nested `move ||`) subscribes that context, and firing it
+        // rebuilds the entire modal subtree, remounting both code editors.
+        // `save_disabled` flipping empty->non-empty on the first SQL
+        // keystroke did exactly that (KYO-725) even though the Memo only
+        // fires once — the bug is the READ'S SCOPE, not how often it fires.
+        // `disabled` below reads `save_disabled` inside its own `move ||`
+        // instead, so only that one attribute updates — the same leaf-closure
+        // shape already used correctly by the Title/X-Axis inputs'
+        // `prop:value=move || title_sig.get()` / `x_field_sig.get()`.
+        // Use try_get so that leaf closure gracefully handles disposal — it
+        // can be called by Modal during the <Show> teardown cascade.
         view! {
             <button
                 class=cancel_class
@@ -768,21 +931,13 @@ pub fn ChartBuilderModal(
             <button
                 class=insert_class
                 on:click=move |_| handle_insert.run(())
-                disabled=is_disabled
+                disabled=move || save_disabled.try_get().unwrap_or(false)
             >
                 {insert_label}
             </button>
         }
         .into_any()
     });
-
-    // ── SQL Editor on_change — writes to AST ────────────────────────────
-    let sql_on_change: Arc<dyn Fn(String) + Send + Sync> = Arc::new(move |new_val: String| {
-        mutate_ast(ast, yaml_text, yaml_parse_error, move |a| {
-            ast_set_query(a, &new_val);
-        });
-    });
-    let sql_on_change = StoredValue::new(sql_on_change);
 
     // ── YAML editor on_change ───────────────────────────────────────────
     // Writes the incoming text to yaml_text unconditionally (so cursor state
@@ -801,6 +956,7 @@ pub fn ChartBuilderModal(
                 set_next_series_id.set(next_id_after(&new_visual_series));
                 visual_series.set(new_visual_series);
                 ast.set(doc);
+                sql_text.set(ast.with_untracked(ast_get_query));
                 yaml_parse_error.set(None);
             }
             Err(e) => {
@@ -810,6 +966,17 @@ pub fn ChartBuilderModal(
     });
     let yaml_on_change = StoredValue::new(yaml_on_change);
 
+    // ── Editor handle for this modal's SQL editor ───────────────────────
+    // `SqlCodeEditor` resolves its `EditorHandle` from context. This modal
+    // is also rendered from inside `SqlEditorPage` (via `ResultsContainer`),
+    // which provides its own handle for the page's editor — so without a
+    // fresh one here the modal's editor would overwrite it on `on_ready`,
+    // hijacking the page's cursor readout, insert-at-cursor and dry-run
+    // markers, and leaving a dangling handle when the modal closes.
+    // Shadowing it in this subtree keeps the two editors independent.
+    #[cfg(target_arch = "wasm32")]
+    provide_context(RwSignal::new(None::<kode_leptos::EditorHandle>));
+
     // ── Catalog sidebar state ──────────────────────────────────────────
     let (catalog_open, set_catalog_open) = signal(false);
     let (catalog_tab, set_catalog_tab) = signal("catalog".to_string());
@@ -817,10 +984,44 @@ pub fn ChartBuilderModal(
     let (catalog_refresh_trigger, set_catalog_refresh_trigger) = signal(0u32);
     let catalog_sidebar_width = RwSignal::new(320.0_f64);
 
+    // ⌘K toggles the catalog sidebar while this modal is open (KYO-725) —
+    // `SqlCodeEditor`'s placeholder advertises the shortcut but nothing wired
+    // it up inside the modal.
+    #[cfg(target_arch = "wasm32")]
+    use_catalog_shortcut(open, catalog_open, set_catalog_open);
+
     // ── Query execution state ─────────────────────────────────────────
     let (query_running, set_query_running) = signal(false);
     let (query_result, set_query_result) = signal(None::<QueryResult>);
     let (query_error, set_query_error) = signal(None::<String>);
+
+    // ── Run query callback ──────────────────────────────────────────────
+    // Wired to both the shared `SqlCodeEditor`'s status-bar Run Query button
+    // and its Cmd/Ctrl+Enter shortcut (`on_run` + `on_run_query`).
+    let run_query_cb = Callback::new(move |()| {
+        let ds_slug = datasource_slug_sig.get_untracked();
+        let query_text = sql_text.get_untracked();
+        if ds_slug.is_empty() || query_text.trim().is_empty() {
+            return;
+        }
+        set_query_running.set(true);
+        set_query_error.set(None);
+        set_query_result.set(None);
+
+        #[cfg(target_arch = "wasm32")]
+        leptos::task::spawn_local(async move {
+            match crate::arrow_fetch::fetch_arrow_buffered(&ds_slug, &query_text, 50, 0, true, None).await {
+                Ok(arrow_result) => {
+                    let result = QueryResult::from_arrow(arrow_result, None, None);
+                    set_query_result.try_set(Some(result));
+                }
+                Err(e) => {
+                    set_query_error.try_set(Some(e));
+                }
+            }
+            set_query_running.try_set(false);
+        });
+    });
 
     // ── Preview state — remote data fetching ──────────────────────────
     // `ChartMLRef` is `Rc<ChartML>` on WASM (!Send + !Sync). Leptos signals
@@ -985,20 +1186,16 @@ pub fn ChartBuilderModal(
                                     // Database icon before dropdown
                                     <Icon icon=phosphor_leptos::DATABASE attr:class="w-4 h-4 text-muted-foreground flex-shrink-0" />
                                     <div class="w-full sm:w-[240px] min-w-0 sm:flex-shrink-0">
-                                        <Suspense fallback=move || view! {
-                                            <div class="text-sm text-muted-foreground">"Loading datasources..."</div>
-                                        }>
-                                            <Select
-                                                value=datasource_slug_sig.into()
-                                                options=datasource_options
-                                                on_change=move |slug: String| {
-                                                    mutate_ast(ast, yaml_text, yaml_parse_error, move |a| {
-                                                        ast_set_datasource(a, &slug);
-                                                    });
-                                                }
-                                                placeholder="Select a datasource..."
-                                            />
-                                        </Suspense>
+                                        <Select
+                                            value=datasource_value
+                                            options=datasource_options
+                                            on_change=move |slug: String| {
+                                                mutate_ast(ast, yaml_text, yaml_parse_error, move |a| {
+                                                    ast_set_datasource(a, &slug);
+                                                });
+                                            }
+                                            placeholder="Select a datasource..."
+                                        />
                                     </div>
                                     // Catalog toggle button (pill-style)
                                     <button
@@ -1017,62 +1214,19 @@ pub fn ChartBuilderModal(
                                     </button>
                                 </div>
 
-                                // SQL query editor — fills remaining space
-                                <div class="flex-1 min-h-0">
-                                    <SqlEditorSection
-                                        content=sql_sig.into()
-                                        on_change=sql_on_change.try_get_value().unwrap_or_else(|| std::sync::Arc::new(|_| {}))
+                                // SQL query editor — shared component; its StatusBar carries dry-run
+                                // validation, the BigQuery cost estimate, cursor position and Run Query.
+                                <div class="min-h-[200px] border border-input rounded-md overflow-hidden flex flex-col" style="height: calc(100vh - 420px);">
+                                    <SqlCodeEditor
+                                        content=sql_text
+                                        on_run=run_query_cb
+                                        datasource_slug=catalog_slug_signal
+                                        query_running=Signal::derive(move || query_running.get())
+                                        run_disabled=Signal::derive(move || {
+                                            datasource_slug_sig.get().is_empty() || sql_text.get().trim().is_empty()
+                                        })
+                                        on_run_query=run_query_cb
                                     />
-                                </div>
-
-                                // Run Query button
-                                <div class="flex items-center justify-between flex-shrink-0">
-                                    // Query status (row count / error indicator)
-                                    <div class="text-xs text-muted-foreground">
-                                        {move || {
-                                            if query_running.get() {
-                                                view! { <span class="flex items-center gap-1.5"><Spinner class="text-primary".to_string() />" Running..."</span> }.into_any()
-                                            } else if let Some(ref err) = query_error.get() {
-                                                view! { <span class="text-error-foreground" title=err.clone()>"Query failed"</span> }.into_any()
-                                            } else if let Some(ref result) = query_result.get() {
-                                                let total = result.total_rows.unwrap_or(result.row_count);
-                                                view! { <span>{format!("{total} rows")}</span> }.into_any()
-                                            } else {
-                                                view! { <span></span> }.into_any()
-                                            }
-                                        }}
-                                    </div>
-                                    <button
-                                        type="button"
-                                        class=format!("{BTN_BASE} {BTN_DEFAULT} {BTN_SIZE}")
-                                        disabled=move || query_running.get() || datasource_slug_sig.get().is_empty() || sql_sig.get().trim().is_empty()
-                                        on:click=move |_| {
-                                            let ds_slug = datasource_slug_sig.get_untracked();
-                                            let query_text = sql_sig.get_untracked();
-                                            if ds_slug.is_empty() || query_text.trim().is_empty() {
-                                                return;
-                                            }
-                                            set_query_running.set(true);
-                                            set_query_error.set(None);
-                                            set_query_result.set(None);
-
-                                            #[cfg(target_arch = "wasm32")]
-                                            leptos::task::spawn_local(async move {
-                                                match crate::arrow_fetch::fetch_arrow_buffered(&ds_slug, &query_text, 50, 0, true, None).await {
-                                                    Ok(arrow_result) => {
-                                                        let result = QueryResult::from_arrow(arrow_result, None, None);
-                                                        set_query_result.try_set(Some(result));
-                                                    }
-                                                    Err(e) => {
-                                                        set_query_error.try_set(Some(e));
-                                                    }
-                                                }
-                                                set_query_running.try_set(false);
-                                            });
-                                        }
-                                    >
-                                        "Run Query"
-                                    </button>
                                 </div>
 
                                 // Query error display
@@ -1106,11 +1260,6 @@ pub fn ChartBuilderModal(
                             // Catalog sidebar — uses shared RightPanel for consistent
                             // styling with the main SQL editor sidebar.
                             {
-                                let catalog_slug_signal = Signal::derive(move || {
-                                    let slug = datasource_slug_sig.get();
-                                    if slug.is_empty() { None } else { Some(slug) }
-                                });
-
                                 let catalog_tab_class = move |tab: &str| {
                                     let base = "flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md transition-colors";
                                     if catalog_tab.get() == tab {
@@ -1201,6 +1350,7 @@ pub fn ChartBuilderModal(
                                                             };
                                                             ast_set_query(a, &next);
                                                         });
+                                                        sql_text.set(ast.with_untracked(ast_get_query));
                                                     })
                                                     on_column_click=Callback::new(move |col_name: String| {
                                                         mutate_ast(ast, yaml_text, yaml_parse_error, move |a| {
@@ -1212,6 +1362,7 @@ pub fn ChartBuilderModal(
                                                             };
                                                             ast_set_query(a, &next);
                                                         });
+                                                        sql_text.set(ast.with_untracked(ast_get_query));
                                                     })
                                                 />
                                             </div>
@@ -1525,6 +1676,7 @@ pub fn ChartBuilderModal(
                                                         visual_series.set(new_visual_series);
                                                         ast.set(doc);
                                                         yaml_text.set(ast.with_untracked(serialize_ast));
+                                                        sql_text.set(ast.with_untracked(ast_get_query));
                                                         yaml_parse_error.set(None);
                                                     }
                                                     Err(e) => {
@@ -1774,47 +1926,6 @@ fn ChartPreview(
         view! {
             <div class="flex items-center justify-center h-full text-muted-foreground text-sm">
                 "Chart preview loading..."
-            </div>
-        }
-        .into_any()
-    }
-}
-
-// ─── SQL Editor Section ─────────────────────────────────────────────────────
-
-/// Renders either the kode-leptos CodeEditor (on wasm32) or a plain textarea
-/// placeholder (during SSR).
-#[component]
-fn SqlEditorSection(
-    content: Signal<String>,
-    on_change: Arc<dyn Fn(String) + Send + Sync>,
-) -> impl IntoView {
-    #[cfg(target_arch = "wasm32")]
-    {
-        use kode_leptos::{CodeEditor, Language};
-        let theme = crate::pages::sql_editor::code_editor::use_editor_theme();
-
-        view! {
-            <div class="min-h-[200px] border border-input rounded-md overflow-hidden" style="height: calc(100vh - 420px);">
-                <CodeEditor
-                    language=Signal::stored(Language::new_static("sql"))
-                    content=content
-                    theme=theme
-                    on_change=on_change
-                />
-            </div>
-        }
-        .into_any()
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let _ = content;
-        let _ = on_change;
-
-        view! {
-            <div class="h-full min-h-[200px] bg-muted rounded-md p-4 flex items-center justify-center text-muted-foreground text-sm">
-                "Loading SQL editor..."
             </div>
         }
         .into_any()

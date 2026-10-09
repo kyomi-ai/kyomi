@@ -93,6 +93,8 @@ pub async fn setup_server() -> TestServer {
         connect_token: None,
         connect_registry: kyomi_server::connect::registry::ConnectRegistry::new_local(),
         platforms: Arc::new(kyomi_core::platform::PlatformRegistry::new()),
+        schema_drift: kyomi_server::schema_drift::SchemaDriftStatus::default(),
+        process_instance: "test-instance:0".to_string(),
     };
 
     // Mirrors apps/server/src/main.rs's route assembly: build the core

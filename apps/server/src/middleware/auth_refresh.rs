@@ -11,7 +11,8 @@
 //! Silently no-ops on refresh failure — the canonical 401 from the downstream
 //! extractor is what the frontend is already wired to handle.
 //!
-//! Concurrency: no locks. When multiple concurrent requests from the same
+//! Concurrency: no middleware lock; rotation serializes with account-wide
+//! revocation in the token service. When multiple concurrent requests from the same
 //! tab/session hit this middleware with an expired access token, each one
 //! independently mints a new access token and rotates the refresh token.
 //! [`kyomi_auth::token_service::verify_refresh_token`]'s grace-period +

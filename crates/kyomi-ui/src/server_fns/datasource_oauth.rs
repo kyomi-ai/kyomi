@@ -41,6 +41,10 @@ pub use kyomi_types::DatasourceOAuthStatus;
 /// Result of disconnecting per-datasource OAuth credentials.
 pub use kyomi_types::DatasourceOAuthDisconnectResult;
 
+/// What happened to the grant at the provider during a per-datasource OAuth
+/// disconnect — the settings page keys its toast wording off this.
+pub use kyomi_types::DatasourceOAuthRevocationOutcome;
+
 // ---------------------------------------------------------------------------
 // Server functions
 // ---------------------------------------------------------------------------
@@ -52,7 +56,7 @@ pub use kyomi_types::DatasourceOAuthDisconnectResult;
 /// `apps/server/src/routes/auth_google_oauth.rs`.
 ///
 /// Delegates to `kyomi_auth::google_oauth::google_oauth_status_service`.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_google_oauth_status() -> Result<GoogleOAuthStatus, ServerFnError> {
     use kyomi_auth::google_oauth::google_oauth_status_service;
 
@@ -75,7 +79,7 @@ pub async fn get_google_oauth_status() -> Result<GoogleOAuthStatus, ServerFnErro
 /// and `GOOGLE_OAUTH_CLIENT_SECRET` to be configured.
 ///
 /// Delegates to `kyomi_auth::google_oauth::google_oauth_projects_service`.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_google_oauth_projects() -> Result<GoogleOAuthProjectsResult, ServerFnError> {
     use kyomi_auth::google_oauth::google_oauth_projects_service;
 
@@ -121,7 +125,7 @@ pub async fn get_google_oauth_projects() -> Result<GoogleOAuthProjectsResult, Se
 /// Returns `already_disconnected: true` if no account was linked.
 ///
 /// Delegates to `kyomi_auth::google_oauth::google_oauth_disconnect_service`.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn disconnect_google_oauth() -> Result<GoogleOAuthDisconnectResult, ServerFnError> {
     use kyomi_auth::google_oauth::google_oauth_disconnect_service;
 
@@ -144,7 +148,7 @@ pub async fn disconnect_google_oauth() -> Result<GoogleOAuthDisconnectResult, Se
 /// - `datasource_slug`: slug of the datasource whose credential to check.
 ///
 /// Delegates to `kyomi_auth::datasource_oauth::datasource_oauth_status_service`.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_datasource_oauth_status(
     provider: String,
     datasource_slug: String,
@@ -179,10 +183,12 @@ pub async fn get_datasource_oauth_status(
 ///   `"bigquery-enterprise"`, `"microsoft-enterprise"`.
 /// - `datasource_slug`: slug of the datasource whose credential to remove.
 ///
-/// Returns `already_disconnected: true` if no credential row existed.
+/// Returns `already_disconnected: true` if no credential row existed, and
+/// `revocation` describing what happened to the grant at the provider —
+/// which for three of the four providers is "nothing Kyomi could do" (KYO-714).
 ///
 /// Delegates to `kyomi_auth::datasource_oauth::datasource_oauth_disconnect_service`.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn disconnect_datasource_oauth(
     provider: String,
     datasource_slug: String,
@@ -190,6 +196,7 @@ pub async fn disconnect_datasource_oauth(
     use kyomi_auth::datasource_oauth::{datasource_oauth_disconnect_service, OAuthProvider};
 
     let ac = AuthenticatedContext::extract().await?;
+    let encryption_key = ac.encryption_key()?;
 
     let parsed_provider = OAuthProvider::parse(&provider)
         .ok_or_else(|| ServerFnError::new(format!("Unknown OAuth provider: {provider}")))?;
@@ -200,6 +207,7 @@ pub async fn disconnect_datasource_oauth(
         &ac.ws_id,
         parsed_provider,
         &datasource_slug,
+        &encryption_key,
     )
     .await
     .into_sfn_core()

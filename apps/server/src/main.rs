@@ -125,6 +125,13 @@ async fn serve() {
         .await
         .expect("failed to connect to database");
 
+    // Migration schema drift (KYO-716): `connect()` above just ran `.run()`
+    // to completion, so drift is zero by definition at this instant — the
+    // `Default` seed here is truthful, not a placeholder. The periodic watch
+    // task started further down keeps it that way as the schema and this
+    // process's own lifetime diverge afterwards.
+    let schema_drift = kyomi_server::schema_drift::SchemaDriftStatus::default();
+
     // Post-SQL-migration hook: convert knowledge-file folders to collections,
     // then drop the old knowledge_files table. Idempotent — no-op if already done.
     kyomi_knowledge::unify::migrate_folders_to_collections(&db)
@@ -330,6 +337,12 @@ async fn serve() {
         kyomi_datasource_server::ConnectRegistry::new_local()
     };
 
+    let connect_registry = match std::env::var_os("CONNECT_OWNER_RECOVERY_DIR") {
+        Some(directory) => connect_registry.with_owner_recovery(std::path::Path::new(&directory))
+            .expect("CONNECT_OWNER_RECOVERY_DIR must be a persistent local Linux lock directory"),
+        None => connect_registry,
+    };
+
     // Platform registry — register messaging platform implementations.
     #[cfg_attr(not(feature = "slack"), allow(unused_mut))]
     let mut registry = kyomi_core::platform::PlatformRegistry::new();
@@ -362,6 +375,18 @@ async fn serve() {
         platforms: platforms.clone(),
     };
 
+    // KYO-493: resolved once, here at startup, so a misconfigured HOSTNAME
+    // fails the server at boot instead of panicking on a user's first chat
+    // message. `config_arc.port` is the same `PORT` this process is
+    // actually listening on — see `resolve_process_instance`'s doc for why
+    // that (not HOSTNAME alone) is the identity, and why it must not be
+    // read from `PORT` a second time here.
+    let process_instance = kyomi_core::resolve_process_instance(
+        &config_arc,
+        std::env::var("HOSTNAME").ok().as_deref(),
+        config_arc.port,
+    );
+
     let state = kyomi_server::state::AppState {
         db: db.clone(),
         kv: kv.clone(),
@@ -377,10 +402,25 @@ async fn serve() {
         connect_token,
         connect_registry,
         platforms,
+        schema_drift: schema_drift.clone(),
+        process_instance: process_instance.clone(),
     };
 
     // Shared cancellation token for graceful shutdown of all background tasks
     let shutdown_token = CancellationToken::new();
+
+    let _durable_chat_worker = kyomi_agent::durable_chat::DurableChatWorker {
+        db: state.db.clone(),
+        kv: state.kv.clone(),
+        encryption_key: state.encryption_key.clone(),
+        embedding: state.embedding.clone(),
+        ws_manager: state.ws_manager.clone(),
+        app_config: state.config.clone(),
+        connect_registry: Some(state.connect_registry.clone()),
+        platforms: state.platforms.clone(),
+        owner: state.process_instance.clone(),
+        shutdown: shutdown_token.child_token(),
+    }.start();
 
     // Start background schedulers (if enabled)
     let watch_scheduler: Option<Arc<kyomi_agent::WatchScheduler>> = if enable_schedulers {
@@ -391,6 +431,7 @@ async fn serve() {
             encryption_key_arc.clone(),
             embedding.clone(),
             shutdown_token.child_token(),
+            config_arc.clone(),
         ));
         let (_refresh_handle, _cleanup_handle, _maintenance_handle, _query_history_cleanup_handle, _public_dataset_handle) = catalog_scheduler.start();
         tracing::info!("Catalog refresh scheduler started");
@@ -398,7 +439,7 @@ async fn serve() {
         // Watch scheduler — polls for due watches every 30s
         let scheduler = Arc::new(kyomi_agent::WatchScheduler::new(
             kyomi_agent::WatchSchedulerDeps {
-                db,
+                db: db.clone(),
                 kv: kv.clone(),
                 encryption_key: encryption_key_arc,
                 embedding,
@@ -558,6 +599,62 @@ async fn serve() {
         tracing::info!("Sync log pruning started (startup + 24h interval, 30-day retention)");
     }
 
+    // Migration drift watch — every 15 minutes (KYO-716).
+    //
+    // `DbPool::connect` above already checks for drift once, before running
+    // migrations — but that boot-time check can never catch the case that
+    // actually matters here: a process that connected *before* newer
+    // migrations existed. Right after `connect()` succeeds, drift is zero
+    // by definition (it just ran every migration it knows about), so only a
+    // repeating check — not another boot-time one — can later notice the
+    // schema moving ahead of this already-running process. That's the
+    // incident this ticket exists for: an 18-day-old process on
+    // dev.kyomi.ai whose pool was still open, invisible until the next
+    // restart failed outright.
+    {
+        const MIGRATION_DRIFT_CHECK_INTERVAL: std::time::Duration =
+            std::time::Duration::from_secs(15 * 60);
+
+        let db = state.db.clone();
+        let schema_drift = state.schema_drift.clone();
+        let shutdown = shutdown_token.child_token();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(MIGRATION_DRIFT_CHECK_INTERVAL);
+            // The immediate first tick is consumed rather than acted on —
+            // `schema_drift` was already seeded truthfully in `serve()`
+            // right after `connect()`'s own fresh check, so re-checking
+            // again this instant would be redundant.
+            interval.tick().await;
+            loop {
+                tokio::select! {
+                    _ = shutdown.cancelled() => break,
+                    _ = interval.tick() => {
+                        match kyomi_core::db::detect_migration_drift(&db).await {
+                            Ok(drift) if !drift.is_empty() => {
+                                tracing::warn!(
+                                    missing_versions = ?drift.missing_versions,
+                                    "database schema has migrations this binary does not embed \
+                                     — a restart of this process will fail until a newer binary \
+                                     is deployed"
+                                );
+                                schema_drift.set(drift.missing_versions);
+                            }
+                            Ok(_) => schema_drift.set(Vec::new()),
+                            Err(e) => {
+                                tracing::warn!(error = %e, "migration drift check failed");
+                            }
+                        }
+                    }
+                }
+            }
+            tracing::info!("Migration drift watch stopped");
+        });
+        tracing::info!(
+            interval_minutes = MIGRATION_DRIFT_CHECK_INTERVAL.as_secs() / 60,
+            "Migration drift watch started"
+        );
+    }
+
     // Leptos server functions self-register with the Axum server_fn registry
     // via `inventory` (see the `#[server]` macro) — no explicit call is
     // needed here. KYO-191 measured, under the production build profile
@@ -616,6 +713,29 @@ async fn serve() {
 
     tracing::info!("Kyomi Rust backend listening on port {port}");
 
+    // KYO-493 Phase 4: startup sweep — reclassify `in_progress` chat rows
+    // this instance's previous incarnation left behind (it died mid-turn)
+    // as `interrupted`, plus any row past the hard-timeout age bound. See
+    // `kyomi_auth::chat_service::sweep_interrupted_rows` for the two
+    // clauses and why the identity boundary keeps this from touching
+    // another local instance's live runs. Best-effort by design: a sweep
+    // failure must not keep the server from serving — the next boot or the
+    // age bound catches whatever was missed.
+    match kyomi_auth::chat_service::sweep_interrupted_rows(
+        &db,
+        &process_instance,
+        kyomi_auth::chat_service::IN_PROGRESS_HARD_TIMEOUT,
+    )
+    .await
+    {
+        Ok(n) if n > 0 => tracing::info!(
+            count = n,
+            "startup sweep: marked stranded in_progress chat rows as interrupted"
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("startup sweep of in_progress chat rows failed: {e}"),
+    }
+
     // Run server with graceful shutdown on SIGTERM/SIGINT
     let shutdown_signal = async {
         let ctrl_c = tokio::signal::ctrl_c();
@@ -647,6 +767,29 @@ async fn serve() {
     // Wait for the watch scheduler to drain active executions
     if let Some(scheduler) = watch_scheduler {
         scheduler.shutdown().await;
+    }
+
+    // KYO-493 Phase 4: graceful-shutdown sweep — runs still `in_progress`
+    // here are about to lose their process, so their rows become
+    // `interrupted` now instead of waiting for this instance's next boot.
+    // A detached run that still lands its final write after this sweep
+    // simply overwrites the status with its true terminal state
+    // (`update_message` writes status unconditionally). Rows that already
+    // carry a terminal status are untouched — the sweep only moves rows
+    // still `in_progress`.
+    match kyomi_auth::chat_service::sweep_interrupted_rows(
+        &db,
+        &process_instance,
+        kyomi_auth::chat_service::IN_PROGRESS_HARD_TIMEOUT,
+    )
+    .await
+    {
+        Ok(n) if n > 0 => tracing::info!(
+            count = n,
+            "shutdown sweep: marked this instance's unfinished chat rows as interrupted"
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("shutdown sweep of in_progress chat rows failed: {e}"),
     }
 
     tracing::info!("Kyomi Rust backend shutdown complete");

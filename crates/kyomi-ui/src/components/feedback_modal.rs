@@ -24,8 +24,11 @@ use crate::server_fns::feedback::submit_feedback;
 /// "Request BigQuery Access" type here; KYO-504 removed it because the
 /// only in-app trigger for it (`FeedbackAccessRequestHandle`, provided by
 /// `components/layout.rs`'s `Layout`) had no caller — the datasource
-/// modal's "Request beta access" link uses a plain `mailto:` link instead
-/// (see `utils::beta_access::BETA_ACCESS_REQUEST_HREF`, KYO-499).
+/// modal's "Request access" link used a plain `mailto:` link instead
+/// (KYO-499). That notice itself, and the Google-OAuth-allowlist
+/// attestation gate it was part of, was removed entirely in KYO-705 once
+/// Kyomi's Google OAuth app left Testing publishing status in the Google
+/// Cloud Console.
 const FEEDBACK_TYPES: &[(&str, &str, phosphor_leptos::IconData)] = &[
     ("bug", "Bug", phosphor_leptos::BUG),
     ("feature", "Feature Request", phosphor_leptos::LIGHTBULB),

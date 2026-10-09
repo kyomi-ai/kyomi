@@ -48,12 +48,31 @@ const SRC: &str = include_str!("../../datasources.rs");
 /// after that function.
 const MOD_TESTS_MARKER: &str = "#[cfg(all(test, feature = \"ssr\"))]\nmod tests;";
 
+/// The full body of `build_connection_config`, scoped away from every other
+/// `"synapse" => {` / `"sqlserver" => {` / `"bigquery" => {` / `"snowflake"
+/// => {` match arm in the file (the edit-mode load-back, `build_credentials`,
+/// the connection-field view fragments, the OAuth-status-fetch match, ...)
+/// so a narrower `extract_between` call scoped to this body can't
+/// false-match one of those instead.
+///
+/// Shared by `synapse_connection_config.rs` (KYO-516) and
+/// `bigquery_snowflake_auth_mode_gating.rs` (KYO-702) — see
+/// `docs/standards/code-organization/third-copy-of-test-helper-is-extraction-trigger.md`:
+/// this is the second copy's worth of usefulness without yet being a third
+/// independent copy, so it is extracted here rather than duplicated.
+pub(super) fn build_connection_config_body() -> &'static str {
+    extract_between(
+        SRC,
+        "let build_connection_config = move || -> serde_json::Value {",
+        "// ── Build credentials JSON",
+    )
+}
+
 mod save_actions;
 mod auth_mode_sections;
 mod oauth_status_refetch;
 mod oauth_popup_recovery_modal;
 mod oauth_popup_recovery_list;
-mod oauth_access_gating;
 mod oauth_messaging;
 mod credential_state_reset;
 mod create_mode;
@@ -63,4 +82,6 @@ mod list_view;
 mod connection_test_badge;
 mod synapse_connection_config;
 mod synapse_tenant_id_credentials;
+mod bigquery_snowflake_auth_mode_gating;
 mod list_connect_gate;
+mod retired_auth_mode_default;

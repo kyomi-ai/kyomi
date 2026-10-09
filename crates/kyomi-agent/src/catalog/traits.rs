@@ -495,36 +495,12 @@ pub async fn index_catalog_sql(
         return result;
     };
 
-    // Create provider. `ctx.connection_config` came straight from the
-    // database and may hold encrypted `COMMON_SENSITIVE` fields (e.g.
-    // `ssh_private_key`) — every driver needs plaintext.
-    let decrypted_config = match kyomi_auth::credential_service::decrypt_connection_config_secrets(
-        &ctx.connection_config,
-        &ctx.encryption_key,
-    ) {
-        Ok(config) => config,
-        Err(e) => {
-            let msg = format!("Failed to decrypt connection_config: {e}");
-            let result = CatalogIndexResult::error(&msg)
-                .with_times(&start_time.to_rfc3339(), &Utc::now().to_rfc3339())
-                .with_ids(&ctx.datasource_config_id, &ctx.workspace_id);
-
-            let _ = update_datasource_status(
-                db,
-                &ctx.workspace_id,
-                &ctx.datasource_config_id,
-                "failed",
-                None,
-                Some(&msg),
-                &[],
-            )
-            .await;
-
-            return result;
-        }
-    };
+    // `ctx.connection_config` is already decrypted — `indexing_service.rs`
+    // decrypts once at `IndexerContext` construction time (KYO-786), before
+    // any `CatalogIndexer` impl (this SQL path included) ever sees it, so
+    // there is no separate decrypt step here anymore.
     let provider = match indexer
-        .create_provider(&decrypted_config, &credentials)
+        .create_provider(&ctx.connection_config, &credentials)
         .await
     {
         Ok(p) => p,

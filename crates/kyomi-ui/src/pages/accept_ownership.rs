@@ -318,7 +318,7 @@ fn ready_view(
     let workspace_name = transfer.workspace_name.clone();
     let from_email = transfer.from_user_email.clone();
     let expires_at = transfer.expires_at.clone();
-    let date_script = format_date_script(expires_at.clone());
+    let expiration_display = crate::utils::time::format_local_date_time(&expires_at);
 
     view! {
         <div class="space-y-6">
@@ -350,11 +350,7 @@ fn ready_view(
                     // Expiration
                     <div class="pt-2 border-t border-border">
                         <div class="text-sm text-muted-foreground">"Expires"</div>
-                        <div class="text-foreground" id="expires-at-display">
-                            {expires_at.clone()}
-                        </div>
-                        // Format the date client-side
-                        {date_script}
+                        <div class="text-foreground">{expiration_display}</div>
                     </div>
                 </div>
             </div>
@@ -473,22 +469,6 @@ fn capability_item(text: &'static str) -> impl IntoView {
             </svg>
             <span>{text}</span>
         </li>
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Client-side date formatting
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Render a small inline script that formats an ISO date string into the
-/// user's local date/time and replaces the placeholder element content.
-fn format_date_script(iso_date: String) -> impl IntoView {
-    let script = format!(
-        r#"(function(){{var el=document.getElementById('expires-at-display');if(el){{var d=new Date('{}');el.textContent=d.toLocaleDateString()+' at '+d.toLocaleTimeString();}}}})();"#,
-        iso_date
-    );
-    view! {
-        <script>{script}</script>
     }
 }
 

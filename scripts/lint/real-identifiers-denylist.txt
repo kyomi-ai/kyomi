@@ -1,0 +1,56 @@
+# scripts/lint/real-identifiers-denylist.txt — KYO-662
+#
+# Salted SHA-256 hashes of forbidden, low-entropy real-world identifiers
+# (customer project ids, company names, and the like) that have no
+# distinguishing *shape* a regex could ever find — a GCP project id looks
+# exactly like any other kebab-case string. scripts/lint/check-real-identifiers.sh
+# reads this file to power its `denylisted-identifier` rule. See
+# docs/standards/security/no-real-world-identifiers-in-a-public-repo.md for
+# why this class of leak keeps recurring (KYO-619, KYO-643).
+#
+# This file is never allowed to contain a forbidden value in plaintext —
+# this is a public, dual-licensed repo, and the entire point of this file is
+# to keep those values out of it. Only salted hashes are committed here.
+#
+# ------------------------------------------------------------------------------
+# Hashing contract (the scanner MUST implement this exactly, or every hash
+# below silently stops firing — see check-real-identifiers.sh's own header
+# for the full tokenisation contract that produces the candidate strings
+# this hashes):
+#
+#     hash = sha256_hex( salt + ":" + lowercase(candidate) )
+#
+# `salt` is the hex string from the `# salt=...` line directly below. Every
+# other non-comment, non-blank line is one 64-hex-character SHA-256 hash.
+#
+# ------------------------------------------------------------------------------
+# Honest limitation: these are short, low-entropy strings run through one
+# unsalted-per-entry (but list-wide salted) SHA-256 pass. A determined reader
+# who guesses the plaintext and the salt together can brute-force a hash in
+# this file in well under a second — there is no defense against that here,
+# and this file does not attempt one. The goal is preventing *accidental*
+# re-publication (the exact KYO-619/KYO-643 failure mode: a value that was
+# already sanitised once getting pasted back in by a concurrent branch that
+# never saw the fix), not defending against a motivated attacker who already
+# suspects a specific value and is willing to compute hashes to confirm it.
+#
+# ------------------------------------------------------------------------------
+# The plaintext source list is NOT in this repo. It lives in
+# ~/repos/kyomi-private/ (not yet created as of KYO-662 — a follow-up ticket
+# covers building it out as the maintained source of truth). Until that
+# exists, a maintainer adding a new forbidden value computes its hash by
+# hand and appends it below:
+#
+#     printf '%s:%s' "$SALT" "$(printf '%s' "$VALUE" | tr 'A-Z' 'a-z')" | sha256sum | awk '{print $1}'
+#
+# ------------------------------------------------------------------------------
+# Overriding for tests: set REAL_IDENTIFIERS_DENYLIST to point
+# check-real-identifiers.sh at a different file — this is how
+# check-real-identifiers-test.sh exercises the denylist rule against a
+# throwaway, synthetic value instead of needing (or being able to see) the
+# real list.
+# ------------------------------------------------------------------------------
+# salt=b3c57fc2c1c3f5ecf5c3a84ab1a71b2b
+4ae91ffb5c16d9f031b058093802c0d847e4d903bd6806cc6eff5b1f65e5c86f
+70f01d88b9ed3f102ac8d18db6bfac53f0e36f901148688cc6a3b7167a999c28
+f870a0d3cee8b62c1aea00edba7b8efdcc7f81a00976dc92d41454bc56d7282f

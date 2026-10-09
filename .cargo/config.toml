@@ -13,3 +13,41 @@ rustflags = ["-C", "link-arg=-fuse-ld=mold"]
 
 [target.wasm32-unknown-unknown]
 rustflags = ["--cfg=has_std"]
+
+# BEGIN_LOCAL_DEV_DEBUGINFO
+# KYO-677. `leptos_debuginfo` is reactive_graph's own escape hatch: its
+# `unwrap_signal!` macro (reactive_graph 0.2.14, src/traits.rs) emits a panic
+# naming both where the signal was defined and where the offending access ran
+# under `cfg(any(debug_assertions, leptos_debuginfo))`, and the bare
+# "Tried to access a reactive value that has already been disposed."
+# otherwise. Neither the `release` profile nor `wasm-dev` (which inherits it)
+# sets debug-assertions, so without this flag no wasm build anywhere can name
+# the site of a disposal panic — which is why every in-app panic report we
+# hold arrives as that bare sentence and is untriageable.
+#
+# Cargo *joins* the rustflags of a `cfg()`-predicate target table with those of
+# the matching triple table rather than overriding them, so this block adds
+# `--cfg=leptos_debuginfo` alongside `--cfg=has_std` above; deleting the block
+# leaves `--cfg=has_std` intact. A second `[target.wasm32-unknown-unknown]`
+# table could not do that — TOML forbids the duplicate — and wrapping the
+# stanza above in the markers would strip `has_std` with it.
+#
+# Dev-only, by scope decision on KYO-677. The invariant the release path rests
+# on is not a count of jobs but a property: every job that produces a shipped
+# wasm artifact deletes everything between these markers, along with
+# Trunk.toml's `cargo_profile`, before it builds. Today those are release.yml's
+# `docker` and `binaries` jobs and desktop.yml's `desktop` job — each of which
+# builds two wasm artifacts (`crates/kyomi-ui`, and `apps/mcp-chart-app-wasm`
+# via its own `trunk build --release`) after that step. CI's `trunk build` job
+# deliberately does not strip: it builds the same wasm-dev artifact shape
+# dev.kyomi.ai serves, which is exactly where the richer panic message is
+# wanted, and it publishes nothing.
+#
+# Nothing enforces any of that mechanically. A new job that produces a release
+# artifact has to add the deletion itself, and a *local* `trunk build --release`
+# (scripts/dev/rebuild-leptos.sh) is not stripped either — so the flag is
+# present there despite the release profile. Harmless, because only CI
+# publishes; but "release profile" is not what gates this, the strip step is.
+[target.'cfg(target_arch = "wasm32")']
+rustflags = ["--cfg=leptos_debuginfo"]
+# END_LOCAL_DEV_DEBUGINFO

@@ -20,6 +20,8 @@ use serde::{Deserialize, Serialize};
 use super::{AuthenticatedContext, IntoServerFnErrorCore, IntoServerFnErrorSqlx};
 #[cfg(feature = "ssr")]
 use kyomi_types::Permission;
+#[cfg(feature = "ssr")]
+use crate::utils::permissions::analytics_quota_applies;
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -53,10 +55,29 @@ pub struct AnalyticsUsageData {
     pub status: String,
 }
 
+/// Run the Cloud loader only when analytics quotas apply.
+///
+/// Both usage endpoints share this absence/short-circuit decision so a
+/// self-hosted response cannot acquire a Cloud allowance or touch metering.
+#[cfg(feature = "ssr")]
+pub(crate) async fn load_with_analytics_quota<T, E, F>(
+    is_self_hosted: bool,
+    load: impl FnOnce() -> F,
+) -> Result<Option<T>, E>
+where
+    F: std::future::Future<Output = Result<T, E>>,
+{
+    if analytics_quota_applies(is_self_hosted) {
+        load().await.map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
 // ─── Server Functions ───────────────────────────────────────────────────────
 
 /// List all analytics sites for the current workspace.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn list_analytics_sites() -> Result<Vec<AnalyticsSiteData>, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -84,35 +105,18 @@ pub async fn list_analytics_sites() -> Result<Vec<AnalyticsSiteData>, ServerFnEr
 ///
 /// Requires `Permission::ManageAnalytics` — checked before every return
 /// path below, including the self-hosted short-circuit, so a self-hosted
-/// non-admin is refused rather than handed a zeroed-out result (KYO-278).
-#[server(prefix = "/leptos-api")]
-pub async fn get_analytics_usage() -> Result<AnalyticsUsageData, ServerFnError> {
+/// non-admin is refused rather than handed quota data (KYO-278).
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
+pub async fn get_analytics_usage() -> Result<Option<AnalyticsUsageData>, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
     ac.require(Permission::ManageAnalytics, "Workspace admin access required")?;
 
-    // Self-hosted: no quota tracking — returns an all-zero result
-    // (events_limit: 0, not a real quota) rather than Redis-computed
-    // numbers. In practice this branch's result is never rendered: the
-    // page-level `analytics_access()` gate in `pages/settings/analytics.rs`
-    // routes self-hosted requests to a "not available" card before
-    // `AnalyticsUsageCard` ever mounts, though the fetch itself still
-    // fires. Contrast with `get_ai_usage_status` in `server_fns/usage.rs`,
-    // whose self-hosted branch is a sibling all-zero short-circuit that
-    // *does* get rendered (`UsagePage`'s `AnalyticsEventsCard`) — and
-    // reports a nonzero 100K `events_included` there instead of 0. The two
-    // self-hosted stories disagree and neither is clearly "the real one";
-    // reconciling them is tracked separately (see PR discussion / ticket).
-    if ac.ctx.config.self_hosted {
-        return Ok(AnalyticsUsageData {
-            events_used: 0,
-            events_limit: 0,
-            usage_percent: 0.0,
-            bundle_balance: 0,
-            status: "ok".to_string(),
-        });
-    }
+    load_with_analytics_quota(ac.ctx.config.self_hosted, || cloud_analytics_usage(ac)).await
+}
 
+#[cfg(feature = "ssr")]
+async fn cloud_analytics_usage(ac: AuthenticatedContext) -> Result<AnalyticsUsageData, ServerFnError> {
     let tier_str = ac.auth.workspace.subscription_tier.as_ref();
     let configs = kyomi_auth::analytics_quota::default_tier_configs();
     let config = configs
@@ -182,7 +186,7 @@ pub async fn get_analytics_usage() -> Result<AnalyticsUsageData, ServerFnError> 
 }
 
 /// Create a new analytics site.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn create_analytics_site(
     name: String,
     allowed_domains: String,
@@ -247,7 +251,7 @@ pub async fn create_analytics_site(
 }
 
 /// Update an existing analytics site.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn update_analytics_site(
     site_id: String,
     name: String,
@@ -302,7 +306,7 @@ pub async fn update_analytics_site(
 }
 
 /// Delete an analytics site.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn delete_analytics_site(site_id: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -351,7 +355,7 @@ mod tests {
 
     /// `get_analytics_usage` must call `ac.require(Permission::ManageAnalytics, ...)`
     /// before its self-hosted short-circuit — a self-hosted non-admin must
-    /// be refused, not handed the zeroed-out result. This is the exact
+    /// be refused, not handed quota data. This is the exact
     /// ordering KYO-278 asked for: the check must precede *every* return
     /// path, not just the Cloud one.
     #[test]
@@ -363,7 +367,7 @@ mod tests {
 
         let fn_body = extract_between(
             production_src,
-            "pub async fn get_analytics_usage() -> Result<AnalyticsUsageData, ServerFnError> {",
+            "pub async fn get_analytics_usage() -> Result<Option<AnalyticsUsageData>, ServerFnError> {",
             "\n/// Create a new analytics site.",
         );
 
@@ -378,15 +382,19 @@ mod tests {
                 )
             });
         let self_hosted_pos = fn_body
-            .find("if ac.ctx.config.self_hosted")
+            .find("load_with_analytics_quota(ac.ctx.config.self_hosted")
             .expect("self-hosted branch marker not found in get_analytics_usage");
 
         assert!(
             require_pos < self_hosted_pos,
             "the ManageAnalytics check must precede the self-hosted short-circuit, so a \
-             self-hosted non-admin is refused rather than handed a zeroed-out result — found \
+             self-hosted non-admin is refused rather than handed quota data — found \
              require() at byte {require_pos}, self-hosted check at byte {self_hosted_pos}"
         );
     }
 }
 
+
+#[cfg(all(test, feature = "ssr"))]
+#[path = "analytics/quota_applicability_tests.rs"]
+mod quota_applicability_tests;

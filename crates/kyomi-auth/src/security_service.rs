@@ -68,6 +68,43 @@ pub async fn change_password(
     Ok(())
 }
 
+/// Set a password for a user who does not yet have one (e.g. OAuth-only
+/// users, or a user completing signup — KYO-683 phase 1).
+///
+/// Unlike `change_password` above, this function validates the minimum
+/// length itself rather than leaving it to the caller — the `set_password`
+/// server_fn used to do that check inline before this function existed, and
+/// moving the check here (rather than just the hash/upsert) is what makes
+/// that server_fn purely a thin wrapper.
+///
+/// Returns `Err` if `new_password` is under 8 characters, the user already
+/// has a password set (use `change_password` to update it), or a database
+/// error occurs.
+pub async fn set_password(
+    pool: &DbPool,
+    user_id: &str,
+    new_password: &str,
+) -> kyomi_core::Result<()> {
+    if new_password.len() < 8 {
+        return Err(kyomi_core::Error::BadRequest(
+            "Password must be at least 8 characters".into(),
+        ));
+    }
+
+    let has_pw = crate::user_service::has_password(pool, user_id).await?;
+    if has_pw {
+        return Err(kyomi_core::Error::Conflict(
+            "Password already set. Use change-password to update it.".into(),
+        ));
+    }
+
+    let hash = crate::password::hash_password(new_password)?;
+    let auth_data = serde_json::json!({"hash": hash});
+    crate::user_service::upsert_auth_method(pool, user_id, "password", &auth_data).await?;
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // TOTP 2FA
 // ---------------------------------------------------------------------------

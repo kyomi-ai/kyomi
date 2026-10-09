@@ -163,11 +163,11 @@ pub fn Select(
                 class=TRIGGER_CLASS
                 disabled=move || disabled.map(|d| d.get()).unwrap_or(false)
                 on:click=on_trigger_click
-                aria-expanded=move || is_open.get().to_string()
+                aria-expanded=move || is_open.try_get().unwrap_or(false).to_string()
                 aria-haspopup="listbox"
             >
                 <span class=move || {
-                    if value.get().is_empty() && !placeholder_for_class.is_empty() {
+                    if value.try_get().unwrap_or_default().is_empty() && !placeholder_for_class.is_empty() {
                         "line-clamp-1 text-muted-foreground"
                     } else {
                         "line-clamp-1"
@@ -257,7 +257,7 @@ pub fn Select(
                                     <div
                                         class=ITEM_CLASS
                                         role="option"
-                                        aria-selected=move || (value.get() == val_for_check).to_string()
+                                        aria-selected=move || (value.try_get().unwrap_or_default() == val_for_check).to_string()
                                         on:click=move |_| {
                                             let v = val_for_click.clone();
                                             on_change_stored.with_value(|cb| cb(v));
@@ -267,7 +267,7 @@ pub fn Select(
                                         {label_str}
                                         <span class=CHECK_CLASS>
                                             {move || {
-                                                (value.get() == val_for_icon).then(|| {
+                                                (value.try_get().unwrap_or_default() == val_for_icon).then(|| {
                                                     view! {
                                                         <Icon icon=phosphor_leptos::CHECK attr:class="h-4 w-4"/>
                                                     }

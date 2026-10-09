@@ -45,6 +45,17 @@
 // Exits 0 when the feedback panel is topmost by both checks, 1 otherwise
 // (including when the DOM path to reproduce the scenario can't be found —
 // treated as inconclusive-and-failing, not silently skipped).
+//
+// KYO-704 (not yet reconciled against a real browser — see below): this
+// script's repro path assumes the freshly opened Add Datasource modal
+// lands directly on BigQuery's kyomi_oauth notice/"Request access" link.
+// KYO-704 retired kyomi_oauth and made service_account the create-mode
+// default (`BIGQUERY_DEFAULT_AUTH_MODE`,
+// crates/kyomi-ui/src/pages/settings/datasources.rs), so reaching that
+// notice now requires explicitly selecting BigQuery's kyomi_oauth
+// Authentication Mode first — this script was not rewritten to do that,
+// per the same "needs a real browser to pick correct selectors" reasoning
+// documented in bigquery-create-modal.cjs (KYO-602/KYO-604).
 
 const { chromium } = require('playwright');
 

@@ -113,7 +113,14 @@ fn is_session_owned(session: &ChatSessionItem, current_user_id: &str) -> bool {
 /// before `Some`, so under `Reverse` a session whose timestamp fails to parse
 /// sinks to the bottom rather than floating to the top — the correct failure
 /// mode for a list ordered by recency.
-fn sort_sessions_by_recency(sessions: &mut [ChatSessionItem]) {
+///
+/// `pub(crate)` (KYO-498): this is the ordering the chats list actually
+/// renders, so the cross-module regression test proving a brand-new
+/// session's live-insert snapshot sorts to the top
+/// (`server_fns::chat::new_session_live_insert_tests`) must call this exact
+/// function rather than reimplement it — a copy could drift from what the
+/// page renders and pass while the real page stays broken.
+pub(crate) fn sort_sessions_by_recency(sessions: &mut [ChatSessionItem]) {
     sessions.sort_by_key(|s| std::cmp::Reverse(crate::utils::time::parse_timestamp(&s.updated_at)));
 }
 

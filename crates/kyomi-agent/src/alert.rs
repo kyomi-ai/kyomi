@@ -330,11 +330,22 @@ async fn send_watch_alert_emails(
             params.mode,
         );
 
-        if email_service
+        match email_service
             .send_email(email, &subject, &html_body, None, None, &chart_images)
             .await
         {
-            any_success = true;
+            Ok(()) => any_success = true,
+            // Per-recipient, because one bad address among several must not
+            // read as "the alert was not delivered". Reported here because
+            // `send_email` returns its reason rather than logging it
+            // (KYO-697), and this loop previously discarded the outcome.
+            Err(e) => tracing::error!(
+                recipient = %email,
+                watch_name = %params.watch_name,
+                execution_id = %params.execution_id,
+                error = %e,
+                "Failed to send watch alert email"
+            ),
         }
     }
 
@@ -376,9 +387,9 @@ static RE_CHARTML_CAPTURE: LazyLock<regex::Regex> = LazyLock::new(|| {
 /// 1. Extract ChartML blocks from the message.
 /// 2. **Resolve data queries** — execute SQL against datasources to populate inline rows.
 /// 3. Render up to [`MAX_EMAIL_CHARTS`] charts via the chart-renderer service.
-/// 4. Replace rendered blocks with `<img src="cid:...">` HTML.
+/// 4. Render metric HTML or `<img src="cid:...">` chart fragments.
 /// 5. Replace any remaining (unrendered) ChartML/YAML-chart blocks with placeholder text.
-/// 6. Convert the result through [`markdown_to_simple_html`].
+/// 6. Escape and convert message segments, then insert generated chart HTML.
 ///
 /// Returns `(html_content, cid_images)`.
 async fn process_message_for_email(
@@ -390,7 +401,7 @@ async fn process_message_for_email(
     use crate::tools::chart_palettes;
 
     let mut images: Vec<(String, Vec<u8>)> = Vec::new();
-    let mut processed = message.to_string();
+    let mut rendered_blocks = Vec::new();
 
     // Collect all chartml blocks with their byte ranges and YAML content.
     let blocks: Vec<(std::ops::Range<usize>, String)> = RE_CHARTML_CAPTURE
@@ -409,14 +420,14 @@ async fn process_message_for_email(
         let (light_palette, dark_palette) =
             chart_palettes::get_user_palette_light_dark(&query_ctx.db, &query_ctx.user_id).await;
 
-        // Process blocks in reverse order so byte offsets stay valid after replacements.
+        // Keep the existing reverse rendering order; ranges refer to the original message.
         for (idx, (range, yaml_content)) in blocks.iter().enumerate().rev() {
             if idx >= MAX_EMAIL_CHARTS {
                 // Replace with placeholder
-                processed.replace_range(
+                rendered_blocks.push((
                     range.clone(),
-                    "[Chart available - view in Kyomi]",
-                );
+                    "[Chart available - view in Kyomi]".to_string(),
+                ));
                 continue;
             }
 
@@ -425,10 +436,10 @@ async fn process_message_for_email(
                 Ok(v) => v,
                 Err(e) => {
                     warn!(error = %e, "Failed to parse ChartML YAML for email rendering");
-                    processed.replace_range(
+                    rendered_blocks.push((
                         range.clone(),
-                        "[Chart available - view in Kyomi]",
-                    );
+                        "[Chart available - view in Kyomi]".to_string(),
+                    ));
                     continue;
                 }
             };
@@ -438,10 +449,10 @@ async fn process_message_for_email(
                 Ok(s) => s,
                 Err(e) => {
                     warn!(error = %e, chart_idx = idx, "Failed to resolve chart data for email — using placeholder");
-                    processed.replace_range(
+                    rendered_blocks.push((
                         range.clone(),
-                        "[Chart available - view in Kyomi]",
-                    );
+                        "[Chart available - view in Kyomi]".to_string(),
+                    ));
                     continue;
                 }
             };
@@ -452,7 +463,7 @@ async fn process_message_for_email(
             let viz_type = crate::chartml_utils::get_visualize_type(&resolved_spec);
             if let Some("metric") = viz_type.as_deref() {
                 let metric_html = render_metric_email_html(&resolved_spec);
-                processed.replace_range(range.clone(), &metric_html);
+                rendered_blocks.push((range.clone(), metric_html));
                 continue;
             }
 
@@ -467,7 +478,10 @@ async fn process_message_for_email(
                 Ok(y) => y,
                 Err(e) => {
                     warn!(error = %e, chart_idx = idx, "Failed to serialize spec to YAML");
-                    processed.replace_range(range.clone(), "[Chart available - view in Kyomi]");
+                    rendered_blocks.push((
+                        range.clone(),
+                        "[Chart available - view in Kyomi]".to_string(),
+                    ));
                     continue;
                 }
             };
@@ -516,29 +530,39 @@ async fn process_message_for_email(
 
                     let img_html =
                         build_chart_img_html(&cid_light, cid_dark.as_deref(), chart_title);
-                    processed.replace_range(range.clone(), &img_html);
+                    rendered_blocks.push((range.clone(), img_html));
                     images.push((cid_light, light_png));
                 }
                 Err(e) => {
                     warn!(error = %e, chart_idx = idx, "Failed to render chart for email");
-                    processed.replace_range(
+                    rendered_blocks.push((
                         range.clone(),
-                        "[Chart available - view in Kyomi]",
-                    );
+                        "[Chart available - view in Kyomi]".to_string(),
+                    ));
                 }
             }
         }
     }
 
-    // Strip any remaining YAML chart blocks (```yaml ... visualize: ...```)
-    let processed = RE_YAML_CHART
-        .replace_all(&processed, "[Chart available - view in Kyomi]")
-        .into_owned();
-
-    // Convert markdown to HTML
-    let html = markdown_to_simple_html(&processed);
+    let html = email_html_with_charts(message, rendered_blocks);
 
     (html, images)
+}
+
+/// Convert untrusted message segments before inserting generated chart HTML.
+/// Byte ranges refer to the original message, so chart fragments cannot be
+/// forged by text markers or reinterpreted as Markdown.
+fn email_html_with_charts(message: &str, mut charts: Vec<(std::ops::Range<usize>, String)>) -> String {
+    charts.sort_by_key(|(range, _)| range.start);
+    let mut html = String::new();
+    let mut cursor = 0;
+    for (range, chart) in charts {
+        html.push_str(&markdown_to_simple_html(&message[cursor..range.start]));
+        html.push_str(&chart);
+        cursor = range.end;
+    }
+    html.push_str(&markdown_to_simple_html(&message[cursor..]));
+    html
 }
 
 /// Build the inline HTML for a rendered email chart.
@@ -555,8 +579,7 @@ async fn process_message_for_email(
 /// parses it. `mso-hide: all` plus `max-height: 0; overflow: hidden` cover
 /// the remaining clients that ignore `display: none` alone.
 ///
-/// The whole block stays on ONE line — [`markdown_to_simple_html`] runs
-/// after injection and converts newlines to `<br>`/`</p><p>`.
+/// This generated block is inserted after untrusted Markdown conversion.
 ///
 /// `width="600"` pins the display size: the PNG is rendered at 2x density
 /// ([`EMAIL_CHART_DENSITY`]) and downsampling keeps it crisp on high-DPI
@@ -595,8 +618,7 @@ fn escape_html(text: &str) -> String {
 /// Render a metric ChartML spec as email-compatible HTML.
 ///
 /// Uses table-based layout (email clients don't support CSS Grid) with inline
-/// styles only. The output is a single line — [`markdown_to_simple_html`] runs
-/// after injection and converts newlines to `<br>`.
+/// styles only. Inserted after untrusted Markdown conversion.
 ///
 /// Mirrors the data-extraction pattern from `render_metric_slack_blocks` (Slack)
 /// and `render_metric_typst_markup` (PDF).
@@ -732,11 +754,15 @@ fn build_watch_alert_email(
     let emoji = if is_report { "📊" } else { "🔔" };
     let subject = format!("{emoji} {subject_text}");
 
-    let view_url = format!("{frontend_url}/inbox?alert={execution_id}");
+    let view_url = escape_html(&format!("{frontend_url}/inbox?alert={execution_id}"));
+    let watch_name = escape_html(watch_name);
+    let alert_title = escape_html(alert_title);
+
 
     // Attribution text (matches Python build_watch_alert_with_content wording)
     let (attribution_html, footer_reason) = match configured_by_email {
         Some(configured_by) if configured_by.to_lowercase() != recipient_email.to_lowercase() => {
+            let configured_by = escape_html(configured_by);
             (
                 format!(
                     "{configured_by} configured this {type_label_lower} to be sent to you."
@@ -766,7 +792,7 @@ fn build_watch_alert_email(
     let title_text = if alert_title.is_empty() {
         format!("Watch {type_label}")
     } else {
-        alert_title.to_string()
+        alert_title
     };
 
     // Build HTML email — matches Python build_watch_alert_with_content + build_html_email wrapper
@@ -1058,9 +1084,13 @@ fn markdown_table_to_html(table_text: &str) -> String {
 /// Handles: tables, bold, italic, headers, bullet and numbered lists,
 /// inline code, links, horizontal rules, and line breaks.
 fn markdown_to_simple_html(text: &str) -> String {
-    // 1. Convert markdown tables to HTML first (before other processing)
+    // Escape agent text before generating any markup. Generated chart HTML
+    // is inserted separately by email_html_with_charts.
+    let text = RE_YAML_CHART.replace_all(text, "[Chart available - view in Kyomi]");
+    let text = escape_html(&text);
+    // Convert markdown tables to HTML before other processing.
     let mut result = RE_TABLE
-        .replace_all(text, |caps: &regex::Captures| {
+        .replace_all(&text, |caps: &regex::Captures| {
             markdown_table_to_html(&caps[1])
         })
         .into_owned();
@@ -1126,7 +1156,14 @@ fn markdown_to_simple_html(text: &str) -> String {
 
     // Links: [text](url) -> <a href="url">text</a>
     result = RE_LINK
-        .replace_all(&result, r#"<a href="$2">$1</a>"#)
+        .replace_all(&result, |caps: &regex::Captures| {
+            let url = &caps[2];
+            if kyomi_types::text::safe_markdown_url(url, false) {
+                format!(r#"<a href="{url}">{}</a>"#, &caps[1])
+            } else {
+                caps[1].to_string()
+            }
+        })
         .into_owned();
 
     // Horizontal rules: --- -> <hr>
@@ -1149,6 +1186,10 @@ fn markdown_to_simple_html(text: &str) -> String {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[path = "alert_html_tests.rs"]
+mod html_safety_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1608,7 +1649,7 @@ mod tests {
     /// Build a dummy `QueryContext` for tests where chart data resolution is
     /// never actually triggered (e.g., empty renderer URL → all charts become
     /// placeholders).  The PgPool is created lazily and never connects.
-    fn dummy_query_ctx() -> QueryContext {
+    pub(super) fn dummy_query_ctx() -> QueryContext {
         let pg = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://fake:fake@localhost/fake")
             .expect("connect_lazy should not fail");
@@ -1880,4 +1921,3 @@ mod tests {
         assert!(html.contains("&quot;"), "should escape quotes in label");
     }
 }
-

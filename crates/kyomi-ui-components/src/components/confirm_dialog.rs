@@ -62,19 +62,32 @@ pub fn ConfirmDialog(
     /// Text for the cancel button.
     #[prop(into, optional)]
     cancel_text: MaybeProp<String>,
-    /// If true, confirm button uses destructive (red) styling.
-    #[prop(default = true)]
-    destructive: bool,
+    /// If true, confirm button uses destructive (red) styling. Reactive —
+    /// matches `Switch`'s `disabled` convention (`MaybeProp<bool>` via
+    /// `#[prop(into)]`, KYO-487) so a caller holding a `Signal<bool>` (e.g.
+    /// "destructive only for the cancel-subscription variant of this
+    /// dialog, not the reactivate variant") can pass it directly instead of
+    /// snapshotting a stale value at construction time. A plain `bool`
+    /// still works via `Into`. Defaults to `true` (KYO-726), preserving the
+    /// prior non-reactive default.
+    #[prop(optional, into)]
+    destructive: MaybeProp<bool>,
     /// Called when the user confirms.
     on_confirm: Callback<()>,
     /// Called when the user cancels (or clicks backdrop).
     on_cancel: Callback<()>,
 ) -> impl IntoView {
-    // Match Button component variant classes exactly (from button.jsx)
-    let confirm_btn_class = if destructive {
-        "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring h-9 px-4 py-2 bg-destructive text-destructive-foreground shadow-sm hover:bg-destructive/90"
-    } else {
-        "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring h-9 px-4 py-2 bg-primary text-primary-foreground shadow hover:bg-primary/90"
+    // Match Button component variant classes exactly (from button.jsx).
+    // Reactive closure (not a value computed once) so a caller whose
+    // `destructive` signal changes between opens — e.g. billing.rs reusing
+    // one `ConfirmDialog` for both "Cancel Subscription" (destructive) and
+    // "Reactivate" (not) — gets the correct button color each time (KYO-726).
+    let confirm_btn_class = move || {
+        if destructive.get().unwrap_or(true) {
+            "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring h-9 px-4 py-2 bg-destructive text-destructive-foreground shadow-sm hover:bg-destructive/90"
+        } else {
+            "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring h-9 px-4 py-2 bg-primary text-primary-foreground shadow hover:bg-primary/90"
+        }
     };
 
     view! {
@@ -170,6 +183,136 @@ mod tests {
         assert!(
             confirm_dialog < tooltip,
             "ConfirmDialog ({confirm_dialog}) must stay below Tooltip ({tooltip})"
+        );
+    }
+}
+
+// Rendering to HTML (`RenderHtml::to_html`) panics unless the shared
+// `leptos`/`tachys` `ssr` feature is active for this build — see the
+// crate's own `ssr` feature in Cargo.toml and `switch.rs`'s identical
+// convention for its KYO-487 reactive-prop tests. `cargo test -p
+// kyomi-ui-components` alone skips this module cleanly; `--features ssr` is
+// required to run it.
+#[cfg(all(test, feature = "ssr"))]
+mod reactive_prop_tests {
+    use super::*;
+
+    /// KYO-726 — `title`/`message` must be genuinely reactive, not
+    /// snapshotted once at construction time. The actual production bug
+    /// was one level up the call stack (team.rs, billing.rs, and
+    /// passkey_manager.rs each passed `dialog_title.get_untracked()` as the
+    /// prop, collapsing the signal to a frozen `String` at parent-render
+    /// time — long before the click handler that later called
+    /// `set_dialog_title.set(...)` ever ran), but the contract this test
+    /// pins belongs to `ConfirmDialog` itself: given a real signal prop, it
+    /// must re-read it on render, not capture it once.
+    ///
+    /// This builds the `<ConfirmDialog>` view *before* setting the bound
+    /// signals, then renders to HTML *after* — mirroring switch.rs's
+    /// KYO-487 `disabled` test. Against a component that captured
+    /// `title.get()` once into a local at construction time, this render,
+    /// happening strictly after the `.set()` calls, would still show the
+    /// empty initial value.
+    #[test]
+    fn title_and_message_reflect_signals_set_after_construction() {
+        let owner = Owner::new();
+        owner.set();
+
+        let open = RwSignal::new(true);
+        let title = RwSignal::new(String::new());
+        let message = RwSignal::new(String::new());
+
+        let view = view! {
+            <ConfirmDialog
+                open=Signal::from(open)
+                title=title
+                message=message
+                on_confirm=Callback::new(|_: ()| {})
+                on_cancel=Callback::new(|_: ()| {})
+            />
+        };
+
+        // Set strictly after the view value above was constructed — exactly
+        // what the buggy callsites' `set_dialog_title.set(...)` /
+        // `set_dialog_message.set(...)` click handlers do.
+        title.set("Delete Passkey?".to_string());
+        message.set("This cannot be undone.".to_string());
+
+        let html = view.to_html();
+        assert!(
+            html.contains("Delete Passkey?"),
+            "expected the rendered <h3> to reflect the title set after \
+             construction, got: {html}"
+        );
+        assert!(
+            html.contains("This cannot be undone."),
+            "expected the rendered <p> to reflect the message set after \
+             construction, got: {html}"
+        );
+    }
+
+    /// KYO-726 — `destructive` must also be reactive: billing.rs reuses one
+    /// `ConfirmDialog` for both a destructive "Cancel Subscription" prompt
+    /// and a non-destructive "Reactivate" prompt, flipping the same signal
+    /// between opens.
+    #[test]
+    fn destructive_class_reflects_signal_flip_to_true_after_construction() {
+        let owner = Owner::new();
+        owner.set();
+
+        let open = RwSignal::new(true);
+        let destructive = RwSignal::new(false);
+
+        let view = view! {
+            <ConfirmDialog
+                open=Signal::from(open)
+                title="Title"
+                message="Message"
+                destructive=destructive
+                on_confirm=Callback::new(|_: ()| {})
+                on_cancel=Callback::new(|_: ()| {})
+            />
+        };
+
+        destructive.set(true);
+
+        let html = view.to_html();
+        assert!(
+            html.contains("bg-destructive"),
+            "expected the confirm button to carry the destructive class \
+             after the signal flipped to true, got: {html}"
+        );
+    }
+
+    /// Mirror of the above in the other direction — rules out a component
+    /// that renders destructive styling unconditionally regardless of the
+    /// signal.
+    #[test]
+    fn destructive_class_clears_when_signal_flips_to_false_after_construction() {
+        let owner = Owner::new();
+        owner.set();
+
+        let open = RwSignal::new(true);
+        let destructive = RwSignal::new(true);
+
+        let view = view! {
+            <ConfirmDialog
+                open=Signal::from(open)
+                title="Title"
+                message="Message"
+                destructive=destructive
+                on_confirm=Callback::new(|_: ()| {})
+                on_cancel=Callback::new(|_: ()| {})
+            />
+        };
+
+        destructive.set(false);
+
+        let html = view.to_html();
+        assert!(
+            !html.contains("bg-destructive"),
+            "expected no destructive class after the signal flipped to \
+             false, got: {html}"
         );
     }
 }

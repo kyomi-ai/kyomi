@@ -246,3 +246,74 @@ fn bigquery_kyomi_oauth_is_the_only_surviving_stored_false_exception() {
         );
     }
 }
+
+// ── KYO-714: the disconnect toast must not over-claim ────────────────
+
+/// `datasource_disconnect_message` is the whole of AC4: the toast may only
+/// say "disconnected" when the grant is actually gone at the provider.
+/// Snowflake, Databricks and Microsoft Enterprise have no revocation
+/// mechanism Kyomi can call, so their disconnect yields `NotSupported` and
+/// must tell the user the grant is still live and where to finish the job.
+#[test]
+fn not_supported_outcome_does_not_claim_the_account_was_disconnected() {
+    use super::super::datasource_disconnect_message;
+    use crate::server_fns::datasource_oauth::DatasourceOAuthRevocationOutcome as Outcome;
+
+    let message = datasource_disconnect_message(Outcome::NotSupported);
+
+    assert!(
+        !message.contains("Account disconnected"),
+        "the no-revocation outcome must not reuse the wording that claims the \
+         account was disconnected: {message}"
+    );
+    assert!(
+        message.contains("revoke"),
+        "the user must be told the grant is still live and needs revoking at the \
+         provider: {message}"
+    );
+    assert!(
+        message.contains("account settings"),
+        "the user must be told where to finish revoking: {message}"
+    );
+}
+
+/// The three outcomes that really do leave nothing behind at the provider
+/// keep the original wording — this change must not degrade the honest case
+/// into a hedge.
+#[test]
+fn outcomes_that_cleared_the_grant_keep_the_plain_wording() {
+    use super::super::datasource_disconnect_message;
+    use crate::server_fns::datasource_oauth::DatasourceOAuthRevocationOutcome as Outcome;
+
+    for outcome in [
+        Outcome::Revoked,
+        Outcome::AlreadyInvalid,
+        Outcome::NoStoredToken,
+    ] {
+        assert_eq!(
+            datasource_disconnect_message(outcome),
+            "Account disconnected",
+            "{outcome:?} leaves nothing live at the provider, so the plain wording \
+             is true and must be kept"
+        );
+    }
+}
+
+/// The Effect that fires the toast must route through
+/// `datasource_disconnect_message` rather than passing a literal. A literal
+/// here is exactly the pre-KYO-714 defect, and it would be invisible to the
+/// two tests above — they'd still pass against a function nobody calls.
+#[test]
+fn disconnect_effect_derives_its_toast_from_the_revocation_outcome() {
+    let effect = extract_between(
+        SRC,
+        "if let Some(result) = datasource_disconnect_action.value().get() {",
+        "let ssh_key_action = Action::new(",
+    );
+
+    assert!(
+        effect.contains("toast_success(datasource_disconnect_message(result.revocation))"),
+        "the datasource disconnect Effect must derive its toast from the \
+         revocation outcome, not hardcode a success string"
+    );
+}

@@ -31,8 +31,8 @@ details, it does not belong in this repo at all: `CLAUDE.md` routes anything of 
 ```rust
 // WRONG — a real GCP project and a real service-account identity, in a doc comment,
 // in a public repo, for the rest of the repo's life.
-/// The exact observed body: `kyomi-test@nexata-dev` has access to the dataset,
-/// `filemaker-1105` does not, and the 200 omits the `datasets` key entirely.
+/// The exact observed body: `test-service-account@test-project` has access to the dataset,
+/// `acme-corp-472819` does not, and the 200 omits the `datasets` key entirely.
 
 // RIGHT — same shape, same lesson, no identity.
 /// The exact observed body: one identity has access to the dataset and the other
@@ -42,7 +42,7 @@ details, it does not belong in this repo at all: `CLAUDE.md` routes anything of 
 
 Flagged in **KYO-619** (`2026-09-03`, `13:15`) — the sole blocking finding on a diff whose
 parsing and testing work the reviewer called excellent. A real-looking GCP project ID
-(`filemaker-1105`) and a service-account identity (`kyomi-test@nexata-dev`) appeared across
+(`acme-corp-472819`) and a service-account identity (`test-service-account@test-project`) appeared across
 four sites in two files (`bigquery_rest.rs:47-48`, `:246-247`, `user_dataset.rs:1213-1215`,
 `:1240` — line numbers as they stood at that review, before PR #482 rewrote the module) —
 in doc comments, a test context string and a code comment. The framing ("the
@@ -55,7 +55,7 @@ carries no identifying fields.
 repo and found no other hits, and concluded the pattern was a one-off. It was not: PR #482
 ("tell a BigQuery listing's absence apart from its emptiness", merged the same day as
 `d71b9efd`) rewrote `bigquery_rest.rs` and re-introduced **both** identifiers at new
-locations, plus a third in `helpers.rs` — so `grep -rn "nexata-dev\|filemaker-1105" crates/`
+locations, plus a third in `helpers.rs` — so `grep -rn "test-project\|acme-corp-472819" crates/`
 comes back dirty on `origin/main` today. The two changes were in flight concurrently, so the
 sanitisation and the re-introduction never saw each other. Filed as KYO-643.
 

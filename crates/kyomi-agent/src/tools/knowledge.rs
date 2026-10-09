@@ -12,8 +12,8 @@ use kyomi_auth::websocket::helpers as ws_helpers;
 use kyomi_core::models::DocType;
 
 use crate::tools::document::{
-    apply_update, find_document_by_title, ApplyUpdateOutcome, ApplyUpdateParams, DocumentEditTool,
-    DocumentReadTool,
+    apply_create, apply_update, find_document_by_title, ApplyCreateParams, ApplyUpdateOutcome,
+    ApplyUpdateParams, DocumentEditTool, DocumentReadTool,
 };
 use crate::tools::{AgentTool, ToolContext};
 use crate::types::ToolAnnotations;
@@ -629,6 +629,7 @@ impl AgentTool for WriteDocumentTool {
         if let Some(doc) = existing {
             // Update existing document
             let outcome = apply_update(ApplyUpdateParams {
+            validation_context: Some(&ctx.query_context()),
                 db: &ctx.db,
                 dashboard_id: &doc.dashboard_id,
                 workspace_id: &ctx.workspace_id,
@@ -637,21 +638,15 @@ impl AgentTool for WriteDocumentTool {
                 content: Some(content),
                 change_summary: None,
                 expected_content_hash: content_hash,
+                document_scope: ctx.document_id.as_deref(),
+                embed,
             })
             .await?;
 
             match outcome {
                 ApplyUpdateOutcome::Updated => {
-                    // Rechunk after update
-                    kyomi_auth::dashboard_service::rechunk_document(
-                        &ctx.db,
-                        embed,
-                        &doc.dashboard_id,
-                        content,
-                        &ctx.workspace_id,
-                    )
-                    .await?;
-
+                    // KYO-541: `apply_update` rechunks itself now — see its
+                    // doc comment in `tools/document/mod.rs`.
                     ws_helpers::broadcast_dashboard_sync(
                         &ctx.db, &ctx.ws_manager, &doc.dashboard_id, &ctx.workspace_id,
                         kyomi_types::sync::SyncActionType::Update,
@@ -682,26 +677,35 @@ impl AgentTool for WriteDocumentTool {
                 .to_string()),
             }
         } else {
-            // Create new document
-            let dashboard_id = kyomi_auth::dashboard_service::create_dashboard(
-                &ctx.db,
-                &ctx.user_id,
-                &ctx.workspace_id,
+            // KYO-536: a document-scoped copilot (knowledge_copilot) edits
+            // the document it was opened against — it does not manage the
+            // document set. `create_dashboard` itself is withheld from the
+            // copilot's tool subset for the same reason (see
+            // `crate::copilot::tools_for_context`); this covers the second
+            // path to the same effect, `write_knowledge_file`'s implicit
+            // create-on-no-match branch, which the copilot *does* retain
+            // for full-content replacement of the open document.
+            if let Some(scope) = ctx.document_id.as_deref() {
+                return Err(kyomi_core::Error::Forbidden(format!(
+                    "This copilot is scoped to a single open document (id {scope}) and \
+                     cannot create a new one (no existing document titled '{title}')"
+                )));
+            }
+
+            // Create new document. KYO-776: shares its "create, then
+            // populate knowledge_chunks" tail with `CreateDashboardTool` via
+            // `apply_create` — see that function's doc comment in
+            // `tools/document/mod.rs`.
+            let dashboard_id = apply_create(ApplyCreateParams {
+            validation_context: Some(&ctx.query_context()),
+                db: &ctx.db,
+                user_id: &ctx.user_id,
+                workspace_id: &ctx.workspace_id,
                 title,
                 content,
                 doc_type,
-                None, // Agent does explicit sync rechunk below
-            )
-            .await?;
-
-            // Rechunk the new document
-            kyomi_auth::dashboard_service::rechunk_document(
-                &ctx.db,
                 embed,
-                &dashboard_id,
-                content,
-                &ctx.workspace_id,
-            )
+            })
             .await?;
 
             ws_helpers::broadcast_dashboard_sync(
@@ -1113,6 +1117,74 @@ mod tests {
         assert_eq!(doc.content, "# Runbook\nSteps.");
     }
 
+    /// KYO-776 companion to `create_dashboard_populates_knowledge_chunks_before_any_edit`
+    /// (`tools/dashboard.rs`) — this branch already rechunked on create
+    /// before KYO-776 (it called `rechunk_document` explicitly, right after
+    /// `create_dashboard`), so this pins that the behavior survived being
+    /// routed through the new shared `apply_create` unchanged: the
+    /// `knowledge_chunks` row exists with the created content immediately
+    /// after create, before any edit.
+    ///
+    /// This does NOT prove "only one rechunk happened" — `rechunk_document`
+    /// (`crates/kyomi-auth/src/dashboard_service.rs`) deletes existing
+    /// chunks before inserting, so two sequential, awaited calls with the
+    /// same content converge on the same single row; a row-count assertion
+    /// cannot distinguish one call from two. That guarantee instead comes
+    /// structurally, from `apply_create` being the single call site both
+    /// `CreateDashboardTool` and this branch now go through — see its doc
+    /// comment in `tools/document/mod.rs`.
+    ///
+    /// Confirmed by mutation: commenting out the
+    /// `rechunk_document(...).await?;` call inside `apply_create`
+    /// (`tools/document/mod.rs`) and re-running this test fails identically
+    /// to the dashboard-side test above — `left: Vec::new()`, `right:
+    /// ["Runbook content, single chunk."]` — proving this branch has no
+    /// independent rechunk path left of its own; it is load-bearing on
+    /// `apply_create` alone.
+    #[tokio::test]
+    async fn write_knowledge_file_populates_knowledge_chunks_on_create() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let mut ctx = build_ctx(db);
+        ctx.embedding = loaded_embedding();
+
+        let result = WriteDocumentTool
+            .execute(
+                serde_json::json!({"path": "Onboarding", "content": "Runbook content, single chunk."}),
+                &ctx,
+            )
+            .await
+            .expect("write_knowledge_file execute");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+        assert_eq!(parsed["success"], serde_json::json!(true), "{result}");
+        let dashboard_id = parsed["id"].as_str().expect("id").to_string();
+
+        let sq = match &ctx.db {
+            kyomi_core::DbPool::Sqlite(sq) => sq,
+            kyomi_core::DbPool::Postgres(_) => unreachable!("test pool is always sqlite"),
+        };
+        let chunk_contents: Vec<String> = sqlx::query_scalar(
+            "SELECT content FROM knowledge_chunks WHERE dashboard_id = ? ORDER BY chunk_index",
+        )
+        .bind(&dashboard_id)
+        .fetch_all(sq)
+        .await
+        .expect("read back knowledge_chunks");
+
+        // Proves exactly one thing: the knowledge_chunks row(s) exist and
+        // match the created content, before any edit. It does not prove
+        // "rechunked exactly once" — see the doc comment above for why a
+        // row-count assertion can't carry that claim against a
+        // delete-then-insert helper, and where that guarantee actually
+        // comes from instead.
+        assert_eq!(
+            chunk_contents,
+            vec!["Runbook content, single chunk.".to_string()],
+            "write_knowledge_file must populate knowledge_chunks with the created content \
+             before any edit: {chunk_contents:?}"
+        );
+    }
+
     #[tokio::test]
     async fn write_knowledge_file_updates_existing_document_by_title() {
         let db = test_pool().await;
@@ -1202,6 +1274,43 @@ mod tests {
             .expect("lookup")
             .expect("document exists");
         assert_eq!(doc.content, "v1", "a rejected CAS write must not apply");
+    }
+
+    /// A knowledge copilot scoped to one open document must not be able to
+    /// create a brand-new document via `write_knowledge_file`'s implicit
+    /// create-on-no-match branch — it edits the open document, it does not
+    /// manage the document set (mirrors why `create_dashboard` itself is
+    /// withheld from the copilot's tool subset).
+    #[tokio::test]
+    async fn write_knowledge_file_copilot_scope_refuses_creating_new_document() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let open_id = kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Open Doc", "open content", DocType::Knowledge, None,
+        )
+        .await
+        .expect("seed open doc");
+        let count_before = kyomi_auth::dashboard_service::get_document_count(&db, "ws-1", None, "user-a")
+            .await
+            .expect("count before");
+
+        let mut ctx = build_ctx(db);
+        ctx.embedding = loaded_embedding();
+        ctx.document_id = Some(open_id);
+
+        let err = WriteDocumentTool
+            .execute(
+                serde_json::json!({"path": "Totally New Document", "content": "sneaked in"}),
+                &ctx,
+            )
+            .await
+            .expect_err("creating a new document while scoped to a single open one must be refused");
+        assert!(matches!(err, kyomi_core::Error::Forbidden(_)), "got: {err:?}");
+
+        let count_after = kyomi_auth::dashboard_service::get_document_count(&ctx.db, "ws-1", None, "user-a")
+            .await
+            .expect("count after");
+        assert_eq!(count_after, count_before, "no new document row may have been created");
     }
 
     // ---------------------------------------------------------------------
@@ -1465,6 +1574,287 @@ mod tests {
             .expect("lookup")
             .expect("document exists");
         assert_eq!(doc.content, "alpha BETA gamma");
+    }
+
+    /// KYO-541 regression guard: `edit_knowledge_file` already rechunked
+    /// before this ticket, via its own explicit `rechunk_document` call in
+    /// `tools/document/edit.rs` — now removed, since `apply_update`
+    /// (`tools/document/mod.rs`) does it for every caller. This pins that
+    /// the move didn't break knowledge-typed refresh: `execute()` must
+    /// hand back a document whose `knowledge_chunks` row already reflects
+    /// the new content, through the unified path rather than the removed
+    /// per-caller one.
+    ///
+    /// Single-dispatch — deliberately NOT claimed in this test's name,
+    /// because nothing here measures it — is enforced by
+    /// `apply_update` passing `embed: None` to
+    /// `dashboard_service::update_dashboard`, which is what keeps
+    /// `update_dashboard`'s own `spawn_rechunk_document` background path
+    /// from *also* firing (see the `NOTE` on `apply_update`) — confirmed by
+    /// reading that both call sites remain as described, not by a runtime
+    /// assertion here: `rechunk_document` deletes its document's chunks
+    /// before re-inserting, so a second sequential call converges to
+    /// identical rows rather than duplicating them, and forcing a genuine
+    /// concurrent race between the synchronous call and a hypothetical
+    /// background one would be a nondeterministic test outcome, which
+    /// `docs/standards/testing/nondeterministic-verdict-is-a-failing-test.md`
+    /// rules out. What this test asserts is the one thing state-inspection
+    /// after `execute()` returns actually can prove: the refreshed content
+    /// is correct and present.
+    #[tokio::test]
+    async fn edit_knowledge_file_refreshes_knowledge_chunks_via_unified_path() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Runbook", "stale pre-edit content", DocType::Knowledge, None,
+        )
+        .await
+        .expect("seed doc");
+        let doc = find_document_by_title(&db, "ws-1", "user-a", "Runbook")
+            .await
+            .expect("lookup")
+            .expect("document exists");
+
+        // Seed a chunk row reflecting the pre-edit content, the same way
+        // `modify_dashboard_refreshes_knowledge_chunks_for_dashboard_doc_type`
+        // does for the dashboard-doc_type case in `tools/dashboard.rs`.
+        let embedding = loaded_embedding();
+        let embed = embedding.wait_ready().await.expect("loaded_embedding is pre-loaded");
+        kyomi_auth::dashboard_service::rechunk_document(
+            &db, embed, &doc.dashboard_id, "stale pre-edit content", "ws-1",
+        )
+        .await
+        .expect("seed stale chunk");
+
+        let mut ctx = build_ctx(db);
+        ctx.embedding = loaded_embedding();
+
+        let result = EditDocumentTool
+            .execute(
+                serde_json::json!({
+                    "path": "Runbook",
+                    "old_text": "stale pre-edit content",
+                    "new_text": "fresh post-edit content, via edit_knowledge_file",
+                }),
+                &ctx,
+            )
+            .await
+            .expect("execute");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+        assert_eq!(parsed["success"], serde_json::json!(true), "{result}");
+
+        let sq = match &ctx.db {
+            kyomi_core::DbPool::Sqlite(sq) => sq,
+            kyomi_core::DbPool::Postgres(_) => unreachable!("test pool is always sqlite"),
+        };
+        let chunk_contents: Vec<String> = sqlx::query_scalar(
+            "SELECT content FROM knowledge_chunks WHERE dashboard_id = ? ORDER BY chunk_index",
+        )
+        .bind(&doc.dashboard_id)
+        .fetch_all(sq)
+        .await
+        .expect("read back knowledge_chunks");
+
+        assert_eq!(
+            chunk_contents,
+            vec!["fresh post-edit content, via edit_knowledge_file".to_string()],
+            "edit_knowledge_file must refresh knowledge_chunks to the new content via the \
+             unified apply_update path: {chunk_contents:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_knowledge_file_unicode_refreshes_saved_content_and_chunks() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let stale_content = "stale pre-edit content";
+        let document_id = kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Unicode runbook", stale_content, DocType::Knowledge, None,
+        )
+        .await
+        .expect("seed doc");
+        let embedding = loaded_embedding();
+        let embed = embedding.wait_ready().await.expect("embedding is pre-loaded");
+        kyomi_auth::dashboard_service::rechunk_document(
+            &db, embed, &document_id, stale_content, "ws-1",
+        )
+        .await
+        .expect("seed stale chunk");
+
+        // The dash crosses byte 1800, the breakpoint search-window start.
+        let saved_content = format!("{}—{}", "a".repeat(1798), "b".repeat(300));
+        let mut ctx = build_ctx(db);
+        ctx.embedding = embedding;
+        let result = DocumentEditTool::new(DocType::Knowledge)
+            .execute(serde_json::json!({
+                "path": "Unicode runbook",
+                "old_text": stale_content,
+                "new_text": saved_content,
+            }), &ctx)
+            .await
+            .expect("Unicode edit must complete and refresh its chunks");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+        assert_eq!(parsed["success"], serde_json::json!(true), "{result}");
+        let saved_doc = find_document_by_title(&ctx.db, "ws-1", "user-a", "Unicode runbook")
+            .await.expect("lookup").expect("document exists");
+        assert_eq!(saved_doc.content, saved_content);
+
+        let sq = match &ctx.db {
+            kyomi_core::DbPool::Sqlite(sq) => sq,
+            kyomi_core::DbPool::Postgres(_) => unreachable!("test pool is sqlite"),
+        };
+        let chunk_contents: Vec<String> = sqlx::query_scalar(
+            "SELECT content FROM knowledge_chunks WHERE dashboard_id = ? ORDER BY chunk_index",
+        )
+        .bind(&document_id).fetch_all(sq).await.expect("read persisted chunks");
+        assert_eq!(chunk_contents, vec![saved_content[..2000].to_string(), saved_content[1600..].to_string()]);
+        assert_eq!(format!("{}{}", chunk_contents[0], &chunk_contents[1][400..]), saved_doc.content);
+    }
+
+    // -- KYO-536: edit_knowledge_file as a document-scoped copilot tool -----
+
+    /// A targeted edit's tool-call payload (`old_text` + `new_text`) is
+    /// proportional to the size of the change, not the size of the
+    /// document — unlike `write_knowledge_file`/`modify_dashboard`, which
+    /// require the model to resend the complete content on every call.
+    /// This is the property that makes `edit_knowledge_file` the right
+    /// default tool for the knowledge copilot's small edits.
+    #[tokio::test]
+    async fn edit_knowledge_file_targeted_edit_payload_proportional_to_edit_not_document() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let filler = "This paragraph exists only to pad the document out to a realistic \
+                       size so the edit payload can be measured against it. "
+            .repeat(50);
+        let old_text = "the quarterly revenue figure";
+        let new_text = "the quarterly revenue figure (restated)";
+        let content = format!("{filler}\n\nSee {old_text} in the table below.\n{filler}");
+        kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Runbook", &content, DocType::Knowledge, None,
+        )
+        .await
+        .expect("seed doc");
+        let mut ctx = build_ctx(db);
+        ctx.embedding = loaded_embedding();
+        ctx.document_id = Some(
+            find_document_by_title(&ctx.db, "ws-1", "user-a", "Runbook")
+                .await
+                .expect("lookup")
+                .expect("document exists")
+                .dashboard_id,
+        );
+
+        let payload_size = old_text.len() + new_text.len();
+        assert!(
+            payload_size * 20 < content.len(),
+            "test setup: the edit payload ({payload_size} bytes) must be tiny relative to \
+             the document ({} bytes) for this test to mean anything",
+            content.len()
+        );
+
+        let result = EditDocumentTool
+            .execute(
+                serde_json::json!({"path": "Runbook", "old_text": old_text, "new_text": new_text}),
+                &ctx,
+            )
+            .await
+            .expect("execute");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+        assert_eq!(parsed["success"], serde_json::json!(true), "{result}");
+
+        // The tool call itself only ever carried `path` + `old_text` +
+        // `new_text` (payload_size bytes) — nowhere near the full document.
+        assert!(
+            payload_size * 20 < content.len(),
+            "the arguments this tool call required stayed proportional to the edit"
+        );
+    }
+
+    /// Untouched ChartML (or any other) content outside the replaced span
+    /// must come through byte-for-byte identical — `edit_knowledge_file`
+    /// does a single `str::replacen`, never a full-content rewrite, so nothing
+    /// else in the document can be reworded, reformatted, or reflowed.
+    #[tokio::test]
+    async fn edit_knowledge_file_leaves_untouched_chartml_block_byte_identical() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let chartml_block = "```chartml\ntype: bar\ndata:\n  datasource: sales\n  query: |\n    SELECT region, SUM(amount) FROM orders GROUP BY region\n```";
+        let content = format!(
+            "# Regional Notes\n\nThe west region underperformed this quarter.\n\n{chartml_block}\n\nEnd of notes."
+        );
+        kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Runbook", &content, DocType::Knowledge, None,
+        )
+        .await
+        .expect("seed doc");
+        let mut ctx = build_ctx(db);
+        ctx.embedding = loaded_embedding();
+
+        let result = EditDocumentTool
+            .execute(
+                serde_json::json!({
+                    "path": "Runbook",
+                    "old_text": "The west region underperformed this quarter.",
+                    "new_text": "The west region beat forecast this quarter.",
+                }),
+                &ctx,
+            )
+            .await
+            .expect("execute");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+        assert_eq!(parsed["success"], serde_json::json!(true), "{result}");
+
+        let doc = find_document_by_title(&ctx.db, "ws-1", "user-a", "Runbook")
+            .await
+            .expect("lookup")
+            .expect("document exists");
+        assert!(
+            doc.content.contains(chartml_block),
+            "the ChartML block must survive byte-for-byte unchanged: {}",
+            doc.content
+        );
+        assert!(doc.content.contains("beat forecast"), "the edited span must reflect the new text");
+        assert!(!doc.content.contains("underperformed"), "the old text must be gone");
+    }
+
+    /// A copilot scoped to one open knowledge document must not be able to
+    /// edit a different document, even though `edit_knowledge_file`
+    /// resolves its target by title/path rather than a raw id — the
+    /// enforcement in `document::apply_update` runs against the *resolved*
+    /// document id, after `resolve_document` turns the title into one.
+    #[tokio::test]
+    async fn edit_knowledge_file_copilot_scope_refuses_other_document() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let open_id = kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Open Doc", "open content", DocType::Knowledge, None,
+        )
+        .await
+        .expect("seed open doc");
+        kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Other Doc", "other content here", DocType::Knowledge, None,
+        )
+        .await
+        .expect("seed other doc");
+
+        let mut ctx = build_ctx(db);
+        ctx.embedding = loaded_embedding();
+        ctx.document_id = Some(open_id);
+
+        let err = EditDocumentTool
+            .execute(
+                serde_json::json!({"path": "Other Doc", "old_text": "other content", "new_text": "hijacked"}),
+                &ctx,
+            )
+            .await
+            .expect_err("an edit resolving to a document outside the copilot's scope must be refused");
+        assert!(matches!(err, kyomi_core::Error::Forbidden(_)), "got: {err:?}");
+
+        let other = find_document_by_title(&ctx.db, "ws-1", "user-a", "Other Doc")
+            .await
+            .expect("lookup")
+            .expect("document exists");
+        assert_eq!(other.content, "other content here", "the out-of-scope document must be untouched");
     }
 
     // NOTE (ticket item 5, CAS presence): unlike `write_knowledge_file`,

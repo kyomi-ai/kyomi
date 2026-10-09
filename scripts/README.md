@@ -62,8 +62,8 @@ All scripts are organized by environment. **Every script is environment-specific
   autonomous worker claims a backlog ticket: *is anyone else already
   working on this?* (KYO-422, fixing the double-pickup of KYO-416 that
   produced conflicting PRs #367/#368). Checks remote branches
-  (`git ls-remote --heads`), pull requests (`gh pr list`, matched on
-  `headRefName` only — never PR body or title, see the script header for
+  (`git ls-remote --heads`), pull requests (`gh api --paginate`, matched on
+  the head ref only — never PR body or title, see the script header for
   why that was tried and reverted, KYO-471), local worktrees
   (`git worktree list`), and local branches (`git branch --list`). The
   last two exist because a worker whose run dies between `git commit` and
@@ -78,15 +78,20 @@ All scripts are organized by environment. **Every script is environment-specific
   ticket**; `1` — work in flight found, do not claim; `2` — usage error,
   including a malformed `KEY_RESTART_CUTOFF` (KYO-607); `3` — a check could
   not be completed (remote unreachable, `gh` missing
-  or failing, **or the PR listing came back at `--limit` and may therefore
-  be truncated**, or a PR row that did not split into four usable fields —
-  KYO-607) and must be treated exactly like `1`, never like `0` —
-  the script fails closed by design, since a false "clear" costs a full
-  duplicate implementation while a false "in flight" costs one skipped
-  cycle. The PR page size is the env-overridable `PR_LIST_LIMIT` (default
-  `500`, must exceed the repo's total PR count — it was 411 on 2026-08-24);
-  raising it is the fix when the truncation guard trips, and the guard is
-  why raising it is a deliberate act rather than a silently wrong answer.
+  or failing, **a pagination that stopped part-way through**, a PR row
+  that did not split into five usable fields — KYO-607, or a PR row whose
+  rework-label flag was anything other than the literal `0`/`1` — KYO-778)
+  and must be treated exactly like `1`, never like `0` — the script fails closed by design,
+  since a false "clear" costs a full duplicate implementation while a false
+  "in flight" costs one skipped cycle. **The PR listing has no size ceiling
+  (KYO-703).** It paginates to completion, so there is no truncation
+  condition to detect and no limit to raise. Before KYO-703 the fetch was
+  `gh pr list --limit $PR_LIST_LIMIT` guarded by a "rows == limit" check;
+  when the repo reached exactly the default of 500 PRs that guard tripped on
+  every invocation and every backlog worker was blocked at the claim step,
+  reporting clean runs while claiming nothing. If pagination fails part-way,
+  `gh` emits the rows it already fetched *and* exits non-zero; the script
+  discards them and exits `3` rather than answering from a partial listing.
   **`--self <branch>` makes self-exclusion cwd-independent (KYO-593):** the
   script's default self-exclusion is derived from
   `git rev-parse --abbrev-ref HEAD` in the invoking shell's cwd, which is
@@ -169,6 +174,33 @@ All scripts are organized by environment. **Every script is environment-specific
   of the exit `3` the failure already forces. Keys 293 and 294 remain in
   flight after the fix, correctly — they also have legitimate
   current-numbering PRs (#321, #322).
+  **Distinguishes a rework-target PR from a live worker's PR (KYO-778):**
+  `/merge-sweeper` deliberately leaves a rejected PR **open** when it routes
+  a ticket back for rework — "the old PR stays open" — so, before this fix,
+  that PR (and its still-live remote head branch) was itself an unconditional
+  in-flight hit on *every* rework ticket, by construction. The signal is a
+  GitHub PR label, `rework-requested` (`REWORK_LABEL` in the script),
+  applied by `/merge-sweeper`'s own Step 6 the moment it routes a PR back.
+  **Removing the label is the claim** — the rework worker removes it when it
+  picks the ticket back up, so a second check afterward sees an ordinary
+  unlabelled open PR and gets exit `1`, same as any other hit. A PR only
+  classifies as a rework target if it is **OPEN and carries the label**;
+  closed/merged PRs are handled exactly as before regardless of the label.
+  The PR's exact remote head branch (check 1) is classified the same way —
+  the label lives on the PR, not the branch, so check 1 reads it out of a
+  branch list check 2 populates, the same mechanism `RECYCLED_BRANCHES`
+  uses for pre-restart keys. **Local worktrees and local branches (checks 3
+  and 4) are never suppressed by the label**, even one with the identical
+  branch name — a remote label describes what `/merge-sweeper` saw, not
+  what is sitting on this machine, and local evidence of a physically
+  present worker must never be hidden by it. **The durability rule is
+  unweakened:** a `rework-requested` PR is still printed, under its own
+  `REWORK TARGET(S)` heading, on every verdict — it is reclassified, not
+  suppressed, the same distinction `PRESERVED STRANDED WORK` and
+  `PRE-RESTART KEY REUSE` already draw. Fail-closed behaviour applies to
+  the new 5th TSV column the same way it applies to the other four: a row
+  whose label flag is not exactly `0` or `1` is a row the PR check could not
+  read, and forces exit `3` rather than being read as "not labelled."
 
 - **`mark-worktree-stranded.sh`** - The writer side of the KYO-529 tombstone
   above: writes `STRANDED.md` at a preserved worktree's root so
@@ -190,6 +222,42 @@ All scripts are organized by environment. **Every script is environment-specific
   write itself failed); `2` usage error. Self-tested by
   `scripts/mark-worktree-stranded-test.sh`, including an interop check that
   `check-ticket-in-flight.sh` actually honours a marker this script wrote.
+
+- **`retire-worktree.sh`** - The ONLY supported way to remove a linked
+  `kyomi-wt-*` worktree (KYO-733, after a bulk cleanup ran
+  `git worktree remove` on a live agent's tree and lost its staged,
+  uncommitted work, and separately deleted a tree explicitly tombstoned
+  with `STRANDED.md`). `ps` alone is a known-insufficient liveness signal —
+  an agent sitting between tool calls has no child process in the tree at
+  all — so this script refuses removal, reporting EVERY reason found (not
+  just the first), when any of: (a) a file outside `target/` and `.git`
+  was modified in the last 30 minutes; (b) a process (other than this
+  script's own PID and its direct children) has its cwd inside the tree —
+  corroboration, not the sole signal, but still a refusal on its own; (c)
+  `git status --porcelain` is non-empty; (d) HEAD has commits unreachable
+  from any `origin` remote-tracking ref, checked after `git fetch --prune
+  origin` so a stale tracking ref for a since-deleted remote branch can't
+  read as "pushed"; (e) a `STRANDED.md` tombstone is present. Usage:
+  `scripts/retire-worktree.sh <path>` or
+  `scripts/retire-worktree.sh --force <path> <path>` — `--force` overrides
+  reasons (a)-(e) (printing each one it overrides) once a human has
+  confirmed the work is safe to discard (e.g. the PR merged and the remote
+  branch was since deleted, which reads as unpushed by design). It never
+  overrides a usage error (path missing, not a git worktree, not a
+  registered linked worktree, or the primary worktree / canonical clone)
+  or a "could not complete a check" result, and requires the path twice
+  under `--force` as a typo guard. Removes ONLY the worktree — it never
+  deletes the branch (that's the caller's job) and never runs
+  `git worktree prune`. **Exit-code contract:** `0` removed; `1` refused —
+  a check found live/unsaved work; `2` usage error, never overridden by
+  `--force`; `3` a check could not be completed (unsupported git version,
+  `find`/`git worktree list`/`git fetch`/`git rev-list` failed, or `/proc`
+  was wholly unreadable) or the removal itself failed after every check
+  passed — also never overridden by `--force`. Self-tested by
+  `scripts/retire-worktree-test.sh`, including a real backgrounded process
+  planted inside a fixture tree to exercise the `/proc` scan, and mutation
+  checks that prove the find-failure and recent-write assertions actually
+  exercise the script's own bytes.
 
 - **`mark-branch-stranded.sh`** - The writer side of the KYO-567 `stranded/`
   remote-branch tombstone above, and the answer to "what does *releasing* a
@@ -244,16 +312,39 @@ All scripts are organized by environment. **Every script is environment-specific
   the narrowed crates or when `-p` is omitted, and is otherwise skipped with
   an explicit note in the summary. Runs all three passes even after an
   earlier one fails, so one cold run surfaces every problem instead of just
-  the first. **Exit-code contract:** `0` every pass that ran was clean; `1`
-  at least one pass reported lints; `2` usage error; `3` a pass could not be
-  run at all (`wasm32-unknown-unknown` not installed) — deliberately never
+  the first.
+
+  **`-p` narrowing derives, and adds, a `--features` flag (KYO-723).** A bare
+  `-p kyomi-ui` builds a smaller dependency graph than CI's
+  `--workspace --exclude kyomi-desktop` passes do, so it misses feature
+  unification `apps/server`'s own dependency on `kyomi-ui` would otherwise
+  trigger (its `ssr` feature, and `slack` via `apps/server`'s own default
+  features) — without correcting for that, `-p kyomi-ui` used to report
+  `credential_status_indicates_connected`
+  (`crates/kyomi-ui/src/pages/settings/datasources.rs`) as `dead_code`, a
+  false positive CI never produces. This script now runs
+  `cargo metadata --locked --format-version 1` once per narrowed invocation,
+  reads each named crate's unified feature set straight from
+  `.resolve.nodes[].features`, and passes it to passes 1 and 2 as
+  `--features <crate>/<feature>,...` (sorted, comma-joined, empty when a
+  crate resolves to `default` alone) — never a hand-maintained per-crate
+  table, so it cannot drift from `ci.yml`'s own resolution the way a second,
+  manually-updated list would. Requires `jq`, only when `-p` is given; the
+  unnarrowed run stays exactly as before, `jq`-free. **Exit-code contract:**
+  `0` every pass that ran was clean; `1` at least one pass reported lints;
+  `2` usage error; `3` a pass could not be run at all —
+  `wasm32-unknown-unknown` not installed, or (with `-p`) the unified feature
+  set could not be derived (`jq` missing, `cargo metadata` failed, or a
+  named crate has no unique match in its output) — deliberately never
   reported as `0`, checked ahead of `1` the same way
   `check-ticket-in-flight.sh` checks its FAILURES ahead of its HITS.
   Self-tested by `scripts/preflight-clippy-test.sh`, which stubs `cargo` and
   `rustup` to pin the exact argv this script emits (no Rust toolchain
-  needed) and, most importantly, parses the three `run: cargo clippy` lines
-  back out of `.github/workflows/ci.yml` itself and diffs them against what
-  this script runs, so the two cannot silently drift apart again.
+  needed — though the `-p` feature-derivation tests do need the real `jq`
+  binary, which is not stubbed) and, most importantly, parses the three
+  `run: cargo clippy` lines back out of `.github/workflows/ci.yml` itself
+  and diffs them against what this script runs, so the two cannot silently
+  drift apart again.
 
 ## Directory Structure
 

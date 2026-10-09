@@ -64,6 +64,24 @@ pub async fn health_check(State(state): State<AppState>) -> Json<HealthResponse>
 
     let all_healthy = db_ok && kv_ok;
 
+    // Migration schema drift (KYO-716): reads the last result the periodic
+    // background task in `main.rs` published — never queries the database
+    // itself. This endpoint backs the startup, readiness, AND liveness
+    // probes for the `kyomi-api` deployment, so it must not gain a new
+    // "unhealthy" outcome here: a distinct `services` key is alertable
+    // without risking a probe-triggered restart, which is precisely the
+    // operation that fails when the schema is ahead of this binary. `status`
+    // is deliberately left untouched by this check.
+    let missing_versions = state.schema_drift.get();
+    services.insert(
+        "schema".into(),
+        if missing_versions.is_empty() {
+            "current".into()
+        } else {
+            format!("drifted (missing {missing_versions:?} — restart will fail until redeployed)")
+        },
+    );
+
     let version = &kyomi_core::constants::get().api.version;
 
     Json(HealthResponse {

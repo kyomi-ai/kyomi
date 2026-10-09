@@ -11,12 +11,54 @@
 # Static lint that blocks two patterns known to cause "reactive value already
 # disposed" WASM panics in Leptos:
 #
-# NOTE: the two rules are NOT equally strict, despite reading symmetrically
-# below. Rule A FAILS the build; Rule B only WARNS and exits 0 (see the
-# `*:WARN*)` case in the reporting loop near the bottom of this file). Rule B
-# cannot distinguish a genuinely mixed-lifetime derive from a same-scope one,
-# so gating on it would fail every build — it is advisory by design. Do not
-# "fix" that asymmetry without addressing the false-positive rate first.
+# NOTE: KYO-679 changed Rule B's enforcement shape, but not its underlying
+# judgment call. Read this before touching either rule.
+#
+# Rule A still FAILS the build unconditionally (see the `*:WARN*)`/`*:PARSE*)`
+# cases in the reporting loop near the bottom of this file — anything that
+# matches neither is a hard failure). Rule B is now a RATCHET, not a pure
+# advisory: it blocks on NEW findings only. A finding is "new" if it is
+# absent from the checked-in baseline
+# (scripts/lint/disposal-safety-baseline.txt — one line per distinct
+# (repo-relative path, sha256 of the trimmed source line) pair, plus an
+# occurrence count) or if it occurs MORE times in a file than the baseline
+# records — so a 7th copy of an already-baselined identical line still
+# fails, even though its hash alone would match. A finding within its
+# baselined count is silently suppressed: that is what makes a genuinely new
+# site visible as ERROR:B instead of drowning inside 388 unchanging WARN:B
+# lines nobody reads on every single run.
+#
+# The ORIGINAL reasoning for treating Rule B as advisory in the first place
+# still holds, and still governs the 388 sites the baseline currently
+# records: Rule B cannot distinguish a genuinely mixed-lifetime derive from
+# a same-scope one (KYO-548, see the rule's own comment below), so it warns
+# on every bare .get() inside a Signal::derive/Memo::new regardless of
+# whether it is actually unsafe, and blocking on all 388 of them today would
+# fail every build over a judgment call this script cannot make. That is
+# exactly why they are BASELINED rather than fixed or exempted — the debt is
+# real and un-adjudicated, not cleared. Making Rule B block on the full set
+# (rather than just the delta added after today) would reintroduce the
+# original problem this ticket exists to avoid — do not do that.
+#
+# A checked-in baseline can also go STALE: an entry recorded but no longer
+# firing, because someone actually fixed the read. Full-tree scans (no file
+# arguments — what CI's lint-policy job runs) treat a stale entry as an
+# ERROR (exit 1, naming --update-baseline): that is what makes the ratchet
+# tighten instead of merely never loosening. File-scoped scans (file
+# arguments — what the pre-commit hook runs against staged files) report the
+# same condition informationally and never fail on it, for two reasons: (a)
+# the hook only ever sees staged files, so it structurally cannot tell "this
+# file was fixed" apart from "this file wasn't part of the scan" for any
+# baseline entry outside that set; (b) failing a developer's commit BECAUSE
+# they fixed a warning would be a hostile ratchet. CI's full-tree run is the
+# authority on whether the baseline may shrink.
+#
+# Regenerate the baseline after fixing (or deliberately introducing new,
+# reviewed) Rule B sites with:
+#   ./scripts/lint/check-disposal-safety.sh --update-baseline
+# This always does a full-tree scan (it refuses file arguments — a partial
+# scan would silently erase every unscanned file's recorded debt) and
+# rewrites scripts/lint/disposal-safety-baseline.txt from scratch.
 #
 #   Rule A — bare .set() / .update() inside spawn_local or deferred callbacks
 #     [BLOCKING — sets exit status 1]
@@ -27,7 +69,9 @@
 #     Deferred contexts also include gloo_timers Timeout/Interval callbacks.
 #
 #   Rule B — bare .get() inside Signal::derive / Memo::new closures
-#     [ADVISORY — prints WARN:B, does NOT affect exit status]
+#     [RATCHET, see the KYO-679 NOTE above — a new or over-count finding is
+#     ERROR:B (blocking, exit 1); a finding within the checked-in baseline
+#     is silent by default, shown as BASELINED:B under --show-baselined]
 #     KYO-548: the panic condition is the OWN Owner of the derive itself —
 #     the one current when `Signal::derive`/`Memo::new` is CALLED
 #     (reactive_graph 0.2.14 wrappers.rs:631-649 -> owner/arena_item.rs:47-64)
@@ -50,9 +94,22 @@
 # Usage:
 #   check-disposal-safety.sh                 run against full tree
 #   check-disposal-safety.sh <file>...       run against the listed files only
+#   check-disposal-safety.sh --update-baseline
+#                                             regenerate the Rule B baseline
+#                                             from a full-tree scan; refuses
+#                                             file arguments (see the KYO-679
+#                                             NOTE above)
+#   ... [--show-baselined]                   also print Rule B findings that
+#                                             ARE covered by the baseline (as
+#                                             BASELINED:B) instead of the
+#                                             default of suppressing them
 #
-# Exit codes: 0 no Rule A violations (Rule B warnings do not affect this),
-#             1 Rule A violations found, 2 usage error.
+# Exit codes: 0 clean — no Rule A violations, no new/stale Rule B findings
+#               (Rule B findings within the baseline do not affect this),
+#             1 a Rule A violation, a new Rule B finding, or (full-tree scans
+#               only) a stale Rule B baseline entry,
+#             2 usage error — e.g. --update-baseline with file arguments, or
+#               perl+Digest::SHA (used to hash Rule B findings) unavailable.
 #
 # Pure bash + awk. No Rust toolchain required.
 #
@@ -265,10 +322,62 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 LINT_DIR="${DISPOSAL_LINT_DIR:-$REPO_ROOT/crates/kyomi-ui/src}"
+# DISPOSAL_BASELINE_FILE override exists for the same reason
+# DISPOSAL_LINT_DIR does: it lets check-disposal-safety-test.sh point at a
+# hermetic scratch baseline instead of ever reading or writing the real
+# checked-in one.
+BASELINE_FILE="${DISPOSAL_BASELINE_FILE:-$REPO_ROOT/scripts/lint/disposal-safety-baseline.txt}"
+
+# --- KYO-679: Rule B ratchet — flag parsing ---------------------------------
+#
+# --update-baseline regenerates the checked-in Rule B baseline from a
+# full-tree scan. It is mutually exclusive with file arguments: a baseline
+# written from a partial (file-scoped) scan would silently record every
+# unscanned file's existing debt as newly absent, erasing it from the
+# baseline without ever having verified it was fixed. See the header NOTE
+# above for the full ratchet design.
+UPDATE_BASELINE=0
+SHOW_BASELINED=0
+declare -a ARGS=()
+for arg in "$@"; do
+    case "$arg" in
+        --update-baseline) UPDATE_BASELINE=1 ;;
+        --show-baselined) SHOW_BASELINED=1 ;;
+        *) ARGS+=("$arg") ;;
+    esac
+done
+
+if [ "$UPDATE_BASELINE" -eq 1 ] && [ "${#ARGS[@]}" -gt 0 ]; then
+    echo "usage: $(basename "$0") --update-baseline" >&2
+    echo "  --update-baseline takes no file arguments — baseline regeneration is" >&2
+    echo "  always a full-tree scan. A file-scoped baseline write would silently" >&2
+    echo "  erase every unscanned file's recorded debt." >&2
+    exit 2
+fi
+
+FILE_SCOPED=0
+[ "${#ARGS[@]}" -gt 0 ] && FILE_SCOPED=1
 
 declare -a TARGETS=()
-if [ "$#" -gt 0 ]; then
-    for f in "$@"; do
+declare -A SCANNED_RELPATH=()
+
+# Sets REPLY_RELPATH to the repo-relative form of the absolute path $1, or
+# leaves it as $1 unchanged if it is not under $REPO_ROOT (defensive — every
+# TARGETS entry below is built from $REPO_ROOT or $LINT_DIR, so in normal
+# use this always strips; the fallback also correctly handles an
+# already-relative input, which likewise fails the prefix match and is
+# returned unchanged). A function that sets a global rather than echoing
+# avoids a subshell per call — this runs once per scanned file, not once per
+# finding, but there is no reason to pay for a fork here either.
+to_repo_relative() {
+    case "$1" in
+        "$REPO_ROOT"/*) REPLY_RELPATH="${1#"$REPO_ROOT"/}" ;;
+        *) REPLY_RELPATH="$1" ;;
+    esac
+}
+
+if [ "$FILE_SCOPED" -eq 1 ]; then
+    for f in "${ARGS[@]}"; do
         if [ -f "$f" ]; then
             abs="$(cd "$(dirname "$f")" && pwd)/$(basename "$f")"
         elif [ -f "$REPO_ROOT/$f" ]; then
@@ -282,7 +391,11 @@ if [ "$#" -gt 0 ]; then
                 # (<file_stem>/tests/*.rs) render nothing — see header §3.
                 case "$abs" in
                     */tests/*.rs) ;;
-                    *) TARGETS+=("$abs") ;;
+                    *)
+                        TARGETS+=("$abs")
+                        to_repo_relative "$abs"
+                        SCANNED_RELPATH["$REPLY_RELPATH"]=1
+                        ;;
                 esac
                 ;;
             *) ;;
@@ -292,7 +405,11 @@ else
     while IFS= read -r -d '' f; do
         case "$f" in
             */tests/*.rs) ;;
-            *) TARGETS+=("$f") ;;
+            *)
+                TARGETS+=("$f")
+                to_repo_relative "$f"
+                SCANNED_RELPATH["$REPLY_RELPATH"]=1
+                ;;
         esac
     done < <(find "$LINT_DIR" -name '*.rs' -type f -print0 | sort -z)
 fi
@@ -316,6 +433,12 @@ BEGIN {
     # actual quote-mark byte anywhere below would end that bash string
     # early and corrupt everything after it.
     SQ = sprintf("%c", 39)
+    # KYO-679: ASCII Unit Separator (0x1F), appended by rule_b_findings()
+    # before the raw trimmed source line it emits for baseline hashing (see
+    # that function). Chosen over TAB because legitimately tab-indented Rust
+    # source could contain a literal tab; a Unit Separator byte inside real
+    # source text would be pathological.
+    US = sprintf("%c", 31)
 }
 
 function trim(s,  t) {
@@ -702,14 +825,22 @@ function rule_a_findings(text) {
 # could not tell the difference. Requiring empty parens between the `(`
 # and `)` (only whitespace permitted) fixes this without touching genuine
 # signal reads, which are always `.get()`.
+#
+# KYO-679: also appends a US-delimited, trimmed copy of the raw source line
+# ($0 as read, i.e. `raw` — set once per record in the main rule block below
+# — trimmed of leading/trailing whitespace via trim()) after the message.
+# This is what the bash driver hashes to build/consult the Rule B baseline;
+# see the reporting loop near the bottom of this file. The delimiter and
+# trimming happen here, not in bash, because this is the one place that
+# already has both the exact matched line and a trim() helper on hand.
 function rule_b_findings(text) {
     if (match(text, /\.[[:space:]]*get[[:space:]]*\([[:space:]]*\)/) &&
         text !~ /\.[[:space:]]*try_get[[:space:]]*\(/ &&
         text !~ /\.[[:space:]]*get_untracked[[:space:]]*\(/ &&
         text !~ /\.[[:space:]]*try_get_untracked[[:space:]]*\(/ &&
         text !~ /\.[[:space:]]*get_value[[:space:]]*\(/) {
-        printf "%s:%d:WARN:B bare .get() inside Signal::derive/Memo — disposal is governed by the construction-time Owner of THIS derive, not by what it reads (KYO-548); verify every reader is disposed no later than the derive itself, or use .try_get()\n",
-            FILENAME, FNR
+        printf "%s:%d:WARN:B bare .get() inside Signal::derive/Memo — disposal is governed by the construction-time Owner of THIS derive, not by what it reads (KYO-548); verify every reader is disposed no later than the derive itself, or use .try_get()%s%s\n",
+            FILENAME, FNR, US, trim(raw)
     }
 }
 
@@ -864,20 +995,169 @@ ENDFILE {
 
 findings="$(awk "$awk_program" "${TARGETS[@]}" | LC_ALL=C sort -t: -k1,1 -k2,2n -k3,3)"
 
-if [ -z "$findings" ]; then
+# ------------------------------------------------------------------------------
+# KYO-679 — Rule B ratchet: reporting loop
+# ------------------------------------------------------------------------------
+# See the header NOTE (top of file) for the full design. Summary of what
+# follows: Rule A / PARSE / escape-hatch-WARN lines are handled exactly as
+# before (printed unconditionally, only a bare "kind" — Rule A — fails the
+# build). Rule B (`WARN:B`) lines are held back for a baseline lookup: each
+# carries a US-delimited trimmed copy of its raw source line (see
+# rule_b_findings() above), which is hashed (one batched perl process, not
+# one subprocess per finding) and compared against
+# scripts/lint/disposal-safety-baseline.txt's per-(path,hash) occurrence
+# counts. Within-baseline findings are suppressed; anything new, or any
+# occurrence beyond what the baseline recorded, is promoted to a blocking
+# ERROR:B.
+
+US=$'\x1f'
+KEY_SEP=$'\x1e'   # joins (relpath, hash) into one associative-array key
+
+declare -a RB_ABSPATH=() RB_RELPATH=() RB_LINENO=() RB_MSG=() RB_RAWLINE=()
+status=0
+
+if [ -n "$findings" ]; then
+    while IFS="$US" read -r meta rawline; do
+        case "$meta" in
+            *:WARN:B\ *)
+                abspath="${meta%%:*}"
+                rest1="${meta#*:}"
+                lineno="${rest1%%:*}"
+                kindmsg="${rest1#*:}"
+                msg="${kindmsg#WARN:B }"
+
+                to_repo_relative "$abspath"
+
+                RB_ABSPATH+=("$abspath")
+                RB_RELPATH+=("$REPLY_RELPATH")
+                RB_LINENO+=("$lineno")
+                RB_MSG+=("$msg")
+                RB_RAWLINE+=("$rawline")
+                ;;
+            *)
+                # Rule A / PARSE / escape-hatch-WARN — unchanged behaviour:
+                # always printed; only a kind matching neither `WARN` nor
+                # `PARSE` (i.e. Rule A) fails the build.
+                printf '%s\n' "$meta" >&2
+                case "$meta" in
+                    *:WARN*) ;;
+                    *:PARSE*) ;;
+                    *) status=1 ;;
+                esac
+                ;;
+        esac
+    done <<< "$findings"
+fi
+
+# --- Load the checked-in baseline -------------------------------------------
+declare -A BASELINE_COUNT=()
+if [ -f "$BASELINE_FILE" ]; then
+    while IFS=: read -r bpath bhash bcount; do
+        [ -z "$bpath" ] && continue
+        BASELINE_COUNT["$bpath$KEY_SEP$bhash"]="$bcount"
+    done < "$BASELINE_FILE"
+fi
+
+# --- Hash every Rule B finding's raw line in one batched perl process -------
+#
+# Matches the convention check-real-identifiers.sh already established
+# ("Perl, not awk, because this rule set needs SHA-256 hashing (Digest::SHA,
+# core)") rather than spawning one `sha256sum` per finding (~388+ forks
+# today, and growing only downward as the baseline is fixed up over time).
+declare -a RB_HASH=()
+if [ "${#RB_RAWLINE[@]}" -gt 0 ]; then
+    if ! perl -MDigest::SHA -e 1 >/dev/null 2>&1; then
+        echo "ERROR: perl with the core Digest::SHA module is required by" >&2
+        echo "  check-disposal-safety.sh's Rule B baseline hashing and was not found." >&2
+        exit 2
+    fi
+    mapfile -t RB_HASH < <(printf '%s\n' "${RB_RAWLINE[@]}" \
+        | perl -MDigest::SHA=sha256_hex -ne 'chomp; print sha256_hex($_), "\n";')
+    if [ "${#RB_HASH[@]}" -ne "${#RB_RAWLINE[@]}" ]; then
+        echo "ERROR: internal error in check-disposal-safety.sh — hashed ${#RB_HASH[@]}" >&2
+        echo "  lines but expected ${#RB_RAWLINE[@]}." >&2
+        exit 2
+    fi
+fi
+
+# --- --update-baseline: regenerate from this (full-tree) scan and stop -----
+#
+# Deliberately does not consult BASELINE_COUNT at all, and does not affect
+# `status`: this is a maintenance action, not a verification run. Rule
+# A/PARSE findings above were still printed for visibility, but a broken
+# Rule A is an unrelated, separately-gated concern (see the header NOTE) and
+# does not block writing the new Rule B baseline.
+if [ "$UPDATE_BASELINE" -eq 1 ]; then
+    : > "$BASELINE_FILE.tmp"
+    if [ "${#RB_RAWLINE[@]}" -gt 0 ]; then
+        i=0
+        while [ "$i" -lt "${#RB_RAWLINE[@]}" ]; do
+            printf '%s\n' "${RB_RELPATH[$i]}$KEY_SEP${RB_HASH[$i]}"
+            i=$((i + 1))
+        done | LC_ALL=C sort | uniq -c | while read -r count keyed; do
+            printf '%s:%s:%s\n' "${keyed%%"$KEY_SEP"*}" "${keyed#*"$KEY_SEP"}" "$count"
+        done > "$BASELINE_FILE.tmp"
+    fi
+    LC_ALL=C sort -o "$BASELINE_FILE.tmp" "$BASELINE_FILE.tmp"
+    mv "$BASELINE_FILE.tmp" "$BASELINE_FILE"
+    new_total=$(wc -l < "$BASELINE_FILE" | tr -d ' ')
+    echo "Wrote $new_total baseline entries (${#RB_RAWLINE[@]} total Rule B findings) to $BASELINE_FILE" >&2
     exit 0
 fi
 
-status=0
-while IFS= read -r line; do
-    printf '%s\n' "$line" >&2
-    case "$line" in
-        *:WARN*) ;;
-        *:PARSE*) ;;
-        *)
-            status=1
-            ;;
-    esac
-done <<< "$findings"
+# --- Compare current Rule B findings against the baseline, in order --------
+declare -A CURRENT_COUNT=()
+i=0
+while [ "$i" -lt "${#RB_RAWLINE[@]}" ]; do
+    relpath="${RB_RELPATH[$i]}"
+    hash="${RB_HASH[$i]}"
+    key="$relpath$KEY_SEP$hash"
+    occurrence=$(( ${CURRENT_COUNT[$key]:-0} + 1 ))
+    CURRENT_COUNT["$key"]=$occurrence
+    baseline_n="${BASELINE_COUNT[$key]:-0}"
+
+    if [ "$occurrence" -le "$baseline_n" ]; then
+        if [ "$SHOW_BASELINED" -eq 1 ]; then
+            printf '%s:%s:BASELINED:B %s\n' "${RB_ABSPATH[$i]}" "${RB_LINENO[$i]}" "${RB_MSG[$i]}" >&2
+        fi
+    else
+        printf '%s:%s:ERROR:B %s — not covered by scripts/lint/disposal-safety-baseline.txt (a new site, or more copies of this exact line than recorded there). Fix it: change this read to .try_get(), or if a post-disposal read here is genuinely fine, add `// lint-allow: disposal-safe=<why>` on this line.\n' \
+            "${RB_ABSPATH[$i]}" "${RB_LINENO[$i]}" "${RB_MSG[$i]}" >&2
+        status=1
+    fi
+    i=$((i + 1))
+done
+
+# --- Stale-entry check -------------------------------------------------------
+#
+# Full-tree scans (FILE_SCOPED=0) treat every baseline entry recording more
+# occurrences than were actually found as an error — this is what lets the
+# ratchet tighten. File-scoped scans only ever consult entries whose path
+# was part of THIS invocation's scanned set (SCANNED_RELPATH); every other
+# entry belongs to a file that was not part of this scan at all, not one
+# that has necessarily improved, and is silently skipped rather than
+# reported at all — see the header NOTE for why getting this backwards would
+# fail a developer's commit on every run.
+for key in "${!BASELINE_COUNT[@]}"; do
+    relpath="${key%%"$KEY_SEP"*}"
+    hash="${key#*"$KEY_SEP"}"
+    baseline_n="${BASELINE_COUNT[$key]}"
+    current_n="${CURRENT_COUNT[$key]:-0}"
+
+    if [ "$current_n" -ge "$baseline_n" ]; then
+        continue
+    fi
+
+    if [ "$FILE_SCOPED" -eq 1 ]; then
+        if [ -n "${SCANNED_RELPATH[$relpath]:-}" ]; then
+            echo "INFO: $relpath now has $current_n occurrence(s) of a baselined Rule B line (hash ${hash:0:12}...), was $baseline_n — the debt went down. Not failing: file-scoped mode only sees staged files, so this cannot be distinguished from 'not scanned'; CI's full-tree run is authoritative and will require --update-baseline to record the improvement." >&2
+        fi
+        # else: this baseline entry's file was not part of this file-scoped
+        # scan at all — unscanned, not stale. Silently skip.
+    else
+        echo "ERROR: $relpath: baseline expects $baseline_n occurrence(s) of a Rule B line hashing to ${hash:0:12}..., but a full-tree scan found only $current_n. The baseline is stale (the debt went down) — run './scripts/lint/check-disposal-safety.sh --update-baseline' to tighten it." >&2
+        status=1
+    fi
+done
 
 exit "$status"

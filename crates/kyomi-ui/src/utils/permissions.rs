@@ -93,6 +93,14 @@ pub enum AnalyticsAccess {
     Denied,
 }
 
+/// Analytics event quotas apply only to Cloud deployments.
+///
+/// Shared by both usage server functions and the analytics settings gate.
+/// Self-hosted deployments have no analytics metering, allowance or billing.
+pub fn analytics_quota_applies(is_self_hosted: bool) -> bool {
+    !is_self_hosted
+}
+
 /// The single "may this user use analytics?" decision (KYO-260).
 ///
 /// Before this existed, the question was answered independently in three
@@ -112,7 +120,7 @@ pub enum AnalyticsAccess {
 /// self-hosted mode"), even though they would also fail the (on
 /// self-hosted, irrelevant) billing check.
 pub fn analytics_access(ctx: &UserContext) -> AnalyticsAccess {
-    if ctx.is_self_hosted {
+    if !analytics_quota_applies(ctx.is_self_hosted) {
         AnalyticsAccess::SelfHosted
     } else if !ctx.can(Permission::ManageAnalytics) {
         AnalyticsAccess::Denied
@@ -179,6 +187,7 @@ mod tests {
             is_personal_mode: false,
             is_self_hosted,
             billing_enabled,
+            billing_lapsed: false,
             capabilities: HashMap::new(),
             chart_palette: "balanced".to_string(),
             permissions,

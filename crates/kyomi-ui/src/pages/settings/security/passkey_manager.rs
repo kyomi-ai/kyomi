@@ -761,11 +761,16 @@ pub fn PasskeyManager() -> impl IntoView {
             </CardContent>
         </Card>
 
-        // Delete Confirm Dialog
+        // Delete Confirm Dialog — pass the signals through so
+        // `ConfirmDialog` re-reads them reactively when it opens (KYO-726).
+        // `open_delete_dialog` above sets these signals right before
+        // flipping `dialog_open`, so `.get_untracked()` here would freeze
+        // the title/message at the empty values they held at initial
+        // render.
         <ConfirmDialog
             open=Signal::from(dialog_open)
-            title=dialog_title.get_untracked()
-            message=dialog_message.get_untracked()
+            title=dialog_title
+            message=dialog_message
             confirm_text="Delete"
             on_confirm=on_confirm_delete
             on_cancel=on_cancel_delete
@@ -806,7 +811,7 @@ pub fn PasskeyManager() -> impl IntoView {
                 <div class="flex justify-end gap-3 pt-4">
                     <Button
                         variant=ButtonVariant::Outline
-                        disabled=add_loading.get_untracked()
+                        disabled=add_loading
                         on:click=move |_| {
                             add_modal_open.set(false);
                             add_device_name.set(String::new());
@@ -815,7 +820,7 @@ pub fn PasskeyManager() -> impl IntoView {
                         "Cancel"
                     </Button>
                     <Button
-                        disabled=add_loading.get_untracked()
+                        disabled=add_loading
                         on:click=handle_add_passkey
                     >
                         {move || if add_loading.get() { "Adding..." } else { "Add Passkey" }}
@@ -854,7 +859,7 @@ pub fn PasskeyManager() -> impl IntoView {
                 <div class="flex justify-end gap-3 pt-4">
                     <Button
                         variant=ButtonVariant::Outline
-                        disabled=rename_action.pending().get_untracked()
+                        disabled=rename_action.pending()
                         on:click=move |_| {
                             rename_modal_open.set(false);
                             rename_credential_id.set(None);
@@ -864,7 +869,7 @@ pub fn PasskeyManager() -> impl IntoView {
                         "Cancel"
                     </Button>
                     <Button
-                        disabled=rename_action.pending().get_untracked()
+                        disabled=rename_action.pending()
                         on:click=handle_rename
                     >
                         {move || if rename_action.pending().get() { "Saving..." } else { "Save" }}
