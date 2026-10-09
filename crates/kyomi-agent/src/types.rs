@@ -186,8 +186,11 @@ pub struct ToolCall {
 ///
 /// Contains the generated text, tool calls (if any), token usage statistics,
 /// and an estimated cost for the call.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LLMResponse {
+    /// Complete provider payload, including opaque continuation/signature blocks. Restricted storage only.
+    #[serde(default)]
+    pub raw_response: serde_json::Value,
     /// The text content of the response.
     pub content: String,
     /// Why the LLM stopped generating (e.g., "end_turn", "tool_use", "max_tokens").

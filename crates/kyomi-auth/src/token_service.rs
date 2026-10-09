@@ -196,29 +196,34 @@ pub async fn rotate_refresh_token(
     expires_at: DateTime<Utc>,
     device_info: &DeviceInfo,
 ) -> kyomi_core::Result<String> {
-    let is_pg = pool.is_postgres();
-    let now = sql_compat::now(is_pg);
-
-    // Mark the old token as replaced
-    let replace_sql = format!(
-        "UPDATE refresh_tokens SET replaced_at = {now} WHERE token_id = $1"
-    );
-    kyomi_core::db_execute!(pool, &replace_sql, old_token_id)?;
-
-    // Create the new token in the same family
     let random_bytes: [u8; 16] = rand::rng().random();
     let new_token_id = format!("rt_{}", URL_SAFE_NO_PAD.encode(random_bytes));
-
-    kyomi_core::db_execute!(
-        pool,
-        "INSERT INTO refresh_tokens \
-         (token_id, user_id, token_hash, expires_at, user_agent, ip_address, country_code, family_id) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-        &new_token_id, user_id, new_token_hash, &expires_at,
-        &device_info.user_agent, &device_info.ip_address,
-        &device_info.country_code, family_id
-    )?;
-
+    // Lock order is always user then tokens, shared with all-session revocation.
+    // SQLite's first write obtains the database write lock; Postgres locks this row.
+    macro_rules! rotate {
+        ($pool:expr) => {{
+            let mut tx = $pool.begin().await?;
+            sqlx::query("UPDATE users SET sessions_valid_from = sessions_valid_from WHERE user_id = $1")
+                .bind(user_id).execute(&mut *tx).await?;
+            let now = sql_compat::now(pool.is_postgres());
+            let bt = sql_compat::bool_true(pool.is_postgres());
+            let sql = format!("UPDATE refresh_tokens SET replaced_at = {now} WHERE token_id = $1 AND user_id = $2 AND family_id = $3 AND is_active = {bt} AND expires_at > {now}");
+            let replaced = sqlx::query(&sql).bind(old_token_id).bind(user_id).bind(family_id)
+                .execute(&mut *tx).await?;
+            if replaced.rows_affected() == 0 {
+                return Err(kyomi_core::Error::Unauthorized("Refresh token has been revoked".into()));
+            }
+            sqlx::query("INSERT INTO refresh_tokens (token_id, user_id, token_hash, expires_at, user_agent, ip_address, country_code, family_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)")
+                .bind(&new_token_id).bind(user_id).bind(new_token_hash).bind(expires_at)
+                .bind(&device_info.user_agent).bind(&device_info.ip_address)
+                .bind(&device_info.country_code).bind(family_id).execute(&mut *tx).await?;
+            tx.commit().await?;
+        }};
+    }
+    match pool {
+        DbPool::Postgres(pg) => rotate!(pg),
+        DbPool::Sqlite(sq) => rotate!(sq),
+    }
     Ok(new_token_id)
 }
 
@@ -287,6 +292,74 @@ pub async fn revoke_user_refresh_token(
     // Revoke the entire family
     let count = revoke_token_family(pool, &row.family_id).await?;
     Ok(count > 0)
+}
+
+/// Persist a browser login's refresh token only if its signed access issuance
+/// still follows the current cutoff. Serializes with revocation so a pre-event
+/// mint cannot insert a surviving refresh token after the event commits.
+pub async fn store_session_refresh_token(
+    pool: &DbPool,
+    user_id: &str,
+    token_hash: &str,
+    expires_at: DateTime<Utc>,
+    device_info: &DeviceInfo,
+    family_id: &str,
+    issued_at_us: i64,
+) -> kyomi_core::Result<String> {
+    let random_bytes: [u8; 16] = rand::rng().random();
+    let token_id = format!("rt_{}", URL_SAFE_NO_PAD.encode(random_bytes));
+    macro_rules! store {
+        ($pool:expr) => {{
+            let mut tx = $pool.begin().await?;
+            let cutoff: Option<i64> = sqlx::query_scalar("UPDATE users SET sessions_valid_from = sessions_valid_from WHERE user_id = $1 RETURNING sessions_valid_from")
+                .bind(user_id).fetch_one(&mut *tx).await?;
+            if cutoff.is_some_and(|cutoff| issued_at_us <= cutoff) {
+                return Err(kyomi_core::Error::Unauthorized("Session revoked during login".into()));
+            }
+            sqlx::query("INSERT INTO refresh_tokens (token_id, user_id, token_hash, expires_at, user_agent, ip_address, country_code, family_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)")
+                .bind(&token_id).bind(user_id).bind(token_hash).bind(expires_at)
+                .bind(&device_info.user_agent).bind(&device_info.ip_address)
+                .bind(&device_info.country_code).bind(family_id).execute(&mut *tx).await?;
+            tx.commit().await?;
+        }};
+    }
+    match pool {
+        DbPool::Postgres(pg) => store!(pg),
+        DbPool::Sqlite(sq) => store!(sq),
+    }
+    Ok(token_id)
+}
+
+/// Immediately revoke browser access sessions and all user refresh tokens.
+/// Both writes commit together even with no refresh tokens. The cutoff advances
+/// strictly under concurrent/repeated events, including wall-clock rollback.
+pub async fn revoke_all_user_sessions(pool: &DbPool, user_id: &str) -> kyomi_core::Result<u64> {
+    macro_rules! revoke {
+        ($pool:expr) => {{
+            let mut tx = $pool.begin().await?;
+            // Sample issuance cutoff only after acquiring the serialization lock.
+            // A queued event must include sessions minted while it was waiting.
+            sqlx::query("UPDATE users SET sessions_valid_from = sessions_valid_from WHERE user_id = $1")
+                .bind(user_id).execute(&mut *tx).await?;
+            let candidate = Utc::now().timestamp_micros();
+            let advanced = sqlx::query("UPDATE users SET sessions_valid_from = CASE WHEN sessions_valid_from >= $1 THEN sessions_valid_from + 1 ELSE $1 END WHERE user_id = $2")
+                .bind(candidate).bind(user_id).execute(&mut *tx).await?;
+            if advanced.rows_affected() == 0 {
+                return Err(kyomi_core::Error::Unauthorized("User not found".into()));
+            }
+            let now = sql_compat::now(pool.is_postgres());
+            let bf = sql_compat::bool_false(pool.is_postgres());
+            let bt = sql_compat::bool_true(pool.is_postgres());
+            let sql = format!("UPDATE refresh_tokens SET is_active = {bf}, revoked_at = {now} WHERE user_id = $1 AND is_active = {bt}");
+            let count = sqlx::query(&sql).bind(user_id).execute(&mut *tx).await?.rows_affected();
+            tx.commit().await?;
+            count
+        }};
+    }
+    Ok(match pool {
+        DbPool::Postgres(pg) => revoke!(pg),
+        DbPool::Sqlite(sq) => revoke!(sq),
+    })
 }
 
 /// Revoke ALL refresh tokens for a user. Returns count of revoked tokens.

@@ -65,30 +65,6 @@ pub(crate) const COMMON_SENSITIVE: &[&str] = &[
     "service_account_json",
 ];
 
-/// Mask sensitive credential fields for API responses.
-///
-/// Looks up the datasource type in the registry to determine which credential
-/// fields are sensitive, then replaces their values with [`MASKED_VALUE`].
-///
-/// Non-sensitive fields are preserved as-is. If the type is unknown or the
-/// credentials are not an object, the value is returned unchanged.
-pub fn mask_credentials(credentials: &Value, ds_type: &str) -> Value {
-    let Some(obj) = credentials.as_object() else {
-        return credentials.clone();
-    };
-
-    let sensitive_fields: &[&str] = datasource_registry::get_metadata_by_str(ds_type)
-        .map(|m| m.sensitive_credential_fields)
-        .unwrap_or(&[]);
-
-    let mut masked = obj.clone();
-    for &field in sensitive_fields {
-        mask_field_if_present(&mut masked, field);
-    }
-
-    Value::Object(masked)
-}
-
 /// Mask sensitive connection config fields for API responses.
 ///
 /// Looks up the datasource type in the registry for type-specific sensitive
@@ -708,72 +684,6 @@ mod tests {
         );
     }
 
-    // -- mask_credentials ---
-
-    #[test]
-    fn mask_credentials_replaces_password_for_postgres() {
-        let creds = json!({"username": "admin", "password": "secret123"});
-        let masked = mask_credentials(&creds, "postgres");
-
-        assert_eq!(masked["username"], "admin");
-        assert_eq!(masked["password"], MASKED_VALUE);
-    }
-
-    #[test]
-    fn mask_credentials_replaces_password_for_clickhouse() {
-        let creds = json!({"username": "default", "password": "ch-pass"});
-        let masked = mask_credentials(&creds, "clickhouse");
-
-        assert_eq!(masked["username"], "default");
-        assert_eq!(masked["password"], MASKED_VALUE);
-    }
-
-    #[test]
-    fn mask_credentials_replaces_access_token_for_databricks() {
-        let creds = json!({"access_token": "dapi-secret-token"});
-        let masked = mask_credentials(&creds, "databricks");
-
-        assert_eq!(masked["access_token"], MASKED_VALUE);
-    }
-
-    #[test]
-    fn mask_credentials_preserves_non_sensitive_for_bigquery() {
-        let creds = json!({"billing_project": "my-project", "oauth_access_token": "tok-123"});
-        let masked = mask_credentials(&creds, "bigquery");
-
-        // BigQuery has no sensitive credential fields
-        assert_eq!(masked["billing_project"], "my-project");
-        assert_eq!(masked["oauth_access_token"], "tok-123");
-    }
-
-    #[test]
-    fn mask_credentials_handles_unknown_type() {
-        let creds = json!({"username": "admin", "password": "secret"});
-        let masked = mask_credentials(&creds, "unknown_type");
-
-        // Unknown type — nothing is masked
-        assert_eq!(masked["username"], "admin");
-        assert_eq!(masked["password"], "secret");
-    }
-
-    #[test]
-    fn mask_credentials_handles_non_object() {
-        let creds = json!("just a string");
-        let masked = mask_credentials(&creds, "postgres");
-        assert_eq!(masked, creds);
-    }
-
-    #[test]
-    fn mask_credentials_skips_null_and_empty_values() {
-        let creds = json!({"username": "admin", "password": null});
-        let masked = mask_credentials(&creds, "postgres");
-        assert!(masked["password"].is_null(), "null values should not be masked");
-
-        let creds2 = json!({"username": "admin", "password": ""});
-        let masked2 = mask_credentials(&creds2, "postgres");
-        assert_eq!(masked2["password"], "", "empty strings should not be masked");
-    }
-
     // -- mask_connection_config ---
 
     #[test]
@@ -872,80 +782,6 @@ mod tests {
 
         let masked = mask_connection_config(&config, "postgres");
         assert_eq!(masked, config, "no sensitive fields present — should be unchanged");
-    }
-
-    #[test]
-    fn mask_redshift_sensitive_credential_fields() {
-        // Redshift sensitive_credential_fields is ["password"] (matches Python source).
-        // access_key_id and secret_access_key are NOT in the sensitive list.
-        let creds = json!({
-            "username": "admin",
-            "password": "pass123",
-            "access_key_id": "AKIA...",
-            "secret_access_key": "secret..."
-        });
-
-        let masked = mask_credentials(&creds, "redshift");
-        assert_eq!(masked["username"], "admin");
-        assert_eq!(masked["password"], MASKED_VALUE);
-        // These are NOT in Redshift's sensitive_credential_fields
-        assert_eq!(masked["access_key_id"], "AKIA...");
-        assert_eq!(masked["secret_access_key"], "secret...");
-    }
-
-    #[test]
-    fn mask_snowflake_sensitive_credential_fields() {
-        // Snowflake's key-pair auth mode carries a PEM private_key alongside
-        // username/password (KYO-330). Both password and private_key are
-        // sensitive_credential_fields and must be masked; username must not.
-        let creds = json!({
-            "username": "admin",
-            "password": "pass123",
-            "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvQ...\n-----END PRIVATE KEY-----"
-        });
-
-        let masked = mask_credentials(&creds, "snowflake");
-        assert_eq!(masked["username"], "admin");
-        assert_eq!(masked["password"], MASKED_VALUE);
-        assert_eq!(masked["private_key"], MASKED_VALUE);
-    }
-
-    #[test]
-    fn mask_credentials_skips_non_string_values() {
-        // Non-string values (numbers, booleans) should NOT be masked
-        let creds = json!({
-            "username": "admin",
-            "password": 12345,
-        });
-        let masked = mask_credentials(&creds, "postgres");
-        assert_eq!(masked["password"], 12345, "numeric values should not be masked");
-
-        let creds2 = json!({
-            "username": "admin",
-            "password": true,
-        });
-        let masked2 = mask_credentials(&creds2, "postgres");
-        assert_eq!(masked2["password"], true, "boolean values should not be masked");
-    }
-
-    #[test]
-    fn mask_synapse_sensitive_credential_fields() {
-        let creds = json!({
-            "auth_type": "sql",
-            "username": "admin",
-            "password": "pass123",
-            "client_secret": "az-secret",
-            "oauth_access_token": "tok",
-            "oauth_refresh_token": "ref"
-        });
-
-        let masked = mask_credentials(&creds, "synapse");
-        assert_eq!(masked["auth_type"], "sql");
-        assert_eq!(masked["username"], "admin");
-        assert_eq!(masked["password"], MASKED_VALUE);
-        assert_eq!(masked["client_secret"], MASKED_VALUE);
-        assert_eq!(masked["oauth_access_token"], MASKED_VALUE);
-        assert_eq!(masked["oauth_refresh_token"], MASKED_VALUE);
     }
 
     // -- finalize_connection_config_secrets ---

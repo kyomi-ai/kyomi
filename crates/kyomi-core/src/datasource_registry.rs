@@ -39,11 +39,8 @@ const ALL_TYPES: [DatasourceType; 10] = [
 
 /// Authentication mode configuration for a datasource type.
 ///
-/// Mirrors Python's `AuthModeConfig` from `datasources/auth_modes.py`.
-/// Contains all fields needed for credential handling, UI rendering,
-/// and routing logic.
-///
-/// Serialized to JSON for the `/types` endpoint.
+/// Contains credential-routing and UI metadata. The datasource types endpoint
+/// projects the UI fields into its `AuthModeOption` DTO.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthModeConfig {
     // === Identity ===
@@ -97,19 +94,21 @@ pub struct AuthModeConfig {
     /// `connection_config` JSON blob on `datasource_configs`. KYO-702's
     /// root cause was exactly this confusion: a ticket assumed this field
     /// already tracked `connection_config` ownership, and it never did.
+    ///
+    /// Read by `shared_credential_status` (KYO-518), which validates the
+    /// `shared_<field>` keys holding a mode's shared credential. KYO-332
+    /// removed this field as unused; it gained its first consumer here, so
+    /// "no reader" is not by itself a reason to delete it again — remove it
+    /// only alongside the shared-credential readiness check that reads it.
     pub credential_fields: Vec<String>,
-
-    /// Fields to mask in API responses (e.g., `["password"]`).
-    pub sensitive_fields: Vec<String>,
 
     /// `connection_config` keys this auth mode owns — i.e. the keys
     /// `build_connection_config` (kyomi-ui) writes only when this mode is
     /// active, and that a switch to a *different* mode must not leave
     /// behind (KYO-702).
     ///
-    /// **Distinct from [`Self::credential_fields`] above**: this is
-    /// workspace-level `connection_config` on `datasource_configs`, not a
-    /// per-user credential. A field can appear in neither, either, or (if
+    /// This is workspace-level `connection_config` on `datasource_configs`,
+    /// not a per-user credential. A field can appear in no mode, one mode, or (if
     /// two modes both write it, e.g. Synapse's `tenant_id`) more than one
     /// mode's list — this list only needs to name fields that are
     /// mode-*exclusive*, since [`DatasourceTypeMetadata::inactive_auth_mode_connection_config_fields`]
@@ -181,7 +180,6 @@ fn password_auth_mode(is_default: bool, supports_shared: bool) -> AuthModeConfig
         credential_scope: "user".into(),
         preference_tracking: "credential".into(),
         credential_fields: vec!["username".into(), "password".into()],
-        sensitive_fields: vec!["password".into()],
         connection_config_fields: vec![],
         is_default,
         supports_shared_credentials: supports_shared,
@@ -218,7 +216,6 @@ fn enterprise_oauth_auth_mode(
         credential_scope: "user".into(),
         preference_tracking: "credential".into(),
         credential_fields: vec!["oauth_token".into()],
-        sensitive_fields: vec!["oauth_token".into()],
         // Both factories write into the same connection_config keys —
         // build_connection_config (kyomi-ui) gates its "oauth_client_id"/
         // "oauth_client_secret" writes on this exact mode_id for every
@@ -264,7 +261,6 @@ fn oauth_auth_mode(
         credential_scope: "user".into(),
         preference_tracking: "credential".into(),
         credential_fields: vec!["oauth_token".into()],
-        sensitive_fields: vec!["oauth_token".into()],
         // Both factories write into the same connection_config keys —
         // build_connection_config (kyomi-ui) gates its "oauth_client_id"/
         // "oauth_client_secret" writes on this exact mode_id for every
@@ -295,7 +291,6 @@ fn service_account_auth_mode(is_default: bool) -> AuthModeConfig {
         credential_scope: "workspace".into(),
         preference_tracking: "preference".into(),
         credential_fields: vec![],
-        sensitive_fields: vec![],
         // BigQuery is this factory's only caller today (verified via
         // `grep -n "service_account_auth_mode(" crates/kyomi-core/src/datasource_registry.rs`)
         // and its driver-facing key is genuinely "service_account_json" —
@@ -328,7 +323,6 @@ fn token_auth_mode(
         credential_scope: "user".into(),
         preference_tracking: "credential".into(),
         credential_fields: vec![token_field.into()],
-        sensitive_fields: vec![token_field.into()],
         connection_config_fields: vec![],
         is_default,
         supports_shared_credentials: supports_shared,
@@ -384,12 +378,6 @@ pub struct DatasourceTypeMetadata {
 
     /// Default port, or `None` for API-based (BigQuery, Snowflake).
     pub default_port: Option<u16>,
-
-    /// Credential field names required from users (e.g., `["username", "password"]`).
-    pub credential_fields: &'static [&'static str],
-
-    /// Credential fields that must be masked in API responses (e.g., `["password"]`).
-    pub sensitive_credential_fields: &'static [&'static str],
 
     /// Connection config fields that must be masked in API responses
     /// **and** restored from the stored config on write when the client's
@@ -648,8 +636,6 @@ static BIGQUERY_META: LazyLock<DatasourceTypeMetadata> = LazyLock::new(|| Dataso
     display_name: "BigQuery",
     description: "Google Cloud BigQuery",
     default_port: None,
-    credential_fields: &["billing_project", "query_size_limit_gb"],
-    sensitive_credential_fields: &[],
     // oauth_client_secret and service_account_json moved to COMMON_SENSITIVE
     // in kyomi_auth::credential_service (KYO-786) — masking is unaffected,
     // see that constant's doc.
@@ -678,8 +664,6 @@ static CLICKHOUSE_META: LazyLock<DatasourceTypeMetadata> =
         display_name: "ClickHouse",
         description: "ClickHouse analytics database",
         default_port: Some(8123),
-        credential_fields: &["username", "password"],
-        sensitive_credential_fields: &["password"],
         sensitive_connection_config_fields: &[],
         requires_user_credentials: true,
         accepts_user_context: false,
@@ -697,11 +681,6 @@ static CLICKHOUSE_META: LazyLock<DatasourceTypeMetadata> =
 // --- Snowflake ---
 // Python: apps/backend-python/src/api/datasources/snowflake/__init__.py
 // auth_modes: [password_auth_mode(is_default=True), oauth_auth_mode(oauth_provider="snowflake")]
-// The Python source predates key-pair auth (KYO-274) and only ever masked
-// "password". Key-pair mode's own PEM `private_key` field (see the `keypair`
-// AuthModeConfig below) is just as sensitive and is masked here too — see
-// KYO-330.
-//
 // oauth_client_secret was added here for KYO-780 (mirroring what
 // `oauth_auth_mode`'s own `connection_config_fields` already declared this
 // mode owns) and moved to COMMON_SENSITIVE in kyomi_auth::credential_service
@@ -712,12 +691,6 @@ static SNOWFLAKE_META: LazyLock<DatasourceTypeMetadata> =
         display_name: "Snowflake",
         description: "Snowflake cloud data warehouse",
         default_port: None,
-        // Type-level field surface across all auth modes: password mode's
-        // ["username", "password"] plus keypair mode's "private_key" (see
-        // the `keypair` AuthModeConfig below, which lists the same three
-        // fields at the per-mode level).
-        credential_fields: &["username", "password", "private_key"],
-        sensitive_credential_fields: &["password", "private_key"],
         sensitive_connection_config_fields: &[],
         requires_user_credentials: true,
         accepts_user_context: false,
@@ -751,25 +724,11 @@ static SNOWFLAKE_META: LazyLock<DatasourceTypeMetadata> =
                 // same as password. No reason found to diverge.
                 credential_scope: "user".into(),
                 preference_tracking: "credential".into(),
-                // Mirrors exactly what `kyomi-ui`'s connection-config /
-                // credential builder persists for this mode
-                // (`datasources.rs:2028-2037` writes `username` + `password`
-                // + `private_key`; the keypair-mode field UI at
-                // `datasources.rs:5946-5985` shows "Username" and "Private
-                // Key (PEM)" as required, and "Private Key Passphrase" —
-                // stored under the `password` key — as optional). All three
-                // are listed here since `credential_fields` documents the
-                // field surface, not just the required subset (compare
-                // `password_auth_mode`, which lists both of its fields
-                // despite neither being conditionally optional in the same
-                // way). `password` and `private_key` both carry secrets, so
-                // both are sensitive.
-                credential_fields: vec!["username".into(), "password".into(), "private_key".into()],
-                sensitive_fields: vec!["password".into(), "private_key".into()],
                 // Keypair auth's credentials live entirely in the per-user
-                // `credentials` map above (username/password/private_key) —
+                // `credentials` map (username/password/private_key) —
                 // nothing is written into workspace-level `connection_config`
                 // for this mode.
+                credential_fields: vec!["username".into(), "password".into(), "private_key".into()],
                 connection_config_fields: vec![],
                 is_default: false,
                 // The common resolver copies username/password, never a private key.
@@ -789,8 +748,6 @@ static SNOWFLAKE_META: LazyLock<DatasourceTypeMetadata> =
 
 // --- Databricks ---
 // Python: apps/backend-python/src/api/datasources/databricks/__init__.py
-// credential_fields: ["access_token"]
-// sensitive_credential_fields: ["access_token"]
 //
 // oauth_client_secret was added here for KYO-780 — see the identical note on
 // Snowflake above — and moved to COMMON_SENSITIVE for KYO-786.
@@ -800,8 +757,6 @@ static DATABRICKS_META: LazyLock<DatasourceTypeMetadata> =
         display_name: "Databricks",
         description: "Databricks SQL warehouse",
         default_port: Some(443),
-        credential_fields: &["access_token"],
-        sensitive_credential_fields: &["access_token"],
         sensitive_connection_config_fields: &[],
         requires_user_credentials: true,
         accepts_user_context: false,
@@ -832,8 +787,6 @@ static DATABRICKS_META: LazyLock<DatasourceTypeMetadata> =
 
 // --- Redshift ---
 // Python: apps/backend-python/src/api/datasources/redshift/__init__.py
-// credential_fields: ["username", "password"]
-// sensitive_credential_fields: ["password"]
 // No sensitive_connection_config_fields
 static REDSHIFT_META: LazyLock<DatasourceTypeMetadata> =
     LazyLock::new(|| DatasourceTypeMetadata {
@@ -841,8 +794,6 @@ static REDSHIFT_META: LazyLock<DatasourceTypeMetadata> =
         display_name: "Amazon Redshift",
         description: "Amazon Redshift data warehouse",
         default_port: Some(5439),
-        credential_fields: &["username", "password"],
-        sensitive_credential_fields: &["password"],
         sensitive_connection_config_fields: &[],
         requires_user_credentials: true,
         accepts_user_context: false,
@@ -867,8 +818,6 @@ static POSTGRES_META: LazyLock<DatasourceTypeMetadata> =
         display_name: "PostgreSQL",
         description: "PostgreSQL database",
         default_port: Some(5432),
-        credential_fields: &["username", "password"],
-        sensitive_credential_fields: &["password"],
         sensitive_connection_config_fields: &[],
         requires_user_credentials: true,
         accepts_user_context: false,
@@ -890,8 +839,6 @@ static MYSQL_META: LazyLock<DatasourceTypeMetadata> = LazyLock::new(|| Datasourc
     display_name: "MySQL",
     description: "MySQL database server",
     default_port: Some(3306),
-    credential_fields: &["username", "password"],
-    sensitive_credential_fields: &["password"],
     sensitive_connection_config_fields: &[],
     requires_user_credentials: true,
     accepts_user_context: false,
@@ -915,8 +862,6 @@ static SQLSERVER_META: LazyLock<DatasourceTypeMetadata> =
         display_name: "SQL Server",
         description: "Microsoft SQL Server database",
         default_port: Some(1433),
-        credential_fields: &["username", "password"],
-        sensitive_credential_fields: &["password"],
         sensitive_connection_config_fields: &[],
         requires_user_credentials: true,
         accepts_user_context: false,
@@ -939,22 +884,6 @@ static SYNAPSE_META: LazyLock<DatasourceTypeMetadata> =
         display_name: "Azure Synapse",
         description: "Azure Synapse Analytics (SQL pools)",
         default_port: Some(1433),
-        credential_fields: &[
-            "auth_type",
-            "username",
-            "password",
-            "client_id",
-            "client_secret",
-            "tenant_id",
-            "oauth_access_token",
-            "oauth_refresh_token",
-        ],
-        sensitive_credential_fields: &[
-            "password",
-            "client_secret",
-            "oauth_access_token",
-            "oauth_refresh_token",
-        ],
         // oauth_client_secret moved to COMMON_SENSITIVE for KYO-786 (see the
         // note on BigQuery above).
         sensitive_connection_config_fields: &[],
@@ -972,7 +901,6 @@ static SYNAPSE_META: LazyLock<DatasourceTypeMetadata> =
                 credential_scope: "user".into(),
                 preference_tracking: "credential".into(),
                 credential_fields: vec!["username".into(), "password".into()],
-                sensitive_fields: vec!["password".into()],
                 connection_config_fields: vec![],
                 is_default: true,
                 supports_shared_credentials: true,
@@ -996,7 +924,6 @@ static SYNAPSE_META: LazyLock<DatasourceTypeMetadata> =
                     "client_id".into(),
                     "client_secret".into(),
                 ],
-                sensitive_fields: vec!["client_secret".into()],
                 // client_id/client_secret for this mode live in the
                 // per-user `credentials` map (`cred_sp_client_id`/
                 // `cred_sp_client_secret` — datasources.rs's
@@ -1052,8 +979,6 @@ static FLAREDB_META: LazyLock<DatasourceTypeMetadata> =
         display_name: "FlareDB",
         description: "FlareDB analytics database (Arrow Flight SQL)",
         default_port: Some(8815),
-        credential_fields: &[],
-        sensitive_credential_fields: &[],
         sensitive_connection_config_fields: &[],
         requires_user_credentials: false,
         accepts_user_context: false,
@@ -1068,7 +993,6 @@ static FLAREDB_META: LazyLock<DatasourceTypeMetadata> =
                 credential_scope: "workspace".into(),
                 preference_tracking: "preference".into(),
                 credential_fields: vec![],
-                sensitive_fields: vec![],
                 connection_config_fields: vec![],
                 is_default: true,
                 supports_shared_credentials: false,
@@ -1224,8 +1148,6 @@ mod tests {
         assert!(meta.auth_modes[0].supports_shared_credentials);
         assert_eq!(meta.auth_modes[0].credential_scope, "user");
         assert_eq!(meta.auth_modes[0].preference_tracking, "credential");
-        assert_eq!(meta.auth_modes[0].credential_fields, vec!["username", "password"]);
-        assert_eq!(meta.auth_modes[0].sensitive_fields, vec!["password"]);
     }
 
     // --- Snowflake auth modes ---
@@ -1248,14 +1170,6 @@ mod tests {
         assert!(!meta.auth_modes[2].is_default);
         assert!(!meta.auth_modes[2].supports_shared_credentials);
         assert!(meta.auth_modes[2].supports_headless_indexing);
-        assert_eq!(
-            meta.auth_modes[2].credential_fields,
-            vec!["username", "password", "private_key"]
-        );
-        assert_eq!(
-            meta.auth_modes[2].sensitive_fields,
-            vec!["password", "private_key"]
-        );
     }
 
     // --- Synapse auth modes ---
@@ -1267,18 +1181,9 @@ mod tests {
         assert_eq!(meta.auth_modes[0].mode_id, "sql");
         assert_eq!(meta.auth_modes[0].display_name, "SQL Authentication");
         assert!(meta.auth_modes[0].is_default);
-        assert_eq!(
-            meta.auth_modes[0].credential_fields,
-            vec!["username", "password"]
-        );
 
         assert_eq!(meta.auth_modes[1].mode_id, "service_principal");
         assert_eq!(meta.auth_modes[1].display_name, "Service Principal");
-        assert_eq!(
-            meta.auth_modes[1].credential_fields,
-            vec!["tenant_id", "client_id", "client_secret"]
-        );
-        assert_eq!(meta.auth_modes[1].sensitive_fields, vec!["client_secret"]);
 
         // The plain "Microsoft Account" oauth mode that used to sit here was
         // removed as an unwired dead entry (KYO-274) — see the comment left
@@ -1300,14 +1205,6 @@ mod tests {
         assert_eq!(meta.auth_modes[0].credential_type, "token");
         assert_eq!(meta.auth_modes[0].display_name, "Personal Access Token");
         assert!(meta.auth_modes[0].is_default);
-        assert_eq!(
-            meta.auth_modes[0].credential_fields,
-            vec!["access_token"]
-        );
-        assert_eq!(
-            meta.auth_modes[0].sensitive_fields,
-            vec!["access_token"]
-        );
 
         assert_eq!(meta.auth_modes[1].mode_id, "oauth");
         assert_eq!(meta.auth_modes[1].credential_type, "oauth_per_datasource");
@@ -1326,56 +1223,6 @@ mod tests {
         assert_eq!(meta.auth_modes[0].mode_id, "password");
         assert_eq!(meta.auth_modes[0].credential_type, "password");
         assert!(meta.auth_modes[0].is_default);
-    }
-
-    // --- Sensitive fields ---
-
-    #[test]
-    fn sensitive_fields_are_correct() {
-        // BigQuery — no sensitive credential fields. oauth_client_secret and
-        // service_account_json used to be listed here (KYO-780) but moved to
-        // COMMON_SENSITIVE in kyomi_auth::credential_service for KYO-786, so
-        // this type's own sensitive_connection_config_fields is empty —
-        // masking and at-rest encryption for both fields still happen, just
-        // via COMMON_SENSITIVE instead of this per-type list.
-        let bq = get_metadata(&DatasourceType::BigQuery);
-        assert!(bq.sensitive_credential_fields.is_empty());
-        assert!(bq.sensitive_connection_config_fields.is_empty());
-
-        // Postgres — password is sensitive, no type-specific sensitive config
-        // (ssh_private_key is in COMMON_SENSITIVE in credential_service.rs)
-        let pg = get_metadata(&DatasourceType::Postgres);
-        assert!(pg.sensitive_credential_fields.contains(&"password"));
-        assert!(pg.sensitive_connection_config_fields.is_empty());
-
-        // Redshift — only password is sensitive (matches Python source)
-        let rs = get_metadata(&DatasourceType::Redshift);
-        assert_eq!(rs.sensitive_credential_fields, &["password"]);
-
-        // Databricks — access_token is the sensitive credential field; its
-        // "oauth" mode's own oauth_client_secret was sensitive config here
-        // under KYO-780, now moved to COMMON_SENSITIVE for KYO-786 (same as
-        // BigQuery above).
-        let db = get_metadata(&DatasourceType::Databricks);
-        assert_eq!(db.sensitive_credential_fields, &["access_token"]);
-        assert!(db.sensitive_connection_config_fields.is_empty());
-
-        // Snowflake — password (password auth mode) and private_key
-        // (key-pair auth mode, KYO-330) are both sensitive credential
-        // fields; the Python source predates key-pair auth and only had
-        // "password". Its "oauth" mode's own oauth_client_secret moved to
-        // COMMON_SENSITIVE for KYO-786, same as Databricks above.
-        let sf = get_metadata(&DatasourceType::Snowflake);
-        assert_eq!(sf.sensitive_credential_fields, &["password", "private_key"]);
-        assert!(sf.sensitive_connection_config_fields.is_empty());
-
-        // Synapse — multiple sensitive fields
-        let sy = get_metadata(&DatasourceType::Synapse);
-        assert!(sy.sensitive_credential_fields.contains(&"password"));
-        assert!(sy.sensitive_credential_fields.contains(&"client_secret"));
-        assert!(sy.sensitive_credential_fields.contains(&"oauth_access_token"));
-        assert!(sy.sensitive_credential_fields.contains(&"oauth_refresh_token"));
-        assert!(sy.sensitive_connection_config_fields.is_empty());
     }
 
     #[test]
@@ -1834,6 +1681,89 @@ mod tests {
                 meta.inactive_auth_mode_connection_config_fields("password").is_empty(),
                 "{type_id} should have no connection_config-owning auth modes"
             );
+        }
+    }
+
+    // --- credential_fields (restored in KYO-518 after KYO-332 removed it) ---
+
+    #[test]
+    fn shared_credential_modes_publish_exactly_the_resolver_contract() {
+        // `kyomi_datasource_drivers::resolve_shared_credentials` (kyomi-connect,
+        // crates/kyomi-datasource/src/factory.rs) copies exactly two keys out of
+        // `connection_config`: `shared_username` -> `username` and
+        // `shared_password` -> `password`, and nothing else.
+        //
+        // `shared_credential_status` (kyomi-auth) validates `shared_<field>` for
+        // every entry of `credential_fields` and returns "shared" only when all of
+        // them are present. So a mode that offers the shared toggle must list
+        // exactly those two fields — and this is a cross-repo contract nothing else
+        // pins:
+        //   * fewer fields than the resolver copies -> a secret the resolver will
+        //     use is never validated, and readiness is claimed from partial data;
+        //   * more fields than the resolver copies -> the extra `shared_<field>` is
+        //     never written, so the mode reports "missing" forever and the shared
+        //     toggle can never be satisfied.
+        // Both directions fail; keep them aligned here rather than in a comment.
+        for ds_type in &ALL_TYPES {
+            for mode in get_metadata(ds_type).auth_modes.iter() {
+                if !mode.supports_shared_credentials {
+                    continue;
+                }
+                let expected: Vec<String> =
+                    ["username", "password"].iter().map(|s| s.to_string()).collect();
+                assert_eq!(
+                    mode.credential_fields, expected,
+                    "{:?} mode `{}` opts into shared credentials but its credential_fields \
+                     do not match the two keys resolve_shared_credentials copies",
+                    ds_type, mode.mode_id,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn credential_fields_per_mode_id_match_expected_table() {
+        // The complete per-mode credential-field inventory. KYO-332 (#593) deleted
+        // this field as unused and KYO-518 restored it, so the values now have
+        // exactly one consumer (`shared_credential_status`) and would otherwise be
+        // unpinned — a future mode added or flipped could silently carry a field
+        // nobody copies or omit one everybody does.
+        let expected: &[(&str, &[&str])] = &[
+            ("password", &["username", "password"]),
+            ("sql", &["username", "password"]),
+            ("keypair", &["username", "password", "private_key"]),
+            ("oauth", &["oauth_token"]),
+            ("enterprise_oauth", &["oauth_token"]),
+            ("token", &["access_token"]),
+            ("service_principal", &["tenant_id", "client_id", "client_secret"]),
+            ("service_account", &[]),
+            ("none", &[]),
+        ];
+
+        let mut seen = std::collections::BTreeSet::new();
+        for ds_type in &ALL_TYPES {
+            for mode in get_metadata(ds_type).auth_modes.iter() {
+                seen.insert(mode.mode_id.as_str());
+                let want = expected.iter().find(|(id, _)| *id == mode.mode_id.as_str());
+                let Some((_, fields)) = want else {
+                    panic!(
+                        "{:?} mode `{}` has no credential_fields expectation in this table",
+                        ds_type, mode.mode_id
+                    );
+                };
+                assert_eq!(
+                    &mode.credential_fields.iter().map(String::as_str).collect::<Vec<_>>(),
+                    fields,
+                    "{:?} mode `{}` credential_fields drifted",
+                    ds_type,
+                    mode.mode_id,
+                );
+            }
+        }
+        // Every entry in the table must actually exist somewhere in the registry,
+        // so deleting a mode cannot quietly leave a stale row behind.
+        for (id, _) in expected {
+            assert!(seen.contains(id), "table row `{id}` matches no registry mode");
         }
     }
 }

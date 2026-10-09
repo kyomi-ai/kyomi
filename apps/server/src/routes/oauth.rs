@@ -249,7 +249,11 @@ async fn oauth_authorize(
         && let Ok(session) = jwt::validate_token(token, &state.config.jwt_secret)
         && session.claims.require_session().is_ok()
     {
-        return render_consent(&state, &client, &params, &session.claims).await;
+        match kyomi_auth::session::require_current_browser_session(&state.db, &session.claims).await {
+            Ok(()) => return render_consent(&state, &client, &params, &session.claims).await,
+            Err(kyomi_core::Error::Unauthorized(_)) => {},
+            Err(error) => return Err(internal_oauth_error(error)),
+        }
     }
 
     let oauth_state = redis_ops::generate_token();
@@ -397,9 +401,11 @@ async fn oauth_authorize_continue(
         .ok_or_else(|| RouteError::from((StatusCode::UNAUTHORIZED, "Not logged in")))?;
     let session = jwt::validate_token(token, &state.config.jwt_secret)
         .map_err(|_| RouteError::from((StatusCode::UNAUTHORIZED, "Invalid session")))?;
-    session.claims.require_session().map_err(|_| {
-        RouteError::from((StatusCode::UNAUTHORIZED, "Invalid session"))
-    })?;
+    kyomi_auth::session::require_current_browser_session(&state.db, &session.claims)
+        .await.map_err(|error| match error {
+            kyomi_core::Error::Unauthorized(_) => RouteError::from((StatusCode::UNAUTHORIZED, "Invalid session")),
+            other => internal_oauth_error(other),
+        })?;
     let pending = redis_ops::verify_oauth_state(&state.kv, "oauth_pending", &params.state)
         .await
         .map_err(internal_oauth_error)?
@@ -439,9 +445,11 @@ async fn oauth_consent_decision(
         .ok_or_else(|| RouteError::from((StatusCode::UNAUTHORIZED, "Not logged in")))?;
     let session = jwt::validate_token(token, &state.config.jwt_secret)
         .map_err(|_| RouteError::from((StatusCode::UNAUTHORIZED, "Invalid session")))?;
-    session.claims.require_session().map_err(|_| {
-        RouteError::from((StatusCode::UNAUTHORIZED, "Invalid session"))
-    })?;
+    kyomi_auth::session::require_current_browser_session(&state.db, &session.claims)
+        .await.map_err(|error| match error {
+            kyomi_core::Error::Unauthorized(_) => RouteError::from((StatusCode::UNAUTHORIZED, "Invalid session")),
+            other => internal_oauth_error(other),
+        })?;
     if form.decision != "allow" && form.decision != "deny" {
         return Err((StatusCode::BAD_REQUEST, "Invalid decision").into());
     }

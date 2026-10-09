@@ -148,7 +148,7 @@
 # ------------------------------------------------------------------------------
 
 # The guard's own escalation exit code. Deliberately outside 0-3, the range
-# every one of the seven guarded scripts' own documented exit-code
+# every one of the twelve guarded scripts' own documented exit-code
 # contracts uses today (see WARN VS. FAIL above) — a caller that cares can
 # distinguish "the guard stopped me" from "the script's own logic decided
 # this".

@@ -51,6 +51,9 @@ pub async fn create_authenticated_session(
     user: &User,
     device_info: &DeviceInfo,
 ) -> kyomi_core::Result<AuthenticatedSession> {
+    let fresh_user = user_service::get_user_by_id(db, &user.user_id).await?
+        .ok_or_else(|| kyomi_core::Error::Unauthorized("User not found".into()))?;
+    let user = &fresh_user;
     let _ = kv; // Reserved for future use (e.g., session tracking)
 
     let jwt_config = &kyomi_core::constants::get().jwt;
@@ -82,11 +85,12 @@ pub async fn create_authenticated_session(
     }
 
     // Create access token
-    let access_token = jwt::create_access_token_str(
+    let access_token = jwt::create_session_access_token_str(
         &user.user_id,
         jwt_secret,
         jwt_config.access_token_expire_minutes,
         extra,
+        user.sessions_valid_from,
     )?;
 
     // Create refresh token with a new family
@@ -94,8 +98,11 @@ pub async fn create_authenticated_session(
     let token_hash = token_service::hash_refresh_token(&raw_refresh);
     let expires_at = Utc::now() + Duration::days(jwt_config.refresh_token_expire_days);
     let family_id = token_service::generate_family_id();
-    token_service::store_refresh_token(db, &user.user_id, &token_hash, expires_at, device_info, &family_id)
-        .await?;
+    let issued_at_us = jwt::validate_token(&access_token, jwt_secret)?.claims.session_iat_us
+        .ok_or_else(|| kyomi_core::Error::Internal("Missing session issuance claim".into()))?;
+    token_service::store_session_refresh_token(
+        db, &user.user_id, &token_hash, expires_at, device_info, &family_id, issued_at_us,
+    ).await?;
 
     // Set cookies
     let mut cookie_headers = HeaderMap::new();
@@ -118,6 +125,30 @@ pub async fn create_authenticated_session(
         workspace_name,
         workspace_roles,
     })
+}
+
+/// Validate session authority at handlers that do not use an auth extractor.
+/// These handlers have no existing user lookup; perform one fresh lookup and
+/// enforce the same cutoff as the shared middleware.
+pub async fn require_current_browser_session(db: &DbPool, claims: &jwt::Claims) -> kyomi_core::Result<()> {
+    claims.require_session()?;
+    let user = user_service::get_user_by_id(db, &claims.sub).await?
+        .ok_or_else(|| kyomi_core::Error::Unauthorized("User not found".into()))?;
+    claims.require_current_session(user.sessions_valid_from)
+}
+
+/// Mint a browser access token from the latest user revocation state (also
+/// used for WebSocket reconnects, which do not create a refresh-token family).
+pub async fn create_user_access_token(
+    db: &DbPool,
+    user_id: &str,
+    secret: &str,
+    expires_minutes: i64,
+    extra: std::collections::HashMap<String, serde_json::Value>,
+) -> kyomi_core::Result<String> {
+    let user = user_service::get_user_by_id(db, user_id).await?
+        .ok_or_else(|| kyomi_core::Error::Unauthorized("User not found".into()))?;
+    jwt::create_session_access_token_str(user_id, secret, expires_minutes, extra, user.sessions_valid_from)
 }
 
 /// Switch the user's active workspace and mint a fresh session for it.

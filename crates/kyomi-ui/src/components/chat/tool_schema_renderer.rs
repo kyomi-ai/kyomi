@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use kyomi_types::truncate_preview;
 
-use crate::utils::cron::{describe_cron, get_tz_offset_minutes};
+use crate::utils::cron::describe_schedule;
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -277,11 +277,11 @@ fn info_row_mono(label: &str, value: &str) -> AnyView {
     .into_any()
 }
 
-/// Describe a cron schedule using the browser's timezone.
-fn describe_cron_local(schedule: &str) -> String {
-    let offset = get_tz_offset_minutes();
-    let desc = describe_cron(schedule, offset);
-    desc.description
+/// Describe a watch in its saved zone, with UTC for legacy payloads.
+fn describe_watch_schedule(payload: &Value) -> Option<String> {
+    str_field(payload, "schedule").map(|schedule| {
+        describe_schedule(schedule, str_field(payload, "timezone")).description
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1485,7 +1485,7 @@ fn render_create_watch(schema: &Value) -> impl IntoView {
         <div class="space-y-2">
             {input.map(|inp| {
                 let name = str_field(inp, "name").map(String::from);
-                let schedule = str_field(inp, "schedule").map(describe_cron_local);
+                let schedule = describe_watch_schedule(inp);
                 let prompt = str_field(inp, "prompt").map(String::from);
                 let queries = array_field(inp, "queries").cloned().unwrap_or_default();
 
@@ -1530,8 +1530,8 @@ fn render_create_watch(schema: &Value) -> impl IntoView {
                     }
                 } else {
                     let name = str_field(out, "name").map(String::from);
-                    let schedule = str_field(out, "schedule").map(describe_cron_local);
-                    let next_run = str_field(out, "next_run_at").map(String::from);
+                    let schedule = describe_watch_schedule(out);
+                    let next_run = str_field(out, "next_execution").or_else(|| str_field(out, "next_run_at")).map(String::from);
 
                     view! {
                         <div class="bg-success p-2 rounded border border-success-border text-xs">
@@ -1557,7 +1557,7 @@ fn render_preview_watch(schema: &Value) -> impl IntoView {
         <div class="space-y-2">
             {input.map(|inp| {
                 let name = str_field(inp, "name").map(String::from);
-                let schedule = str_field(inp, "schedule").map(describe_cron_local);
+                let schedule = describe_watch_schedule(inp);
                 let prompt = str_field(inp, "prompt").map(String::from);
 
                 view! {
@@ -1575,13 +1575,15 @@ fn render_preview_watch(schema: &Value) -> impl IntoView {
                 if has_error {
                     error_block("Error", str_field(out, "error").unwrap_or("Unknown error").to_string()).into_any()
                 } else {
-                    let preview_schedule = out.get("preview").and_then(|p| str_field(p, "schedule")).map(describe_cron_local);
+                    let preview_schedule = describe_watch_schedule(out).or_else(|| out.get("preview").and_then(describe_watch_schedule));
+                    let next = str_field(out, "next_execution").map(String::from);
                     let msg = str_field(out, "message").map(String::from);
 
                     view! {
                         <div class="bg-primary/10 p-2 rounded border border-primary/20 text-xs">
                             <div class="font-medium text-primary">"Preview Generated"</div>
                             {preview_schedule.map(|s| view! { <div class="mt-1 text-foreground">{format!("Schedule: {}", s)}</div> })}
+                            {next.map(|n| view! { <div class="mt-1 text-foreground">{format!("Next: {n}")}</div> })}
                             {msg.map(|m| view! { <div class="mt-1 text-muted-foreground text-xs">{m}</div> })}
                         </div>
                     }.into_any()
@@ -1602,7 +1604,7 @@ fn render_update_watch(schema: &Value) -> impl IntoView {
             {input.map(|inp| {
                 let watch_id = str_field(inp, "watch_id").map(String::from);
                 let name = str_field(inp, "name").map(String::from);
-                let schedule = str_field(inp, "schedule").map(describe_cron_local);
+                let schedule = describe_watch_schedule(inp);
                 let prompt = str_field(inp, "prompt").map(String::from);
                 let enabled = bool_field(inp, "enabled");
 
@@ -1624,8 +1626,8 @@ fn render_update_watch(schema: &Value) -> impl IntoView {
                     error_block("Error", str_field(out, "error").unwrap_or("Unknown error").to_string()).into_any()
                 } else {
                     let name = str_field(out, "name").map(String::from);
-                    let schedule = str_field(out, "schedule").map(describe_cron_local);
-                    let next_run = str_field(out, "next_run_at").map(String::from);
+                    let schedule = describe_watch_schedule(out);
+                    let next_run = str_field(out, "next_execution").or_else(|| str_field(out, "next_run_at")).map(String::from);
 
                     view! {
                         <div class="bg-success p-2 rounded border border-success-border text-xs">
@@ -1657,7 +1659,7 @@ fn render_update_watch_draft(schema: &Value) -> impl IntoView {
             {input.map(|inp| {
                 let summary = str_field(inp, "summary").map(String::from);
                 let name = str_field(inp, "name").map(String::from);
-                let schedule = str_field(inp, "schedule").map(describe_cron_local);
+                let schedule = describe_watch_schedule(inp);
                 let mode = str_field(inp, "mode").map(String::from);
                 let prompt = str_field(inp, "prompt").map(String::from);
                 let queries_count = array_field(inp, "queries").map(|q| q.len()).unwrap_or(0);
@@ -1753,7 +1755,8 @@ fn render_search_watches(schema: &Value) -> impl IntoView {
                                 {watches.iter().map(|w| {
                                     let name = str_field(w, "name").unwrap_or("").to_string();
                                     let prompt = str_field(w, "prompt").unwrap_or("").to_string();
-                                    let schedule = str_field(w, "schedule").map(describe_cron_local).unwrap_or_default();
+                                    let schedule = describe_watch_schedule(w).unwrap_or_default();
+                    let next = str_field(w, "next_execution").map(String::from);
                                     let status = str_field(w, "status").unwrap_or("").to_string();
                                     let status_class = if status == "active" { "text-success-foreground" } else { "text-muted-foreground" };
                                     let queries_count = array_field(w, "queries").map(|q| q.len()).unwrap_or(0);
@@ -1764,6 +1767,7 @@ fn render_search_watches(schema: &Value) -> impl IntoView {
                                             <div class="text-muted-foreground text-xs mt-1">{prompt}</div>
                                             <div class="text-muted-foreground text-xs mt-1 space-y-0.5">
                                                 <div>{format!("Schedule: {}", schedule)}</div>
+                                        {next.map(|n| view! { <div>{format!("Next: {n}")}</div> })}
                                                 <div>"Status: "<span class=status_class>{status}</span></div>
                                                 {(queries_count > 0).then(|| view! {
                                                     <div class="text-muted-foreground">{format!("{} reference queries", queries_count)}</div>
@@ -1879,7 +1883,8 @@ fn render_watch_info(schema: &Value) -> impl IntoView {
                     let name = str_field(w, "name").unwrap_or("").to_string();
                     let prompt = str_field(w, "prompt").unwrap_or("").to_string();
                     let mode = str_field(w, "mode").unwrap_or("").to_string();
-                    let schedule = str_field(w, "schedule").map(describe_cron_local).unwrap_or_default();
+                    let schedule = describe_watch_schedule(w).unwrap_or_default();
+                    let next = str_field(w, "next_execution").map(String::from);
                     let enabled = bool_field(w, "enabled").unwrap_or(false);
                     let status_class = if enabled { "text-success-foreground" } else { "text-muted-foreground" };
                     let status_text = if enabled { "Active" } else { "Paused" };
@@ -1894,6 +1899,7 @@ fn render_watch_info(schema: &Value) -> impl IntoView {
                                     <div class="text-muted-foreground text-xs space-y-0.5 mt-2">
                                         <div>"Mode: "<span class="font-medium">{mode}</span></div>
                                         <div>{format!("Schedule: {}", schedule)}</div>
+                                        {next.map(|n| view! { <div>{format!("Next: {n}")}</div> })}
                                         <div>"Status: "<span class=status_class>{status_text.to_string()}</span></div>
                                     </div>
                                 </div>
@@ -1950,61 +1956,85 @@ fn render_watch_info(schema: &Value) -> impl IntoView {
 // -- Chart & Misc Renderers (Task 5) --
 
 fn render_validate_chartml(schema: &Value) -> impl IntoView {
-    let input = schema.get("input");
-    let output = schema.get("output");
+    let blocks = schema
+        .get("input")
+        .and_then(|input| array_field(input, "blocks"));
+    let input_view = match blocks {
+        Some(blocks) if blocks.is_empty() => view! {
+            <div class="text-muted-foreground text-xs">"No ChartML blocks supplied (0 blocks)."</div>
+        }.into_any(),
+        Some(blocks) => blocks.iter().enumerate().map(|(index, block)| {
+            let label = format!("ChartML Block {}:", index + 1);
+            view! {
+                <div>
+                    {section_label(&label)}
+                    {match block.as_str() {
+                        Some(code) => code_block(code),
+                        None => warning_block("Unrecognized ChartML input", "Expected a ChartML string for this block.".into()),
+                    }}
+                </div>
+            }
+        }).collect_view().into_any(),
+        None => warning_block("ChartML input unavailable", "Expected a blocks array.".into()),
+    };
+
+    let malformed = || {
+        warning_block(
+            "Unrecognized validation result",
+            "The returned result does not match the ChartML validation format.".into(),
+        )
+    };
+    let result = match schema.get("output").filter(|output| !output.is_null()) {
+        None => view! {
+            <div class="text-muted-foreground text-xs">"Validation pending — no result received."</div>
+        }.into_any(),
+        Some(output) => match bool_field(output, "valid") {
+            Some(true) => match u64_field(output, "blocks_checked") {
+                Some(count) if output.get("errors").is_none_or(|errors| errors.as_array().is_some_and(Vec::is_empty)) => {
+                    let message = match count {
+                        0 => "Validation completed: 0 blocks checked.".to_string(),
+                        1 => "ChartML is valid: 1 block checked.".to_string(),
+                        _ => format!("ChartML is valid: {count} blocks checked."),
+                    };
+                    success_block(message)
+                }
+                _ => malformed(),
+            },
+            Some(false) => match array_field(output, "errors") {
+                Some(errors) if !errors.is_empty() => errors.iter().map(|error| {
+                    match (u64_field(error, "block"), str_field(error, "message")) {
+                        (Some(block), Some(message)) if block > 0 => {
+                            let title = format!("Block {block}: Validation Failed");
+                            view! {
+                                <div class="space-y-1">
+                                    {error_block(&title, message.to_string())}
+                                    {str_field(error, "type").map(|kind| info_row("Type", kind))}
+                                    {str_field(error, "path").map(|path| info_row("Path", path))}
+                                    {str_field(error, "instance_path").map(|path| info_row("Instance path", path))}
+                                    {str_field(error, "schema_path").map(|path| info_row("Schema path", path))}
+                                    {str_field(error, "stage").map(|stage| info_row("Stage", stage))}
+                                    {str_field(error, "component").map(String::from)
+                                        .or_else(|| u64_field(error, "component").map(|component| component.to_string()))
+                                        .map(|component| info_row("Component", &component))}
+                                </div>
+                            }.into_any()
+                        }
+                        _ => malformed(),
+                    }
+                }).collect_view().into_any(),
+                _ => malformed(),
+            },
+            None => malformed(),
+        },
+    };
 
     view! {
         <div class="space-y-2">
-            {input.and_then(|inp| str_field(inp, "chartml").or(Some("No ChartML provided"))).map(|chartml| {
-                view! {
-                    <div>
-                        {section_label("ChartML:")}
-                        {code_block(chartml)}
-                    </div>
-                }
-            })}
-            {output.map(|out| {
-                let success = bool_field(out, "success").unwrap_or(false);
-                if success {
-                    let query_cost = f64_field(out, "query_cost");
-                    let bytes_scanned = u64_field(out, "bytes_scanned");
-                    let has_cost_info = query_cost.is_some() || bytes_scanned.is_some();
-
-                    view! {
-                        <div>
-                            {section_label("Validation Result:")}
-                            <div class="mt-1 space-y-2">
-                                {success_block("ChartML is valid".into())}
-                                {has_cost_info.then(|| {
-                                    view! {
-                                        <div class="grid grid-cols-2 gap-2 text-xs">
-                                            {query_cost.map(|c| metric_card("Query Cost", format!("{:.2} GB", c)))}
-                                            {bytes_scanned.map(|b| {
-                                                let formatted = if b > 1_000_000 {
-                                                    format!("{:.1} MB", b as f64 / 1_000_000.0)
-                                                } else if b > 1_000 {
-                                                    format!("{:.1} KB", b as f64 / 1_000.0)
-                                                } else {
-                                                    format!("{} B", b)
-                                                };
-                                                metric_card("Bytes Scanned", formatted)
-                                            })}
-                                        </div>
-                                    }
-                                })}
-                            </div>
-                        </div>
-                    }.into_any()
-                } else {
-                    let msg = str_field(out, "error_message").unwrap_or("Unknown validation error").to_string();
-                    view! {
-                        <div>
-                            {section_label("Validation Result:")}
-                            <div class="mt-1">{error_block("Validation Failed", msg)}</div>
-                        </div>
-                    }.into_any()
-                }
-            })}
+            {input_view}
+            <div>
+                {section_label("Validation Result:")}
+                <div class="mt-1 space-y-2">{result}</div>
+            </div>
         </div>
     }
 }
@@ -2396,3 +2426,7 @@ mod tests {
         assert_eq!(chartml_spec_content_preview(content), content);
     }
 }
+
+#[cfg(all(test, feature = "ssr"))]
+#[path = "tool_schema_renderer/tests/mod.rs"]
+mod validation_contract_tests;

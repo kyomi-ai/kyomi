@@ -629,6 +629,7 @@ impl AgentTool for WriteDocumentTool {
         if let Some(doc) = existing {
             // Update existing document
             let outcome = apply_update(ApplyUpdateParams {
+            validation_context: Some(&ctx.query_context()),
                 db: &ctx.db,
                 dashboard_id: &doc.dashboard_id,
                 workspace_id: &ctx.workspace_id,
@@ -696,6 +697,7 @@ impl AgentTool for WriteDocumentTool {
             // `apply_create` — see that function's doc comment in
             // `tools/document/mod.rs`.
             let dashboard_id = apply_create(ApplyCreateParams {
+            validation_context: Some(&ctx.query_context()),
                 db: &ctx.db,
                 user_id: &ctx.user_id,
                 workspace_id: &ctx.workspace_id,
@@ -1659,6 +1661,54 @@ mod tests {
             "edit_knowledge_file must refresh knowledge_chunks to the new content via the \
              unified apply_update path: {chunk_contents:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn edit_knowledge_file_unicode_refreshes_saved_content_and_chunks() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let stale_content = "stale pre-edit content";
+        let document_id = kyomi_auth::dashboard_service::create_dashboard(
+            &db, "user-a", "ws-1", "Unicode runbook", stale_content, DocType::Knowledge, None,
+        )
+        .await
+        .expect("seed doc");
+        let embedding = loaded_embedding();
+        let embed = embedding.wait_ready().await.expect("embedding is pre-loaded");
+        kyomi_auth::dashboard_service::rechunk_document(
+            &db, embed, &document_id, stale_content, "ws-1",
+        )
+        .await
+        .expect("seed stale chunk");
+
+        // The dash crosses byte 1800, the breakpoint search-window start.
+        let saved_content = format!("{}—{}", "a".repeat(1798), "b".repeat(300));
+        let mut ctx = build_ctx(db);
+        ctx.embedding = embedding;
+        let result = DocumentEditTool::new(DocType::Knowledge)
+            .execute(serde_json::json!({
+                "path": "Unicode runbook",
+                "old_text": stale_content,
+                "new_text": saved_content,
+            }), &ctx)
+            .await
+            .expect("Unicode edit must complete and refresh its chunks");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+        assert_eq!(parsed["success"], serde_json::json!(true), "{result}");
+        let saved_doc = find_document_by_title(&ctx.db, "ws-1", "user-a", "Unicode runbook")
+            .await.expect("lookup").expect("document exists");
+        assert_eq!(saved_doc.content, saved_content);
+
+        let sq = match &ctx.db {
+            kyomi_core::DbPool::Sqlite(sq) => sq,
+            kyomi_core::DbPool::Postgres(_) => unreachable!("test pool is sqlite"),
+        };
+        let chunk_contents: Vec<String> = sqlx::query_scalar(
+            "SELECT content FROM knowledge_chunks WHERE dashboard_id = ? ORDER BY chunk_index",
+        )
+        .bind(&document_id).fetch_all(sq).await.expect("read persisted chunks");
+        assert_eq!(chunk_contents, vec![saved_content[..2000].to_string(), saved_content[1600..].to_string()]);
+        assert_eq!(format!("{}{}", chunk_contents[0], &chunk_contents[1][400..]), saved_doc.content);
     }
 
     // -- KYO-536: edit_knowledge_file as a document-scoped copilot tool -----
