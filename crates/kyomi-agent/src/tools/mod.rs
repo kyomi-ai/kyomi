@@ -84,22 +84,7 @@ pub const WATCH_TOOLS: &[&str] = &[
 ///
 /// Extracted from [`ToolContext`] so lightweight callers (e.g., email chart
 /// rendering) can resolve chart data without the full agent context.
-#[derive(Clone)]
-pub struct QueryContext {
-    /// PostgreSQL connection pool.
-    pub db: kyomi_core::DbPool,
-    /// ID of the user making the request.
-    pub user_id: String,
-    /// ID of the user's active workspace.
-    pub workspace_id: String,
-    /// AES-256-GCM encryption key for credential decryption.
-    pub encryption_key: Arc<[u8; 32]>,
-    /// Application configuration (needed for Google OAuth client credentials).
-    pub config: Arc<kyomi_core::Config>,
-    /// Connect registry for routing queries through Kyomi Connect instances.
-    /// `None` when Connect is not available (e.g., lightweight callers).
-    pub connect_registry: Option<kyomi_datasource_server::ConnectRegistry>,
-}
+pub use kyomi_auth::chartml_validation::QueryContext;
 
 // ---------------------------------------------------------------------------
 // ToolContext
@@ -214,6 +199,22 @@ pub trait AgentTool: Send + Sync {
     /// Optional MCP-compatible annotations for the tool.
     fn annotations(&self) -> Option<ToolAnnotations> {
         None
+    }
+
+    /// Product result semantics, separate from successful invocation transport.
+    /// Tools with a textual rejection contract override this explicitly.
+    fn result_domain_outcome(&self, text: &str) -> agent_runtime::DomainOutcome {
+        let rejected = serde_json::from_str::<serde_json::Value>(text).is_ok_and(|value| {
+            ["valid", "success", "saved"].iter().any(|key| value.get(key).and_then(serde_json::Value::as_bool) == Some(false))
+                || value.get("error").is_some_and(|error| !error.is_null())
+        });
+        if rejected { agent_runtime::DomainOutcome::Rejected } else { agent_runtime::DomainOutcome::Succeeded }
+    }
+
+    /// An execution error may follow a committed effect. Metadata annotations are
+    /// advisory; only an audited implementation may override this default.
+    fn failure_domain_outcome(&self) -> agent_runtime::DomainOutcome {
+        agent_runtime::DomainOutcome::Unknown
     }
 
     /// Execute the tool with the given arguments and context.
@@ -345,112 +346,7 @@ impl Default for ToolRegistry {
 /// caller ([`crate::tools::query_utils::create_provider_for_datasource`])
 /// decrypts exactly once and reuses the result for both this OAuth-refresh
 /// step and provider construction.
-pub async fn resolve_credentials(
-    ctx: &QueryContext,
-    ds: &kyomi_core::models::datasource::DatasourceConfig,
-    ds_type: &kyomi_core::datasource_registry::DatasourceType,
-    connection_config: &serde_json::Value,
-) -> kyomi_core::Result<serde_json::Value> {
-    let is_shared =
-        kyomi_auth::datasource_auth_service::is_shared_auth(ds_type.as_str(), connection_config);
-
-    if is_shared {
-        // Shared auth: credentials live in connection_config.
-        // The factory's resolve_shared_credentials() will extract them.
-        // `service_account` (the registry default since KYO-704) and
-        // `enterprise_oauth` are both handled that way, below.
-        //
-        // Special case: BigQuery `kyomi_oauth` needs the user's Google OAuth
-        // token from users.oauth_data (not from datasource credentials).
-        // KYO-704: `kyomi_oauth` is retired and no longer selectable for a
-        // new or re-saved datasource — this branch only still fires for a
-        // pre-KYO-704 row whose stored `auth_mode` literally names it.
-        // `ensure_valid_google_token` below refreshes whatever token that
-        // user already granted; it does not request any new scopes, so
-        // this deliberately isn't gated the same way the connect/enable
-        // paths now are (KYO-704 phase A, KYO-739).
-        //
-        // Deliberately NOT `.unwrap_or(BIGQUERY_DEFAULT_AUTH_MODE)` —
-        // an absent `auth_mode` must never match `"kyomi_oauth"` here
-        // regardless of what the registry default is, so the empty-string
-        // sentinel stays correct on its own.
-        let auth_mode = connection_config
-            .get("auth_mode")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-
-        if ds_type.as_str() == "bigquery" && auth_mode == "kyomi_oauth"
-            && let (Some(client_id), Some(client_secret)) = (
-                ctx.config.google_oauth_client_id.as_deref(),
-                ctx.config.google_oauth_client_secret.as_deref(),
-            ) {
-                let tokens = kyomi_auth::google_oauth::ensure_valid_google_token(
-                    &ctx.db,
-                    &ctx.user_id,
-                    &ctx.encryption_key,
-                    client_id,
-                    client_secret,
-                )
-                .await?;
-                let oauth_data = kyomi_auth::google_oauth::OAuthData {
-                    google_oauth_tokens: Some(tokens),
-                    ..Default::default()
-                };
-
-                // Also load per-user credentials so that billing_project is
-                // available to resolve_billing_project() downstream. Without
-                // this, the per-user billing project stored in
-                // user_datasource_credentials is invisible to the BigQuery
-                // factory and the query fails.
-                let mut result = if let Some(cred) =
-                    kyomi_auth::datasource_service::get_user_credential(
-                        &ctx.db,
-                        &ctx.user_id,
-                        &ds.id,
-                    )
-                    .await?
-                {
-                    kyomi_auth::encryption::decrypt_json(
-                        &cred.credentials,
-                        &ctx.encryption_key,
-                    )?
-                } else {
-                    serde_json::json!({})
-                };
-
-                result["oauth_data"] = serde_json::json!(oauth_data);
-                return Ok(result);
-            }
-
-        Ok(serde_json::json!({}))
-    } else {
-        // Personal auth: decrypt per-user credentials
-        let cred =
-            kyomi_auth::datasource_service::get_user_credential(&ctx.db, &ctx.user_id, &ds.id)
-                .await?
-                .ok_or_else(|| {
-                    kyomi_core::Error::NotFound(
-                        "No credentials found for this datasource".into(),
-                    )
-                })?;
-        let decrypted = kyomi_auth::encryption::decrypt_json(
-            &cred.credentials,
-            &ctx.encryption_key,
-        )?;
-
-        // OAuth refresh if needed. `connection_config` is already decrypted
-        // (see this function's doc) — `ensure_valid_oauth_credentials` needs
-        // plaintext to refresh against the provider's token endpoint.
-        let refreshed = kyomi_datasource_server::oauth_refresh::ensure_valid_oauth_credentials(
-            &decrypted,
-            connection_config,
-            ds_type,
-        )
-        .await?;
-
-        Ok(refreshed)
-    }
-}
+pub use kyomi_auth::chartml_validation::resolve_credentials;
 
 /// Create the default tool registry with all built-in tools.
 pub fn create_default_registry() -> ToolRegistry {

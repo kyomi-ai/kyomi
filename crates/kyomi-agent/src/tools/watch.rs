@@ -49,7 +49,7 @@ impl AgentTool for CreateWatchTool {
          1. Use search_watches to check for semantically equivalent monitoring first\n\
          2. Explore data schema\n\
          3. Set verified_no_duplicates=true after checking\n\n\
-         **Schedule:** Cron expression in UTC (5 fields: min hour day month weekday)\n\n\
+         **Schedule:** Wall-clock cron in the named IANA timezone (UTC when omitted; 5 fields: min hour day month weekday)\n\n\
          NOTE: Premium feature (Pro/Team plans)."
     }
 
@@ -65,9 +65,13 @@ impl AgentTool for CreateWatchTool {
                     "type": "string",
                     "description": "The monitoring instruction - what to check and when to alert."
                 },
+                "timezone": {
+                    "type": "string",
+                    "description": "IANA schedule timezone, e.g. Australia/Sydney. Creation omission means UTC; preview/update omission preserves the saved zone when watch_id is supplied. Use UTC to switch to UTC. A timezone mentioned only in the report prompt does not set the schedule zone."
+                },
                 "schedule": {
                     "type": "string",
-                    "description": "Cron expression in UTC (5 fields: minute hour day-of-month month day-of-week). Examples: '0 9 * * *' (daily 9am UTC), '0 15 * * 1-5' (weekdays 3pm UTC)."
+                    "description": "Wall-clock cron (5 fields: minute hour day-of-month month day-of-week). Pair with timezone for local schedules: Monday 09:00 Sydney = '0 9 * * 1' plus 'Australia/Sydney'. Omitted timezone means UTC."
                 },
                 "mode": {
                     "type": "string",
@@ -232,6 +236,7 @@ impl AgentTool for CreateWatchTool {
             name,
             prompt,
             schedule,
+            args.get("timezone").and_then(|v| v.as_str()),
             mode,
             queries.as_ref(),
             datasource_hints.as_ref(),
@@ -282,7 +287,7 @@ impl AgentTool for CreateWatchTool {
         .await;
 
         let schedule_description =
-            kyomi_auth::watch_service::describe_cron(&watch.schedule);
+            kyomi_auth::watch_service::describe_cron_in_timezone(&watch.schedule, watch.timezone.as_deref());
         let next_run_display = watch
             .next_run_at
             .map(|t| t.to_rfc3339())
@@ -293,6 +298,8 @@ impl AgentTool for CreateWatchTool {
             "watch_id": watch.watch_id,
             "name": watch.name,
             "schedule": watch.schedule,
+            "timezone": watch.timezone,
+            "next_execution": watch.next_run_at.map(|t| kyomi_auth::watch_service::describe_execution(t, watch.timezone.as_deref())).transpose()?,
             "schedule_description": schedule_description,
             "next_run_at": next_run_display,
             "mode": watch.mode,
@@ -336,9 +343,13 @@ impl AgentTool for PreviewWatchTool {
                     "type": "string",
                     "description": "The monitoring instruction"
                 },
+                "timezone": {
+                    "type": "string",
+                    "description": "IANA schedule timezone, e.g. Australia/Sydney. Creation omission means UTC; preview/update omission preserves the saved zone when watch_id is supplied. Use UTC to switch to UTC. A timezone mentioned only in the report prompt does not set the schedule zone."
+                },
                 "schedule": {
                     "type": "string",
-                    "description": "Cron expression in UTC (5 fields)"
+                    "description": "Wall-clock cron in timezone (5 fields); omitted timezone means UTC"
                 },
                 "watch_id": {
                     "type": "string",
@@ -363,7 +374,7 @@ impl AgentTool for PreviewWatchTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        _ctx: &ToolContext,
+        ctx: &ToolContext,
     ) -> kyomi_core::Result<String> {
         let name = args
             .get("name")
@@ -390,19 +401,27 @@ impl AgentTool for PreviewWatchTool {
             return Ok(schedule_validation_failure(&e));
         }
 
-        let schedule_description =
-            kyomi_auth::watch_service::describe_cron(schedule.trim());
-        let next_run_at = kyomi_auth::watch_service::calculate_next_run(schedule.trim())
-            .map(|t| t.to_rfc3339())
-            .unwrap_or_default();
-
+        let saved = if args.get("timezone").is_none() {
+            if let Some(watch_id) = watch_id {
+                kyomi_auth::watch_service::get_watch(&ctx.db, watch_id, &ctx.workspace_id, &ctx.user_id).await?
+            } else { None }
+        } else { None };
+        let timezone = args.get("timezone").and_then(|v| v.as_str())
+            .or_else(|| saved.as_ref().and_then(|watch| watch.timezone.as_deref()));
+        let next_run_at = match kyomi_auth::watch_service::calculate_next_run_in_timezone(schedule, timezone) {
+            Ok(next) => next,
+            Err(error) => return Ok(schedule_validation_failure(&error)),
+        };
+        let schedule_description = kyomi_auth::watch_service::describe_cron_in_timezone(schedule.trim(), timezone);
         let mut result = serde_json::json!({
             "success": true,
             "name": name.trim(),
             "prompt": prompt.trim(),
             "schedule": schedule.trim(),
+            "timezone": timezone,
             "schedule_description": schedule_description,
-            "next_run_at": next_run_at,
+            "next_run_at": next_run_at.to_rfc3339(),
+            "next_execution": kyomi_auth::watch_service::describe_execution(next_run_at, timezone)?,
         });
 
         if let Some(wid) = watch_id {
@@ -447,6 +466,10 @@ impl AgentTool for UpdateWatchTool {
                 "prompt": {
                     "type": "string",
                     "description": "New monitoring instruction (optional)"
+                },
+                "timezone": {
+                    "type": "string",
+                    "description": "IANA schedule timezone, e.g. Australia/Sydney. Creation omission means UTC; preview/update omission preserves the saved zone when watch_id is supplied. Use UTC to switch to UTC. A timezone mentioned only in the report prompt does not set the schedule zone."
                 },
                 "schedule": {
                     "type": "string",
@@ -528,6 +551,7 @@ impl AgentTool for UpdateWatchTool {
                 .get("prompt")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
+            timezone: args.get("timezone").and_then(|v| v.as_str()).map(str::to_owned),
             schedule: args
                 .get("schedule")
                 .and_then(|v| v.as_str())
@@ -587,7 +611,7 @@ impl AgentTool for UpdateWatchTool {
         .await;
 
         let schedule_description =
-            kyomi_auth::watch_service::describe_cron(&watch.schedule);
+            kyomi_auth::watch_service::describe_cron_in_timezone(&watch.schedule, watch.timezone.as_deref());
         let next_run_display = watch
             .next_run_at
             .map(|t| t.to_rfc3339())
@@ -604,6 +628,8 @@ impl AgentTool for UpdateWatchTool {
             "watch_id": watch.watch_id,
             "name": watch.name,
             "schedule": watch.schedule,
+            "timezone": watch.timezone,
+            "next_execution": watch.next_run_at.map(|t| kyomi_auth::watch_service::describe_execution(t, watch.timezone.as_deref())).transpose()?,
             "schedule_description": schedule_description,
             "enabled": watch.enabled,
             "next_run_at": next_run_display,
@@ -652,7 +678,7 @@ impl AgentTool for SearchWatchesTool {
                 },
                 "timezone_offset": {
                     "type": "string",
-                    "description": "User's timezone offset in ISO format (e.g., '+11:00', '-05:00') for schedule display."
+                    "description": "Legacy display hint (ignored); returned schedules use their saved IANA timezone. This offset never controls recurrence."
                 }
             },
             "required": []
@@ -702,14 +728,16 @@ impl AgentTool for SearchWatchesTool {
             .iter()
             .map(|w| {
                 let schedule_display =
-                    kyomi_auth::watch_service::describe_cron(&w.schedule);
+                    kyomi_auth::watch_service::describe_cron_in_timezone(&w.schedule, w.timezone.as_deref());
                 let prompt_truncated = truncate_preview(&w.prompt, 200);
 
-                serde_json::json!({
+                Ok(serde_json::json!({
                     "watch_id": w.watch_id,
                     "name": w.name,
                     "prompt": prompt_truncated,
                     "schedule": w.schedule,
+                    "timezone": w.timezone,
+                    "next_execution": w.next_run_at.map(|t| kyomi_auth::watch_service::describe_execution(t, w.timezone.as_deref())).transpose()?,
                     "schedule_display": schedule_display,
                     "mode": w.mode,
                     "enabled": w.enabled,
@@ -718,9 +746,9 @@ impl AgentTool for SearchWatchesTool {
                     "last_run_status": w.last_run_status,
                     "next_run_at": w.next_run_at.map(|t| t.to_rfc3339()),
                     "created_at": w.created_at.to_rfc3339(),
-                })
+                }))
             })
-            .collect();
+            .collect::<kyomi_core::Result<Vec<_>>>()?;
 
         let count = watches.len();
 
@@ -905,7 +933,7 @@ impl AgentTool for GetWatchInfoTool {
         .await?;
 
         let schedule_description =
-            kyomi_auth::watch_service::describe_cron(&watch.schedule);
+            kyomi_auth::watch_service::describe_cron_in_timezone(&watch.schedule, watch.timezone.as_deref());
 
         let execution_list: Vec<serde_json::Value> = executions
             .iter()
@@ -948,6 +976,8 @@ impl AgentTool for GetWatchInfoTool {
                 "name": watch.name,
                 "prompt": watch.prompt,
                 "schedule": watch.schedule,
+            "timezone": watch.timezone,
+            "next_execution": watch.next_run_at.map(|t| kyomi_auth::watch_service::describe_execution(t, watch.timezone.as_deref())).transpose()?,
                 "schedule_description": schedule_description,
                 "mode": watch.mode,
                 "enabled": watch.enabled,
@@ -1150,10 +1180,6 @@ mod tests {
     mod schedule_validation {
         use super::*;
 
-        const EXPECTED_MESSAGE: &str = "Invalid cron expression. Use standard cron format \
-             (5 fields): 'minute hour day-of-month month day-of-week'. \
-             Example: '0 9 * * *' (daily at 9am UTC), '0 15 * * 1-5' (weekdays at 3pm UTC).";
-
         #[test]
         fn schedule_validation_failure_strips_tag_for_wrong_field_count() {
             // 4 fields instead of 5.
@@ -1167,7 +1193,7 @@ mod tests {
             assert_eq!(parsed["success"], serde_json::json!(false), "{payload}");
             assert_eq!(
                 parsed["error"],
-                serde_json::json!(EXPECTED_MESSAGE),
+                serde_json::json!(err.user_message()),
                 "error field must be the user_message() text with no \"bad request:\" tag: {payload}"
             );
         }
@@ -1185,7 +1211,7 @@ mod tests {
             assert_eq!(parsed["success"], serde_json::json!(false), "{payload}");
             assert_eq!(
                 parsed["error"],
-                serde_json::json!(EXPECTED_MESSAGE),
+                serde_json::json!(err.user_message()),
                 "error field must be the user_message() text with no \"bad request:\" tag: {payload}"
             );
         }
@@ -1240,9 +1266,10 @@ mod tests {
                 serde_json::from_str(&result).expect("tool result is JSON");
 
             assert_eq!(parsed["success"], serde_json::json!(false), "{result}");
+            let err = kyomi_auth::watch_service::parse_schedule("0 9 * *").unwrap_err();
             assert_eq!(
                 parsed["error"],
-                serde_json::json!(EXPECTED_MESSAGE),
+                serde_json::json!(err.user_message()),
                 "error field must be the user_message() text with no \"bad request:\" tag: {result}"
             );
         }
@@ -1346,6 +1373,45 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn timezone_tools_create_preview_update_and_read_preserve_saved_zone() {
+            use chrono::Timelike;
+            let pool = test_pool().await;
+            seed_workspace_with_two_users(&pool).await;
+            let manager = WebSocketManager::new(None, pool.clone());
+            let ctx = build_ctx(pool, &manager);
+            let result = CreateWatchTool.execute(serde_json::json!({
+                "name": "Sydney schedule", "prompt": "Report weekly revenue trends",
+                "schedule": "0 9 * * 1", "timezone": "Australia/Sydney", "mode": "report",
+                "verified_no_duplicates": true,
+            }), &ctx).await.unwrap();
+            let created: serde_json::Value = serde_json::from_str(&result).unwrap();
+            assert_eq!(created["timezone"], "Australia/Sydney");
+            assert_eq!(created["schedule"], "0 9 * * 1");
+            let watch_id = created["watch_id"].as_str().unwrap();
+            let result = PreviewWatchTool.execute(serde_json::json!({
+                "watch_id": watch_id, "name": "Sydney schedule", "prompt": "Report weekly revenue trends",
+                "schedule": "0 9 * * 1",
+            }), &ctx).await.unwrap();
+            let preview: serde_json::Value = serde_json::from_str(&result).unwrap();
+            assert_eq!(preview["timezone"], "Australia/Sydney");
+            assert!(preview["next_execution"].as_str().unwrap().contains("09:00"));
+            assert!(preview["next_execution"].as_str().unwrap().contains("UTC"));
+            let result = UpdateWatchTool.execute(serde_json::json!({"watch_id": watch_id, "schedule": "30 9 * * 1"}), &ctx).await.unwrap();
+            let updated: serde_json::Value = serde_json::from_str(&result).unwrap();
+            assert_eq!(updated["timezone"], "Australia/Sydney");
+            let saved = kyomi_auth::watch_service::get_watch(&ctx.db, watch_id, "ws-1", "user-a").await.unwrap().unwrap();
+            assert_eq!(saved.timezone.as_deref(), Some("Australia/Sydney"));
+            let local = saved.next_run_at.unwrap().with_timezone(&kyomi_auth::watch_service::parse_timezone(saved.timezone.as_deref()).unwrap());
+            assert_eq!((local.hour(), local.minute()), (9, 30));
+            let result = GetWatchInfoTool.execute(serde_json::json!({"watch_id": watch_id}), &ctx).await.unwrap();
+            let info: serde_json::Value = serde_json::from_str(&result).unwrap();
+            assert_eq!(info["watch"]["timezone"], "Australia/Sydney");
+            assert!(info["watch"]["next_execution"].as_str().unwrap().contains("09:30"));
+            let invalid = PreviewWatchTool.execute(serde_json::json!({"name": "Invalid", "prompt": "Report revenue", "schedule": "0 9 * * 1", "timezone": "+11:00"}), &ctx).await.unwrap();
+            assert_eq!(serde_json::from_str::<serde_json::Value>(&invalid).unwrap()["success"], false);
+        }
+
+        #[tokio::test]
         async fn create_watch_tool_broadcasts_to_owner_only() {
             let pool = test_pool().await;
             seed_workspace_with_two_users(&pool).await;
@@ -1408,6 +1474,7 @@ mod tests {
                 "Pre-existing watch",
                 "Check if revenue drops more than 10 percent",
                 "0 9 * * *",
+            None,
                 "alert",
                 None,
                 None,
@@ -1462,6 +1529,7 @@ mod tests {
                 "Watch to delete",
                 "Check if revenue drops more than 10 percent",
                 "0 9 * * *",
+            None,
                 "alert",
                 None,
                 None,
@@ -1533,6 +1601,7 @@ mod tests {
         assert!(props.contains_key("name"));
         assert!(props.contains_key("prompt"));
         assert!(props.contains_key("schedule"));
+        assert!(props.contains_key("timezone"));
         assert!(props.contains_key("mode"));
         assert!(props.contains_key("verified_no_duplicates"));
         assert!(props.contains_key("queries"));
@@ -1580,6 +1649,7 @@ mod tests {
         let schema = PreviewWatchTool.parameters_schema();
         let props = schema["properties"].as_object().expect("properties is object");
         assert!(props.contains_key("watch_id"));
+        assert!(props.contains_key("timezone"));
     }
 
     #[test]
@@ -1621,6 +1691,7 @@ mod tests {
         assert!(props.contains_key("name"));
         assert!(props.contains_key("prompt"));
         assert!(props.contains_key("schedule"));
+        assert!(props.contains_key("timezone"));
         assert!(props.contains_key("mode"));
         assert!(props.contains_key("enabled"));
         assert!(props.contains_key("alert_emails"));

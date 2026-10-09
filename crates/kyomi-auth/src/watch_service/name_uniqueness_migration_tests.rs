@@ -67,6 +67,52 @@ async fn watch_indexes(db: &DbPool) -> Vec<String> {
     }
 }
 
+/// Read a watch using the pre-timezone projection.
+///
+/// `get_watch` selects `timezone`, but this test's `before` state runs only
+/// the migrations below *this branch's* target (SQLite 39 /
+/// Postgres 20261003000000) so the forward migration still has work to do —
+/// and that target is numbered *earlier* than main's timezone migration
+/// (SQLite 00045 / Postgres 20261005000000). The before-schema therefore has
+/// no `timezone` column at all, and `get_watch` fails with "no such column"
+/// before the comparison is ever reached.
+///
+/// `CAST(NULL AS TEXT) AS timezone` supplies the column name `models::Watch`
+/// expects without ever referencing the real one, so this works on both the
+/// pre- and post-timezone schemas. The field is trivially equal across the
+/// migration: the seeded row is inserted without a timezone, and
+/// `ALTER TABLE watches ADD COLUMN timezone TEXT` is nullable with no default,
+/// so the after-state decodes to `None` as well. Timezone preservation is not
+/// this test's subject — the name-uniqueness migration never touches it.
+async fn get_watch_before_timezone(
+    db: &DbPool,
+    watch_id: &str,
+    workspace_id: &str,
+    user_id: &str,
+) -> Result<Option<kyomi_core::models::Watch>> {
+    let sql = r#"
+        SELECT watch_id, workspace_id, created_by, name, prompt, schedule,
+               CAST(NULL AS TEXT) AS timezone,
+               mode, datasource_hints, queries, alert_emails,
+               alert_emails_enabled, enabled, last_run_at, last_run_status,
+               next_run_at, created_at, updated_at
+        FROM watches
+        WHERE watch_id = $1 AND workspace_id = $2 AND created_by = $3
+    "#;
+
+    let watch = kyomi_core::db_fetch_optional!(
+        db,
+        kyomi_core::models::Watch,
+        sql,
+        watch_id,
+        workspace_id,
+        user_id
+    )
+    .map_err(|e| kyomi_core::Error::Internal(format!("failed to get watch: {e}")))?;
+
+    Ok(watch)
+}
+
 async fn assert_migration_preserves_rows_and_indexes(db: &DbPool) {
     run_migrations(db, true).await;
     let before_indexes = watch_indexes(db).await;
@@ -87,7 +133,7 @@ async fn assert_migration_preserves_rows_and_indexes(db: &DbPool) {
         .expect("seed existing watch");
     kyomi_core::db_execute!(db, "INSERT INTO watch_executions (watch_id, workspace_id, created_by, status, alert_triggered) VALUES ('name-watch', 'name-ws', 'name-user', 'success', $1)", true)
         .expect("seed existing execution");
-    let before = get_watch(db, "name-watch", "name-ws", "name-user")
+    let before = get_watch_before_timezone(db, "name-watch", "name-ws", "name-user")
         .await
         .expect("read before")
         .expect("existing watch");

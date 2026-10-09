@@ -43,6 +43,7 @@ async fn assert_duplicate_names_and_id_scoping(db: &DbPool) {
                 name,
                 "Check if revenue drops more than 10 percent",
                 "0 9 * * *",
+                None,
                 "alert",
                 None,
                 None,

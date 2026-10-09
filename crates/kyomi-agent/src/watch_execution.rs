@@ -1644,7 +1644,7 @@ async fn execute_watch_inner(
 async fn load_watch(db: &DbPool, watch_id: &str) -> kyomi_core::Result<Option<Watch>> {
     let watch = kyomi_core::db_fetch_optional!(
         db, Watch,
-        "SELECT watch_id, workspace_id, created_by, name, prompt, schedule, \
+        "SELECT watch_id, workspace_id, created_by, name, prompt, schedule, timezone, \
                mode, \
                datasource_hints, \
                queries, \
@@ -2423,3 +2423,7 @@ That concludes my analysis."#;
         assert!(prompt.contains("Execution Context"));
     }
 }
+
+#[cfg(test)]
+#[path = "watch_execution_timezone_tests.rs"]
+mod timezone_loader_tests;

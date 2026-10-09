@@ -249,7 +249,11 @@ async fn oauth_authorize(
         && let Ok(session) = jwt::validate_token(token, &state.config.jwt_secret)
         && session.claims.require_session().is_ok()
     {
-        return render_consent(&state, &client, &params, &session.claims).await;
+        match kyomi_auth::session::require_current_browser_session(&state.db, &session.claims).await {
+            Ok(()) => return render_consent(&state, &client, &params, &session.claims).await,
+            Err(kyomi_core::Error::Unauthorized(_)) => {},
+            Err(error) => return Err(internal_oauth_error(error)),
+        }
     }
 
     let oauth_state = redis_ops::generate_token();
@@ -397,9 +401,11 @@ async fn oauth_authorize_continue(
         .ok_or_else(|| RouteError::from((StatusCode::UNAUTHORIZED, "Not logged in")))?;
     let session = jwt::validate_token(token, &state.config.jwt_secret)
         .map_err(|_| RouteError::from((StatusCode::UNAUTHORIZED, "Invalid session")))?;
-    session.claims.require_session().map_err(|_| {
-        RouteError::from((StatusCode::UNAUTHORIZED, "Invalid session"))
-    })?;
+    kyomi_auth::session::require_current_browser_session(&state.db, &session.claims)
+        .await.map_err(|error| match error {
+            kyomi_core::Error::Unauthorized(_) => RouteError::from((StatusCode::UNAUTHORIZED, "Invalid session")),
+            other => internal_oauth_error(other),
+        })?;
     let pending = redis_ops::verify_oauth_state(&state.kv, "oauth_pending", &params.state)
         .await
         .map_err(internal_oauth_error)?
@@ -439,9 +445,11 @@ async fn oauth_consent_decision(
         .ok_or_else(|| RouteError::from((StatusCode::UNAUTHORIZED, "Not logged in")))?;
     let session = jwt::validate_token(token, &state.config.jwt_secret)
         .map_err(|_| RouteError::from((StatusCode::UNAUTHORIZED, "Invalid session")))?;
-    session.claims.require_session().map_err(|_| {
-        RouteError::from((StatusCode::UNAUTHORIZED, "Invalid session"))
-    })?;
+    kyomi_auth::session::require_current_browser_session(&state.db, &session.claims)
+        .await.map_err(|error| match error {
+            kyomi_core::Error::Unauthorized(_) => RouteError::from((StatusCode::UNAUTHORIZED, "Invalid session")),
+            other => internal_oauth_error(other),
+        })?;
     if form.decision != "allow" && form.decision != "deny" {
         return Err((StatusCode::BAD_REQUEST, "Invalid decision").into());
     }
@@ -803,6 +811,15 @@ async fn handle_refresh_token(
         ));
     }
 
+    // Renewal belongs to the issuing client. Keep the existing browser-token
+    // rejection above; broader client-binding changes are tracked by KYO-840.
+    if user_data.oauth_client_id.as_deref() != Some(params.client_id.as_str()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid_grant: client_id mismatch"})),
+        ));
+    }
+
     // Verify user still exists and is active
     let user = user_service::get_user_by_id(&state.db, &user_data.user_id)
         .await
@@ -862,6 +879,30 @@ async fn handle_refresh_token(
             Json(json!({"error": "internal_error"})),
         )
     })?;
+
+    // Only a fully validated grant with a successfully minted access token
+    // earns another inactivity window. Recheck persisted grant state so an
+    // intervening expiry, rotation past grace, or revocation cannot revive it.
+    let renewed = token_service::renew_oauth_refresh_token(
+        &state.db,
+        &user_data.token_id,
+        &params.client_id,
+        Utc::now() + Duration::days(jwt_config.refresh_token_expire_days),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "Failed to renew OAuth refresh token");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "internal_error"})),
+        )
+    })?;
+    if !renewed {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid_grant: refresh token invalid or expired"})),
+        ));
+    }
 
     tracing::info!(
         user_id = %user.user_id,

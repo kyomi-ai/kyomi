@@ -409,6 +409,19 @@ async fn serve() {
     // Shared cancellation token for graceful shutdown of all background tasks
     let shutdown_token = CancellationToken::new();
 
+    let _durable_chat_worker = kyomi_agent::durable_chat::DurableChatWorker {
+        db: state.db.clone(),
+        kv: state.kv.clone(),
+        encryption_key: state.encryption_key.clone(),
+        embedding: state.embedding.clone(),
+        ws_manager: state.ws_manager.clone(),
+        app_config: state.config.clone(),
+        connect_registry: Some(state.connect_registry.clone()),
+        platforms: state.platforms.clone(),
+        owner: state.process_instance.clone(),
+        shutdown: shutdown_token.child_token(),
+    }.start();
+
     // Start background schedulers (if enabled)
     let watch_scheduler: Option<Arc<kyomi_agent::WatchScheduler>> = if enable_schedulers {
         // Catalog refresh scheduler — hourly catalog re-indexing + daily token cleanup

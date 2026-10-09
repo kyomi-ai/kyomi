@@ -74,7 +74,7 @@
 #   5. A genuine --allow-unstaged signature is acknowledged and the commit
 #      is allowed, with exactly one accurate acknowledgement line.
 #   6. A 2-line .review-approval written by the ORIGINAL (pre-KYO-712)
-#      scripts/sign-review.sh at origin/main — hash + signature only, no
+#      scripts/sign-review.sh fixture — hash + signature only, no
 #      line 3 at all — still verifies under the fixed hook. This is the
 #      backward-compatibility guarantee scripts/sign-review.sh's own
 #      header promises.
@@ -170,33 +170,10 @@ openssl genpkey -algorithm ed25519 -out "$KEY_PEM" >/dev/null 2>&1
 openssl pkey -in "$KEY_PEM" -pubout -out "$PUB_PEM" >/dev/null 2>&1
 PRIVATE_KEY="$(cat "$KEY_PEM")"
 
-# The ORIGINAL (pre-KYO-712) sign-review.sh, fetched straight from
-# origin/main — hash+signature only, no --allow-unstaged support and no
-# unstaged/untracked guard at all. Used by Test 6 to prove backward
-# compatibility with approvals written before this ticket existed. This is
-# a read-only fetch into a scratch file (`git show <rev>:<path> > file`),
-# never a working-tree mutation.
-ORIGIN_SIGN="$tmpdir/origin-sign-review.sh"
-if ! git -C "$REPO_ROOT" show origin/main:scripts/sign-review.sh > "$ORIGIN_SIGN" 2>/dev/null; then
-    echo "ERROR: could not fetch origin/main:scripts/sign-review.sh — is origin/main available in this checkout?" >&2
-    exit 1
-fi
-# Until this PR merges, origin/main's copy predates the -rawin fix (see
-# scripts/sign-review.sh's own comment on its `pkeyutl -sign` line): its
-# `openssl pkeyutl -sign` call has no -rawin and, unpatched, cannot run at
-# all on OpenSSL 3.0.x (Ubuntu 24.04 / ubuntu-latest at the time of
-# writing) — it errors out before producing a signature, which would make
-# this Test 6 fixture fail to generate on this exact CI runner, for a
-# reason unrelated to what Test 6 actually checks (whether the FIXED hook
-# accepts a 2-line, no-line-3 approval). Patching -rawin into this fetched
-# copy before executing it changes no signature bytes (sign output is
-# byte-identical with or without -rawin — see the same comment), so it
-# does not weaken the backward-compatibility property under test; it only
-# lets the frozen historical script execute on this host. Once this PR
-# merges, origin/main's copy already has -rawin and this substitution
-# becomes a no-op (the pattern below no longer matches).
-sed -i 's/openssl pkeyutl -sign -inkey/openssl pkeyutl -sign -rawin -inkey/' "$ORIGIN_SIGN"
-chmod +x "$ORIGIN_SIGN"
+# Frozen real pre-KYO-712 signer, checked in so compatibility does not depend
+# on origin/main's evolving signer or on history being available in CI.
+# See the fixture header for provenance and its sole OpenSSL compatibility edit.
+LEGACY_SIGN="$SCRIPT_DIR/fixtures/sign-review-pre-kyo-712.sh"
 
 # ─── stub lint scripts, installed into each throwaway repo ─────────────────
 install_stub_lints() {
@@ -369,7 +346,7 @@ new_repo "$t6"
 activate_hook "$t6"
 echo "unrelated change" >> "$t6/README.md"
 git -C "$t6" add README.md
-( cd "$t6" && "$ORIGIN_SIGN" "$PRIVATE_KEY" > /dev/null )
+( cd "$t6" && bash "$LEGACY_SIGN" "$PRIVATE_KEY" > /dev/null )
 approval_lines="$(wc -l < "$t6/.review-approval")"
 if [ "$approval_lines" -eq 2 ]; then
     pass "the original sign-review.sh wrote a 2-line approval (no line 3)"

@@ -198,3 +198,20 @@ pub(crate) fn test_key() -> [u8; 32] {
     key[16..].copy_from_slice(b"8901234567890123");
     key
 }
+
+/// Exercise both real signed-token extractors against the supplied backend.
+pub(crate) async fn authenticate_session(
+    db: &DbPool, secret: &str, token: &str, path: &str, allow_lapsed: bool,
+) -> kyomi_core::Result<()> {
+    use axum::extract::FromRequestParts;
+    use crate::middleware::{AuthState, AuthUser, AuthUserAllowLapsed};
+    let mut parts = axum::http::Request::builder().uri(path)
+        .header("authorization", format!("Bearer {token}"))
+        .body(()).expect("request").into_parts().0;
+    let state = AuthState { db: db.clone(), jwt_secret: secret.into(), is_personal: false, self_hosted: false };
+    if allow_lapsed {
+        AuthUserAllowLapsed::from_request_parts(&mut parts, &state).await.map(|_| ())
+    } else {
+        AuthUser::from_request_parts(&mut parts, &state).await.map(|_| ())
+    }
+}

@@ -626,7 +626,7 @@ The same ChartML syntax works in both chat and dashboards. For chart orientation
 
 ## ChartML Validation
 
-Before including any ChartML blocks in your response, you MUST call the `validate_chartml` tool with the YAML content of each block (without the ```chartml fences). Only include ChartML in your final response after validation passes. If validation fails, fix the errors and validate again. Do not narrate the validation process to the user — it should be invisible.
+Before including any ChartML blocks in your response, you MUST call the `validate_chartml` tool with the YAML content of each block (without the ```chartml fences). Validation must pass the authoritative JSON Schema for every component and dry-run every SQL source against its selected datasource. Unavailable or skipped dry-runs are validation failures. Only include ChartML in your final response after both stages pass. If validation fails, fix the errors and validate again. Do not narrate the validation process to the user — it should be invisible.
 
 ## Documentation Resources
 

@@ -1,54 +1,27 @@
 /**
  * BigQuery create-modal E2E — a customer's reported defect.
- * Covers KYO-404, 405, 408, 411, 413, 417.
+ * Covers the surviving KYO-404, KYO-405 and KYO-413 create-mode controls.
  *
  * Assertions use isVisible(), never count(): count() matches hidden DOM and
  * would pass on a control the user cannot actually see — which is precisely
  * the defect being tested ("the control never appears").
  *
- * STALE ASSERTIONS (KYO-602) — this spec has NOT been run since the changes
- * below landed. The stale selectors were deliberately NOT rewritten here:
- * choosing correct replacement selectors requires driving the modal in a
- * real browser, which this pass did not do. Reconciling and running the spec
- * is tracked as KYO-604. Until then, treat a failure on any of these lines
- * as expected, not as a new regression:
+ * Current create-mode contract (KYO-604):
+ * - KYO-704 retired kyomi_oauth; Service Account is the default. Its former
+ *   Connect BigQuery / Google-connection Next checks no longer apply here.
+ * - KYO-705 removed the allowlist notice and attestation checkbox.
+ * - KYO-415 removed Default Project; Billing Project remains supported.
+ * - KYO-504 removed the Request BigQuery Access feedback type, so the former
+ *   section D request-access flow is removed.
  *
- *   - `text=Google account authorization required` (section A) — DEAD.
- *     KYO-705 removed the entire KYO-408/KYO-499 Google-OAuth-allowlist
- *     attestation notice and confirmation checkbox, once Kyomi's Google
- *     OAuth app left Testing publishing status in the Google Cloud
- *     Console (Google no longer refuses un-allowlisted accounts, so there
- *     was nothing left to attest to). The module that owned the shared
- *     copy/persistence for that notice is gone. The checks this spec ran
- *     against that notice were replaced with absence checks — see
- *     section A below.
- *   - `button:has-text("Request access")` (section D only — the KYO-417
- *     feedback-modal trigger, unrelated to the removed attestation
- *     notice) — STALE.
- *   - `text=Request BigQuery Access` (section D, KYO-417) — WILL BECOME
- *     STALE. Passes today, but KYO-504's PR #457 is open and removes the
- *     access-request feedback type entirely.
- *   - `text=Default Project` (section B) — DEAD. The field was removed
- *     outright by KYO-415 (`1f27f54c`, PR #410), enforced by
- *     `bigquery_default_project_field_is_gone_billing_project_survives`
- *     (`crates/kyomi-ui/src/pages/settings/datasources/tests/auth_mode_sections.rs:509`).
- *     Unlike the other four, this one needed no browser to establish — a
- *     merged unit test proves it.
+ * This spec uses a deliberately invalid key only to exercise local JSON parsing
+ * and control visibility. It never validates against Google or saves a datasource.
+ * Remove checks credential teardown and the unvalidated Next gate; it does not
+ * prove teardown clears a previously successful validation result.
  *
- *   - `check('KYO-404 Next is disabled for kyomi_oauth with no Google
- *     connection', ...)` (section A) — WILL BECOME STALE. KYO-704 retired
- *     BigQuery's `kyomi_oauth` auth mode and made `service_account` the
- *     create-mode default (`BIGQUERY_DEFAULT_AUTH_MODE`,
- *     `crates/kyomi-ui/src/pages/settings/datasources.rs`), so a freshly
- *     opened create modal no longer lands on the kyomi_oauth panel by
- *     default — this section needs to explicitly select an auth mode
- *     before relying on kyomi_oauth-specific UI, or be retargeted at
- *     `enterprise_oauth`/`service_account`. Not rewritten here — same
- *     "needs a real browser" reasoning as the rest of this list; tracked
- *     alongside KYO-604.
- *
- * Still present on `main` and not affected: `Connect BigQuery`,
- * `Validate & Discover Projects`, `Billing Project`.
+ * Run against a built local dev server with seeded test users. Syntax checks do
+ * not establish a passing browser run; screenshots are written to /tmp/bq-e2e-*.
+ * The named built-app run and screenshot evidence are tracked in KYO-895.
  */
 const { chromium } = require('playwright');
 
@@ -68,7 +41,7 @@ function check(name, pass, detail) {
 }
 const vis = async (page, sel) => page.locator(sel).first().isVisible().catch(() => false);
 
-const FAKE_SA = JSON.stringify({
+const INVALID_SA = JSON.stringify({
   type: 'service_account',
   project_id: 'kyomi-e2e-project',
   private_key_id: 'e2e0000000000000000000000000000000000000',
@@ -78,12 +51,15 @@ const FAKE_SA = JSON.stringify({
   token_uri: 'https://oauth2.googleapis.com/token',
 });
 
-async function pickAuthMode(page, label) {
-  const trigger = page.locator('label:has-text("Authentication Mode")')
+function authModeTrigger(page) {
+  return page.locator('label:has-text("Authentication Mode")')
     .locator('xpath=following-sibling::*[1]')
     .locator('button[aria-haspopup="listbox"]');
-  await trigger.click({ timeout: 10000 });
-  await page.locator('[role="option"]', { hasText: label }).first().click({ timeout: 10000 });
+}
+
+async function pickAuthMode(page, label) {
+  await authModeTrigger(page).click({ timeout: 10000 });
+  await page.getByRole('option', { name: label, exact: true }).click({ timeout: 10000 });
   await page.waitForTimeout(800);
 }
 
@@ -118,40 +94,42 @@ async function pickAuthMode(page, label) {
     await page.waitForTimeout(500);
     check('name field filled', (await nameInput.inputValue()) === 'E2E BigQuery');
 
-    // ══ A — Kyomi OAuth: the customer's first reported symptom ════════════════════════
-    await pickAuthMode(page, 'Kyomi');
-    await page.screenshot({ path: `${SHOT}-A-kyomi-oauth.png`, fullPage: true });
-
-    check('KYO-404 ★ "Connect BigQuery" button is VISIBLE in create mode',
-      await vis(page, 'button:has-text("Connect BigQuery")'));
-    // KYO-705 removed the KYO-408/KYO-499 Google-OAuth-allowlist
-    // attestation notice and confirmation checkbox entirely — Kyomi's
-    // Google OAuth app left Testing publishing status, so there is
-    // nothing left to attest to, and no checkbox renders in this section
-    // any more. No selector-based check replaces the three removed here:
-    // this whole spec hasn't been run since KYO-602 (see the file header),
-    // so a hand-picked selector for "the notice is gone" would be no more
-    // trustworthy than the ones it replaces. Absence is left for the
-    // KYO-604 reconciliation pass / the next batch QA sweep to confirm in
-    // a real browser.
-    check('no checkbox renders in the kyomi_oauth Connection tab',
+    // ══ A — Default mode and retired controls ═══════════════════════════════
+    const authTrigger = authModeTrigger(page);
+    check('KYO-704 Service Account is the default create-mode authentication',
+      await authTrigger.isVisible() &&
+      (await authTrigger.innerText()).trim() === 'Service Account (Recommended)');
+    await authTrigger.click({ timeout: 10000 });
+    const serviceAccountOption = page.getByRole('option', {
+      name: 'Service Account (Recommended)', exact: true,
+    });
+    await serviceAccountOption.waitFor({ state: 'visible', timeout: 10000 });
+    // Check retirement while the options are open: checking a closed listbox
+    // would pass even if the retired option was still offered.
+    check('KYO-704 Kyomi OAuth is not offered in create mode',
+      !(await vis(page, '[role="option"]:has-text("Google OAuth (Kyomi)")')));
+    await serviceAccountOption.click({ timeout: 10000 });
+    await page.waitForTimeout(800);
+    check('KYO-705 allowlist notice is absent',
+      !(await vis(page, 'text=Google account authorization required')));
+    check('KYO-705 beta-access attestation is absent',
+      !(await vis(page, 'text=I have beta access')));
+    check('no attestation checkbox renders in the service-account Connection tab',
       !(await vis(page, '[role="checkbox"]')));
 
-    // Correct create-mode gate: Next needs a proven OAuth connection.
-    const nextBtn = () => page.locator('button:has-text("Next")').last();
-    let d = await nextBtn().isDisabled().catch(() => null);
-    check('KYO-404 Next is disabled for kyomi_oauth with no Google connection',
-      d === true, `disabled=${d}`);
+    const nextBtn = () => page.getByRole('button', { name: 'Next', exact: true });
+    let d = await nextBtn().isDisabled();
+    check('Next is visible and disabled before service-account validation',
+      await nextBtn().isVisible() && d === true, `disabled=${d}`);
 
     // ══ B — Service Account: the customer's unblocking path ════════════════════
-    await pickAuthMode(page, 'Service Account');
     await page.screenshot({ path: `${SHOT}-B1-sa-empty.png`, fullPage: true });
 
     check('service-account JSON field is visible', await vis(page, 'textarea'));
     check('"Validate & Discover Projects" correctly hidden before JSON supplied',
       !(await vis(page, 'button:has-text("Validate & Discover Projects")')));
 
-    await page.locator('textarea').first().fill(FAKE_SA, { timeout: 10000 });
+    await page.locator('textarea').first().fill(INVALID_SA, { timeout: 10000 });
     await page.waitForTimeout(1500);
     await page.screenshot({ path: `${SHOT}-B2-sa-filled.png`, fullPage: true });
 
@@ -163,7 +141,11 @@ async function pickAuthMode(page, label) {
       await vis(page, 'button:has-text("Validate & Discover Projects")'));
     check('KYO-405 ★ "Billing Project" field is visible',
       await vis(page, 'text=Billing Project'));
-    // KYO-415 removed the "Default Project" field; assertion deleted (KYO-602).
+    check('KYO-415 Default Project field is absent in service-account mode',
+      !(await vis(page, 'text=Default Project')));
+    d = await nextBtn().isDisabled();
+    check('parsed service-account JSON alone does not enable Next',
+      await nextBtn().isVisible() && d === true, `disabled=${d}`);
 
     // Free-text fallback: the customer must be able to type a project id by hand,
     // because their IAM cannot list projects.
@@ -177,7 +159,7 @@ async function pickAuthMode(page, label) {
         'free-text input not visible');
     }
 
-    // ══ KYO-413 — tearing down credentials must re-close the gate ═══════════
+    // ══ KYO-413 — credential teardown hides validation controls ════════════
     const removeBtn = page.locator('button:has-text("Remove")').first();
     if (await removeBtn.isVisible().catch(() => false)) {
       await removeBtn.click({ timeout: 10000 });
@@ -185,29 +167,44 @@ async function pickAuthMode(page, label) {
       await page.screenshot({ path: `${SHOT}-B3-after-remove.png`, fullPage: true });
       check('KYO-413 ★ Remove hides "Validate & Discover Projects" again',
         !(await vis(page, 'button:has-text("Validate & Discover Projects")')));
-      d = await nextBtn().isDisabled().catch(() => null);
-      check('KYO-413 ★ Next is re-disabled after credential teardown',
-        d === true, `disabled=${d}`);
+      check('KYO-413 Remove restores the service-account JSON field',
+        await vis(page, 'textarea'));
+      d = await nextBtn().isDisabled();
+      check('KYO-413 Next remains disabled after removing unvalidated credentials',
+        await nextBtn().isVisible() && d === true, `disabled=${d}`);
     } else {
       check('KYO-413 Remove control visible', false, 'Remove button not visible');
     }
 
     // ══ C — Enterprise OAuth: KYO-404 create-mode exception ═════════════════
-    await pickAuthMode(page, 'Enterprise');
+    await pickAuthMode(page, 'Google OAuth (Enterprise)');
     await page.screenshot({ path: `${SHOT}-C-enterprise.png`, fullPage: true });
-    d = await nextBtn().isDisabled().catch(() => null);
-    check('KYO-404 ★ Next is ENABLED for enterprise_oauth in create mode',
-      d === false, `disabled=${d}`);
+    check('enterprise OAuth configuration fields are visible',
+      await vis(page, 'input[placeholder="From Google Cloud Console"]') &&
+      await vis(page, 'input[placeholder="OAuth client secret"]'));
+    check('enterprise OAuth explains connection happens after saving',
+      await vis(page, 'text=After saving, connect your BigQuery account from this settings panel.'));
+    check('enterprise OAuth connect button is hidden until the datasource is saved',
+      !(await vis(page, 'button:has-text("Connect BigQuery")')));
+    check('no attestation checkbox renders in the enterprise Connection tab',
+      !(await vis(page, '[role="checkbox"]')));
+    check('KYO-415 Default Project field is absent in enterprise mode',
+      !(await vis(page, 'text=Default Project')));
+    d = await nextBtn().isDisabled();
+    check('KYO-404 ★ Next is visible and ENABLED for enterprise_oauth in create mode',
+      await nextBtn().isVisible() && d === false, `disabled=${d}`);
+    await nameInput.fill('');
+    d = await nextBtn().isDisabled();
+    check('enterprise OAuth still requires a datasource name',
+      await nextBtn().isVisible() && d === true, `disabled=${d}`);
+    await nameInput.fill('E2E BigQuery');
 
-    // ══ D — KYO-417 feedback context gating (last: modals stack) ════════════
-    await pickAuthMode(page, 'Kyomi');
-    await page.locator('button:has-text("Request access")').first().click({ timeout: 10000 });
-    await page.waitForTimeout(1800);
-    await page.screenshot({ path: `${SHOT}-D1-request-access.png`, fullPage: true });
-    check('KYO-417 ★ "Request access" opens the feedback modal',
-      await vis(page, 'text=Send Feedback'));
-    check('KYO-417 ★ "Request BigQuery Access" type is revealed in this context',
-      await vis(page, 'text=Request BigQuery Access'));
+    // Switching away from the enterprise precreate exception must close Next.
+    await pickAuthMode(page, 'Service Account (Recommended)');
+    d = await nextBtn().isDisabled();
+    check('switching back to an empty service account disables Next',
+      await nextBtn().isVisible() && d === true, `disabled=${d}`);
+    await page.screenshot({ path: `${SHOT}-C2-back-to-sa.png`, fullPage: true });
 
     check('no hydration panics / console errors', consoleErrors.length === 0,
       consoleErrors.slice(0, 3).join(' | '));
