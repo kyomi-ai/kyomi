@@ -43,15 +43,38 @@ use kyomi_types::sync::entity_types;
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
-/// Start the sync engine. Call **once** from the Layout after the WebSocket
-/// connects (i.e. from inside a `<WebSocketProvider>` subtree).
+/// Start the sync engine for `workspace_id`, from inside a `<WebSocketProvider>`
+/// subtree.
 ///
-/// Subscribes to `sync_action`, `sync_complete`, and `sync_reset` messages.
-/// Sends an immediate bootstrap or delta request based on the stored cursor.
+/// Subscribes to `sync_action`, `sync_complete`, `sync_reset`,
+/// `billing_status_changed`, and `error` messages. Sends an immediate
+/// bootstrap or delta request based on the stored cursor.
 ///
 /// On every reconnection (transition to `Connected`) the engine re-sends the
 /// appropriate request so the client catches up with any events it missed
 /// while offline.
+///
+/// ## Lifetime and re-invocation (KYO-833)
+///
+/// Called from inside `components::layout::SyncEngineStarter`, whose effect
+/// calls this at most once **per distinct workspace id** — never on every
+/// effect rerun, and never merely because the reactive `workspace_id` signal
+/// transiently reported the same id or went briefly empty (see that
+/// component's doc comment, and `cache::sync_engine_lifecycle::sync_engine_action`
+/// for the exact decision). If the caller switches workspaces, it disposes
+/// the previous call's owner (see below) and calls this again for the new
+/// workspace id — this function itself has no "already running" guard of its
+/// own; that is entirely the caller's responsibility.
+///
+/// Every subscription/cleanup this function registers via `on_cleanup` is
+/// bound to whichever reactive `Owner` is current when it is called — the
+/// caller MUST invoke this from inside a dedicated child `Owner`'s `.with()`
+/// (not directly inside its own `Effect`'s closure: an `Effect`'s owner in
+/// `reactive_graph` 0.2.14 has its cleanups wiped at the START of every
+/// rerun, which would silently unsubscribe everything below on the very next
+/// unrelated rerun). Unsubscribe fires when the caller disposes that specific
+/// child `Owner` — on an actual workspace switch, or when the component that
+/// owns it unmounts — not on every effect rerun.
 pub fn start_sync_engine(
     ws: WebSocketContext,
     store: SyncStore,
@@ -286,17 +309,78 @@ pub fn start_sync_engine(
         }
     });
 
+    // ── Subscribe to billing_status_changed (KYO-807) ────────────────────────
+    // `crate::subscription_service`'s billing-state writers
+    // (`kyomi_auth::websocket::helpers::broadcast_billing_status_changed`)
+    // push this to every workspace member whenever a server-side write
+    // changes the workspace's billing state — including a currently-lapsed
+    // workspace's members, since `connect` is never billing-gated (only
+    // `sync_bootstrap`/`sync_delta` are). On receipt: refetch the billing
+    // state that decides the paywall, AND re-send the sync catch-up request
+    // — a tab that was lapsed had its bootstrap/delta refused while locked,
+    // so once billing unlocks it must catch up exactly the same way a fresh
+    // connect would, without waiting for a reload. If the workspace is still
+    // lapsed, the server refuses the catch-up request again with
+    // `payment_required`, which the `error` subscription below already turns
+    // into the paywall — no special-casing needed here.
+    let unsub_billing = ws.subscribe("billing_status_changed", {
+        let my_workspace_id = workspace_id.clone();
+        let ws_for_billing = ws.clone();
+        move |msg| {
+            let event_workspace_id = billing_status_changed_workspace_id(msg.data.as_ref());
+            if crate::utils::billing_lapse::is_billing_status_change_for_workspace(
+                event_workspace_id,
+                &my_workspace_id,
+            ) {
+                crate::utils::billing_lapse::refetch_billing_state();
+                let ws_clone = ws_for_billing.clone();
+                let wid = my_workspace_id.clone();
+                spawn_local(async move {
+                    request_sync_catchup(&ws_clone, &wid).await;
+                });
+            }
+        }
+    });
+
+    // ── Subscribe to error (KYO-806: payment-required sync refusal) ─────────
+    // `handle_sync_bootstrap`/`handle_sync_delta` (apps/server/src/routes/
+    // websocket.rs) refuse a lapsed workspace with a `send_error` carrying
+    // `error_code == kyomi_types::PAYMENT_REQUIRED_CODE` — the *only* code
+    // that must flip this tab into the paywall. The `Unverifiable` refusal
+    // ("try again shortly") carries no code at all and must not (see
+    // `billing_refusal_message`'s doc comment on the server side), so this
+    // checks the code, never just "did an error arrive".
+    let unsub_error = ws.subscribe("error", move |msg| {
+        let error_code = msg
+            .data
+            .as_ref()
+            .and_then(|d| d.get("error_code"))
+            .and_then(|v| v.as_str());
+        if crate::utils::billing_lapse::is_payment_required_error_code(error_code) {
+            crate::utils::billing_lapse::report_payment_required();
+        }
+    });
+
     // ── Register cleanup ──────────────────────────────────────────────────────
-    // Unsubscribe when the component that called start_sync_engine is dropped.
-    // The unsubscribe closures are `Box<dyn FnOnce()>` which is !Send, so wrap
-    // them in SendWrapper to satisfy on_cleanup's `Send + 'static` requirement.
+    // Unsubscribe when the caller's child Owner (see this function's doc
+    // comment — KYO-833) is disposed: on a genuine workspace switch, or when
+    // the component that owns it unmounts. Registers against whichever Owner
+    // is current when this line runs, which is why the caller must invoke
+    // this function from inside that Owner's `.with()` rather than directly
+    // inside an Effect closure. The unsubscribe closures are `Box<dyn
+    // FnOnce()>` which is !Send, so wrap them in SendWrapper to satisfy
+    // on_cleanup's `Send + 'static` requirement.
     let unsub_action = SendWrapper::new(unsub_action);
     let unsub_complete = SendWrapper::new(unsub_complete);
     let unsub_reset = SendWrapper::new(unsub_reset);
+    let unsub_billing = SendWrapper::new(unsub_billing);
+    let unsub_error = SendWrapper::new(unsub_error);
     on_cleanup(move || {
         unsub_action.take()();
         unsub_complete.take()();
         unsub_reset.take()();
+        unsub_billing.take()();
+        unsub_error.take()();
     });
 
     // ── Watch connection state to send bootstrap or delta on connect ────────
@@ -327,31 +411,54 @@ pub fn start_sync_engine(
         let wid = wid_for_state.clone();
 
         spawn_local(async move {
-            let idb_cursor = match crate::cache::db::init_cache_db(&wid).await {
-                Ok(db) => crate::cache::db::get_last_sync_id(&db, &wid)
-                    .await
-                    .ok()
-                    .flatten()
-                    .and_then(|s| s.parse::<i64>().ok())
-                    .unwrap_or(0),
-                Err(_) => 0,
-            };
-
-            if idb_cursor == 0 {
-                tracing::info!("sync: no cursor — sending sync_bootstrap");
-                ws_send.send(serde_json::json!({"type": "sync_bootstrap"}));
-            } else {
-                tracing::info!(idb_cursor, "sync: IDB cursor found — sending sync_delta");
-                ws_send.send(serde_json::json!({
-                    "type": "sync_delta",
-                    "last_sync_id": idb_cursor
-                }));
-            }
+            request_sync_catchup(&ws_send, &wid).await;
         });
     });
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
+
+/// Read the IDB cursor for `workspace_id` and send the appropriate
+/// `sync_bootstrap`/`sync_delta` request over `ws`.
+///
+/// Shared by the connect/reconnect `Effect` above and the
+/// `billing_status_changed` subscription (KYO-807): a tab that was lapsed
+/// had its bootstrap/delta refused while locked, so once billing unlocks it
+/// must catch up exactly the same way a fresh connect would, without a
+/// reload.
+async fn request_sync_catchup(ws: &WebSocketContext, workspace_id: &str) {
+    let idb_cursor = match crate::cache::db::init_cache_db(workspace_id).await {
+        Ok(db) => crate::cache::db::get_last_sync_id(&db, workspace_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0),
+        Err(_) => 0,
+    };
+
+    if idb_cursor == 0 {
+        tracing::info!("sync: no cursor — sending sync_bootstrap");
+        ws.send(serde_json::json!({"type": "sync_bootstrap"}));
+    } else {
+        tracing::info!(idb_cursor, "sync: IDB cursor found — sending sync_delta");
+        ws.send(serde_json::json!({
+            "type": "sync_delta",
+            "last_sync_id": idb_cursor
+        }));
+    }
+}
+
+/// KYO-807: `broadcast_billing_status_changed`
+/// (`kyomi_auth::websocket::helpers`) writes the workspace id under the
+/// top-level key `"workspace_id"` — this reads that same key. The match
+/// decision itself (`billing_lapse::is_billing_status_change_for_workspace`)
+/// is unit-tested on the host; this extraction only exists because
+/// `sync_engine` itself is `wasm32`-only and cannot compile into the host
+/// test binary.
+fn billing_status_changed_workspace_id(data: Option<&serde_json::Value>) -> Option<&str> {
+    data.and_then(|d| d.get("workspace_id")).and_then(|v| v.as_str())
+}
 
 /// Extract `WorkspaceSettingsData` from the raw sync entity JSON.
 ///

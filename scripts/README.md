@@ -78,9 +78,10 @@ All scripts are organized by environment. **Every script is environment-specific
   ticket**; `1` — work in flight found, do not claim; `2` — usage error,
   including a malformed `KEY_RESTART_CUTOFF` (KYO-607); `3` — a check could
   not be completed (remote unreachable, `gh` missing
-  or failing, **a pagination that stopped part-way through**, or a PR row
-  that did not split into four usable fields — KYO-607) and must be treated
-  exactly like `1`, never like `0` — the script fails closed by design,
+  or failing, **a pagination that stopped part-way through**, a PR row
+  that did not split into five usable fields — KYO-607, or a PR row whose
+  rework-label flag was anything other than the literal `0`/`1` — KYO-778)
+  and must be treated exactly like `1`, never like `0` — the script fails closed by design,
   since a false "clear" costs a full duplicate implementation while a false
   "in flight" costs one skipped cycle. **The PR listing has no size ceiling
   (KYO-703).** It paginates to completion, so there is no truncation
@@ -173,6 +174,33 @@ All scripts are organized by environment. **Every script is environment-specific
   of the exit `3` the failure already forces. Keys 293 and 294 remain in
   flight after the fix, correctly — they also have legitimate
   current-numbering PRs (#321, #322).
+  **Distinguishes a rework-target PR from a live worker's PR (KYO-778):**
+  `/merge-sweeper` deliberately leaves a rejected PR **open** when it routes
+  a ticket back for rework — "the old PR stays open" — so, before this fix,
+  that PR (and its still-live remote head branch) was itself an unconditional
+  in-flight hit on *every* rework ticket, by construction. The signal is a
+  GitHub PR label, `rework-requested` (`REWORK_LABEL` in the script),
+  applied by `/merge-sweeper`'s own Step 6 the moment it routes a PR back.
+  **Removing the label is the claim** — the rework worker removes it when it
+  picks the ticket back up, so a second check afterward sees an ordinary
+  unlabelled open PR and gets exit `1`, same as any other hit. A PR only
+  classifies as a rework target if it is **OPEN and carries the label**;
+  closed/merged PRs are handled exactly as before regardless of the label.
+  The PR's exact remote head branch (check 1) is classified the same way —
+  the label lives on the PR, not the branch, so check 1 reads it out of a
+  branch list check 2 populates, the same mechanism `RECYCLED_BRANCHES`
+  uses for pre-restart keys. **Local worktrees and local branches (checks 3
+  and 4) are never suppressed by the label**, even one with the identical
+  branch name — a remote label describes what `/merge-sweeper` saw, not
+  what is sitting on this machine, and local evidence of a physically
+  present worker must never be hidden by it. **The durability rule is
+  unweakened:** a `rework-requested` PR is still printed, under its own
+  `REWORK TARGET(S)` heading, on every verdict — it is reclassified, not
+  suppressed, the same distinction `PRESERVED STRANDED WORK` and
+  `PRE-RESTART KEY REUSE` already draw. Fail-closed behaviour applies to
+  the new 5th TSV column the same way it applies to the other four: a row
+  whose label flag is not exactly `0` or `1` is a row the PR check could not
+  read, and forces exit `3` rather than being read as "not labelled."
 
 - **`mark-worktree-stranded.sh`** - The writer side of the KYO-529 tombstone
   above: writes `STRANDED.md` at a preserved worktree's root so
@@ -194,6 +222,42 @@ All scripts are organized by environment. **Every script is environment-specific
   write itself failed); `2` usage error. Self-tested by
   `scripts/mark-worktree-stranded-test.sh`, including an interop check that
   `check-ticket-in-flight.sh` actually honours a marker this script wrote.
+
+- **`retire-worktree.sh`** - The ONLY supported way to remove a linked
+  `kyomi-wt-*` worktree (KYO-733, after a bulk cleanup ran
+  `git worktree remove` on a live agent's tree and lost its staged,
+  uncommitted work, and separately deleted a tree explicitly tombstoned
+  with `STRANDED.md`). `ps` alone is a known-insufficient liveness signal —
+  an agent sitting between tool calls has no child process in the tree at
+  all — so this script refuses removal, reporting EVERY reason found (not
+  just the first), when any of: (a) a file outside `target/` and `.git`
+  was modified in the last 30 minutes; (b) a process (other than this
+  script's own PID and its direct children) has its cwd inside the tree —
+  corroboration, not the sole signal, but still a refusal on its own; (c)
+  `git status --porcelain` is non-empty; (d) HEAD has commits unreachable
+  from any `origin` remote-tracking ref, checked after `git fetch --prune
+  origin` so a stale tracking ref for a since-deleted remote branch can't
+  read as "pushed"; (e) a `STRANDED.md` tombstone is present. Usage:
+  `scripts/retire-worktree.sh <path>` or
+  `scripts/retire-worktree.sh --force <path> <path>` — `--force` overrides
+  reasons (a)-(e) (printing each one it overrides) once a human has
+  confirmed the work is safe to discard (e.g. the PR merged and the remote
+  branch was since deleted, which reads as unpushed by design). It never
+  overrides a usage error (path missing, not a git worktree, not a
+  registered linked worktree, or the primary worktree / canonical clone)
+  or a "could not complete a check" result, and requires the path twice
+  under `--force` as a typo guard. Removes ONLY the worktree — it never
+  deletes the branch (that's the caller's job) and never runs
+  `git worktree prune`. **Exit-code contract:** `0` removed; `1` refused —
+  a check found live/unsaved work; `2` usage error, never overridden by
+  `--force`; `3` a check could not be completed (unsupported git version,
+  `find`/`git worktree list`/`git fetch`/`git rev-list` failed, or `/proc`
+  was wholly unreadable) or the removal itself failed after every check
+  passed — also never overridden by `--force`. Self-tested by
+  `scripts/retire-worktree-test.sh`, including a real backgrounded process
+  planted inside a fixture tree to exercise the `/proc` scan, and mutation
+  checks that prove the find-failure and recent-write assertions actually
+  exercise the script's own bytes.
 
 - **`mark-branch-stranded.sh`** - The writer side of the KYO-567 `stranded/`
   remote-branch tombstone above, and the answer to "what does *releasing* a

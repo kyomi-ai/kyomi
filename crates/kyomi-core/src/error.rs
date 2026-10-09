@@ -5,6 +5,18 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
+/// Machine-readable code for [`Error::PaymentRequired`]. Re-exported from
+/// `kyomi_types::PAYMENT_REQUIRED_CODE` — the ONE definition of this contract
+/// string, living in `kyomi-types` because `kyomi-ui`'s WASM client build
+/// can't depend on this crate (see that constant's own doc comment).
+/// `Error::into_response()` below puts it in the JSON body's `"error"`
+/// field; `kyomi_ui::server_fns::PAYMENT_REQUIRED_MARKER` re-exports this
+/// same path for the server-fn-error-message contract, and
+/// `apps/server/src/routes/websocket.rs` passes it as the WS `send_error`
+/// `error_code` for the same reason — one literal, several re-exports, so
+/// none of them can drift apart (KYO-805).
+pub use kyomi_types::PAYMENT_REQUIRED_CODE;
+
 /// Application-wide error type.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -31,6 +43,17 @@ pub enum Error {
 
     #[error("service unavailable: {0}")]
     ServiceUnavailable(String),
+
+    /// The requesting workspace's billing is lapsed (SaaS only) — the caller
+    /// must pay before this request can be served. Maps to HTTP 402 Payment
+    /// Required, not 403: the caller *is* authorized and authenticated, the
+    /// resource is simply gated on payment (see MDN's definition of 402).
+    /// Computed exclusively via `kyomi_core::capability::billing_gate_blocks`
+    /// (never re-derive lapsed-ness from a status string at a call site) —
+    /// see `crates/kyomi-auth/src/middleware.rs`'s `AuthUser` extractor,
+    /// which is the one place this variant is constructed today (KYO-805).
+    #[error("payment required: {0}")]
+    PaymentRequired(String),
 
     /// A datasource connection or validation failure whose message is already
     /// a complete, user-facing sentence (e.g. "Connection test failed — check
@@ -118,6 +141,7 @@ impl Error {
             | Error::TooManyRequests(msg, _)
             | Error::NotImplemented(msg)
             | Error::ServiceUnavailable(msg)
+            | Error::PaymentRequired(msg)
             | Error::DatasourceConnection(msg)
             | Error::CredentialDecryptionFailed(msg)
             | Error::Internal(msg) => msg,
@@ -153,6 +177,15 @@ impl IntoResponse for Error {
             }
             Error::NotImplemented(msg) => (StatusCode::NOT_IMPLEMENTED, msg.clone()),
             Error::ServiceUnavailable(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg.clone()),
+            // Machine-readable code alongside the message (same shape as the
+            // TooManyRequests arm above) so a client can branch on
+            // `error == "payment_required"` without parsing prose — the
+            // contract KYO-806's paywall consumes. See the variant's own doc
+            // comment for why this is 402, not 403.
+            Error::PaymentRequired(msg) => {
+                let body = serde_json::json!({ "error": PAYMENT_REQUIRED_CODE, "message": msg });
+                return (StatusCode::PAYMENT_REQUIRED, axum::Json(body)).into_response();
+            }
             // Client-actionable (bad credentials / wrong host / unreachable):
             // surface the full message so the caller can fix the config.
             Error::DatasourceConnection(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
@@ -242,6 +275,35 @@ mod tests {
         let err = Error::Internal("the tool-use budget was exhausted".into());
         assert!(!err.user_message().contains("internal:"));
         assert_eq!(err.user_message(), "the tool-use budget was exhausted");
+    }
+
+    #[tokio::test]
+    async fn payment_required_maps_to_402_with_machine_readable_body() {
+        // KYO-805: the gate on a lapsed SaaS workspace is HTTP 402, not 403 —
+        // the caller IS authenticated and authorized, payment is simply due.
+        let err = Error::PaymentRequired("This workspace's billing is past due.".into());
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        let json: serde_json::Value =
+            serde_json::from_slice(&body).expect("response body is valid JSON");
+        assert_eq!(json["error"], "payment_required");
+        assert_eq!(json["message"], "This workspace's billing is past due.");
+    }
+
+    #[test]
+    fn payment_required_display_carries_the_log_prefix() {
+        let err = Error::PaymentRequired("billing lapsed".into());
+        assert_eq!(err.to_string(), "payment required: billing lapsed");
+    }
+
+    #[test]
+    fn payment_required_user_message_strips_the_log_prefix() {
+        let err = Error::PaymentRequired("billing lapsed".into());
+        assert_eq!(err.user_message(), "billing lapsed");
     }
 
     #[test]

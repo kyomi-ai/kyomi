@@ -248,6 +248,7 @@ mod tests {
             is_personal_mode: false,
             is_self_hosted,
             billing_enabled: false,
+            billing_lapsed: false,
             capabilities: HashMap::new(),
             chart_palette: "balanced".to_string(),
             permissions,

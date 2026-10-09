@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+pub mod billing;
+pub mod cron_weekdays;
 pub mod datasource_contracts;
 pub mod feedback;
 pub mod permission;
 pub mod sync;
 pub mod text;
 pub mod websocket;
+pub use billing::{BillingLapseReason, PAYMENT_REQUIRED_CODE};
 pub use datasource_contracts::{
     DatasourceOAuthDisconnectResult, DatasourceOAuthRevocationOutcome, DatasourceOAuthStatus,
     GeneratedSshKey,

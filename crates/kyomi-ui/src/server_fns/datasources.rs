@@ -82,7 +82,7 @@ pub use kyomi_types::GeneratedSshKey;
 ///
 /// Combines the list and credential-status endpoints into a single call.
 /// Mirrors `GET /api/v1/datasources` + `GET /api/v1/datasources/credential-status`.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn list_datasources() -> Result<Vec<DatasourceInfo>, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -103,7 +103,7 @@ pub async fn list_datasources() -> Result<Vec<DatasourceInfo>, ServerFnError> {
 /// Get all registered datasource types.
 ///
 /// Mirrors `GET /api/v1/datasources/types` (simplified for the list view).
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_datasource_types() -> Result<Vec<DatasourceTypeInfo>, ServerFnError> {
     let all_meta = kyomi_core::datasource_registry::all_metadata();
 
@@ -140,7 +140,7 @@ pub async fn get_datasource_types() -> Result<Vec<DatasourceTypeInfo>, ServerFnE
 /// Toggle a datasource enabled/disabled for the current user.
 ///
 /// Mirrors `POST /api/v1/datasources/{id}/toggle`.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn toggle_datasource(
     datasource_id: String,
     enabled: bool,
@@ -164,7 +164,7 @@ pub async fn toggle_datasource(
 /// Delete a datasource (workspace admin only).
 ///
 /// Mirrors `DELETE /api/v1/datasources/{id}`.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn delete_datasource(datasource_id: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -185,7 +185,7 @@ pub async fn delete_datasource(datasource_id: String) -> Result<(), ServerFnErro
 ///
 /// No REST counterpart: the datasources REST router was removed (PR #183);
 /// this is served exclusively through the `/leptos-api/{*fn_name}` catch-all.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn generate_ssh_key() -> Result<GeneratedSshKey, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -309,7 +309,7 @@ pub struct CatalogStatsResult {
 /// then returns `None` and silently falls back to the provider default —
 /// dropping the user's port, or worse, a TLS setting. JSON preserves the
 /// original types on the wire, matching `update_dashboard` (dashboards.rs).
-#[server(prefix = "/leptos-api", input = server_fn::codec::Json)]
+#[server(prefix = "/leptos-api", input = server_fn::codec::Json, client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn create_datasource_modal(
     name: String,
     slug: String,
@@ -391,7 +391,7 @@ pub async fn create_datasource_modal(
 /// `input = server_fn::codec::Json` (KYO-428) — see `create_datasource_modal`
 /// for why a `serde_json::Value` argument needs the JSON codec rather than
 /// the default `PostUrl`.
-#[server(prefix = "/leptos-api", input = server_fn::codec::Json)]
+#[server(prefix = "/leptos-api", input = server_fn::codec::Json, client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn update_datasource_settings(
     datasource_id: String,
     name: String,
@@ -443,7 +443,7 @@ pub async fn update_datasource_settings(
 /// call sites sent it — silently correct only as long as no credential
 /// field is ever a number or boolean. Matching the codec here removes that
 /// path-dependent trap instead of leaving it for the next field to trip over.
-#[server(prefix = "/leptos-api", input = server_fn::codec::Json)]
+#[server(prefix = "/leptos-api", input = server_fn::codec::Json, client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn save_datasource_credentials(
     datasource_id: String,
     credentials: serde_json::Value,
@@ -469,7 +469,7 @@ pub async fn save_datasource_credentials(
 /// Load full settings for the edit modal.
 ///
 /// Mirrors `GET /api/v1/datasources/{id}/settings`.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_datasource_settings(
     datasource_id: String,
 ) -> Result<DatasourceSettingsResult, ServerFnError> {
@@ -567,7 +567,7 @@ fn connect_failure_message(e: &kyomi_core::Error) -> String {
 /// `input = server_fn::codec::Json` (KYO-428) — see `create_datasource_modal`
 /// for why `connection_config` (a `serde_json::Value`) needs the JSON codec
 /// rather than the default `PostUrl`.
-#[server(prefix = "/leptos-api", input = server_fn::codec::Json)]
+#[server(prefix = "/leptos-api", input = server_fn::codec::Json, client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn discover_datasource_resources(
     datasource_type: String,
     connection_config: serde_json::Value,
@@ -1082,7 +1082,7 @@ fn extract_refresh_warnings(
 /// Return table count, schema count, and last-indexed timestamp for a datasource.
 ///
 /// Used by the datasource settings page to display catalog health at a glance.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_catalog_stats(
     datasource_id: String,
 ) -> Result<CatalogStatsResult, ServerFnError> {

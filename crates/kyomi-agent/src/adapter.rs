@@ -68,6 +68,26 @@ pub struct ChatAgentAdapter {
     /// [`ChatAgentAdapter::chat`], before `load_context()` runs. See that
     /// field's doc for the contract this enforces.
     user_message_persistence: UserMessagePersistence,
+    /// Set from [`ChatParams::assistant_message_persistence`] at the top of
+    /// [`ChatAgentAdapter::chat`]. See [`AssistantMessagePersistence`] for
+    /// the contract this enforces on [`ChatAgentAdapter::persist_after_chat`].
+    assistant_message_persistence: AssistantMessagePersistence,
+    /// Index into `agent.state().messages` up to which messages have
+    /// already been durably written — by the incremental per-iteration
+    /// writer ([`ChatAgentAdapter::wire_incremental_persister`]), not just
+    /// by `persist_after_chat`'s own tail pass (KYO-493 phase 3).
+    /// Re-initialized to `messages_loaded_count` at the top of every
+    /// [`ChatAgentAdapter::chat`] call, once `load_context()` has run.
+    /// `Arc<Mutex<_>>` because the incremental writer is a callback closure
+    /// (`Fn`, not `FnMut`) invoked from inside `CustomAgent::chat()` — see
+    /// [`crate::agent::IterationBoundaryCallback`]'s doc for why that
+    /// closure's own sequencing already rules out concurrent access; the
+    /// lock exists only to satisfy interior mutability, not to arbitrate a
+    /// real race.
+    persisted_up_to: Arc<tokio::sync::Mutex<usize>>,
+    /// Awaited interface delivery; durable progress is supplied only after a sink commit.
+    thinking_tracker: Option<Arc<tokio::sync::Mutex<AgentThinkingTracker>>>,
+    persistence_error: Arc<tokio::sync::Mutex<Option<String>>>,
 }
 
 /// How the user's message for a given turn reaches the database.
@@ -136,6 +156,94 @@ impl UserMessagePersistence {
     }
 }
 
+/// How the assistant's reply for a given turn reaches the database.
+///
+/// Mirrors [`UserMessagePersistence`] on the other side of the same turn —
+/// same shape, same reason: which arm applies is a claim about what the
+/// caller already did to the DB, and folding it back into a bare
+/// `Option<String>` (as this crate did before KYO-493) makes "an id was
+/// minted" and "a row was pre-inserted for that id" indistinguishable at
+/// the call site, which is exactly the ambiguity that caused KYO-572.
+#[derive(Debug, Clone)]
+pub enum AssistantMessagePersistence {
+    /// [`ChatAgentAdapter::persist_after_chat`] INSERTs the final assistant
+    /// message itself, once the agent loop produces it — pre-KYO-493
+    /// behaviour, and still correct for every caller that does not
+    /// pre-insert a placeholder: copilot (KYO-572 — deliberately no
+    /// placeholder, see `kyomi_auth::copilot_service::prepare_copilot_message`),
+    /// Slack, and watch execution. `Some(id)` stamps the row with a
+    /// caller-chosen id (kept in sync with the id already used for
+    /// WebSocket streaming / thinking-tracker attribution); `None` lets the
+    /// database layer generate one.
+    AdapterInserts(Option<String>),
+    /// The caller already INSERTed an empty placeholder row for this id
+    /// before the agent ran, with `status = 'in_progress'` (KYO-493 —
+    /// `kyomi_auth::chat_service::prepare_chat_dispatch`).
+    /// `persist_after_chat` must UPDATE that row — via
+    /// `kyomi_auth::chat_service::finalize_assistant_placeholder` — never
+    /// INSERT a second one under the same primary key, when it reaches the
+    /// message tagged with this id. `status` itself is finalized separately
+    /// by `kyomi_agent::execution::execute_agent_chat`, which is the one
+    /// place that knows the turn's true terminal outcome.
+    CallerPreInserted(String),
+    /// All writes are committed under the durable run lease.
+    Durable { message_id: String, run: DurableRun },
+}
+
+#[derive(Debug, Clone)]
+pub struct DurableRun {
+    pub conversation_id: agent_runtime::ConversationId,
+    pub run_id: agent_runtime::RunId,
+    pub lease: agent_runtime::Lease,
+    pub context: Arc<kyomi_auth::conversation_events::ClaimedConversationContext>,
+}
+
+impl Default for AssistantMessagePersistence {
+    /// `AdapterInserts(None)` — no pre-inserted row, no caller-chosen id.
+    /// Pre-KYO-493 behaviour: the adapter both generates and inserts the
+    /// message id itself.
+    fn default() -> Self {
+        Self::AdapterInserts(None)
+    }
+}
+
+impl AssistantMessagePersistence {
+    /// The id to stamp on the final assistant message in agent state, if
+    /// any — fires for either variant whenever a concrete id is available.
+    /// This is what keeps the id used for WebSocket streaming / the
+    /// thinking tracker in sync with the id ultimately written to the DB.
+    ///
+    /// `pub(crate)`: also called from `crate::execution::execute_agent_chat`
+    /// to resolve the id it hands the thinking tracker and
+    /// `AgentExecutionResult`, before `ChatParams` is even built.
+    pub(crate) fn tag_id(&self) -> Option<&str> {
+        match self {
+            Self::AdapterInserts(id) => id.as_deref(),
+            Self::CallerPreInserted(id) => Some(id.as_str()),
+            Self::Durable { message_id, .. } => Some(message_id.as_str()),
+        }
+    }
+
+    /// The id of a row the caller already pre-inserted — `Some` only for
+    /// `CallerPreInserted`. Drives the UPDATE-instead-of-INSERT branch in
+    /// `persist_after_chat`; `AdapterInserts` never triggers it, even when
+    /// it carries an id.
+    fn preinserted_id(&self) -> Option<&str> {
+        match self {
+            Self::CallerPreInserted(id) => Some(id.as_str()),
+            Self::Durable { message_id, .. } => Some(message_id.as_str()),
+            Self::AdapterInserts(_) => None,
+        }
+    }
+
+    pub(crate) fn durable_run(&self) -> Option<&DurableRun> {
+        match self {
+            Self::Durable { run, .. } => Some(run),
+            _ => None,
+        }
+    }
+}
+
 /// Arguments for [`ChatAgentAdapter::chat`] — one agent turn.
 ///
 /// Packaged into a struct to keep the public signature under clippy's
@@ -151,7 +259,10 @@ pub struct ChatParams<'a> {
     /// [`UserMessagePersistence`] for the two arms and the contract each
     /// enforces.
     pub user_message_persistence: &'a UserMessagePersistence,
-    pub assistant_message_id: Option<&'a str>,
+    /// How the assistant's reply for this turn reaches the database — see
+    /// [`AssistantMessagePersistence`] for the two arms and the contract
+    /// each enforces.
+    pub assistant_message_persistence: &'a AssistantMessagePersistence,
 }
 
 impl ChatAgentAdapter {
@@ -177,85 +288,30 @@ impl ChatAgentAdapter {
             encryption_key,
             messages_loaded_count: 0,
             user_message_persistence: UserMessagePersistence::default(),
+            assistant_message_persistence: AssistantMessagePersistence::default(),
+            persisted_up_to: Arc::new(tokio::sync::Mutex::new(0)),
+            thinking_tracker: None,
+            persistence_error: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
-    /// Wire a thinking tracker to the agent's callbacks.
-    ///
-    /// The tracker methods are async but callbacks are synchronous closures.
-    /// We use `tokio::task::spawn` to bridge the gap — each callback fires
-    /// an async task that runs the tracker method. This keeps the agent loop
-    /// non-blocking while still delivering events in near-real-time.
+    /// Await tracker delivery in the shared loop. Durable planning/tool notifications are
+    /// supplied by RuntimeSink only after their atomic commit.
     pub fn set_thinking_tracker(&mut self, tracker: Arc<tokio::sync::Mutex<AgentThinkingTracker>>) {
-        let callbacks = self.agent.callbacks_mut();
-
-        // on_thinking -> tracker.agent_thought(thought)
-        // Note: error handling for Redis publish is inside the tracker methods themselves.
-        let tracker_thinking = tracker.clone();
-        callbacks.on_thinking = Some(Box::new(move |thought: &str| {
-            let tracker = tracker_thinking.clone();
-            let thought = thought.to_string();
-            tokio::task::spawn(async move {
-                tracker.lock().await.agent_thought(&thought).await;
-            });
-        }));
-
-        // on_token_usage -> accumulate + tracker.update_token_usage(...)
-        let tracker_usage = tracker.clone();
-        callbacks.on_token_usage = Some(Box::new(
-            move |input_tokens: u32, output_tokens: u32, cost: Option<f64>| {
-                let tracker = tracker_usage.clone();
-                tokio::task::spawn(async move {
-                    tracker
-                        .lock()
-                        .await
-                        .update_token_usage(input_tokens, output_tokens, cost)
-                        .await;
-                });
-            },
-        ));
-
-        // on_tool_start -> tracker.tool_execution_started(tool_name, tool_input)
-        let tracker_tool_start = tracker.clone();
-        callbacks.on_tool_start = Some(Box::new(
-            move |tool_name: &str, tool_input: &serde_json::Value| {
-                let tracker = tracker_tool_start.clone();
-                let name = tool_name.to_string();
-                let input = tool_input.clone();
-                tokio::task::spawn(async move {
-                    tracker
-                        .lock()
-                        .await
-                        .tool_execution_started(&name, &input)
-                        .await;
-                });
-            },
-        ));
-
-        // on_tool_end -> tracker.tool_execution_completed(tool_name, result, success)
-        let tracker_tool_end = tracker.clone();
-        callbacks.on_tool_end = Some(Box::new(
-            move |tool_name: &str, result: &str, success: bool| {
-                let tracker = tracker_tool_end.clone();
-                let name = tool_name.to_string();
-                let result_str = result.to_string();
-                tokio::task::spawn(async move {
-                    tracker
-                        .lock()
-                        .await
-                        .tool_execution_completed(&name, &result_str, success)
-                        .await;
-                });
-            },
-        ));
-
-        // on_preparing_response -> tracker.preparing_response()
-        let tracker_preparing = tracker;
-        callbacks.on_preparing_response = Some(Box::new(move || {
-            let tracker = tracker_preparing.clone();
-            tokio::task::spawn(async move {
-                tracker.lock().await.preparing_response().await;
-            });
+        self.thinking_tracker = Some(tracker.clone());
+        self.agent.callbacks_mut().on_progress = Some(Box::new(move |progress| {
+            let tracker = tracker.clone();
+            Box::pin(async move {
+                use crate::agent::AgentProgress;
+                let mut tracker = tracker.lock().await;
+                match progress {
+                    AgentProgress::Thinking(text) => tracker.agent_thought(&text).await,
+                    AgentProgress::Usage(input, output, cost) => tracker.update_token_usage(input, output, cost).await,
+                    AgentProgress::ToolStart(name, arguments) => tracker.tool_execution_started(&name, &arguments).await,
+                    AgentProgress::ToolEnd(name, text, success) => tracker.tool_execution_completed(&name, &text, success).await,
+                    AgentProgress::Preparing => tracker.preparing_response().await,
+                }
+            })
         }));
     }
 
@@ -271,14 +327,23 @@ impl ChatAgentAdapter {
             return Ok(false);
         };
 
-        // Get session info for metadata restoration.
-        let session = chat_service::get_session(&self.db, session_id).await?;
-        let Some(session) = session else {
-            return Ok(false);
+        // Durable history and compaction state were read under the claim lock.
+        // Subsequent edits or newly accepted turns cannot alter this execution.
+        let (session_config, db_messages) = if let Some(run) = self.assistant_message_persistence.durable_run() {
+            (run.context.config.clone(), run.context.messages.clone())
+        } else {
+            let Some(session) = chat_service::get_session(&self.db, session_id).await? else {
+                return Ok(false);
+            };
+            let messages = chat_service::get_agent_messages(&self.db, &self.encryption_key, session_id, None).await?;
+            let config = session.config.as_ref()
+                .map(|config| kyomi_auth::encryption::restore_chat_config(config, &self.encryption_key))
+                .transpose()?;
+            (config, messages)
         };
 
         // Restore agent state from session config if available.
-        if let Some(ref config) = session.config
+        if let Some(ref config) = session_config
             && let Some(agent_state) = config.get("agent_state")
         {
             let state = self.agent.state_mut();
@@ -307,15 +372,6 @@ impl ChatAgentAdapter {
             }
         }
 
-        // Load all messages from DB.
-        let db_messages = chat_service::get_agent_messages(
-            &self.db,
-            &self.encryption_key,
-            session_id,
-            None, // load all messages
-        )
-        .await?;
-
         // Drop the row the caller already persisted before calling chat()
         // (KYO-492) — otherwise it would both be loaded into context here
         // AND re-appended by CustomAgent::chat(), so the LLM sees the same
@@ -327,6 +383,7 @@ impl ChatAgentAdapter {
         );
 
         if db_messages.is_empty() {
+            self.messages_loaded_count = self.agent.state().messages.len();
             self.context_loaded = true;
             return Ok(false);
         }
@@ -354,9 +411,13 @@ impl ChatAgentAdapter {
 
     /// Persist new messages and agent metadata to the database after a chat.
     ///
-    /// Saves any intermediate messages (tool calls, tool results) that the
-    /// agent generated during the loop, and updates the session config with
-    /// the current agent state.
+    /// Saves whatever intermediate messages (tool calls, tool results)
+    /// [`Self::wire_incremental_persister`]'s per-iteration writer hasn't
+    /// already saved during the loop (KYO-493 phase 3 — before that writer
+    /// existed, this persisted every new message; now it's the catch-up
+    /// pass over `persisted_up_to..`, which is everything for a caller that
+    /// never wires the incremental writer, e.g. a hand-built adapter in a
+    /// test), and updates the session config with the current agent state.
     pub async fn persist_after_chat(&mut self) -> kyomi_core::Result<()> {
         let Some(ref session_id) = self.session_id else {
             return Ok(());
@@ -364,81 +425,31 @@ impl ChatAgentAdapter {
 
         let state = self.agent.state();
         let total_messages = state.messages.len();
+        let start = *self.persisted_up_to.lock().await;
 
-        // Save any messages beyond what we loaded from the DB.
-        // The first `messages_loaded_count` messages came from the DB;
-        // everything after is new (user message, tool calls, tool results, etc.).
-        if total_messages > self.messages_loaded_count {
-            let new_messages = &state.messages[self.messages_loaded_count..];
+        if total_messages > start {
+            let new_messages = &state.messages[start..];
+            let caller_persisted_user_id = self.user_message_persistence.caller_persisted_id();
+            let preinserted_assistant_id = self.assistant_message_persistence.preinserted_id();
 
-            for msg in new_messages {
-                // Skip system messages (they're part of the prompt, not stored).
-                if msg.role == MessageRole::System {
-                    continue;
-                }
-
-                // Skip the one message the caller already persisted before
-                // calling chat() (KYO-492) — see
-                // UserMessagePersistence::CallerPersisted. Every other new
-                // message (a second user turn within the same run, every
-                // assistant/tool message, and — critically — any
-                // AdapterPersists row, e.g. Slack's caller-chosen id) is
-                // still persisted here.
-                if !should_persist_new_message(
-                    msg,
-                    self.user_message_persistence.caller_persisted_id(),
-                ) {
-                    continue;
-                }
-
-                let role = match msg.role {
-                    MessageRole::User => "user",
-                    MessageRole::Assistant => "assistant",
-                    MessageRole::Tool => "tool",
-                    MessageRole::System => continue,
-                };
-
-                let tool_calls_json = msg
-                    .tool_calls
-                    .as_ref()
-                    .map(|tc| serde_json::to_value(tc).unwrap_or_default());
-
-                chat_service::add_message(
+            for (offset, msg) in new_messages.iter().enumerate() {
+                persist_one_new_message(
                     &self.db,
                     &self.encryption_key,
                     session_id,
-                    role,
-                    &msg.content,
-                    None, // metadata
-                    msg.message_id.as_deref(), // use tagged ID if set, else auto-generate
-                    None, // current_time_user_tz
-                    // message_source: always None here — a *user*-role
-                    // message reaching this branch (an AdapterPersists row
-                    // — Slack, watch; or a second user turn within one
-                    // CallerPersisted run, e.g. copilot/chat mid-conversation
-                    // follow-ups the loop itself injects) has its content
-                    // built by `agent.chat()`'s `build_metadata_prefix`, so
-                    // any source/local-time annotation is already baked
-                    // into `msg.content` as literal text. Recording it
-                    // again in this row's own columns would make
-                    // `db_message_to_agent_message` reconstruct a *second*
-                    // prefix on top of the one already there the next time
-                    // this row is loaded (KYO-506). Assistant/tool messages
-                    // (including copilot's, which is CallerPersisted for
-                    // its one user row since KYO-554) always reach this
-                    // branch too, but never carry a prefix to begin with.
-                    None,
-                    if msg.role == MessageRole::User {
-                        msg.user_id.as_deref()
-                    } else {
-                        None
+                    msg,
+                    caller_persisted_user_id,
+                    preinserted_assistant_id,
+                    MessagePersistenceScope {
+                        durable_run: self.assistant_message_persistence.durable_run(),
+                        user_id: &self.user_id, workspace_id: &self.workspace_id,
+                        message_index: start + offset,
                     },
-                    msg.tool_call_id.as_deref(),
-                    msg.name.as_deref(),
-                    tool_calls_json.as_ref(),
                 )
                 .await?;
             }
+
+            *self.persisted_up_to.lock().await = total_messages;
         }
 
         // Save agent metadata to session config.
@@ -451,15 +462,170 @@ impl ChatAgentAdapter {
             }
         });
 
-        chat_service::update_session(&self.db, session_id, None, None, Some(&metadata)).await?;
+        if let Some(run) = self.assistant_message_persistence.durable_run() {
+            kyomi_auth::conversation_events::ConversationStore::new(
+                &self.db, &self.encryption_key, &self.user_id, &self.workspace_id,
+            ).fenced_session_metadata(
+                &run.conversation_id, &run.run_id, &run.lease,
+                chrono::Utc::now().timestamp_millis(), &metadata,
+            ).await.map_err(|e| kyomi_core::Error::ServiceUnavailable(e.to_string()))?;
+        } else {
+            chat_service::update_session(&self.db, session_id, None, None, Some(&metadata)).await?;
+        }
 
         info!(
             session_id = %session_id,
-            new_messages = total_messages.saturating_sub(self.messages_loaded_count),
+            new_messages = total_messages.saturating_sub(start),
             "Persisted agent state after chat"
         );
 
         Ok(())
+    }
+
+    /// Wire the per-iteration incremental persister and the paired
+    /// thinking-events flush trigger (KYO-493 phase 3).
+    ///
+    /// Must run after `load_context()` — it needs the final
+    /// `messages_loaded_count` to seed `persisted_up_to` — and before
+    /// `self.agent.chat()`, since the callback it installs
+    /// (`on_iteration_boundary`) fires from inside that call. A no-op when
+    /// `self.session_id` is `None`: there is no row to persist into.
+    ///
+    /// Unlike [`Self::set_thinking_tracker`]'s five callbacks, this hook is
+    /// awaited in-line by the agent loop rather than spawned — see
+    /// [`crate::agent::IterationBoundaryCallback`]'s doc for why that's
+    /// what lets `persisted_up_to` be tracked safely.
+    fn wire_incremental_persister(&mut self, cancel_token: tokio_util::sync::CancellationToken) {
+        let Some(ref session_id) = self.session_id else {
+            return;
+        };
+
+        let persisted_up_to = Arc::new(tokio::sync::Mutex::new(self.messages_loaded_count));
+        self.persisted_up_to = persisted_up_to.clone();
+
+        let db = self.db.clone();
+        let encryption_key = self.encryption_key.clone();
+        let session_id = session_id.clone();
+        let user_message_persistence = self.user_message_persistence.clone();
+        let assistant_message_persistence = self.assistant_message_persistence.clone();
+        let tracker = self.thinking_tracker.clone();
+        let durable_run = self.assistant_message_persistence.durable_run().cloned();
+        let persistence_error = self.persistence_error.clone();
+        let user_id = self.user_id.clone();
+        let workspace_id = self.workspace_id.clone();
+        // `CustomAgent::chat()` pushes exactly one new User-role message —
+        // this turn's own — and always as the very first thing it does,
+        // before the iteration loop even starts; ChartML-retry and
+        // budget-notice messages are deliberately kept out of
+        // `state.messages` (see that function's doc), so no later message
+        // in this turn is ever User-role. That means the CallerPersisted
+        // row (KYO-492/554 — already durably written by
+        // `prepare_chat_dispatch`/`prepare_copilot_message` before the
+        // agent ran) is always at exactly this global index when one
+        // exists, which is what this hook uses to skip it — NOT
+        // `should_persist_new_message`'s id match. That id match only
+        // works once `ChatAgentAdapter::chat()` tags the message
+        // (`tag_first_new_user_message_id`), which happens *after* the
+        // whole loop returns — i.e. after every iteration boundary this
+        // hook could ever fire for has already run. Without this
+        // positional skip, the first iteration boundary of a
+        // CallerPersisted turn would see an untagged, still-`None`
+        // `message_id`, `should_persist_new_message` would not recognise
+        // it as already covered, and the user row would be inserted a
+        // second time.
+        let caller_persisted_user_row_index = self
+            .user_message_persistence
+            .caller_persisted_id()
+            .is_some()
+            .then_some(self.messages_loaded_count);
+
+        let callback: crate::agent::IterationBoundaryCallback =
+            Box::new(move |messages: &[Message]| {
+                let db = db.clone();
+                let encryption_key = encryption_key.clone();
+                let session_id = session_id.clone();
+                // Resolved fresh (and converted to owned strings) on every
+                // invocation rather than borrowed from the closure's
+                // captured enums — the returned future's lifetime is tied
+                // to `messages`, not to these, so it must not borrow them.
+                let caller_persisted_user_id =
+                    user_message_persistence.caller_persisted_id().map(str::to_string);
+                let preinserted_assistant_id =
+                    assistant_message_persistence.preinserted_id().map(str::to_string);
+                let persisted_up_to = persisted_up_to.clone();
+                let tracker = tracker.clone();
+                let durable_run = durable_run.clone();
+                let persistence_error = persistence_error.clone();
+                let cancel_token = cancel_token.clone();
+                let user_id = user_id.clone();
+                let workspace_id = workspace_id.clone();
+
+                Box::pin(async move {
+                    {
+                        let mut idx = persisted_up_to.lock().await;
+                        let start = *idx;
+                        if messages.len() > start {
+                            // Advance past only what actually got written —
+                            // a failure here is logged and left for
+                            // persist_after_chat's own catch-up pass to
+                            // retry at the end of the turn (KYO-493 ticket:
+                            // "must NOT kill the agent run").
+                            let mut advanced = 0usize;
+                            for (offset, msg) in messages[start..].iter().enumerate() {
+                                let global_index = start + offset;
+                                if Some(global_index) == caller_persisted_user_row_index {
+                                    // The row prepare_chat_dispatch/
+                                    // prepare_copilot_message already wrote
+                                    // — see this method's doc above. Not a
+                                    // failure; counts toward `advanced`.
+                                    advanced += 1;
+                                    continue;
+                                }
+                                match persist_one_new_message(
+                                    &db,
+                                    &encryption_key,
+                                    &session_id,
+                                    msg,
+                                    caller_persisted_user_id.as_deref(),
+                                    preinserted_assistant_id.as_deref(),
+                                    MessagePersistenceScope {
+                                        durable_run: durable_run.as_ref(),
+                                        user_id: &user_id, workspace_id: &workspace_id,
+                                        message_index: global_index,
+                                    },
+                                )
+                                .await
+                                {
+                                    Ok(()) => advanced += 1,
+                                    Err(e) => {
+                                        if durable_run.is_some() {
+                                            *persistence_error.lock().await = Some(e.to_string());
+                                            cancel_token.cancel();
+                                        }
+                                        error!(
+                                            session_id = %session_id,
+                                            error = %e,
+                                            "Failed to incrementally persist an agent message \
+                                             mid-run (KYO-493) — will retry when the turn finishes"
+                                        );
+                                        break;
+                                    }
+                                }
+                            }
+                            *idx = start + advanced;
+                        }
+                    }
+
+                    if let Some(tracker) = tracker {
+                        let mut tracker = tracker.lock().await;
+                        if durable_run.is_none() {
+                            tracker.flush_at_iteration_boundary().await;
+                        }
+                    }
+                })
+            });
+
+        self.agent.callbacks_mut().on_iteration_boundary = Some(callback);
     }
 
     /// Run the agent loop for a user message.
@@ -468,18 +634,35 @@ impl ChatAgentAdapter {
     /// post-chat persistence. All new messages (user, tool, assistant)
     /// are saved to the DB by `persist_after_chat()`.
     ///
-    /// If `assistant_message_id` is provided, it will be set on the final
-    /// assistant response message before persistence, ensuring the DB record
-    /// matches the ID used for WebSocket streaming and UI display.
+    /// `params.assistant_message_persistence` is set on the final assistant
+    /// response message before persistence, ensuring the DB record matches
+    /// the ID used for WebSocket streaming and UI display — and, for
+    /// `CallerPreInserted`, that `persist_after_chat` UPDATEs the
+    /// pre-inserted placeholder row rather than inserting a second one.
     pub async fn chat(&mut self, params: ChatParams<'_>) -> kyomi_core::Result<String> {
-        // Record how this turn's user message is persisted before
-        // load_context() runs, so the filter it applies (and the
+        // Record how this turn's user/assistant messages are persisted
+        // before load_context() runs, so the filter it applies (and the
         // persist-skip below) see it.
         self.user_message_persistence = params.user_message_persistence.clone();
+        self.assistant_message_persistence = params.assistant_message_persistence.clone();
 
         // Lazy context loading on first call.
         if !self.context_loaded {
             self.load_context().await?;
+        }
+
+        // KYO-493 phase 3: must run after load_context() (needs
+        // messages_loaded_count) and before self.agent.chat() (the
+        // callback it installs fires from inside that call).
+        self.wire_incremental_persister(params.cancel_token.clone());
+        if let Some(run) = self.assistant_message_persistence.durable_run().cloned() {
+            self.agent.set_runtime(agent_runtime::ExecutionContext {
+                conversation_id: run.conversation_id.clone(), run_id: run.run_id.clone(),
+            }, Arc::new(crate::runtime_adapter::RuntimeSink {
+                db: self.db.clone(), key: self.encryption_key.clone(), user: self.user_id.clone(),
+                workspace: self.workspace_id.clone(), run, tracker: self.thinking_tracker.clone(),
+                tools: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            }));
         }
 
         // Run the agent loop.
@@ -508,24 +691,24 @@ impl ChatAgentAdapter {
 
         // Tag the final assistant message with the known ID so that the DB
         // record matches the ID used for WebSocket streaming.
-        if let Some(amid) = params.assistant_message_id {
+        if let Some(amid) = params.assistant_message_persistence.tag_id() {
             self.tag_last_assistant_message_id(amid);
         }
 
-        // Persist all new messages and metadata regardless of success/failure.
-        // We log at error level (not warn) because message persistence failures
-        // mean data loss — the user's conversation may not be saved. The error
-        // is deliberately not propagated: `result` below is what the caller
-        // already delivered to the user over the WebSocket, so failing this
-        // turn now would report success as failure without giving the user
-        // anything back. That makes this log line the only record of the
-        // loss (KYO-572), so it carries enough to identify exactly what was
-        // lost: which turn (session_id) and which row never made it to the
-        // DB (assistant_message_id).
+        // Durable turns must surface every persistence failure before their worker
+        // can commit a terminal result. Legacy callers retain their existing
+        // delivery behavior and log a failed tail write with the affected IDs.
+        if self.assistant_message_persistence.durable_run().is_some() {
+            if let Some(error) = self.persistence_error.lock().await.take() {
+                return Err(kyomi_core::Error::ServiceUnavailable(error));
+            }
+            self.persist_after_chat().await?;
+            return result;
+        }
         if let Err(e) = self.persist_after_chat().await {
             error!(
                 session_id = self.session_id.as_deref().unwrap_or("<none>"),
-                assistant_message_id = params.assistant_message_id.unwrap_or("<none>"),
+                assistant_message_id = params.assistant_message_persistence.tag_id().unwrap_or("<none>"),
                 user_id = %self.user_id,
                 error = %e,
                 "Failed to persist agent state after chat — messages may be lost"
@@ -607,6 +790,140 @@ fn should_persist_new_message(msg: &Message, caller_persisted_id: Option<&str>) 
         Some(id) => !(msg.role == MessageRole::User && msg.message_id.as_deref() == Some(id)),
         None => true,
     }
+}
+
+/// Persist one newly-produced agent message to the DB, applying the same
+/// skip / UPDATE-vs-INSERT rules every caller of it must use (KYO-493 phase
+/// 3) — shared by `persist_after_chat`'s tail pass and
+/// `ChatAgentAdapter::wire_incremental_persister`'s per-iteration writer, so
+/// the two paths cannot drift out of sync with each other. Message ordering
+/// (which one fires for a given `msg` first) is the caller's
+/// responsibility; this function's job is only "should this be a no-op,
+/// an UPDATE, or an INSERT" — the same three-way decision
+/// `persist_after_chat` made inline before this extraction.
+///
+/// `Ok(())` for a system message, or the one row already covered by
+/// `caller_persisted_user_id` (see [`should_persist_new_message`]), is a
+/// deliberate no-op, not a skipped write that still needs a retry — a
+/// caller tracking a persisted-up-to index may advance past it. Only a
+/// real persistence attempt that failed returns `Err`.
+struct MessagePersistenceScope<'a> {
+    durable_run: Option<&'a DurableRun>,
+    user_id: &'a str,
+    workspace_id: &'a str,
+    message_index: usize,
+}
+
+async fn persist_one_new_message(
+    db: &DbPool,
+    encryption_key: &Arc<[u8; 32]>,
+    session_id: &str,
+    msg: &Message,
+    caller_persisted_user_id: Option<&str>,
+    preinserted_assistant_id: Option<&str>,
+    scope: MessagePersistenceScope<'_>,
+) -> kyomi_core::Result<()> {
+    let MessagePersistenceScope { durable_run, user_id, workspace_id, message_index } = scope;
+    // Skip system messages (they're part of the prompt, not stored).
+    if msg.role == MessageRole::System {
+        return Ok(());
+    }
+
+    // Skip the one message the caller already persisted before calling
+    // chat() (KYO-492) — see UserMessagePersistence::CallerPersisted. Every
+    // other new message (a second user turn within the same run, every
+    // assistant/tool message, and — critically — any AdapterPersists row,
+    // e.g. Slack's caller-chosen id) is still persisted here.
+    if !should_persist_new_message(msg, caller_persisted_user_id) {
+        return Ok(());
+    }
+
+    let role = match msg.role {
+        MessageRole::User => "user",
+        MessageRole::Assistant => "assistant",
+        MessageRole::Tool => "tool",
+        MessageRole::System => return Ok(()), // unreachable — guarded above
+    };
+
+    let tool_calls_json = msg
+        .tool_calls
+        .as_ref()
+        .map(|tc| serde_json::to_value(tc).unwrap_or_default());
+
+    if let Some(run) = durable_run {
+        let write = kyomi_auth::conversation_events::MessageWrite {
+            message_id: msg.message_id.clone().unwrap_or_else(|| format!("{}:message:{message_index}", run.run_id.as_str())),
+            role: role.to_string(),
+            content: msg.content.clone(),
+            tool_call_id: msg.tool_call_id.clone(),
+            name: msg.name.clone(),
+            tool_calls: tool_calls_json.clone(),
+        };
+        kyomi_auth::conversation_events::ConversationStore::new(db, encryption_key, user_id, workspace_id)
+            .fenced_message(&run.conversation_id, &run.run_id, &run.lease,
+                chrono::Utc::now().timestamp_millis(), &write)
+            .await.map_err(|e| kyomi_core::Error::ServiceUnavailable(e.to_string()))?;
+        return Ok(());
+    }
+
+    // KYO-493: the one message tagged with
+    // `AssistantMessagePersistence::CallerPreInserted`'s id already has a
+    // row — `prepare_chat_dispatch` wrote it before the agent was spawned.
+    // UPDATE it instead of INSERTing a second row under the same primary
+    // key (the exact collision KYO-572 fixed for copilot, which is why
+    // copilot's placeholder-less path — `AdapterInserts` — must never take
+    // this branch and always falls through to the plain INSERT below).
+    if msg.role == MessageRole::Assistant
+        && preinserted_assistant_id.is_some_and(|id| msg.message_id.as_deref() == Some(id))
+    {
+        chat_service::finalize_assistant_placeholder(
+            db,
+            encryption_key,
+            msg.message_id.as_deref().expect("matched Some above"),
+            &msg.content,
+            msg.tool_call_id.as_deref(),
+            msg.name.as_deref(),
+            tool_calls_json.as_ref(),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    chat_service::add_message(
+        db,
+        encryption_key,
+        session_id,
+        role,
+        &msg.content,
+        None, // metadata
+        msg.message_id.as_deref(), // use tagged ID if set, else auto-generate
+        None, // current_time_user_tz
+        // message_source: always None here — a *user*-role message
+        // reaching this branch (an AdapterPersists row — Slack, watch; or a
+        // second user turn within one CallerPersisted run, e.g.
+        // copilot/chat mid-conversation follow-ups the loop itself
+        // injects) has its content built by `agent.chat()`'s
+        // `build_metadata_prefix`, so any source/local-time annotation is
+        // already baked into `msg.content` as literal text. Recording it
+        // again in this row's own columns would make
+        // `db_message_to_agent_message` reconstruct a *second* prefix on
+        // top of the one already there the next time this row is loaded
+        // (KYO-506). Assistant/tool messages (including copilot's, which
+        // is CallerPersisted for its one user row since KYO-554) always
+        // reach this branch too, but never carry a prefix to begin with.
+        None,
+        if msg.role == MessageRole::User {
+            msg.user_id.as_deref()
+        } else {
+            None
+        },
+        msg.tool_call_id.as_deref(),
+        msg.name.as_deref(),
+        tool_calls_json.as_ref(),
+        chat_service::MessageStatus::Complete,
+    )
+    .await?;
+    Ok(())
 }
 
 /// Drop the DB row already covered by `caller_persisted_id`
@@ -1453,7 +1770,7 @@ mod tests {
             _user_names: &std::collections::HashMap<String, String>,
         ) -> kyomi_core::Result<crate::types::LLMResponse> {
             Ok(crate::types::LLMResponse {
-                content: self.reply.to_string(),
+                raw_response: serde_json::Value::Null,                content: self.reply.to_string(),
                 finish_reason: "end_turn".to_string(),
                 usage: crate::types::AgentTokenUsage::default(),
                 tool_calls: None,
@@ -1464,6 +1781,35 @@ mod tests {
 
         fn model(&self) -> &str {
             "text-reply-test-provider"
+        }
+    }
+
+    /// An [`LLMProvider`] whose very first call fails — no message is ever
+    /// appended to agent state, so `tag_last_assistant_message_id` has
+    /// nothing to tag and the pre-inserted placeholder is left completely
+    /// untouched by `persist_after_chat` (KYO-493's terminal-state tests
+    /// need exactly this: a clean failure with no intermediate tool-call
+    /// message for `tag_last_assistant_message_id`'s "lands on an
+    /// intermediate row" edge case to complicate the assertion).
+    struct FailingProvider {
+        message: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::provider::LLMProvider for FailingProvider {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[crate::types::Tool],
+            _temperature: Option<f32>,
+            _max_tokens: u32,
+            _user_names: &std::collections::HashMap<String, String>,
+        ) -> kyomi_core::Result<crate::types::LLMResponse> {
+            Err(kyomi_core::Error::Internal(self.message.to_string()))
+        }
+
+        fn model(&self) -> &str {
+            "failing-test-provider"
         }
     }
 
@@ -1531,6 +1877,7 @@ mod tests {
             None,                                        // tool_call_id
             None,                                        // tool_name
             None,                                        // tool_calls
+            chat_service::MessageStatus::Complete,
         )
         .await
         .expect("store turn 1's user message the way prepare_chat_dispatch does");
@@ -1581,6 +1928,7 @@ mod tests {
             None,
             None,
             None,
+            chat_service::MessageStatus::Complete,
         )
         .await
         .expect("store a row with time but no source");
@@ -1670,6 +2018,11 @@ mod tests {
         // post-fix: CallerPersisted(user_message_id) — the row
         // prepare_copilot_message already wrote.
         let persistence = UserMessagePersistence::CallerPersisted(prep.user_message_id.clone());
+        // Exactly the persistence choice send_copilot_message configures:
+        // AdapterInserts(Some(id)) — copilot mints the assistant id but
+        // (KYO-572) deliberately never pre-inserts a placeholder for it.
+        let assistant_persistence =
+            AssistantMessagePersistence::AdapterInserts(Some(prep.assistant_message_id.clone()));
         adapter
             .chat(ChatParams {
                 message: &prep.user_message,
@@ -1678,7 +2031,7 @@ mod tests {
                 message_source: Some("web"),
                 user_id: Some("user-a"),
                 user_message_persistence: &persistence,
-                assistant_message_id: Some(&prep.assistant_message_id),
+                assistant_message_persistence: &assistant_persistence,
             })
             .await
             .expect("chat() should succeed");
@@ -1767,6 +2120,8 @@ mod tests {
         );
 
         let persistence = UserMessagePersistence::CallerPersisted(prep.user_message_id.clone());
+        let assistant_persistence =
+            AssistantMessagePersistence::AdapterInserts(Some(prep.assistant_message_id.clone()));
         adapter
             .chat(ChatParams {
                 message: &prep.user_message,
@@ -1775,7 +2130,7 @@ mod tests {
                 message_source: Some("web"),
                 user_id: Some("user-a"),
                 user_message_persistence: &persistence,
-                assistant_message_id: Some(&prep.assistant_message_id),
+                assistant_message_persistence: &assistant_persistence,
             })
             .await
             .expect("chat() should succeed");
@@ -1808,6 +2163,473 @@ mod tests {
             "the assistant row must hold the provider's real reply, not be left empty by a \
              swallowed primary-key collision (KYO-572)"
         );
+    }
+
+    // -- Contract: chat's pre-inserted placeholder is UPDATEd, never
+    // -- INSERTed a second time, and terminal outcomes persist correctly
+    // -- (KYO-493) ----------------------------------------------------------
+    //
+    // Unlike copilot (KYO-572, deliberately no placeholder), the main chat
+    // surface (`kyomi_auth::chat_service::prepare_chat_dispatch`) DOES
+    // pre-insert an empty, `status = 'in_progress'` placeholder before the
+    // agent runs, and configures `AssistantMessagePersistence::CallerPreInserted`
+    // over it. These tests drive that real dispatch seam (not a hand-rolled
+    // stand-in) followed by a real turn, so a regression back to plain
+    // INSERT would fail these exactly as the collision failed KYO-572's.
+    //
+    // The last two compose the same finalization steps
+    // `kyomi_agent::execution::execute_agent_chat`'s step 13/15 perform
+    // (`classify_agent_failure` + `finalize_terminal_write` +
+    // `chat_service::update_message`) around a real `adapter.chat()` call —
+    // `execute_agent_chat` itself resolves a real, network-calling LLM
+    // provider from workspace config, which makes it impractical to drive
+    // directly in a unit test (see that function's own doc).
+
+    /// Submit through the production durable acceptance seam. Callers must
+    /// claim its run before using the resulting placeholder.
+    async fn submit_durable_turn(
+        db: &kyomi_core::DbPool,
+        key: &Arc<[u8; 32]>,
+        session_id: &str,
+        message: &str,
+    ) -> (UserMessagePersistence, String) {
+        let outcome = kyomi_auth::chat_service::prepare_chat_dispatch(
+            kyomi_auth::chat_service::ChatDispatchParams {
+                db,
+                encryption_key: key,
+                ws_manager: None,
+                user_id: "user-a",
+                workspace_id: "ws-1",
+                user_display_name: "User A",
+                session_id,
+                is_new_session: true,
+                message,
+                current_time_user_tz: None,
+                message_source: Some("web"),
+                skip_ai: false,
+                client_msg_id: None,
+                owner_instance: "test-instance",
+                execution_context: None,
+            },
+        )
+        .await
+        .expect("prepare_chat_dispatch should succeed, exactly as send_chat_message calls it");
+
+        let kyomi_auth::chat_service::ChatDispatchOutcome::Ready {
+            user_message_id, assistant_message_id, ..
+        } = outcome
+        else {
+            panic!("skip_ai=false must return Ready");
+        };
+
+        (
+            UserMessagePersistence::CallerPersisted(user_message_id),
+            assistant_message_id,
+        )
+    }
+
+    /// Legacy CallerPreInserted compatibility uses an ordinary placeholder,
+    /// with no journal run. Durable fixtures must never use this variant.
+    async fn dispatch_chat_turn(
+        db: &kyomi_core::DbPool,
+        key: &Arc<[u8; 32]>,
+        session_id: &str,
+        message: &str,
+    ) -> (UserMessagePersistence, AssistantMessagePersistence) {
+        chat_service::create_session_with_id(db, "user-a", "ws-1", session_id, None, "chat", None)
+            .await.expect("create legacy conversation");
+        let user_id = chat_service::add_message(db, key, session_id, "user", message,
+            None, None, None, Some("web"), Some("user-a"), None, None, None,
+            chat_service::MessageStatus::Complete).await.expect("legacy caller persists user");
+        let assistant_id = chat_service::add_message(db, key, session_id, "assistant", "",
+            None, None, None, None, None, None, None, None,
+            chat_service::MessageStatus::InProgress).await.expect("legacy caller inserts placeholder");
+        let journal_rows = kyomi_core::db_fetch_scalar!(db, i64,
+            "SELECT COUNT(*) FROM conversation_runs WHERE session_id=$1", session_id).expect("check legacy scope");
+        assert_eq!(journal_rows, 0, "legacy fixture cannot bypass durable ownership");
+        (UserMessagePersistence::CallerPersisted(user_id), AssistantMessagePersistence::CallerPreInserted(assistant_id))
+    }
+
+    async fn claim_durable_turn(
+        db: &kyomi_core::DbPool,
+        key: &Arc<[u8; 32]>,
+        session_id: &str,
+        claim_time: i64,
+        ttl: i64,
+    ) -> (UserMessagePersistence, AssistantMessagePersistence) {
+        claim_durable_message(db, key, session_id, "hello", claim_time, ttl).await
+    }
+
+    async fn claim_durable_message(
+        db: &kyomi_core::DbPool,
+        key: &Arc<[u8; 32]>,
+        session_id: &str,
+        message: &str,
+        claim_time: i64,
+        ttl: i64,
+    ) -> (UserMessagePersistence, AssistantMessagePersistence) {
+        let (user, assistant) = submit_durable_turn(db, key, session_id, message).await;
+        let store = kyomi_auth::conversation_events::ConversationStore::new(db, key, "user-a", "ws-1");
+        let conversation = agent_runtime::ConversationId(session_id.to_string());
+        let run_id = store.find_run_by_assistant(&conversation, assistant.as_str())
+            .await.expect("lookup accepted run").expect("accepted run");
+        let claimed = store.claim(&conversation, &run_id, "worker", claim_time, ttl).await.expect("claim");
+        (user, AssistantMessagePersistence::Durable {
+            message_id: assistant.as_str().to_string(),
+            run: DurableRun { conversation_id: conversation, run_id, lease: claimed.snapshot.lease.expect("lease"), context: Arc::new(claimed.context) },
+        })
+    }
+
+    #[tokio::test]
+    async fn durable_context_is_fixed_at_claim_and_next_claim_sees_committed_terminal() {
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let key = Arc::new([7u8; 32]);
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let (user, assistant) = claim_durable_turn(&db, &key, &session_id, chrono::Utc::now().timestamp_millis(), 30_000).await;
+        chat_service::add_message(&db, &key, &session_id, "assistant", "late history", None, None, None, None, None, None, None, None, chat_service::MessageStatus::Complete).await.expect("commit an edit after claim");
+        chat_service::update_session(&db, &session_id, None, None, Some(&serde_json::json!({"agent_state":{"compacted_summary":"changed after claim"}}))).await.expect("commit compaction edit after claim");
+        let mut first = adapter_over(db.clone(), "user-a", &session_id, key.clone());
+        first.user_message_persistence = user;
+        first.assistant_message_persistence = assistant.clone();
+        first.load_context().await.expect("restore claim snapshot");
+        assert!(!first.agent_state().messages.iter().any(|message| message.content == "late history"));
+        assert_eq!(first.agent_state().compacted_summary, None);
+        let owned = assistant.durable_run().expect("durable");
+        let store = kyomi_auth::conversation_events::ConversationStore::new(&db, &key, "user-a", "ws-1");
+        store.finish(&owned.conversation_id, &owned.run_id, &owned.lease, chrono::Utc::now().timestamp_millis(), agent_runtime::RunState::Completed, "first committed answer").await.expect("commit preceding terminal result");
+        let accepted = chat_service::prepare_chat_dispatch(chat_service::ChatDispatchParams {
+            db: &db, encryption_key: &key, ws_manager: None, user_id: "user-a", workspace_id: "ws-1", user_display_name: "Test",
+            session_id: &session_id, is_new_session: false, message: "next turn", current_time_user_tz: None, message_source: Some("web"),
+            skip_ai: false, client_msg_id: Some("next-claim-request"), owner_instance: "test", execution_context: None,
+        }).await.expect("accept next turn");
+        let chat_service::ChatDispatchOutcome::Ready {run_id,user_message_id,assistant_message_id,..} = accepted else {panic!("ready");};
+        let run_id = agent_runtime::RunId(run_id);
+        let claim = store.claim(&owned.conversation_id, &run_id, "second-worker", chrono::Utc::now().timestamp_millis(), 30_000).await.expect("claim next turn");
+        let mut next = adapter_over(db.clone(), "user-a", &session_id, key.clone());
+        next.user_message_persistence = UserMessagePersistence::CallerPersisted(user_message_id);
+        next.assistant_message_persistence = AssistantMessagePersistence::Durable {
+            message_id: assistant_message_id,
+            run: DurableRun {conversation_id:owned.conversation_id.clone(),run_id,lease:claim.snapshot.lease.expect("lease"),context:Arc::new(claim.context)},
+        };
+        next.load_context().await.expect("restore next claim snapshot");
+        assert!(next.agent_state().messages.iter().any(|message| message.content == "first committed answer"));
+        assert!(next.agent_state().messages.iter().any(|message| message.content == "late history"));
+        assert_eq!(next.agent_state().compacted_summary.as_deref(), Some("changed after claim"));
+    }
+
+    #[tokio::test]
+    async fn durable_adapter_keeps_placeholder_running_until_atomic_finish() {
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let key = Arc::new([7u8; 32]);
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let (user, assistant) = claim_durable_turn(&db, &key, &session_id, chrono::Utc::now().timestamp_millis(), 30_000).await;
+        let mut adapter = adapter_with_provider(db.clone(), "user-a", &session_id, key.clone(), Box::new(TextReplyProvider { reply: "durable answer" }));
+        let answer = adapter.chat(ChatParams {
+            message: "hello", cancel_token: CancellationToken::new(), current_time_user_tz: None,
+            message_source: Some("web"), user_id: Some("user-a"), user_message_persistence: &user,
+            assistant_message_persistence: &assistant,
+        }).await.expect("provider and fenced writes succeed");
+        let amid = assistant.tag_id().expect("assistant id");
+        assert_eq!(chat_service::get_message_status(&db, amid).await.expect("read").expect("row").0, chat_service::MessageStatus::InProgress);
+        let run = assistant.durable_run().expect("durable");
+        kyomi_auth::conversation_events::ConversationStore::new(&db, &key, "user-a", "ws-1")
+            .finish(&run.conversation_id, &run.run_id, &run.lease, chrono::Utc::now().timestamp_millis(), agent_runtime::RunState::Completed, &answer)
+            .await.expect("atomic terminal commit");
+        let rows = chat_service::get_session_messages(&db, &key, &session_id, 100).await.expect("read projections");
+        let terminal = rows.iter().filter(|row| row.message_id == amid).collect::<Vec<_>>();
+        assert_eq!(terminal.len(), 1);
+        assert_eq!(terminal[0].content, "durable answer");
+        assert_eq!(terminal[0].status, "complete");
+    }
+
+    #[tokio::test]
+    async fn durable_compaction_state_is_encrypted_and_restored_by_legacy_context_loading() {
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let key = Arc::new([7u8; 32]);
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let (user, assistant) = claim_durable_turn(&db, &key, &session_id, chrono::Utc::now().timestamp_millis(), 30_000).await;
+        const SUMMARY: &str = "private warehouse summary retained across adapter boundaries";
+        let mut durable = adapter_with_provider(db.clone(), "user-a", &session_id, key.clone(), Box::new(TextReplyProvider { reply: "answer" }));
+        durable.agent.state_mut().compacted_summary = Some(SUMMARY.to_string());
+        durable.chat(ChatParams {
+            message: "hello", cancel_token: CancellationToken::new(), current_time_user_tz: None,
+            message_source: Some("web"), user_id: Some("user-a"), user_message_persistence: &user,
+            assistant_message_persistence: &assistant,
+        }).await.expect("persist durable compaction state");
+        let raw = chat_service::get_session(&db, &session_id).await.expect("raw session").expect("session");
+        assert!(!raw.config.expect("persisted state").to_string().contains(SUMMARY), "compatibility config keeps sensitive summaries encrypted");
+        let mut legacy = adapter_over(db.clone(), "user-a", &session_id, key.clone());
+        legacy.load_context().await.expect("legacy adapter restores encrypted config");
+        assert_eq!(legacy.agent_state().compacted_summary.as_deref(), Some(SUMMARY));
+    }
+
+    #[tokio::test]
+    async fn durable_initial_turn_with_system_prompt_does_not_duplicate_user_at_iteration_boundary() {
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let key = Arc::new([7u8; 32]);
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let (user, assistant) = claim_durable_turn(&db, &key, &session_id, chrono::Utc::now().timestamp_millis(), 30_000).await;
+        let provider = crate::test_support::ScriptedProvider {
+            script: std::sync::Mutex::new(vec![crate::test_support::Reply::ToolCall, crate::test_support::Reply::Text("answer".into())].into()),
+            after_script: crate::test_support::Reply::Text("unexpected".into()),
+            calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+        };
+        let mut adapter = adapter_with_provider(db.clone(), "user-a", &session_id, key.clone(), Box::new(provider));
+        // execute_agent_chat inserts a system message before load_context. With no
+        // prior history it must still count toward the incremental write index.
+        adapter.agent.state_mut().messages.push(Message::system("system prompt"));
+        adapter.chat(ChatParams {
+            message: "hello", cancel_token: CancellationToken::new(), current_time_user_tz: None,
+            message_source: Some("web"), user_id: Some("user-a"), user_message_persistence: &user,
+            assistant_message_persistence: &assistant,
+        }).await.expect("complete scripted turn");
+        let history = chat_service::get_agent_messages(&db, &key, &session_id, None).await.expect("committed history");
+        assert_eq!(history.iter().filter(|message| message.role == "user").count(), 1, "accepted user row is never reinserted after a tool round");
+        assert!(history.iter().any(|message| message.role == "tool"), "complete tool history is retained");
+    }
+
+    #[tokio::test]
+    async fn durable_history_retry_uses_position_identity_without_collapsing_equal_messages() {
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let key = Arc::new([7u8; 32]);
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let (_, assistant) = claim_durable_turn(&db, &key, &session_id, chrono::Utc::now().timestamp_millis(), 30_000).await;
+        let message = Message::assistant("repeated complete response");
+        for index in [42, 42, 43] {
+            persist_one_new_message(&db, &key, &session_id, &message, None, assistant.tag_id(), MessagePersistenceScope {
+                durable_run: assistant.durable_run(), user_id: "user-a", workspace_id: "ws-1", message_index: index,
+            }).await.expect("fenced immutable response commit/retry");
+        }
+        let history = chat_service::get_agent_messages(&db, &key, &session_id, None).await.expect("load committed history");
+        assert_eq!(history.iter().filter(|row| row.content == message.content).count(), 2,
+            "one retried position and a distinct identical response each have one record");
+    }
+
+    #[tokio::test]
+    async fn durable_adapter_propagates_stale_fence_without_writing_messages() {
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let key = Arc::new([7u8; 32]);
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let (user, assistant) = claim_durable_turn(&db, &key, &session_id, chrono::Utc::now().timestamp_millis() - 1_000, 1).await;
+        let mut adapter = adapter_with_provider(db.clone(), "user-a", &session_id, key.clone(), Box::new(TextReplyProvider { reply: "must not persist" }));
+        assert!(adapter.chat(ChatParams {
+            message: "hello", cancel_token: CancellationToken::new(), current_time_user_tz: None,
+            message_source: Some("web"), user_id: Some("user-a"), user_message_persistence: &user,
+            assistant_message_persistence: &assistant,
+        }).await.is_err(), "stale persistence must fail the execution");
+        let rows = chat_service::get_session_messages(&db, &key, &session_id, 100).await.expect("read projections");
+        assert_eq!(rows.len(), 2, "only atomic submission rows survive");
+        assert!(rows.iter().all(|row| row.content != "must not persist"));
+        assert_eq!(rows.iter().find(|row| row.message_id == assistant.tag_id().expect("id")).expect("placeholder").status, "in_progress");
+    }
+
+    #[tokio::test]
+    async fn durable_first_provider_error_has_one_truthful_terminal_projection() {
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let key = Arc::new([7u8; 32]);
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let (user, assistant) = claim_durable_turn(&db, &key, &session_id, chrono::Utc::now().timestamp_millis(), 30_000).await;
+        let mut adapter = adapter_with_provider(db.clone(), "user-a", &session_id, key.clone(), Box::new(FailingProvider { message: "provider cancelled upstream" }));
+        let error = adapter.chat(ChatParams {
+            message: "hello", cancel_token: CancellationToken::new(), current_time_user_tz: None,
+            message_source: Some("web"), user_id: Some("user-a"), user_message_persistence: &user,
+            assistant_message_persistence: &assistant,
+        }).await.expect_err("first provider fails");
+        let (status, response) = crate::execution::classify_agent_failure(&error);
+        let (state, content) = crate::durable_chat::terminal_outcome(status, &response);
+        let run = assistant.durable_run().expect("durable");
+        kyomi_auth::conversation_events::ConversationStore::new(&db, &key, "user-a", "ws-1")
+            .finish(&run.conversation_id, &run.run_id, &run.lease, chrono::Utc::now().timestamp_millis(), state, content)
+            .await.expect("persist failure before any provider response");
+        let rows = chat_service::get_session_messages(&db, &key, &session_id, 100).await.expect("read projections");
+        let assistants = rows.iter().filter(|row| row.message_type == "assistant").collect::<Vec<_>>();
+        assert_eq!(assistants.len(), 1);
+        assert_eq!(assistants[0].content, content);
+        assert_eq!(assistants[0].status, "error");
+    }
+
+    #[tokio::test]
+    async fn preinserted_placeholder_completed_run_updates_the_row_not_insert() {
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let key: Arc<[u8; 32]> = Arc::new([7u8; 32]);
+        let session_id = uuid::Uuid::new_v4().to_string();
+
+        const REAL_REPLY: &str = "Q4 revenue was $1M.";
+        let (user_persistence, assistant_persistence) =
+            dispatch_chat_turn(&db, &key, &session_id, "what was Q4 revenue").await;
+        let assistant_message_id = assistant_persistence.tag_id().expect("CallerPreInserted has an id").to_string();
+
+        let mut adapter = adapter_with_provider(
+            db.clone(),
+            "user-a",
+            &session_id,
+            key.clone(),
+            Box::new(TextReplyProvider { reply: REAL_REPLY }),
+        );
+        adapter
+            .chat(ChatParams {
+                message: "what was Q4 revenue",
+                cancel_token: CancellationToken::new(),
+                current_time_user_tz: None,
+                message_source: Some("web"),
+                user_id: Some("user-a"),
+                user_message_persistence: &user_persistence,
+                assistant_message_persistence: &assistant_persistence,
+            })
+            .await
+            .expect("chat() should succeed");
+
+        let stored = chat_service::get_session_messages(&db, &key, &session_id, 100)
+            .await
+            .expect("get_session_messages should succeed");
+        let assistant_rows: Vec<&chat_service::MessageItem> =
+            stored.iter().filter(|m| m.message_type == "assistant").collect();
+
+        assert_eq!(
+            assistant_rows.len(),
+            1,
+            "exactly one assistant row must exist — a regression back to plain INSERT \
+             would either duplicate-key-fail (swallowed by persist_after_chat's \
+             error-log-only handling, per KYO-572) or produce a second row; found {}: {:?}",
+            assistant_rows.len(),
+            assistant_rows.iter().map(|m| &m.content).collect::<Vec<_>>()
+        );
+        assert_eq!(assistant_rows[0].message_id, assistant_message_id);
+        assert_eq!(
+            assistant_rows[0].content, REAL_REPLY,
+            "the placeholder's content must have been UPDATEd to the real reply"
+        );
+    }
+
+    #[tokio::test]
+    async fn preinserted_placeholder_in_loop_error_persists_error_text_and_status() {
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let key: Arc<[u8; 32]> = Arc::new([7u8; 32]);
+        let session_id = uuid::Uuid::new_v4().to_string();
+
+        let (user_persistence, assistant_persistence) =
+            dispatch_chat_turn(&db, &key, &session_id, "what was Q4 revenue").await;
+        let assistant_message_id = assistant_persistence.tag_id().expect("has an id").to_string();
+
+        let mut adapter = adapter_with_provider(
+            db.clone(),
+            "user-a",
+            &session_id,
+            key.clone(),
+            Box::new(FailingProvider { message: "workspace AI config could not be loaded" }),
+        );
+        let result = adapter
+            .chat(ChatParams {
+                message: "what was Q4 revenue",
+                cancel_token: CancellationToken::new(),
+                current_time_user_tz: None,
+                message_source: Some("web"),
+                user_id: Some("user-a"),
+                user_message_persistence: &user_persistence,
+                assistant_message_persistence: &assistant_persistence,
+            })
+            .await;
+        let err = result.expect_err("FailingProvider must make chat() return Err");
+
+        // Exactly what execute_agent_chat's step 13/15 do with that Err.
+        let (exec_status, response_text) = crate::execution::classify_agent_failure(&err);
+        assert_eq!(exec_status, "error");
+        let (content, message_status) =
+            crate::execution::finalize_terminal_write(exec_status, &response_text);
+        chat_service::update_message(&db, &key, &assistant_message_id, content, None, Some(message_status))
+            .await
+            .expect("update_message should succeed");
+
+        let (status, _owner) = chat_service::get_message_status(&db, &assistant_message_id)
+            .await
+            .expect("get_message_status should succeed")
+            .expect("the placeholder row must still exist");
+        assert_eq!(status, chat_service::MessageStatus::Error);
+
+        let stored = chat_service::get_session_messages(&db, &key, &session_id, 100)
+            .await
+            .expect("get_session_messages should succeed");
+        let assistant_rows: Vec<&chat_service::MessageItem> =
+            stored.iter().filter(|m| m.message_type == "assistant").collect();
+        assert_eq!(
+            assistant_rows.len(),
+            1,
+            "exactly one assistant row, carrying the placeholder id, even though the \
+             turn never produced a real answer"
+        );
+        assert!(
+            assistant_rows[0].content.contains("workspace AI config could not be loaded"),
+            "today an in-loop error is streamed to the client but never persisted \
+             (KYO-493) — this must no longer be true; got {:?}",
+            assistant_rows[0].content
+        );
+    }
+
+    #[tokio::test]
+    async fn preinserted_placeholder_cancelled_run_persists_cancellation_notice_and_status() {
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let key: Arc<[u8; 32]> = Arc::new([7u8; 32]);
+        let session_id = uuid::Uuid::new_v4().to_string();
+
+        let (user_persistence, assistant_persistence) =
+            dispatch_chat_turn(&db, &key, &session_id, "what was Q4 revenue").await;
+        let assistant_message_id = assistant_persistence.tag_id().expect("has an id").to_string();
+
+        // Matches the exact text crate::agent constructs on cancellation
+        // (e.g. agent.rs's cancel-token checks) — classify_agent_failure
+        // keys off this substring.
+        let mut adapter = adapter_with_provider(
+            db.clone(),
+            "user-a",
+            &session_id,
+            key.clone(),
+            Box::new(FailingProvider { message: "Request cancelled" }),
+        );
+        let result = adapter
+            .chat(ChatParams {
+                message: "what was Q4 revenue",
+                cancel_token: CancellationToken::new(),
+                current_time_user_tz: None,
+                message_source: Some("web"),
+                user_id: Some("user-a"),
+                user_message_persistence: &user_persistence,
+                assistant_message_persistence: &assistant_persistence,
+            })
+            .await;
+        let err = result.expect_err("FailingProvider must make chat() return Err");
+
+        let (exec_status, response_text) = crate::execution::classify_agent_failure(&err);
+        assert_eq!(exec_status, "cancelled");
+        assert_eq!(response_text, "Request was cancelled.");
+        let (content, message_status) =
+            crate::execution::finalize_terminal_write(exec_status, &response_text);
+        chat_service::update_message(&db, &key, &assistant_message_id, content, None, Some(message_status))
+            .await
+            .expect("update_message should succeed");
+
+        let (status, _owner) = chat_service::get_message_status(&db, &assistant_message_id)
+            .await
+            .expect("get_message_status should succeed")
+            .expect("the placeholder row must still exist");
+        assert_eq!(status, chat_service::MessageStatus::Cancelled);
+
+        let stored = chat_service::get_session_messages(&db, &key, &session_id, 100)
+            .await
+            .expect("get_session_messages should succeed");
+        let assistant_rows: Vec<&chat_service::MessageItem> =
+            stored.iter().filter(|m| m.message_type == "assistant").collect();
+        assert_eq!(assistant_rows.len(), 1);
+        assert_eq!(assistant_rows[0].content, "Request was cancelled.");
     }
 
     // -- Contract: a watch turn must not double-write the user message,
@@ -1891,7 +2713,7 @@ mod tests {
                 message_source: Some("Kyomi Watch"),
                 user_id: Some("user-a"),
                 user_message_persistence: &watch_dispatch.user_message_persistence,
-                assistant_message_id: None,
+                assistant_message_persistence: &AssistantMessagePersistence::AdapterInserts(None),
             })
             .await
             .expect("chat() should succeed");
@@ -1983,4 +2805,858 @@ mod tests {
             user_rows[0].message_source
         );
     }
+
+    // -- Contract: intermediate messages are persisted at each agent-loop
+    // -- iteration boundary, not only at the end of the turn (KYO-493
+    // -- phase 3) --------------------------------------------------------
+    //
+    // Before this fix, `persist_after_chat` was the *only* writer of new
+    // messages, and it ran once, after `CustomAgent::chat()`'s whole
+    // iteration loop returned. A chat re-entered mid-run therefore saw no
+    // tool-call/tool-result rows at all for the turn in progress — the
+    // failure scenario the ticket describes. These tests drive a real
+    // multi-iteration turn (ToolCall -> ToolCall -> Text) through the real
+    // `prepare_chat_dispatch` seam and a tool that snapshots the DB from
+    // *inside* the agent loop, between the first and second tool calls —
+    // exactly "mid-run".
+
+    /// A snapshot of DB state [`ProbeTool`] takes from inside the agent
+    /// loop, between the two tool-calling iterations of the ToolCall ->
+    /// ToolCall -> Text script.
+    struct ProbeSnapshot {
+        /// Non-user rows (assistant-with-tool-calls + tool-result) visible
+        /// via `get_agent_messages` at snapshot time.
+        intermediate_rows: usize,
+        /// The pre-inserted placeholder's `status` column at snapshot time.
+        placeholder_status: chat_service::MessageStatus,
+        /// Length of the placeholder's `extra_metadata.thinking_events`
+        /// array at snapshot time, as `get_session_messages` (the real UI
+        /// read path) sees it.
+        thinking_events_len: usize,
+    }
+
+    /// Registered under the same name [`crate::test_support::NOOP_TOOL_NAME`]
+    /// (`"noop"`) that every [`crate::test_support::Reply::ToolCall`] in the
+    /// ToolCall -> ToolCall -> Text script targets — a plain
+    /// [`crate::test_support::NoopTool`] can't observe anything, so this
+    /// stands in for it. Behaves identically to `NoopTool` (returns
+    /// `"noop"`) except on its second invocation, where it reads the DB
+    /// first and stashes a [`ProbeSnapshot`] into `snapshot` — capturing
+    /// exactly the state between iteration 1 (already complete, including
+    /// whatever iteration 1's own boundary hook flushed) and iteration 2
+    /// (whose own messages/flush have not happened yet). This is
+    /// deterministic — no timing assumption — because tool execution is
+    /// strictly sequential within `CustomAgent::chat()`'s loop: iteration
+    /// 2's tool cannot run before iteration 1's iteration-boundary hook
+    /// (awaited in-line, not spawned — see
+    /// `ChatAgentAdapter::wire_incremental_persister`'s doc) has returned.
+    struct ProbeTool {
+        calls: std::sync::atomic::AtomicUsize,
+        db: kyomi_core::DbPool,
+        key: Arc<[u8; 32]>,
+        session_id: String,
+        assistant_message_id: String,
+        snapshot: Arc<std::sync::Mutex<Option<ProbeSnapshot>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::tools::AgentTool for ProbeTool {
+        fn name(&self) -> &str {
+            "noop"
+        }
+
+        fn description(&self) -> &str {
+            "Does nothing, except snapshot DB state on its second call."
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+
+        async fn execute(
+            &self,
+            _args: serde_json::Value,
+            _ctx: &crate::tools::ToolContext,
+        ) -> kyomi_core::Result<String> {
+            let call_number = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if call_number == 2 {
+                let rows = chat_service::get_agent_messages(&self.db, &self.key, &self.session_id, None)
+                    .await
+                    .expect("get_agent_messages should succeed inside the probe");
+                let intermediate_rows = rows.iter().filter(|m| m.role != "user").count();
+
+                let (placeholder_status, _owner) =
+                    chat_service::get_message_status(&self.db, &self.assistant_message_id)
+                        .await
+                        .expect("get_message_status should succeed inside the probe")
+                        .expect("the placeholder row must still exist mid-run");
+
+                let stored = chat_service::get_session_messages(&self.db, &self.key, &self.session_id, 100)
+                    .await
+                    .expect("get_session_messages should succeed inside the probe");
+                let thinking_events_len = stored
+                    .iter()
+                    .find(|m| m.message_id == self.assistant_message_id)
+                    .map(|m| m.thinking_events.len())
+                    .unwrap_or(0);
+
+                *self.snapshot.lock().expect("snapshot mutex") = Some(ProbeSnapshot {
+                    intermediate_rows,
+                    placeholder_status,
+                    thinking_events_len,
+                });
+            }
+            Ok("noop".to_string())
+        }
+    }
+
+    /// Build a `ChatAgentAdapter` wired to `ScriptedProvider`'s
+    /// ToolCall -> ToolCall -> Text script, a `ProbeTool` (registered under
+    /// `noop`, replacing `NoopTool`), and — since a mid-run
+    /// `get_session_messages` read must see thinking_events too (KYO-493
+    /// AC) — a real `AgentThinkingTracker` with `incremental_flush` set,
+    /// exactly as `execute_agent_chat` wires one for a `CallerPreInserted`
+    /// turn. Returns the adapter and the snapshot handle the probe fills in.
+    fn adapter_with_probe(
+        db: kyomi_core::DbPool,
+        key: Arc<[u8; 32]>,
+        session_id: &str,
+        assistant_message_id: &str,
+        durable: bool,
+    ) -> (ChatAgentAdapter, Arc<std::sync::Mutex<Option<ProbeSnapshot>>>) {
+        let script = vec![
+            crate::test_support::Reply::ToolCall,
+            crate::test_support::Reply::ToolCall,
+            crate::test_support::Reply::Text("Revenue was $1M, up 12% QoQ.".to_string()),
+        ];
+        let provider = crate::test_support::ScriptedProvider {
+            script: std::sync::Mutex::new(script.into()),
+            after_script: crate::test_support::Reply::Text("unexpected".to_string()),
+            calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+        };
+
+        let snapshot = Arc::new(std::sync::Mutex::new(None));
+        let mut registry = crate::tools::ToolRegistry::new();
+        registry.register(Arc::new(ProbeTool {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            db: db.clone(),
+            key: key.clone(),
+            session_id: session_id.to_string(),
+            assistant_message_id: assistant_message_id.to_string(),
+            snapshot: snapshot.clone(),
+        }));
+
+        let agent = CustomAgent::new(
+            Box::new(provider),
+            crate::agent::AgentConfig::default(),
+            Arc::new(registry),
+            crate::test_support::build_ctx(db.clone()),
+            std::collections::HashMap::new(),
+        );
+
+        let mut adapter = ChatAgentAdapter::new(
+            agent,
+            "user-a".to_string(),
+            "ws-1".to_string(),
+            Some(session_id.to_string()),
+            "custom_agent".to_string(),
+            db.clone(),
+            key.clone(),
+        );
+
+        let tracker = crate::thinking::AgentThinkingTracker::new(crate::thinking::AgentThinkingTrackerConfig {
+            session_id: session_id.to_string(),
+            user_id: "user-a".to_string(),
+            message_id: assistant_message_id.to_string(),
+            ws_manager: kyomi_auth::websocket::WebSocketManager::new(None, db.clone()),
+            workspace_user_ids: None,
+            context_type: Some("chat".to_string()),
+            context_window: 0,
+            incremental_flush: (!durable).then_some(crate::thinking::IncrementalFlushTarget {
+                db: db.clone(),
+                encryption_key: key.clone(),
+            }),
+        });
+        adapter.set_thinking_tracker(Arc::new(tokio::sync::Mutex::new(tracker)));
+
+        (adapter, snapshot)
+    }
+
+    #[tokio::test]
+    async fn intermediate_messages_and_thinking_events_are_visible_mid_run() {
+        assert_intermediate_visibility(false).await;
+    }
+
+    #[tokio::test]
+    async fn durable_intermediate_messages_and_thinking_events_are_visible_mid_run() {
+        assert_intermediate_visibility(true).await;
+    }
+
+    async fn assert_intermediate_visibility(durable: bool) {
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let key: Arc<[u8; 32]> = Arc::new([7u8; 32]);
+        let session_id = uuid::Uuid::new_v4().to_string();
+
+        let (user_persistence, assistant_persistence) = if durable {
+            claim_durable_message(&db, &key, &session_id, "investigate revenue", chrono::Utc::now().timestamp_millis(), 30_000).await
+        } else {
+            dispatch_chat_turn(&db, &key, &session_id, "investigate revenue").await
+        };
+        let assistant_message_id = assistant_persistence.tag_id().expect("has an id").to_string();
+
+        let (mut adapter, snapshot) =
+            adapter_with_probe(db.clone(), key.clone(), &session_id, &assistant_message_id, durable);
+
+        adapter
+            .chat(ChatParams {
+                message: "investigate revenue",
+                cancel_token: CancellationToken::new(),
+                current_time_user_tz: None,
+                message_source: Some("web"),
+                user_id: Some("user-a"),
+                user_message_persistence: &user_persistence,
+                assistant_message_persistence: &assistant_persistence,
+            })
+            .await
+            .expect("chat() should succeed");
+
+        // -- Mid-run snapshot, captured from inside the agent loop --------
+        let snapshot = snapshot
+            .lock()
+            .expect("snapshot mutex")
+            .take()
+            .expect("the probe's second call must have captured a snapshot");
+
+        assert_eq!(
+            snapshot.intermediate_rows, if durable { 3 } else { 2 },
+            "today: no intermediate rows exist until the whole turn finishes (KYO-493). \
+             After the fix: iteration 1's assistant-with-tool-calls + tool-result rows \
+             must already be durable by the time iteration 2's tool starts executing — \
+             found {} instead of 2",
+            snapshot.intermediate_rows
+        );
+        assert_eq!(
+            snapshot.placeholder_status,
+            chat_service::MessageStatus::InProgress,
+            "the placeholder must still read in_progress mid-run — no terminal status \
+             is written until the turn actually finishes"
+        );
+        assert!(
+            snapshot.thinking_events_len >= 1,
+            "today: the placeholder's extra_metadata carries no thinking_events until \
+             the turn finishes. After the fix: a mid-run get_session_messages read must \
+             already see iteration 1's completed tool-call step; found {} events",
+            snapshot.thinking_events_len
+        );
+
+        if let Some(run) = assistant_persistence.durable_run() {
+            assert_eq!(chat_service::get_message_status(&db, &assistant_message_id).await.expect("status").expect("placeholder").0,
+                chat_service::MessageStatus::InProgress, "adapter cannot finalize a durable placeholder");
+            kyomi_auth::conversation_events::ConversationStore::new(&db, &key, "user-a", "ws-1")
+                .finish(&run.conversation_id, &run.run_id, &run.lease, chrono::Utc::now().timestamp_millis(), agent_runtime::RunState::Completed, "Revenue was $1M, up 12% QoQ.")
+                .await.expect("worker commits terminal answer");
+        }
+
+        // -- After the full run: no duplicates, correct final content -----
+        // get_agent_messages returns every row except an *empty*
+        // assistant placeholder (no content AND no tool_calls) — the
+        // finalized placeholder has real content, so it's included here
+        // too, alongside the 4 intermediate rows.
+        let all_rows = chat_service::get_agent_messages(&db, &key, &session_id, None)
+            .await
+            .expect("get_agent_messages should succeed");
+        let user_rows = all_rows.iter().filter(|m| m.role == "user").count();
+        let non_user_rows = all_rows.iter().filter(|m| m.role != "user").count();
+
+        assert_eq!(
+            user_rows, 1,
+            "exactly one user row — the incremental writer's positional skip of the \
+             CallerPersisted row must hold even though that row is untagged while the \
+             loop is still running; found {user_rows}"
+        );
+        assert_eq!(
+            non_user_rows, 5,
+            "exactly 5 non-user rows — 2 tool-calling iterations x (1 \
+             assistant-with-tool-calls + 1 tool-result) plus the 1 finalized assistant \
+             answer — with no duplicates from persist_after_chat's own catch-up pass \
+             re-writing what the incremental writer already wrote; found {non_user_rows}"
+        );
+
+        let stored = chat_service::get_session_messages(&db, &key, &session_id, 100)
+            .await
+            .expect("get_session_messages should succeed");
+        let assistant_rows: Vec<&chat_service::MessageItem> =
+            stored.iter().filter(|m| m.message_type == "assistant").collect();
+        assert_eq!(
+            assistant_rows.len(),
+            1,
+            "exactly one final assistant row (get_session_messages filters out the \
+             tool_calls IS NOT NULL intermediate rows) — found {}",
+            assistant_rows.len()
+        );
+        assert_eq!(assistant_rows[0].message_id, assistant_message_id);
+        assert_eq!(assistant_rows[0].content, "Revenue was $1M, up 12% QoQ.");
+    }
+
+    #[tokio::test]
+    async fn incremental_persist_failure_does_not_kill_the_run_and_is_caught_up_at_the_end() {
+        // KYO-493 ticket: "Any persistence failure mid-run must be logged
+        // loudly but must NOT kill the agent run; the final write still
+        // happens." Simulated by using a session_id that does not exist in
+        // `chat_sessions` for the *incremental* writes — SQLite's foreign
+        // key on chat_messages.session_id makes every incremental INSERT
+        // fail — while still asserting the turn completes successfully and
+        // the caller sees the real answer.
+        //
+        // This can't drive persist_after_chat's own catch-up pass to
+        // succeed afterward (the FK violation is structural, not
+        // transient) — it only proves the "non-fatal" half of the AC. The
+        // "still caught up" half — persisted_up_to doesn't advance past a
+        // failed message, and persist_after_chat's end-of-run catch-up
+        // pass successfully persists it once the DB is healthy again — is
+        // proven separately by
+        // `persist_after_chat_catches_up_messages_left_unpersisted_by_a_transient_incremental_failure`
+        // below, which simulates a *transient* failure (a healthy DB,
+        // `persisted_up_to` simply stuck short of `state.messages.len()`)
+        // rather than this test's permanent one.
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let key: Arc<[u8; 32]> = Arc::new([7u8; 32]);
+        // Deliberately never created via create_session_with_id — the FK
+        // on chat_messages.session_id has nothing to reference.
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let assistant_message_id = uuid::Uuid::new_v4().to_string();
+
+        // A plain ToolCall -> ToolCall -> Text script over the ordinary
+        // NoopTool — unlike `adapter_with_probe`, this test has no
+        // pre-inserted placeholder to probe (`AdapterInserts`, not
+        // `CallerPreInserted`), so it doesn't need `ProbeTool`'s DB reads.
+        let script = vec![
+            crate::test_support::Reply::ToolCall,
+            crate::test_support::Reply::ToolCall,
+            crate::test_support::Reply::Text("Revenue was $1M, up 12% QoQ.".to_string()),
+        ];
+        let provider = crate::test_support::ScriptedProvider {
+            script: std::sync::Mutex::new(script.into()),
+            after_script: crate::test_support::Reply::Text("unexpected".to_string()),
+            calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+        };
+        let mut registry = crate::tools::ToolRegistry::new();
+        registry.register(Arc::new(crate::test_support::NoopTool));
+        let agent = CustomAgent::new(
+            Box::new(provider),
+            crate::agent::AgentConfig::default(),
+            Arc::new(registry),
+            crate::test_support::build_ctx(db.clone()),
+            std::collections::HashMap::new(),
+        );
+        let mut adapter = ChatAgentAdapter::new(
+            agent,
+            "user-a".to_string(),
+            "ws-1".to_string(),
+            Some(session_id.clone()),
+            "custom_agent".to_string(),
+            db.clone(),
+            key.clone(),
+        );
+
+        let user_persistence = UserMessagePersistence::AdapterPersists(None);
+        let assistant_persistence =
+            AssistantMessagePersistence::AdapterInserts(Some(assistant_message_id.clone()));
+
+        let result = adapter
+            .chat(ChatParams {
+                message: "investigate revenue",
+                cancel_token: CancellationToken::new(),
+                current_time_user_tz: None,
+                message_source: Some("web"),
+                user_id: Some("user-a"),
+                user_message_persistence: &user_persistence,
+                assistant_message_persistence: &assistant_persistence,
+            })
+            .await;
+
+        let response = result.expect(
+            "an incremental persist failure (FK violation — no such session) must not \
+             kill the agent run; the caller must still get the real answer back",
+        );
+        assert_eq!(response, "Revenue was $1M, up 12% QoQ.");
+    }
+
+    // -- Contract: persist_after_chat catches up messages a *transient*
+    // -- incremental failure left behind (KYO-493 review) -------------------
+    //
+    // `incremental_persist_failure_does_not_kill_the_run_and_is_caught_up_
+    // at_the_end` above uses a session that never exists in `chat_sessions`
+    // at all, so the FK violation it drives is permanent — persist_after_
+    // chat's own catch-up pass hits the exact same violation and fails
+    // too. That test can only prove the "non-fatal" half of the AC. It
+    // says nothing about whether the catch-up pass actually persists what
+    // was left behind once the DB is healthy again, which is the more
+    // common real case (a lock timeout, a momentary connection hiccup —
+    // the kind of failure `wire_incremental_persister`'s error branch is
+    // designed to let a later, healthy write recover from).
+    //
+    // This test drives that case directly: two messages already durably
+    // written (exactly the shape `persist_one_new_message` would have left
+    // them — this is what a *successful* incremental write looks like),
+    // and two more sitting in `agent.state_mut().messages` past
+    // `persisted_up_to`, which is left stuck at 2 — precisely how
+    // `wire_incremental_persister`'s error branch leaves it after a failed
+    // attempt (advance only past what actually succeeded, log, break). The
+    // DB itself is healthy throughout — nothing here is broken except the
+    // in-memory bookkeeping, which is exactly what makes this "transient"
+    // rather than the sibling test's "permanent". Calling
+    // `persist_after_chat()` directly (never `chat()`, so the agent loop
+    // and the incremental writer are never involved) isolates the one
+    // thing under test: the catch-up pass alone, over a healthy DB.
+    #[tokio::test]
+    async fn persist_after_chat_catches_up_messages_left_unpersisted_by_a_transient_incremental_failure() {
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let key: Arc<[u8; 32]> = Arc::new([7u8; 32]);
+        let session_id = uuid::Uuid::new_v4().to_string();
+        chat_service::create_session_with_id(&db, "user-a", "ws-1", &session_id, None, "chat", None)
+            .await
+            .expect("create session");
+
+        // Rows already durably written before the transient failure — a
+        // one-tool-call round, seeded directly rather than replayed
+        // through persist_one_new_message, so this test doesn't depend on
+        // that function already being correct to set up its own fixture.
+        let already_persisted_assistant_id = chat_service::add_message(
+            &db,
+            &key,
+            &session_id,
+            "assistant",
+            "Let me check the catalog.",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            chat_service::MessageStatus::Complete,
+        )
+        .await
+        .expect("seed the already-persisted assistant row");
+        let already_persisted_tool_id = chat_service::add_message(
+            &db,
+            &key,
+            &session_id,
+            "tool",
+            "5 rows",
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("tc_1"),
+            Some("search_catalog"),
+            None,
+            chat_service::MessageStatus::Complete,
+        )
+        .await
+        .expect("seed the already-persisted tool row");
+
+        // A bare adapter over the same (healthy) session — UnusedProvider
+        // is fine since persist_after_chat() is called directly, never
+        // chat(): the agent loop, and therefore the incremental writer,
+        // never runs.
+        let mut adapter = adapter_over(db.clone(), "user-a", &session_id, key.clone());
+
+        // The in-memory state a real turn would have reached: the two
+        // already-persisted messages at indices 0-1 (their exact content
+        // doesn't matter — persist_after_chat never looks at anything
+        // before persisted_up_to), then two more at indices 2-3 that the
+        // incremental writer never got to.
+        {
+            let state = adapter.agent.state_mut();
+            state.messages.push(Message::assistant("placeholder — already persisted, index 0"));
+            state.messages.push(Message::tool_result("tc_1", "search_catalog", "placeholder — already persisted, index 1"));
+            state.messages.push(Message::assistant_with_tool_calls(
+                "",
+                vec![ToolCall {
+                    id: "tc_2".to_string(),
+                    name: "query_datasource".to_string(),
+                    arguments: serde_json::json!({}),
+                    arguments_error: None,
+                }],
+            ));
+            state.messages.push(Message::tool_result("tc_2", "query_datasource", "10 rows"));
+        }
+        // Exactly how wire_incremental_persister's error branch leaves it
+        // after a transient failure: advanced past the 2 that succeeded,
+        // stuck short of state.messages.len() (4).
+        *adapter.persisted_up_to.lock().await = 2;
+
+        adapter
+            .persist_after_chat()
+            .await
+            .expect("persist_after_chat must succeed — the DB is healthy, only the \
+                     in-memory persisted_up_to bookkeeping was left behind");
+
+        let all_rows = chat_service::get_agent_messages(&db, &key, &session_id, None)
+            .await
+            .expect("get_agent_messages should succeed");
+
+        // Every remaining message lands exactly once: 2 seeded (already
+        // persisted) + 2 caught up = 4, not 6 (which duplicates from
+        // re-persisting the first 2 would produce) and not 2 (which
+        // skipping the catch-up entirely would produce).
+        assert_eq!(
+            all_rows.len(),
+            4,
+            "expected exactly 4 rows (2 already-persisted + 2 caught up); found {}: {:?}",
+            all_rows.len(),
+            all_rows.iter().map(|m| (&m.role, &m.content)).collect::<Vec<_>>()
+        );
+
+        // Messages persisted earlier are not duplicated — each seeded id
+        // appears exactly once.
+        let ids: Vec<&str> = all_rows.iter().map(|m| m.message_id.as_str()).collect();
+        assert_eq!(
+            ids.iter().filter(|id| **id == already_persisted_assistant_id).count(),
+            1,
+            "the already-persisted assistant row must not be duplicated by the catch-up pass"
+        );
+        assert_eq!(
+            ids.iter().filter(|id| **id == already_persisted_tool_id).count(),
+            1,
+            "the already-persisted tool row must not be duplicated by the catch-up pass"
+        );
+
+        // Order is correct: the 2 seeded rows first (they were written
+        // first, in an earlier wall-clock moment), then the 2 the
+        // catch-up pass wrote — in the same order they were pushed onto
+        // state.messages.
+        assert_eq!(all_rows[0].message_id, already_persisted_assistant_id);
+        assert_eq!(all_rows[1].message_id, already_persisted_tool_id);
+        assert_eq!(
+            all_rows[2].role, "assistant",
+            "the catch-up pass's first newly-written row must be the assistant-with-\
+             tool-calls message at state.messages[2]"
+        );
+        assert_eq!(
+            all_rows[3].role, "tool",
+            "the catch-up pass's second newly-written row must be the tool-result \
+             message at state.messages[3]"
+        );
+        assert_eq!(
+            all_rows[3].tool_name.as_deref(),
+            Some("query_datasource"),
+            "the caught-up tool row must be the real one from state.messages[3], not a \
+             stale or swapped one"
+        );
+        assert_eq!(all_rows[3].content, "10 rows");
+    }
+    struct AwaitedProvider {
+        inner: crate::test_support::ScriptedProvider,
+        index: std::sync::atomic::AtomicUsize,
+        invalid_chart: bool,
+    }
+    #[async_trait::async_trait]
+    impl crate::provider::LLMProvider for AwaitedProvider {
+        async fn complete(&self, messages: &[Message], tools: &[crate::types::Tool], temperature: Option<f32>, max_tokens: u32,
+            names: &std::collections::HashMap<String,String>) -> kyomi_core::Result<crate::types::LLMResponse> {
+            let mut response = self.inner.complete(messages, tools, temperature, max_tokens, names).await?;
+            let index = self.index.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if response.tool_calls.is_some() {
+                response.thinking_content = Some(if index == 0 { "Thought: Inspecting the revenue records carefully before taking action. ".repeat(8) } else { "Checking the second revenue total".into() });
+                if self.invalid_chart { response.content = "```chartml\ninvalid_883_candidate: true\n```".into(); }
+                response.raw_response = serde_json::json!({"content": response.content,"tool_calls":response.tool_calls,"signature":"private-883-signature","opaque_continuation":{"secret":true}});
+            }
+            Ok(response)
+        }
+        fn model(&self) -> &str { "awaited-fixture" }
+    }
+    struct AwaitedTool {
+        db: kyomi_core::DbPool,
+        key: Arc<[u8;32]>,
+        run: DurableRun,
+        message: String,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        invalid_chart: bool,
+        uncertain_failure: bool,
+        uncertain_result: bool,
+    }
+    #[async_trait::async_trait]
+    impl crate::tools::AgentTool for AwaitedTool {
+        fn name(&self) -> &str { crate::test_support::NOOP_TOOL_NAME }
+        fn description(&self) -> &str { "Awaited persistence probe" }
+        fn parameters_schema(&self) -> serde_json::Value { serde_json::json!({"type":"object","properties":{}}) }
+        fn result_domain_outcome(&self, text: &str) -> agent_runtime::DomainOutcome {
+            if self.uncertain_result {
+                crate::tools::AgentTool::result_domain_outcome(&crate::tools::datasource::QueryDatasourceTool, text)
+            } else {
+                agent_runtime::DomainOutcome::Rejected
+            }
+        }
+        fn annotations(&self) -> Option<crate::types::ToolAnnotations> {
+            Some(crate::types::ToolAnnotations { read_only_hint: Some(true), ..Default::default() })
+        }
+        async fn execute(&self, _:serde_json::Value, _: &crate::tools::ToolContext) -> kyomi_core::Result<String> {
+            let index = self.calls.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
+            let store = kyomi_auth::conversation_events::ConversationStore::new(&self.db,&self.key,"user-a","ws-1");
+            let replay = store.replay(&self.run.conversation_id,0,100).await.unwrap();
+            assert!(replay.events.iter().any(|event| matches!(event.payload,agent_runtime::PublicPayload::ToolStarted {..})));
+            assert!(!replay.events.iter().any(|event| matches!(event.payload,agent_runtime::PublicPayload::ApprovedAnswer {..})));
+            let planning = replay.events.iter().find(|event| matches!(&event.payload,agent_runtime::PublicPayload::Planning {text} if text.detail.is_some())).expect("full planning visible before action");
+            let body = chat_service::get_thinking_event_detail(&self.db,&self.key,&self.message,planning.event_id.as_str(),"user-a","ws-1").await.unwrap().expect("More is retrievable mid-run");
+            assert!(body.len()>200);
+            assert!(!body.starts_with("Thought: "));
+            let history = chat_service::get_agent_messages(&self.db,&self.key,self.run.conversation_id.as_str(),None).await.unwrap();
+            assert_eq!(history.iter().filter(|row| row.role=="assistant").count(),index+1,"complete response projected before each tool");
+            let public = serde_json::to_string(&replay).unwrap();
+            assert!(!public.contains("private-883-signature"));
+            if self.invalid_chart {
+                assert!(!public.contains("```chartml"),"validation diagnostics may name rejected fields, but raw candidate charts stay restricted");
+                assert!(!history.iter().any(|row| row.content.contains("invalid_883_candidate")));
+            }
+            kyomi_core::db_execute!(&self.db, "UPDATE workspaces SET name='883 side effect committed' WHERE workspace_id='ws-1'").unwrap();
+            tokio::task::yield_now().await;
+            if self.uncertain_failure {
+                return Err(kyomi_core::Error::ServiceUnavailable("lost acknowledgement after advisory read-only action".into()));
+            }
+            if self.uncertain_result { return Ok("{\"error\":\"query timed out after possible commit\"}".into()); }
+            Ok("{\"valid\":false,\"errors\":[\"fixture rejected\"]}".into())
+        }
+    }
+    async fn awaited_adapter_fixture(fail_writer: &str, invalid_chart: bool) {
+        let db=crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let key=Arc::new([7u8;32]); let session=uuid::Uuid::new_v4().to_string();
+        let (user, assistant)=claim_durable_message(&db,&key,&session,"investigate revenue",chrono::Utc::now().timestamp_millis(),30_000).await;
+        let run=assistant.durable_run().unwrap().clone();
+        let calls=Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let script=vec![crate::test_support::Reply::ToolCall,crate::test_support::Reply::ToolCall,crate::test_support::Reply::Text("Revenue checked".into())];
+        let provider=AwaitedProvider {inner:crate::test_support::ScriptedProvider {script:std::sync::Mutex::new(script.into()),after_script:crate::test_support::Reply::Text("unexpected".into()),calls:Arc::new(std::sync::Mutex::new(Vec::new()))},index:std::sync::atomic::AtomicUsize::new(0),invalid_chart};
+        let mut registry=crate::tools::ToolRegistry::new();
+        registry.register(Arc::new(AwaitedTool {db:db.clone(),key:key.clone(),run:run.clone(),message:assistant.tag_id().unwrap().into(),calls:calls.clone(),invalid_chart,uncertain_failure:fail_writer == "uncertain",uncertain_result:fail_writer == "uncertain_result"}));
+        let mut context=crate::test_support::build_ctx(db.clone());
+        context.session_id=Some(session.clone());
+        let agent=CustomAgent::new(Box::new(provider),crate::agent::AgentConfig::default(),Arc::new(registry),context,std::collections::HashMap::new());
+        let mut adapter=ChatAgentAdapter::new(agent,"user-a".into(),"ws-1".into(),Some(session.clone()),"custom_agent".into(),db.clone(),key.clone());
+        let manager=kyomi_auth::websocket::WebSocketManager::new(None,db.clone());
+        let (_, mut receiver)=manager.connect("user-a").unwrap();
+        let heartbeat: kyomi_core::WebSocketMessage = serde_json::from_str(&receiver.try_recv().expect("connection heartbeat")).unwrap();
+        assert_eq!(heartbeat.message_type,kyomi_core::MessageType::Heartbeat);
+        assert!(receiver.try_recv().is_err(),"fixture begins without progress");
+        let tracker=Arc::new(tokio::sync::Mutex::new(crate::thinking::AgentThinkingTracker::new(crate::thinking::AgentThinkingTrackerConfig {
+            session_id:session.clone(),user_id:"user-a".into(),message_id:assistant.tag_id().unwrap().into(),ws_manager:manager,workspace_user_ids:None,context_type:Some("chat".into()),context_window:0,incremental_flush:None,
+        })));
+        adapter.set_thinking_tracker(tracker.clone());
+        if fail_writer == "response" {
+            kyomi_core::db_execute!(&db,"CREATE TRIGGER reject_883_response BEFORE INSERT ON conversation_events WHEN NEW.public=false BEGIN SELECT RAISE(ABORT,'injected response persistence failure'); END").unwrap();
+        }
+        if fail_writer == "outcome" {
+            kyomi_core::db_execute!(&db,"CREATE TRIGGER reject_883_outcome BEFORE INSERT ON conversation_tool_receipts BEGIN SELECT RAISE(ABORT,'injected result commit failure'); END").unwrap();
+        }
+        let result=adapter.chat(ChatParams {message:"investigate revenue",cancel_token:CancellationToken::new(),current_time_user_tz:None,message_source:Some("web"),user_id:Some("user-a"),user_message_persistence:&user,assistant_message_persistence:&assistant}).await;
+        if fail_writer == "response" {
+            assert!(result.is_err()); assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst),0);
+            assert!(receiver.try_recv().is_err(),"failed response commit publishes no progress");
+            assert!(tracker.lock().await.events().is_empty());
+            return;
+        }
+        if fail_writer == "outcome" || fail_writer == "uncertain" || fail_writer == "uncertain_result" {
+            assert!(result.unwrap_err().to_string().contains("unknown after execution"));
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst),1);
+            let mutation:(String,)=kyomi_core::db_fetch_one!(&db,(String,),"SELECT name FROM workspaces WHERE workspace_id='ws-1'").unwrap();
+            assert_eq!(mutation.0,"883 side effect committed");
+            if fail_writer == "outcome" { kyomi_core::db_execute!(&db,"DROP TRIGGER reject_883_outcome").unwrap(); }
+            let store=kyomi_auth::conversation_events::ConversationStore::new(&db,&key,"user-a","ws-1");
+            store.expire(&run.conversation_id,&run.run_id,run.lease.expires_at+1).await.unwrap();
+            assert!(store.claim(&run.conversation_id,&run.run_id,"replacement",run.lease.expires_at+2,30_000).await.is_err());
+            let replay=store.replay(&run.conversation_id,0,100).await.unwrap();
+            let expected_transport = match fail_writer { "outcome" => agent_runtime::TransportOutcome::Unknown, "uncertain_result" => agent_runtime::TransportOutcome::Completed, _ => agent_runtime::TransportOutcome::Failed };
+            assert!(replay.events.iter().any(|event| matches!(&event.payload,agent_runtime::PublicPayload::ToolOutcome {transport,domain:agent_runtime::DomainOutcome::Unknown,..} if *transport == expected_transport)));
+            assert_eq!(replay.events.iter().filter(|event| matches!(event.payload,agent_runtime::PublicPayload::Interrupted {..})).count(),1);
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst),1);
+            return;
+        }
+        assert_eq!(result.unwrap(),"Revenue checked");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst),2);
+        let store=kyomi_auth::conversation_events::ConversationStore::new(&db,&key,"user-a","ws-1");
+        let replay=store.replay(&run.conversation_id,0,100).await.unwrap();
+        let outcomes:Vec<_>=replay.events.iter().filter_map(|event| match &event.payload {
+            agent_runtime::PublicPayload::ToolOutcome {tool_call_id,transport,domain,..} => Some((tool_call_id,transport,domain)),_=>None,
+        }).collect();
+        assert_eq!(outcomes.len(),2); assert_ne!(outcomes[0].0,outcomes[1].0);
+        let projected=chat_service::get_session_messages(&db,&key,&session,100).await.unwrap();
+        let thinking=&projected.iter().find(|message| message.message_id==assistant.tag_id().unwrap()).unwrap().thinking_events;
+        assert_eq!(thinking.iter().filter(|event| event.get("data").and_then(|data| data.get("success")).and_then(serde_json::Value::as_bool)==Some(false)).count(),2);
+        assert!(outcomes.iter().all(|(_,transport,domain)| **transport==agent_runtime::TransportOutcome::Completed && **domain==agent_runtime::DomainOutcome::Rejected));
+        assert_eq!(replay.events.iter().filter(|event| matches!(event.payload,agent_runtime::PublicPayload::Usage {..})).count(),3);
+        store.finish(&run.conversation_id,&run.run_id,&run.lease,chrono::Utc::now().timestamp_millis(),agent_runtime::RunState::Completed,"Revenue checked").await.unwrap();
+        assert!(store.finish(&run.conversation_id,&run.run_id,&run.lease,chrono::Utc::now().timestamp_millis(),agent_runtime::RunState::Completed,"late overwrite").await.is_err());
+        let replay=store.replay(&run.conversation_id,0,100).await.unwrap();
+        assert_eq!(replay.events.iter().filter(|event| matches!(event.payload,agent_runtime::PublicPayload::ApprovedAnswer {..})).count(),1);
+    }
+    #[tokio::test]
+    async fn awaited_sink_response_start_full_planning_and_domain_results_are_visible_before_completion() { awaited_adapter_fixture("",false).await; }
+    #[tokio::test]
+    async fn awaited_sink_writer_failure_calls_zero_tools_and_notifies_zero_progress() { awaited_adapter_fixture("response",false).await; }
+    #[tokio::test]
+    async fn awaited_sink_invalid_chart_candidate_stays_restricted_before_validated_answer() { awaited_adapter_fixture("",true).await; }
+    #[tokio::test]
+    async fn awaited_sink_committed_side_effect_without_result_is_interrupted_and_never_reexecuted() { awaited_adapter_fixture("outcome",false).await; }
+    #[tokio::test]
+    async fn awaited_sink_advisory_read_only_action_with_uncertain_effect_halts_and_never_reruns() {
+        use crate::tools::AgentTool;
+        let query = crate::tools::datasource::QueryDatasourceTool;
+        assert_eq!(query.annotations().unwrap().read_only_hint,Some(true));
+        assert_eq!(query.failure_domain_outcome(),agent_runtime::DomainOutcome::Unknown,"advisory query metadata cannot establish effect certainty");
+        awaited_adapter_fixture("uncertain",false).await;
+    }
+    #[tokio::test]
+    async fn awaited_sink_query_error_envelope_after_effect_halts_and_never_reruns() {
+        use crate::tools::AgentTool;
+        let tools: [&dyn AgentTool;3] = [&crate::tools::datasource::QueryDatasourceTool, &crate::tools::forecast::ForecastDataTool, &crate::tools::chart::RenderChartTool];
+        for tool in tools {
+            assert_eq!(tool.result_domain_outcome("{\"error\":\"timeout\",\"datasource\":\"pg\"}"),agent_runtime::DomainOutcome::Unknown,"{} returned error",tool.name());
+            assert_eq!(tool.result_domain_outcome("{\"cols\":[],\"data\":{},\"rows\":0}"),agent_runtime::DomainOutcome::Succeeded,"{} success",tool.name());
+            assert_eq!(tool.failure_domain_outcome(),agent_runtime::DomainOutcome::Unknown,"{} transport error",tool.name());
+        }
+        awaited_adapter_fixture("uncertain_result",false).await;
+    }
+    #[tokio::test]
+    async fn awaited_sink_notification_publish_failure_keeps_committed_detail_and_reports_receipt() {
+        use agent_runtime::EventSink;
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address=listener.local_addr().unwrap();
+        let publishes=Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let publish_count=publishes.clone();
+        // Real Redis protocol transport, with deterministic PUBLISH rejection.
+        let server=tokio::spawn(async move {
+            let (connection,_)=listener.accept().await.unwrap();
+            let (read,mut write)=connection.into_split();
+            let mut reader=tokio::io::BufReader::new(read);
+            loop {
+                let mut header=String::new();
+                if reader.read_line(&mut header).await.unwrap()==0 { break; }
+                let count=header.trim().strip_prefix('*').unwrap().parse::<usize>().unwrap();
+                let mut arguments=Vec::new();
+                for _ in 0..count {
+                    let mut size=String::new(); reader.read_line(&mut size).await.unwrap();
+                    let size=size.trim().strip_prefix('$').unwrap().parse::<usize>().unwrap();
+                    let mut body=vec![0;size+2]; reader.read_exact(&mut body).await.unwrap();
+                    arguments.push(body[..size].to_vec());
+                }
+                if arguments.first().is_some_and(|command| command.eq_ignore_ascii_case(b"PUBLISH")) {
+                    publish_count.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
+                    write.write_all(b"-ERR injected publisher failure\r\n").await.unwrap();
+                } else { write.write_all(b"+OK\r\n").await.unwrap(); }
+            }
+        });
+        let redis_url=format!("redis://{address}/");
+        let redis=kyomi_core::redis::create_pool(&redis_url).await.unwrap();
+        let db=crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let key=Arc::new([7u8;32]); let session=uuid::Uuid::new_v4().to_string();
+        let (_,assistant)=claim_durable_turn(&db,&key,&session,chrono::Utc::now().timestamp_millis(),30_000).await;
+        let run=assistant.durable_run().unwrap().clone();
+        let tracker=Arc::new(tokio::sync::Mutex::new(crate::thinking::AgentThinkingTracker::new(crate::thinking::AgentThinkingTrackerConfig {
+            session_id:session,user_id:"user-a".into(),message_id:assistant.tag_id().unwrap().into(),
+            ws_manager:kyomi_auth::websocket::WebSocketManager::new(Some((redis,redis_url)),db.clone()),
+            workspace_user_ids:None,context_type:Some("chat".into()),context_window:0,incremental_flush:None,
+        })));
+        let sink=crate::runtime_adapter::RuntimeSink {db:db.clone(),key:key.clone(),user:"user-a".into(),workspace:"ws-1".into(),run:run.clone(),tracker:Some(tracker),tools:tokio::sync::Mutex::new(std::collections::HashMap::new())};
+        let context=agent_runtime::ExecutionContext {conversation_id:run.conversation_id.clone(),run_id:run.run_id.clone()};
+        let body="Planning body preserved when publisher rejects delivery. ".repeat(10);
+        let (text,detail)=context.text("planning",&body,200);
+        let command=context.command("planning",agent_runtime::Payload::Public(agent_runtime::PublicPayload::Planning {text}),detail);
+        let outcome=sink.commit(&command).await.unwrap();
+        assert!(outcome.notification_error.unwrap().contains("injected publisher failure"));
+        let saved=chat_service::get_thinking_event_detail(&db,&key,assistant.tag_id().unwrap(),command.event_id.as_str(),"user-a","ws-1").await.unwrap();
+        assert_eq!(saved,Some(body));
+        assert!(sink.commit(&command).await.unwrap().receipt.duplicate);
+        assert_eq!(publishes.load(std::sync::atomic::Ordering::SeqCst),1);
+        server.abort(); let _=server.await;
+    }
+    #[tokio::test]
+    async fn awaited_sink_unknown_tool_has_explicit_failed_transport_rejected_domain_receipt() {
+        let db=crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let key=Arc::new([7u8;32]); let session=uuid::Uuid::new_v4().to_string();
+        let (user,assistant)=claim_durable_turn(&db,&key,&session,chrono::Utc::now().timestamp_millis(),30_000).await;
+        let provider=crate::test_support::ScriptedProvider {script:std::sync::Mutex::new(vec![crate::test_support::Reply::ToolCall,crate::test_support::Reply::Text("Unknown tool reported".into())].into()),after_script:crate::test_support::Reply::Text("unexpected".into()),calls:Arc::new(std::sync::Mutex::new(Vec::new()))};
+        let mut adapter=adapter_with_provider(db.clone(),"user-a",&session,key.clone(),Box::new(provider));
+        adapter.chat(ChatParams {message:"hello",cancel_token:CancellationToken::new(),current_time_user_tz:None,message_source:Some("web"),user_id:Some("user-a"),user_message_persistence:&user,assistant_message_persistence:&assistant}).await.unwrap();
+        let run=assistant.durable_run().unwrap();
+        let store=kyomi_auth::conversation_events::ConversationStore::new(&db,&key,"user-a","ws-1");
+        let replay=store.replay(&run.conversation_id,0,100).await.unwrap();
+        assert_eq!(replay.events.iter().filter(|event| matches!(&event.payload,agent_runtime::PublicPayload::ToolOutcome {text,transport:agent_runtime::TransportOutcome::Failed,domain:agent_runtime::DomainOutcome::Rejected,..} if text.preview.contains("Unknown tool"))).count(),1);
+    }
+
+    struct ActualToolsProvider {
+        inner: crate::test_support::ScriptedProvider,
+        requested: Vec<(&'static str, serde_json::Value)>,
+        index: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl crate::provider::LLMProvider for ActualToolsProvider {
+        async fn complete(&self, messages: &[Message], tools: &[crate::types::Tool], temperature: Option<f32>, max_tokens: u32,
+            names: &std::collections::HashMap<String,String>) -> kyomi_core::Result<crate::types::LLMResponse> {
+            let mut response = self.inner.complete(messages, tools, temperature, max_tokens, names).await?;
+            let index = self.index.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Some((name, arguments)) = self.requested.get(index) {
+                response.tool_calls = Some(vec![crate::types::ToolCall { id: "repeated-provider-call".into(), name: (*name).into(), arguments: arguments.clone(), arguments_error: None }]);
+            }
+            Ok(response)
+        }
+        fn model(&self) -> &str { "actual-tool-outcome-fixture" }
+    }
+    async fn actual_tool_outcomes(requested: Vec<(&'static str, serde_json::Value)>) -> (Vec<agent_runtime::DomainOutcome>, Vec<crate::test_support::RecordedCall>) {
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let key = Arc::new([7u8;32]); let session = uuid::Uuid::new_v4().to_string();
+        let (user, assistant) = claim_durable_turn(&db,&key,&session,chrono::Utc::now().timestamp_millis(),30_000).await;
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut script: Vec<_> = (0..requested.len()).map(|_| crate::test_support::Reply::ToolCall).collect();
+        script.push(crate::test_support::Reply::Text("Tool corrections complete".into()));
+        let provider = ActualToolsProvider { inner: crate::test_support::ScriptedProvider {script:std::sync::Mutex::new(script.into()),after_script:crate::test_support::Reply::Text("unexpected".into()),calls:calls.clone()}, requested, index:std::sync::atomic::AtomicUsize::new(0) };
+        let mut registry = crate::tools::ToolRegistry::new();
+        registry.register(Arc::new(crate::tools::validate_chartml::ValidateChartmlTool));
+        registry.register(Arc::new(crate::tools::analytics::CreateAnalyticsSiteTool));
+        registry.register(Arc::new(crate::tools::analytics::UpdateAnalyticsSiteTool));
+        registry.register(Arc::new(crate::tools::analytics::DeleteAnalyticsSiteTool));
+        registry.register(Arc::new(crate::test_support::NoopTool));
+        let agent = CustomAgent::new(Box::new(provider),crate::agent::AgentConfig::default(),Arc::new(registry),crate::test_support::build_ctx(db.clone()),std::collections::HashMap::new());
+        let mut adapter = ChatAgentAdapter::new(agent,"user-a".into(),"ws-1".into(),Some(session.clone()),"custom_agent".into(),db.clone(),key.clone());
+        let tracker = Arc::new(tokio::sync::Mutex::new(crate::thinking::AgentThinkingTracker::new(crate::thinking::AgentThinkingTrackerConfig {
+            session_id:session.clone(),user_id:"user-a".into(),message_id:assistant.tag_id().unwrap().into(),ws_manager:kyomi_auth::websocket::WebSocketManager::new(None,db.clone()),workspace_user_ids:None,context_type:Some("chat".into()),context_window:0,incremental_flush:None,
+        })));
+        adapter.set_thinking_tracker(tracker);
+        let answer = adapter.chat(ChatParams {message:"correct tool errors",cancel_token:CancellationToken::new(),current_time_user_tz:None,message_source:Some("web"),user_id:Some("user-a"),user_message_persistence:&user,assistant_message_persistence:&assistant}).await.unwrap();
+        assert_eq!(answer,"Tool corrections complete");
+        let run = assistant.durable_run().unwrap();
+        let store = kyomi_auth::conversation_events::ConversationStore::new(&db,&key,"user-a","ws-1");
+        let replay = store.replay(&run.conversation_id,0,100).await.unwrap();
+        let outcomes: Vec<_> = replay.events.iter().filter_map(|event| match &event.payload { agent_runtime::PublicPayload::ToolOutcome {domain,..} => Some(domain.clone()), _ => None }).collect();
+        let rows = chat_service::get_session_messages(&db,&key,&session,100).await.unwrap();
+        let projected: Vec<_> = rows.iter().find(|row| row.message_id == assistant.tag_id().unwrap()).unwrap().thinking_events.iter().filter_map(|event| event.get("data").and_then(|data| data.get("success")).and_then(serde_json::Value::as_bool)).collect();
+        assert_eq!(projected, outcomes.iter().map(|domain| *domain == agent_runtime::DomainOutcome::Succeeded).collect::<Vec<_>>(),"durable domain truth drives compatibility progress");
+        let recorded = std::mem::take(&mut *calls.lock().unwrap());
+        (outcomes, recorded)
+    }
+    #[tokio::test]
+    async fn awaited_sink_real_validation_argument_rejection_reaches_model_and_allows_correction() {
+        let (outcomes, calls) = actual_tool_outcomes(vec![("validate_chartml",serde_json::json!({})),("validate_chartml",serde_json::json!({"blocks":[]}))]).await;
+        assert_eq!(outcomes,vec![agent_runtime::DomainOutcome::Rejected,agent_runtime::DomainOutcome::Succeeded]);
+        assert_eq!(calls.len(),3);
+        assert!(calls[1].messages.iter().any(|message| message.role == crate::types::MessageRole::Tool && message.content.contains("Missing required parameter 'blocks'")),"known validation error must reach the repair turn");
+    }
+    #[tokio::test]
+    async fn awaited_sink_real_analytics_text_rejections_are_failed_progress_and_text_success_survives() {
+        let (outcomes, calls) = actual_tool_outcomes(vec![("create_analytics_site",serde_json::json!({})),("update_analytics_site",serde_json::json!({})),("delete_analytics_site",serde_json::json!({})),(crate::test_support::NOOP_TOOL_NAME,serde_json::json!({}))]).await;
+        assert_eq!(outcomes,vec![agent_runtime::DomainOutcome::Rejected,agent_runtime::DomainOutcome::Rejected,agent_runtime::DomainOutcome::Rejected,agent_runtime::DomainOutcome::Succeeded]);
+        assert_eq!(calls.len(),5);
+        assert!(calls[3].messages.iter().filter(|message| message.role == crate::types::MessageRole::Tool).all(|message| message.content.starts_with("Error: Workspace admin access required")));
+    }
+
 }

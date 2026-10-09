@@ -31,11 +31,12 @@ use tokio::time::Instant;
 use tokio_tungstenite::tungstenite;
 
 use kyomi_core::connect_protocol::{ConnectResponse, ConnectResponseBody};
+use kyomi_core::DbPool;
 
 use crate::state::AppState;
 
 use super::extract_bearer_token;
-use super::registry::{CommandPayload, ResponseChannel};
+use super::registry::{CommandPayload, ConnectRegistry, ResponseChannel};
 
 /// Maximum size of a single WebSocket message from Connect (16 MB).
 ///
@@ -196,14 +197,35 @@ async fn handle_connect_ws(socket: WebSocket, state: AppState, headers: HeaderMa
 
     // Create the command channel and register with the registry
     let (cmd_tx, cmd_rx) = mpsc::channel::<CommandPayload>(COMMAND_CHANNEL_BUFFER);
-    let connection_id = state.connect_registry.register(&dsid, cmd_tx).await;
+    let (connection_id, revoked) = match state.connect_registry.register_authenticated(&dsid, &claims.jti, cmd_tx).await {
+        Ok(connection) => connection,
+        Err(e) => {
+            tracing::warn!(datasource_config_id = %dsid, error = %e, "Connect WS registration rejected");
+            close_with_code(socket, CLOSE_FORBIDDEN, "Token revoked").await;
+            return;
+        }
+    };
+
+    // A rotation can commit between the first JTI read and registration.
+    if !session_is_current(&state.db, &state.connect_registry, &dsid, &claims.wid, &claims.jti).await {
+        state.connect_registry.unregister(&dsid, connection_id).await;
+        close_with_code(socket, CLOSE_FORBIDDEN, "Token revoked").await;
+        return;
+    }
 
     // Start Redis command subscriber for cross-replica routing.
     // Other pods can forward commands to this connection via Redis pub/sub.
     state.connect_registry.start_command_subscriber(&dsid, connection_id);
 
     // Run the message loop
-    run_message_loop(socket, cmd_rx, &state, &dsid, connection_id).await;
+    run_message_loop(socket, cmd_rx, revoked, ConnectSessionContext {
+        db: &state.db,
+        registry: &state.connect_registry,
+        datasource_config_id: &dsid,
+        workspace_id: &claims.wid,
+        jti: &claims.jti,
+        connection_id,
+    }).await;
 
     // Cleanup on disconnect — removes connection, subscriber, and Redis presence key
     // (only if this connection still owns the entry)
@@ -215,13 +237,29 @@ async fn handle_connect_ws(socket: WebSocket, state: AppState, headers: HeaderMa
 }
 
 /// Main message loop — multiplexes commands, WebSocket messages, and heartbeats.
+struct ConnectSessionContext<'a> {
+    db: &'a DbPool,
+    registry: &'a ConnectRegistry,
+    datasource_config_id: &'a str,
+    workspace_id: &'a str,
+    jti: &'a str,
+    connection_id: u64,
+}
+
 async fn run_message_loop(
     socket: WebSocket,
     mut cmd_rx: mpsc::Receiver<CommandPayload>,
-    state: &AppState,
-    datasource_config_id: &str,
-    connection_id: u64,
+    mut revoked: tokio::sync::watch::Receiver<bool>,
+    context: ConnectSessionContext<'_>,
 ) {
+    let ConnectSessionContext {
+        db,
+        registry,
+        datasource_config_id,
+        workspace_id,
+        jti,
+        connection_id,
+    } = context;
     let (mut ws_sender, mut ws_receiver) = socket.split();
 
     // Track pending commands by request ID so we can route responses.
@@ -232,13 +270,33 @@ async fn run_message_loop(
     heartbeat_interval.tick().await; // consume the immediate first tick
 
     let mut last_pong = Instant::now();
+    let mut auth_interval = tokio::time::interval(Duration::from_secs(1));
+    auth_interval.tick().await;
+    let mut revoked_session = false;
 
     loop {
         tokio::select! {
+            biased;
+            _ = revoked.changed() => {
+                tracing::info!(datasource_config_id, "Connect session revoked");
+                revoked_session = true;
+                break;
+            }
+            _ = auth_interval.tick() => {
+                if !session_is_current(db, registry, datasource_config_id, workspace_id, jti).await {
+                    revoked_session = true;
+                    break;
+                }
+            }
             // --- New command from the registry ---
             cmd = cmd_rx.recv() => {
                 match cmd {
                     Some((request, response_channel)) => {
+                        if *revoked.borrow() || !session_is_current(db, registry, datasource_config_id, workspace_id, jti).await {
+                            drop(response_channel);
+                            revoked_session = true;
+                            break;
+                        }
                         let request_id = request.id.clone();
                         let json = match serde_json::to_string(&request) {
                             Ok(j) => j,
@@ -256,13 +314,17 @@ async fn run_message_loop(
 
                         pending.insert(request_id.clone(), response_channel);
 
-                        if ws_sender.send(ws::Message::text(json)).await.is_err() {
-                            tracing::warn!(
-                                datasource_config_id,
-                                request_id,
-                                "Failed to send command over Connect WebSocket"
-                            );
-                            break;
+                        match send_while_current(&mut revoked, ws_sender.send(ws::Message::text(json))).await {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                revoked_session = true;
+                                break;
+                            }
+                            Err(_) => {
+                                tracing::warn!(datasource_config_id, request_id, "Failed to send command over Connect WebSocket");
+                                revoked_session = true;
+                                break;
+                            }
                         }
                     }
                     None => {
@@ -277,6 +339,10 @@ async fn run_message_loop(
             msg = ws_receiver.next() => {
                 match msg {
                     Some(Ok(ws::Message::Text(text))) => {
+                        if *revoked.borrow() || !session_is_current(db, registry, datasource_config_id, workspace_id, jti).await {
+                            revoked_session = true;
+                            break;
+                        }
                         let byte_size = text.len();
                         tracing::debug!(
                             datasource_config_id,
@@ -300,7 +366,7 @@ async fn run_message_loop(
                     Some(Ok(ws::Message::Pong(_))) => {
                         // Heartbeat pong received — refresh Redis presence key
                         last_pong = Instant::now();
-                        state.connect_registry.refresh_heartbeat(datasource_config_id, connection_id).await;
+                        registry.refresh_heartbeat(datasource_config_id, connection_id).await;
                     }
                     Some(Ok(ws::Message::Close(_))) => {
                         tracing::info!(datasource_config_id, "Connect sent Close frame");
@@ -357,9 +423,17 @@ async fn run_message_loop(
                     break;
                 }
 
-                if ws_sender.send(ws::Message::Ping(vec![].into())).await.is_err() {
-                    tracing::warn!(datasource_config_id, "Failed to send heartbeat ping");
-                    break;
+                match send_while_current(&mut revoked, ws_sender.send(ws::Message::Ping(vec![].into()))).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        revoked_session = true;
+                        break;
+                    }
+                    Err(_) => {
+                        tracing::warn!(datasource_config_id, "Failed to send heartbeat ping");
+                        revoked_session = true;
+                        break;
+                    }
                 }
             }
         }
@@ -376,8 +450,36 @@ async fn run_message_loop(
     }
     drop(pending);
 
-    // Try to send a close frame (best-effort)
-    let _ = ws_sender.close().await;
+    // A canceled SinkExt::send may already have queued a command inside the
+    // WebSocket sink. Graceful close flushes that queue, so revoke by dropping
+    // the transport. Ordinary disconnects can still send a close frame.
+    if !revoked_session {
+        let _ = tokio::time::timeout(Duration::from_secs(1), ws_sender.close()).await;
+    }
+}
+
+async fn session_is_current(db: &DbPool, registry: &ConnectRegistry, datasource_config_id: &str, workspace_id: &str, jti: &str) -> bool {
+    if !matches!(registry.is_revoked(datasource_config_id, jti).await, Ok(false)) {
+        return false;
+    }
+    matches!(
+        kyomi_auth::datasource_service::get_datasource(db, datasource_config_id, workspace_id).await,
+        Ok(Some(ds)) if ds.connection_type == "connect" && ds.connect_token_jti.as_deref() == Some(jti)
+    )
+}
+
+async fn send_while_current<F, E>(revoked: &mut tokio::sync::watch::Receiver<bool>, send: F) -> Result<bool, E>
+where
+    F: std::future::Future<Output = Result<(), E>>,
+{
+    if *revoked.borrow() {
+        return Ok(false);
+    }
+    tokio::select! {
+        biased;
+        _ = revoked.changed() => Ok(false),
+        result = send => result.map(|_| true),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -449,6 +551,9 @@ async fn close_with_code(socket: WebSocket, code: u16, reason: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::routing::get;
+    use axum::Router;
+    use p256::pkcs8::EncodePrivateKey;
 
     #[test]
     fn extract_bearer_token_valid() {
@@ -517,5 +622,183 @@ mod tests {
             });
 
         assert_eq!(too_long, Some((20_000_000, MAX_MESSAGE_SIZE)));
+    }
+
+    #[tokio::test]
+    async fn revoked_session_cancels_a_backpressured_websocket_send() {
+        use futures_util::{Sink, SinkExt};
+        use std::pin::Pin;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::task::{Context, Poll};
+
+        struct BufferedSink {
+            queued: std::sync::Arc<AtomicBool>,
+            flushed: std::sync::Arc<AtomicBool>,
+        }
+
+        impl Sink<&'static str> for BufferedSink {
+            type Error = ();
+
+            fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+                Poll::Ready(Ok(()))
+            }
+
+            fn start_send(self: Pin<&mut Self>, _item: &'static str) -> Result<(), Self::Error> {
+                self.queued.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+
+            fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+                Poll::Pending
+            }
+
+            fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+                self.flushed.store(true, Ordering::SeqCst);
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        let queued = std::sync::Arc::new(AtomicBool::new(false));
+        let flushed = std::sync::Arc::new(AtomicBool::new(false));
+        let mut sink = BufferedSink { queued: queued.clone(), flushed: flushed.clone() };
+        let (revoke, mut receiver) = tokio::sync::watch::channel(false);
+        let sending = tokio::spawn(async move {
+            let result = send_while_current(&mut receiver, sink.send("old command")).await;
+            // The production revoked path drops the sink without poll_close.
+            drop(sink);
+            result
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !queued.load(Ordering::SeqCst) { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        revoke.send(true).unwrap();
+        assert_eq!(tokio::time::timeout(Duration::from_millis(100), sending).await.unwrap().unwrap(), Ok(false));
+        assert!(!flushed.load(Ordering::SeqCst), "revocation must not flush a queued command");
+    }
+
+    #[tokio::test]
+    async fn rotation_and_disconnect_close_live_websocket_and_pending_command() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        async fn read_frame(socket: &mut tokio::net::TcpStream) -> (u8, Vec<u8>) {
+            let mut header = [0_u8; 2];
+            socket.read_exact(&mut header).await.unwrap();
+            let length = match header[1] & 0x7f {
+                n @ 0..=125 => n as usize,
+                126 => {
+                    let mut extended = [0; 2];
+                    socket.read_exact(&mut extended).await.unwrap();
+                    u16::from_be_bytes(extended) as usize
+                }
+                _ => panic!("unexpected large test frame"),
+            };
+            let mut payload = vec![0; length];
+            socket.read_exact(&mut payload).await.unwrap();
+            (header[0] & 0x0f, payload)
+        }
+
+        async fn connect(address: std::net::SocketAddr, token: &str) -> tokio::net::TcpStream {
+            let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+            socket.write_all(format!(
+                "GET /test HTTP/1.1\r\nHost: {address}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nAuthorization: Bearer {token}\r\n\r\n"
+            ).as_bytes()).await.unwrap();
+            let mut handshake = Vec::new();
+            while !handshake.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                socket.read_exact(&mut byte).await.unwrap();
+                handshake.push(byte[0]);
+            }
+            assert!(handshake.starts_with(b"HTTP/1.1 101"));
+            socket
+        }
+
+        let db = DbPool::connect("sqlite::memory:").await.unwrap();
+        let DbPool::Sqlite(sqlite) = &db else { panic!("test requires SQLite"); };
+        sqlx::query("INSERT INTO users (user_id, email) VALUES ('u-connect', 'connect-test@example.com')")
+            .execute(sqlite).await.unwrap();
+        sqlx::query("INSERT INTO workspaces (workspace_id, owner_user_id) VALUES ('w-connect', 'u-connect')")
+            .execute(sqlite).await.unwrap();
+
+        for disconnect in [false, true] {
+            let dsid = if disconnect { "ds-disconnect" } else { "ds-rotate" };
+            sqlx::query("INSERT INTO datasource_configs (id, workspace_id, name, datasource_type, slug, connection_type, connect_token_jti) VALUES (?1, 'w-connect', ?1, 'postgres', ?1, 'connect', 'old-jti')")
+                .bind(dsid).execute(sqlite).await.unwrap();
+            let config = std::sync::Arc::new(kyomi_core::Config::test_config());
+            let kv = kyomi_core::create_kv_store(None).await.unwrap();
+            let pem = p256::SecretKey::random(&mut p256::elliptic_curve::rand_core::OsRng)
+                .to_pkcs8_pem(p256::pkcs8::LineEnding::LF).unwrap();
+            let token_service = std::sync::Arc::new(
+                kyomi_auth::connect_token::ConnectTokenService::new(&pem, "wss://connect.test/v1").unwrap()
+            );
+            let (old_token, old_jti) = token_service.generate(dsid, "w-connect", "postgres").unwrap();
+            kyomi_auth::datasource_service::update_connect_jti(&db, dsid, &old_jti).await.unwrap();
+            let registry = ConnectRegistry::new_local();
+            let webauthn = kyomi_auth::webauthn::build_webauthn(
+                "localhost", "Kyomi Test", &url::Url::parse("http://localhost:5173").unwrap()
+            ).unwrap();
+            let state = AppState {
+                db: db.clone(),
+                kv: kv.clone(),
+                redis: None,
+                config,
+                encryption_key: std::sync::Arc::new([0; 32]),
+                webauthn: std::sync::Arc::new(webauthn),
+                embedding: kyomi_embed::LazyEmbedding::new(),
+                ws_manager: kyomi_auth::websocket::WebSocketManager::new(None, db.clone()),
+                stripe: None,
+                mcp_sessions: kyomi_auth::mcp_session_manager::MCPSessionManager::new(kv),
+                cancel_registry: crate::cancel_registry::CancelRegistry::default(),
+                connect_token: Some(token_service.clone()),
+                connect_registry: registry.clone(),
+                platforms: std::sync::Arc::new(kyomi_core::platform::PlatformRegistry::new()),
+                schema_drift: crate::schema_drift::SchemaDriftStatus::default(),
+                process_instance: "connect-test".into(),
+            };
+            let app = Router::new().route("/test", get(connect_websocket_handler)).with_state(state);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+            let mut socket = connect(address, &old_token).await;
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !registry.is_connected(dsid).await { tokio::task::yield_now().await; }
+            }).await.unwrap();
+
+            let command = tokio::spawn({
+                let registry = registry.clone();
+                let dsid = dsid.to_owned();
+                async move { registry.send_command(&dsid, kyomi_core::connect_protocol::ConnectRequest {
+                    id: "pending".into(), op: kyomi_core::connect_protocol::ConnectOp::TestConnection,
+                    params: None, streaming: false,
+                }, Duration::from_secs(30)).await }
+            });
+            let (opcode, _) = tokio::time::timeout(Duration::from_secs(2), read_frame(&mut socket)).await.unwrap();
+            assert_eq!(opcode, 1);
+
+            if disconnect {
+                kyomi_auth::datasource_service::clear_connect_jti(&db, dsid).await.unwrap();
+            } else {
+                kyomi_auth::datasource_service::update_connect_jti(&db, dsid, "new-jti").await.unwrap();
+            }
+            registry.revoke_generation(dsid, &old_jti).await.unwrap();
+            assert!(!session_is_current(&db, &registry, dsid, "w-connect", &old_jti).await);
+            let mut next = [0_u8; 2];
+            let bytes = tokio::time::timeout(Duration::from_secs(2), socket.read(&mut next)).await.unwrap().unwrap();
+            assert_eq!(bytes, 0, "revoked socket must close without flushing a queued frame");
+            assert!(tokio::time::timeout(Duration::from_secs(2), command).await.unwrap().unwrap().is_err());
+
+            let mut denied = connect(address, &old_token).await;
+            let (closed, frame) = tokio::time::timeout(Duration::from_secs(2), read_frame(&mut denied)).await.unwrap();
+            assert_eq!(closed, 8);
+            assert_eq!(u16::from_be_bytes([frame[0], frame[1]]), CLOSE_FORBIDDEN);
+            if !disconnect {
+                let (new_token, new_jti) = token_service.generate(dsid, "w-connect", "postgres").unwrap();
+                kyomi_auth::datasource_service::update_connect_jti(&db, dsid, &new_jti).await.unwrap();
+                let _replacement = connect(address, &new_token).await;
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while !registry.is_connected(dsid).await { tokio::task::yield_now().await; }
+                }).await.unwrap();
+            }
+            server.abort();
+        }
     }
 }

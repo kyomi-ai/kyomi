@@ -54,7 +54,7 @@ pub struct WatchChannel {
 /// Checks whether:
 /// 1. The workspace has the Slack app installed (workspace_integrations table)
 /// 2. The user has linked their Slack account (platform_user_links table)
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_slack_status() -> Result<SlackStatus, ServerFnError> {
     use super::{AuthenticatedContext, IntoServerFnErrorCore};
 
@@ -104,7 +104,7 @@ pub async fn get_slack_status() -> Result<SlackStatus, ServerFnError> {
 /// Slack OAuth authorization URL. The frontend redirects the user to
 /// this URL to complete the OAuth flow.
 #[cfg(feature = "slack")]
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn slack_connect() -> Result<String, ServerFnError> {
     use super::{extract_auth, extract_context};
 
@@ -159,7 +159,7 @@ pub async fn slack_connect() -> Result<String, ServerFnError> {
 }
 
 #[cfg(not(feature = "slack"))]
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn slack_connect() -> Result<String, ServerFnError> {
     Err(ServerFnError::new("Slack integration not available"))
 }
@@ -167,7 +167,7 @@ pub async fn slack_connect() -> Result<String, ServerFnError> {
 /// Disconnect the current user's Slack account.
 ///
 /// Removes the user integration and platform user link from the database.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn slack_disconnect() -> Result<(), ServerFnError> {
     use super::{AuthenticatedContext, IntoServerFnErrorCore};
 
@@ -203,7 +203,7 @@ pub async fn slack_disconnect() -> Result<(), ServerFnError> {
 /// - User has linked their Slack account (platform_user_links)
 /// - SlackClient is available in server context
 #[cfg(feature = "slack")]
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_slack_channels() -> Result<Vec<SlackChannel>, ServerFnError> {
     use super::{AuthenticatedContext, IntoServerFnErrorCore};
 
@@ -254,7 +254,7 @@ pub async fn get_slack_channels() -> Result<Vec<SlackChannel>, ServerFnError> {
 }
 
 #[cfg(not(feature = "slack"))]
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_slack_channels() -> Result<Vec<SlackChannel>, ServerFnError> {
     Err(ServerFnError::new("Slack integration not available"))
 }
@@ -262,7 +262,7 @@ pub async fn get_slack_channels() -> Result<Vec<SlackChannel>, ServerFnError> {
 /// Get the user's default watch channel setting.
 ///
 /// Reads from the user's Slack integration config in workspace_user_integrations.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_default_watch_channel() -> Result<WatchChannel, ServerFnError> {
     use super::{AuthenticatedContext, IntoServerFnErrorCore};
 
@@ -298,7 +298,7 @@ pub async fn get_default_watch_channel() -> Result<WatchChannel, ServerFnError> 
 ///
 /// Pass `None` for both fields to clear the default channel.
 /// Updates the user's Slack integration config in workspace_user_integrations.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn set_default_watch_channel(
     channel_id: Option<String>,
     channel_name: Option<String>,

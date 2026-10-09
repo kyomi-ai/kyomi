@@ -39,6 +39,20 @@ gitignored, invisible to everyone else, and will drift. Put them in
 `~/repos/kyomi-private/docs/`. Anything describing *unfixed* weaknesses (open
 gaps, vulnerabilities, audit findings) **must** go there: this repo is public.
 
+## Fast backlog handoff
+
+`/backlog-fast` implements, obtains review, opens a PR, and waits and fixes failures
+until the current head's CI is green. It never merges, including under `/loop` and
+cron; it leaves the ticket **In Review**. `/merge-sweeper` owns the merge and the
+**Done** transition, using its documented `/usr/bin/gh` path without a
+test-verification signature for handed-off fast PRs. Invoking `/merge-sweeper`
+authorizes that path. Do not stop mid-loop to ask which merge path to use.
+
+The canonical versioned workflows are
+`~/repos/kyomi-private/skills/backlog-fast/SKILL.md` and
+`~/repos/kyomi-private/skills/merge-sweeper/SKILL.md`. Build and browser QA remain
+batched against `main` after merging.
+
 ## Setup
 
 Run `./scripts/setup-hooks.sh` once per clone — it enables the tracked hooks
@@ -54,6 +68,36 @@ setting is shared by every worktree of that clone. Because the configured
 path is relative (`.githooks`), git resolves it against each worktree's own
 top level, so one run correctly activates every worktree's own tracked hooks
 (KYO-358). The script is idempotent; re-run it any time you're unsure.
+
+### Review after a rebase with no staged change
+
+The pre-commit hook checks a staged approval when a commit is created. A
+rebase can rewrite already reviewed commits without invoking that hook. Before
+pushing a rebased branch, give the code-review-architect the committed range
+from the current base to `HEAD` and ask it to review that exact range. After
+its approval, the reviewer signs it with:
+
+```bash
+bash scripts/sign-review.sh "<reviewer private key>" --committed-range origin/main
+```
+
+The reviewer should run this only after reading the range and confirming the
+worktree is clean. The approval is recorded in the ignored
+`.review-range-approval` file, with the base commit, `HEAD` commit, and diff
+hash bound into the signature. Before **each** push of a rebased branch, run:
+
+```bash
+git fetch origin main && bash scripts/sign-review.sh --verify-committed-range origin/main
+```
+
+Both commands must succeed; if the fetch fails, stop and do not push. Fetch
+immediately before verification so a stale local `origin/main` cannot make an
+old approval appear current. A further rebase, a changed `HEAD`, or a new
+`origin/main` base invalidates the approval and requires another review and
+signature. This is an explicit review-time gate: `pre-push` only blocks direct
+pushes to `main` and does not enforce committed-range approval. Ordinary
+staged changes still use the existing one-argument signing call and
+`.review-approval` pre-commit gate.
 
 ## Build & Testing
 

@@ -777,6 +777,9 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                                         }
                                                 } else {
                                                     let status = resp.status();
+                                                    // KYO-806: raw fetch, bypasses
+                                                    // PaywallAwareClient — check here.
+                                                    crate::utils::billing_lapse::check_rest_response_status(status);
                                                     let message = if status == 403 {
                                                         "PDF export requires a paid plan".to_string()
                                                     } else {

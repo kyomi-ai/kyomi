@@ -23,7 +23,7 @@ import uuid
 import psycopg2
 from argon2 import PasswordHasher
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
@@ -144,6 +144,8 @@ def seed():
         """, (user_id, auth_data, now))
         print(f"  ✓ Password auth set for: {user['email']}")
 
+    # Keep the E2E workspace active with no trial expiry: billing_lapse_reason
+    # treats Active as non-lapsed, so rerunning the seed repairs expired trials.
     # Upsert workspace
     cur.execute("SELECT workspace_id FROM workspaces WHERE workspace_id = %s", (WORKSPACE_ID,))
     if cur.fetchone():
@@ -152,20 +154,22 @@ def seed():
         cur.execute("""
             UPDATE workspaces
                SET name = %s,
+                   status = 'active',
+                   subscription_status = 'active',
+                   trial_ends_at = NULL,
                    settings = %s,
                    updated_at = %s
              WHERE workspace_id = %s
         """, (WORKSPACE_NAME, settings, now, WORKSPACE_ID))
     else:
-        trial_ends_at = now + timedelta(days=30)
         settings = json.dumps({"custom_settings": {"default_model": "claude-haiku-4-5"}})
         cur.execute("""
             INSERT INTO workspaces (
                 workspace_id, name, admin_email, owner_user_id, status,
                 subscription_tier, subscription_status, trial_ends_at,
                 user_limit, ai_bundle_balance_usd, settings, created_at, updated_at
-            ) VALUES (%s, %s, %s, %s, 'trial', 'cloud', 'trialing', %s, NULL, %s, %s, %s, %s)
-        """, (WORKSPACE_ID, WORKSPACE_NAME, owner_user["email"], owner_user_id, trial_ends_at, 5.0, settings, now, now))
+            ) VALUES (%s, %s, %s, %s, 'active', 'cloud', 'active', NULL, NULL, %s, %s, %s, %s)
+        """, (WORKSPACE_ID, WORKSPACE_NAME, owner_user["email"], owner_user_id, 5.0, settings, now, now))
         print(f"  ✓ Created workspace: {WORKSPACE_NAME} ({WORKSPACE_ID})")
 
     # Set last_workspace_id on users

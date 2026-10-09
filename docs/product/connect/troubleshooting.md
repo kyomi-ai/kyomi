@@ -100,7 +100,7 @@ Connect cannot establish the WebSocket connection to Kyomi's backend.
    nslookup api.kyomi.ai
    ```
 
-4. **Token expired or revoked** -- If the token's `jti` has been revoked (via "Rotate Token" or "Disconnect" in the Kyomi UI), the WebSocket handshake will be rejected. Generate a new token.
+4. **Token expired or revoked** -- "Rotate Token" and "Disconnect" close an existing session immediately and reject later WebSocket handshakes with the old token. Generate a new token after rotation.
 
 ### Connection Drops and Reconnects
 

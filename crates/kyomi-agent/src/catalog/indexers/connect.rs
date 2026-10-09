@@ -633,7 +633,7 @@ mod tests {
     // - zero tables + errors -> `"failed"`, reason drawn from the real error
     // - zero tables + no errors -> `"idle"` (the original KYO-126 case)
 
-    async fn seed_connect_fixture(sq: &sqlx::SqlitePool, suffix: &str) -> IndexerContext {
+    pub(super) async fn seed_connect_fixture(sq: &sqlx::SqlitePool, suffix: &str) -> IndexerContext {
         let user_id = format!("u-connect-{suffix}");
         let workspace_id = format!("ws-connect-{suffix}");
         let datasource_config_id = format!("ds-connect-{suffix}");
@@ -669,7 +669,7 @@ mod tests {
         }
     }
 
-    async fn datasource_status(sq: &sqlx::SqlitePool, datasource_config_id: &str) -> String {
+    pub(super) async fn datasource_status(sq: &sqlx::SqlitePool, datasource_config_id: &str) -> String {
         sqlx::query_scalar("SELECT catalog_refresh_status FROM datasource_configs WHERE id = ?")
             .bind(datasource_config_id)
             .fetch_one(sq)
@@ -680,7 +680,7 @@ mod tests {
     /// Read back the full persisted `catalog_refresh_progress` envelope as
     /// parsed JSON (KYO-327), so tests can assert on the structured
     /// `"warnings"` array rather than the `"error"` string.
-    async fn datasource_progress_envelope(
+    pub(super) async fn datasource_progress_envelope(
         sq: &sqlx::SqlitePool,
         datasource_config_id: &str,
     ) -> Value {
@@ -1310,7 +1310,7 @@ mod tests {
         let ctx = seed_connect_fixture(sq, "explicitempty").await;
         let embedding = EmbeddingService::new().expect("load embedding model");
 
-        for (dataset_id, table_id) in [("ds_a", "t1"), ("ds_b", "t1")] {
+        for (dataset_id, table_id) in [("ds_a", "t1"), ("ds_b", "t1"), ("ds_c", "t1")] {
             sqlx::query(
                 r#"
                 INSERT INTO datasource_table_cache
@@ -1327,6 +1327,12 @@ mod tests {
             .expect("seed cache row");
         }
 
+        sqlx::query("UPDATE datasource_table_cache SET is_archived = 1 WHERE datasource_config_id = ? AND dataset_id = 'ds_c'")
+            .bind(&ctx.datasource_config_id)
+            .execute(sq)
+            .await
+            .expect("seed archived history alongside live container");
+
         let result = process_discovered_catalog(ProcessDiscoveredCatalogParams {
             db: &db,
             embedding: &embedding,
@@ -1341,7 +1347,7 @@ mod tests {
         .await;
 
         assert_eq!(result.tables_archived, 2);
-        for dataset_id in ["ds_a", "ds_b"] {
+        for dataset_id in ["ds_a", "ds_b", "ds_c"] {
             let is_archived: i64 = sqlx::query_scalar(
                 "SELECT is_archived FROM datasource_table_cache WHERE datasource_config_id = ? AND dataset_id = ?",
             )
@@ -1353,6 +1359,9 @@ mod tests {
             assert_eq!(is_archived, 1, "{dataset_id} must be archived — the selection was explicitly emptied");
         }
 
+        let envelope = datasource_progress_envelope(sq, &ctx.datasource_config_id).await;
+        assert_eq!(envelope["warnings"], serde_json::json!([]));
+        assert!(result.errors.is_none());
         assert_eq!(
             datasource_status(sq, &ctx.datasource_config_id).await,
             "idle",
@@ -1360,3 +1369,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "connect_archived_coverage_tests.rs"]
+mod archived_coverage_tests;

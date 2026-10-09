@@ -8,14 +8,19 @@
 //! - Block Kit message processor ([`message_processor`])
 //! - Watch alert delivery via Slack ([`alert`])
 //! - Axum routes for OAuth, events, commands, interactions ([`routes`])
+//! - KYO-823 billing gate for the inbound agent pipeline (`billing_gate`,
+//!   crate-private — see its module doc for why only that one path is gated)
 //!
 //! Implements the [`kyomi_core::platform::MessagingPlatform`] trait via [`SlackPlatform`].
 
 pub mod alert;
+mod billing_gate;
 pub mod client;
 pub mod helpers;
 pub mod message_processor;
 pub mod routes;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 use std::sync::Arc;
 
@@ -57,6 +62,7 @@ impl FromRef<SlackState> for AuthState {
             jwt_secret: state.config.jwt_secret.clone(),
             db: state.db.clone(),
             is_personal: false, // Slack is SaaS-only; personal mode never uses Slack routes
+            self_hosted: state.config.self_hosted,
         }
     }
 }

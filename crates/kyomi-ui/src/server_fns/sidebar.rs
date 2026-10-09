@@ -6,7 +6,7 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
-use super::IntoServerFnErrorCore;
+use super::{extract_auth_allow_lapsed, IntoServerFnErrorCore};
 
 /// Minimal chat session info for the sidebar list.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -30,12 +30,22 @@ pub struct SidebarUser {
     pub subscription_status: String,
     /// Trial expiration ISO 8601 timestamp. Present when status is "trialing".
     pub trial_ends_at: Option<String>,
+    /// Whether this workspace must pay before continuing to use the app.
+    ///
+    /// Computed server-side by `kyomi_core::capability::is_billing_lapsed` —
+    /// the one definition of this rule. The client must never re-derive it
+    /// (e.g. by string-matching `subscription_status`) — that predicate
+    /// already accounts for cases a naive status match gets wrong, such as a
+    /// scheduled cancellation (`cancel_at_period_end`) that still has paid-up
+    /// time remaining. Always `false` outside SaaS mode (self-hosted and
+    /// personal deployments have no billing).
+    pub billing_lapsed: bool,
     /// User's theme preference: "light", "dark", or "system".
     pub theme_preference: String,
 }
 
 /// Load recent chat sessions for the sidebar.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_recent_sessions() -> Result<Vec<SidebarSession>, ServerFnError> {
     let auth = super::extract_auth().await?;
     let ctx = super::extract_context()?;
@@ -68,9 +78,14 @@ pub async fn get_recent_sessions() -> Result<Vec<SidebarSession>, ServerFnError>
 }
 
 /// Load current user info for the sidebar user menu.
-#[server(prefix = "/leptos-api")]
+///
+/// Uses `extract_auth_allow_lapsed()` (KYO-805): the sidebar — including the
+/// billing_lapsed flag itself, which drives the client-side redirect to the
+/// billing page — must render for a lapsed workspace, or the owner has no
+/// way to reach the page that fixes it.
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_sidebar_user() -> Result<SidebarUser, ServerFnError> {
-    let auth = super::extract_auth().await?;
+    let auth = extract_auth_allow_lapsed().await?;
     let ctx = super::extract_context()?;
 
     // Read theme preference from user's extra_metadata (same source as profile.rs)
@@ -90,6 +105,14 @@ pub async fn get_sidebar_user() -> Result<SidebarUser, ServerFnError> {
     // trial_ends_at is already on the middleware's WorkspaceContext — no extra DB query needed.
     let trial_ends_at = auth.workspace.trial_ends_at.map(|dt| dt.to_rfc3339());
 
+    // billing_lapsed is computed once, in the AuthUser extractor
+    // (`kyomi_auth::middleware::load_auth_user`), and carried on
+    // `WorkspaceContext` — read it from there rather than re-deriving it
+    // with a second workspace load (KYO-805). That extractor already
+    // applies the exact same SaaS-only, self-hosted-and-personal-never
+    // reasoning this comment used to explain locally.
+    let billing_lapsed = auth.workspace.billing_lapsed;
+
     Ok(SidebarUser {
         user_id: auth.user_id.clone(),
         workspace_id: auth.workspace.workspace_id.clone(),
@@ -100,6 +123,7 @@ pub async fn get_sidebar_user() -> Result<SidebarUser, ServerFnError> {
         is_self_hosted: ctx.config.self_hosted,
         subscription_status: auth.workspace.subscription_status.to_string(),
         trial_ends_at,
+        billing_lapsed,
         theme_preference,
     })
 }

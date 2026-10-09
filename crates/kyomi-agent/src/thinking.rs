@@ -13,12 +13,15 @@
 //! [`AgentThinkingTracker::get_events_for_storage`].
 
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use kyomi_auth::websocket::WebSocketManager;
+use kyomi_core::DbPool;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tokio::time::Instant;
+use tracing::{debug, error};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -77,7 +80,7 @@ pub const TOOL_FRIENDLY_NAMES: &[(&str, &str)] = &[
 ///
 /// Returns a static fallback for unknown tools because we cannot return a
 /// dynamically-formatted `&str` from this function.
-fn get_friendly_name(tool_name: &str) -> &'static str {
+pub(crate) fn get_friendly_name(tool_name: &str) -> &'static str {
     TOOL_FRIENDLY_NAMES
         .iter()
         .find(|(name, _)| *name == tool_name)
@@ -164,22 +167,80 @@ pub struct AgentThinkingTracker {
     /// display limit. Keyed by event_id; persisted to `thinking_event_details`
     /// after the agent loop completes.
     full_texts: HashMap<String, String>,
+    /// Where to flush `thinking_events` mid-run (KYO-493 phase 3) — `Some`
+    /// only when this turn's assistant row is a pre-inserted placeholder a
+    /// mid-run read can already see
+    /// (`AssistantMessagePersistence::CallerPreInserted` — chat). `None` for
+    /// copilot/Slack/watch, which have no placeholder to flush into.
+    incremental_flush: Option<IncrementalFlushTarget>,
+    /// Wall-clock instant of the last successful incremental flush. `None`
+    /// before the first one. Drives the ~500ms rate limit
+    /// [`Self::maybe_flush_thinking_events`] applies to non-forced calls.
+    last_flush_at: Option<Instant>,
+    /// Set by [`Self::finalize`], under this tracker's own lock, in the
+    /// same critical section `execute_agent_chat`'s step 14 reads events
+    /// from for the terminal `extra_metadata` write — see that method's
+    /// doc for why this is what makes the terminal write strictly win over
+    /// every incremental flush, including ones whose spawned task hadn't
+    /// run yet when the agent loop returned (KYO-493 review fix).
+    finalized: bool,
 }
+
+/// Where and how [`AgentThinkingTracker`] flushes `thinking_events` into the
+/// DB mid-run (KYO-493 phase 3). Bundled into [`AgentThinkingTrackerConfig`]
+/// rather than added as its own parameter to [`AgentThinkingTracker::new`]
+/// — see that struct's doc.
+#[derive(Clone)]
+pub struct IncrementalFlushTarget {
+    pub db: DbPool,
+    pub encryption_key: Arc<[u8; 32]>,
+}
+
+/// Arguments for [`AgentThinkingTracker::new`].
+///
+/// Bundled into a struct — same reason as `crate::adapter::ChatParams`
+/// (added by KYO-493 phase 2 for exactly this) — to keep the constructor
+/// under clippy's `too_many_arguments` threshold as `incremental_flush`
+/// (KYO-493 phase 3) pushed the field count past it, while keeping every
+/// field explicit and named at the one production call site.
+pub struct AgentThinkingTrackerConfig {
+    pub session_id: String,
+    pub user_id: String,
+    pub message_id: String,
+    pub ws_manager: WebSocketManager,
+    /// `None` broadcasts only to `user_id`.
+    pub workspace_user_ids: Option<Vec<String>>,
+    pub context_type: Option<String>,
+    /// Context window size for the model in use (0 = unknown).
+    pub context_window: u32,
+    /// See [`IncrementalFlushTarget`]. `None` for copilot/Slack/watch.
+    pub incremental_flush: Option<IncrementalFlushTarget>,
+}
+
+/// Rate limit applied to non-forced incremental flushes (agent thoughts,
+/// token-usage updates, "preparing response") — bounds write volume for a
+/// run that emits many events in a burst. Tool start/end and the
+/// agent-loop iteration-boundary checkpoint always bypass this (KYO-493
+/// ticket AC: "unconditional flush at every tool start and end and at
+/// every iteration boundary").
+const INCREMENTAL_FLUSH_INTERVAL: Duration = Duration::from_millis(500);
 
 impl AgentThinkingTracker {
     /// Create a new tracker for a single message exchange.
     ///
     /// If `workspace_user_ids` is `None`, the tracker broadcasts only to the
     /// requesting user.
-    pub fn new(
-        session_id: String,
-        user_id: String,
-        message_id: String,
-        ws_manager: WebSocketManager,
-        workspace_user_ids: Option<Vec<String>>,
-        context_type: Option<String>,
-        context_window: u32,
-    ) -> Self {
+    pub fn new(config: AgentThinkingTrackerConfig) -> Self {
+        let AgentThinkingTrackerConfig {
+            session_id,
+            user_id,
+            message_id,
+            ws_manager,
+            workspace_user_ids,
+            context_type,
+            context_window,
+            incremental_flush,
+        } = config;
         let ws_users = workspace_user_ids.unwrap_or_else(|| vec![user_id]);
         Self {
             session_id,
@@ -198,6 +259,9 @@ impl AgentThinkingTracker {
             context_window,
             ws_manager,
             full_texts: HashMap::new(),
+            incremental_flush,
+            last_flush_at: None,
+            finalized: false,
         }
     }
 
@@ -220,6 +284,11 @@ impl AgentThinkingTracker {
     /// The WebSocket manager handles both standalone (direct local delivery)
     /// and multi-replica (Redis pub/sub) modes automatically.
     async fn send_event(&self, event: &AgentThinkingEvent, is_update: bool) {
+        if let Err(error) = self.try_send_event(event, is_update).await {
+            error!(%error, "Thinking notification failed");
+        }
+    }
+    async fn try_send_event(&self, event: &AgentThinkingEvent, is_update: bool) -> Result<(), String> {
         let mut event_obj = serde_json::json!({
             "event_id": event.event_id,
             "event_type": event.event_type,
@@ -236,16 +305,15 @@ impl AgentThinkingTracker {
         }
         let thinking_data = serde_json::json!({ "event": event_obj });
 
+        let mut errors = Vec::new();
         for uid in &self.workspace_user_ids {
-            kyomi_auth::websocket::helpers::send_agent_thinking(
-                &self.ws_manager,
-                uid,
-                &self.session_id,
-                thinking_data.clone(),
-                Some(&self.message_id),
-            )
-            .await;
+            use kyomi_core::{MessageType, WebSocketMessage};
+            let message = WebSocketMessage::new(MessageType::AgentThinking)
+                .with_session(&self.session_id).with_data(thinking_data.clone())
+                .with_message_id(&self.message_id);
+            if let Err(error) = self.ws_manager.try_send_to_user(uid, message).await { errors.push(error); }
         }
+        if errors.is_empty() { Ok(()) } else { Err(errors.join("; ")) }
     }
 
     // -----------------------------------------------------------------------
@@ -314,6 +382,7 @@ impl AgentThinkingTracker {
             self.full_texts.insert(eid.clone(), full_text);
         }
         self.send_event(&event, false).await;
+        self.maybe_flush_thinking_events(false).await;
     }
 
     /// Record the start of a tool execution.
@@ -355,6 +424,10 @@ impl AgentThinkingTracker {
         self.active_tools.insert(tool_name.to_string(), event_index);
 
         self.send_event(&event, false).await;
+        // Unconditional: a tool call is exactly where a run can stall for a
+        // long time, so a mid-run reader should not have to wait out the
+        // rate limit to see that it started (KYO-493 ticket AC).
+        self.maybe_flush_thinking_events(true).await;
     }
 
     /// Record the completion of a tool execution.
@@ -439,6 +512,9 @@ impl AgentThinkingTracker {
         // Clean up active tracking.
         self.active_tools.remove(tool_name);
         self.tool_start_times.remove(tool_name);
+
+        // Unconditional — see tool_execution_started's same call.
+        self.maybe_flush_thinking_events(true).await;
     }
 
     /// Record that the agent is preparing its final response.
@@ -455,6 +531,7 @@ impl AgentThinkingTracker {
         };
         let event = self.add_event(event);
         self.send_event(&event, false).await;
+        self.maybe_flush_thinking_events(false).await;
     }
 
     /// Record that the agent is compacting conversation context.
@@ -471,6 +548,7 @@ impl AgentThinkingTracker {
         };
         let event = self.add_event(event);
         self.send_event(&event, false).await;
+        self.maybe_flush_thinking_events(false).await;
     }
 
     /// Record that the agent has completed its work.
@@ -497,6 +575,11 @@ impl AgentThinkingTracker {
         output_tokens: u32,
         cost: Option<f64>,
     ) {
+        if let Err(error) = self.try_update_token_usage(input_tokens, output_tokens, cost).await {
+            error!(%error, "Token usage notification failed");
+        }
+    }
+    pub(crate) async fn try_update_token_usage(&mut self, input_tokens: u32, output_tokens: u32, cost: Option<f64>) -> Result<(), String> {
         self.total_input_tokens += input_tokens;
         self.total_output_tokens += output_tokens;
         self.last_input_tokens = input_tokens;
@@ -516,21 +599,168 @@ impl AgentThinkingTracker {
             }
         });
 
+        let mut errors = Vec::new();
         for uid in &self.workspace_user_ids {
-            kyomi_auth::websocket::helpers::send_token_usage_update(
-                &self.ws_manager,
-                uid,
-                &self.session_id,
-                token_data.clone(),
-                Some(&self.message_id),
-            )
-            .await;
+            use kyomi_core::{MessageType, WebSocketMessage};
+            let message = WebSocketMessage::new(MessageType::TokenUsageUpdate)
+                .with_session(&self.session_id).with_data(token_data.clone()).with_message_id(&self.message_id);
+            if let Err(error) = self.ws_manager.try_send_to_user(uid, message).await { errors.push(error); }
+        }
+        self.maybe_flush_thinking_events(false).await;
+        if errors.is_empty() { Ok(()) } else { Err(errors.join("; ")) }
+    }
+
+    // -----------------------------------------------------------------------
+    // Incremental DB flush (KYO-493 phase 3)
+    // -----------------------------------------------------------------------
+
+    /// Force an unconditional flush at an agent-loop iteration boundary.
+    ///
+    /// Called from `ChatAgentAdapter`'s `on_iteration_boundary` hook —
+    /// separate from the per-event methods above because an iteration
+    /// boundary carries no thinking event of its own; it's purely a
+    /// persistence checkpoint (KYO-493 ticket AC: "unconditional flush at
+    /// ... every iteration boundary").
+    pub async fn flush_at_iteration_boundary(&mut self) {
+        self.maybe_flush_thinking_events(true).await;
+    }
+
+    /// Mark this tracker finalized: every incremental flush attempted after
+    /// this call — [`Self::maybe_flush_thinking_events`], via any of the
+    /// public methods above — becomes a no-op (KYO-493 review fix).
+    ///
+    /// Callers MUST call this from inside the *same* locked critical
+    /// section they read final event/usage data from for the terminal
+    /// `extra_metadata` write, immediately before performing that write —
+    /// `execute_agent_chat`'s step 14/15 is the one production caller. That
+    /// ordering (finalize while holding the lock, release the lock, *then*
+    /// write) is what makes the terminal write strictly win: this tracker's
+    /// own mutex already serializes every flush against every other flush
+    /// (see `maybe_flush_thinking_events`'s doc), and `finalized` is what
+    /// extends that ordering to cover the one write that doesn't go through
+    /// this tracker at all. Calling this any earlier (e.g. right after
+    /// `agent_completed`) would still leave the gap open — a callback
+    /// spawned by the last iteration, still unscheduled at that point,
+    /// could acquire the lock in between and flush past a premature
+    /// `finalized = true` before this method was even invoked to set it.
+    pub fn finalize(&mut self) {
+        self.finalized = true;
+    }
+
+    /// Write the accumulated `thinking_events` into the placeholder row's
+    /// `extra_metadata`, so a mid-run `get_session_messages` read sees the
+    /// steps completed so far (KYO-493 phase 3). A no-op when this tracker
+    /// has no [`IncrementalFlushTarget`] — copilot/Slack/watch have no
+    /// placeholder to flush into.
+    ///
+    /// `force` bypasses the `~500ms` rate limit — see
+    /// [`INCREMENTAL_FLUSH_INTERVAL`]'s doc for which callers set it.
+    ///
+    /// This writes only `{"thinking_events": [...]}`, not the full
+    /// `{model, thinking_events, token_usage, component}` shape
+    /// `execute_agent_chat`'s step 15 writes at turn completion —
+    /// `chat_service::update_message` replaces `extra_metadata` wholesale.
+    /// A mid-run reader only needs `thinking_events` to replay completed
+    /// steps (see `kyomi_ui`'s `chat_page.rs`), so the narrower interim
+    /// shape is sufficient — but *only* while the row is still mid-run:
+    /// see [`Self::finalize`] for why this method must never win a race
+    /// against step 15's write once the turn has actually finished.
+    ///
+    /// Every caller of a tracker method holds this tracker's own
+    /// `tokio::sync::Mutex` for the whole call (see
+    /// `ChatAgentAdapter::set_thinking_tracker`'s doc), including the DB
+    /// write this method performs — so flushes are already serialized
+    /// *against each other* by that lock; nothing here needs its own writer
+    /// task. `self.events` also only ever grows (nothing is ever removed
+    /// from it), so whichever call happens to acquire the lock last is
+    /// always looking at a superset of what any earlier call saw — a flush
+    /// can never regress the persisted event list. None of that orders a
+    /// flush against `execute_agent_chat`'s own step 15 write, though —
+    /// that write doesn't go through this tracker at all — which is why the
+    /// `finalized` check below exists.
+    async fn maybe_flush_thinking_events(&mut self, force: bool) {
+        // KYO-493 review fix: the five `AgentCallbacks` closures
+        // (`on_thinking`, `on_tool_start`/`on_tool_end`, ...) each fire a
+        // *detached* `tokio::task::spawn` — see
+        // `ChatAgentAdapter::set_thinking_tracker`'s doc. A callback fired
+        // by the agent loop's very last iteration can still be sitting
+        // unscheduled when `agent.chat()` returns; nothing awaits it. If it
+        // finally runs (and acquires this tracker's lock) *after*
+        // `execute_agent_chat`'s step 15 has already written the terminal
+        // `{model, thinking_events, token_usage, component}` metadata —
+        // which does not go through this tracker, so the tracker's own
+        // mutex cannot order against it — an unguarded forced flush (tool
+        // start/end always force; see this method's doc) would overwrite
+        // that terminal write with just `{"thinking_events": [...]}`,
+        // silently dropping `model`/`token_usage`/`component`. `finalized`
+        // closes that: `finalize()` is called from the same locked critical
+        // section step 14 reads events from, immediately before step 15's
+        // write, so every flush attempted from then on — no matter how late
+        // its spawned task finally runs — sees `finalized` and no-ops.
+        if self.finalized {
+            return;
+        }
+
+        let Some(ref target) = self.incremental_flush else {
+            return;
+        };
+
+        if !force
+            && self
+                .last_flush_at
+                .is_some_and(|last| last.elapsed() < INCREMENTAL_FLUSH_INTERVAL)
+        {
+            return;
+        }
+
+        let metadata = serde_json::json!({ "thinking_events": self.get_events_for_storage() });
+        let db = target.db.clone();
+        let encryption_key = target.encryption_key.clone();
+        let message_id = self.message_id.clone();
+
+        match kyomi_auth::chat_service::update_message(
+            &db,
+            &encryption_key,
+            &message_id,
+            None,
+            Some(&metadata),
+            None,
+        )
+        .await
+        {
+            Ok(_) => {
+                self.last_flush_at = Some(Instant::now());
+            }
+            Err(e) => {
+                // Logged loudly, never fatal: execute_agent_chat's step 15
+                // still writes the complete, correct thinking_events list
+                // once the turn finishes, regardless of any interim flush
+                // failing here.
+                error!(
+                    message_id = %message_id,
+                    error = %e,
+                    "Failed to flush thinking_events to the assistant placeholder mid-run \
+                     (KYO-493) — the final write at turn completion will still succeed"
+                );
+            }
         }
     }
 
     // -----------------------------------------------------------------------
     // Storage / accessors
     // -----------------------------------------------------------------------
+
+    /// Project an already committed runtime event and only then notify the interface.
+    pub(crate) async fn committed_execution_event(
+        &mut self, event: AgentThinkingEvent, full_text: Option<&str>,
+    ) -> Result<(), String> {
+        if self.finalized { return Err("tracker already finalized".into()); }
+        if let (Some(id), Some(body)) = (&event.event_id, full_text) {
+            self.full_texts.insert(id.clone(), body.to_string());
+        }
+        let event = self.add_event(event);
+        self.try_send_event(&event, false).await
+    }
 
     /// Produce a serializable list of events for database persistence.
     pub fn get_events_for_storage(&self) -> Vec<serde_json::Value> {
@@ -598,9 +828,9 @@ impl AgentThinkingTracker {
 // ---------------------------------------------------------------------------
 
 /// Result of cleaning a thought — truncated display text plus optional full text.
-struct CleanedThought {
-    display: String,
-    full_text: Option<String>,
+pub(crate) struct CleanedThought {
+    pub(crate) display: String,
+    pub(crate) full_text: Option<String>,
 }
 
 /// Clean up LLM thinking text for user-facing display.
@@ -609,7 +839,7 @@ struct CleanedThought {
 /// generic patterns (action/observation markers), and truncates to a
 /// reasonable length. When the cleaned text exceeds 200 characters,
 /// `full_text` contains the untruncated version for on-demand retrieval.
-fn clean_thought(thought: &str) -> Option<CleanedThought> {
+pub(crate) fn clean_thought(thought: &str) -> Option<CleanedThought> {
     // 1. Remove <memory>...</memory> blocks.
     static MEMORY_RE: OnceLock<Regex> = OnceLock::new();
     let re = MEMORY_RE.get_or_init(|| Regex::new(r"(?is)<memory>.*?</memory>").expect("valid regex literal"));
@@ -678,7 +908,7 @@ fn clean_thought(thought: &str) -> Option<CleanedThought> {
 ///
 /// Returns a JSON object with a `tool` name and either an `input` or
 /// `output` key, extracting the most relevant fields for each known tool.
-fn format_tool_schema(
+pub(crate) fn format_tool_schema(
     tool_name: &str,
     data: &serde_json::Value,
     is_input: bool,
@@ -1561,5 +1791,442 @@ mod tests {
         assert!(storage.get("description").is_some());
         assert!(storage.get("data").is_some());
         assert!(storage.get("duration_ms").is_some());
+    }
+
+    // -- Contract: incremental thinking_events flush (KYO-493 phase 3) ------
+    //
+    // Unlike the five `AgentCallbacks` closures `ChatAgentAdapter::
+    // set_thinking_tracker` wires (each a detached `tokio::spawn`, so their
+    // completion order relative to each other is not guaranteed — see that
+    // method's doc), every call here is a plain, directly-awaited method
+    // call. That's deliberate: it isolates the flush logic itself
+    // (rate-limiting, forcing, the DB write) from the *separate*, already
+    // pre-existing concern of detached-callback ordering, which phase 3
+    // does not change and is not what these tests are about.
+
+    async fn insert_placeholder_row(
+        db: &kyomi_core::DbPool,
+        key: &std::sync::Arc<[u8; 32]>,
+        session_id: &str,
+        message_id: &str,
+    ) {
+        kyomi_auth::chat_service::add_message(
+            db,
+            key,
+            session_id,
+            "assistant",
+            "",
+            None,
+            Some(message_id),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            kyomi_auth::chat_service::MessageStatus::InProgress,
+        )
+        .await
+        .expect("insert placeholder row");
+    }
+
+    /// Read back `message_id`'s `thinking_events` exactly the way a mid-run
+    /// UI read would (`get_session_messages` — the real read path, not a
+    /// raw SQL peek).
+    async fn read_thinking_events(
+        db: &kyomi_core::DbPool,
+        key: &std::sync::Arc<[u8; 32]>,
+        session_id: &str,
+        message_id: &str,
+    ) -> Vec<serde_json::Value> {
+        let stored = kyomi_auth::chat_service::get_session_messages(db, key, session_id, 100)
+            .await
+            .expect("get_session_messages should succeed");
+        stored
+            .iter()
+            .find(|m| m.message_id == message_id)
+            .map(|m| m.thinking_events.clone())
+            .unwrap_or_default()
+    }
+
+    fn tracker_config(
+        session_id: &str,
+        message_id: &str,
+        db: kyomi_core::DbPool,
+        key: std::sync::Arc<[u8; 32]>,
+        incremental_flush: bool,
+    ) -> AgentThinkingTrackerConfig {
+        AgentThinkingTrackerConfig {
+            session_id: session_id.to_string(),
+            user_id: "user-a".to_string(),
+            message_id: message_id.to_string(),
+            ws_manager: WebSocketManager::new(None, db.clone()),
+            workspace_user_ids: None,
+            context_type: Some("chat".to_string()),
+            context_window: 0,
+            incremental_flush: incremental_flush
+                .then_some(IncrementalFlushTarget { db, encryption_key: key }),
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_start_and_end_flush_unconditionally() {
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let key: Arc<[u8; 32]> = Arc::new([7u8; 32]);
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let message_id = uuid::Uuid::new_v4().to_string();
+        kyomi_auth::chat_service::create_session_with_id(&db, "user-a", "ws-1", &session_id, None, "chat", None)
+            .await
+            .expect("create session");
+        insert_placeholder_row(&db, &key, &session_id, &message_id).await;
+
+        let mut tracker =
+            AgentThinkingTracker::new(tracker_config(&session_id, &message_id, db.clone(), key.clone(), true));
+
+        tracker.tool_execution_started("search_catalog", &serde_json::json!({"query": "revenue"})).await;
+        let events = read_thinking_events(&db, &key, &session_id, &message_id).await;
+        assert_eq!(
+            events.len(),
+            1,
+            "tool_execution_started must flush unconditionally, not wait out the \
+             rate limit — found {} events",
+            events.len()
+        );
+        assert_eq!(
+            events[0]["data"]["status"], "processing",
+            "the flushed event must reflect the tool as still in progress"
+        );
+
+        tracker.tool_execution_completed("search_catalog", "5 rows", true).await;
+        let events = read_thinking_events(&db, &key, &session_id, &message_id).await;
+        assert_eq!(
+            events.len(),
+            1,
+            "completion updates the same event in place — it must not appear as a \
+             second event; found {}",
+            events.len()
+        );
+        assert_eq!(
+            events[0]["data"]["status"], "completed",
+            "tool_execution_completed must also flush unconditionally, so a mid-run \
+             read sees the tool as done, not still processing"
+        );
+    }
+
+    #[tokio::test]
+    async fn interleaved_tool_calls_never_regress_the_persisted_event_list() {
+        // KYO-493 AC: "out-of-order callback delivery can't make the
+        // persisted thinking_events shrink." A true race between detached
+        // `tokio::spawn`ed callbacks isn't reproducible deterministically in
+        // a unit test — see this module's `mod tests` doc comment — so this
+        // proves the structural guarantee that makes such a race harmless
+        // regardless of arrival order: every flush writes
+        // `get_events_for_storage()` — the tracker's *entire* current event
+        // list — while holding `&mut self`, and `self.events` only ever
+        // grows (nothing removes from it). Two tools started before either
+        // finishes (interleaved, not sequential start-then-finish-then-
+        // start-next) is the realistic shape a genuine race would produce;
+        // the persisted length must still be non-decreasing at every flush
+        // point, ending at exactly 2 (one event per tool, each updated in
+        // place on completion — not 4).
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let key: Arc<[u8; 32]> = Arc::new([7u8; 32]);
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let message_id = uuid::Uuid::new_v4().to_string();
+        kyomi_auth::chat_service::create_session_with_id(&db, "user-a", "ws-1", &session_id, None, "chat", None)
+            .await
+            .expect("create session");
+        insert_placeholder_row(&db, &key, &session_id, &message_id).await;
+
+        let mut tracker =
+            AgentThinkingTracker::new(tracker_config(&session_id, &message_id, db.clone(), key.clone(), true));
+
+        let mut previous_len = 0usize;
+        let mut assert_non_decreasing = |events: &[serde_json::Value], step: &str| {
+            assert!(
+                events.len() >= previous_len,
+                "flush at step {step:?} regressed the persisted event list: {} -> {}",
+                previous_len,
+                events.len()
+            );
+            previous_len = events.len();
+        };
+
+        tracker.tool_execution_started("search_catalog", &serde_json::json!({})).await;
+        assert_non_decreasing(&read_thinking_events(&db, &key, &session_id, &message_id).await, "tool A start");
+
+        tracker.tool_execution_started("query_datasource", &serde_json::json!({})).await;
+        assert_non_decreasing(&read_thinking_events(&db, &key, &session_id, &message_id).await, "tool B start");
+
+        tracker.tool_execution_completed("search_catalog", "5 rows", true).await;
+        assert_non_decreasing(&read_thinking_events(&db, &key, &session_id, &message_id).await, "tool A complete");
+
+        let events = read_thinking_events(&db, &key, &session_id, &message_id).await;
+        tracker.tool_execution_completed("query_datasource", "10 rows", true).await;
+        assert_non_decreasing(&events, "tool B complete");
+
+        let events = read_thinking_events(&db, &key, &session_id, &message_id).await;
+        assert_eq!(
+            events.len(),
+            2,
+            "exactly one persisted event per tool — completion updates its own \
+             tool's event in place, it must never append a second one; found {}",
+            events.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn non_forced_flushes_are_rate_limited_to_one_per_interval() {
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let key: Arc<[u8; 32]> = Arc::new([7u8; 32]);
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let message_id = uuid::Uuid::new_v4().to_string();
+        kyomi_auth::chat_service::create_session_with_id(&db, "user-a", "ws-1", &session_id, None, "chat", None)
+            .await
+            .expect("create session");
+        insert_placeholder_row(&db, &key, &session_id, &message_id).await;
+
+        let mut tracker =
+            AgentThinkingTracker::new(tracker_config(&session_id, &message_id, db.clone(), key.clone(), true));
+
+        // Real time, not `tokio::time::pause`/`advance`: this test's own
+        // reads (`read_thinking_events`) are real queries against the
+        // single-connection in-memory SQLite pool `test_pool()` builds —
+        // under a paused clock, sqlx's own connection-acquire timer races
+        // the pool's `spawn_blocking` work the same way
+        // `agent.rs::deadline_short_circuits_the_iteration_ceiling`'s
+        // comment describes for the initial connect, except here it can
+        // fire on *any* later query too (confirmed empirically: this test
+        // hit `PoolTimedOut` on the first post-pause `get_session_messages`
+        // call when written against a paused clock). A ~550ms real sleep
+        // below is the trade-off — small and deterministic.
+
+        // First call: no prior flush, so it always writes regardless of the
+        // rate limit.
+        tracker.agent_thought("Checking the revenue table for anomalies in Q4").await;
+        let events = read_thinking_events(&db, &key, &session_id, &message_id).await;
+        assert_eq!(events.len(), 1, "the first agent_thought must flush unconditionally");
+
+        // 19 more, all within the same instant (paused clock never
+        // auto-advances) — every one of these must be rate-limited: the DB
+        // must still show only the first thought.
+        for i in 0..19 {
+            tracker
+                .agent_thought(&format!("Investigating candidate cause number {i} for the anomaly"))
+                .await;
+        }
+        let events = read_thinking_events(&db, &key, &session_id, &message_id).await;
+        assert_eq!(
+            events.len(),
+            1,
+            "a burst of 19 more thoughts inside the ~500ms window must produce zero \
+             additional writes — write volume must be bounded by the flush interval, \
+             not the event count; found {} events persisted",
+            events.len()
+        );
+        assert_eq!(
+            tracker.events.len(),
+            20,
+            "sanity: all 20 events must still be recorded in memory even though only \
+             1 was flushed"
+        );
+
+        // Sleep past the rate limit and emit one more thought — this flush
+        // is unrated-limited again, and must carry every event accumulated
+        // so far (KYO-493: "a flush must never regress the persisted event
+        // list").
+        tokio::time::sleep(INCREMENTAL_FLUSH_INTERVAL + Duration::from_millis(50)).await;
+        tracker.agent_thought("Found it: a one-off billing correction skewed the total").await;
+        let events = read_thinking_events(&db, &key, &session_id, &message_id).await;
+        assert_eq!(
+            events.len(),
+            21,
+            "once the interval elapses, the next flush must carry every event \
+             accumulated during the rate-limited window, not just the newest one"
+        );
+    }
+
+    #[tokio::test]
+    async fn iteration_boundary_flush_is_unconditional() {
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let key: Arc<[u8; 32]> = Arc::new([7u8; 32]);
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let message_id = uuid::Uuid::new_v4().to_string();
+        kyomi_auth::chat_service::create_session_with_id(&db, "user-a", "ws-1", &session_id, None, "chat", None)
+            .await
+            .expect("create session");
+        insert_placeholder_row(&db, &key, &session_id, &message_id).await;
+
+        let mut tracker =
+            AgentThinkingTracker::new(tracker_config(&session_id, &message_id, db.clone(), key.clone(), true));
+
+        // First flushes (unconditionally, since it's the first ever), then
+        // a second thought immediately after — with a real (unpaused)
+        // clock this could occasionally slip past the rate limit on a slow
+        // CI box, so drive the boundary-forced flush instead of relying on
+        // timing for the second event to prove anything.
+        tracker.agent_thought("Checking the revenue table for anomalies in Q4").await;
+        tracker.flush_at_iteration_boundary().await;
+        let events = read_thinking_events(&db, &key, &session_id, &message_id).await;
+        assert_eq!(
+            events.len(),
+            1,
+            "flush_at_iteration_boundary must persist whatever has accumulated so far, \
+             unconditionally"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_incremental_flush_target_is_a_no_op() {
+        // copilot/Slack/watch (AssistantMessagePersistence::AdapterInserts)
+        // have no pre-inserted placeholder — AgentThinkingTracker must never
+        // attempt to write into a row that isn't theirs to begin with.
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let key: Arc<[u8; 32]> = Arc::new([7u8; 32]);
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let message_id = uuid::Uuid::new_v4().to_string();
+        kyomi_auth::chat_service::create_session_with_id(&db, "user-a", "ws-1", &session_id, None, "chat", None)
+            .await
+            .expect("create session");
+        insert_placeholder_row(&db, &key, &session_id, &message_id).await;
+
+        let mut tracker = AgentThinkingTracker::new(tracker_config(
+            &session_id,
+            &message_id,
+            db.clone(),
+            key.clone(),
+            false, // incremental_flush: None
+        ));
+
+        tracker.agent_thought("Checking the revenue table for anomalies in Q4").await;
+        tracker.tool_execution_started("search_catalog", &serde_json::json!({})).await;
+        tracker.tool_execution_completed("search_catalog", "ok", true).await;
+        tracker.flush_at_iteration_boundary().await;
+
+        let events = read_thinking_events(&db, &key, &session_id, &message_id).await;
+        assert!(
+            events.is_empty(),
+            "with no IncrementalFlushTarget, nothing may ever be written to the row — \
+             found {} events",
+            events.len()
+        );
+    }
+
+    // -- Contract: the terminal write strictly wins over a late flush
+    // -- (KYO-493 review fix) ------------------------------------------------
+    //
+    // The five `AgentCallbacks` closures each fire a detached
+    // `tokio::task::spawn` (see `set_thinking_tracker`'s doc). One from the
+    // loop's last iteration can still be unscheduled when `agent.chat()`
+    // returns; nothing awaits it. `execute_agent_chat`'s step 15 writes the
+    // terminal `{model, thinking_events, token_usage, component}` metadata
+    // directly — not through the tracker — so the tracker's own mutex
+    // cannot order a flush against that write on its own. Before
+    // `AgentThinkingTracker::finalize` existed, a late callback's forced
+    // flush (tool start/end always force) landing after step 15 would
+    // clobber the terminal metadata back down to bare
+    // `{"thinking_events": [...]}`, silently dropping model/token_usage/
+    // component. This test drives exactly that sequence — an interim
+    // flush, `finalize()`, a simulated step-15 terminal write, then a late
+    // flush attempt that must be a no-op — deterministically (no real
+    // concurrency needed: `finalize()`'s contract is "no flush after this
+    // point succeeds", which is testable directly in sequence).
+
+    #[tokio::test]
+    async fn flush_attempted_after_finalize_does_not_clobber_the_terminal_write() {
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let key: Arc<[u8; 32]> = Arc::new([7u8; 32]);
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let message_id = uuid::Uuid::new_v4().to_string();
+        kyomi_auth::chat_service::create_session_with_id(&db, "user-a", "ws-1", &session_id, None, "chat", None)
+            .await
+            .expect("create session");
+        insert_placeholder_row(&db, &key, &session_id, &message_id).await;
+
+        let mut tracker =
+            AgentThinkingTracker::new(tracker_config(&session_id, &message_id, db.clone(), key.clone(), true));
+
+        // An interim flush during the run, same as any other mid-run event.
+        tracker.agent_thought("Checking the revenue table for anomalies in Q4").await;
+
+        // Exactly execution.rs step 14/15's sequence: finalize while still
+        // holding (conceptually) the tracker, then perform the terminal
+        // write the tracker itself never makes — the full
+        // {model, thinking_events, token_usage, component} shape, plus a
+        // terminal status.
+        tracker.finalize();
+        let terminal_metadata = serde_json::json!({
+            "model": "claude-final-model",
+            "thinking_events": tracker.get_events_for_storage(),
+            "token_usage": {"input_tokens": 42, "output_tokens": 7},
+            "component": "custom_agent",
+        });
+        kyomi_auth::chat_service::update_message(
+            &db,
+            &key,
+            &message_id,
+            Some("Revenue was $1M."),
+            Some(&terminal_metadata),
+            Some(kyomi_auth::chat_service::MessageStatus::Complete),
+        )
+        .await
+        .expect("terminal write should succeed");
+
+        // A callback whose spawned task only gets scheduled now — after
+        // both finalize() and the terminal write. Every one of these would
+        // force an unconditional flush pre-fix.
+        tracker.tool_execution_started("search_catalog", &serde_json::json!({})).await;
+        tracker.tool_execution_completed("search_catalog", "5 rows", true).await;
+        tracker.flush_at_iteration_boundary().await;
+
+        // The row must still hold exactly what the terminal write put
+        // there — content, status, and every key of the terminal metadata
+        // shape — not the narrower {"thinking_events": [...]} a late flush
+        // would have replaced it with.
+        let stored = kyomi_auth::chat_service::get_session_messages(&db, &key, &session_id, 100)
+            .await
+            .expect("get_session_messages should succeed");
+        let row = stored
+            .iter()
+            .find(|m| m.message_id == message_id)
+            .expect("the finalized row must still exist");
+
+        assert_eq!(
+            row.content, "Revenue was $1M.",
+            "a late flush must not touch content at all"
+        );
+        assert_eq!(
+            row.model.as_deref(),
+            Some("claude-final-model"),
+            "a late flush replacing extra_metadata wholesale with \
+             {{\"thinking_events\": [...]}} would silently drop `model` — it must not"
+        );
+        assert_eq!(
+            row.token_usage,
+            Some(serde_json::json!({"input_tokens": 42, "output_tokens": 7})),
+            "a late flush must not drop `token_usage` from the terminal metadata"
+        );
+        assert_eq!(
+            row.metadata.get("component").and_then(|v| v.as_str()),
+            Some("custom_agent"),
+            "a late flush must not drop `component` from the terminal metadata"
+        );
+
+        let (status, _owner) = kyomi_auth::chat_service::get_message_status(&db, &message_id)
+            .await
+            .expect("get_message_status should succeed")
+            .expect("the row must still exist");
+        assert_eq!(
+            status,
+            kyomi_auth::chat_service::MessageStatus::Complete,
+            "a late flush passes status: None to update_message and must not revert \
+             the terminal status"
+        );
     }
 }

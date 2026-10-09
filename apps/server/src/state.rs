@@ -67,6 +67,18 @@ pub struct AppState {
     /// without ever querying the database itself. See
     /// `crate::schema_drift` and KYO-716.
     pub schema_drift: SchemaDriftStatus,
+    /// This process's identity for owning `chat_messages` rows that are
+    /// `in_progress` (KYO-493's `owner_instance` column). Resolved exactly
+    /// once, here at startup (`main.rs`, via
+    /// `kyomi_core::resolve_process_instance`), so a missing
+    /// `HOSTNAME` fails the server at boot instead of panicking on a
+    /// user's first chat message. `"{HOSTNAME}:{PORT}"` outside personal
+    /// mode — the port disambiguates multiple local server processes that
+    /// share both `HOSTNAME` and Postgres (dev.kyomi.ai plus worktree
+    /// verifier servers on this machine) and stays stable across restarts
+    /// of the same instance, which the later stuck-row sweep (KYO-493
+    /// Phase 4) relies on. The fixed literal `"desktop"` in personal mode.
+    pub process_instance: String,
 }
 
 // Allow extracting AuthState from AppState for the auth middleware.
@@ -76,6 +88,7 @@ impl FromRef<AppState> for AuthState {
             jwt_secret: state.config.jwt_secret.clone(),
             db: state.db.clone(),
             is_personal: state.config.is_personal(),
+            self_hosted: state.config.self_hosted,
         }
     }
 }
