@@ -1825,17 +1825,8 @@ pub async fn passkey_recovery_complete_service(
 /// after it would immediately log the user back out of the session they
 /// are in the middle of establishing.
 ///
-/// This revokes refresh tokens only — it does not log the user out
-/// everywhere. It does NOT invalidate access tokens already issued to an
-/// attacker: `AuthUser::from_request_parts`
-/// (`crates/kyomi-auth/src/middleware.rs`) authenticates purely by
-/// cryptographic JWT validation and never consults `refresh_tokens` or
-/// checks `token_jti` against any revocation record. A stolen access token
-/// therefore stays valid until it expires on its own
-/// (`access_token_expire_minutes` in `data/constants.toml`, 15 minutes by
-/// default) regardless of this call. Full immediate revocation would
-/// require an access-token allow/deny list keyed on `jti`, which does not
-/// exist in this codebase today (tracked as KYO-341).
+/// KYO-341: atomically invalidate prior browser access and refresh sessions,
+/// then reload the committed cutoff before creating the recovery session.
 async fn revoke_sessions_and_mint_recovery_session(
     db: &DbPool,
     kv: &KVPool,
@@ -1845,12 +1836,12 @@ async fn revoke_sessions_and_mint_recovery_session(
     flow: &'static str,
 ) -> kyomi_core::Result<AuthenticatedSession> {
     let revoked_count =
-        crate::token_service::revoke_all_user_refresh_tokens(db, &user.user_id).await?;
+        crate::token_service::revoke_all_user_sessions(db, &user.user_id).await?;
     tracing::info!(
         user_id = %user.user_id,
         revoked_count,
         recovery_flow = flow,
-        "Refresh tokens revoked during account recovery"
+        "Prior browser sessions and refresh tokens revoked during account recovery"
     );
 
     create_authenticated_session(db, kv, jwt_secret, user, device).await
@@ -2961,6 +2952,95 @@ mod tests {
     // `verify_and_store_passkey` succeeds — against a real (migrated,
     // in-memory) database, so the revoke-before-mint behavior is proven
     // against production code, not a reimplementation of it.
+
+
+    #[tokio::test]
+    async fn session_cutoff_both_recovery_flows_replace_session_immediately() {
+        let db = test_pool().await;
+        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+        let device = test_device();
+        let user = crate::user_service::create_user(
+            &db,
+            "cutoff-recovery@test.local",
+            Some("Test User"),
+            true,
+        )
+        .await
+        .unwrap();
+        let secret = "recovery-cutoff-test-secret";
+        let original = create_authenticated_session(&db, &kv, secret, &user, &device)
+            .await
+            .unwrap();
+        // Exact production post-WebAuthn orchestration; inert test passkeys cannot
+        // complete signature verification (same seam as the KYO-287 tests below).
+        let passkey =
+            revoke_sessions_and_mint_recovery_session(&db, &kv, secret, &user, &device, "passkey")
+                .await
+                .unwrap();
+        crate::test_support::authenticate_session(&db, secret, &passkey.access_token, "/", false)
+            .await
+            .unwrap();
+        assert!(
+            crate::test_support::authenticate_session(
+                &db,
+                secret,
+                &original.access_token,
+                "/",
+                false
+            )
+            .await
+            .is_err()
+        );
+        crate::token_refresh::refresh_tokens(&db, secret, &passkey.refresh_token, &device)
+            .await
+            .unwrap();
+        crate::redis_ops::store_recovery_session(&kv, "cutoff-password-recovery", &user.user_id)
+            .await
+            .unwrap();
+        let result = recovery_set_password_service(
+            &db,
+            &kv,
+            secret,
+            "cutoff-password-recovery",
+            "new-test-password-123",
+            &device,
+        )
+        .await
+        .unwrap();
+        let RecoverySetPasswordServiceResult::Success(password) = result else {
+            panic!("password recovery succeeds");
+        };
+        for allow in [false, true] {
+            assert!(
+                crate::test_support::authenticate_session(
+                    &db,
+                    secret,
+                    &passkey.access_token,
+                    "/",
+                    allow
+                )
+                .await
+                .is_err()
+            );
+            crate::test_support::authenticate_session(
+                &db,
+                secret,
+                &password.access_token,
+                "/",
+                allow,
+            )
+            .await
+            .unwrap();
+        }
+        assert!(
+            crate::token_refresh::refresh_tokens(&db, secret, &passkey.refresh_token, &device)
+                .await
+                .is_err()
+        );
+        crate::token_refresh::refresh_tokens(&db, secret, &password.refresh_token, &device)
+            .await
+            .unwrap();
+    }
 
     #[tokio::test]
     async fn passkey_recovery_revokes_pre_existing_refresh_tokens() {

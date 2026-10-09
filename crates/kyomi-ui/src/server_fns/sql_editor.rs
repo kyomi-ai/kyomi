@@ -81,23 +81,16 @@ pub async fn dry_run_sql(
     )
     .await
     {
-        Ok(Ok(dr)) => DryRunResult {
-            valid: dr.valid,
-            message: dr.message,
-            line: dr.line,
-            column: dr.column,
-            // bytes_processed is not part of the driver DryRunResult;
-            // BigQuery returns it in the message string. Future enhancement
-            // could parse it out, but for now we leave it as None.
-            bytes_processed: None,
-        },
-        Ok(Err(e)) => DryRunResult {
-            valid: false,
-            message: format!("Validation failed: {e}"),
-            line: None,
-            column: None,
-            bytes_processed: None,
-        },
+        Ok(result) => {
+            match &result {
+                Ok(dr) if !dr.valid => {
+                    tracing::warn!(message = %dr.message, "SQL dry run validation failed");
+                }
+                Err(error) => tracing::warn!(error = %error, "SQL dry run failed"),
+                _ => {}
+            }
+            map_dry_run_result(result)
+        }
         Err(_) => DryRunResult {
             valid: false,
             message: "SQL validation timed out".to_string(),
@@ -110,6 +103,70 @@ pub async fn dry_run_sql(
     // No provider.close() — the cache manages provider lifecycle.
 
     Ok(result)
+}
+
+#[cfg(feature = "ssr")]
+fn map_dry_run_result(
+    result: kyomi_connect_protocol::Result<kyomi_datasource_server::DryRunResult>,
+) -> DryRunResult {
+    match result {
+        Ok(dr) => DryRunResult {
+            valid: dr.valid,
+            message: kyomi_core::sanitize_error(&dr.message),
+            line: dr.line,
+            column: dr.column,
+            // bytes_processed is not part of the driver DryRunResult;
+            // BigQuery returns it in the message string. Future enhancement
+            // could parse it out, but for now we leave it as None.
+            bytes_processed: None,
+        },
+        Err(e) => DryRunResult {
+            valid: false,
+            message: kyomi_core::sanitize_error(&format!("Validation failed: {e}")),
+            line: None,
+            column: None,
+            bytes_processed: None,
+        },
+    }
+}
+
+#[cfg(all(test, feature = "ssr"))]
+mod dry_run_redaction_tests {
+    use super::map_dry_run_result;
+
+    const CLICKHOUSE_URL: &str =
+        "http://clickhouse.example:8123/?database=analytics&password=secret123";
+
+    #[test]
+    fn sanitizes_driver_validation_message_and_keeps_location() {
+        let driver = kyomi_datasource_server::DryRunResult::failure(
+            format!("ClickHouse request failed for {CLICKHOUSE_URL}"),
+            Some(3),
+            Some(7),
+        );
+        let result = map_dry_run_result(Ok(driver));
+        assert!(!result.valid);
+        assert_eq!(result.line, Some(3));
+        assert_eq!(result.column, Some(7));
+        assert!(result.message.contains("[connection details redacted]"));
+        assert!(!result.message.contains("secret123"));
+        assert!(!result.message.contains("password="));
+    }
+
+    #[test]
+    fn sanitizes_driver_error() {
+        let error = kyomi_connect_protocol::Error::Provider(format!(
+            "ClickHouse request failed for {CLICKHOUSE_URL}"
+        ));
+        let result = map_dry_run_result(Err(error));
+        assert!(!result.valid);
+        assert_eq!(result.line, None);
+        assert_eq!(result.column, None);
+        assert!(result.message.starts_with("Validation failed:"));
+        assert!(result.message.contains("[connection details redacted]"));
+        assert!(!result.message.contains("secret123"));
+        assert!(!result.message.contains("password="));
+    }
 }
 
 // ===========================================================================

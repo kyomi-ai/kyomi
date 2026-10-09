@@ -76,7 +76,11 @@ async fn handle_authenticated_ws(
     };
 
     let claims = match jwt::validate_token(&token, &state.config.jwt_secret) {
-        Ok(token_data) => token_data.claims,
+        Ok(token_data) if token_data.claims.require_session().is_ok() => token_data.claims,
+        Ok(_) => {
+            close_with_code(socket, CLOSE_AUTH_REQUIRED, "Authentication failed").await;
+            return;
+        }
         Err(e) => {
             tracing::warn!("WebSocket JWT validation failed: {e}");
             close_with_code(socket, CLOSE_AUTH_REQUIRED, "Authentication failed").await;
@@ -114,6 +118,11 @@ async fn handle_authenticated_ws(
         }
     };
 
+    if claims.require_current_session(user.sessions_valid_from).is_err() {
+        close_with_code(socket, CLOSE_AUTH_REQUIRED, "Session revoked").await;
+        return;
+    }
+
     if !user.active {
         tracing::warn!("WebSocket rejected: user disabled: {jwt_user_id}");
         close_with_code(socket, CLOSE_FORBIDDEN, "Account disabled").await;
@@ -148,15 +157,38 @@ async fn handle_authenticated_ws(
     // Pings every 45s keep the connection alive through Cloudflare (100s idle
     // timeout), nginx, and Vite dev proxy (120s).
     let user_id_for_send = jwt_user_id.clone();
-    let send_task = tokio::spawn(async move {
+    let workspace_id_for_send = workspace_id.clone();
+    let db_for_send = state.db.clone();
+    let (denial_tx, mut denial_rx) = tokio::sync::oneshot::channel::<u16>();
+    let mut send_task = tokio::spawn(async move {
         let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(45));
         ping_interval.tick().await; // consume the immediate first tick
 
         loop {
             tokio::select! {
+                biased;
+                denial = &mut denial_rx => {
+                    if let Ok(code) = denial {
+                        let _ = ws_sender.send(ws::Message::Close(Some(ws::CloseFrame {
+                            code,
+                            reason: "Workspace access denied".into(),
+                        }))).await;
+                    }
+                    break;
+                }
                 msg = manager_rx.recv() => {
                     match msg {
                         Some(json) => {
+                            let denial = outbound_membership_denial_code(
+                                &db_for_send, &workspace_id_for_send, &user_id_for_send, &json,
+                            ).await;
+                            if let Some(code) = denial {
+                                let _ = ws_sender.send(ws::Message::Close(Some(ws::CloseFrame {
+                                    code,
+                                    reason: "Workspace access denied".into(),
+                                }))).await;
+                                break;
+                            }
                             if ws_sender.send(ws::Message::text(json)).await.is_err() {
                                 break;
                             }
@@ -179,20 +211,27 @@ async fn handle_authenticated_ws(
     let manager_clone = state.ws_manager.clone();
     let db_clone = state.db.clone();
     let cancel_registry_clone = state.cancel_registry.clone();
+    let encryption_key = state.encryption_key.clone();
     let self_hosted = state.config.self_hosted;
     let user_id_for_recv = jwt_user_id.clone();
     let workspace_id_for_recv = workspace_id.clone();
-    let recv_task = tokio::spawn(async move {
+    let mut recv_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = ws_receiver.next().await {
             match msg {
                 ws::Message::Text(text) => {
+                    // Check before dispatch, including before billing or any sync reads.
+                    if let Some(code) = workspace_membership_denial_code(
+                        &db_clone, &workspace_id_for_recv, &user_id_for_recv,
+                    ).await {
+                        let _ = denial_tx.send(code);
+                        return;
+                    }
                     handle_client_message(
                         &text,
                         &user_id_for_recv,
                         &workspace_id_for_recv,
                         &manager_clone,
-                        &db_clone,
-                        &cancel_registry_clone,
+                        ClientMessageContext { db: &db_clone, key: &encryption_key, cancel_registry: &cancel_registry_clone },
                         self_hosted,
                     )
                     .await;
@@ -207,8 +246,15 @@ async fn handle_authenticated_ws(
 
     // Wait for either side to finish
     tokio::select! {
-        _ = send_task => {}
-        _ = recv_task => {}
+        _ = &mut send_task => {
+            recv_task.abort();
+            let _ = recv_task.await;
+        }
+        _ = &mut recv_task => {
+            // The oneshot carries a denial or closes on normal EOF. Let the
+            // sender deliver the close frame before dropping registration.
+            let _ = send_task.await;
+        }
     }
 
     // Cleanup
@@ -220,7 +266,7 @@ async fn handle_authenticated_ws(
     );
 }
 
-/// Return the code the WebSocket handler must send before registration when
+/// Return the code the WebSocket handler must send when
 /// membership is absent or cannot be verified.
 async fn workspace_membership_denial_code(
     db: &kyomi_core::DbPool,
@@ -238,6 +284,37 @@ async fn workspace_membership_denial_code(
             Some(CLOSE_FORBIDDEN)
         }
     }
+}
+
+/// User-targeted lifecycle notices deliberately reach invitees/nonmembers.
+/// All other manager traffic revalidates this socket's workspace, plus an
+/// explicit payload workspace when user-wide fan-out crosses workspace scopes.
+/// This costs one membership read per frame (two for a different explicit scope);
+/// caching the result would allow revoked sockets to keep receiving queued data.
+async fn outbound_membership_denial_code(
+    db: &kyomi_core::DbPool,
+    workspace_id: &str,
+    user_id: &str,
+    json: &str,
+) -> Option<u16> {
+    use kyomi_types::websocket::{MessageType, WebSocketMessage};
+    let Ok(message) = serde_json::from_str::<WebSocketMessage>(json) else {
+        return Some(CLOSE_FORBIDDEN);
+    };
+    if matches!(message.message_type, MessageType::WorkspaceInvitation | MessageType::WorkspaceRemoved) {
+        return None;
+    }
+    if let Some(code) = workspace_membership_denial_code(db, workspace_id, user_id).await {
+        return Some(code);
+    }
+    if let Some(scope) = message.data.as_ref()
+        .and_then(|data| data.get("workspace_id"))
+        .and_then(|value| value.as_str())
+        && scope != workspace_id
+    {
+        return workspace_membership_denial_code(db, scope, user_id).await;
+    }
+    None
 }
 
 /// Extract the workspace_id from a path that is "{workspace_id}_{user_id}".
@@ -285,15 +362,21 @@ fn extract_user_id_from_path(path: &str) -> &str {
 }
 
 /// Handle a client→server message on the authenticated WebSocket.
+struct ClientMessageContext<'a> {
+    db: &'a kyomi_core::DbPool,
+    key: &'a [u8; 32],
+    cancel_registry: &'a crate::cancel_registry::CancelRegistry,
+}
+
 async fn handle_client_message(
     text: &str,
     user_id: &str,
     workspace_id: &str,
     manager: &kyomi_auth::websocket::WebSocketManager,
-    db: &kyomi_core::DbPool,
-    cancel_registry: &crate::cancel_registry::CancelRegistry,
+    context: ClientMessageContext<'_>,
     self_hosted: bool,
 ) {
+    let ClientMessageContext { db, key, cancel_registry } = context;
     let msg: serde_json::Value = match serde_json::from_str(text) {
         Ok(v) => v,
         Err(_) => {
@@ -306,12 +389,43 @@ async fn handle_client_message(
 
     match msg_type {
         "cancel_request" => {
-            let session_id = msg.get("session_id").and_then(|v| v.as_str());
-            if let Some(sid) = session_id {
-                let cancelled = cancel_registry.cancel(user_id, sid);
-                tracing::info!(user_id, session_id = sid, cancelled, "cancel_request");
-            } else {
+            let Some(sid) = msg.get("session_id").and_then(|v| v.as_str()) else {
                 tracing::warn!(user_id, "cancel_request missing session_id");
+                return;
+            };
+            let store = kyomi_auth::conversation_events::ConversationStore::new(db, key, user_id, workspace_id);
+            let conversation = agent_runtime::ConversationId(sid.to_string());
+            // An explicit immutable identity never falls through to a local session
+            // token: a late cancellation must not cancel a newer accepted turn.
+            let identified = if let Some(run_id) = msg.get("run_id").and_then(|v| v.as_str()) {
+                Some(Ok(Some(agent_runtime::RunId(run_id.to_string()))))
+            } else {
+                match msg.get("message_id").and_then(|v| v.as_str()) {
+                    Some(id) => Some(store.find_run_by_assistant(&conversation, id).await),
+                    None => None,
+                }
+            };
+            match identified {
+                Some(Ok(Some(run_id))) => {
+                    match store.cancel(&conversation, &run_id, chrono::Utc::now().timestamp_millis()).await {
+                        Ok(snapshot) => {
+                            if snapshot.state == agent_runtime::RunState::Cancelled {
+                                kyomi_auth::websocket::helpers::send_request_cancelled(manager, user_id, sid, snapshot.assistant_message_id.as_str(), Some("chat")).await;
+                            }
+                        }
+                        Err(error) => tracing::error!(user_id, session_id = sid, %error, "Durable cancellation failed"),
+                    }
+                }
+                Some(Err(error)) => tracing::error!(user_id, session_id = sid, %error, "Cancellation identity lookup failed"),
+                Some(Ok(None)) | None => {
+                    // Legacy copilots still execute locally. Verify the authorized
+                    // conversation type before touching their session token.
+                    match store.is_legacy_conversation(&conversation).await {
+                        Ok(true) => { cancel_registry.cancel(user_id, sid); }
+                        Ok(false) => tracing::debug!(user_id, session_id = sid, "Cancellation identity no longer exists"),
+                        Err(error) => tracing::error!(%error, "Legacy cancellation scope lookup failed"),
+                    }
+                }
             }
         }
         "oauth_cancel" => {
@@ -365,9 +479,8 @@ async fn handle_client_message(
 /// [`refuse_if_billing_gate_blocks`] so this mapping — in particular, that
 /// [`billing_gate::WorkspaceBillingGate::Unverifiable`] never carries the
 /// `payment_required` code — is unit-testable without a live
-/// `WebSocketManager` or database connection (KYO-805 follow-up): this repo
-/// has no WebSocket integration-test harness, so this is the level at which
-/// the refusal *decision* gets coverage.
+/// `WebSocketManager` or database connection (KYO-805 follow-up). Live
+/// delivery is also covered by `contract_websocket_membership`.
 ///
 /// `Unverifiable` deliberately gets no error code at all rather than a new
 /// invented one: KYO-806's client-side paywall keys off
@@ -857,8 +970,8 @@ mod tests {
     //
     // `handle_sync_bootstrap`/`handle_sync_delta` are DB- and
     // WebSocketManager-backed async fns with no lightweight unit-test seam
-    // (this repo has no WebSocket integration-test harness), so these tests
-    // target the pure decision function directly — proving the refusal
+    // in this unit-test module, so these tests target the pure decision
+    // function directly — proving the refusal
     // *message* is correct proves it's correct at both call sites
     // structurally, since `refuse_if_billing_gate_blocks` is the only place
     // either one produces one.
@@ -941,6 +1054,86 @@ mod tests {
              is recorded, which is exactly what distinguishes it from \
              knowledge/watch's omitted failures"
         );
+    }
+
+    async fn cancellation_db() -> kyomi_core::DbPool {
+        let _ = kyomi_core::constants::load_with_fallback();
+        let db = kyomi_core::DbPool::connect("sqlite::memory:").await.expect("migrated sqlite");
+        kyomi_core::db_execute!(&db, "INSERT INTO users(user_id,email) VALUES($1,$2)", "cancel-user", "cancel@test.local").expect("user");
+        kyomi_core::db_execute!(&db, "INSERT INTO workspaces(workspace_id,name,owner_user_id) VALUES($1,$2,$3)", "cancel-workspace", "Test", "cancel-user").expect("workspace");
+        kyomi_core::db_execute!(&db, "INSERT INTO workspace_users(workspace_id,user_id,role,active) VALUES($1,$2,$3,true)", "cancel-workspace", "cancel-user", "workspace_admin").expect("membership");
+        db
+    }
+
+    #[tokio::test]
+    async fn durable_cancel_identity_never_cancels_a_replacement_local_token() {
+        let db = cancellation_db().await;
+        let key = [3u8; 32];
+        let sid = uuid::Uuid::new_v4().to_string();
+        let accepted = kyomi_auth::chat_service::prepare_chat_dispatch(kyomi_auth::chat_service::ChatDispatchParams {
+            db: &db, encryption_key: &key, ws_manager: None,
+            user_id: "cancel-user", workspace_id: "cancel-workspace", user_display_name: "Test",
+            session_id: &sid, is_new_session: true, message: "hello", current_time_user_tz: None,
+            message_source: Some("web"), skip_ai: false, client_msg_id: Some("cancel-request"),
+            owner_instance: "test", execution_context: None,
+        }).await.expect("atomic acceptance");
+        let kyomi_auth::chat_service::ChatDispatchOutcome::Ready { assistant_message_id, run_id, .. } = accepted else { panic!("ready"); };
+        let manager = kyomi_auth::websocket::WebSocketManager::new(None, db.clone());
+        let registry = crate::cancel_registry::CancelRegistry::default();
+        let replacement = tokio_util::sync::CancellationToken::new();
+        registry.register("cancel-user", &sid, replacement.clone());
+        let store = kyomi_auth::conversation_events::ConversationStore::new(&db, &key, "cancel-user", "cancel-workspace");
+        store.cancel(&agent_runtime::ConversationId(sid.clone()), &agent_runtime::RunId(run_id.clone()), chrono::Utc::now().timestamp_millis()).await.expect("first replica cancellation");
+        for payload in [
+            serde_json::json!({"type":"cancel_request", "session_id":sid}),
+            serde_json::json!({"type":"cancel_request", "session_id":sid, "message_id":assistant_message_id}),
+            serde_json::json!({"type":"cancel_request", "session_id":sid, "message_id":"missing"}),
+            serde_json::json!({"type":"cancel_request", "session_id":sid, "run_id":"missing"}),
+        ] {
+            handle_client_message(&payload.to_string(), "cancel-user", "cancel-workspace", &manager,
+                ClientMessageContext { db: &db, key: &key, cancel_registry: &registry }, true).await;
+            assert!(!replacement.is_cancelled(), "late or missing durable identity must not cancel replacement");
+        }
+        let rows = kyomi_auth::chat_service::get_session_messages(&db, &key, &sid, 100).await.expect("read");
+        assert_eq!(rows.iter().filter(|row| row.status == "cancelled").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn verified_legacy_copilot_retains_local_cancellation() {
+        let db = cancellation_db().await;
+        let sid = uuid::Uuid::new_v4().to_string();
+        kyomi_auth::chat_service::create_session_with_id(&db, "cancel-user", "cancel-workspace", &sid, None, "dashboard_copilot", None).await.expect("legacy session");
+        let manager = kyomi_auth::websocket::WebSocketManager::new(None, db.clone());
+        let registry = crate::cancel_registry::CancelRegistry::default();
+        let token = tokio_util::sync::CancellationToken::new();
+        registry.register("cancel-user", &sid, token.clone());
+        handle_client_message(&serde_json::json!({"type":"cancel_request", "session_id":sid, "message_id":"legacy-assistant"}).to_string(),
+            "cancel-user", "cancel-workspace", &manager, ClientMessageContext { db: &db, key: &[3u8;32], cancel_registry: &registry }, true).await;
+        assert!(token.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn identity_free_cancellation_requires_authorized_legacy_context() {
+        let db = cancellation_db().await;
+        let sid = uuid::Uuid::new_v4().to_string();
+        kyomi_auth::chat_service::create_session_with_id(&db, "cancel-user", "cancel-workspace", &sid, None, "dashboard_copilot", None).await.expect("legacy session");
+        let manager = kyomi_auth::websocket::WebSocketManager::new(None, db.clone());
+        let registry = crate::cancel_registry::CancelRegistry::default();
+        let token = tokio_util::sync::CancellationToken::new();
+        registry.register("cancel-user", &sid, token.clone());
+        let payload = serde_json::json!({"type":"cancel_request", "session_id":sid}).to_string();
+        // The socket's workspace cannot authorize a session in another scope.
+        handle_client_message(&payload, "cancel-user", "other-workspace", &manager,
+            ClientMessageContext { db: &db, key: &[3u8;32], cancel_registry: &registry }, true).await;
+        assert!(!token.is_cancelled(), "mismatched workspace cannot cancel a local token");
+        kyomi_core::db_execute!(&db, "UPDATE workspace_users SET active=false WHERE workspace_id=$1 AND user_id=$2", "cancel-workspace", "cancel-user").expect("revoke membership after socket authentication");
+        handle_client_message(&payload, "cancel-user", "cancel-workspace", &manager,
+            ClientMessageContext { db: &db, key: &[3u8;32], cancel_registry: &registry }, true).await;
+        assert!(!token.is_cancelled(), "revoked membership cannot cancel a local token");
+        kyomi_core::db_execute!(&db, "UPDATE workspace_users SET active=true WHERE workspace_id=$1 AND user_id=$2", "cancel-workspace", "cancel-user").expect("restore membership");
+        handle_client_message(&payload, "cancel-user", "cancel-workspace", &manager,
+            ClientMessageContext { db: &db, key: &[3u8;32], cancel_registry: &registry }, true).await;
+        assert!(token.is_cancelled(), "authorized legacy copilot keeps identity-free cancellation");
     }
 
     #[test]

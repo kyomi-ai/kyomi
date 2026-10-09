@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 pub mod billing;
+pub mod cron_weekdays;
 pub mod datasource_contracts;
 pub mod feedback;
 pub mod permission;

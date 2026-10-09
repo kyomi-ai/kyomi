@@ -118,7 +118,7 @@ pub async fn save_learning(params: SaveLearningParams<'_>) -> Result<String> {
         structured_metadata,
     } = params;
     // Generate embedding from the insight text
-    let embedding_vec = embedding_svc.embed_one(insight)?;
+    let embedding_vec = embedding_svc.embed_passage_offloaded(insight).await?;
     let embedding_bytes = embedding_to_bytes(&embedding_vec);
 
     let ref_queries_json = reference_queries.map(|rq| serde_json::to_string(rq).unwrap_or_default());
@@ -392,7 +392,7 @@ pub async fn update_learning(
 
     // If insight changed, regenerate embedding
     if let Some(ref insight) = updates.insight {
-        let embedding_vec = embedding_svc.embed_one(insight)?;
+        let embedding_vec = embedding_svc.embed_passage_offloaded(insight).await?;
         let embedding_bytes = embedding_to_bytes(&embedding_vec);
 
         let sql = format!(
@@ -637,7 +637,7 @@ pub async fn get_relevant_learnings_hybrid(
     }
 
     // Generate query embedding (with BGE query prefix for asymmetric retrieval)
-    let query_embedding_vec = embedding_svc.embed_query(query)?;
+    let query_embedding_vec = embedding_svc.embed_query_offloaded(query).await?;
 
     // Build scope filter (Postgres uses bare column names, SQLite FTS queries
     // join agent_learnings as `al` so need the prefix).
@@ -958,7 +958,7 @@ pub async fn search_learnings(
         return Ok(Vec::new());
     }
 
-    let query_embedding_vec = embedding_svc.embed_query(query)?;
+    let query_embedding_vec = embedding_svc.embed_query_offloaded(query).await?;
     let fts_query = query.split_whitespace().collect::<Vec<_>>().join(" OR ");
     let fetch_limit = (limit * 2) as i64;
 
@@ -1763,3 +1763,7 @@ mod tests {
         cleanup_learning_pg(pg, &workspace_id, &owner_id).await;
     }
 }
+
+#[cfg(test)]
+#[path = "learning_service_runtime_tests.rs"]
+mod runtime_tests;

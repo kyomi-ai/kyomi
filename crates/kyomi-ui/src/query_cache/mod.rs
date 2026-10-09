@@ -211,6 +211,25 @@ where
     F: Fn(D) -> Fut + Copy + 'static,
     Fut: Future<Output = Result<T, ServerFnError>> + 'static,
 {
+    use_optional_query(name, move || Some(deps()), fetcher)
+}
+
+/// Fetch a query only when its dependencies are present.
+///
+/// `None` disables the query before any cache lookup or initial fetch and
+/// clears the active result. Returning `Some` enables the normal cached query
+/// behavior, including revalidation on selection changes and refreshes.
+pub fn use_optional_query<T, D, F, Fut>(
+    name: &'static str,
+    deps: impl Fn() -> Option<D> + 'static,
+    fetcher: F,
+) -> Signal<Option<Result<T, ServerFnError>>>
+where
+    T: Clone + Send + Sync + 'static,
+    D: Serialize + Clone + 'static,
+    F: Fn(D) -> Fut + Copy + 'static,
+    Fut: Future<Output = Result<T, ServerFnError>> + 'static,
+{
     let cache = expect_context::<QueryCache>();
 
     // Holds the currently-active entry for the latest deps value. Changing
@@ -229,23 +248,34 @@ where
     // skeleton. `untrack(deps)` reads the current dep values without
     // subscribing — the Effect below handles reactive tracking for
     // subsequent deps changes.
-    let initial_entry =
-        lookup_or_create::<T, D, F, Fut>(&cache, name, untrack(&deps), fetcher);
-    current.set(Some(initial_entry));
+    let initial_deps = untrack(&deps);
+    let initial_key = initial_deps.as_ref().map(|d| query_key(name, d));
+    let initial_entry = initial_deps
+        .map(|d| lookup_or_create::<T, D, F, Fut>(&cache, name, d, fetcher));
+    current.set(initial_entry);
 
-    // Watch for deps changes (e.g. search box edits) and swap the active
-    // entry. Skips its first run so we don't do the lookup twice — the
-    // initial one above already covers it.
+    // Skip the first Effect lookup only when its dependencies still match
+    // the synchronous lookup. Selection, switching, and disabling can all
+    // happen before the first tick (e.g. a selector initializes reactively).
     Effect::new(move |prev: Option<()>| {
         let d = deps();
-        if prev.is_none() {
+        if prev.is_none() && d.as_ref().map(|d| query_key(name, d)) == initial_key {
             return;
         }
-        let entry = lookup_or_create::<T, D, F, Fut>(&cache, name, d, fetcher);
-        current.set(Some(entry));
+        let entry = d.map(|d| lookup_or_create::<T, D, F, Fut>(&cache, name, d, fetcher));
+        current.try_set(entry);
     });
 
-    Signal::derive(move || current.get().and_then(|e| e.data.get()))
+    Signal::derive(move || current.try_get().flatten().and_then(|e| e.data.get()))
+}
+
+/// Serialize dependency keys consistently for initial-effect comparison
+/// and cache lookup, retaining the existing keys for enabled queries.
+fn query_key(name: &'static str, deps: &impl Serialize) -> QueryKey {
+    let key = serde_json::to_string(deps).unwrap_or_else(|e| {
+        panic!("use_query: deps for '{name}' must be serde-serializable: {e}")
+    });
+    (name, key)
 }
 
 /// Look up an existing `CacheEntry` for this `(name, deps)` combination or
@@ -263,10 +293,7 @@ where
     F: Fn(D) -> Fut + Copy + 'static,
     Fut: Future<Output = Result<T, ServerFnError>> + 'static,
 {
-    let key_str = serde_json::to_string(&deps).unwrap_or_else(|e| {
-        panic!("use_query: deps for '{name}' must be serde-serializable: {e}")
-    });
-    let key: QueryKey = (name, key_str);
+    let key = query_key(name, &deps);
 
     // Phase 1: look up or insert under the cache borrow. Don't call refetch
     // here — `refetch()` uses `spawn_local` which can re-enter the borrow.
