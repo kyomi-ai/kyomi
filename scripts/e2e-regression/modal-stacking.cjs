@@ -78,17 +78,21 @@ const SCREENSHOT_PATH = '/tmp/kyo-434-modal-stacking.png';
 
   try {
     // ── Auth + navigate to the scenario ──────────────────────────────────
-    await page.goto(`${BASE_URL}/login`, { waitUntil: 'networkidle', timeout: 30000 });
+    await page.goto(`${BASE_URL}/login`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    // SSR inputs exist before WASM attaches listeners; wait before filling them.
+    await page.locator('body:not([data-ssr]) input[type="email"]').waitFor({ timeout: 120000 });
     await page.fill('input[type="email"]', ADMIN_EMAIL, { timeout: 8000 });
     await page.fill('input[type="password"]', ADMIN_PASSWORD, { timeout: 8000 });
-    await page.click('button[type="submit"]', { timeout: 8000 });
-    await page.waitForURL((u) => !u.toString().includes('/login'), { timeout: 20000 });
+    await Promise.all([
+      page.waitForURL((u) => !u.toString().includes('/login'), { waitUntil: 'domcontentloaded', timeout: 20000 }),
+      page.click('button[type="submit"]', { timeout: 8000 }),
+    ]);
 
     await page.goto(`${BASE_URL}/settings/datasources`, {
-      waitUntil: 'networkidle',
+      waitUntil: 'domcontentloaded',
       timeout: 30000,
     });
-    await page.waitForTimeout(3000);
+    await page.getByRole('button', { name: 'Add Datasource', exact: true }).waitFor({ timeout: 120000 });
 
     // Open the Add Datasource modal, then trigger the BigQuery kyomi_oauth
     // "Request access" link — this is the exact user action from the bug

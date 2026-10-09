@@ -134,11 +134,22 @@ function activateWorkspace(state) {
 // ── Playwright helpers ──────────────────────────────────────────────────────
 
 async function login(page, email, password) {
-  await page.goto(`${BASE_URL}/login`, { waitUntil: 'networkidle', timeout: 30000 });
+  await page.goto(`${BASE_URL}/login`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  // SSR inputs exist before WASM attaches listeners; wait before filling them.
+  await page.locator('body:not([data-ssr]) input[type="email"]').waitFor({ timeout: 120000 });
   await page.fill('input[type="email"]', email, { timeout: 8000 });
   await page.fill('input[type="password"]', password, { timeout: 8000 });
-  await page.click('button[type="submit"]', { timeout: 8000 });
-  await page.waitForURL((u) => !u.toString().includes('/login'), { timeout: 20000 });
+  await Promise.all([
+    page.waitForURL((u) => !u.toString().includes('/login'), { waitUntil: 'domcontentloaded', timeout: 20000 }),
+    page.click('button[type="submit"]', { timeout: 8000 }),
+  ]);
+}
+
+/** Wait for the billing decision; existing checks diagnose the wrong branch. */
+async function waitForBillingView(page) {
+  await page.locator('a:has-text("Dashboards")')
+    .or(page.getByText(/^(Your payment failed|Your trial has ended|Your subscription has ended)$/))
+    .first().waitFor({ timeout: 120000 });
 }
 
 /** Any nav item that only ever renders inside the authenticated app shell. */
@@ -158,8 +169,8 @@ async function paywallIsPresent(page) {
 }
 
 async function assertPaywallAtPath(page, path, label) {
-  await page.goto(`${BASE_URL}${path}`, { waitUntil: 'networkidle', timeout: 30000 });
-  await page.waitForTimeout(1500);
+  await page.goto(`${BASE_URL}${path}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  await waitForBillingView(page);
 
   const currentPath = new URL(page.url()).pathname;
   if (currentPath !== path) {
@@ -189,8 +200,8 @@ async function scenarioActiveUser(browser) {
   ).newPage();
   try {
     await login(page, OWNER_EMAIL, OWNER_PASSWORD);
-    await page.goto(`${BASE_URL}/dashboards`, { waitUntil: 'networkidle', timeout: 30000 });
-    await page.waitForTimeout(1500);
+    await page.goto(`${BASE_URL}/dashboards`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await waitForBillingView(page);
 
     if (await paywallIsPresent(page)) {
       fail('active workspace: paywall rendered for an active workspace');
@@ -291,8 +302,8 @@ async function scenario402WhileOpen(browser, activeState) {
     activateWorkspace(activeState);
 
     await login(page, OWNER_EMAIL, OWNER_PASSWORD);
-    await page.goto(`${BASE_URL}/dashboards`, { waitUntil: 'networkidle', timeout: 30000 });
-    await page.waitForTimeout(1500);
+    await page.goto(`${BASE_URL}/dashboards`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await waitForBillingView(page);
 
     if (await paywallIsPresent(page)) {
       fail('402-while-open: paywall already showing before the workspace was lapsed');

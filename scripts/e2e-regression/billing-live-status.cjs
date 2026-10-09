@@ -287,11 +287,22 @@ function seedFakeSubscriptionId() {
 // ── Playwright helpers ──────────────────────────────────────────────────────
 
 async function login(page, email, password) {
-  await page.goto(`${BASE_URL}/login`, { waitUntil: 'networkidle', timeout: 30000 });
+  await page.goto(`${BASE_URL}/login`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  // SSR inputs exist before WASM attaches listeners; wait before filling them.
+  await page.locator('body:not([data-ssr]) input[type="email"]').waitFor({ timeout: 120000 });
   await page.fill('input[type="email"]', email, { timeout: 8000 });
   await page.fill('input[type="password"]', password, { timeout: 8000 });
-  await page.click('button[type="submit"]', { timeout: 8000 });
-  await page.waitForURL((u) => !u.toString().includes('/login'), { timeout: 20000 });
+  await Promise.all([
+    page.waitForURL((u) => !u.toString().includes('/login'), { waitUntil: 'domcontentloaded', timeout: 20000 }),
+    page.click('button[type="submit"]', { timeout: 8000 }),
+  ]);
+}
+
+/** Wait for the billing decision; existing checks diagnose the wrong branch. */
+async function waitForBillingView(page) {
+  await page.locator('a:has-text("Dashboards")')
+    .or(page.getByText(/^(Your payment failed|Your trial has ended|Your subscription has ended)$/))
+    .first().waitFor({ timeout: 120000 });
 }
 
 async function sidebarIsPresent(page) {
@@ -400,8 +411,11 @@ function hasRequestSince(events, sinceMs) {
     await login(tabA, OWNER_EMAIL, OWNER_PASSWORD);
     await login(tabB, OWNER_EMAIL, OWNER_PASSWORD);
 
-    await tabA.goto(`${BASE_URL}/dashboards`, { waitUntil: 'networkidle', timeout: 30000 });
-    await tabB.goto(`${BASE_URL}/dashboards`, { waitUntil: 'networkidle', timeout: 30000 });
+    await tabA.goto(`${BASE_URL}/dashboards`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await tabB.goto(`${BASE_URL}/dashboards`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await waitForBillingView(tabA);
+    await waitForBillingView(tabB);
+    // Keep the existing window for WebSocket setup before sending a webhook.
     await tabA.waitForTimeout(1500);
     await tabB.waitForTimeout(1500);
 
@@ -462,7 +476,9 @@ function hasRequestSince(events, sinceMs) {
     const wsConfigRespC = trackServerFnResponses(tabC, 'get_websocket_config');
 
     await login(tabC, OWNER_EMAIL, OWNER_PASSWORD);
-    await tabC.goto(`${BASE_URL}/dashboards`, { waitUntil: 'networkidle', timeout: 30000 });
+    await tabC.goto(`${BASE_URL}/dashboards`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await waitForBillingView(tabC);
+    // Retain the response-observation window used by the WebSocket checks below.
     await tabC.waitForTimeout(3000);
 
     if (!(await paywallIsPresent(tabC))) {

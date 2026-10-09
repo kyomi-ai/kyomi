@@ -62,16 +62,22 @@ function fail(name, reason) {
   // Login
   console.log('=== Setup ===');
   console.log('  Logging in...');
-  await page.goto(`${BASE_URL}/login`, { waitUntil: 'networkidle', timeout: 15000 });
+  await page.goto(`${BASE_URL}/login`, { waitUntil: 'domcontentloaded', timeout: 15000 });
+  // SSR inputs exist before WASM attaches listeners; wait before filling them.
+  await page.locator('body:not([data-ssr]) input[type="email"]').waitFor({ timeout: 120000 });
   await page.fill('input[type="email"]', TEST_EMAIL, { timeout: 8000 });
   await page.fill('input[type="password"]', TEST_PASSWORD, { timeout: 8000 });
-  await page.click('button[type="submit"]', { timeout: 8000 });
-  await page.waitForURL(url => !url.toString().includes('/login'), { timeout: 15000 });
+  await Promise.all([
+    page.waitForURL(url => !url.toString().includes('/login'), { waitUntil: 'domcontentloaded', timeout: 15000 }),
+    page.click('button[type="submit"]', { timeout: 8000 }),
+  ]);
   console.log('  Logged in.');
 
   // Navigate to SQL editor
-  await page.goto(`${BASE_URL}/sql-editor`, { waitUntil: 'networkidle', timeout: 30000 });
-  await page.waitForTimeout(5000);
+  await page.goto(`${BASE_URL}/sql-editor`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  await page.locator('.kode-editor').waitFor({ timeout: 120000 });
+  // The editor renders before list_datasources resolves and auto-selects a slug.
+  await page.locator('button:has-text("Run Query"):enabled:visible').waitFor({ timeout: 120000 });
   console.log('  SQL editor loaded.');
 
   // Helper: run a query and return the page body text + screenshot
