@@ -84,6 +84,24 @@ pub struct AuthModeConfig {
     pub preference_tracking: String,
 
     // === Field Configuration ===
+    /// Credential field names required from users (e.g., `["username", "password"]`).
+    ///
+    /// **Not the same thing as [`Self::connection_config_fields`] below** —
+    /// this list is *per-user credential* fields (`username`, `password`,
+    /// `oauth_token`, ...), stored in `UserDatasourceCredential.credentials`
+    /// or `user_datasource_credentials.credentials`, scoped to the
+    /// requesting user. It is never written to the workspace-level
+    /// `connection_config` JSON blob on `datasource_configs`. KYO-702's
+    /// root cause was exactly this confusion: a ticket assumed this field
+    /// already tracked `connection_config` ownership, and it never did.
+    ///
+    /// Read by `shared_credential_status` (KYO-518), which validates the
+    /// `shared_<field>` keys holding a mode's shared credential. KYO-332
+    /// removed this field as unused; it gained its first consumer here, so
+    /// "no reader" is not by itself a reason to delete it again — remove it
+    /// only alongside the shared-credential readiness check that reads it.
+    pub credential_fields: Vec<String>,
+
     /// `connection_config` keys this auth mode owns — i.e. the keys
     /// `build_connection_config` (kyomi-ui) writes only when this mode is
     /// active, and that a switch to a *different* mode must not leave
@@ -105,7 +123,9 @@ pub struct AuthModeConfig {
     /// `true` if this is the default auth mode for the datasource.
     pub is_default: bool,
 
-    /// `true` if workspace can share credentials for this auth mode.
+    /// `true` if the explicit shared username/password toggle resolves all
+    /// required credential fields through the published provider factory.
+    /// Intrinsic workspace service-account auth is independent of this flag.
     pub supports_shared_credentials: bool,
 
     /// Whether this mode can authenticate a *headless* background catalog-indexing
@@ -159,6 +179,7 @@ fn password_auth_mode(is_default: bool, supports_shared: bool) -> AuthModeConfig
         oauth_global: false,
         credential_scope: "user".into(),
         preference_tracking: "credential".into(),
+        credential_fields: vec!["username".into(), "password".into()],
         connection_config_fields: vec![],
         is_default,
         supports_shared_credentials: supports_shared,
@@ -194,6 +215,7 @@ fn enterprise_oauth_auth_mode(
         oauth_global: false,
         credential_scope: "user".into(),
         preference_tracking: "credential".into(),
+        credential_fields: vec!["oauth_token".into()],
         // Both factories write into the same connection_config keys —
         // build_connection_config (kyomi-ui) gates its "oauth_client_id"/
         // "oauth_client_secret" writes on this exact mode_id for every
@@ -238,6 +260,7 @@ fn oauth_auth_mode(
         oauth_global: false,
         credential_scope: "user".into(),
         preference_tracking: "credential".into(),
+        credential_fields: vec!["oauth_token".into()],
         // Both factories write into the same connection_config keys —
         // build_connection_config (kyomi-ui) gates its "oauth_client_id"/
         // "oauth_client_secret" writes on this exact mode_id for every
@@ -267,6 +290,7 @@ fn service_account_auth_mode(is_default: bool) -> AuthModeConfig {
         oauth_global: false,
         credential_scope: "workspace".into(),
         preference_tracking: "preference".into(),
+        credential_fields: vec![],
         // BigQuery is this factory's only caller today (verified via
         // `grep -n "service_account_auth_mode(" crates/kyomi-core/src/datasource_registry.rs`)
         // and its driver-facing key is genuinely "service_account_json" —
@@ -274,7 +298,9 @@ fn service_account_auth_mode(is_default: bool) -> AuthModeConfig {
         // (kyomi-ui/src/pages/settings/datasources.rs).
         connection_config_fields: vec!["service_account_json".into()],
         is_default,
-        supports_shared_credentials: true,
+        // Intrinsic workspace auth uses service_account_json, independently
+        // of the explicit shared username/password toggle.
+        supports_shared_credentials: false,
         supports_headless_indexing: true,
     }
 }
@@ -282,6 +308,7 @@ fn service_account_auth_mode(is_default: bool) -> AuthModeConfig {
 /// Create a token authentication mode (e.g., Databricks personal access token).
 fn token_auth_mode(
     is_default: bool,
+    token_field: &str,
     display_name: &str,
     description: &str,
     supports_shared: bool,
@@ -295,6 +322,7 @@ fn token_auth_mode(
         oauth_global: false,
         credential_scope: "user".into(),
         preference_tracking: "credential".into(),
+        credential_fields: vec![token_field.into()],
         connection_config_fields: vec![],
         is_default,
         supports_shared_credentials: supports_shared,
@@ -700,15 +728,11 @@ static SNOWFLAKE_META: LazyLock<DatasourceTypeMetadata> =
                 // `credentials` map (username/password/private_key) —
                 // nothing is written into workspace-level `connection_config`
                 // for this mode.
+                credential_fields: vec!["username".into(), "password".into(), "private_key".into()],
                 connection_config_fields: vec![],
                 is_default: false,
-                // The "Shared credentials (all users)" toggle
-                // (`ProviderCredentialsFields`, `datasources.rs:5908-5920`)
-                // is not excluded for Snowflake's keypair mode — it falls
-                // through to the same generic branch that renders the
-                // toggle for `password` mode. A workspace admin can already
-                // configure one shared key-pair for every member today.
-                supports_shared_credentials: true,
+                // The common resolver copies username/password, never a private key.
+                supports_shared_credentials: false,
                 supports_headless_indexing: true,
             },
         ]),
@@ -739,9 +763,10 @@ static DATABRICKS_META: LazyLock<DatasourceTypeMetadata> =
         auth_modes: leak_auth_modes(vec![
             token_auth_mode(
                 true,
+                "access_token",
                 "Personal Access Token",
                 "Use a Databricks personal access token for authentication",
-                true,
+                false,
             ),
             oauth_auth_mode(
                 "databricks",
@@ -875,6 +900,7 @@ static SYNAPSE_META: LazyLock<DatasourceTypeMetadata> =
                 oauth_global: false,
                 credential_scope: "user".into(),
                 preference_tracking: "credential".into(),
+                credential_fields: vec!["username".into(), "password".into()],
                 connection_config_fields: vec![],
                 is_default: true,
                 supports_shared_credentials: true,
@@ -884,19 +910,20 @@ static SYNAPSE_META: LazyLock<DatasourceTypeMetadata> =
             AuthModeConfig {
                 mode_id: "service_principal".into(),
                 display_name: "Service Principal".into(),
-                // KYO-274: same downgrade as BigQuery's service_account —
-                // "Authenticate using an Azure AD service principal" doesn't
-                // say the client ID/secret is one identity used by the whole
-                // workspace, not a per-user credential (there is exactly one
-                // Client ID/Secret field pair for the datasource; every
-                // connecting user shares it). That's the fact worth stating.
-                description: "All users share a service principal (app registration) identity"
+                // These credentials are personal; the shared resolver does
+                // not copy tenant/client secrets from connection_config.
+                description: "Authenticate using a service principal (app registration) identity"
                     .into(),
                 credential_type: "password".into(),
                 oauth_provider: None,
                 oauth_global: false,
                 credential_scope: "user".into(),
                 preference_tracking: "credential".into(),
+                credential_fields: vec![
+                    "tenant_id".into(),
+                    "client_id".into(),
+                    "client_secret".into(),
+                ],
                 // client_id/client_secret for this mode live in the
                 // per-user `credentials` map (`cred_sp_client_id`/
                 // `cred_sp_client_secret` — datasources.rs's
@@ -909,7 +936,7 @@ static SYNAPSE_META: LazyLock<DatasourceTypeMetadata> =
                 // see `inactive_auth_mode_connection_config_fields`'s doc.
                 connection_config_fields: vec![],
                 is_default: false,
-                supports_shared_credentials: true,
+                supports_shared_credentials: false,
                 supports_headless_indexing: true,
             },
             // NOTE: a plain (non-enterprise) `oauth_auth_mode("microsoft", ...)`
@@ -965,6 +992,7 @@ static FLAREDB_META: LazyLock<DatasourceTypeMetadata> =
                 oauth_global: false,
                 credential_scope: "workspace".into(),
                 preference_tracking: "preference".into(),
+                credential_fields: vec![],
                 connection_config_fields: vec![],
                 is_default: true,
                 supports_shared_credentials: false,
@@ -1140,7 +1168,7 @@ mod tests {
         assert_eq!(meta.auth_modes[2].mode_id, "keypair");
         assert_eq!(meta.auth_modes[2].credential_type, "keypair");
         assert!(!meta.auth_modes[2].is_default);
-        assert!(meta.auth_modes[2].supports_shared_credentials);
+        assert!(!meta.auth_modes[2].supports_shared_credentials);
         assert!(meta.auth_modes[2].supports_headless_indexing);
     }
 
@@ -1653,6 +1681,89 @@ mod tests {
                 meta.inactive_auth_mode_connection_config_fields("password").is_empty(),
                 "{type_id} should have no connection_config-owning auth modes"
             );
+        }
+    }
+
+    // --- credential_fields (restored in KYO-518 after KYO-332 removed it) ---
+
+    #[test]
+    fn shared_credential_modes_publish_exactly_the_resolver_contract() {
+        // `kyomi_datasource_drivers::resolve_shared_credentials` (kyomi-connect,
+        // crates/kyomi-datasource/src/factory.rs) copies exactly two keys out of
+        // `connection_config`: `shared_username` -> `username` and
+        // `shared_password` -> `password`, and nothing else.
+        //
+        // `shared_credential_status` (kyomi-auth) validates `shared_<field>` for
+        // every entry of `credential_fields` and returns "shared" only when all of
+        // them are present. So a mode that offers the shared toggle must list
+        // exactly those two fields — and this is a cross-repo contract nothing else
+        // pins:
+        //   * fewer fields than the resolver copies -> a secret the resolver will
+        //     use is never validated, and readiness is claimed from partial data;
+        //   * more fields than the resolver copies -> the extra `shared_<field>` is
+        //     never written, so the mode reports "missing" forever and the shared
+        //     toggle can never be satisfied.
+        // Both directions fail; keep them aligned here rather than in a comment.
+        for ds_type in &ALL_TYPES {
+            for mode in get_metadata(ds_type).auth_modes.iter() {
+                if !mode.supports_shared_credentials {
+                    continue;
+                }
+                let expected: Vec<String> =
+                    ["username", "password"].iter().map(|s| s.to_string()).collect();
+                assert_eq!(
+                    mode.credential_fields, expected,
+                    "{:?} mode `{}` opts into shared credentials but its credential_fields \
+                     do not match the two keys resolve_shared_credentials copies",
+                    ds_type, mode.mode_id,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn credential_fields_per_mode_id_match_expected_table() {
+        // The complete per-mode credential-field inventory. KYO-332 (#593) deleted
+        // this field as unused and KYO-518 restored it, so the values now have
+        // exactly one consumer (`shared_credential_status`) and would otherwise be
+        // unpinned — a future mode added or flipped could silently carry a field
+        // nobody copies or omit one everybody does.
+        let expected: &[(&str, &[&str])] = &[
+            ("password", &["username", "password"]),
+            ("sql", &["username", "password"]),
+            ("keypair", &["username", "password", "private_key"]),
+            ("oauth", &["oauth_token"]),
+            ("enterprise_oauth", &["oauth_token"]),
+            ("token", &["access_token"]),
+            ("service_principal", &["tenant_id", "client_id", "client_secret"]),
+            ("service_account", &[]),
+            ("none", &[]),
+        ];
+
+        let mut seen = std::collections::BTreeSet::new();
+        for ds_type in &ALL_TYPES {
+            for mode in get_metadata(ds_type).auth_modes.iter() {
+                seen.insert(mode.mode_id.as_str());
+                let want = expected.iter().find(|(id, _)| *id == mode.mode_id.as_str());
+                let Some((_, fields)) = want else {
+                    panic!(
+                        "{:?} mode `{}` has no credential_fields expectation in this table",
+                        ds_type, mode.mode_id
+                    );
+                };
+                assert_eq!(
+                    &mode.credential_fields.iter().map(String::as_str).collect::<Vec<_>>(),
+                    fields,
+                    "{:?} mode `{}` credential_fields drifted",
+                    ds_type,
+                    mode.mode_id,
+                );
+            }
+        }
+        // Every entry in the table must actually exist somewhere in the registry,
+        // so deleting a mode cannot quietly leave a stale row behind.
+        for (id, _) in expected {
+            assert!(seen.contains(id), "table row `{id}` matches no registry mode");
         }
     }
 }

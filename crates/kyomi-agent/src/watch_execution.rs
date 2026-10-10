@@ -902,7 +902,7 @@ pub async fn execute_watch(
 
             // Send final WS state update
             ws_helpers::send_watch_state_update(
-                ws_manager,
+                ws_manager.for_workspace(&watch.workspace_id),
                 &watch.created_by,
                 &watch.watch_id,
                 &ws_status,
@@ -962,7 +962,7 @@ pub async fn execute_watch(
 
             // Send error WS state update
             ws_helpers::send_watch_state_update(
-                ws_manager,
+                ws_manager.for_workspace(&watch.workspace_id),
                 &watch.created_by,
                 &watch.watch_id,
                 "error",
@@ -1145,7 +1145,7 @@ async fn execute_watch_inner(
     ];
 
     // Send WebSocket state update: running (after validation checks pass)
-    ws_helpers::send_watch_state_update(ws_manager, &watch.created_by, &watch.watch_id, "running")
+    ws_helpers::send_watch_state_update(ws_manager.for_workspace(&watch.workspace_id), &watch.created_by, &watch.watch_id, "running")
         .await;
 
     // 5. Check AI budget

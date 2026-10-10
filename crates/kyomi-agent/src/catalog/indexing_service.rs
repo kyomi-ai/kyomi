@@ -708,12 +708,13 @@ mod tests {
         // Ciphertext encrypted with a key other than the one passed to
         // `index_datasource` below — `looks_encrypted` recognizes the
         // format, so this is a guaranteed decrypt failure, not the
-        // legacy-plaintext passthrough.
+        // legacy-plaintext passthrough. Sharing is active so this secret
+        // is used; dormant shared secrets deliberately skip decryption.
         let wrong_key = [7u8; 32];
         let bogus_ciphertext =
             kyomi_auth::encryption::encrypt("irrelevant", &wrong_key).expect("encrypt fixture");
         let connection_config =
-            serde_json::json!({ "shared_password": bogus_ciphertext }).to_string();
+            serde_json::json!({ "shared_credentials": true, "shared_password": bogus_ciphertext }).to_string();
 
         sqlx::query(
             "INSERT INTO datasource_configs \

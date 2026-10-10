@@ -176,12 +176,57 @@ pub fn check_credential_status(
         None => None,
     };
 
+    if connection_config.get("shared_credentials") == Some(&Value::Bool(true)) {
+        return CredentialStatusResult {
+            credential_status: shared_credential_status(ds_type, connection_config, encryption_key).into(),
+            auth_method: "shared".into(),
+            oauth_provider: None,
+        };
+    }
+
     let Some(mode) = active_mode else {
         // Unknown type or no auth modes — treat as password
-        return check_credential_status_legacy(&config_map, user_credential);
+        return check_credential_status_legacy(user_credential);
     };
 
-    check_credential_status_with_mode(mode, user_credential, &config_map, encryption_key)
+    check_credential_status_with_mode(mode, user_credential, encryption_key)
+}
+
+/// Validate the explicit shared username/password contract used by the provider factory.
+/// Decryption also accepts legacy plaintext config values; masked or corrupt secrets
+/// never establish readiness. Intrinsic service-account authentication is separate.
+pub fn shared_credential_status(
+    ds_type: &str,
+    connection_config: &Value,
+    encryption_key: &[u8; 32],
+) -> &'static str {
+    let Ok(Some(mode)) = get_active_auth_mode(ds_type, connection_config) else {
+        return "invalid";
+    };
+    if !mode.supports_shared_credentials
+        || connection_config
+            .get("auth_mode")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.is_empty() && id != mode.mode_id)
+    {
+        return "invalid";
+    }
+    let Ok(config) = crate::credential_service::decrypt_connection_config_secrets(
+        connection_config,
+        encryption_key,
+    ) else {
+        return "invalid";
+    };
+    for field in &mode.credential_fields {
+        let key = format!("shared_{field}");
+        match config.get(&key) {
+            None | Some(Value::Null) => return "missing",
+            Some(Value::String(value)) if value.trim().is_empty() => return "missing",
+            Some(Value::String(value)) if value != crate::credential_service::MASKED_VALUE => {}
+            _ => return "invalid",
+        }
+    }
+    "shared"
 }
 
 /// Check if a datasource requires Google OAuth authentication.
@@ -322,21 +367,9 @@ pub fn get_user_enabled(
 fn check_credential_status_with_mode(
     mode: &AuthModeConfig,
     user_credential: Option<&UserDatasourceCredential>,
-    config_map: &HashMap<String, Value>,
     encryption_key: &[u8; 32],
 ) -> CredentialStatusResult {
     let credential_type = mode.credential_type.as_str();
-
-    // Check for shared_credentials flag first (workspace-level shared auth)
-    if config_map.get("shared_credentials") == Some(&Value::Bool(true))
-        && mode.supports_shared_credentials
-    {
-        return CredentialStatusResult {
-            credential_status: "shared".to_string(),
-            auth_method: "shared".to_string(),
-            oauth_provider: None,
-        };
-    }
 
     match credential_type {
         "none" => CredentialStatusResult {
@@ -435,18 +468,8 @@ fn check_credential_status_with_mode(
 
 /// Legacy credential status check for datasources without rich auth modes.
 fn check_credential_status_legacy(
-    config_map: &HashMap<String, Value>,
     user_credential: Option<&UserDatasourceCredential>,
 ) -> CredentialStatusResult {
-    // Check for shared credentials
-    if config_map.get("shared_credentials") == Some(&Value::Bool(true)) {
-        return CredentialStatusResult {
-            credential_status: "shared".to_string(),
-            auth_method: "shared".to_string(),
-            oauth_provider: None,
-        };
-    }
-
     // Default: password auth
     let status = if user_credential.is_some() {
         "valid"
@@ -714,11 +737,11 @@ mod tests {
     }
 
     #[test]
-    fn credential_status_shared_with_flag() {
+    fn credential_status_bare_shared_flag_is_missing() {
         let key = test_key();
         let config = json!({"shared_credentials": true});
         let result = check_credential_status("postgres", &config, None, &key);
-        assert_eq!(result.credential_status, "shared");
+        assert_eq!(result.credential_status, "missing");
     }
 
     // -- get_user_enabled tests --

@@ -4,10 +4,14 @@
 //!
 //! One function per message type — constructs `WebSocketMessage` with the correct
 //! `MessageType` and data payload, then calls `send_to_user` or `broadcast_to_workspace`.
+//! User-targeted workspace helpers require `manager.for_workspace(workspace_id)`
+//! so their origin survives user-wide local and Redis fan-out. Invitation and
+//! removal notices deliberately remain account-scoped.
 
 use kyomi_core::{MessageType, WebSocketMessage};
 
 use super::WebSocketManager;
+use super::manager::WorkspaceMessageContext;
 
 // ---------------------------------------------------------------------------
 // Chat streaming
@@ -15,7 +19,7 @@ use super::WebSocketManager;
 
 /// Send a chat_stream chunk to a user.
 pub async fn send_chat_stream(
-    manager: &WebSocketManager,
+    manager: WorkspaceMessageContext<'_>,
     user_id: &str,
     session_id: &str,
     message_id: &str,
@@ -41,7 +45,7 @@ pub async fn send_chat_stream(
 
 /// Parameters for [`send_chat_complete`].
 pub struct ChatCompleteParams<'a> {
-    pub manager: &'a WebSocketManager,
+    pub manager: WorkspaceMessageContext<'a>,
     pub user_id: &'a str,
     pub session_id: &'a str,
     pub message_id: &'a str,
@@ -89,7 +93,7 @@ pub async fn send_chat_complete(params: ChatCompleteParams<'_>) {
 
 /// Send a session_created notification.
 pub async fn send_session_created(
-    manager: &WebSocketManager,
+    manager: WorkspaceMessageContext<'_>,
     user_id: &str,
     session_id: &str,
     session_data: serde_json::Value,
@@ -103,7 +107,7 @@ pub async fn send_session_created(
 
 /// Send a title_update notification.
 pub async fn send_title_update(
-    manager: &WebSocketManager,
+    manager: WorkspaceMessageContext<'_>,
     user_id: &str,
     session_id: &str,
     title: &str,
@@ -121,7 +125,7 @@ pub async fn send_title_update(
 
 /// Send an agent_thinking event.
 pub async fn send_agent_thinking(
-    manager: &WebSocketManager,
+    manager: WorkspaceMessageContext<'_>,
     user_id: &str,
     session_id: &str,
     thinking_event: serde_json::Value,
@@ -139,7 +143,7 @@ pub async fn send_agent_thinking(
 
 /// Send a token_usage_update.
 pub async fn send_token_usage_update(
-    manager: &WebSocketManager,
+    manager: WorkspaceMessageContext<'_>,
     user_id: &str,
     session_id: &str,
     token_usage: serde_json::Value,
@@ -161,7 +165,7 @@ pub async fn send_token_usage_update(
 
 /// Send an error message to a user.
 pub async fn send_error(
-    manager: &WebSocketManager,
+    manager: WorkspaceMessageContext<'_>,
     user_id: &str,
     session_id: Option<&str>,
     error_message: &str,
@@ -188,7 +192,7 @@ pub async fn send_error(
 
 /// Send a request_cancelled event to a user.
 pub async fn send_request_cancelled(
-    manager: &WebSocketManager,
+    manager: WorkspaceMessageContext<'_>,
     user_id: &str,
     session_id: &str,
     message_id: &str,
@@ -230,7 +234,7 @@ pub async fn send_oauth_reconnect_required(
             "message": message,
         }));
 
-    manager.send_to_user(user_id, msg).await;
+    manager.for_workspace(workspace_id).send_to_user(user_id, msg).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -295,7 +299,7 @@ pub async fn send_workspace_removed(
 
 /// Send an ownership_transfer_offered notification.
 pub async fn send_ownership_transfer_offered(
-    manager: &WebSocketManager,
+    manager: WorkspaceMessageContext<'_>,
     user_id: &str,
     transfer_id: &str,
     workspace_name: &str,
@@ -317,7 +321,7 @@ pub async fn send_ownership_transfer_offered(
 
 /// Send a watch_alert notification.
 pub async fn send_watch_alert(
-    manager: &WebSocketManager,
+    manager: WorkspaceMessageContext<'_>,
     user_id: &str,
     watch_id: &str,
     watch_name: &str,
@@ -342,7 +346,7 @@ pub async fn send_watch_alert(
 /// Sent at key points during watch execution to update the frontend's watch list
 /// in real-time. Status values: `"running"`, `"success"`, `"no_alert"`, `"error"`.
 pub async fn send_watch_state_update(
-    manager: &WebSocketManager,
+    manager: WorkspaceMessageContext<'_>,
     user_id: &str,
     watch_id: &str,
     status: &str,
@@ -377,7 +381,7 @@ pub async fn send_credential_status_changed(
             "datasource_type": datasource_type,
         }));
 
-    manager.send_to_user(user_id, msg).await;
+    manager.for_workspace(workspace_id).send_to_user(user_id, msg).await;
 }
 
 /// Broadcast a catalog_status_update to all workspace members.
@@ -421,7 +425,7 @@ pub async fn send_ai_usage_update(
             "workspace_id": workspace_id,
         }));
 
-    manager.send_to_user(user_id, msg).await;
+    manager.for_workspace(workspace_id).send_to_user(user_id, msg).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -484,7 +488,7 @@ pub async fn send_shared_chat_message(
 
 /// Send a user's own message echo back to themselves.
 pub async fn send_user_message_to_self(
-    manager: &WebSocketManager,
+    manager: WorkspaceMessageContext<'_>,
     user_id: &str,
     session_id: &str,
     message_id: &str,
@@ -614,7 +618,7 @@ pub async fn send_member_role_changed(
             "message": format!("Your role has been changed to {new_role}"),
         }));
 
-    manager.send_to_user(user_id, msg).await;
+    manager.for_workspace(workspace_id).send_to_user(user_id, msg).await;
 }
 
 /// Broadcast a member_joined notification to all workspace members.
@@ -653,7 +657,7 @@ pub async fn send_ownership_transfer_completed(
             "message": format!("{new_owner_name} accepted ownership of {workspace_name}"),
         }));
 
-    manager.send_to_user(user_id, msg).await;
+    manager.for_workspace(workspace_id).send_to_user(user_id, msg).await;
 }
 
 /// Send an ownership_transfer_declined notification to the original owner.
@@ -674,7 +678,7 @@ pub async fn send_ownership_transfer_declined(
             "message": format!("{declined_by_name} declined ownership of {workspace_name}"),
         }));
 
-    manager.send_to_user(user_id, msg).await;
+    manager.for_workspace(workspace_id).send_to_user(user_id, msg).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -859,7 +863,7 @@ pub async fn broadcast_dashboard_sync(
     } else {
         let msg = WebSocketMessage::new(MessageType::SyncAction)
             .with_data(serde_json::to_value(&sync_action).unwrap_or_default());
-        manager.send_to_user(user_id, msg).await;
+        manager.for_workspace(workspace_id).send_to_user(user_id, msg).await;
     }
 }
 
@@ -961,7 +965,7 @@ pub async fn broadcast_dashboard_visibility_change(
         // Owner keeps it, now correctly scoped as private.
         let msg = WebSocketMessage::new(MessageType::SyncAction)
             .with_data(serde_json::to_value(&update_action).unwrap_or_default());
-        manager.send_to_user(owner_user_id, msg).await;
+        manager.for_workspace(workspace_id).send_to_user(owner_user_id, msg).await;
     }
 }
 
@@ -1023,7 +1027,7 @@ pub async fn broadcast_watch_sync(
 
     let msg = WebSocketMessage::new(MessageType::SyncAction)
         .with_data(serde_json::to_value(&sync_action).unwrap_or_default());
-    manager.send_to_user(owner_user_id, msg).await;
+    manager.for_workspace(workspace_id).send_to_user(owner_user_id, msg).await;
 }
 
 /// Broadcast a chat session mutation to workspace members.
@@ -1085,7 +1089,7 @@ pub async fn broadcast_chat_session_sync(
     } else {
         let msg = WebSocketMessage::new(MessageType::SyncAction)
             .with_data(serde_json::to_value(&sync_action).unwrap_or_default());
-        manager.send_to_user(user_id, msg).await;
+        manager.for_workspace(workspace_id).send_to_user(user_id, msg).await;
     }
 }
 
@@ -1130,7 +1134,7 @@ pub async fn broadcast_chat_session_unshare(
             };
             let msg = WebSocketMessage::new(MessageType::SyncAction)
                 .with_data(serde_json::to_value(&update_action).unwrap_or_default());
-            manager.send_to_user(owner_user_id, msg).await;
+            manager.for_workspace(workspace_id).send_to_user(owner_user_id, msg).await;
         }
         Ok(None) => {
             tracing::warn!(
@@ -1172,7 +1176,7 @@ pub async fn broadcast_entity_delete(
 
 /// Send a dashboard_summary_ready notification.
 pub async fn send_dashboard_summary_ready(
-    manager: &WebSocketManager,
+    manager: WorkspaceMessageContext<'_>,
     user_id: &str,
     dashboard_id: &str,
     summary: &str,

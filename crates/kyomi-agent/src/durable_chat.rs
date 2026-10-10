@@ -254,7 +254,7 @@ impl DurableChatWorker {
         // Cancellation and completion may race; the committed winner determines delivery.
         if terminal.state == RunState::Cancelled {
             kyomi_auth::websocket::helpers::send_request_cancelled(
-                &self.ws_manager,
+                self.ws_manager.for_workspace(&queued.workspace_id),
                 &queued.actor_id,
                 conversation.as_str(),
                 terminal.assistant_message_id.as_str(),
@@ -271,7 +271,7 @@ impl DurableChatWorker {
                 model.as_deref().unwrap_or("unknown"),
                 usage,
                 "chat",
-                None,
+                &queued.workspace_id,
                 None,
             )
             .await;

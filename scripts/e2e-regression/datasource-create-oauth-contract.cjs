@@ -330,16 +330,20 @@ async function pickAuthMode(page, label) {
 
   try {
     // ── Login ──────────────────────────────────────────────────────────
-    await page.goto(`${BASE}/login`, { waitUntil: 'networkidle', timeout: 30000 });
+    await page.goto(`${BASE}/login`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    // SSR inputs exist before WASM attaches listeners; wait before filling them.
+    await page.locator('body:not([data-ssr]) input[type="email"]').waitFor({ timeout: 120000 });
     await page.fill('input[type="email"]', ADMIN_EMAIL, { timeout: 10000 });
     await page.fill('input[type="password"]', ADMIN_PASSWORD, { timeout: 10000 });
-    await page.click('button[type="submit"]', { timeout: 10000 });
-    await page.waitForURL(u => !u.toString().includes('/login'), { timeout: 20000 });
+    await Promise.all([
+      page.waitForURL(u => !u.toString().includes('/login'), { waitUntil: 'domcontentloaded', timeout: 20000 }),
+      page.click('button[type="submit"]', { timeout: 10000 }),
+    ]);
     check('login as admin', true);
 
     // ── Open create modal (default type is BigQuery — no Type switch needed) ──
-    await page.goto(`${BASE}/settings/datasources`, { waitUntil: 'networkidle', timeout: 30000 });
-    await page.waitForTimeout(3000);
+    await page.goto(`${BASE}/settings/datasources`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.getByRole('button', { name: 'Add Datasource', exact: true }).waitFor({ timeout: 120000 });
     await page.locator('button:has-text("Add Datasource")').first().click({ timeout: 10000 });
     await page.waitForTimeout(1500);
     check('create modal opens', await vis(page.locator('text=Connection Method')));

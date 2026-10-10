@@ -85,3 +85,5 @@ mod synapse_tenant_id_credentials;
 mod bigquery_snowflake_auth_mode_gating;
 mod list_connect_gate;
 mod retired_auth_mode_default;
+
+mod shared_credentials;

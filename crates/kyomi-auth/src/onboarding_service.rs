@@ -291,6 +291,7 @@ pub async fn get_onboarding_state(
 /// listed here.
 fn needs_action_for(credential_status: &str) -> bool {
     credential_status == "missing"
+        || credential_status == "invalid"
         || credential_status == "expired"
         || credential_status == "retired_auth_mode"
 }
@@ -349,6 +350,40 @@ fn build_credential_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn invalid_shared_credentials_flag_onboarding_for_admin_repair() {
+        use crate::test_support::{seed_user, seed_workspace, sqlite_pool, test_key, test_pool};
+        let db = test_pool().await;
+        let key = test_key();
+        seed_user(sqlite_pool(&db), "owner-shared", "owner-shared@test.local").await;
+        seed_workspace(sqlite_pool(&db), "ws-shared", "owner-shared").await;
+        let mut ds = datasource_service::create_datasource(
+            &db,
+            datasource_service::CreateDatasourceParams {
+                workspace_id: "ws-shared",
+                name: "Shared",
+                slug: None,
+                ds_type: "postgres",
+                connection_config: serde_json::json!({"shared_credentials": true,
+                "shared_username": "reader", "shared_password": "secret"}),
+                connection_type: None,
+                encryption_key: &key,
+            },
+        )
+        .await
+        .unwrap();
+        let creds = std::collections::HashMap::new();
+        let prefs = std::collections::HashMap::new();
+        let valid = build_credential_status(&[ds.clone()], &creds, &prefs, &key);
+        assert_eq!(valid[0].status, "shared");
+        assert!(!valid[0].needs_action);
+        ds.connection_config["shared_password"] =
+            serde_json::json!(crate::credential_service::MASKED_VALUE);
+        let invalid = build_credential_status(&[ds], &creds, &prefs, &key);
+        assert_eq!(invalid[0].status, "invalid");
+        assert!(invalid[0].needs_action);
+    }
 
     // -- needs_action_for tests (KYO-704) --
 

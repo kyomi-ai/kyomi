@@ -342,6 +342,24 @@ pub struct CreateDatasourceParams<'a> {
     pub encryption_key: &'a [u8; 32],
 }
 
+/// Reject explicit shared activation unless the stored config can satisfy the
+/// registry and published driver contract. Both create and update use this gate.
+fn validate_shared_connection_config(
+    ds_type: &str,
+    config: &Value,
+    key: &[u8; 32],
+) -> kyomi_core::Result<()> {
+    if config.get("shared_credentials") == Some(&Value::Bool(true))
+        && crate::datasource_auth_service::shared_credential_status(ds_type, config, key)
+            != "shared"
+    {
+        return Err(kyomi_core::Error::BadRequest(
+            "Shared credentials require a supported authentication mode and valid shared username/password. Ask a workspace admin to repair the datasource.".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Create a new datasource configuration.
 ///
 /// Checks for duplicate name and slug within the workspace before inserting.
@@ -380,6 +398,8 @@ pub async fn create_datasource(
         ds_type,
         encryption_key,
     )?;
+
+    validate_shared_connection_config(ds_type, &connection_config, encryption_key)?;
 
     // Check duplicate name
     let existing_name: i64 = kyomi_core::db_fetch_scalar!(
@@ -547,6 +567,14 @@ pub async fn update_datasource(
                 existing.datasource_type.as_ref(),
                 encryption_key,
             )?;
+            // Shared identity is independent of mode activation. Preserve it
+            // when the form omits it on mode switches or when turning sharing off.
+            if cfg.get("shared_username").is_none()
+                && let Some(username) = existing.connection_config.get("shared_username")
+            {
+                cfg["shared_username"] = username.clone();
+            }
+            validate_shared_connection_config(existing.datasource_type.as_ref(), &cfg, encryption_key)?;
             cfg
         }
         None => existing.connection_config.clone(),
@@ -1257,6 +1285,9 @@ pub enum DiscoveryPrepError {
 /// positional argument list.
 pub struct DiscoveryConnectionRequest<'a> {
     pub user_id: &'a str,
+    /// Server-derived datasource-management capability. Members may test a
+    /// stored shared datasource, but cannot redirect its credentials to a draft destination.
+    pub is_admin: bool,
     pub ws_id: &'a str,
     pub datasource_slug: Option<&'a str>,
     pub connection_config: &'a Value,
@@ -1294,20 +1325,41 @@ pub async fn resolve_discovery_connection_inputs(
     db: &DbPool,
     req: DiscoveryConnectionRequest<'_>,
 ) -> Result<DiscoveryConnectionInputs, DiscoveryPrepError> {
-    let stored_cred_str: Option<String> = if let Some(slug) = req.datasource_slug {
-        match get_datasource_by_slug(db, slug, req.ws_id).await {
-            Ok(Some(ds)) => match get_user_credential(db, req.user_id, &ds.id).await {
-                Ok(Some(cred)) => Some(cred.credentials),
-                _ => None,
-            },
-            _ => None,
-        }
+    let stored_ds = if let Some(slug) = req.datasource_slug {
+        get_datasource_by_slug(db, slug, req.ws_id).await.ok().flatten()
     } else {
         None
     };
+    let stored_cred_str = if let Some(ds) = &stored_ds {
+        get_user_credential(db, req.user_id, &ds.id).await.ok().flatten().map(|cred| cred.credentials)
+    } else {
+        None
+    };
+    // Members test saved destinations, never draft configuration. This also
+    // prevents reactivating a dormant shared secret with a crafted draft flag.
+    // Only admins can test connection-config edits.
+    let mut submitted_config = match &stored_ds {
+        Some(ds) if !req.is_admin => ds.connection_config.clone(),
+        _ => req.connection_config.clone(),
+    };
+    if submitted_config.get("shared_password").is_none()
+        || submitted_config.get("shared_password").and_then(Value::as_str) == Some(credential_service::MASKED_VALUE)
+    {
+        if let Some(password) = stored_ds.as_ref().and_then(|ds| ds.connection_config.get("shared_password")) {
+            submitted_config["shared_password"] = password.clone();
+        } else if let Some(config) = submitted_config.as_object_mut() {
+            config.remove("shared_password");
+        }
+    }
+
+    if submitted_config.get("shared_username").is_none()
+        && let Some(username) = stored_ds.as_ref().and_then(|ds| ds.connection_config.get("shared_username"))
+    {
+        submitted_config["shared_username"] = username.clone();
+    }
 
     let (connection_config, stored_creds) = credential_service::decrypt_provider_secrets(
-        req.connection_config,
+        &submitted_config,
         stored_cred_str.as_deref(),
         req.encryption_key,
     )
@@ -1439,7 +1491,7 @@ pub async fn prepare_manual_catalog_refresh(
     }
 
     // Fetch and decrypt credentials in one service call.
-    let (user_cred, credentials) =
+    let (user_cred, original_credentials) =
         get_decrypted_user_credentials(p.db, p.user_id, &p.datasource.id, p.encryption_key).await?;
 
     let ds_type: kyomi_core::datasource_registry::DatasourceType =
@@ -1461,7 +1513,7 @@ pub async fn prepare_manual_catalog_refresh(
     // requirement is user-actionable and must reach the "Refresh Now" toast
     // prefix-free, exactly like the connect/timeout failures.
     let credentials = kyomi_datasource_server::ensure_valid_oauth_credentials(
-        &credentials,
+        &original_credentials,
         &decrypted_connection_config,
         &ds_type,
     )
@@ -1472,7 +1524,7 @@ pub async fn prepare_manual_catalog_refresh(
     })?;
 
     // Persist refreshed token if it changed.
-    if let Some(ref cred) = user_cred {
+    if credentials != original_credentials && let Some(ref cred) = user_cred {
         let _ = save_user_credential(
             p.db,
             p.encryption_key,
@@ -1667,7 +1719,8 @@ pub async fn list_datasources_with_status(
             // "retired_auth_mode" status above; reuse that signal rather
             // than re-deriving it.
             let is_retired = cred_result.credential_status == "retired_auth_mode";
-            let can_enable = !is_retired && (has_credentials || user_enabled);
+            let invalid_shared = cred_result.auth_method == "shared" && !has_credentials;
+            let can_enable = !is_retired && !invalid_shared && (has_credentials || user_enabled);
             (cred_result, user_enabled, can_enable)
         };
 
@@ -1942,6 +1995,7 @@ pub async fn toggle_datasource_enabled(
                     ds_type_str,
                     connection_config,
                 )?;
+                validate_shared_connection_config(ds_type_str, connection_config, encryption_key)?;
             }
             upsert_user_preference(pool, user_id, &ds.id, true).await?;
         } else {
@@ -2131,23 +2185,22 @@ pub async fn get_datasource_settings_detail(
         None => serde_json::json!({}),
     };
 
-    // `ds.connection_config` came straight from the database and may hold
-    // an encrypted `service_account_json` (COMMON_SENSITIVE, KYO-786) —
-    // `service_account_email_from` below needs the plaintext key file to
-    // read `client_email` out of it. Decrypted once here and reused for
-    // every read below, including `mask_connection_config`: masking a
-    // decrypted config is still correct because masking is presence-based
-    // (any non-empty string becomes `MASKED_VALUE`, ciphertext or plaintext
-    // alike) — this is not a leak, just a single canonical config value for
-    // the rest of this function instead of two.
-    let connection_config = credential_service::decrypt_connection_config_secrets(
+    // Settings need plaintext service-account JSON to derive its email. Invalid
+    // explicit shared credentials must remain editable for admin repair; their
+    // status is validated separately against stored values below, and the response
+    // is masked whether this decryption succeeds or fails.
+    let decrypted_config = match credential_service::decrypt_connection_config_secrets(
         &ds.connection_config,
         encryption_key,
-    )?;
-    let connection_config = &connection_config;
+    ) {
+        Ok(config) => Some(config),
+        Err(_) if ds.connection_config.get("shared_credentials") == Some(&Value::Bool(true)) => None,
+        Err(error) => return Err(error),
+    };
+    let connection_config = decrypted_config.as_ref().unwrap_or(&ds.connection_config);
     let cred_result = crate::datasource_auth_service::check_credential_status(
         ds.datasource_type.as_ref(),
-        connection_config,
+        &ds.connection_config,
         user_cred.as_ref(),
         encryption_key,
     );
@@ -2190,10 +2243,15 @@ pub async fn get_datasource_settings_detail(
         };
 
     // Mask connection config (don't return secrets)
-    let masked_config = credential_service::mask_connection_config(
+    let mut masked_config = credential_service::mask_connection_config(
         connection_config,
         ds.datasource_type.as_ref(),
     );
+
+    if !is_admin && let Some(config) = masked_config.as_object_mut() {
+        config.remove("shared_password");
+        config.remove("shared_username");
+    }
 
     // Project the decrypted per-user credential blob down to the client-safe
     // whitelist — the full blob contains plaintext secrets and must never
@@ -2231,6 +2289,598 @@ mod tests {
     use serde_json::json;
 
     use crate::test_support::{seed_user, seed_workspace, sqlite_pool, test_key, test_pool};
+
+    #[tokio::test]
+    async fn shared_credentials_admin_roundtrip_preserves_secrets_and_resolves_for_members() {
+        let db = test_pool().await;
+        let key = test_key();
+        seed_workspace_and_owner(&db, "ws-shared", "owner-shared").await;
+        seed_user(
+            sqlite_pool(&db),
+            "member-shared",
+            "member-shared@test.local",
+        )
+        .await;
+        for (ds_type, mode) in [
+            ("postgres", "password"),
+            ("mysql", "password"),
+            ("clickhouse", "password"),
+            ("sqlserver", "password"),
+            ("redshift", "password"),
+            ("snowflake", "password"),
+            ("synapse", "sql"),
+        ] {
+            let ds = create_datasource(
+                &db,
+                CreateDatasourceParams {
+                    workspace_id: "ws-shared",
+                    name: ds_type,
+                    slug: Some(ds_type),
+                    ds_type,
+                    connection_config: json!({"auth_mode": mode, "shared_credentials": true,
+                    "shared_username": "workspace-reader", "shared_password": "workspace-secret"}),
+                    connection_type: None,
+                    encryption_key: &key,
+                },
+            )
+            .await
+            .unwrap();
+            let ciphertext = ds.connection_config["shared_password"].clone();
+            assert_ne!(ciphertext, "workspace-secret");
+            let admin = get_datasource_settings_detail(
+                &db,
+                &ds.id,
+                "ws-shared",
+                "owner-shared",
+                true,
+                &key,
+            )
+            .await
+            .unwrap();
+            assert!(admin.shared_credentials);
+            assert_eq!(
+                admin.connection_config["shared_username"],
+                "workspace-reader"
+            );
+            assert_eq!(
+                admin.connection_config["shared_password"],
+                credential_service::MASKED_VALUE
+            );
+            let mut edited = admin.connection_config;
+            edited["host"] = json!("changed.example.invalid");
+            let updated = update_datasource(
+                &db,
+                &ds.id,
+                "ws-shared",
+                None,
+                None,
+                Some(edited.clone()),
+                None,
+                None,
+                &key,
+            )
+            .await
+            .unwrap();
+            assert_eq!(updated.connection_config["shared_password"], ciphertext);
+            edited.as_object_mut().unwrap().remove("shared_password");
+            let updated = update_datasource(
+                &db,
+                &ds.id,
+                "ws-shared",
+                None,
+                None,
+                Some(edited),
+                None,
+                None,
+                &key,
+            )
+            .await
+            .unwrap();
+            assert_eq!(updated.connection_config["shared_password"], ciphertext);
+            let member = get_datasource_settings_detail(
+                &db,
+                &ds.id,
+                "ws-shared",
+                "member-shared",
+                false,
+                &key,
+            )
+            .await
+            .unwrap();
+            assert!(member.connection_config.get("shared_password").is_none());
+            assert_eq!(member.credential_status, "shared");
+            let (config, credentials) = credential_service::decrypt_provider_secrets(
+                &updated.connection_config,
+                None,
+                &key,
+            )
+            .unwrap();
+            // This calls the actual published factory's resolver, without a
+            // personal credential row or a live warehouse connection.
+            let discovery = resolve_discovery_connection_inputs(&db, DiscoveryConnectionRequest {
+                user_id: "owner-shared", is_admin: true, ws_id: "ws-shared", datasource_slug: Some(ds_type),
+                connection_config: &json!({"shared_credentials": true, "shared_username": "workspace-reader",
+                    "shared_password": credential_service::MASKED_VALUE}), encryption_key: &key,
+                google_client_id: None, google_client_secret: None, user_email: "owner@test.local".into(),
+            }).await.unwrap_or_else(|_| panic!("masked discovery config must restore stored shared password"));
+            assert_eq!(
+                discovery.connection_config["shared_password"],
+                "workspace-secret"
+            );
+            let resolved =
+                kyomi_datasource_server::resolve_shared_credentials(&config, &credentials);
+            assert_eq!(resolved["username"], "workspace-reader");
+            assert_eq!(resolved["password"], "workspace-secret");
+            let disabled = update_datasource(
+                &db,
+                &ds.id,
+                "ws-shared",
+                None,
+                None,
+                Some(json!({"auth_mode": mode, "shared_credentials": false})),
+                None,
+                None,
+                &key,
+            )
+            .await
+            .unwrap();
+            assert_eq!(disabled.connection_config["shared_password"], ciphertext);
+            assert_eq!(
+                disabled.connection_config["shared_username"],
+                "workspace-reader"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_credentials_reject_unsupported_modes_and_preserve_identity_on_switch() {
+        let db = test_pool().await;
+        let key = test_key();
+        seed_workspace_and_owner(&db, "ws-shared", "owner-shared").await;
+        for (ds_type, mode) in [
+            ("snowflake", "keypair"),
+            ("snowflake", "oauth"),
+            ("databricks", "token"),
+            ("databricks", "oauth"),
+            ("synapse", "service_principal"),
+            ("synapse", "enterprise_oauth"),
+            ("bigquery", "service_account"),
+            ("bigquery", "enterprise_oauth"),
+        ] {
+            let result = create_datasource(
+                &db,
+                CreateDatasourceParams {
+                    workspace_id: "ws-shared",
+                    name: ds_type,
+                    slug: None,
+                    ds_type,
+                    connection_config: json!({"auth_mode": mode, "shared_credentials": true,
+                    "shared_username": "reader", "shared_password": "secret"}),
+                    connection_type: None,
+                    encryption_key: &key,
+                },
+            )
+            .await;
+            assert!(
+                matches!(result, Err(kyomi_core::Error::BadRequest(_))),
+                "{ds_type}/{mode}"
+            );
+        }
+        let ds = create_datasource(
+            &db,
+            CreateDatasourceParams {
+                workspace_id: "ws-shared",
+                name: "Snowflake",
+                slug: None,
+                ds_type: "snowflake",
+                connection_config: json!({"auth_mode": "password", "shared_credentials": true,
+                "shared_username": "reader", "shared_password": "secret"}),
+                connection_type: None,
+                encryption_key: &key,
+            },
+        )
+        .await
+        .unwrap();
+        let rejected = update_datasource(
+            &db,
+            &ds.id,
+            "ws-shared",
+            None,
+            None,
+            Some(json!({"auth_mode": "keypair", "shared_credentials": true})),
+            None,
+            None,
+            &key,
+        )
+        .await;
+        assert!(matches!(rejected, Err(kyomi_core::Error::BadRequest(_))));
+        let switched = update_datasource(
+            &db,
+            &ds.id,
+            "ws-shared",
+            None,
+            None,
+            Some(json!({"auth_mode": "keypair", "shared_credentials": false})),
+            None,
+            None,
+            &key,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            switched.connection_config["shared_password"],
+            ds.connection_config["shared_password"]
+        );
+        assert_eq!(switched.connection_config["shared_username"], "reader");
+        assert!(!crate::datasource_auth_service::is_shared_auth(
+            "snowflake",
+            &switched.connection_config
+        ));
+    }
+
+    #[tokio::test]
+    async fn shared_credentials_member_discovery_uses_saved_destination() {
+        let db = test_pool().await;
+        let key = test_key();
+        seed_workspace_and_owner(&db, "ws-shared", "owner-shared").await;
+        seed_user(sqlite_pool(&db), "member-shared", "member@test.local").await;
+        let ds = create_datasource(&db, CreateDatasourceParams {
+            workspace_id: "ws-shared", name: "Shared", slug: Some("shared"), ds_type: "postgres",
+            connection_config: json!({"host": "saved.example.invalid", "shared_credentials": true,
+                "shared_username": "reader", "shared_password": "secret"}),
+            connection_type: None, encryption_key: &key,
+        }).await.unwrap();
+        let hostile_draft = json!({"host": "attacker.example.invalid", "shared_credentials": true,
+            "shared_password": credential_service::MASKED_VALUE});
+        let request = |is_admin| DiscoveryConnectionRequest {
+            user_id: "member-shared",
+            is_admin,
+            ws_id: "ws-shared",
+            datasource_slug: Some("shared"),
+            connection_config: &hostile_draft,
+            encryption_key: &key,
+            google_client_id: None,
+            google_client_secret: None,
+            user_email: "member@test.local".into(),
+        };
+        let member_inputs = resolve_discovery_connection_inputs(&db, request(false))
+            .await
+            .unwrap_or_else(|_| panic!("member discovery preparation"));
+        assert_eq!(
+            member_inputs.connection_config["host"],
+            "saved.example.invalid"
+        );
+        assert_eq!(member_inputs.connection_config["shared_username"], "reader");
+        assert_eq!(member_inputs.connection_config["shared_password"], "secret");
+        // An administrator can test an edited destination with the stored password.
+        let admin_inputs = resolve_discovery_connection_inputs(&db, request(true))
+            .await
+            .unwrap_or_else(|_| panic!("admin discovery preparation"));
+        assert_eq!(
+            admin_inputs.connection_config["host"],
+            "attacker.example.invalid"
+        );
+        assert_eq!(admin_inputs.connection_config["shared_password"], "secret");
+        let unchanged = get_datasource(&db, &ds.id, "ws-shared")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.connection_config, ds.connection_config);
+        update_datasource(
+            &db,
+            &ds.id,
+            "ws-shared",
+            None,
+            None,
+            Some(json!({"host": "saved.example.invalid", "shared_credentials": false})),
+            None,
+            None,
+            &key,
+        )
+        .await
+        .unwrap();
+        let disabled_inputs = resolve_discovery_connection_inputs(&db, request(false))
+            .await
+            .unwrap_or_else(|_| panic!("disabled shared discovery preparation"));
+        assert_eq!(
+            disabled_inputs.connection_config["host"],
+            "saved.example.invalid"
+        );
+        assert_eq!(
+            disabled_inputs.connection_config["shared_credentials"],
+            false
+        );
+        let resolved = kyomi_datasource_server::resolve_shared_credentials(
+            &disabled_inputs.connection_config,
+            &json!({}),
+        );
+        assert_eq!(
+            resolved,
+            json!({}),
+            "a draft flag must not activate a dormant workspace secret"
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_credentials_invalid_legacy_rows_are_not_ready_and_remain_repairable() {
+        let db = test_pool().await;
+        let key = test_key();
+        seed_workspace_and_owner(&db, "ws-shared", "owner-shared").await;
+        for (index, config, expected) in [
+            (0, json!({"shared_credentials": true}), "missing"),
+            (
+                1,
+                json!({"shared_credentials": true, "shared_username": "reader"}),
+                "missing",
+            ),
+            (
+                2,
+                json!({"shared_credentials": true, "shared_username": 42, "shared_password": "secret"}),
+                "invalid",
+            ),
+            (
+                3,
+                json!({"shared_credentials": true, "shared_username": "reader", "shared_password": credential_service::MASKED_VALUE}),
+                "invalid",
+            ),
+            (
+                4,
+                json!({"shared_credentials": true, "shared_username": "reader", "shared_password": encryption::encrypt("secret", &[7;32]).unwrap()}),
+                "invalid",
+            ),
+            (
+                5,
+                json!({"shared_credentials": true, "shared_username": "reader", "shared_password": {"password": "legacy-secret"}}),
+                "invalid",
+            ),
+        ] {
+            let id = format!("ds-shared-{index}");
+            if index != 4 {
+                let rejected = create_datasource(
+                    &db,
+                    CreateDatasourceParams {
+                        workspace_id: "ws-shared",
+                        name: &id,
+                        slug: None,
+                        ds_type: "postgres",
+                        connection_config: config.clone(),
+                        connection_type: None,
+                        encryption_key: &key,
+                    },
+                )
+                .await;
+                assert!(matches!(rejected, Err(kyomi_core::Error::BadRequest(_))));
+            }
+            seed_datasource_with_config(
+                &db,
+                &id,
+                "ws-shared",
+                &id,
+                "postgres",
+                &config.to_string(),
+            )
+            .await;
+            let status = crate::datasource_auth_service::check_credential_status(
+                "postgres", &config, None, &key,
+            );
+            assert_eq!(status.credential_status, expected);
+            let detail =
+                get_datasource_settings_detail(&db, &id, "ws-shared", "owner-shared", true, &key)
+                    .await
+                    .unwrap();
+            assert_eq!(detail.credential_status, expected);
+            assert!(
+                !detail
+                    .connection_config
+                    .to_string()
+                    .contains("legacy-secret")
+            );
+            let enable =
+                toggle_datasource_enabled(&db, &id, "ws-shared", "owner-shared", true, &key).await;
+            assert!(enable.is_err());
+        }
+        let list = list_datasources_with_status(&db, "ws-shared", "owner-shared", &key)
+            .await
+            .unwrap();
+        assert_eq!(list.len(), 6);
+        assert!(list.iter().all(|ds| !ds.can_enable));
+    }
+
+    #[tokio::test]
+    async fn shared_refresh_failure_preserves_personal_credentials() {
+        let db = test_pool().await;
+        let key = test_key();
+        seed_workspace_and_owner(&db, "ws-refresh-shared", "owner-refresh").await;
+        let mut ds = create_datasource(
+            &db,
+            CreateDatasourceParams {
+                workspace_id: "ws-refresh-shared",
+                name: "shared",
+                slug: None,
+                ds_type: "snowflake",
+                connection_config: json!({"auth_mode": "password", "shared_credentials": true,
+                    "shared_username": "workspace-reader", "shared_password": "workspace-secret"}),
+                connection_type: None,
+                encryption_key: &key,
+            },
+        )
+        .await
+        .unwrap();
+        let personal = json!({"username": "personal", "password": "personal-password",
+                "oauth_access_token": "personal-token", "oauth_refresh_token": "personal-refresh",
+                "private_key": "personal-key", "oauth_token_expiry": "2000-01-01T00:00:00Z"});
+        let before = save_user_credential(
+            &db,
+            &key,
+            "owner-refresh",
+            &ds.id,
+            "ws-refresh-shared",
+            &personal,
+        )
+        .await
+        .unwrap();
+        // Fail provider validation deterministically, without a warehouse call.
+        // Refresh/persistence runs before this missing Connect registry check.
+        ds.connection_type = "connect".into();
+        let result = prepare_manual_catalog_refresh(PrepareManualRefreshParams {
+            db: &db,
+            user_id: "owner-refresh",
+            email: "owner@test.local".into(),
+            ws_id: "ws-refresh-shared",
+            datasource: &ds,
+            encryption_key: &key,
+            connect_registry: None,
+            google_oauth_client_id: None,
+            google_oauth_client_secret: None,
+            guard_minutes: 60,
+            connect_timeout: std::time::Duration::from_secs(1),
+        })
+        .await;
+        let error = match result {
+            Ok(_) => panic!("missing Connect registry must fail provider validation"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("Connect registry not available"));
+        let after = get_user_credential(&db, "owner-refresh", &ds.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.credentials, before.credentials);
+        assert_eq!(
+            encryption::decrypt_json(&after.credentials, &key).unwrap(),
+            personal
+        );
+        let disabled = update_datasource(
+            &db,
+            &ds.id,
+            "ws-refresh-shared",
+            None,
+            None,
+            Some(json!({"auth_mode": "password", "shared_credentials": false})),
+            None,
+            None,
+            &key,
+        )
+        .await
+        .unwrap();
+        let (config, credentials) = credential_service::decrypt_provider_secrets(
+            &disabled.connection_config,
+            Some(&after.credentials),
+            &key,
+        )
+        .unwrap();
+        assert_eq!(
+            kyomi_datasource_server::resolve_shared_credentials(&config, &credentials),
+            personal
+        );
+    }
+
+    #[tokio::test]
+    async fn dormant_shared_secret_survives_disable_reopen_personal_resolution_and_repair() {
+        let db = test_pool().await;
+        let key = test_key();
+        seed_workspace_and_owner(&db, "ws-dormant", "owner-dormant").await;
+        let bad_secret = encryption::encrypt("old-shared-secret", &[7; 32]).unwrap();
+        for (index, mode) in ["password", "keypair"].into_iter().enumerate() {
+            let id = format!("ds-dormant-{index}");
+            seed_datasource_with_config(
+                &db,
+                &id,
+                "ws-dormant",
+                &id,
+                "snowflake",
+                &json!({"auth_mode": "password", "shared_credentials": true,
+                        "shared_username": "workspace-reader", "shared_password": bad_secret})
+                .to_string(),
+            )
+            .await;
+            let personal = json!({"username": "personal", "password": "personal-password",
+                    "private_key": "personal-key"});
+            let saved = save_user_credential(&db, &key, "owner-dormant", &id, "ws-dormant", &personal)
+                .await
+                .unwrap();
+            let disabled = update_datasource(
+                &db,
+                &id,
+                "ws-dormant",
+                None,
+                None,
+                Some(json!({"auth_mode": mode, "shared_credentials": false})),
+                None,
+                None,
+                &key,
+            )
+            .await
+            .unwrap();
+            assert_eq!(disabled.connection_config["shared_password"], bad_secret);
+            let reopened =
+                get_datasource_settings_detail(&db, &id, "ws-dormant", "owner-dormant", true, &key)
+                    .await
+                    .unwrap();
+            assert!(!reopened.shared_credentials);
+            assert_eq!(
+                reopened.connection_config["shared_password"],
+                credential_service::MASKED_VALUE
+            );
+            let (config, credentials) = credential_service::decrypt_provider_secrets(
+                &disabled.connection_config,
+                Some(&saved.credentials),
+                &key,
+            )
+            .unwrap();
+            assert_eq!(
+                kyomi_datasource_server::resolve_shared_credentials(&config, &credentials),
+                personal
+            );
+            assert_eq!(
+                kyomi_datasource_server::ensure_valid_oauth_credentials(
+                    &credentials,
+                    &config,
+                    &kyomi_core::datasource_registry::DatasourceType::Snowflake
+                )
+                .await
+                .unwrap(),
+                personal
+            );
+            // Replace the broken dormant secret and switch back to password sharing.
+            let mut repaired_config = reopened.connection_config;
+            repaired_config["auth_mode"] = json!("password");
+            repaired_config["shared_credentials"] = json!(true);
+            repaired_config["shared_password"] = json!("replacement-secret");
+            let repaired = update_datasource(
+                &db,
+                &id,
+                "ws-dormant",
+                None,
+                None,
+                Some(repaired_config),
+                None,
+                None,
+                &key,
+            )
+            .await
+            .unwrap();
+            let (config, _) =
+                credential_service::decrypt_provider_secrets(&repaired.connection_config, None, &key)
+                    .unwrap();
+            assert_eq!(config["shared_password"], "replacement-secret");
+            assert_eq!(
+                get_datasource_settings_detail(&db, &id, "ws-dormant", "owner-dormant", true, &key)
+                    .await
+                    .unwrap()
+                    .credential_status,
+                "shared"
+            );
+            assert_eq!(
+                get_user_credential(&db, "owner-dormant", &id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .credentials,
+                saved.credentials
+            );
+        }
+    }
 
     #[tokio::test]
     async fn resolve_datasource_missing_lookup_does_not_disclose_other_slugs() {

@@ -73,7 +73,7 @@ pub async fn deliver_watch_alert(
     };
 
     ws_helpers::send_watch_alert(
-        ws_manager,
+        ws_manager.for_workspace(&watch.workspace_id),
         &watch.created_by,
         &watch.watch_id,
         &watch.name,

@@ -66,13 +66,17 @@ impl std::fmt::Display for MessageType {
 
 /// A WebSocket message sent to clients.
 ///
-/// Serializes to JSON matching the Python backend's `WebSocketMessage` format exactly.
+/// Retains the existing client payload format, with an optional server-supplied
+/// workspace origin carried through local and Redis delivery.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebSocketMessage {
     #[serde(rename = "type")]
     pub message_type: MessageType,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// Authorization scope supplied by the server-side emitter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_id: Option<String>,
     #[serde(default)]
@@ -82,6 +86,11 @@ pub struct WebSocketMessage {
 }
 
 impl WebSocketMessage {
+    pub fn with_workspace(mut self, workspace_id: impl Into<String>) -> Self {
+        self.workspace_id = Some(workspace_id.into());
+        self
+    }
+
     pub fn with_session(mut self, session_id: impl Into<String>) -> Self {
         self.session_id = Some(session_id.into());
         self
@@ -104,6 +113,7 @@ impl WebSocketMessage {
         Self {
             message_type,
             session_id: None,
+            workspace_id: None,
             message_id: None,
             timestamp: chrono::Utc::now().to_rfc3339(),
             data: None,

@@ -142,7 +142,7 @@ impl AgentTool for UpdateChartCopilotTool {
             msg = msg.with_session(sid);
         }
 
-        ctx.ws_manager.send_to_user(&ctx.user_id, msg).await;
+        ctx.ws_manager.for_workspace(&ctx.workspace_id).send_to_user(&ctx.user_id, msg).await;
 
         Ok(serde_json::json!({
             "success": true,
@@ -338,7 +338,7 @@ impl AgentTool for UpdateWatchCopilotTool {
             msg = msg.with_session(sid);
         }
 
-        ctx.ws_manager.send_to_user(&ctx.user_id, msg).await;
+        ctx.ws_manager.for_workspace(&ctx.workspace_id).send_to_user(&ctx.user_id, msg).await;
 
         Ok(serde_json::json!({
             "success": true,

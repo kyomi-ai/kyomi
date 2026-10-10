@@ -1307,7 +1307,7 @@ fn truncated_arguments_message(tool_call: &ToolCall, response_finish_reason: &st
 }
 
 /// Check if text contains ChartML code blocks.
-fn has_chartml_blocks(text: &str) -> bool {
+pub(crate) fn has_chartml_blocks(text: &str) -> bool {
     text.contains("```chartml")
 }
 

@@ -7,7 +7,8 @@ use async_trait::async_trait;
 use kyomi_auth::websocket::helpers as ws_helpers;
 
 use crate::tools::document::{
-    apply_create, apply_update, ApplyCreateParams, ApplyUpdateOutcome, ApplyUpdateParams,
+    apply_create, apply_update, sql_validation_failure_result, ApplyCreateOutcome,
+    ApplyCreateParams, ApplyUpdateOutcome, ApplyUpdateParams,
     DocumentDeleteTool, DocumentReadTool,
 };
 use crate::tools::{AgentTool, ToolContext};
@@ -290,18 +291,6 @@ impl AgentTool for CreateDashboardTool {
             .to_string());
         }
 
-        // Validate SQL in ChartML blocks before saving.
-        if let Some(sql_errors) =
-            super::query_utils::validate_chartml_sql(&ctx.query_context(), content).await
-        {
-            return Ok(serde_json::json!({
-                "success": false,
-                "error": format!("Dashboard contains invalid SQL: {sql_errors}"),
-                "validation_errors": [sql_errors],
-            })
-            .to_string());
-        }
-
         // KYO-776: resolved once, up front, for `apply_create`'s synchronous
         // `knowledge_chunks` population below — the same pattern
         // `ModifyDashboardTool` already uses for `apply_update` (see its own
@@ -310,7 +299,7 @@ impl AgentTool for CreateDashboardTool {
         let embed = ctx.embedding.wait_ready().await?;
 
         let dashboard_id = match apply_create(ApplyCreateParams {
-            validation_context: Some(&ctx.query_context()),
+            query_context: ctx.query_context(),
             db: &ctx.db,
             user_id: &ctx.user_id,
             workspace_id: &ctx.workspace_id,
@@ -321,7 +310,10 @@ impl AgentTool for CreateDashboardTool {
         })
         .await
         {
-            Ok(id) => id,
+            Ok(ApplyCreateOutcome::Created(id)) => id,
+            Ok(ApplyCreateOutcome::ValidationFailed(errors)) => {
+                return Ok(sql_validation_failure_result(&errors));
+            }
             Err(kyomi_core::Error::Forbidden(msg)) => {
                 return Ok(serde_json::json!({
                     "success": false,
@@ -495,19 +487,6 @@ impl AgentTool for ModifyDashboardTool {
             .to_string());
         }
 
-        // Validate SQL in ChartML blocks before saving.
-        if let Some(c) = content
-            && let Some(sql_errors) =
-                super::query_utils::validate_chartml_sql(&ctx.query_context(), c).await
-        {
-            return Ok(serde_json::json!({
-                "success": false,
-                "error": format!("Dashboard contains invalid SQL: {sql_errors}"),
-                "validation_errors": [sql_errors],
-            })
-            .to_string());
-        }
-
         // Single read that serves two purposes: (1) the "reject title-only
         // updates on empty dashboards" guard below, and (2) the CAS hash
         // passed to apply_update. `get_dashboard` never itself returns
@@ -572,7 +551,7 @@ impl AgentTool for ModifyDashboardTool {
         };
 
         match apply_update(ApplyUpdateParams {
-            validation_context: Some(&ctx.query_context()),
+            query_context: ctx.query_context(),
             db: &ctx.db,
             dashboard_id,
             workspace_id: &ctx.workspace_id,
@@ -593,6 +572,9 @@ impl AgentTool for ModifyDashboardTool {
         .await
         {
             Ok(ApplyUpdateOutcome::Updated) => {}
+            Ok(ApplyUpdateOutcome::ValidationFailed(errors)) => {
+                return Ok(sql_validation_failure_result(&errors));
+            }
             Ok(ApplyUpdateOutcome::NotFound) => {
                 return Ok(serde_json::json!({
                     "error": format!("Dashboard not found: {dashboard_id}")
@@ -642,7 +624,7 @@ impl AgentTool for ModifyDashboardTool {
                 "title": receipt.saved_title,
                 "change_summary": receipt.change_summary,
             }));
-            ctx.ws_manager.send_to_user(&ctx.user_id, event).await;
+            ctx.ws_manager.for_workspace(&ctx.workspace_id).send_to_user(&ctx.user_id, event).await;
         }
 
         // Spawn background embedding if content changed and is substantial
@@ -1538,7 +1520,7 @@ mod tests {
         let embedding = loaded_embedding();
         let embed = embedding.wait_ready().await.expect("loaded_embedding is pre-loaded");
         let outcome = apply_update(ApplyUpdateParams {
-            validation_context: None,
+            query_context: build_ctx(db.clone()).query_context(),
             db: &db,
             dashboard_id: &dashboard_id,
             workspace_id: "ws-1",
@@ -1727,7 +1709,11 @@ mod tests {
         .await
         .expect("seed dashboard");
 
+        let manager = WebSocketManager::new(None, db.clone());
+        let (_connection, mut receiver) = manager.connect("user-a").expect("connect receipt receiver");
+        receiver.try_recv().expect("heartbeat");
         let mut ctx = build_ctx(db);
+        ctx.ws_manager = manager;
         // The copilot is scoped to the document it was opened against —
         // here, the same dashboard being edited.
         ctx.document_id = Some(dashboard_id.clone());
@@ -1752,6 +1738,18 @@ mod tests {
             .expect("a scoped write to the open document must succeed");
         let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
         assert_eq!(parsed["success"], serde_json::json!(true), "{result}");
+        let receipt_event = std::iter::from_fn(|| receiver.try_recv().ok())
+            .map(|frame| serde_json::from_str::<serde_json::Value>(&frame).expect("event JSON"))
+            .find(|frame| frame["type"] == "copilot_mutation_receipt")
+            .expect("persisted Copilot write must emit its receipt");
+        assert_eq!(receipt_event["workspace_id"], "ws-1",
+            "receipt must carry its origin so the socket boundary accepts it");
+        assert_eq!(receipt_event["session_id"], "session-a");
+        assert_eq!(receipt_event["data"]["dashboard_id"], dashboard_id);
+        let emitted_receipt = receipt_event["data"]["receipt_id"].as_str().expect("receipt ID");
+        assert!(kyomi_auth::dashboard_service::get_copilot_mutation_receipt(
+            &ctx.db, emitted_receipt, "ws-1", "user-a",
+        ).await.expect("receipt lookup").is_some(), "emitted receipt must name the persisted write");
 
         let dash = kyomi_auth::dashboard_service::get_dashboard(&ctx.db, &dashboard_id, "ws-1", "user-a")
             .await

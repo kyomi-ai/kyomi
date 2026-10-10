@@ -2,13 +2,13 @@
 
 //! Centralized WebSocket context provider for the Leptos frontend.
 //!
-//! Matches `apps/frontend/src/context/WebSocketContext.jsx` exactly:
+//! Retains the frontend WebSocket lifecycle:
 //! - Single connection per user (no duplicates)
 //! - Automatic reconnection with exponential backoff (max 30s, 10 attempts)
 //! - Event subscription system (components subscribe to specific message types)
 //! - Proper cleanup on unmount
 //! - Connection state tracking
-//! - Message deduplication using `type_sessionId_messageId_data` key
+//! - Message deduplication including type, workspace origin, session, message, and data
 //!
 //! On SSR: provides a no-op context (WebSocket is browser-only).
 
@@ -500,10 +500,11 @@ mod wasm {
 
                 let mut s = onmsg_state.borrow_mut();
 
-                // Deduplication — matches React: `${message.type}_${message.session_id}_${message.message_id}_${JSON.stringify(message.data)}`
+                // Keep identical sync controls from different workspace origins distinct.
                 let dedup_key = format!(
-                    "{}_{}_{}_{}",
+                    "{}_{}_{}_{}_{}",
                     msg.message_type,
+                    msg.workspace_id.as_deref().unwrap_or(""),
                     msg.session_id.as_deref().unwrap_or(""),
                     msg.message_id.as_deref().unwrap_or(""),
                     msg.data

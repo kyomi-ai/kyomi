@@ -259,7 +259,7 @@ async function flushRendering(page) {
     await expect(page.getByText('KYO-495 rejected retry prompt', { exact: true })).toHaveCount(1);
     await shot(page, 'rejected-draft-retry');
     await navigate(page, `/dashboard/${dashboardId}/edit`);
-    await page.waitForLoadState('networkidle');
+    await page.getByRole('button', { name: 'Toggle copilot', exact: true }).waitFor();
     let created = page.waitForResponse(response => response.url().includes('/create_copilot_session'));
     await page.getByRole('button', { name: 'Toggle copilot', exact: true }).click();
     await (await created).finished();
@@ -286,7 +286,7 @@ async function flushRendering(page) {
     await expect.poll(async () => (await copilotPanel.boundingBox())?.width || 0).toBeGreaterThanOrEqual(380);
     await expect(page.locator('main')).not.toContainText('Copilot first session reply');
     await expect(page.locator('main')).not.toContainText('Late closed session reply');
-    await page.waitForLoadState('networkidle');
+    await page.getByPlaceholder('Ask about your dashboard...').waitFor();
     copilotFrame('copilot-2', 'Copilot fresh session reply');
     await expect(page.locator('main')).toContainText('Copilot fresh session reply');
     await shot(page, 'copilot-reopened');
