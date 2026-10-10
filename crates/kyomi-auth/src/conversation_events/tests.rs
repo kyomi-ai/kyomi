@@ -208,6 +208,7 @@ async fn conformance(db: &DbPool) {
     );
     assert_eq!(notify.calls.load(Ordering::SeqCst), 1);
     assert_eq!(count(db, "conversation_events", &sid).await, 3);
+    assert_eq!(count(db, "conversation_read_projection", &sid).await, 2, "read projection must roll back with failed compatibility write");
     let state = kyomi_core::db_fetch_one!(
         db,
         (String,),
@@ -430,6 +431,7 @@ async fn conformance(db: &DbPool) {
         "conversation_event_aliases",
         "conversation_runs",
         "conversation_event_details",
+        "conversation_read_projection",
         "conversation_usage_receipts",
         "conversation_tool_receipts",
         "chat_messages",
@@ -714,6 +716,7 @@ fn before_journal(mut full: sqlx::migrate::Migrator) -> sqlx::migrate::Migrator 
             .filter(|m| {
                 !m.description.contains("durable conversation journal")
                     && !m.description.contains("durable run lifecycle")
+                    && !m.description.contains("durable read projection")
             })
             .cloned()
             .collect(),
@@ -2471,3 +2474,5 @@ async fn postgres_awaited_execution_sink_conformance() {
     scratch.run(execution_sink_conformance(&scratch.db)).await;
     scratch.close().await;
 }
+
+mod read;

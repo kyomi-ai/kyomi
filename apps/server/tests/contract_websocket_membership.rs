@@ -902,3 +902,239 @@ async fn session_cutoff_rejects_new_websocket_authentication() {
         "fresh session must open a WebSocket immediately"
     );
 }
+
+async fn durable_conversation(ctx: &Context) -> (String, agent_runtime::RunId) {
+    let sid = uuid::Uuid::new_v4().to_string();
+    let run = agent_runtime::RunId(uuid::Uuid::new_v4().to_string());
+    kyomi_core::db_execute!(
+        &ctx.db,
+        "INSERT INTO chat_sessions(session_id,user_id,workspace_id,shared) VALUES($1,$2,$3,true)",
+        &sid,
+        &ctx.user_id,
+        &ctx.workspace_id
+    )
+    .unwrap();
+    durable_event(
+        ctx,
+        &sid,
+        &run,
+        agent_runtime::PublicPayload::Submitted {
+            message_id: agent_runtime::MessageId(uuid::Uuid::new_v4().to_string()),
+            text: agent_runtime::Text {
+                preview: "committed question".into(),
+                detail: None,
+            },
+        },
+        None,
+    )
+    .await;
+    (sid, run)
+}
+async fn durable_event(
+    ctx: &Context,
+    sid: &str,
+    run: &agent_runtime::RunId,
+    payload: agent_runtime::PublicPayload,
+    detail: Option<String>,
+) {
+    let id = uuid::Uuid::new_v4().to_string();
+    let command = agent_runtime::AppendCommand {
+        version: agent_runtime::VERSION,
+        conversation_id: agent_runtime::ConversationId(sid.into()),
+        run_id: run.clone(),
+        event_id: agent_runtime::EventId(id.clone()),
+        idempotency_key: agent_runtime::IdempotencyKey(id),
+        payload: agent_runtime::Payload::Public(payload),
+        detail,
+    };
+    // Intentionally omit notification. The actual open WS must catch up from DB.
+    kyomi_auth::conversation_events::ConversationStore::new(
+        &ctx.db,
+        &[0; 32],
+        &ctx.user_id,
+        &ctx.workspace_id,
+    )
+    .append(&command)
+    .await
+    .unwrap();
+}
+async fn next_durable(socket: &mut Socket) -> serde_json::Value {
+    loop {
+        match next_frame(socket).await {
+            Message::Text(text) => {
+                let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+                if value["type"] == "conversation_read" {
+                    return value;
+                }
+            }
+            Message::Ping(bytes) => socket.send(Message::Pong(bytes)).await.unwrap(),
+            frame => panic!("expected durable response, got {frame:?}"),
+        }
+    }
+}
+async fn acknowledge(socket: &mut Socket, response: &serde_json::Value, through: i64) {
+    socket.send(Message::Text(json!({"type":"conversation_ack", "connection_generation":response["data"]["identity"]["connection_generation"],
+        "request_generation":response["data"]["identity"]["request_generation"], "through_cursor":through }).to_string().into())).await.unwrap();
+}
+#[tokio::test]
+async fn durable_ws_periodic_catchup_without_wakeup_detail_and_request_connection_isolation() {
+    let ctx = context("durable-ws-catchup").await;
+    let (sid, run) = durable_conversation(&ctx).await;
+    let mut requesting = connect_ws(
+        &ctx.base_url,
+        &ctx.workspace_id,
+        &ctx.user_id,
+        &ctx.access_token,
+    )
+    .await;
+    assert!(matches!(
+        next_frame(&mut requesting).await,
+        Message::Text(_)
+    ));
+    let mut other = connect_ws(
+        &ctx.base_url,
+        &ctx.workspace_id,
+        &ctx.user_id,
+        &ctx.access_token,
+    )
+    .await;
+    assert!(matches!(next_frame(&mut other).await, Message::Text(_)));
+    // Manager registration emits a heartbeat to existing connections as well.
+    assert!(matches!(
+        next_frame(&mut requesting).await,
+        Message::Text(_)
+    ));
+    requesting.send(Message::Text(json!({"type":"conversation_subscribe", "session_id":sid, "run_id":run, "request_generation":1}).to_string().into())).await.unwrap();
+    let snapshot = next_durable(&mut requesting).await;
+    assert_eq!(snapshot["workspace_id"], ctx.workspace_id);
+    assert_eq!(snapshot["data"]["kind"], "snapshot");
+    assert_eq!(snapshot["data"]["snapshot"]["through_cursor"], 1);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), other.next())
+            .await
+            .is_err(),
+        "snapshot was broadcast to another connection"
+    );
+    acknowledge(&mut requesting, &snapshot, 1).await;
+    let detail = agent_runtime::DetailId(uuid::Uuid::new_v4().to_string());
+    let full = "full public planning committed before completion".repeat(300);
+    durable_event(
+        &ctx,
+        &sid,
+        &run,
+        agent_runtime::PublicPayload::Planning {
+            text: agent_runtime::Text {
+                preview: "thinking only".into(),
+                detail: Some(detail.clone()),
+            },
+        },
+        Some(full.clone()),
+    )
+    .await;
+    let replay = next_durable(&mut requesting).await;
+    assert_eq!(replay["data"]["kind"], "replay");
+    assert_eq!(replay["data"]["page"]["from_cursor"], 1);
+    assert_eq!(replay["data"]["page"]["through_cursor"], 2);
+    assert_eq!(
+        replay["data"]["page"]["events"][0]["payload"]["text"]["preview"],
+        "thinking only"
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), other.next())
+            .await
+            .is_err(),
+        "periodic replay was broadcast"
+    );
+    requesting.send(Message::Text(json!({"type":"conversation_detail", "session_id":sid, "run_id":run, "detail_id":detail, "request_generation":2}).to_string().into())).await.unwrap();
+    let expansion = next_durable(&mut requesting).await;
+    assert_eq!(expansion["data"]["kind"], "detail");
+    assert_eq!(expansion["data"]["text"], full);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), other.next())
+            .await
+            .is_err(),
+        "detail was broadcast"
+    );
+    acknowledge(&mut requesting, &replay, 2).await;
+    durable_event(
+        &ctx,
+        &sid,
+        &run,
+        agent_runtime::PublicPayload::Interrupted {
+            text: agent_runtime::Text {
+                preview: "worker interrupted".into(),
+                detail: None,
+            },
+        },
+        None,
+    )
+    .await;
+    let terminal = next_durable(&mut requesting).await;
+    assert_eq!(terminal["data"]["page"]["through_cursor"], 3);
+    // A new connection recovers the thinking-only interrupted run from durable
+    // storage even though no worker/registry or Redis notification was involved.
+    other.send(Message::Text(json!({"type":"conversation_snapshot", "session_id":sid, "run_id":run, "request_generation":1}).to_string().into())).await.unwrap();
+    let recovered = next_durable(&mut other).await;
+    assert_eq!(recovered["data"]["snapshot"]["run"]["state"], "interrupted");
+    assert_eq!(
+        recovered["data"]["snapshot"]["page"]["events"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_ne!(
+        recovered["data"]["identity"]["connection_generation"],
+        snapshot["data"]["identity"]["connection_generation"]
+    );
+    other.send(Message::Text(json!({"type":"conversation_detail", "session_id":sid, "run_id":run, "detail_id":detail, "request_generation":2}).to_string().into())).await.unwrap();
+    let after_worker = next_durable(&mut other).await;
+    assert_eq!(after_worker["data"]["text"], full);
+}
+
+#[tokio::test]
+async fn durable_ws_live_revocation_denies_periodic_reads_without_run_disclosure() {
+    let ctx = context("durable-ws-revocation").await;
+    let (sid, run) = durable_conversation(&ctx).await;
+    let mut socket = connect_ws(
+        &ctx.base_url,
+        &ctx.workspace_id,
+        &ctx.user_id,
+        &ctx.access_token,
+    )
+    .await;
+    next_frame(&mut socket).await;
+    socket.send(Message::Text(json!({"type":"conversation_subscribe", "session_id":sid, "run_id":run, "request_generation":1}).to_string().into())).await.unwrap();
+    let snapshot = next_durable(&mut socket).await;
+    acknowledge(&mut socket, &snapshot, 1).await;
+    kyomi_core::db_execute!(
+        &ctx.db,
+        "UPDATE workspace_users SET active=false WHERE workspace_id=$1 AND user_id=$2",
+        &ctx.workspace_id,
+        &ctx.user_id
+    )
+    .unwrap();
+    // The existing inbound membership guard can close first if the ack is still
+    // queued; otherwise the periodic durable read returns a sanitized denial.
+    loop {
+        match next_frame(&mut socket).await {
+            Message::Close(Some(frame)) => {
+                assert_eq!(u16::from(frame.code), 4003);
+                assert!(!frame.reason.contains(run.as_str()));
+                assert!(!frame.reason.contains("committed question"));
+                break;
+            }
+            Message::Text(text) => {
+                let denied: serde_json::Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(denied["type"], "conversation_read");
+                assert_eq!(denied["data"]["kind"], "error");
+                assert_eq!(denied["data"]["code"], "unauthorized");
+                assert!(!text.contains(run.as_str()));
+                assert!(!text.contains("committed question"));
+                break;
+            }
+            Message::Ping(bytes) => socket.send(Message::Pong(bytes)).await.unwrap(),
+            frame => panic!("expected fail-closed revocation, got {frame:?}"),
+        }
+    }
+}

@@ -3,6 +3,8 @@
 //! Complete responses only; this protocol has no token delta events.
 mod lifecycle;
 mod execution;
+mod replay;
+pub use replay::*;
 pub use execution::*;
 pub use lifecycle::*;
 
@@ -10,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 pub const VERSION: u16 = 1;
 pub const MAX_EVENT_BYTES: usize = 64 * 1024;
+pub const MAX_IDENTITY_BYTES: usize = 128;
 pub const MAX_DETAIL_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_REPLAY_EVENTS: usize = 100;
 pub const MAX_REPLAY_BYTES: usize = 1024 * 1024;
@@ -277,7 +280,7 @@ pub fn validate(command: &AppendCommand) -> Result<(), PolicyError> {
         &command.event_id.0,
         &command.idempotency_key.0,
     ] {
-        if id.is_empty() || id.len() > 128 {
+        if id.is_empty() || id.len() > MAX_IDENTITY_BYTES {
             return Err(PolicyError::InvalidIdentity);
         }
     }
@@ -310,7 +313,7 @@ pub fn validate(command: &AppendCommand) -> Result<(), PolicyError> {
         return Err(PolicyError::TooLarge);
     }
     let check_id = |id: &str| {
-        if id.is_empty() || id.len() > 128 {
+        if id.is_empty() || id.len() > MAX_IDENTITY_BYTES {
             Err(PolicyError::InvalidIdentity)
         } else {
             Ok(())

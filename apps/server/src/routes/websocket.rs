@@ -159,8 +159,15 @@ async fn handle_authenticated_ws(
     let user_id_for_send = jwt_user_id.clone();
     let workspace_id_for_send = workspace_id.clone();
     let db_for_send = state.db.clone();
+    let key_for_send = state.encryption_key.clone();
+    let (read_tx, mut read_rx) = tokio::sync::mpsc::channel::<super::conversation_read::ReadCommand>(8);
+    let connection_generation = uuid::Uuid::new_v4().to_string();
     let (denial_tx, mut denial_rx) = tokio::sync::oneshot::channel::<u16>();
     let mut send_task = tokio::spawn(async move {
+        let store = kyomi_auth::conversation_events::ConversationStore::new(&db_for_send, &key_for_send, &user_id_for_send, &workspace_id_for_send);
+        let mut reads = super::conversation_read::ConnectionReads::new(connection_generation);
+        let mut catch_up_interval = tokio::time::interval(super::conversation_read::CATCH_UP_INTERVAL);
+        catch_up_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(45));
         ping_interval.tick().await; // consume the immediate first tick
 
@@ -175,6 +182,15 @@ async fn handle_authenticated_ws(
                         }))).await;
                     }
                     break;
+                }
+                command = read_rx.recv() => {
+                    let Some(command) = command else { break; };
+                    let response = reads.command(command, &store).await;
+                    if super::conversation_read::send_response(&mut ws_sender, &store, &workspace_id_for_send, response).await.is_err() { break; }
+                }
+                _ = catch_up_interval.tick() => {
+                    let response = reads.catch_up(&store).await;
+                    if super::conversation_read::send_response(&mut ws_sender, &store, &workspace_id_for_send, response).await.is_err() { break; }
                 }
                 msg = manager_rx.recv() => {
                     match msg {
@@ -192,6 +208,8 @@ async fn handle_authenticated_ws(
                                     break;
                                 }
                             }
+                            let response = reads.catch_up(&store).await;
+                            if super::conversation_read::send_response(&mut ws_sender, &store, &workspace_id_for_send, response).await.is_err() { break; }
                             if ws_sender.send(ws::Message::text(json)).await.is_err() {
                                 break;
                             }
@@ -207,7 +225,11 @@ async fn handle_authenticated_ws(
             }
         }
 
-        let _ = ws_sender.close().await;
+        // Drop the sink without another flush. A timed-out durable send may
+        // contain buffered bytes; flushing them after its authorization lock is
+        // released would race completed revocation. Explicit close frames above
+        // have already been sent and flushed while their branch was active.
+        drop(ws_sender);
         tracing::debug!("WS send task ended for user {user_id_for_send}");
     });
 
@@ -228,6 +250,10 @@ async fn handle_authenticated_ws(
                     ).await {
                         let _ = denial_tx.send(code);
                         return;
+                    }
+                    if let Ok(command) = serde_json::from_str::<super::conversation_read::ReadCommand>(&text) {
+                        if read_tx.send(command).await.is_err() { break; }
+                        continue;
                     }
                     handle_client_message(
                         &text,

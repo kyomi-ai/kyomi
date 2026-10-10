@@ -21,6 +21,16 @@ pub enum EventStoreError {
     UnsupportedVersion(i32),
     #[error("invalid replay cursor or limit")]
     InvalidReplay,
+    #[error("requested run does not belong to this conversation")]
+    RunMismatch,
+    #[error("conversation has no durable run")]
+    NoRun,
+    #[error("durable response delivery timed out")]
+    DeliveryTimedOut,
+    #[error("durable response transport failed")]
+    DeliveryFailed,
+    #[error("replay requires a snapshot reset: {0:?}")]
+    CursorReset(agent_runtime::CursorReset),
     #[error(transparent)]
     Lifecycle(#[from] agent_runtime::LifecycleError),
     #[error("projection or run update affected no record")]
@@ -259,6 +269,14 @@ macro_rules! persist_append {
                     .ok_or(agent_runtime::PolicyError::InvalidDetail)?;
                 let encrypted = encryption::encrypt(body, $store.key)?;
                 sqlx::query("INSERT INTO conversation_event_details (detail_id,session_id,event_id,public,encrypted_content) VALUES ($1,$2,$3,true,$4)").bind(detail_id.as_str()).bind(session_id).bind($command.event_id.as_str()).bind(encrypted).execute(&mut *$tx).await?;
+            }
+            if let Payload::Public(payload) = &$command.payload {
+                let detail_id = payload.text().and_then(|text| text.detail.as_ref()).map(DetailId::as_str);
+                let encrypted_detail = $command.detail.as_deref().map(|body| encryption::encrypt(body, $store.key)).transpose()?;
+                let encrypted_payload = encryption::encrypt(&serde_json::to_string(&$command.payload)?, $store.key)?;
+                sqlx::query("INSERT INTO conversation_read_projection(event_id,session_id,run_id,sequence,version,encrypted_payload,detail_id,encrypted_detail) VALUES($1,$2,$3,$4,$5,$6,$7,$8)")
+                    .bind($command.event_id.as_str()).bind(session_id).bind($command.run_id.as_str()).bind(sequence)
+                    .bind(i32::from($command.version)).bind(encrypted_payload).bind(detail_id).bind(encrypted_detail).execute(&mut *$tx).await?;
             }
             if let Some(projection) = plan.projection {
                 let encrypted = encryption::encrypt(&projection.content, $store.key)?;
@@ -499,3 +517,5 @@ pub use lifecycle::{
     ApiUsageWrite, ClaimedConversationContext, ClaimedRun, MessageWrite, QueuedRun, SubmissionReceipt,
     discover_queue,
 };
+
+mod read;
