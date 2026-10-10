@@ -12,7 +12,8 @@ use kyomi_auth::websocket::helpers as ws_helpers;
 use kyomi_core::models::DocType;
 
 use crate::tools::document::{
-    apply_create, apply_update, find_document_by_title, ApplyCreateParams, ApplyUpdateOutcome,
+    apply_create, apply_update, find_document_by_title, sql_validation_failure_result,
+    ApplyCreateOutcome, ApplyCreateParams, ApplyUpdateOutcome,
     ApplyUpdateParams, DocumentEditTool, DocumentReadTool,
 };
 use crate::tools::{AgentTool, ToolContext};
@@ -629,7 +630,7 @@ impl AgentTool for WriteDocumentTool {
         if let Some(doc) = existing {
             // Update existing document
             let outcome = apply_update(ApplyUpdateParams {
-            validation_context: Some(&ctx.query_context()),
+                query_context: ctx.query_context(),
                 db: &ctx.db,
                 dashboard_id: &doc.dashboard_id,
                 workspace_id: &ctx.workspace_id,
@@ -644,6 +645,9 @@ impl AgentTool for WriteDocumentTool {
             .await?;
 
             match outcome {
+                ApplyUpdateOutcome::ValidationFailed(errors) => {
+                    Ok(sql_validation_failure_result(&errors))
+                }
                 ApplyUpdateOutcome::Updated => {
                     // KYO-541: `apply_update` rechunks itself now — see its
                     // doc comment in `tools/document/mod.rs`.
@@ -696,8 +700,8 @@ impl AgentTool for WriteDocumentTool {
             // populate knowledge_chunks" tail with `CreateDashboardTool` via
             // `apply_create` — see that function's doc comment in
             // `tools/document/mod.rs`.
-            let dashboard_id = apply_create(ApplyCreateParams {
-            validation_context: Some(&ctx.query_context()),
+            let outcome = apply_create(ApplyCreateParams {
+                query_context: ctx.query_context(),
                 db: &ctx.db,
                 user_id: &ctx.user_id,
                 workspace_id: &ctx.workspace_id,
@@ -707,6 +711,12 @@ impl AgentTool for WriteDocumentTool {
                 embed,
             })
             .await?;
+            let dashboard_id = match outcome {
+                ApplyCreateOutcome::Created(id) => id,
+                ApplyCreateOutcome::ValidationFailed(errors) => {
+                    return Ok(sql_validation_failure_result(&errors));
+                }
+            };
 
             ws_helpers::broadcast_dashboard_sync(
                 &ctx.db, &ctx.ws_manager, &dashboard_id, &ctx.workspace_id,
@@ -1774,11 +1784,13 @@ mod tests {
     /// must come through byte-for-byte identical — `edit_knowledge_file`
     /// does a single `str::replacen`, never a full-content rewrite, so nothing
     /// else in the document can be reworded, reformatted, or reflowed.
+    /// KYO-542 updates this KYO-537 characterization: the unchanged block
+    /// is now validated too, even though the edit fragment is plain prose.
     #[tokio::test]
     async fn edit_knowledge_file_leaves_untouched_chartml_block_byte_identical() {
         let db = test_pool().await;
         seed_user_and_workspace(&db).await;
-        let chartml_block = "```chartml\ntype: bar\ndata:\n  datasource: sales\n  query: |\n    SELECT region, SUM(amount) FROM orders GROUP BY region\n```";
+        let chartml_block = "```chartml\ntype: source\nversion: 1\nname: sales_data\ndatasource: sales\nquery: |\n  SELECT 1\n```";
         let content = format!(
             "# Regional Notes\n\nThe west region underperformed this quarter.\n\n{chartml_block}\n\nEnd of notes."
         );
@@ -1789,6 +1801,8 @@ mod tests {
         .expect("seed doc");
         let mut ctx = build_ctx(db);
         ctx.embedding = loaded_embedding();
+        let (dry_runs, handler, connection_id) =
+            crate::tools::document::sql_validation_tests::attach_sql_datasource(&mut ctx).await;
 
         let result = EditDocumentTool
             .execute(
@@ -1815,6 +1829,9 @@ mod tests {
         );
         assert!(doc.content.contains("beat forecast"), "the edited span must reflect the new text");
         assert!(!doc.content.contains("underperformed"), "the old text must be gone");
+        assert_eq!(dry_runs.load(std::sync::atomic::Ordering::SeqCst), 1,
+            "the unchanged ChartML block must be dry-run validated once");
+        crate::tools::document::sql_validation_tests::finish(&ctx, handler, connection_id).await;
     }
 
     /// A copilot scoped to one open knowledge document must not be able to

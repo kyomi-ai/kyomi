@@ -12,9 +12,9 @@
 //! the details around them. This module is the shared core those two
 //! families now call into.
 //!
-//! This module (and its submodules) knows nothing about `AgentTool`, JSON
-//! schemas, or the LLM beyond what the [`AgentTool`] trait itself requires —
-//! the actual business logic only calls `kyomi_auth::dashboard_service`.
+//! The shared business logic handles storage and content validation,
+//! including one SQL retry payload for the tool layer. Tool schemas and
+//! registration remain with the `AgentTool` implementations.
 //! [`read`], [`edit`], and [`delete`] each host one `AgentTool` struct whose
 //! *entire* tool-facing shape (not just the underlying DB call) is
 //! genuinely identical across both families, selected by the [`DocType`]
@@ -34,11 +34,13 @@
 //!
 //! KYO-538 is stage 2 of 7 in the document-tool consolidation and unifies
 //! *structure*, not *behaviour*. Every place the two families genuinely
-//! behave differently today (embedding-refresh timing, validation,
-//! targeted-edit reach across doc types) is preserved exactly and called
+//! behaved differently at that stage (embedding-refresh timing, validation,
+//! targeted-edit reach across doc types) was preserved exactly and called
 //! out with a `NOTE:` naming the ticket that will decide whether to
-//! collapse it (KYO-541/542). CAS enforcement was one such difference
-//! until KYO-539 unified it — both families now thread a real
+//! collapse it. KYO-541 unified chunk refresh, and KYO-542 now validates
+//! ChartML SQL by resulting content for both families. CAS enforcement
+//! was one such difference until KYO-539 unified it — both families now
+//! thread a real
 //! `expected_content_hash` through [`apply_update`]. Initial
 //! `knowledge_chunks` population on create was another — until KYO-776
 //! unified it, `CreateDashboardTool` never populated it at all, while
@@ -48,6 +50,9 @@
 mod delete;
 mod edit;
 mod read;
+
+#[cfg(test)]
+pub(crate) mod sql_validation_tests;
 
 pub use delete::DocumentDeleteTool;
 pub use edit::DocumentEditTool;
@@ -190,8 +195,8 @@ pub(crate) async fn read_document(
 
 /// Parameters for [`apply_update`].
 pub(crate) struct ApplyUpdateParams<'a> {
-    pub validation_context: Option<&'a super::QueryContext>,
     pub db: &'a kyomi_core::DbPool,
+    pub query_context: super::QueryContext,
     pub dashboard_id: &'a str,
     pub workspace_id: &'a str,
     pub user_id: &'a str,
@@ -216,13 +221,12 @@ pub(crate) struct ApplyUpdateParams<'a> {
     pub document_scope: Option<&'a str>,
 }
 
-/// Outcome of [`apply_update`] — the three cases every pre-KYO-538 caller
-/// (`write_knowledge_file`'s update branch, `edit_knowledge_file`, and
-/// `modify_dashboard`) already classified identically.
+/// Outcome of updating a document, including correctable SQL failures.
 pub(crate) enum ApplyUpdateOutcome {
     Updated,
     NotFound,
     Conflict(String),
+    ValidationFailed(String),
 }
 
 /// A dashboard/knowledge copilot scoped to one open document
@@ -262,8 +266,8 @@ pub(crate) fn enforce_document_scope(
 
 /// Parameters for [`apply_create`].
 pub(crate) struct ApplyCreateParams<'a> {
-    pub validation_context: Option<&'a super::QueryContext>,
     pub db: &'a kyomi_core::DbPool,
+    pub query_context: super::QueryContext,
     pub user_id: &'a str,
     pub workspace_id: &'a str,
     pub title: &'a str,
@@ -277,8 +281,35 @@ pub(crate) struct ApplyCreateParams<'a> {
     pub embed: &'a EmbeddingService,
 }
 
+/// Outcome of creating a document, including a correctable SQL failure.
+pub(crate) enum ApplyCreateOutcome {
+    Created(String),
+    ValidationFailed(String),
+}
+
+/// The same retry payload for every document-writing tool.
+pub(crate) fn sql_validation_failure_result(errors: &str) -> String {
+    serde_json::json!({
+        "success": false,
+        "error": format!("Document contains invalid SQL: {errors}"),
+        "validation_errors": [errors],
+    })
+    .to_string()
+}
+
+/// Plain prose never reaches datasource dry-run validation. Reuse the
+/// agent's detector so document writes follow the same ChartML contract.
+async fn validate_content_sql(ctx: &super::QueryContext, content: &str) -> Option<String> {
+    if crate::agent::has_chartml_blocks(content) {
+        super::query_utils::validate_chartml_sql(ctx, content).await
+    } else {
+        None
+    }
+}
+
 /// Shared tail of every "create a new document" tool: call
-/// `dashboard_service::create_dashboard`, then populate `knowledge_chunks`
+/// validate resulting ChartML SQL, call `dashboard_service::create_dashboard`,
+/// then populate `knowledge_chunks`
 /// for the row it just inserted.
 ///
 /// NOTE (KYO-776 resolved policy, mirroring [`apply_update`]'s own NOTE
@@ -307,13 +338,19 @@ pub(crate) struct ApplyCreateParams<'a> {
 /// `doc_type`, the normal case). `write_knowledge_file`'s create-on-no-match
 /// branch already rechunked explicitly on its own; it now goes through this
 /// shared function instead of carrying its own copy of the same two calls.
-pub(crate) async fn apply_create(params: ApplyCreateParams<'_>) -> kyomi_core::Result<String> {
+pub(crate) async fn apply_create(
+    params: ApplyCreateParams<'_>,
+) -> kyomi_core::Result<ApplyCreateOutcome> {
+    if let Some(errors) = validate_content_sql(&params.query_context, params.content).await {
+        return Ok(ApplyCreateOutcome::ValidationFailed(errors));
+    }
+
     let dashboard_id = kyomi_auth::dashboard_service::create_dashboard_with_context(
         kyomi_auth::dashboard_service::CreateDashboardParams {
             db: params.db, user_id: params.user_id, workspace_id: params.workspace_id,
             title: params.title, content: params.content, doc_type: params.doc_type,
             embed: None, // rechunk happens synchronously below
-            validation_context: params.validation_context,
+            validation_context: Some(&params.query_context),
         },
     )
     .await?;
@@ -327,11 +364,12 @@ pub(crate) async fn apply_create(params: ApplyCreateParams<'_>) -> kyomi_core::R
     )
     .await?;
 
-    Ok(dashboard_id)
+    Ok(ApplyCreateOutcome::Created(dashboard_id))
 }
 
 /// Shared tail of every "replace a document's content" tool: call
-/// `dashboard_service::update_dashboard` and classify the result.
+/// validate resulting ChartML SQL, call `dashboard_service::update_dashboard`,
+/// and classify the result.
 ///
 /// NOTE (KYO-541 resolved policy — this function now owns chunk refresh):
 /// `UpdateDashboardParams.embed` is always passed as `None` to
@@ -380,6 +418,25 @@ pub(crate) async fn apply_update(
     // `enforce_document_scope`.
     enforce_document_scope(params.document_scope, params.dashboard_id)?;
 
+    // Content replacements already carry the complete result (including
+    // targeted edits). A title-only write keeps the stored content, which
+    // must pass the same gate before the title is persisted.
+    let existing = if params.content.is_none() {
+        kyomi_auth::dashboard_service::get_dashboard(
+            params.db, params.dashboard_id, params.workspace_id, params.user_id,
+        )
+        .await?
+    } else {
+        None
+    };
+    let resulting_content = params.content
+        .or_else(|| existing.as_ref().map(|doc| doc.content.as_str()));
+    if let Some(content) = resulting_content
+        && let Some(errors) = validate_content_sql(&params.query_context, content).await
+    {
+        return Ok(ApplyUpdateOutcome::ValidationFailed(errors));
+    }
+
     match kyomi_auth::dashboard_service::update_dashboard_with_context(
         kyomi_auth::dashboard_service::UpdateDashboardParams {
             db: params.db,
@@ -392,7 +449,7 @@ pub(crate) async fn apply_update(
             change_summary: params.change_summary,
             expected_content_hash: params.expected_content_hash,
         },
-        params.validation_context,
+        Some(&params.query_context),
     )
     .await
     {
