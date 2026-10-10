@@ -1,5 +1,9 @@
 # Sign every field the verifier acts on, not just the one that names the change
 
+The agent review and verification signing gates cited below were retired in
+October 2026. These examples describe historical cryptographic behavior; they
+do not require agents to sign reviews or verification reports.
+
 A signature authorises exactly the bytes that were fed to the signing key. Every other byte
 in the artefact the verifier reads afterwards is unauthenticated input — including bytes
 that make the check *weaker*.
@@ -56,7 +60,7 @@ SIGNATURE=$(openssl pkeyutl -sign -inkey "$KEY_FILE" -in "$HASH_FILE" | base64 -
     fi
 } > .review-approval
 
-# RIGHT — quoted verbatim from scripts/sign-review.sh on `main` today
+# RIGHT — quoted verbatim from scripts/sign-review.sh in the historical KYO-712 implementation
 # (landed as `abe205f8`, PR #516, merged 2026-09-12); its preceding comment
 # is elided. The `{ ... } > .review-approval` block on `main` is
 # byte-identical to the block shown above, which is the point: nothing

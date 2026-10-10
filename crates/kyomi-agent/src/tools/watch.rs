@@ -46,7 +46,7 @@ impl AgentTool for CreateWatchTool {
          1. **Alert Mode** (mode=\"alert\") - Conditional monitoring\n\
          2. **Report Mode** (mode=\"report\") - Scheduled reports\n\n\
          **Workflow:**\n\
-         1. Use search_watches to check for duplicates first\n\
+         1. Use search_watches to check for semantically equivalent monitoring first\n\
          2. Explore data schema\n\
          3. Set verified_no_duplicates=true after checking\n\n\
          **Schedule:** Wall-clock cron in the named IANA timezone (UTC when omitted; 5 fields: min hour day month weekday)\n\n\
@@ -80,7 +80,7 @@ impl AgentTool for CreateWatchTool {
                 },
                 "verified_no_duplicates": {
                     "type": "boolean",
-                    "description": "Set to true after checking for duplicates with search_watches. Must be true to create."
+                    "description": "Set to true after checking for semantically equivalent monitoring with search_watches. Names may be reused. Must be true to create."
                 },
                 "queries": {
                     "type": "array",
@@ -165,7 +165,7 @@ impl AgentTool for CreateWatchTool {
             return Ok(serde_json::json!({
                 "error": "You must confirm that you've searched for existing watches \
                           before creating a new one. Use the search_watches tool first \
-                          to check for duplicates, then set verified_no_duplicates=true."
+                          to check for semantically equivalent monitoring, then set verified_no_duplicates=true."
             })
             .to_string());
         }
@@ -657,7 +657,7 @@ impl AgentTool for SearchWatchesTool {
     }
 
     fn description(&self) -> &str {
-        "Search your own watches to avoid duplicates or find watches to modify. \
+        "Search your own watches to avoid semantically equivalent monitoring or find watches to modify. \
          Leave the query empty to list all of your watches. Returns matching watches \
          with full details (name, prompt, schedule, mode, queries, status, last execution). \
          Watches are private to their creator — this never returns another user's watches."
@@ -1433,12 +1433,22 @@ mod tests {
             });
 
             let result = CreateWatchTool
-                .execute(args, &ctx)
+                .execute(args.clone(), &ctx)
                 .await
                 .expect("create_watch tool execution");
             let parsed: serde_json::Value =
                 serde_json::from_str(&result).expect("tool result is JSON");
             assert_eq!(parsed["success"], serde_json::json!(true), "{result}");
+
+            let repeated = CreateWatchTool
+                .execute(args, &ctx)
+                .await
+                .expect("same-name watch must also succeed through the agent tool");
+            let repeated: serde_json::Value = serde_json::from_str(&repeated).expect("tool JSON");
+            assert_eq!(repeated["success"], serde_json::json!(true));
+            assert!(parsed["watch_id"].is_string());
+            assert!(repeated["watch_id"].is_string());
+            assert_ne!(repeated["watch_id"], parsed["watch_id"]);
 
             let msg_a = rx_a
                 .try_recv()

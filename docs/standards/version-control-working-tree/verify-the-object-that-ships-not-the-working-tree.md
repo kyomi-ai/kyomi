@@ -4,7 +4,7 @@
 
 The failure is silent and total: the verification is genuinely green, the report is honest, and the pushed commit does not compile.
 
-**Rule:** before signing a review, committing, or pushing, confirm that the thing you verified is the thing that ships.
+**Rule:** before approving a review, committing, or pushing, confirm that the thing you verified is the thing that ships.
 
 - `git status --short` must show no unexpected ` M` (unstaged) or `??` (untracked) entries — either means the working tree you tested contains content the commit will not.
 - When a fix is staged on top of an existing commit, verify the *combined* result, or amend first and verify after. `git show HEAD:<path>` reads the committed blob; that is what a fresh checkout gets.
@@ -16,7 +16,7 @@ The failure is silent and total: the verification is genuinely green, the report
 ```bash
 git add -p                      # fix layered into the index only
 cargo test -p kyomi-ui          # reads the working tree → passes
-./sign-review.sh && git push    # pushes HEAD, which lacks the fix
+git push    # pushes HEAD, which lacks the fix
 ```
 
 **RIGHT**:
