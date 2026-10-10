@@ -54,10 +54,20 @@ pub struct DashboardDetail {
     pub workspace_id: String,
     pub title: String,
     pub content: String,
+    pub content_hash: Option<String>,
     pub summary: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub last_change_summary: Option<String>,
+}
+
+/// The exact saved baseline for the next editor save. Later background writes
+/// must be reconciled separately before adopting their hashes.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SavedDashboard {
+    pub title: String,
+    pub content: String,
+    pub content_hash: Option<String>,
 }
 
 /// Lightweight version info for the history list.
@@ -222,6 +232,7 @@ pub async fn get_dashboard(dashboard_id: String) -> Result<DashboardDetail, Serv
         workspace_id: dashboard.workspace_id,
         title: dashboard.title,
         content: dashboard.content,
+        content_hash: dashboard.content_hash,
         summary,
         created_at: dashboard.created_at.to_rfc3339(),
         updated_at: dashboard.updated_at.to_rfc3339(),
@@ -282,6 +293,16 @@ pub async fn create_dashboard(
     Ok(dashboard_id)
 }
 
+/// Create an editor document and return its initial committed baseline.
+/// A concurrent writer can change the document immediately, so do not use
+/// a later fetch as the baseline for the text submitted here.
+#[server(prefix = "/leptos-api", input = server_fn::codec::Json, client = crate::server_fns::paywall_client::PaywallAwareClient)]
+pub async fn create_editor_dashboard(title: String, content: String) -> Result<(String, SavedDashboard), ServerFnError> {
+    let dashboard_id = create_dashboard(title.clone(), Some(content.clone())).await?;
+    let content_hash = Some(kyomi_auth::dashboard_service::hash_content(&content));
+    Ok((dashboard_id, SavedDashboard { title: title.trim().to_string(), content, content_hash }))
+}
+
 /// Update an existing dashboard's title, content, and/or change summary.
 ///
 /// Rejects no-op updates where all fields are `None`.
@@ -292,7 +313,8 @@ pub async fn update_dashboard(
     title: Option<String>,
     content: Option<String>,
     change_summary: Option<String>,
-) -> Result<(), ServerFnError> {
+    expected_content_hash: String,
+) -> Result<SavedDashboard, ServerFnError> {
     // lint-allow: server-fn-callouts=sync broadcast is a separate cross-cutting concern alongside mutation + embedding + re-fetch
     let ac = AuthenticatedContext::extract().await?;
 
@@ -303,41 +325,28 @@ pub async fn update_dashboard(
         return Err(ServerFnError::new("No updates provided"));
     }
 
-    kyomi_auth::dashboard_service::update_dashboard_with_context(
-        kyomi_auth::dashboard_service::UpdateDashboardParams {
-            db: ac.db(),
-            embed: None, // no rechunking from dashboard UI (yet)
-            dashboard_id: &dashboard_id,
-            workspace_id: &ac.ws_id,
-            user_id: &ac.auth.user_id,
-            title: title.as_deref(),
-            content: content.as_deref(),
-            change_summary: change_summary.as_deref(),
-            expected_content_hash: None, // no CAS for dashboard UI
-            copilot_receipt: None,
-        },
-        Some(&validation_context),
-    )
-    .await
-    .into_sfn_core()?;
+    // Resolve dependencies before writing: a successful commit must return
+    // its baseline even if embedding is unavailable.
+    let embedding_svc = if title.is_some() || content.is_some() {
+        Some(ac.ctx.embedding.wait_ready().await
+            .map_err(|e| ServerFnError::new(format!("Embedding service unavailable: {}", e.user_message())))?)
+    } else { None };
+
+    let request = UpdateDashboard {
+        dashboard_id: dashboard_id.clone(), title: title.clone(), content: content.clone(),
+        change_summary: change_summary.clone(), expected_content_hash,
+    };
+    let (_, saved) = persist_dashboard_save(ac.db(), &ac.ws_id, &ac.auth.user_id, &request, Some(&validation_context))
+        .await.map_err(dashboard_save_error)?;
 
     // Re-embed if content or title changed (matches REST handler — propagates error)
-    if title.is_some() || content.is_some() {
-        let embedding_svc = ac.ctx.embedding.wait_ready().await
-            // user_message() (KYO-448) — Display would leak the variant tag.
-            .map_err(|e| ServerFnError::new(format!("Embedding service unavailable: {}", e.user_message())))?;
-        if let Ok(Some(d)) =
-            kyomi_auth::dashboard_service::get_dashboard(ac.db(), &dashboard_id, &ac.ws_id, &ac.auth.user_id).await
-        {
-            kyomi_auth::dashboard_service::spawn_embedding_generation(
-                ac.ctx.db.clone(),
-                embedding_svc.clone(),
-                dashboard_id.clone(),
-                ac.ws_id.clone(),
-                d.title,
-                d.content,
-            );
-        }
+    if let Some(embedding_svc) = embedding_svc
+        && let Ok(Some(d)) = kyomi_auth::dashboard_service::get_dashboard(ac.db(), &dashboard_id, &ac.ws_id, &ac.auth.user_id).await
+    {
+        kyomi_auth::dashboard_service::spawn_embedding_generation(
+            ac.ctx.db.clone(), embedding_svc.clone(), dashboard_id.clone(),
+            ac.ws_id.clone(), d.title, d.content,
+        );
     }
 
     // Generate dashboard summary if content changed and none exists.
@@ -395,7 +404,39 @@ pub async fn update_dashboard(
         ).await;
     }
 
-    Ok(())
+    Ok(SavedDashboard { title: saved.title, content: saved.content, content_hash: saved.content_hash })
+}
+
+/// The UI mutation seam requires a hash, even for documents whose legacy
+/// stored hash is NULL (represented by the empty string).
+#[cfg(feature = "ssr")]
+async fn persist_dashboard_save(
+    db: &kyomi_core::DbPool,
+    workspace_id: &str,
+    user_id: &str,
+    request: &UpdateDashboard,
+    validation_context: Option<&kyomi_auth::chartml_validation::QueryContext>,
+) -> kyomi_core::Result<(bool, kyomi_core::models::Dashboard)> {
+    kyomi_auth::dashboard_service::update_dashboard_with_snapshot(
+        kyomi_auth::dashboard_service::UpdateDashboardParams {
+            db, embed: None, dashboard_id: &request.dashboard_id, workspace_id, user_id,
+            title: request.title.as_deref(), content: request.content.as_deref(),
+            change_summary: request.change_summary.as_deref(),
+            expected_content_hash: Some(&request.expected_content_hash), copilot_receipt: None,
+        }, validation_context,
+    ).await
+}
+
+#[cfg(feature = "ssr")]
+fn dashboard_save_error(error: kyomi_core::Error) -> ServerFnError {
+    let error = match error {
+        kyomi_core::Error::Conflict(_) => kyomi_core::Error::Conflict(
+            "Your save was not applied because this document changed while you were editing. Your text is still here. Review the latest saved version before saving again.".into(),
+        ),
+        error => error,
+    };
+    tracing::error!(error = %error, "dashboard save failed");
+    ServerFnError::new(kyomi_core::sanitize_error(error.user_message()))
 }
 
 /// Delete a dashboard by ID.
@@ -719,4 +760,56 @@ fn chartml_query_context(ac: &AuthenticatedContext) -> Result<kyomi_auth::chartm
         encryption_key: ac.ctx.encryption_key.clone().ok_or_else(|| ServerFnError::new("Datasource validation is unavailable"))?,
         config: ac.ctx.config.clone(), connect_registry: ac.ctx.connect_registry.clone(),
     })
+}
+
+#[cfg(all(test, feature = "ssr"))]
+mod save_cas_tests {
+    use super::*;
+    use kyomi_auth::dashboard_service;
+
+    #[tokio::test]
+    async fn stale_editor_hash_conflicts_without_overwriting_saved_content() {
+        let _ = kyomi_core::constants::load_with_fallback();
+        let db = kyomi_core::DbPool::connect("sqlite::memory:").await.expect("migrated database");
+        let kyomi_core::DbPool::Sqlite(pool) = &db else { panic!("sqlite fixture"); };
+        sqlx::query("INSERT INTO users (user_id, email, active) VALUES ('owner', 'owner@example.com', 1)")
+            .execute(pool).await.expect("seed owner");
+        sqlx::query("INSERT INTO workspaces (workspace_id, name, owner_user_id) VALUES ('workspace', 'Workspace', 'owner')")
+            .execute(pool).await.expect("seed workspace");
+        let id = dashboard_service::create_dashboard(
+            &db, "owner", "workspace", "Original title", "initial content",
+            kyomi_core::models::dashboard::DocType::Knowledge, None,
+        ).await.expect("create document");
+        let initial_hash = dashboard_service::hash_content("initial content");
+        let mut request = UpdateDashboard {
+            dashboard_id: id.clone(), title: Some("  Saved title  ".into()), content: Some("saved content".into()),
+            change_summary: None, expected_content_hash: initial_hash.clone(),
+        };
+        let (updated, first) = persist_dashboard_save(&db, "workspace", "owner", &request, None)
+            .await.expect("first save");
+        assert!(updated);
+        assert_eq!(first.title, "Saved title");
+        assert_eq!(first.content, "saved content");
+        assert_eq!(first.content_hash.as_deref(), Some(dashboard_service::hash_content("saved content").as_str()));
+        request.content = Some("typed local content".into());
+        let rejected = persist_dashboard_save(&db, "workspace", "owner", &request, None)
+            .await.expect_err("stale save must conflict");
+        assert!(matches!(rejected, kyomi_core::Error::Conflict(_)));
+        let message = dashboard_save_error(rejected).to_string();
+        assert!(message.contains("Your save was not applied"));
+        assert!(message.contains("Your text is still here"));
+        assert!(!message.contains("Content hash mismatch"));
+        let stored = dashboard_service::get_dashboard(&db, &id, "workspace", "owner")
+            .await.expect("read persisted state").expect("document exists");
+        assert_eq!(stored.content, first.content);
+        assert_eq!(stored.content_hash, first.content_hash);
+        let versions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM dashboard_versions WHERE dashboard_id = $1")
+            .bind(&id).fetch_one(pool).await.expect("read history");
+        assert_eq!(versions, 1, "a rejected save creates no version");
+        request.content = Some("next edit".into());
+        request.expected_content_hash = first.content_hash.expect("saved hash");
+        let (_, second) = persist_dashboard_save(&db, "workspace", "owner", &request, None)
+            .await.expect("consecutive save uses returned hash");
+        assert_eq!(second.content, "next edit");
+    }
 }

@@ -43,7 +43,7 @@ use crate::components::dashboard::{
 };
 use crate::components::{Alert, AlertDescription, AlertTitle, AlertVariant, Button, ButtonLink, ButtonSize, ButtonVariant, DetailPageSkeleton, ToggleButton, Spinner};
 use crate::server_fns::context::UserContext;
-use crate::server_fns::dashboards::{create_dashboard, get_dashboard, update_dashboard};
+use crate::server_fns::dashboards::{create_editor_dashboard, get_dashboard, update_dashboard};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct EditorSnapshot {
@@ -66,6 +66,33 @@ fn reconcile_remote(saved: &EditorSnapshot, draft: &EditorSnapshot, remote: &Edi
     if remote == saved { RemoteDecision::Unchanged }
     else if draft == saved || draft == remote { RemoteDecision::Apply }
     else { RemoteDecision::Conflict }
+}
+
+fn reconciled_hash(decision: &RemoteDecision, held_hash: Option<String>, remote_hash: Option<String>) -> Option<String> {
+    match decision {
+        RemoteDecision::Conflict => held_hash,
+        RemoteDecision::Unchanged | RemoteDecision::Apply => remote_hash,
+    }
+}
+
+// A remote saved version adopted while the save was in flight is newer than
+// this response. Keep that baseline; never attach its hash to older bytes.
+fn should_adopt_save(current_generation: u64, dispatched_generation: u64, current: &EditorSnapshot, saved: &EditorSnapshot) -> bool {
+    current_generation == dispatched_generation || current == saved
+}
+
+// A read started before this save committed must never restore older bytes.
+// Re-read if an outstanding refresh or conflict still needs reconciliation.
+fn invalidate_refresh_after_save(
+    set_generation: WriteSignal<u64>,
+    pending: ReadSignal<bool>,
+    set_pending: WriteSignal<bool>,
+    has_conflict: bool,
+) -> bool {
+    let needs_refresh = pending.try_get_untracked().unwrap_or(false) || has_conflict;
+    set_generation.try_update(|generation| *generation += 1);
+    set_pending.try_set(false);
+    needs_refresh
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -115,6 +142,45 @@ mod reconciliation_tests {
         let draft = EditorSnapshot::new("Mine".into(), "after".into());
         assert_eq!(reconcile_remote(&saved, &draft, &draft), RemoteDecision::Apply);
         assert_eq!(reconcile_remote(&saved, &draft, &saved), RemoteDecision::Unchanged);
+    }
+
+    #[test]
+    fn remote_hash_is_adopted_only_with_the_saved_snapshot() {
+        let saved = EditorSnapshot::new("Title".into(), "before".into());
+        let remote = EditorSnapshot::new("Title".into(), "copilot write".into());
+        let draft = EditorSnapshot::new("Title".into(), "typed locally".into());
+        let held = Some("old hash".to_string());
+        let latest = Some("remote hash".to_string());
+        let conflict = reconcile_remote(&saved, &draft, &remote);
+        assert_eq!(conflict, RemoteDecision::Conflict);
+        assert_eq!(reconciled_hash(&conflict, held.clone(), latest.clone()), held);
+        let applied = reconcile_remote(&saved, &saved, &remote);
+        assert_eq!(reconciled_hash(&applied, held, latest.clone()), latest);
+    }
+
+    #[test]
+    fn save_response_preserves_a_newer_adopted_remote_baseline() {
+        let before = EditorSnapshot::new("Before".into(), "content".into());
+        let saved = EditorSnapshot::new("Saved".into(), "content".into());
+        let newer = EditorSnapshot::new("Newer remote title".into(), "content".into());
+        assert!(should_adopt_save(0, 0, &before, &saved));
+        assert!(should_adopt_save(1, 0, &saved, &saved));
+        assert!(!should_adopt_save(2, 0, &newer, &saved), "same content hash must not undo a newer title");
+    }
+
+    #[test]
+    fn save_invalidates_an_older_in_flight_read_before_refreshing() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let (generation, set_generation) = signal(7u64);
+            let (pending, set_pending) = signal(true);
+            let earlier_read = generation.get_untracked();
+            assert!(invalidate_refresh_after_save(set_generation, pending, set_pending, false));
+            assert_ne!(generation.get_untracked(), earlier_read, "the old response fails the refresh generation gate");
+            assert!(!pending.get_untracked());
+            assert!(!invalidate_refresh_after_save(set_generation, pending, set_pending, false));
+            assert!(invalidate_refresh_after_save(set_generation, pending, set_pending, true), "a pending conflict must be reconsidered against the committed baseline");
+        });
     }
 
     #[test]
@@ -220,6 +286,7 @@ pub fn DashboardEditorPage() -> impl IntoView {
                         dashboard_id=None
                         initial_title=initial_title.to_string()
                         initial_content=String::new()
+                        initial_content_hash=None
                     />
                 }
                 .into_any()
@@ -251,6 +318,7 @@ pub fn DashboardEditorPage() -> impl IntoView {
                                             dashboard_id=Some(dashboard.dashboard_id.clone())
                                             initial_title=dashboard.title.clone()
                                             initial_content=dashboard.content.clone()
+                                            initial_content_hash=dashboard.content_hash.clone()
                                         />
                                     }
                                     .into_any()
@@ -316,6 +384,7 @@ fn DashboardEditorInner(
     dashboard_id: Option<String>,
     initial_title: String,
     initial_content: String,
+    initial_content_hash: Option<String>,
 ) -> impl IntoView {
     // This page is mounted at both /dashboard/:id/edit and /knowledge/:id/edit.
     // Derive section-specific labels and URL bases from the current pathname
@@ -331,6 +400,8 @@ fn DashboardEditorInner(
     let (preview_content, set_preview_content) = signal(initial_content.clone());
     let (original_title, set_original_title) = signal(initial_title);
     let (original_content, set_original_content) = signal(initial_content);
+    let (content_hash, set_content_hash) = signal(initial_content_hash);
+    let (baseline_generation, set_baseline_generation) = signal(0u64);
 
     // ── Dashboard ID signal (updated after create) ───────────────────────
     let (current_dashboard_id, set_current_dashboard_id) =
@@ -342,7 +413,7 @@ fn DashboardEditorInner(
     // ── Save state ───────────────────────────────────────────────────────
     let (save_error, set_save_error) = signal(Option::<String>::None);
     let (save_success, set_save_success) = signal(false);
-    let (remote_conflict, set_remote_conflict) = signal(Option::<EditorSnapshot>::None);
+    let (remote_conflict, set_remote_conflict) = signal(Option::<(EditorSnapshot, Option<String>)>::None);
     let (retained_draft, set_retained_draft) = signal(Option::<EditorSnapshot>::None);
     let (refresh_error, set_refresh_error) = signal(Option::<String>::None);
     let (refresh_pending, set_refresh_pending) = signal(false);
@@ -476,15 +547,22 @@ fn DashboardEditorInner(
                     ) else { return; };
                     let saved = EditorSnapshot::new(saved_title, saved_content);
                     let draft = EditorSnapshot::new(draft_title, draft_content);
+                    let remote_hash = dashboard.content_hash;
                     let remote = EditorSnapshot::new(dashboard.title, dashboard.content);
                     if pending_snapshot.try_get_untracked().flatten().as_ref() == Some(&remote) {
                         set_original_title.try_set(remote.title);
                         set_original_content.try_set(remote.content);
+                        set_content_hash.try_set(remote_hash);
+                        set_baseline_generation.try_update(|n| *n += 1);
                         set_remote_conflict.try_set(None);
                         return;
                     }
-                    match reconcile_remote(&saved, &draft, &remote) {
-                        RemoteDecision::Unchanged => { set_remote_conflict.try_set(None); }
+                    let decision = reconcile_remote(&saved, &draft, &remote);
+                    set_content_hash.try_set(reconciled_hash(&decision, content_hash.try_get_untracked().flatten(), remote_hash.clone()));
+                    match decision {
+                        RemoteDecision::Unchanged => {
+                            set_remote_conflict.try_set(None);
+                        }
                         RemoteDecision::Apply => {
                             #[cfg(target_arch = "wasm32")]
                             debounce_handle.try_update_value(|h| { drop(h.take()); });
@@ -493,9 +571,10 @@ fn DashboardEditorInner(
                             set_preview_content.try_set(remote.content.clone());
                             set_original_title.try_set(remote.title);
                             set_original_content.try_set(remote.content);
+                            set_baseline_generation.try_update(|n| *n += 1);
                             set_remote_conflict.try_set(None);
                         }
-                        RemoteDecision::Conflict => { set_remote_conflict.try_set(Some(remote)); }
+                        RemoteDecision::Conflict => { set_remote_conflict.try_set(Some((remote, remote_hash))); }
                     }
                 }
                 Err(e) => {
@@ -569,21 +648,20 @@ fn DashboardEditorInner(
     }
 
     // ── Save Action ──────────────────────────────────────────────────────
-    // Input: (existing_id, title, content)
-    // Output: Ok((maybe_new_id, saved_title, saved_content)) on success.
-    type SaveEditorInput = (Option<String>, String, String);
+    // Capture the expected hash with the submitted text at dispatch.
+    // The response carries the exact committed baseline for the next save.
+    type SaveEditorInput = (Option<String>, String, String, String, u64);
 
     let save_action = Action::new(|input: &SaveEditorInput| {
-        let (existing_id, title, content) = input.clone();
+        let (existing_id, title, content, expected_hash, dispatched_generation) = input.clone();
         async move {
             if let Some(did) = existing_id {
-                update_dashboard(did, Some(title.clone()), Some(content.clone()), None)
+                update_dashboard(did, Some(title), Some(content), None, expected_hash.clone())
                     .await
-                    .map(|()| (None::<String>, title, content))
+                    .map(|saved| (None::<String>, saved, dispatched_generation))
             } else {
-                create_dashboard(title.clone(), Some(content.clone()))
-                    .await
-                    .map(|new_id| (Some(new_id), title, content))
+                create_editor_dashboard(title, content).await
+                    .map(|(new_id, saved)| (Some(new_id), saved, dispatched_generation))
             }
         }
     });
@@ -592,7 +670,7 @@ fn DashboardEditorInner(
         if let Some(result) = save_action.value().get() {
             set_pending_snapshot.set(None);
             match result {
-                Ok((maybe_new_id, saved_title, saved_content)) => {
+                Ok((maybe_new_id, saved, dispatched_generation)) => {
                     if let Some(new_id) = maybe_new_id {
                         set_current_dashboard_id.set(Some(new_id.clone()));
 
@@ -617,8 +695,17 @@ fn DashboardEditorInner(
                     }
                     // A keystroke after dispatch is still an unsaved draft.
                     // Advancing the baseline must not replace that buffer.
-                    set_original_title.set(saved_title);
-                    set_original_content.set(saved_content);
+                    let current = EditorSnapshot::new(original_title.get_untracked(), original_content.get_untracked());
+                    let committed = EditorSnapshot::new(saved.title.clone(), saved.content.clone());
+                    if should_adopt_save(baseline_generation.get_untracked(), dispatched_generation, &current, &committed) {
+                        set_original_title.set(saved.title);
+                        set_original_content.set(saved.content);
+                        set_content_hash.set(saved.content_hash);
+                        set_baseline_generation.update(|n| *n += 1);
+                    }
+                    if invalidate_refresh_after_save(set_refresh_generation, refresh_pending, set_refresh_pending, remote_conflict.get_untracked().is_some()) {
+                        refresh_remote();
+                    }
                     set_save_success.set(true);
                     #[cfg(target_arch = "wasm32")]
                     gloo_timers::callback::Timeout::new(2000, move || {
@@ -643,8 +730,8 @@ fn DashboardEditorInner(
         let existing_id = current_dashboard_id.get_untracked();
 
         set_save_error.set(None);
-        set_pending_snapshot.set(Some(EditorSnapshot::new(current_title.clone(), current_content.clone())));
-        save_action.dispatch((existing_id, current_title, current_content));
+        set_pending_snapshot.set(Some(EditorSnapshot::new(current_title.trim().to_string(), current_content.clone())));
+        save_action.dispatch((existing_id, current_title, current_content, content_hash.get_untracked().unwrap_or_default(), baseline_generation.get_untracked()));
     };
 
     // Clone for button handler
@@ -1201,17 +1288,6 @@ fn DashboardEditorInner(
                         })
                     }}
 
-                    // Save error
-                    {move || {
-                        save_error.get().map(|err| {
-                            view! {
-                                <span class="text-xs text-destructive font-medium truncate max-w-48">
-                                    {err}
-                                </span>
-                            }
-                        })
-                    }}
-
                     // History button (only for existing dashboards)
                     {move || {
                         is_existing.get().then(|| {
@@ -1301,6 +1377,17 @@ fn DashboardEditorInner(
                 </div>
             </div>
 
+            <Show when=move || save_error.try_get().flatten().is_some()>
+                <div class="px-6 py-2">
+                    <Alert variant=AlertVariant::Error>
+                        <AlertTitle>"Could not save this document"</AlertTitle>
+                        <AlertDescription>
+                            <p>{move || save_error.try_get().flatten().unwrap_or_default()}</p>
+                            <Button variant=ButtonVariant::Outline size=ButtonSize::Xs class="mt-2" on:click=move |_| refresh_remote()>"Review latest saved version"</Button>
+                        </AlertDescription>
+                    </Alert>
+                </div>
+            </Show>
             {move || remote_deleted.get().then(|| view! {
                 <div class="px-6 py-2">
                     <Alert variant=AlertVariant::Error>
@@ -1320,7 +1407,7 @@ fn DashboardEditorInner(
                     </Alert>
                 </div>
             })}
-            {move || remote_conflict.get().map(|latest| {
+            {move || remote_conflict.get().map(|(latest, latest_hash)| {
                 let noun = if is_knowledge.get() { "document" } else { "dashboard" };
                 let latest_for_use = latest.clone();
                 view! {
@@ -1359,7 +1446,10 @@ fn DashboardEditorInner(
                                 set_preview_content.set(latest_for_use.content.clone());
                                 set_original_title.set(latest_for_use.title.clone());
                                 set_original_content.set(latest_for_use.content.clone());
+                                set_content_hash.set(latest_hash.clone());
+                                set_baseline_generation.update(|n| *n += 1);
                                 set_remote_conflict.set(None);
+                                set_save_error.set(None);
                                 set_history_revision.update(|n| *n += 1);
                             }>"Use saved version"</Button>
                         </div>
@@ -1611,31 +1701,46 @@ fn DashboardEditorInner(
                             }
                             let current_title = title.get_untracked();
                             let current_content = editor_content.get_untracked();
-                            set_pending_snapshot.set(Some(EditorSnapshot::new(current_title.clone(), current_content.clone())));
+                            set_pending_snapshot.set(Some(EditorSnapshot::new(current_title.trim().to_string(), current_content.clone())));
+                            let expected_hash = content_hash.get_untracked().unwrap_or_default();
+                            let dispatched_generation = baseline_generation.get_untracked();
                             Box::pin(async move {
                                 match update_dashboard(
                                     did,
                                     Some(current_title.clone()),
                                     Some(current_content.clone()),
                                     None,
+                                    expected_hash.clone(),
                                 )
                                 .await
                                 {
-                                    Ok(()) => {
-                                        set_pending_snapshot.set(None);
-                                        set_original_title.set(current_title);
-                                        set_original_content.set(current_content);
-                                        set_save_success.set(true);
+                                    Ok(saved) => {
+                                        set_pending_snapshot.try_set(None);
+                                        let (Some(generation), Some(saved_title), Some(saved_content)) = (
+                                            baseline_generation.try_get_untracked(), original_title.try_get_untracked(), original_content.try_get_untracked(),
+                                        ) else { return false; };
+                                        let current = EditorSnapshot::new(saved_title, saved_content);
+                                        let committed = EditorSnapshot::new(saved.title.clone(), saved.content.clone());
+                                        if should_adopt_save(generation, dispatched_generation, &current, &committed) {
+                                            set_original_title.try_set(saved.title);
+                                            set_original_content.try_set(saved.content);
+                                            set_content_hash.try_set(saved.content_hash);
+                                            set_baseline_generation.try_update(|n| *n += 1);
+                                        }
+                                        if invalidate_refresh_after_save(set_refresh_generation, refresh_pending, set_refresh_pending, remote_conflict.try_get_untracked().flatten().is_some()) {
+                                            refresh_remote();
+                                        }
+                                        set_save_success.try_set(true);
                                         #[cfg(target_arch = "wasm32")]
                                         gloo_timers::callback::Timeout::new(2000, move || {
                                             set_save_success.try_set(false);
                                         })
                                         .forget();
-                                        !writes_blocked.get_untracked()
+                                        !writes_blocked.try_get_untracked().unwrap_or(true)
                                     }
                                     Err(e) => {
-                                        set_pending_snapshot.set(None);
-                                        set_save_error.set(Some(e.to_string()));
+                                        set_pending_snapshot.try_set(None);
+                                        set_save_error.try_set(Some(e.to_string()));
                                         false
                                     }
                                 }
