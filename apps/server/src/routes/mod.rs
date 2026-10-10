@@ -27,3 +27,5 @@ pub mod query_arrow;
 mod route_error;
 // Slack routes moved to enterprise/kyomi-slack crate (Phase 12).
 pub mod websocket;
+
+mod conversation_read;
