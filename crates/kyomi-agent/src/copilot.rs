@@ -61,6 +61,16 @@ pub fn tools_for_context(context_type: &str) -> Vec<String> {
     tools
 }
 
+/// The server uses this subset for visible dashboards the user cannot edit,
+/// and for historical previews. Authorization is derived from the database,
+/// never from a client-supplied mode.
+pub fn dashboard_read_only_tools() -> Vec<String> {
+    let mut tools: Vec<String> = CORE_DATA_TOOLS.iter().map(|s| (*s).to_string()).collect();
+    tools.push("get_chartml_spec".to_string());
+    tools.push(DocumentReadTool::name_for(DocType::Dashboard).to_string());
+    tools
+}
+
 // ─── System prompts ─────────────────────────────────────────────────────────
 
 /// Build the copilot system prompt for the given context type.
@@ -375,6 +385,15 @@ mod tests {
         assert!(!tools.contains(&"create_dashboard".to_string()));
         assert!(!tools.contains(&"delete_dashboard".to_string()));
         assert!(!tools.contains(&"update_dashboard".to_string()));
+    }
+
+    #[test]
+    fn dashboard_read_only_tools_keep_data_access_without_mutation() {
+        let tools = dashboard_read_only_tools();
+        assert!(tools.contains(&"query_datasource".to_string()));
+        assert!(tools.contains(&"get_dashboard_info".to_string()));
+        assert!(!tools.contains(&"modify_dashboard".to_string()));
+        assert!(!tools.contains(&"create_dashboard".to_string()));
     }
 
     #[test]

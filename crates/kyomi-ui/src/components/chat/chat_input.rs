@@ -49,8 +49,8 @@ pub fn ChatInput(
     #[prop(into)]
     connection_state: Signal<String>,
     /// Placeholder text for the textarea.
-    #[prop(into, default = "Ask me anything about your data \u{2728}".to_string())]
-    placeholder: String,
+    #[prop(into, default = Signal::stored("Ask me anything about your data \u{2728}".to_string()))]
+    placeholder: Signal<String>,
     /// Whether to show the "Skip AI response" checkbox.
     #[prop(default = false)]
     show_skip_ai: bool,
@@ -178,10 +178,10 @@ pub fn ChatInput(
 
     // Effective placeholder: different when credits are exhausted.
     // Matches React: Chat.jsx line 1668 — placeholder changes when creditsExhausted.
-    let effective_placeholder = if credits_exhausted {
+    let effective_placeholder = move || if credits_exhausted {
         "AI usage limit reached".to_string()
     } else {
-        placeholder
+        placeholder.get()
     };
 
     view! {
