@@ -80,6 +80,26 @@ All scripts are organized by environment. **Every script is environment-specific
   ignored-branch exclusions apply only within the invoking repository;
   identically named sibling branches remain evidence. Recycled-key,
   rework-target and tombstone classification is isolated per repository.
+  **Completed work:** a merged PR is visibly classified as completed only
+  after its merge SHA is verified reachable from the freshly fetched remote
+  default branch in a unique verification ref, removed using its exact SHA.
+  Every verified head is retained when multiple merged PRs reuse a branch.
+  Surviving remote/local refs must exactly equal a verified PR head SHA; local worktrees must also have clean tracked and untracked status.
+  This supports squash merges without assuming branch ancestry. Later
+  commits, dirty trees, open PRs reusing the branch, and live or uncertain
+  pickup reservations for competing completed artifacts remain blocking.
+  Self-excluded artifacts do not turn the caller’s own reservation into a
+  competing claim. When other completed residue exists in the same clone,
+  owned locks are recognized only from exact ticket/branch/absolute-workspace
+  metadata matching the invoking checkout's current self branch: protocol
+  `backlog-fast-locks/<TICKET>/owner.json` (or JSON `owner`) must also name
+  `session_id` and `created_at`; held launcher locks use
+  `ticket-agent/<TICKET>.json` with `session_id`. Missing, malformed or
+  mismatching ownership stays blocking; sibling locks never inherit self.
+  Failed verification exits `3`.
+  Clean completed trees remain nonclaims even when recent activity or ignored
+  files prevent retirement. The guard fetches Git metadata but never removes
+  artifacts or changes checkouts; use the separate cleanup helper below.
   The last two exist because a worker whose run dies between `git commit` and
   `git push` leaves a complete implementation visible only locally
   (KYO-471). Run it **twice** per ticket: once at pickup, and again
@@ -199,7 +219,8 @@ All scripts are organized by environment. **Every script is environment-specific
   picks the ticket back up, so a second check afterward sees an ordinary
   unlabelled open PR and gets exit `1`, same as any other hit. A PR only
   classifies as a rework target if it is **OPEN and carries the label**;
-  closed/merged PRs are handled exactly as before regardless of the label.
+  closed PRs remain hits; merged PRs require the completion checks above,
+  regardless of the label.
   The PR's exact remote head branch (check 1) is classified the same way —
   the label lives on the PR, not the branch, so check 1 reads it out of a
   branch list check 2 populates, the same mechanism `RECYCLED_BRANCHES`
@@ -272,6 +293,71 @@ All scripts are organized by environment. **Every script is environment-specific
   planted inside a fixture tree to exercise the `/proc` scan, and mutation
   checks that prove the find-failure and recent-write assertions actually
   exercise the script's own bytes.
+
+- **`cleanup-merged-ticket.sh`** - Explicit cleanup of one merged PR's
+  unchanged leftovers, including in sibling repositories that have no local
+  retirement helper. Run this Kyomi script with an explicit target clone;
+  it uses shared merged-PR verification and the conservative safety policy
+  of `retire-worktree.sh`, without requiring its presence in the target.
+  Preview is the default; `--apply` performs eligible mutations:
+
+  ```bash
+  scripts/cleanup-merged-ticket.sh KYO-853 \
+    --repo-path /home/jason/repos/kyomi-connect --pr 22 \
+    --protect-workspace /absolute/invoking/workspace \
+    --protect-branch ticket-agent/kyo-853-c15bf0e4
+  # Review preview, then repeat the same command with --apply.
+  ```
+
+  `--repo-path`, `--pr`, `--protect-workspace` and `--protect-branch` are
+  required; `--remote` defaults to `origin`. Protection applies across
+  repository boundaries; primary checkouts and default branches are always
+  retained. Preview checks eligibility without deleting artifacts or writing
+  reservations/rescues (Git fetch still refreshes metadata). Apply repeats PR
+  verification and the exact-branch open-PR check under an atomically acquired
+  per-ticket pickup reservation. Existing protocol reservations and held
+  ticket-agent flock claims are retained, never expired or overridden.
+
+  Requires clean, idle, unlocked linked trees at the exact PR head, no
+  `STRANDED.md`, no recent file writes within 30 minutes outside `.git` and
+  `target`, and no owned process with a readable cwd or open descriptor into
+  the tree (readonly descriptors also conservatively block). Process checks
+  are best effort: vanished or permission-denied per-process entries and
+  individual descriptors are skipped; unreadable cwd never skips readable
+  descriptors, and an unreadable descriptor never skips other descriptors.
+  An inaccessible descriptor directory is skipped; unavailable `/proc` or
+  other scan errors fail closed. This cannot prove that inaccessible
+  processes have no writers; cleanup still uses clean status, recent writes,
+  pickup reservations and immediate rechecks.
+  Dirty/untracked files, symlinks among ignored files, and valuable ignored
+  contents prevent cleanup. Only standard disposable `target/` output and
+  ordinary ignored `docs/review-logs/*.md` are allowed. Before removal, review
+  logs are copied and byte-verified under the target clone's shared Git
+  directory, `merged-ticket-rescues/<TICKET>/pr-<N>-<unique>/`. The printed
+  `RESCUED:` absolute path is a durable maintenance pointer. This helper does
+  not append to canonical daily logs; maintenance can reconcile archives
+  under the review-log lock with content deduplication, avoiding duplicate
+  canonical entries. Archives survive linked-tree removal and partial failures.
+
+  Effective fetch URLs must identify the verified GitHub repository, and every
+  effective push URL must exactly equal that fetch URL. Redirects from
+  `pushurl`, `insteadOf` or `pushInsteadOf` to other endpoints are refused
+  before artifact deletion and checked again before each mutation.
+  Apply rechecks tree safety and remote HEAD after rescue, removes worktrees
+  with ordinary `git worktree remove`, deletes the local ref using an exact
+  expected-SHA compare-and-delete, and deletes the remote ref only with an
+  exact expected-SHA lease. It never forces worktree removal, resets checkouts,
+  prunes trees or discards later commits. Refusals print retention reasons;
+  a partially completed apply reports failure and preserves rescued logs and
+  remaining evidence rather than rolling back other workers' changes.
+  A local reservation coordinates one clone; it cannot lock other machines.
+  Process/file checks have the same unavoidable final race as retirement.
+
+  **Exit codes:** `0` eligible preview / applied / already absent; `1` retained
+  safety finding or completion not verified; `2` usage; `3` incomplete checks
+  or failed mutation. Requires Bash, Python 3, Git, gh and flock on Linux.
+  Focused integration suite: `scripts/cleanup-merged-ticket-test.sh` (real
+  temporary repositories; also covers the guard's completed classifications).
 
 - **`mark-branch-stranded.sh`** - The writer side of the KYO-567 `stranded/`
   remote-branch tombstone above, and the answer to "what does *releasing* a

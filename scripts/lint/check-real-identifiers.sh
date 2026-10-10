@@ -350,6 +350,7 @@ my %denyhash;
 my %ALLOWED_DOMAINS = (
     'test.local'         => 'synthetic fixture domain used across the test suite',
     'contract-test.local' => 'synthetic fixture domain used by the SSR contract test suite',
+    'github.com'         => 'GitHub public Git transport host — SSH remote URLs use git@github.com, not a customer identifier',
     'example.com'        => 'IANA-reserved for documentation (RFC 2606) — never a real registration',
     'kyomi.ai'            => 'first-party production domain',
     'kyomi.dev'           => 'first-party development domain',

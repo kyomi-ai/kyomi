@@ -245,6 +245,7 @@ pub struct StripeService {
 impl StripeService {
     /// Create a new `StripeService` from a Stripe secret key and webhook secret.
     pub fn new(secret_key: &str, webhook_secret: &str) -> Self {
+        crate::initialize_tls_provider();
         let client = Client::new(secret_key);
         Self {
             client,

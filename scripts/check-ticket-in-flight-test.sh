@@ -70,6 +70,10 @@ cat >"$STUB_BIN/gh" <<'STUB'
 # whatever the test harness staged in GH_STDOUT_FILE / GH_STDERR_FILE /
 # GH_EXIT_FILE. Ships only inside this test's own $tmpdir/bin, first on
 # PATH for the duration of the run — never touches the real `gh` or network.
+if [ "$1" = api ] && [[ "$2" =~ /pulls/[0-9]+$ ]]; then
+    printf 'closed\t-\tunused\t-\t-\ttest/repo\ttest/repo\n'
+    exit 0
+fi
 if [ -n "${GH_REPO_FIXTURES:-}" ]; then
     case "$3" in
         repos/kyomi-ai/kyomi/pulls* | repos/kyomi-ai/kyomi-connect/pulls* | repos/kyomi-ai/kyomi-private/pulls* | repos/chartml/chartml/pulls* | repos/kyomi-ai/kode/pulls*) ;;

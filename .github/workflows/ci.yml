@@ -665,6 +665,7 @@ jobs:
         run: |
           suites=(
             scripts/check-ticket-in-flight-test.sh
+            scripts/cleanup-merged-ticket-test.sh
             scripts/mark-worktree-stranded-test.sh
             scripts/retire-worktree-test.sh
             scripts/mark-branch-stranded-test.sh

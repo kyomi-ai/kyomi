@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
 fn main() {
+    kyomi_auth::initialize_tls_provider();
     let arg = std::env::args().nth(1);
 
     if arg.as_deref() == Some("health") {

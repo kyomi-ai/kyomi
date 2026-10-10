@@ -303,7 +303,7 @@
 #
 # Trakkt's ticket-key numbering was RESTARTED in May 2026, so nine keys are
 # shared between a retired ticket and a current one. Because check 2 counts a
-# MERGED PR as in-flight — deliberately, see exit code 1 — each of those nine
+# MERGED PR as in-flight (the historical rule); each of those nine
 # keys returned exit 1 on every run, forever, while the *current* ticket
 # holding that key sat in Backlog looking available. Exit 0 is the only code
 # that permits claiming, so any agent honouring this gate skipped those nine
@@ -428,12 +428,12 @@
 # script; this feature does not weaken that, it only lets the PR's own
 # consumer reclassify a PR it already owns.
 #
-# CLOSED AND MERGED PRs ARE UNAFFECTED, EVEN IF LABELLED. A rework target is
+# CLOSED PRs ARE UNAFFECTED; MERGED PRs require completion verification.
+# A rework target is
 # by definition still open and still awaiting a fix. A closed or merged PR
-# that happens to carry a stale `rework-requested` label (forgotten cleanup,
-# or a branch reused for something else after closing) is handled exactly as
-# it always was: it stays a HIT (or RECYCLED, if pre-restart), never a rework
-# target. The state check is `pr_state = OPEN`, evaluated ahead of the label.
+# that carries a stale `rework-requested` label is never a rework target.
+# Closed PRs stay hits; merged PRs are completed only after verification.
+# The state check is `pr_state = OPEN`, evaluated ahead of the label.
 #
 # THE REMOTE HEAD BRANCH OF A REWORK-TARGET PR IS ALSO A REWORK TARGET (check
 # 1) — the same extension `stranded/` makes from a local tombstone to a
@@ -473,6 +473,16 @@
 # route). Fail closed instead: an unrecognised label field means the PR check
 # could not be completed, full stop — it does not get the benefit of the
 # doubt any more than an unparseable createdAt does above.
+#
+# COMPLETED WORK
+# A matching merged PR is completed only when its merge SHA is reachable from
+# freshly fetched remote default-branch history. Surviving refs/worktrees must
+# equal its recorded head SHA (supports squash merges). Any open PR for the
+# same branch prevents ref reclassification; newer heads remain hits. Dirty
+# trees and competing reservations remain blocking; ownership is verified
+# against invoking branch/workspace metadata, never inferred from --self alone.
+# This script never deletes artifacts or changes any working tree. Fetch updates
+# Git metadata only. Cleanup is a separate explicit preview/apply helper.
 #
 # SIBLING SCOPE (KYO-910)
 # Known project origins sweep kyomi, kyomi-connect, kyomi-private, chartml
@@ -524,10 +534,8 @@
 #       this central to ticket claiming must not go from "silently wrong"
 #       to "blocks every run" as its own default.
 #
-# Pure bash + git + gh. No Rust toolchain, no jq binary — the one JSON
-# extraction needed (from the PR listing) uses gh's own built-in `--jq`,
-# since gh bundles its own jq evaluator and this script should not gain a
-# dependency the box might not have.
+# Bash + git + gh + flock, with Python 3 for JSON claim-owner metadata.
+# No Rust toolchain or jq binary: PR extraction uses gh's built-in `--jq`.
 # ------------------------------------------------------------------------------
 
 set -euo pipefail
@@ -537,6 +545,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/stale-tooling-guard.sh
 source "${SCRIPT_DIR}/lib/stale-tooling-guard.sh"
 stale_tooling_guard "${BASH_SOURCE[0]}"
+source "${SCRIPT_DIR}/lib/merged-ticket.sh"
 
 # The instant Trakkt's ticket-key numbering restarted (KYO-607 — the full
 # evidence is in the RECYCLED TICKET KEYS section of the header above, read it
@@ -551,7 +560,7 @@ stale_tooling_guard "${BASH_SOURCE[0]}"
 # identically — the value is not a tuned threshold and there is nothing to
 # re-tune. It is deliberately NOT a rolling window ("older than N months"),
 # which would silently change meaning every day and eventually discard
-# genuine merged PRs for current tickets.
+# current-ticket PR evidence before completion verification.
 #
 # Env-overridable for two reasons: an operator can probe a different boundary
 # without editing this file, and the self-test drives it to fixture-local
@@ -628,7 +637,7 @@ fi
 # KEY_RESTART_CUTOFF, i.e. under the retired ticket-key numbering (KYO-607).
 #
 # FAILS CLOSED on anything it cannot read: an empty or non-canonical
-# createdAt returns false, so the PR stays a HIT and keeps blocking. Do not
+# createdAt returns false, so normal completion/in-flight checks apply. Do not
 # "fix" that to return true for the unparseable case.
 #
 # Both operands are known to be the same fixed-width canonical shape (the
@@ -798,6 +807,16 @@ else
 fi
 echo
 
+COMPLETED_COMPETITOR=0
+declare -a COMPLETED=()
+declare -A COMPLETED_HEADS=()
+declare -A OPEN_BRANCHES=()
+completed_ref() {
+    local branch="$1" sha="$2"
+    [ -z "${OPEN_BRANCHES[$branch]:-}" ] &&
+        [ -n "${COMPLETED_HEADS[$branch]:-}" ] &&
+        [[ " ${COMPLETED_HEADS[$branch]}" == *" $sha "* ]]
+}
 declare -a HITS=()
 declare -a FAILURES=()
 declare -a TOMBSTONED=()          # printable "path (branch X)" entries (KYO-529)
@@ -949,6 +968,7 @@ if pr_lines="$(gh api --paginate "$PR_ENDPOINT" \
         esac
         is_excluded "$pr_branch" && continue
         if matches_ticket "$pr_branch"; then
+            [ "$pr_state" != OPEN ] || OPEN_BRANCHES["$pr_branch"]=1
             # A pre-restart PR is classified, never dropped: it is still
             # printed, with its creation date, under its own verdict heading.
             # is_pre_restart fails closed on an empty or unparseable date, so
@@ -956,11 +976,27 @@ if pr_lines="$(gh api --paginate "$PR_ENDPOINT" \
             if is_pre_restart "$pr_created"; then
                 RECYCLED+=("PR #${pr_number} (${pr_state}) branch ${pr_branch} — created ${pr_created}, before the ${KEY_RESTART_CUTOFF} key restart")
                 RECYCLED_BRANCHES+=("$pr_branch")
+            elif [ "$pr_state" = "MERGED" ]; then
+                if verify_merged_ticket_pr "$REPO_ID" "$pr_number" "$REMOTE"; then
+                    if [ "$MT_BRANCH" != "$pr_branch" ]; then
+                        FAILURES+=("PR #$pr_number changed head branch during verification")
+                    else
+                        COMPLETED+=("PR #$pr_number branch $pr_branch — merge $MT_MERGE present in fetched $REMOTE/$MT_DEFAULT")
+                        COMPLETED_HEADS["$pr_branch"]+="$MT_HEAD "
+                    fi
+                else
+                    verify_status=$?
+                    if [ "$verify_status" = 3 ]; then
+                        FAILURES+=("PR #$pr_number merged-work verification incomplete")
+                    else
+                        HITS+=("PR #$pr_number (MERGED) branch $pr_branch — completion not verified in default branch")
+                    fi
+                fi
             elif [ "$pr_state" = "OPEN" ] && [ "$pr_rework_flag" = "1" ]; then
                 # Rework target (KYO-778 — see header): routed back by
                 # /merge-sweeper, not a claim. Closed/merged PRs never reach
-                # this arm regardless of the label — see CLOSED AND MERGED
-                # PRs ARE UNAFFECTED above.
+                # this arm regardless of the label — see the closed/merged
+                # label-state rule above.
                 REWORK_TARGETS+=("PR #${pr_number} (${pr_state}) branch ${pr_branch} — labelled ${REWORK_LABEL}, routed back by /merge-sweeper")
                 REWORK_TARGET_BRANCHES+=("$pr_branch")
             else
@@ -1008,7 +1044,10 @@ if remote_refs="$(git ls-remote --heads "$REMOTE" 2>"$remote_stderr_file")"; the
             *)
                 is_excluded "$branch" && continue
                 if matches_ticket "$branch"; then
-                    if is_recycled_branch "$branch"; then
+                    if completed_ref "$branch" "$_sha"; then
+                        COMPLETED_COMPETITOR=1
+                        COMPLETED+=("remote branch $REMOTE/$branch — exact merged PR head $_sha")
+                    elif is_recycled_branch "$branch"; then
                         RECYCLED+=("remote branch $REMOTE/$branch")
                     elif is_rework_target_branch "$branch"; then
                         REWORK_TARGETS+=("remote branch $REMOTE/$branch — head of the rework-target PR above")
@@ -1040,10 +1079,22 @@ rm -f "$remote_stderr_file"
 # ordering changes only which heading a reader sees.
 wt_path=""
 wt_branch=""
+wt_head=""
 flush_worktree_entry() {
     if [ -n "$wt_branch" ]; then
         if ! is_excluded "$wt_branch" && matches_ticket "$wt_branch"; then
-            if is_recycled_branch "$wt_branch"; then
+            if completed_ref "$wt_branch" "$wt_head"; then
+                COMPLETED_COMPETITOR=1
+                if wt_status="$(git -C "$wt_path" status --porcelain --untracked-files=all 2>&1)"; then
+                    if [ -n "$wt_status" ]; then
+                        HITS+=("local worktree $wt_path (branch $wt_branch) — merged head with uncommitted/untracked work")
+                    else
+                        COMPLETED+=("clean local worktree $wt_path (branch $wt_branch) — exact merged PR head; retained, cleanup requires safety preview")
+                    fi
+                else
+                    FAILURES+=("completed worktree status check: $wt_path: $wt_status")
+                fi
+            elif is_recycled_branch "$wt_branch"; then
                 RECYCLED+=("local worktree ${wt_path} (branch ${wt_branch})")
             elif tombstone_names_ticket "${wt_path}/STRANDED.md"; then
                 TOMBSTONED+=("worktree ${wt_path} (branch ${wt_branch})")
@@ -1060,6 +1111,7 @@ if wt_lines="$(git worktree list --porcelain 2>&1)"; then
 while IFS= read -r line; do
     case "$line" in
         "worktree "*) wt_path="${line#worktree }" ;;
+        "HEAD "*) wt_head="${line#HEAD }" ;;
         "branch refs/heads/"*) wt_branch="${line#branch refs/heads/}" ;;
         "") flush_worktree_entry ;;
         *) ;;
@@ -1102,7 +1154,12 @@ while IFS= read -r branch; do
             is_excluded "$branch" && continue
             is_tombstoned_branch "$branch" && continue
             if matches_ticket "$branch"; then
-                if is_recycled_branch "$branch"; then
+                if ! branch_sha="$(git rev-parse --verify "refs/heads/$branch" 2>&1)"; then
+                    FAILURES+=("local branch HEAD check: $branch: $branch_sha")
+                elif completed_ref "$branch" "$branch_sha"; then
+                    COMPLETED_COMPETITOR=1
+                    COMPLETED+=("local branch $branch — exact merged PR head $branch_sha")
+                elif is_recycled_branch "$branch"; then
                     RECYCLED+=("local branch ${branch}")
                 else
                     HITS+=("local branch: $branch")
@@ -1115,8 +1172,32 @@ else
     FAILURES+=("local branches: $local_branches")
 fi
 
+# Only competing completed artifacts need claim evidence to distinguish a
+# leftover from an owner working at the same head. The caller's excluded
+# branch does not make its own protocol/launcher lock a competing claim.
+OWN_CLAIM_BRANCH='' OWN_CLAIM_WORKSPACE=''
+if [ "$4" = 1 ] && [ "$CURRENT_BRANCH" != HEAD ] && [ "$CURRENT_BRANCH" != main ] &&
+    { [ -z "$SELF_BRANCH_SET" ] || [ "$SELF_BRANCH" = "$CURRENT_BRANCH" ]; }; then
+    OWN_CLAIM_BRANCH="$CURRENT_BRANCH"
+    OWN_CLAIM_WORKSPACE="$1"
+fi
+if [ "$COMPLETED_COMPETITOR" = 0 ] || merged_ticket_claim_status "KYO-$ticket_num" "$OWN_CLAIM_BRANCH" "$OWN_CLAIM_WORKSPACE"; then :; else
+    claim_status=$?
+    if [ "$claim_status" = 1 ]; then
+        HITS+=("local pickup reservation for KYO-$ticket_num — preserved active/uncertain claim")
+    else
+        FAILURES+=("local pickup reservation check incomplete for KYO-$ticket_num")
+    fi
+fi
+
 # ---- verdict -----------------------------------------------------------------
 echo
+if [ "${#COMPLETED[@]}" -gt 0 ]; then
+    echo "COMPLETED WORK (merged and present in freshly fetched default branch; not an active claim):"
+    printf '  ~ %s\n' "${COMPLETED[@]}"
+    echo "  Retained artifacts: preview cleanup-merged-ticket.sh before explicit apply."
+    echo
+fi
 if [ "${#TOMBSTONED[@]}" -gt 0 ]; then
     # Printed on every verdict, not only exit 0 — a tombstone suppresses the
     # claim signal, never the fact that unsalvaged/published work is sitting

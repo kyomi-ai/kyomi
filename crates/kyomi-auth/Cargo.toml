@@ -33,6 +33,7 @@ rand = { workspace = true }
 sha2 = { workspace = true }
 redis = { workspace = true }
 reqwest = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 webauthn-rs = { workspace = true }
 webauthn-rs-proto = { workspace = true }
 url = { workspace = true }
@@ -59,6 +60,8 @@ thiserror = { workspace = true }
 ssh-key = { version = "0.6", features = ["ed25519", "alloc", "std"] }
 
 [dev-dependencies]
+# Exercise provider selection with both backends, as datasource 1.6.2 enables.
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
 kyomi-test-tracing = { workspace = true }
 # Enables kyomi-core's "test-helpers" feature (gating `kyomi_core::test_db`)
 # for this crate's own test target only — kyomi-core is already a normal
