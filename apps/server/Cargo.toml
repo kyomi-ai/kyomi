@@ -13,6 +13,7 @@ default = ["slack"]
 slack = ["dep:kyomi-slack", "kyomi-ui/slack"]
 
 [dependencies]
+agent-runtime = { workspace = true }
 kyomi-slack = { path = "../../enterprise/kyomi-slack", optional = true }
 kyomi-core = { workspace = true }
 kyomi-auth = { workspace = true }

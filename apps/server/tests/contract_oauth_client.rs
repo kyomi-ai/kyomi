@@ -711,6 +711,182 @@ async fn code_exchange_requires_exact_redirect_and_correct_pkce() {
     let tokens: Value = exchanged.json().await.expect("OAuth contract value");
     assert!(tokens["access_token"].as_str().is_some());
     assert!(tokens["refresh_token"].as_str().is_some());
+
+    let refresh = tokens["refresh_token"].as_str().expect("refresh token");
+    let other_id = register_test_client(&ctx.base_url, &["https://example.com/other"]).await;
+    let cross_client = client()
+        .post(format!("{}/api/v1/oauth/token", ctx.base_url))
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("client_id", other_id.as_str()),
+            ("refresh_token", refresh),
+        ])
+        .send()
+        .await
+        .expect("cross-client refresh of exchanged token");
+    assert_eq!(cross_client.status(), 400);
+    assert_eq!(
+        cross_client.json::<Value>().await.expect("error JSON"),
+        json!({"error": "invalid_grant: client_id mismatch"})
+    );
+    let same_client = client()
+        .post(format!("{}/api/v1/oauth/token", ctx.base_url))
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("client_id", id.as_str()),
+            ("refresh_token", refresh),
+        ])
+        .send()
+        .await
+        .expect("same-client refresh of exchanged token");
+    assert_eq!(same_client.status(), 200);
+    let refreshed: Value = same_client.json().await.expect("refreshed token JSON");
+    assert!(refreshed["access_token"].as_str().is_some());
+    assert_eq!(refreshed["refresh_token"], refresh);
+}
+
+#[tokio::test]
+async fn refresh_grant_is_bound_to_issuing_client() {
+    let Some((ctx, client_a)) = oauth_context("refresh-client-binding").await else {
+        return;
+    };
+    let client_b = register_test_client(&ctx.base_url, &["https://example.com/other"]).await;
+    let refresh = kyomi_auth::jwt::create_refresh_token();
+    let device = kyomi_auth::token_service::DeviceInfo {
+        user_agent: None,
+        ip_address: None,
+        country_code: None,
+        oauth_client_id: Some(client_a.clone()),
+    };
+    kyomi_auth::token_service::store_refresh_token(
+        &ctx.db,
+        &ctx.user_id,
+        &kyomi_auth::token_service::hash_refresh_token(&refresh),
+        chrono::Utc::now() + chrono::Duration::days(1),
+        &device,
+        &kyomi_auth::token_service::generate_family_id(),
+    )
+    .await
+    .expect("store client-bound refresh token");
+
+    let token_url = format!("{}/api/v1/oauth/token", ctx.base_url);
+    let wrong_client = client()
+        .post(&token_url)
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("client_id", client_b.as_str()),
+            ("refresh_token", refresh.as_str()),
+        ])
+        .send()
+        .await
+        .expect("cross-client refresh request");
+    assert_eq!(wrong_client.status(), 400);
+    assert_eq!(
+        wrong_client.json::<Value>().await.expect("error JSON"),
+        json!({"error": "invalid_grant: client_id mismatch"})
+    );
+
+    // A rejected cross-client attempt must leave A's grant usable. Cursor
+    // requires the same refresh token on every successful OAuth refresh.
+    for _ in 0..2 {
+        let same_client = client()
+            .post(&token_url)
+            .form(&[
+                ("grant_type", "refresh_token"),
+                ("client_id", client_a.as_str()),
+                ("refresh_token", refresh.as_str()),
+            ])
+            .send()
+            .await
+            .expect("same-client refresh request");
+        assert_eq!(same_client.status(), 200);
+        let body: Value = same_client.json().await.expect("token JSON");
+        assert!(body["access_token"].as_str().is_some());
+        assert_eq!(body["refresh_token"], refresh);
+    }
+
+    kyomi_core::db_execute!(
+        &ctx.db,
+        "UPDATE oauth_clients SET active = false WHERE client_id = $1",
+        &client_a
+    )
+    .expect("deactivate issuing client");
+    let inactive_client = client()
+        .post(&token_url)
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("client_id", client_a.as_str()),
+            ("refresh_token", refresh.as_str()),
+        ])
+        .send()
+        .await
+        .expect("inactive-client refresh request");
+    assert_eq!(inactive_client.status(), 400);
+    assert!(
+        inactive_client
+            .json::<Value>()
+            .await
+            .expect("error JSON")["error"]
+            .as_str()
+            .is_some_and(|error| error.starts_with("Unknown client_id:"))
+    );
+}
+
+#[tokio::test]
+async fn oauth_refresh_rejects_unbound_token_but_browser_refresh_succeeds() {
+    let Some((ctx, client_id)) = oauth_context("refresh-unbound").await else {
+        return;
+    };
+    let refresh = kyomi_auth::jwt::create_refresh_token();
+    let device = kyomi_auth::token_service::DeviceInfo {
+        user_agent: None,
+        ip_address: None,
+        country_code: None,
+        oauth_client_id: None,
+    };
+    kyomi_auth::token_service::store_refresh_token(
+        &ctx.db,
+        &ctx.user_id,
+        &kyomi_auth::token_service::hash_refresh_token(&refresh),
+        chrono::Utc::now() + chrono::Duration::days(1),
+        &device,
+        &kyomi_auth::token_service::generate_family_id(),
+    )
+    .await
+    .expect("store unbound refresh token");
+
+    let oauth = client()
+        .post(format!("{}/api/v1/oauth/token", ctx.base_url))
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("client_id", client_id.as_str()),
+            ("refresh_token", refresh.as_str()),
+        ])
+        .send()
+        .await
+        .expect("unbound OAuth refresh request");
+    assert_eq!(oauth.status(), 400);
+    // #571 added an is_none() guard ahead of the client_id comparison in
+    // oauth.rs, so an unbound token now short-circuits there rather than
+    // reaching the mismatch check #619 added. The assertion's intent is
+    // unchanged — an unbound token must not mint an MCP token — only which
+    // rejection fires first. The browser-refresh half below is unaffected:
+    // /api/v1/auth/refresh rejects tokens that ARE OAuth-bound, so this
+    // unbound one proceeds through it.
+    assert_eq!(
+        oauth.json::<Value>().await.expect("error JSON"),
+        json!({"error": "invalid_grant: refresh token is not an OAuth client token"})
+    );
+
+    let browser = client()
+        .post(format!("{}/api/v1/auth/refresh", ctx.base_url))
+        .header("cookie", format!("refresh_token={refresh}"))
+        .send()
+        .await
+        .expect("browser refresh request");
+    assert_eq!(browser.status(), 200);
+    let body: Value = browser.json().await.expect("browser token JSON");
+    assert!(body["access_token"].as_str().is_some());
 }
 
 #[tokio::test]
@@ -737,4 +913,206 @@ async fn different_user_cannot_approve_another_users_transaction() {
         .await
         .expect("OAuth contract value");
     assert_eq!(response.status(), 403);
+}
+
+#[tokio::test]
+async fn session_cutoff_logout_all_clears_cookies_and_revokes_browser_oauth_authority() {
+    let suffix = format!("cutoff-logout-all-{}", uuid::Uuid::new_v4());
+    let email = format!("oauth-test-{suffix}@contract-test.local");
+    let Some((ctx, client_id)) = oauth_context(&suffix).await else {
+        assert_ne!(
+            std::env::var("KYOMI_REQUIRE_POSTGRES_TESTS").as_deref(),
+            Ok("1"),
+            "required Postgres contract must execute"
+        );
+        return;
+    };
+    let user = kyomi_auth::user_service::get_user_by_id(&ctx.db, &ctx.user_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let device = kyomi_auth::token_service::DeviceInfo {
+        user_agent: None,
+        ip_address: None,
+        country_code: None,
+        oauth_client_id: None,
+    };
+    let initiating = kyomi_auth::session::create_authenticated_session(
+        &ctx.db,
+        &ctx.kv,
+        &ctx.jwt_secret,
+        &user,
+        &device,
+    )
+    .await
+    .unwrap();
+    let other = kyomi_auth::session::create_authenticated_session(
+        &ctx.db,
+        &ctx.kv,
+        &ctx.jwt_secret,
+        &user,
+        &device,
+    )
+    .await
+    .unwrap();
+    let (transaction, csrf, consent_cookie) = consent_page(&ctx, &client_id).await;
+    let path =
+        <kyomi_ui::server_fns::security::LogoutAllSessions as leptos::server_fn::ServerFn>::PATH;
+    let logout = client()
+        .post(format!("{}{path}", ctx.base_url))
+        .header("origin", "http://localhost:5173")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header(
+            "cookie",
+            format!(
+                "access_token={}; refresh_token={}",
+                initiating.access_token, initiating.refresh_token
+            ),
+        )
+        .body("")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        logout.status(),
+        200,
+        "actual logout-all server function succeeds"
+    );
+    let cookies: Vec<_> = logout
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .map(|header| header.to_str().unwrap())
+        .collect();
+    for name in ["access_token=", "refresh_token="] {
+        assert!(
+            cookies
+                .iter()
+                .any(|cookie| cookie.starts_with(name) && cookie.contains("Max-Age=0")),
+            "logout-all clears {name}: {cookies:?}"
+        );
+    }
+    for token in [
+        &ctx.access_token,
+        &initiating.access_token,
+        &other.access_token,
+    ] {
+        let response = client()
+            .get(format!("{}/api/v1/push/subscriptions", ctx.base_url))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            401,
+            "all pre-event signed browser access tokens must fail"
+        );
+    }
+    for refresh in [&initiating.refresh_token, &other.refresh_token] {
+        assert!(
+            kyomi_auth::token_refresh::refresh_tokens(&ctx.db, &ctx.jwt_secret, refresh, &device)
+                .await
+                .is_err()
+        );
+    }
+    let authorize = client()
+        .get(format!("{}/api/v1/oauth/authorize", ctx.base_url))
+        .header("cookie", format!("access_token={}", ctx.access_token))
+        .query(&[
+            ("client_id", client_id.as_str()),
+            ("redirect_uri", "https://example.com/callback?existing=1"),
+            ("response_type", "code"),
+            ("code_challenge", CHALLENGE),
+            ("code_challenge_method", "S256"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        authorize.status(),
+        303,
+        "revoked cookie must return to login rather than consent"
+    );
+    assert!(
+        authorize.headers()["location"]
+            .to_str()
+            .unwrap()
+            .contains("/login")
+    );
+    let continuation = client()
+        .get(format!(
+            "{}/api/v1/oauth/authorize/continue?state=unused",
+            ctx.base_url
+        ))
+        .header("cookie", format!("access_token={}", ctx.access_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        continuation.status(),
+        401,
+        "revoked browser cookie cannot resume OAuth"
+    );
+    let consent = client()
+        .post(format!("{}/api/v1/oauth/authorize", ctx.base_url))
+        .header(
+            "cookie",
+            format!("access_token={}; {consent_cookie}", ctx.access_token),
+        )
+        .form(&[
+            ("transaction", transaction.as_str()),
+            ("csrf", csrf.as_str()),
+            ("decision", "allow"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        consent.status(),
+        401,
+        "pre-event consent cannot grant OAuth access after logout-all"
+    );
+    let fresh = kyomi_auth::session::create_authenticated_session(
+        &ctx.db,
+        &ctx.kv,
+        &ctx.jwt_secret,
+        &user,
+        &device,
+    )
+    .await
+    .unwrap();
+    let response = client()
+        .get(format!("{}/api/v1/push/subscriptions", ctx.base_url))
+        .bearer_auth(&fresh.access_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        200,
+        "fresh login works immediately after logout-all"
+    );
+    kyomi_auth::token_refresh::refresh_tokens(
+        &ctx.db,
+        &ctx.jwt_secret,
+        &fresh.refresh_token,
+        &device,
+    )
+    .await
+    .unwrap();
+    kyomi_core::db_execute!(
+        &ctx.db,
+        "DELETE FROM refresh_tokens WHERE user_id = $1",
+        &ctx.user_id
+    )
+    .unwrap();
+    kyomi_test_harness::cleanup_test_user(&ctx.db, &email).await;
+    assert!(
+        kyomi_auth::user_service::get_user_by_id(&ctx.db, &ctx.user_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "cutoff contract must remove its user and related session fixtures"
+    );
 }

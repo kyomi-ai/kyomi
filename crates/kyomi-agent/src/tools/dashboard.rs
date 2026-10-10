@@ -310,6 +310,7 @@ impl AgentTool for CreateDashboardTool {
         let embed = ctx.embedding.wait_ready().await?;
 
         let dashboard_id = match apply_create(ApplyCreateParams {
+            validation_context: Some(&ctx.query_context()),
             db: &ctx.db,
             user_id: &ctx.user_id,
             workspace_id: &ctx.workspace_id,
@@ -361,6 +362,7 @@ impl AgentTool for CreateDashboardTool {
         {
             crate::execution::generate_dashboard_summary(
                 crate::execution::DashboardSummaryParams {
+                    validation_context: ctx.query_context(),
                     db: ctx.db.clone(),
                     ws_manager: ctx.ws_manager.clone(),
                     dashboard_id: dashboard_id.clone(),
@@ -551,6 +553,7 @@ impl AgentTool for ModifyDashboardTool {
         let embed = ctx.embedding.wait_ready().await?;
 
         match apply_update(ApplyUpdateParams {
+            validation_context: Some(&ctx.query_context()),
             db: &ctx.db,
             dashboard_id,
             workspace_id: &ctx.workspace_id,
@@ -615,6 +618,7 @@ impl AgentTool for ModifyDashboardTool {
             if kyomi_auth::dashboard_service::extract_summary(c).is_none() {
                 crate::execution::generate_dashboard_summary(
                     crate::execution::DashboardSummaryParams {
+                    validation_context: ctx.query_context(),
                         db: ctx.db.clone(),
                         ws_manager: ctx.ws_manager.clone(),
                         dashboard_id: dashboard_id.to_string(),
@@ -1478,6 +1482,7 @@ mod tests {
         let embedding = loaded_embedding();
         let embed = embedding.wait_ready().await.expect("loaded_embedding is pre-loaded");
         let outcome = apply_update(ApplyUpdateParams {
+            validation_context: None,
             db: &db,
             dashboard_id: &dashboard_id,
             workspace_id: "ws-1",

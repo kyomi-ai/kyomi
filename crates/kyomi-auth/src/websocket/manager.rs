@@ -234,30 +234,24 @@ impl WebSocketManager {
     /// In multi-replica mode (Redis configured): publishes via Redis so all pods receive it.
     /// In single-instance mode (no Redis): delivers directly to local connections.
     pub async fn send_to_user(&self, user_id: &str, message: WebSocketMessage) {
-        let json = match serde_json::to_string(&message) {
-            Ok(j) => j,
-            Err(e) => {
-                tracing::error!("Failed to serialize WS message: {e}");
-                return;
-            }
-        };
+        if let Err(error) = self.try_send_to_user(user_id, message).await {
+            tracing::error!(%error, "WebSocket notification failed");
+        }
+    }
 
+    /// Fallible notification submission for durable callers. A delivery failure never
+    /// changes the committed journal; readers can recover from database snapshots.
+    pub async fn try_send_to_user(&self, user_id: &str, message: WebSocketMessage) -> Result<(), String> {
+        let json = serde_json::to_string(&message).map_err(|error| error.to_string())?;
         if let Some((redis, _)) = &self.inner.redis {
-            // Multi-replica: publish via Redis so all pods receive it.
             let channel = format!("{REDIS_CHANNEL_PREFIX}{user_id}");
             let mut conn = redis.clone();
-            if let Err(e) = redis::cmd("PUBLISH")
-                .arg(&channel)
-                .arg(&json)
-                .query_async::<i64>(&mut conn)
-                .await
-            {
-                tracing::error!("Redis PUBLISH to {channel} failed: {e}");
-            }
+            redis::cmd("PUBLISH").arg(&channel).arg(&json).query_async::<i64>(&mut conn)
+                .await.map_err(|error| error.to_string())?;
         } else {
-            // Single-instance: deliver directly to local connections.
             self.deliver_to_local_user(user_id, &json);
         }
+        Ok(())
     }
 
     /// Broadcast a message to all members of a workspace (via Redis PUBLISH for each).

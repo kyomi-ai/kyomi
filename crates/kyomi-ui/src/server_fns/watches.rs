@@ -18,6 +18,8 @@ pub struct WatchConfig {
     pub name: String,
     pub prompt: String,
     pub schedule: String,
+    #[serde(default)]
+    pub timezone: Option<String>,
     pub mode: Option<String>,
     pub queries: Option<String>,
     pub slack_channel_id: Option<String>,
@@ -63,6 +65,7 @@ async fn watch_to_item(
         name: watch.name.clone(),
         prompt: watch.prompt.clone(),
         schedule: watch.schedule.clone(),
+        timezone: watch.timezone.clone(),
         mode: watch.mode.to_string(),
         enabled: watch.enabled,
         last_run_at: watch.last_run_at.map(|dt| dt.to_rfc3339()),
@@ -175,6 +178,7 @@ pub async fn create_watch(config: WatchConfig) -> Result<WatchListItem, ServerFn
         name,
         prompt,
         schedule,
+        timezone,
         mode,
         queries,
         slack_channel_id,
@@ -200,6 +204,7 @@ pub async fn create_watch(config: WatchConfig) -> Result<WatchListItem, ServerFn
         name.trim(),
         prompt.trim(),
         &schedule,
+        timezone.as_deref(),
         &mode,
         queries_value.as_ref(),
         None, // datasource_hints: not exposed in Leptos UI
@@ -254,6 +259,7 @@ pub async fn update_watch(
         name: name_val,
         prompt: prompt_val,
         schedule: schedule_val,
+        timezone,
         mode,
         queries,
         slack_channel_id,
@@ -289,6 +295,7 @@ pub async fn update_watch(
         name: name.map(|s| s.trim().to_string()),
         prompt: prompt.map(|s| s.trim().to_string()),
         schedule,
+        timezone,
         mode,
         enabled: None, // Use toggle_watch() instead — enabled is not exposed via update_watch
         alert_emails,
@@ -301,6 +308,7 @@ pub async fn update_watch(
     let has_updates = updates.name.is_some()
         || updates.prompt.is_some()
         || updates.schedule.is_some()
+        || updates.timezone.is_some()
         || updates.mode.is_some()
         || updates.alert_emails.is_some()
         || updates.alert_emails_enabled.is_some()
@@ -814,3 +822,30 @@ pub async fn get_thinking_events(
 // SSR-only import — placed at bottom to match `dashboards.rs` convention.
 #[cfg(feature = "ssr")]
 use super::{AuthenticatedContext, IntoServerFnErrorCore};
+
+/// Preview using exactly the recurrence policy used by the scheduler.
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
+pub async fn preview_watch_schedule(schedule: String, timezone: Option<String>) -> Result<String, ServerFnError> {
+    let _ac = AuthenticatedContext::extract().await?;
+    let next = kyomi_auth::watch_service::calculate_next_run_in_timezone(&schedule, timezone.as_deref()).into_sfn_core()?;
+    kyomi_auth::watch_service::describe_execution(next, timezone.as_deref()).into_sfn_core()
+}
+
+#[cfg(test)]
+mod timezone_config_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_and_named_schedule_config_round_trip() {
+        for timezone in [None, Some("Australia/Sydney")] {
+            let mut value = serde_json::json!({"name": "Schedule", "prompt": "Report revenue", "schedule": "0 9 * * 1"});
+            if let Some(timezone) = timezone { value["timezone"] = serde_json::json!(timezone); }
+            let config: WatchConfig = serde_json::from_value(value).unwrap();
+            assert_eq!(config.timezone.as_deref(), timezone);
+            let serialized = serde_json::to_value(&config).unwrap();
+            let decoded: WatchConfig = serde_json::from_value(serialized).unwrap();
+            assert_eq!(decoded.timezone.as_deref(), timezone);
+            assert_eq!(decoded.schedule, "0 9 * * 1");
+        }
+    }
+}

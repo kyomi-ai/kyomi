@@ -124,7 +124,7 @@ impl AgentTool for UpdateChartCopilotTool {
 
         // Validate ChartML content — wrap in a fenced block for the validator
         let fenced = format!("```chartml\n{content}\n```");
-        if let Err(e) = kyomi_auth::dashboard_service::validate_dashboard_content(&fenced) {
+        if let Err(e) = kyomi_auth::chartml_validation::validate_content(&fenced, Some(&ctx.query_context())).await {
             return Ok(validation_failure_result(
                 "ChartML validation failed. Fix these issues and try again:",
                 &e,
@@ -195,9 +195,13 @@ impl AgentTool for UpdateWatchCopilotTool {
                     "type": "string",
                     "description": "Monitoring instruction for the watch agent"
                 },
+                "timezone": {
+                    "type": "string",
+                    "description": "IANA schedule timezone (e.g. Australia/Sydney). Omission preserves the current zone; use UTC to explicitly switch to UTC."
+                },
                 "schedule": {
                     "type": "string",
-                    "description": "Cron expression in UTC (5 fields: minute hour day-of-month month day-of-week)"
+                    "description": "Wall-clock cron in the saved schedule timezone (5 fields: minute hour day-of-month month day-of-week). Preserve the named zone when editing."
                 },
                 "mode": {
                     "type": "string",
@@ -285,6 +289,12 @@ impl AgentTool for UpdateWatchCopilotTool {
             ));
         }
 
+        if let Some(timezone) = args.get("timezone").and_then(|v| v.as_str())
+            && let Err(error) = kyomi_auth::watch_service::parse_timezone(Some(timezone))
+        {
+            return Ok(validation_failure_result("Watch timezone validation failed:", &error));
+        }
+
         // Validate mode if provided.
         if let Some(mode) = args.get("mode").and_then(|v| v.as_str())
             && let Err(e) = kyomi_auth::watch_service::validate_watch_mode(mode)
@@ -304,6 +314,7 @@ impl AgentTool for UpdateWatchCopilotTool {
             "name",
             "prompt",
             "schedule",
+            "timezone",
             "mode",
             "slack_channel_id",
             "alert_emails",
@@ -416,6 +427,7 @@ mod tests {
             "name",
             "prompt",
             "schedule",
+            "timezone",
             "mode",
             "slack_channel_id",
             "alert_emails",
@@ -562,7 +574,7 @@ mod tests {
         // Missing the required 'visualize' key.
         let result = UpdateChartCopilotTool
             .execute(
-                serde_json::json!({"content": "data:\n  source: table", "summary": "try a chart"}),
+                serde_json::json!({"content": "type: chart\nversion: 1\ndata: {provider: inline, rows: [{x: 1}]}", "summary": "try a chart"}),
                 &ctx,
             )
             .await
@@ -571,11 +583,20 @@ mod tests {
 
         assert_eq!(parsed["success"], serde_json::json!(false), "{result}");
         assert_eq!(parsed["validation_failed"], serde_json::json!(true), "{result}");
-        assert_eq!(
-            parsed["errors"][0],
-            serde_json::json!("ChartML block missing required 'visualize' key"),
-            "{result}"
-        );
+        assert!(parsed["errors"][0].as_str().unwrap().contains("schema"), "{result}");
+        assert!(parsed["errors"][0].as_str().unwrap().contains("visualize"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn update_chart_copilot_chartml_sql_requires_authorized_dry_run() {
+        let ctx = build_ctx(test_pool().await);
+        let result = UpdateChartCopilotTool.execute(serde_json::json!({
+            "content": "type: chart\nversion: 1\ndata: {datasource: absent, query: SELECT 1}\nvisualize: {type: bar}",
+            "summary": "SQL chart"
+        }), &ctx).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["success"], false, "{result}");
+        assert!(parsed["errors"][0].as_str().unwrap().contains("sql_datasource"), "{result}");
     }
 
     #[tokio::test]
@@ -589,7 +610,7 @@ mod tests {
         let mut ctx = build_ctx(db);
         ctx.ws_manager = manager;
 
-        let content = "data:\n  source: table\nvisualize:\n  type: bar";
+        let content = "type: chart\nversion: 1\ndata: {provider: inline, rows: [{x: 1}]}\nvisualize: {type: bar}";
         let result = UpdateChartCopilotTool
             .execute(
                 serde_json::json!({"content": content, "summary": "Switched to a bar chart"}),
@@ -643,6 +664,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn timezone_watch_copilot_invalid_zone_returns_validation_failure() {
+        let ctx = build_ctx(test_pool().await);
+        let result = UpdateWatchCopilotTool.execute(serde_json::json!({"timezone": "+11:00", "summary": "Set local schedule"}), &ctx).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["success"], false);
+        assert_eq!(parsed["validation_failed"], true);
+        assert!(parsed["errors"][0].as_str().unwrap().contains("IANA"));
+    }
+
+    #[tokio::test]
     async fn update_watch_copilot_invalid_mode_returns_validation_failure() {
         let ctx = build_ctx(test_pool().await);
         let result = UpdateWatchCopilotTool
@@ -678,6 +709,7 @@ mod tests {
                 serde_json::json!({
                     "name": "Revenue Watch",
                     "schedule": "0 9 * * *",
+                    "timezone": "Australia/Sydney",
                     "summary": "Drafted a daily revenue watch",
                 }),
                 &ctx,
@@ -696,6 +728,7 @@ mod tests {
         let msg_json: serde_json::Value = serde_json::from_str(&msg).expect("valid json");
         assert_eq!(msg_json["type"], serde_json::json!("watch_update"), "{msg}");
         assert_eq!(msg_json["data"]["name"], serde_json::json!("Revenue Watch"), "{msg}");
+        assert_eq!(msg_json["data"]["timezone"], "Australia/Sydney", "{msg}");
         assert_eq!(msg_json["data"]["schedule"], serde_json::json!("0 9 * * *"), "{msg}");
         assert_eq!(
             msg_json["data"]["context_type"],

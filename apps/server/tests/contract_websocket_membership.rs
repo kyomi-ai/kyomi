@@ -857,3 +857,48 @@ async fn sync_reset_response_carries_request_workspace() {
         Some(ctx.workspace_id.as_str())
     );
 }
+
+#[tokio::test]
+async fn session_cutoff_rejects_new_websocket_authentication() {
+    let ctx = context("cutoff-websocket").await;
+    assert!(matches!(
+        first_ws_message(
+            &ctx.base_url,
+            &ctx.workspace_id,
+            &ctx.user_id,
+            &ctx.access_token
+        )
+        .await,
+        Message::Text(_)
+    ));
+    kyomi_auth::token_service::revoke_all_user_sessions(&ctx.db, &ctx.user_id)
+        .await
+        .unwrap();
+    let first = first_ws_message(
+        &ctx.base_url,
+        &ctx.workspace_id,
+        &ctx.user_id,
+        &ctx.access_token,
+    )
+    .await;
+    assert!(
+        matches!(first, Message::Close(Some(ref frame)) if frame.code == tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Library(4001)),
+        "revoked session must fail handshake authentication: {first:?}"
+    );
+    let token = kyomi_auth::session::create_user_access_token(
+        &ctx.db,
+        &ctx.user_id,
+        &ctx.jwt_secret,
+        15,
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(
+            first_ws_message(&ctx.base_url, &ctx.workspace_id, &ctx.user_id, &token).await,
+            Message::Text(_)
+        ),
+        "fresh session must open a WebSocket immediately"
+    );
+}

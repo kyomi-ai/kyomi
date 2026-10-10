@@ -518,6 +518,7 @@ impl OpenAIProvider {
         );
 
         Ok(LLMResponse {
+            raw_response: response.clone(),
             content,
             finish_reason,
             usage,

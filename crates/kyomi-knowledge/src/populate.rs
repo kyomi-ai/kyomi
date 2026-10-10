@@ -480,7 +480,7 @@ pub async fn populate_learning_embedding(
         }
     };
 
-    let embedding = embed.embed_passage(&row.insight)?;
+    let embedding = embed.embed_passage_offloaded(&row.insight).await?;
 
     match db {
         DbPool::Postgres(pg) => {

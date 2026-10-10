@@ -125,9 +125,8 @@ impl EmbeddingService {
     /// This is a **synchronous, CPU-bound call** (tokenize + one Candle BERT
     /// forward pass, no yield points) — calling it directly from an async
     /// context occupies whatever executor thread runs the call for the
-    /// entire batch. From async code embedding catalog-sized batches (tens
-    /// to thousands of passages), use [`embed_passages_chunked`] instead —
-    /// see its docs for why (KYO-644).
+    /// entire batch. From async code, use [`embed_passages_chunked`] instead,
+    /// or the single-text offloaded helpers — see its docs for why (KYO-644).
     ///
     /// [`embed_passages_chunked`]: Self::embed_passages_chunked
     pub fn embed_passages(&self, texts: &[&str]) -> kyomi_core::Result<Vec<Vec<f32>>> {
@@ -192,6 +191,20 @@ impl EmbeddingService {
         results
             .pop()
             .ok_or_else(|| kyomi_core::Error::Internal("embedding returned empty result".into()))
+    }
+
+    /// Embed one passage off the async runtime, preserving embedding and task errors.
+    pub async fn embed_passage_offloaded(&self, text: &str) -> kyomi_core::Result<Vec<f32>> {
+        let mut results = self.embed_passages_chunked(&[text]).await?;
+        results
+            .pop()
+            .ok_or_else(|| kyomi_core::Error::Internal("embedding returned empty result".into()))
+    }
+
+    /// Embed a query off the async runtime with the same BGE prefix as `embed_query`.
+    pub async fn embed_query_offloaded(&self, query: &str) -> kyomi_core::Result<Vec<f32>> {
+        let prefixed = format!("{BGE_QUERY_PREFIX}{query}");
+        self.embed_passage_offloaded(&prefixed).await
     }
 
     // ─── Query embedding (with BGE prefix) ──────────────────────────────
@@ -313,10 +326,10 @@ fn candle_err(e: candle_core::Error) -> kyomi_core::Error {
 /// # Usage
 /// ```text
 /// // For endpoints (fail fast if not loaded)
-/// let embedding = lazy_embedding.get()?.embed_query(query)?;
+/// let embedding = lazy_embedding.get()?.embed_query_offloaded(query).await?;
 ///
 /// // For background tasks (wait for load)
-/// let embedding = lazy_embedding.wait_ready().await?.embed_query(query)?;
+/// let embedding = lazy_embedding.wait_ready().await?.embed_query_offloaded(query).await?;
 /// ```
 #[derive(Clone)]
 pub struct LazyEmbedding {
@@ -573,3 +586,7 @@ mod chunking_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "offloaded_tests.rs"]
+mod offloaded_tests;

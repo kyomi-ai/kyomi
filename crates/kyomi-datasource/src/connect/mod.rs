@@ -8,3 +8,4 @@
 
 pub mod provider;
 pub mod registry;
+mod owner_recovery;

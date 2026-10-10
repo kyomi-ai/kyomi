@@ -242,3 +242,7 @@ fn inject_palette(yaml: &str, palette: &[String]) -> String {
     serde_yaml::to_string(&value).unwrap_or_else(|_| yaml.to_string())
 }
 
+
+#[cfg(test)]
+#[path = "chartml_html_tests.rs"]
+mod html_safety_tests;

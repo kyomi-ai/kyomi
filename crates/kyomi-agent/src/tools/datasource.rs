@@ -95,6 +95,12 @@ pub struct QueryDatasourceTool;
 
 #[async_trait]
 impl AgentTool for QueryDatasourceTool {
+    /// Provider query errors can follow a committed mutation (including timeout).
+    /// A returned error envelope establishes no rollback guarantee.
+    fn result_domain_outcome(&self, text: &str) -> agent_runtime::DomainOutcome {
+        super::query_utils::sql_result_domain_outcome(text)
+    }
+
     fn name(&self) -> &str {
         "query_datasource"
     }

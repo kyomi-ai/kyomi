@@ -96,6 +96,16 @@ pub async fn store_refresh_token(
     Ok(token_id)
 }
 
+// SQLite stores both RFC3339 (Chrono binds) and SQL timestamp text. Compare
+// parsed instants at SQLite millisecond precision, rather than their separators.
+fn unexpired_token_sql(is_pg: bool, column: &str) -> String {
+    if is_pg {
+        format!("{column} > NOW()")
+    } else {
+        format!("julianday({column}) > julianday('now')")
+    }
+}
+
 /// Verify a raw refresh token, handling rotation grace period and theft detection.
 pub async fn verify_refresh_token(
     pool: &DbPool,
@@ -105,6 +115,7 @@ pub async fn verify_refresh_token(
     let is_pg = pool.is_postgres();
     let now = sql_compat::now(is_pg);
     let bt = sql_compat::bool_true(is_pg);
+    let unexpired = unexpired_token_sql(is_pg, "rt.expires_at");
 
     // Fetch the token + user data in one query (include replaced_at and family_id)
     let sql = format!(
@@ -114,7 +125,7 @@ pub async fn verify_refresh_token(
          JOIN users u ON u.user_id = rt.user_id \
          WHERE rt.token_hash = $1 \
            AND rt.is_active = {bt} \
-           AND rt.expires_at > {now}"
+           AND {unexpired}"
     );
     let row = kyomi_core::db_fetch_optional!(
         pool, RefreshTokenWithUser, &sql, &token_hash
@@ -184,6 +195,48 @@ pub async fn verify_refresh_token(
     Ok(RefreshTokenVerifyResult::Valid(user_data))
 }
 
+/// Persist a successful MCP refresh without rotating its opaque token.
+///
+/// The guarded update serializes with revocation and keeps the later expiry
+/// when concurrent requests finish out of order. Replaced tokens remain usable
+/// only within their original grace period; neither deadline is extended.
+/// Returns false if the grant stopped being usable after verification.
+pub async fn renew_oauth_refresh_token(
+    pool: &DbPool,
+    token_id: &str,
+    oauth_client_id: &str,
+    expires_at: DateTime<Utc>,
+) -> kyomi_core::Result<bool> {
+    let is_pg = pool.is_postgres();
+    let bt = sql_compat::bool_true(is_pg);
+    let grace_seconds = kyomi_core::constants::get().jwt.refresh_token_grace_period_seconds;
+    // SQLite stores both RFC3339 timestamps (chrono binds) and SQL datetime
+    // strings. Compare instants, not their different textual representations.
+    let (later, unexpired, within_grace) = if is_pg {
+        (
+            "expires_at < $3".to_string(),
+            "expires_at > clock_timestamp()".to_string(),
+            format!("replaced_at + INTERVAL '{grace_seconds} seconds' >= clock_timestamp()"),
+        )
+    } else {
+        (
+            "julianday(expires_at) < julianday($3)".to_string(),
+            "julianday(expires_at) > julianday('now')".to_string(),
+            format!("julianday(replaced_at) + {grace_seconds} / 86400.0 >= julianday('now')"),
+        )
+    };
+    let sql = format!(
+        "UPDATE refresh_tokens \
+         SET expires_at = CASE WHEN replaced_at IS NULL AND {later} THEN $3 ELSE expires_at END \
+         WHERE token_id = $1 AND oauth_client_id = $2 \
+           AND is_active = {bt} AND revoked_at IS NULL AND {unexpired} \
+           AND (replaced_at IS NULL OR {within_grace}) \
+           AND EXISTS (SELECT 1 FROM users u WHERE u.user_id = refresh_tokens.user_id AND u.active = {bt})"
+    );
+    let result = kyomi_core::db_execute!(pool, &sql, token_id, oauth_client_id, &expires_at)?;
+    Ok(result.rows_affected() > 0)
+}
+
 /// Rotate a refresh token: mark the old one as replaced, create a new one in the same family.
 ///
 /// Returns the new token_id.
@@ -196,29 +249,35 @@ pub async fn rotate_refresh_token(
     expires_at: DateTime<Utc>,
     device_info: &DeviceInfo,
 ) -> kyomi_core::Result<String> {
-    let is_pg = pool.is_postgres();
-    let now = sql_compat::now(is_pg);
-
-    // Mark the old token as replaced
-    let replace_sql = format!(
-        "UPDATE refresh_tokens SET replaced_at = {now} WHERE token_id = $1"
-    );
-    kyomi_core::db_execute!(pool, &replace_sql, old_token_id)?;
-
-    // Create the new token in the same family
     let random_bytes: [u8; 16] = rand::rng().random();
     let new_token_id = format!("rt_{}", URL_SAFE_NO_PAD.encode(random_bytes));
-
-    kyomi_core::db_execute!(
-        pool,
-        "INSERT INTO refresh_tokens \
-         (token_id, user_id, token_hash, expires_at, user_agent, ip_address, country_code, family_id) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-        &new_token_id, user_id, new_token_hash, &expires_at,
-        &device_info.user_agent, &device_info.ip_address,
-        &device_info.country_code, family_id
-    )?;
-
+    // Lock order is always user then tokens, shared with all-session revocation.
+    // SQLite's first write obtains the database write lock; Postgres locks this row.
+    macro_rules! rotate {
+        ($pool:expr) => {{
+            let mut tx = $pool.begin().await?;
+            sqlx::query("UPDATE users SET sessions_valid_from = sessions_valid_from WHERE user_id = $1")
+                .bind(user_id).execute(&mut *tx).await?;
+            let now = sql_compat::now(pool.is_postgres());
+            let bt = sql_compat::bool_true(pool.is_postgres());
+            let unexpired = unexpired_token_sql(pool.is_postgres(), "expires_at");
+            let sql = format!("UPDATE refresh_tokens SET replaced_at = {now} WHERE token_id = $1 AND user_id = $2 AND family_id = $3 AND is_active = {bt} AND {unexpired}");
+            let replaced = sqlx::query(&sql).bind(old_token_id).bind(user_id).bind(family_id)
+                .execute(&mut *tx).await?;
+            if replaced.rows_affected() == 0 {
+                return Err(kyomi_core::Error::Unauthorized("Refresh token has been revoked".into()));
+            }
+            sqlx::query("INSERT INTO refresh_tokens (token_id, user_id, token_hash, expires_at, user_agent, ip_address, country_code, family_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)")
+                .bind(&new_token_id).bind(user_id).bind(new_token_hash).bind(expires_at)
+                .bind(&device_info.user_agent).bind(&device_info.ip_address)
+                .bind(&device_info.country_code).bind(family_id).execute(&mut *tx).await?;
+            tx.commit().await?;
+        }};
+    }
+    match pool {
+        DbPool::Postgres(pg) => rotate!(pg),
+        DbPool::Sqlite(sq) => rotate!(sq),
+    }
     Ok(new_token_id)
 }
 
@@ -289,6 +348,74 @@ pub async fn revoke_user_refresh_token(
     Ok(count > 0)
 }
 
+/// Persist a browser login's refresh token only if its signed access issuance
+/// still follows the current cutoff. Serializes with revocation so a pre-event
+/// mint cannot insert a surviving refresh token after the event commits.
+pub async fn store_session_refresh_token(
+    pool: &DbPool,
+    user_id: &str,
+    token_hash: &str,
+    expires_at: DateTime<Utc>,
+    device_info: &DeviceInfo,
+    family_id: &str,
+    issued_at_us: i64,
+) -> kyomi_core::Result<String> {
+    let random_bytes: [u8; 16] = rand::rng().random();
+    let token_id = format!("rt_{}", URL_SAFE_NO_PAD.encode(random_bytes));
+    macro_rules! store {
+        ($pool:expr) => {{
+            let mut tx = $pool.begin().await?;
+            let cutoff: Option<i64> = sqlx::query_scalar("UPDATE users SET sessions_valid_from = sessions_valid_from WHERE user_id = $1 RETURNING sessions_valid_from")
+                .bind(user_id).fetch_one(&mut *tx).await?;
+            if cutoff.is_some_and(|cutoff| issued_at_us <= cutoff) {
+                return Err(kyomi_core::Error::Unauthorized("Session revoked during login".into()));
+            }
+            sqlx::query("INSERT INTO refresh_tokens (token_id, user_id, token_hash, expires_at, user_agent, ip_address, country_code, family_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)")
+                .bind(&token_id).bind(user_id).bind(token_hash).bind(expires_at)
+                .bind(&device_info.user_agent).bind(&device_info.ip_address)
+                .bind(&device_info.country_code).bind(family_id).execute(&mut *tx).await?;
+            tx.commit().await?;
+        }};
+    }
+    match pool {
+        DbPool::Postgres(pg) => store!(pg),
+        DbPool::Sqlite(sq) => store!(sq),
+    }
+    Ok(token_id)
+}
+
+/// Immediately revoke browser access sessions and all user refresh tokens.
+/// Both writes commit together even with no refresh tokens. The cutoff advances
+/// strictly under concurrent/repeated events, including wall-clock rollback.
+pub async fn revoke_all_user_sessions(pool: &DbPool, user_id: &str) -> kyomi_core::Result<u64> {
+    macro_rules! revoke {
+        ($pool:expr) => {{
+            let mut tx = $pool.begin().await?;
+            // Sample issuance cutoff only after acquiring the serialization lock.
+            // A queued event must include sessions minted while it was waiting.
+            sqlx::query("UPDATE users SET sessions_valid_from = sessions_valid_from WHERE user_id = $1")
+                .bind(user_id).execute(&mut *tx).await?;
+            let candidate = Utc::now().timestamp_micros();
+            let advanced = sqlx::query("UPDATE users SET sessions_valid_from = CASE WHEN sessions_valid_from >= $1 THEN sessions_valid_from + 1 ELSE $1 END WHERE user_id = $2")
+                .bind(candidate).bind(user_id).execute(&mut *tx).await?;
+            if advanced.rows_affected() == 0 {
+                return Err(kyomi_core::Error::Unauthorized("User not found".into()));
+            }
+            let now = sql_compat::now(pool.is_postgres());
+            let bf = sql_compat::bool_false(pool.is_postgres());
+            let bt = sql_compat::bool_true(pool.is_postgres());
+            let sql = format!("UPDATE refresh_tokens SET is_active = {bf}, revoked_at = {now} WHERE user_id = $1 AND is_active = {bt}");
+            let count = sqlx::query(&sql).bind(user_id).execute(&mut *tx).await?.rows_affected();
+            tx.commit().await?;
+            count
+        }};
+    }
+    Ok(match pool {
+        DbPool::Postgres(pg) => revoke!(pg),
+        DbPool::Sqlite(sq) => revoke!(sq),
+    })
+}
+
 /// Revoke ALL refresh tokens for a user. Returns count of revoked tokens.
 pub async fn revoke_all_user_refresh_tokens(
     pool: &DbPool,
@@ -318,8 +445,9 @@ pub async fn get_user_sessions(
     user_id: &str,
 ) -> kyomi_core::Result<Vec<SessionInfo>> {
     let is_pg = pool.is_postgres();
-    let now = sql_compat::now(is_pg);
     let bt = sql_compat::bool_true(is_pg);
+
+    let unexpired = unexpired_token_sql(is_pg, "rt.expires_at");
 
     let sql = if is_pg {
         format!(
@@ -333,7 +461,7 @@ pub async fn get_user_sessions(
                         oc.name AS oauth_client_name \
                  FROM refresh_tokens rt \
                  LEFT JOIN oauth_clients oc ON rt.oauth_client_id = oc.client_id \
-                 WHERE rt.user_id = $1 AND rt.is_active = {bt} AND rt.expires_at > {now} \
+                 WHERE rt.user_id = $1 AND rt.is_active = {bt} AND {unexpired} \
                        AND rt.replaced_at IS NULL \
                  ORDER BY rt.family_id, rt.created_at DESC \
              ) s \
@@ -348,7 +476,7 @@ pub async fn get_user_sessions(
                     oc.name AS oauth_client_name \
              FROM refresh_tokens rt \
              LEFT JOIN oauth_clients oc ON rt.oauth_client_id = oc.client_id \
-             WHERE rt.user_id = $1 AND rt.is_active = {bt} AND rt.expires_at > {now} \
+             WHERE rt.user_id = $1 AND rt.is_active = {bt} AND {unexpired} \
                    AND rt.replaced_at IS NULL \
              ORDER BY COALESCE(rt.last_used, '1970-01-01') DESC"
         )
@@ -422,9 +550,10 @@ pub async fn verify_verification_token(
     let bf = sql_compat::bool_false(is_pg);
     let bt = sql_compat::bool_true(is_pg);
 
+    let unexpired = unexpired_token_sql(is_pg, "expires_at");
     let fetch_sql = format!(
         "SELECT * FROM verification_tokens \
-         WHERE token_type = $1 AND used = {bf} AND expires_at > {now}"
+         WHERE token_type = $1 AND used = {bf} AND {unexpired}"
     );
     let tokens = kyomi_core::db_fetch_all!(pool, VerificationToken, &fetch_sql, token_type)?;
 
@@ -505,6 +634,305 @@ mod tests {
     use super::*;
 
     use crate::test_support::{seed_user, sqlite_pool, test_pool};
+
+    async fn chronological_expiry_regression(db: DbPool) {
+        let _ = kyomi_core::constants::load_with_fallback();
+        let user = crate::user_service::create_user(
+            &db,
+            &format!("{}@test.local", generate_family_id()),
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+        let device = test_device_info();
+        // The live-path expired fixture shares today's date with the database clock.
+        let now = Utc::now();
+        let midnight = now.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc();
+        let cases = [
+            (midnight, false),
+            (now - Duration::days(1), false),
+            (now + Duration::days(1), true),
+            (now + Duration::hours(1), true),
+        ];
+        let mut expected_sessions = 0;
+        for (index, (expiry, valid)) in cases.into_iter().enumerate() {
+            for sql_format in [false, true] {
+                let raw = format!("rt_{}_{}_{}", user.user_id, index, sql_format);
+                let family = generate_family_id();
+                let id = store_refresh_token(
+                    &db,
+                    &user.user_id,
+                    &hash_refresh_token(&raw),
+                    expiry,
+                    &device,
+                    &family,
+                )
+                .await
+                .unwrap();
+                if let DbPool::Sqlite(sq) = &db {
+                    let text = if sql_format {
+                        expiry.format("%Y-%m-%d %H:%M:%S%.3f").to_string()
+                    } else {
+                        expiry.to_rfc3339()
+                    };
+                    sqlx::query("UPDATE refresh_tokens SET expires_at = $1 WHERE token_id = $2")
+                        .bind(text)
+                        .bind(&id)
+                        .execute(sq)
+                        .await
+                        .unwrap();
+                }
+                assert_eq!(
+                    matches!(
+                        verify_refresh_token(&db, &raw).await.unwrap(),
+                        RefreshTokenVerifyResult::Valid(_)
+                    ),
+                    valid,
+                    "case {index}, SQL format {sql_format}"
+                );
+                let listed = get_user_sessions(&db, &user.user_id).await.unwrap();
+                expected_sessions += usize::from(valid);
+                assert_eq!(
+                    listed.len(),
+                    expected_sessions,
+                    "only unexpired current families are listed"
+                );
+                assert_eq!(listed.iter().any(|row| row.token_id == id), valid);
+                let rotated = rotate_refresh_token(
+                    &db,
+                    &id,
+                    &user.user_id,
+                    &family,
+                    &format!("new-{raw}"),
+                    now + Duration::days(7),
+                    &device,
+                )
+                .await;
+                if valid {
+                    assert!(rotated.is_ok());
+                } else {
+                    assert!(matches!(rotated, Err(kyomi_core::Error::Unauthorized(_))));
+                }
+            }
+        }
+        // Expiry wins over theft detection: an expired replaced token must
+        // not revoke a still-valid sibling in its family.
+        let family = generate_family_id();
+        let expired_raw = format!("rt_expired_replaced_{}", user.user_id);
+        let expired_id = store_refresh_token(
+            &db,
+            &user.user_id,
+            &hash_refresh_token(&expired_raw),
+            midnight,
+            &device,
+            &family,
+        )
+        .await
+        .unwrap();
+        let sibling_raw = format!("rt_live_sibling_{}", user.user_id);
+        store_refresh_token(
+            &db,
+            &user.user_id,
+            &hash_refresh_token(&sibling_raw),
+            now + Duration::days(1),
+            &device,
+            &family,
+        )
+        .await
+        .unwrap();
+        let replaced_at = now - Duration::hours(1);
+        kyomi_core::db_execute!(
+            &db,
+            "UPDATE refresh_tokens SET replaced_at = $1 WHERE token_id = $2",
+            &replaced_at,
+            &expired_id
+        )
+        .unwrap();
+        assert!(matches!(
+            verify_refresh_token(&db, &expired_raw).await.unwrap(),
+            RefreshTokenVerifyResult::Invalid
+        ));
+        assert!(matches!(
+            verify_refresh_token(&db, &sibling_raw).await.unwrap(),
+            RefreshTokenVerifyResult::Valid(_)
+        ));
+        // Persist the database's exact current boundary. Equality is expired;
+        // conversion to RFC3339 must not turn that instant into a future value.
+        let raw = format!("rt_boundary_{}", user.user_id);
+        let family = generate_family_id();
+        let id = store_refresh_token(
+            &db,
+            &user.user_id,
+            &hash_refresh_token(&raw),
+            now + Duration::days(1),
+            &device,
+            &family,
+        )
+        .await
+        .unwrap();
+        let boundary = if db.is_postgres() {
+            "NOW()"
+        } else {
+            "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
+        };
+        let sql = format!("UPDATE refresh_tokens SET expires_at = {boundary} WHERE token_id = $1");
+        kyomi_core::db_execute!(&db, &sql, &id).unwrap();
+        assert!(matches!(
+            verify_refresh_token(&db, &raw).await.unwrap(),
+            RefreshTokenVerifyResult::Invalid
+        ));
+        assert!(
+            !get_user_sessions(&db, &user.user_id)
+                .await
+                .unwrap()
+                .iter()
+                .any(|row| row.token_id == id)
+        );
+        assert!(matches!(
+            rotate_refresh_token(
+                &db,
+                &id,
+                &user.user_id,
+                &family,
+                "boundary-replacement",
+                now + Duration::days(7),
+                &device
+            )
+            .await,
+            Err(kyomi_core::Error::Unauthorized(_))
+        ));
+        kyomi_core::db_execute!(
+            &db,
+            "DELETE FROM refresh_tokens WHERE user_id = $1",
+            &user.user_id
+        )
+        .unwrap();
+        kyomi_core::db_execute!(&db, "DELETE FROM users WHERE user_id = $1", &user.user_id)
+            .unwrap();
+    }
+
+    async fn chronological_verification_expiry_regression(db: DbPool) {
+        let _ = kyomi_core::constants::load_with_fallback();
+        let email = format!("{}@test.local", generate_family_id());
+        let raw = create_verification_token_with_expiry(&db, &email, "email", Some(1.0))
+            .await
+            .unwrap();
+        let expiry = Utc::now()
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc();
+        kyomi_core::db_execute!(
+            &db,
+            "UPDATE verification_tokens SET expires_at = $1 WHERE email = $2",
+            &expiry,
+            &email
+        )
+        .unwrap();
+        assert_eq!(
+            verify_verification_token(&db, &raw, "email").await.unwrap(),
+            None
+        );
+        let future = Utc::now() + Duration::days(1);
+        kyomi_core::db_execute!(
+            &db,
+            "UPDATE verification_tokens SET expires_at = $1 WHERE email = $2",
+            &future,
+            &email
+        )
+        .unwrap();
+        assert_eq!(
+            verify_verification_token(&db, &raw, "email").await.unwrap(),
+            Some(email.clone())
+        );
+        assert_eq!(
+            verify_verification_token(&db, &raw, "email").await.unwrap(),
+            None
+        );
+        kyomi_core::db_execute!(
+            &db,
+            "DELETE FROM verification_tokens WHERE email = $1",
+            &email
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn chronological_verification_expiry_sqlite() {
+        chronological_verification_expiry_regression(test_pool().await).await;
+    }
+
+    #[tokio::test]
+    async fn chronological_verification_expiry_postgres() {
+        let db = crate::test_pg::postgres_test_pool_or_skip(
+            "chronological_verification_expiry_postgres",
+        )
+        .await
+        .expect("real Postgres required for verification expiry regression");
+        chronological_verification_expiry_regression(db).await;
+    }
+
+    #[tokio::test]
+    async fn chronological_expiry_sqlite_exact_fractional_boundary() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        seed_user(sq, "boundary-user", "boundary@test.local").await;
+        // Fixed reference clock only for this predicate test: the production
+        // verifier/rotation/listing paths are exercised above with the real clock.
+        let predicate =
+            unexpired_token_sql(false, "expires_at").replace("'now'", "'2026-01-15T12:00:00.500Z'");
+        for expiry in [
+            "2026-01-15T11:00:00Z",
+            "2026-01-15 11:00:00",
+            "2026-01-15T12:00:00.499Z",
+            "2026-01-15 12:00:00.499",
+            "2026-01-15T12:00:00.500Z",
+            "2026-01-15 12:00:00.500",
+            "2026-01-15T13:00:00.500+01:00",
+        ] {
+            sqlx::query("INSERT OR REPLACE INTO refresh_tokens (token_id, user_id, token_hash, expires_at, family_id) VALUES ('boundary', 'boundary-user', 'boundary-hash', $1, 'boundary-family')")
+                .bind(expiry).execute(sq).await.unwrap();
+            let count: i64 = sqlx::query_scalar(&format!(
+                "SELECT COUNT(*) FROM refresh_tokens WHERE {predicate}"
+            ))
+            .fetch_one(sq)
+            .await
+            .unwrap();
+            assert_eq!(count, 0, "expired or equal instant: {expiry}");
+        }
+        for expiry in [
+            "2026-01-15T12:00:00.501Z",
+            "2026-01-15 12:00:00.501",
+            "2026-01-15T18:00:00Z",
+        ] {
+            sqlx::query("UPDATE refresh_tokens SET expires_at = $1 WHERE token_id = 'boundary'")
+                .bind(expiry)
+                .execute(sq)
+                .await
+                .unwrap();
+            let count: i64 = sqlx::query_scalar(&format!(
+                "SELECT COUNT(*) FROM refresh_tokens WHERE {predicate}"
+            ))
+            .fetch_one(sq)
+            .await
+            .unwrap();
+            assert_eq!(count, 1, "future instant: {expiry}");
+        }
+    }
+
+    #[tokio::test]
+    async fn chronological_expiry_sqlite() {
+        chronological_expiry_regression(test_pool().await).await;
+    }
+
+    #[tokio::test]
+    async fn chronological_expiry_postgres() {
+        let db = crate::test_pg::postgres_test_pool_or_skip("chronological_expiry_postgres")
+            .await
+            .expect("real Postgres required for expiry regression");
+        chronological_expiry_regression(db).await;
+    }
 
     // ─── family_id NOT NULL constraint (KYO-294) ─────────────────────────────
     //

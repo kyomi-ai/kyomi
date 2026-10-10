@@ -13,13 +13,6 @@ crates/kyomi-ui/src/components/chat/agent_thinking.rs:fc0d1757e13a5c40f3424e8c42
 crates/kyomi-ui/src/components/chat/chat_input.rs:5cd58a7d1fa85127e0d5afa74394426ba19a615df6613e4b6b8f826f7fe3be19:1
 crates/kyomi-ui/src/components/chat/chat_input.rs:5e34f74663b2cc3f2e3c4f4d1057a9b87009d64f732fdb0d996ea3bd4e1ab594:1
 crates/kyomi-ui/src/components/chat/chat_input.rs:6ccf05ce86773dee5b6936484d2ba843f3f3cf4c0000aff6a45f423e90b95476:1
-crates/kyomi-ui/src/components/chat/chat_state.rs:08ac1f6a65e0995ae3daf24ef8c9be4fac7536135a2596822fa54e97c744f172:1
-crates/kyomi-ui/src/components/chat/chat_state.rs:12028208a524e5d12b2a4a6fa3299301614770d509791f326c76ecd0e1ba5ff6:1
-crates/kyomi-ui/src/components/chat/chat_state.rs:4394c266ad6500bee48994a7aefbb3e7c81e86116d3ef707224fc35b57035ac9:1
-crates/kyomi-ui/src/components/chat/chat_state.rs:4889f860d0eb0ee82df9b02ef29d9439024f54c3259c4583a7d10438ec4ede53:1
-crates/kyomi-ui/src/components/chat/chat_state.rs:b081d3d3543c38a5ccc0c7d2fa5321e8c41a7a05d98b30ccccf64ac130322782:1
-crates/kyomi-ui/src/components/chat/chat_state.rs:b3e5f933193be978d7b44b60a7b5d70b1745cb2e8d7debca3be28cd739b499b3:1
-crates/kyomi-ui/src/components/chat/chat_state.rs:cfb3080ac06f485e0717d0c3f0a9aae205dc5b0029bd8f69761c2bd75f20b76b:1
 crates/kyomi-ui/src/components/chat/copilot_chat.rs:256060396696fd413aa2ecf0c8aeeb02fcfe4891d49e0f582fc8efc9fe635d42:2
 crates/kyomi-ui/src/components/chat/copilot_chat.rs:70c35ab80a0c8a4a9b05919357734d0a7eb241512cca3fb4899ad12f52f22b9b:1
 crates/kyomi-ui/src/components/chat/copilot_chat.rs:9067646f3a3e47e4e76c6a5c7d7eed9d57f3a5011ff5ec4709b77a7f61af556f:1
@@ -325,6 +318,5 @@ crates/kyomi-ui/src/pages/watches/watches_page.rs:93e6b4c8ba39c1703e5baec04e57c0
 crates/kyomi-ui/src/pages/watches/watches_page.rs:bce029f44d502b58194805da7a9ea3cafd2f459232a1605e9c64109b86e11fca:1
 crates/kyomi-ui/src/pages/welcome.rs:594e1f8bfdfe0470363e3fe5ed6a68e718466cd97d098daafca10b8bd4a8a788:1
 crates/kyomi-ui/src/pages/welcome.rs:69ec6227897922ff99da86344851c6335851de431d9b43269d49b687d1ae5346:1
-crates/kyomi-ui/src/query_cache/mod.rs:325e93fa637494b4a504942bba14106b6d1d78c8111ccb9343cdea4d4c5bbbee:1
 crates/kyomi-ui/src/utils/permissions.rs:41ea990db42f97aa25faceee0b8f03c0e46807b09437bea6d3cc095edcc22587:1
 crates/kyomi-ui/src/utils/permissions.rs:6f1dd55fd0f5821e19dd97906a5d01d6c91d7ef602aef64bd399d30c0b8d19b5:1

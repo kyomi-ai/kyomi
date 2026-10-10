@@ -107,10 +107,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust stable + wasm target
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
+      - name: Install pinned Rust toolchain
+        uses: ./.github/actions/setup-rust
 
       - uses: mozilla-actions/sccache-action@v0.0.9
 

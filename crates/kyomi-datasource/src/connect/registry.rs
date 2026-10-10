@@ -19,7 +19,10 @@
 //!    `connect:cmd:{datasource_config_id}` that forwards the command through the
 //!    local mpsc channel and publishes the response back.
 
+use std::collections::VecDeque;
+use std::path::Path;
 use std::sync::Arc;
+
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -29,6 +32,8 @@ use kyomi_core::connect_protocol::{ConnectRequest, ConnectResponse};
 use kyomi_core::RedisPool;
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
 use tokio::task::JoinHandle;
+
+use super::owner_recovery::OwnerRecovery;
 
 /// Channel for routing responses back to the caller.
 ///
@@ -107,6 +112,8 @@ pub struct ConnectRegistry {
     /// Redis URL for creating dedicated pub/sub connections (ConnectionManager
     /// does not support SUBSCRIBE). `None` in single-instance mode.
     redis_url: Option<String>,
+    /// Verified recovery scope, with a lock retained until process exit.
+    owner_recovery: Option<Arc<OwnerRecovery>>,
 }
 
 impl ConnectRegistry {
@@ -123,6 +130,129 @@ impl ConnectRegistry {
             subscribers: Arc::new(DashMap::new()),
             redis: Some(redis),
             redis_url: Some(redis_url),
+            owner_recovery: None,
+        }
+    }
+
+    /// Enable verified crash recovery in a persistent local filesystem scope.
+    ///
+    /// The directory must already exist. Keep its marker and lock files forever;
+    /// every participating replica must see the same local filesystem inodes.
+    /// Requires Linux and a Tokio runtime. Initialization errors fail startup.
+    /// Isolated volumes and unknown scopes retain owners for operator recovery.
+    pub fn with_owner_recovery(mut self, directory: &Path) -> std::io::Result<Self> {
+        self.owner_recovery = Some(OwnerRecovery::for_process(directory)?);
+        if self.redis.is_some() {
+            let registry = self.clone();
+            tokio::spawn(async move {
+                registry.run_owner_recovery().await;
+            });
+        }
+        Ok(self)
+    }
+
+    fn new_socket_owner(&self) -> String {
+        self.owner_recovery.as_ref().map_or_else(
+            || uuid::Uuid::new_v4().to_string(),
+            |owner| owner.new_socket_owner(),
+        )
+    }
+
+    /// Verify one bounded Redis scan page and remove only exact dead owners.
+    /// The durable revoked marker and replacement owners are never touched.
+    async fn recover_owner_page(&self, key: &str, cursor: u64) -> kyomi_core::Result<u64> {
+        let (Some(redis), Some(recovery)) = (&self.redis, &self.owner_recovery) else {
+            return Ok(0);
+        };
+        let mut conn = redis.clone();
+        let (next, owners): (u64, Vec<String>) = redis::cmd("SSCAN")
+            .arg(key)
+            .arg(cursor)
+            .arg("COUNT")
+            .arg(64)
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| {
+                kyomi_core::Error::ServiceUnavailable(format!("Connect owner scan failed: {e}"))
+            })?;
+        for owner in owners {
+            let proof = match recovery.prove_dead(&owner) {
+                Ok(proof) => proof,
+                Err(error) => {
+                    tracing::warn!(key, owner, %error, "Connect owner verification failed; owner retained");
+                    continue;
+                }
+            };
+            if let Some(_death_guard) = proof {
+                redis::cmd("SREM")
+                    .arg(key)
+                    .arg(&owner)
+                    .query_async::<i64>(&mut conn)
+                    .await
+                    .map_err(|e| {
+                        kyomi_core::Error::ServiceUnavailable(format!(
+                            "Connect dead owner cleanup failed: {e}"
+                        ))
+                    })?;
+            }
+        }
+        Ok(next)
+    }
+
+    // Every configured scope reconciles independently, including when a mutation
+    // is routed to another host. Resume Redis cursors one page per tick rather
+    // than sweeping the entire keyspace in a request or one unbounded task turn.
+    async fn run_owner_recovery(&self) {
+        let Some(redis) = &self.redis else {
+            return;
+        };
+        let mut key_cursor = 0;
+        let mut keys = VecDeque::<String>::new();
+        let mut member_cursor = 0;
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            interval.tick().await;
+            let result = tokio::time::timeout(Duration::from_secs(5), async {
+                if keys.is_empty() {
+                    let mut conn = redis.clone();
+                    let (next, page): (u64, Vec<String>) = redis::cmd("SCAN")
+                        .arg(key_cursor)
+                        .arg("MATCH")
+                        .arg("connect:active:*")
+                        .arg("COUNT")
+                        .arg(64)
+                        .query_async(&mut conn)
+                        .await
+                        .map_err(|e| {
+                            kyomi_core::Error::ServiceUnavailable(format!(
+                                "Connect recovery key scan failed: {e}"
+                            ))
+                        })?;
+                    key_cursor = next;
+                    keys.extend(page);
+                }
+                if let Some(key) = keys.front() {
+                    member_cursor = self.recover_owner_page(key, member_cursor).await?;
+                    if member_cursor == 0 {
+                        keys.pop_front();
+                    }
+                }
+                Ok::<(), kyomi_core::Error>(())
+            })
+            .await;
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "Connect owner recovery retained unverified owners");
+                    keys.pop_front();
+                    member_cursor = 0;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "Connect owner recovery timed out; owners retained");
+                    keys.pop_front();
+                    member_cursor = 0;
+                }
+            }
         }
     }
 
@@ -140,6 +270,7 @@ impl ConnectRegistry {
             subscribers: Arc::new(DashMap::new()),
             redis: None,
             redis_url: None,
+            owner_recovery: None,
         }
     }
 
@@ -152,7 +283,7 @@ impl ConnectRegistry {
     /// stale disconnect cannot remove a newer connection's entry.
     pub async fn register(&self, datasource_config_id: &str, sender: CommandSender) -> u64 {
         let connection_id = self.next_connection_id.fetch_add(1, Ordering::Relaxed);
-        let owner = uuid::Uuid::new_v4().to_string();
+        let owner = self.new_socket_owner();
         let (revoked, _) = watch::channel(false);
         self.lifecycle.insert(connection_id, ConnectionLifecycle {
             datasource_config_id: datasource_config_id.to_owned(),
@@ -187,7 +318,7 @@ impl ConnectRegistry {
         }
         let (revoked, receiver) = watch::channel(false);
         let connection_id = self.next_connection_id.fetch_add(1, Ordering::Relaxed);
-        let owner = uuid::Uuid::new_v4().to_string();
+        let owner = self.new_socket_owner();
         self.lifecycle.insert(connection_id, ConnectionLifecycle {
             datasource_config_id: datasource_config_id.to_owned(),
             owner: owner.clone(),
@@ -269,7 +400,11 @@ impl ConnectRegistry {
         // A successful mutation response means the old handler has dropped its
         // pending channels and can no longer send a queued WebSocket command.
         tokio::time::timeout(Duration::from_secs(5), async {
+            let mut recovery_cursor = 0;
             loop {
+                recovery_cursor = self.recover_owner_page(
+                    &active_generation_key(datasource_config_id, jti), recovery_cursor,
+                ).await?;
                 // A reconnect replaces the routing entry before its old
                 // handler has necessarily finished a blocked WebSocket send.
                 let local_gone = !self.lifecycle.iter().any(|entry| {
@@ -1927,3 +2062,7 @@ mod tests {
         assert!(!registry.connections.contains_key(dsid));
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "registry_recovery_tests.rs"]
+mod recovery_tests;

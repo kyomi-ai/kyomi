@@ -80,7 +80,7 @@ pub const TOOL_FRIENDLY_NAMES: &[(&str, &str)] = &[
 ///
 /// Returns a static fallback for unknown tools because we cannot return a
 /// dynamically-formatted `&str` from this function.
-fn get_friendly_name(tool_name: &str) -> &'static str {
+pub(crate) fn get_friendly_name(tool_name: &str) -> &'static str {
     TOOL_FRIENDLY_NAMES
         .iter()
         .find(|(name, _)| *name == tool_name)
@@ -288,6 +288,11 @@ impl AgentThinkingTracker {
     /// The WebSocket manager handles both standalone (direct local delivery)
     /// and multi-replica (Redis pub/sub) modes automatically.
     async fn send_event(&self, event: &AgentThinkingEvent, is_update: bool) {
+        if let Err(error) = self.try_send_event(event, is_update).await {
+            error!(%error, "Thinking notification failed");
+        }
+    }
+    async fn try_send_event(&self, event: &AgentThinkingEvent, is_update: bool) -> Result<(), String> {
         let mut event_obj = serde_json::json!({
             "event_id": event.event_id,
             "event_type": event.event_type,
@@ -304,16 +309,15 @@ impl AgentThinkingTracker {
         }
         let thinking_data = serde_json::json!({ "event": event_obj });
 
+        let mut errors = Vec::new();
         for uid in &self.workspace_user_ids {
-            kyomi_auth::websocket::helpers::send_agent_thinking(
-                self.ws_manager.for_workspace(&self.workspace_id),
-                uid,
-                &self.session_id,
-                thinking_data.clone(),
-                Some(&self.message_id),
-            )
-            .await;
+            use kyomi_core::{MessageType, WebSocketMessage};
+            let message = WebSocketMessage::new(MessageType::AgentThinking)
+                .with_workspace(&self.workspace_id).with_session(&self.session_id).with_data(thinking_data.clone())
+                .with_message_id(&self.message_id);
+            if let Err(error) = self.ws_manager.try_send_to_user(uid, message).await { errors.push(error); }
         }
+        if errors.is_empty() { Ok(()) } else { Err(errors.join("; ")) }
     }
 
     // -----------------------------------------------------------------------
@@ -575,6 +579,11 @@ impl AgentThinkingTracker {
         output_tokens: u32,
         cost: Option<f64>,
     ) {
+        if let Err(error) = self.try_update_token_usage(input_tokens, output_tokens, cost).await {
+            error!(%error, "Token usage notification failed");
+        }
+    }
+    pub(crate) async fn try_update_token_usage(&mut self, input_tokens: u32, output_tokens: u32, cost: Option<f64>) -> Result<(), String> {
         self.total_input_tokens += input_tokens;
         self.total_output_tokens += output_tokens;
         self.last_input_tokens = input_tokens;
@@ -594,17 +603,15 @@ impl AgentThinkingTracker {
             }
         });
 
+        let mut errors = Vec::new();
         for uid in &self.workspace_user_ids {
-            kyomi_auth::websocket::helpers::send_token_usage_update(
-                self.ws_manager.for_workspace(&self.workspace_id),
-                uid,
-                &self.session_id,
-                token_data.clone(),
-                Some(&self.message_id),
-            )
-            .await;
+            use kyomi_core::{MessageType, WebSocketMessage};
+            let message = WebSocketMessage::new(MessageType::TokenUsageUpdate)
+                .with_workspace(&self.workspace_id).with_session(&self.session_id).with_data(token_data.clone()).with_message_id(&self.message_id);
+            if let Err(error) = self.ws_manager.try_send_to_user(uid, message).await { errors.push(error); }
         }
         self.maybe_flush_thinking_events(false).await;
+        if errors.is_empty() { Ok(()) } else { Err(errors.join("; ")) }
     }
 
     // -----------------------------------------------------------------------
@@ -747,6 +754,18 @@ impl AgentThinkingTracker {
     // Storage / accessors
     // -----------------------------------------------------------------------
 
+    /// Project an already committed runtime event and only then notify the interface.
+    pub(crate) async fn committed_execution_event(
+        &mut self, event: AgentThinkingEvent, full_text: Option<&str>,
+    ) -> Result<(), String> {
+        if self.finalized { return Err("tracker already finalized".into()); }
+        if let (Some(id), Some(body)) = (&event.event_id, full_text) {
+            self.full_texts.insert(id.clone(), body.to_string());
+        }
+        let event = self.add_event(event);
+        self.try_send_event(&event, false).await
+    }
+
     /// Produce a serializable list of events for database persistence.
     pub fn get_events_for_storage(&self) -> Vec<serde_json::Value> {
         self.events
@@ -813,9 +832,9 @@ impl AgentThinkingTracker {
 // ---------------------------------------------------------------------------
 
 /// Result of cleaning a thought — truncated display text plus optional full text.
-struct CleanedThought {
-    display: String,
-    full_text: Option<String>,
+pub(crate) struct CleanedThought {
+    pub(crate) display: String,
+    pub(crate) full_text: Option<String>,
 }
 
 /// Clean up LLM thinking text for user-facing display.
@@ -824,7 +843,7 @@ struct CleanedThought {
 /// generic patterns (action/observation markers), and truncates to a
 /// reasonable length. When the cleaned text exceeds 200 characters,
 /// `full_text` contains the untruncated version for on-demand retrieval.
-fn clean_thought(thought: &str) -> Option<CleanedThought> {
+pub(crate) fn clean_thought(thought: &str) -> Option<CleanedThought> {
     // 1. Remove <memory>...</memory> blocks.
     static MEMORY_RE: OnceLock<Regex> = OnceLock::new();
     let re = MEMORY_RE.get_or_init(|| Regex::new(r"(?is)<memory>.*?</memory>").expect("valid regex literal"));
@@ -893,7 +912,7 @@ fn clean_thought(thought: &str) -> Option<CleanedThought> {
 ///
 /// Returns a JSON object with a `tool` name and either an `input` or
 /// `output` key, extracting the most relevant fields for each known tool.
-fn format_tool_schema(
+pub(crate) fn format_tool_schema(
     tool_name: &str,
     data: &serde_json::Value,
     is_input: bool,

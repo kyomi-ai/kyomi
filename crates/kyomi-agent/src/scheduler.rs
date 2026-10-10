@@ -220,7 +220,7 @@ impl WatchScheduler {
             }
 
             // Compute new next_run_at from cron schedule
-            let new_next_run = match watch_service::calculate_next_run(&watch.schedule) {
+            let new_next_run = match watch_service::calculate_next_run_in_timezone(&watch.schedule, watch.timezone.as_deref()) {
                 Ok(next) => next,
                 Err(e) => {
                     error!(watch_id = %watch_id, error = %e, "Invalid cron schedule for watch");
@@ -672,6 +672,7 @@ struct DueWatch {
     watch_id: String,
     workspace_id: String,
     schedule: String,
+    timezone: Option<String>,
     next_run_at: DateTime<Utc>,
 }
 
@@ -700,7 +701,7 @@ async fn due_watches_to_execute(
     let is_pg = db.is_postgres();
     let bool_true = kyomi_core::sql_compat::bool_true(is_pg);
     let due_sql = format!(
-        "SELECT watch_id, workspace_id, schedule, next_run_at \
+        "SELECT watch_id, workspace_id, schedule, timezone, next_run_at \
          FROM watches \
          WHERE enabled = {bool_true} \
            AND next_run_at IS NOT NULL \
@@ -791,6 +792,7 @@ mod tests {
             watch_id: "watch-abc".into(),
             workspace_id: "ws-1".into(),
             schedule: "0 9 * * *".into(),
+            timezone: None,
             next_run_at: now,
         };
         assert_eq!(watch.watch_id, "watch-abc");
@@ -896,6 +898,21 @@ mod tests {
                 .execute(sqlite(db))
                 .await
                 .expect("update subscription_status");
+        }
+
+        #[tokio::test]
+        async fn timezone_due_watch_round_trip_uses_local_recurrence() {
+            let db = test_pool().await;
+            seed_user_and_workspace(&db).await;
+            let cutoff: DateTime<Utc> = "2026-10-03T00:00:00Z".parse().unwrap();
+            insert_watch(&db, "watch-zone", "ws-1", "user-a", cutoff).await;
+            sqlx::query("UPDATE watches SET schedule = '0 9 * * 1', timezone = 'Australia/Sydney' WHERE watch_id = 'watch-zone'")
+                .execute(sqlite(&db)).await.unwrap();
+            let due = due_watches_to_execute(&db, false, cutoff).await.unwrap();
+            assert_eq!(due.len(), 1);
+            assert_eq!(due[0].timezone.as_deref(), Some("Australia/Sydney"));
+            assert_eq!(watch_service::calculate_next_run_in_timezone_after(&due[0].schedule, due[0].timezone.as_deref(), cutoff).unwrap(),
+                "2026-10-04T22:00:00Z".parse::<DateTime<Utc>>().unwrap());
         }
 
         #[tokio::test]
