@@ -711,6 +711,182 @@ async fn code_exchange_requires_exact_redirect_and_correct_pkce() {
     let tokens: Value = exchanged.json().await.expect("OAuth contract value");
     assert!(tokens["access_token"].as_str().is_some());
     assert!(tokens["refresh_token"].as_str().is_some());
+
+    let refresh = tokens["refresh_token"].as_str().expect("refresh token");
+    let other_id = register_test_client(&ctx.base_url, &["https://example.com/other"]).await;
+    let cross_client = client()
+        .post(format!("{}/api/v1/oauth/token", ctx.base_url))
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("client_id", other_id.as_str()),
+            ("refresh_token", refresh),
+        ])
+        .send()
+        .await
+        .expect("cross-client refresh of exchanged token");
+    assert_eq!(cross_client.status(), 400);
+    assert_eq!(
+        cross_client.json::<Value>().await.expect("error JSON"),
+        json!({"error": "invalid_grant: client_id mismatch"})
+    );
+    let same_client = client()
+        .post(format!("{}/api/v1/oauth/token", ctx.base_url))
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("client_id", id.as_str()),
+            ("refresh_token", refresh),
+        ])
+        .send()
+        .await
+        .expect("same-client refresh of exchanged token");
+    assert_eq!(same_client.status(), 200);
+    let refreshed: Value = same_client.json().await.expect("refreshed token JSON");
+    assert!(refreshed["access_token"].as_str().is_some());
+    assert_eq!(refreshed["refresh_token"], refresh);
+}
+
+#[tokio::test]
+async fn refresh_grant_is_bound_to_issuing_client() {
+    let Some((ctx, client_a)) = oauth_context("refresh-client-binding").await else {
+        return;
+    };
+    let client_b = register_test_client(&ctx.base_url, &["https://example.com/other"]).await;
+    let refresh = kyomi_auth::jwt::create_refresh_token();
+    let device = kyomi_auth::token_service::DeviceInfo {
+        user_agent: None,
+        ip_address: None,
+        country_code: None,
+        oauth_client_id: Some(client_a.clone()),
+    };
+    kyomi_auth::token_service::store_refresh_token(
+        &ctx.db,
+        &ctx.user_id,
+        &kyomi_auth::token_service::hash_refresh_token(&refresh),
+        chrono::Utc::now() + chrono::Duration::days(1),
+        &device,
+        &kyomi_auth::token_service::generate_family_id(),
+    )
+    .await
+    .expect("store client-bound refresh token");
+
+    let token_url = format!("{}/api/v1/oauth/token", ctx.base_url);
+    let wrong_client = client()
+        .post(&token_url)
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("client_id", client_b.as_str()),
+            ("refresh_token", refresh.as_str()),
+        ])
+        .send()
+        .await
+        .expect("cross-client refresh request");
+    assert_eq!(wrong_client.status(), 400);
+    assert_eq!(
+        wrong_client.json::<Value>().await.expect("error JSON"),
+        json!({"error": "invalid_grant: client_id mismatch"})
+    );
+
+    // A rejected cross-client attempt must leave A's grant usable. Cursor
+    // requires the same refresh token on every successful OAuth refresh.
+    for _ in 0..2 {
+        let same_client = client()
+            .post(&token_url)
+            .form(&[
+                ("grant_type", "refresh_token"),
+                ("client_id", client_a.as_str()),
+                ("refresh_token", refresh.as_str()),
+            ])
+            .send()
+            .await
+            .expect("same-client refresh request");
+        assert_eq!(same_client.status(), 200);
+        let body: Value = same_client.json().await.expect("token JSON");
+        assert!(body["access_token"].as_str().is_some());
+        assert_eq!(body["refresh_token"], refresh);
+    }
+
+    kyomi_core::db_execute!(
+        &ctx.db,
+        "UPDATE oauth_clients SET active = false WHERE client_id = $1",
+        &client_a
+    )
+    .expect("deactivate issuing client");
+    let inactive_client = client()
+        .post(&token_url)
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("client_id", client_a.as_str()),
+            ("refresh_token", refresh.as_str()),
+        ])
+        .send()
+        .await
+        .expect("inactive-client refresh request");
+    assert_eq!(inactive_client.status(), 400);
+    assert!(
+        inactive_client
+            .json::<Value>()
+            .await
+            .expect("error JSON")["error"]
+            .as_str()
+            .is_some_and(|error| error.starts_with("Unknown client_id:"))
+    );
+}
+
+#[tokio::test]
+async fn oauth_refresh_rejects_unbound_token_but_browser_refresh_succeeds() {
+    let Some((ctx, client_id)) = oauth_context("refresh-unbound").await else {
+        return;
+    };
+    let refresh = kyomi_auth::jwt::create_refresh_token();
+    let device = kyomi_auth::token_service::DeviceInfo {
+        user_agent: None,
+        ip_address: None,
+        country_code: None,
+        oauth_client_id: None,
+    };
+    kyomi_auth::token_service::store_refresh_token(
+        &ctx.db,
+        &ctx.user_id,
+        &kyomi_auth::token_service::hash_refresh_token(&refresh),
+        chrono::Utc::now() + chrono::Duration::days(1),
+        &device,
+        &kyomi_auth::token_service::generate_family_id(),
+    )
+    .await
+    .expect("store unbound refresh token");
+
+    let oauth = client()
+        .post(format!("{}/api/v1/oauth/token", ctx.base_url))
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("client_id", client_id.as_str()),
+            ("refresh_token", refresh.as_str()),
+        ])
+        .send()
+        .await
+        .expect("unbound OAuth refresh request");
+    assert_eq!(oauth.status(), 400);
+    // #571 added an is_none() guard ahead of the client_id comparison in
+    // oauth.rs, so an unbound token now short-circuits there rather than
+    // reaching the mismatch check #619 added. The assertion's intent is
+    // unchanged — an unbound token must not mint an MCP token — only which
+    // rejection fires first. The browser-refresh half below is unaffected:
+    // /api/v1/auth/refresh rejects tokens that ARE OAuth-bound, so this
+    // unbound one proceeds through it.
+    assert_eq!(
+        oauth.json::<Value>().await.expect("error JSON"),
+        json!({"error": "invalid_grant: refresh token is not an OAuth client token"})
+    );
+
+    let browser = client()
+        .post(format!("{}/api/v1/auth/refresh", ctx.base_url))
+        .header("cookie", format!("refresh_token={refresh}"))
+        .send()
+        .await
+        .expect("browser refresh request");
+    assert_eq!(browser.status(), 200);
+    let body: Value = browser.json().await.expect("browser token JSON");
+    assert!(body["access_token"].as_str().is_some());
 }
 
 #[tokio::test]

@@ -92,6 +92,9 @@ pub(crate) mod test_pg;
 #[cfg(test)]
 mod test_support;
 
+#[cfg(test)]
+mod token_sliding_expiry_tests;
+
 /// Build a shared HTTP client with a proper User-Agent header.
 ///
 /// Some APIs (notably Snowflake) reject requests without a User-Agent.

@@ -198,7 +198,7 @@ impl AgentTool for SearchKnowledgeTool {
             }
 
         // Search knowledge file chunks (new knowledge system)
-        let query_embedding = embed.embed_passage(query)?;
+        let query_embedding = embed.embed_passage_offloaded(query).await?;
         let knowledge_file_results = search_knowledge_chunks(
             &ctx.db, &ctx.workspace_id, &ctx.user_id, &query_embedding, limit, doc_type_filter,
         ).await;

@@ -25,7 +25,7 @@ nobody expects:
   for every matched path. On-disk content is untouched, so every subsequent `cargo test`
   still compiles the reviewed code and still passes. Only the index shrank. That is the worse
   of the two: the tree looks right, the suite is green, and the commit — together with any
-  signature bound to its diff — now covers less than what was read.
+  review of its diff — now covers less than what was read.
 
 Neither shape announces itself. Compare the staged diff and working-tree diff before and
 after verification, alongside `git status --porcelain`. Status detects the illustrated
@@ -76,7 +76,7 @@ git --work-tree="$OTHER" checkout "$BASE" -- scripts .githooks
 git show "$BASE":scripts/foo.txt > "$scratch"
 ```
 
-Real precedent — two tickets in two days, recovered and corrected before signing:
+Real precedent — two tickets in two days, recovered and corrected before final approval:
 
 - **KYO-722, `2026-09-10` log, the entry headed "repoint the panic-context end marker + new
   standards rule"** — shape 1, self-disclosed at the end of an otherwise-clean review:
@@ -91,25 +91,15 @@ Real precedent — two tickets in two days, recovered and corrected before signi
   detect a narrowed index; the cycle-2 entry records *"no repeat of the cycle-1 `--work-tree`
   mutation incident; all pre-fix/post-fix comparisons this cycle used `git show <rev>:<path>`
   into `mktemp -d` scratch files … never a working-tree mutation."* The cycle-3 entry
-  reproduced the transcript in a throwaway repo, and it is recorded in
-  [`scripts/sign-review.sh`](../../../scripts/sign-review.sh)'s header, which explains the
-  mechanism exactly (quoted verbatim, the source's own emphasis preserved):
+  reproduced the transcript in a throwaway repo: because `--git-dir` remained
+  discovered from the current worktree, Git updated that worktree's index while
+  writing content into the unrelated `--work-tree` directory. Its own on-disk
+  files stayed unchanged.
 
-  > Because `--git-dir` was left at its default (discovered from cwd, i.e. THIS worktree's
-  > real gitdir), git updated THIS worktree's index to match the checked-out revision for
-  > those paths, while writing the checked-out file \*content\* into the unrelated
-  > `--work-tree` directory — leaving this worktree's own on-disk files untouched.
-
-This observation does not identify the command behind the original KYO-676 incident;
-its command was never captured. The KYO-712 ticket comments and the script header explicitly
-limit the finding to a reproduced class of command, observed during KYO-712 itself.
-
-That header also records what the defence does: the signing gate refuses to sign a
-narrowed index *regardless of cause*, because the cause could not be named. It stops the bad
-commit when tracked changes are left unstaged; it cannot reconstruct an edit overwritten
-on disk and in the index. Avoiding the write is still necessary. KYO-712's rework review
-(`2026-09-12`, "ci.yml rebase resolution + -rawin for OpenSSL 3.0.x") explicitly records
-using `git show` and `git diff` rather than index-mutating commands.
+This does not identify the uncaptured command behind KYO-676; it reproduces a
+class of command observed during KYO-712. The former signing gate has been
+retired. Avoid index-mutating reads regardless of which lint or review controls
+are active: no gate can reconstruct an edit overwritten on disk and in the index.
 
 Sibling of
 [../testing/no-git-stash-copy-file-instead.md](../testing/no-git-stash-copy-file-instead.md):

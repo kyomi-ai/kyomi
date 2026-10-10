@@ -1,5 +1,9 @@
 # Every `openssl pkeyutl` call on an Ed25519 key needs `-rawin`, proven on the oldest OpenSSL it runs on
 
+The agent review and verification signing gates cited below were retired in
+October 2026. These examples describe historical cryptographic behavior; they
+do not require agents to sign reviews or verification reports.
+
 This repo's review and merge gates sign and verify with Ed25519 keys through
 `openssl pkeyutl`. That call behaves differently depending on the OpenSSL version. On
 OpenSSL 3.2 and later a flagless `pkeyutl -sign` / `-verify` works on an Ed25519 key. On
@@ -28,7 +32,7 @@ evidence only for that version. Nearest siblings:
 
 **Rule:** Every `openssl pkeyutl -sign` or `-verify` on an Ed25519 key passes `-rawin`: in
 scripts, git hooks, test suites, and fixture generators. Signer and verifier must match.
-Copy the explanatory comment that sits next to the call in `scripts/sign-review.sh`, too. It
+Preserve an explanatory comment next to any Ed25519 call. It
 records the measured version matrix and says "do not remove it as \"redundant\"", which is
 what stops a later cleanup from dropping the flag on a box where the flagless form happens
 to work.
