@@ -111,6 +111,12 @@ Contact test-service-account@test-project or someone@example.com instead.
 EOF
 assert_exit "email-address with an allowed domain passes" 0 "$TMP/email_allowed.txt"
 
+cat > "$TMP/git_ssh.txt" <<'EOF'
+git remote add origin git@github.com:example-org/example-repo.git
+git remote set-url origin ssh://git@github.com/example-org/example-repo.git
+EOF
+assert_exit "GitHub SSH Git transport URLs pass" 0 "$TMP/git_ssh.txt"
+
 # ------------------------------------------------------------------------------
 # Rule: public-ipv4 — a real public address is rejected...
 # ------------------------------------------------------------------------------
