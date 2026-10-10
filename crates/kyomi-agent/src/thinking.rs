@@ -140,6 +140,7 @@ pub struct AgentThinkingEvent {
 /// them to Redis for WebSocket delivery, and provides the full event list
 /// for database persistence after the agent loop completes.
 pub struct AgentThinkingTracker {
+    workspace_id: String,
     session_id: String,
     message_id: String,
     workspace_user_ids: Vec<String>,
@@ -204,6 +205,7 @@ pub struct IncrementalFlushTarget {
 /// (KYO-493 phase 3) pushed the field count past it, while keeping every
 /// field explicit and named at the one production call site.
 pub struct AgentThinkingTrackerConfig {
+    pub workspace_id: String,
     pub session_id: String,
     pub user_id: String,
     pub message_id: String,
@@ -232,6 +234,7 @@ impl AgentThinkingTracker {
     /// requesting user.
     pub fn new(config: AgentThinkingTrackerConfig) -> Self {
         let AgentThinkingTrackerConfig {
+            workspace_id,
             session_id,
             user_id,
             message_id,
@@ -243,6 +246,7 @@ impl AgentThinkingTracker {
         } = config;
         let ws_users = workspace_user_ids.unwrap_or_else(|| vec![user_id]);
         Self {
+            workspace_id,
             session_id,
             message_id,
             workspace_user_ids: ws_users,
@@ -309,7 +313,7 @@ impl AgentThinkingTracker {
         for uid in &self.workspace_user_ids {
             use kyomi_core::{MessageType, WebSocketMessage};
             let message = WebSocketMessage::new(MessageType::AgentThinking)
-                .with_session(&self.session_id).with_data(thinking_data.clone())
+                .with_workspace(&self.workspace_id).with_session(&self.session_id).with_data(thinking_data.clone())
                 .with_message_id(&self.message_id);
             if let Err(error) = self.ws_manager.try_send_to_user(uid, message).await { errors.push(error); }
         }
@@ -603,7 +607,7 @@ impl AgentThinkingTracker {
         for uid in &self.workspace_user_ids {
             use kyomi_core::{MessageType, WebSocketMessage};
             let message = WebSocketMessage::new(MessageType::TokenUsageUpdate)
-                .with_session(&self.session_id).with_data(token_data.clone()).with_message_id(&self.message_id);
+                .with_workspace(&self.workspace_id).with_session(&self.session_id).with_data(token_data.clone()).with_message_id(&self.message_id);
             if let Err(error) = self.ws_manager.try_send_to_user(uid, message).await { errors.push(error); }
         }
         self.maybe_flush_thinking_events(false).await;
@@ -1857,6 +1861,7 @@ mod tests {
         incremental_flush: bool,
     ) -> AgentThinkingTrackerConfig {
         AgentThinkingTrackerConfig {
+            workspace_id: "ws-1".to_string(),
             session_id: session_id.to_string(),
             user_id: "user-a".to_string(),
             message_id: message_id.to_string(),

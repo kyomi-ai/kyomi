@@ -179,15 +179,18 @@ async fn handle_authenticated_ws(
                 msg = manager_rx.recv() => {
                     match msg {
                         Some(json) => {
-                            let denial = outbound_membership_denial_code(
+                            match outbound_membership_authorization(
                                 &db_for_send, &workspace_id_for_send, &user_id_for_send, &json,
-                            ).await;
-                            if let Some(code) = denial {
-                                let _ = ws_sender.send(ws::Message::Close(Some(ws::CloseFrame {
-                                    code,
-                                    reason: "Workspace access denied".into(),
-                                }))).await;
-                                break;
+                            ).await {
+                                Ok(true) => {},
+                                Ok(false) => continue,
+                                Err(code) => {
+                                    let _ = ws_sender.send(ws::Message::Close(Some(ws::CloseFrame {
+                                        code,
+                                        reason: "Workspace access denied".into(),
+                                    }))).await;
+                                    break;
+                                }
                             }
                             if ws_sender.send(ws::Message::text(json)).await.is_err() {
                                 break;
@@ -286,35 +289,44 @@ async fn workspace_membership_denial_code(
     }
 }
 
-/// User-targeted lifecycle notices deliberately reach invitees/nonmembers.
-/// All other manager traffic revalidates this socket's workspace, plus an
-/// explicit payload workspace when user-wide fan-out crosses workspace scopes.
-/// This costs one membership read per frame (two for a different explicit scope);
-/// caching the result would allow revoked sockets to keep receiving queued data.
-async fn outbound_membership_denial_code(
+/// Revalidate socket membership before transport, then authorize the emitter's
+/// origin. A revoked origin drops that event without closing another workspace's
+/// still-authorized socket. Database errors deny delivery.
+async fn outbound_membership_authorization(
     db: &kyomi_core::DbPool,
     workspace_id: &str,
     user_id: &str,
     json: &str,
-) -> Option<u16> {
+) -> Result<bool, u16> {
     use kyomi_types::websocket::{MessageType, WebSocketMessage};
     let Ok(message) = serde_json::from_str::<WebSocketMessage>(json) else {
-        return Some(CLOSE_FORBIDDEN);
+        return Ok(false);
     };
+    // These account lifecycle messages intentionally reach nonmembers.
     if matches!(message.message_type, MessageType::WorkspaceInvitation | MessageType::WorkspaceRemoved) {
-        return None;
+        return Ok(true);
     }
     if let Some(code) = workspace_membership_denial_code(db, workspace_id, user_id).await {
-        return Some(code);
+        return Err(code);
     }
-    if let Some(scope) = message.data.as_ref()
-        .and_then(|data| data.get("workspace_id"))
-        .and_then(|value| value.as_str())
-        && scope != workspace_id
+    if message.message_type == MessageType::Heartbeat {
+        return Ok(message.workspace_id.is_none());
+    }
+    let Some(origin) = message.workspace_id.as_deref().filter(|scope| !scope.is_empty()) else {
+        tracing::warn!(user_id, message_type = %message.message_type, "Dropping workspace event without origin");
+        return Ok(false);
+    };
+    // A payload scope is retained for client compatibility, but may not disagree
+    // with the authorization envelope (or carry a malformed scope).
+    if let Some(payload_scope) = message.data.as_ref().and_then(|data| data.get("workspace_id"))
+        && payload_scope.as_str() != Some(origin)
     {
-        return workspace_membership_denial_code(db, scope, user_id).await;
+        return Ok(false);
     }
-    None
+    if origin != workspace_id {
+        return Ok(workspace_membership_denial_code(db, origin, user_id).await.is_none());
+    }
+    Ok(true)
 }
 
 /// Extract the workspace_id from a path that is "{workspace_id}_{user_id}".
@@ -410,7 +422,7 @@ async fn handle_client_message(
                     match store.cancel(&conversation, &run_id, chrono::Utc::now().timestamp_millis()).await {
                         Ok(snapshot) => {
                             if snapshot.state == agent_runtime::RunState::Cancelled {
-                                kyomi_auth::websocket::helpers::send_request_cancelled(manager, user_id, sid, snapshot.assistant_message_id.as_str(), Some("chat")).await;
+                                kyomi_auth::websocket::helpers::send_request_cancelled(manager.for_workspace(workspace_id), user_id, sid, snapshot.assistant_message_id.as_str(), Some("chat")).await;
                             }
                         }
                         Err(error) => tracing::error!(user_id, session_id = sid, %error, "Durable cancellation failed"),
@@ -539,7 +551,7 @@ async fn refuse_if_billing_gate_blocks(
     };
 
     tracing::info!(user_id, workspace_id, ?gate, "sync refused by billing gate");
-    kyomi_auth::websocket::helpers::send_error(manager, user_id, None, message, error_code, None)
+    kyomi_auth::websocket::helpers::send_error(manager.for_workspace(workspace_id), user_id, None, message, error_code, None)
         .await;
     true
 }
@@ -660,6 +672,7 @@ async fn handle_sync_bootstrap(
     send_sync_response(
         manager,
         user_id,
+        workspace_id,
         SyncResponse::SyncComplete {
             last_sync_id: latest_sync_id,
             counts,
@@ -708,7 +721,7 @@ async fn handle_sync_delta(
                     last_sync_id,
                     "sync_id pruned — sending SyncReset"
                 );
-                send_sync_response(manager, user_id, SyncResponse::SyncReset).await;
+                send_sync_response(manager, user_id, workspace_id, SyncResponse::SyncReset).await;
                 return;
             }
             Err(e) => {
@@ -719,7 +732,7 @@ async fn handle_sync_delta(
                     error = %e,
                     "DB error checking sync_id availability — sending SyncReset"
                 );
-                send_sync_response(manager, user_id, SyncResponse::SyncReset).await;
+                send_sync_response(manager, user_id, workspace_id, SyncResponse::SyncReset).await;
                 return;
             }
         }
@@ -733,7 +746,7 @@ async fn handle_sync_delta(
 
     // 3. Stream each entry as a SyncAction message.
     for entry in &entries {
-        send_sync_response(manager, user_id, SyncResponse::SyncAction(entry.clone())).await;
+        send_sync_response(manager, user_id, workspace_id, SyncResponse::SyncAction(entry.clone())).await;
     }
 
     // 4. Send SyncComplete with the latest sync_id we streamed and the
@@ -746,6 +759,7 @@ async fn handle_sync_delta(
     send_sync_response(
         manager,
         user_id,
+        workspace_id,
         SyncResponse::SyncComplete {
             last_sync_id: latest_id,
             counts,
@@ -888,7 +902,7 @@ async fn stream_entities(
             data: Some(item),
             timestamp,
         };
-        send_sync_response(manager, user_id, SyncResponse::SyncAction(action)).await;
+        send_sync_response(manager, user_id, workspace_id, SyncResponse::SyncAction(action)).await;
     }
 }
 
@@ -896,6 +910,7 @@ async fn stream_entities(
 async fn send_sync_response(
     manager: &kyomi_auth::websocket::WebSocketManager,
     user_id: &str,
+    workspace_id: &str,
     response: kyomi_types::sync::SyncResponse,
 ) {
     use kyomi_types::websocket::{MessageType, WebSocketMessage};
@@ -914,6 +929,7 @@ async fn send_sync_response(
 
     let message = WebSocketMessage {
         message_type: msg_type,
+        workspace_id: Some(workspace_id.to_string()),
         session_id: None,
         message_id: None,
         timestamp: chrono::Utc::now().to_rfc3339(),

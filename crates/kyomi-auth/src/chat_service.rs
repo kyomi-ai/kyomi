@@ -2433,7 +2433,7 @@ pub async fn prepare_chat_dispatch(
             {
                 if let Ok(data) = serde_json::to_value(&info) {
                     crate::websocket::helpers::send_session_created(
-                        manager,
+                        manager.for_workspace(p.workspace_id),
                         p.user_id,
                         p.session_id,
                         data,
@@ -2491,7 +2491,7 @@ pub async fn prepare_chat_dispatch(
                 && let Ok(data) = serde_json::to_value(&session_info)
             {
                 crate::websocket::helpers::send_session_created(
-                    ws_manager, p.user_id, p.session_id, data,
+                    ws_manager.for_workspace(p.workspace_id), p.user_id, p.session_id, data,
                 )
                 .await;
             }
@@ -2680,6 +2680,7 @@ pub async fn finalize_assistant_placeholder(
 pub struct SaveAgentErrorParams<'a> {
     pub db: &'a DbPool,
     pub encryption_key: &'a [u8; 32],
+    pub workspace_id: &'a str,
     pub ws_manager: &'a crate::websocket::WebSocketManager,
     pub session_id: &'a str,
     pub user_id: &'a str,
@@ -2699,6 +2700,7 @@ pub struct SaveAgentErrorParams<'a> {
 /// `send_chat_message` so the spawn closure remains a thin wrapper.
 pub async fn save_agent_error(params: SaveAgentErrorParams<'_>) {
     let SaveAgentErrorParams {
+        workspace_id,
         db,
         encryption_key,
         ws_manager,
@@ -2761,7 +2763,7 @@ pub async fn save_agent_error(params: SaveAgentErrorParams<'_>) {
     }
 
     crate::websocket::helpers::send_error(
-        ws_manager,
+        ws_manager.for_workspace(workspace_id),
         user_id,
         Some(session_id),
         &format!("AI processing failed: {error}"),
@@ -3416,11 +3418,13 @@ mod tests {
         seed_workspace(sq, "ws-1", "user-a").await;
         crate::test_support::seed_membership(sq, "ws-1", "user-a", "member", true).await;
 
+        let manager = crate::websocket::WebSocketManager::new(None, db.clone());
+        let (_, mut receiver) = manager.connect("user-a").expect("notification receiver");
         let client_sid = uuid::Uuid::new_v4().to_string();
         let outcome = prepare_chat_dispatch(ChatDispatchParams {
             db: &db,
             encryption_key: &key,
-            ws_manager: None,
+            ws_manager: Some(&manager),
             user_id: "user-a",
             workspace_id: "ws-1",
             user_display_name: "User A",
@@ -3440,6 +3444,17 @@ mod tests {
         let ChatDispatchOutcome::Ready { user_message_id, .. } = outcome else {
             panic!("skip_ai=false must return Ready");
         };
+
+        let mut created = None;
+        while let Ok(frame) = receiver.try_recv() {
+            let frame: kyomi_core::WebSocketMessage = serde_json::from_str(&frame).expect("notification JSON");
+            if frame.message_type == kyomi_core::MessageType::SessionCreated {
+                created = Some(frame);
+            }
+        }
+        let created = created.expect("durable new-session dispatch emits session_created");
+        assert_eq!(created.workspace_id.as_deref(), Some("ws-1"));
+        assert_eq!(created.session_id.as_deref(), Some(client_sid.as_str()));
 
         let messages = get_session_messages(&db, &key, &client_sid, 100)
             .await
@@ -5436,6 +5451,7 @@ mod tests {
         let logs = capture_tracing();
 
         save_agent_error(SaveAgentErrorParams {
+            workspace_id: "ws-1",
             db: &db,
             encryption_key: &key,
             ws_manager: &manager,
@@ -5511,6 +5527,7 @@ mod tests {
 
         let manager = crate::websocket::WebSocketManager::new(None, db.clone());
         save_agent_error(SaveAgentErrorParams {
+            workspace_id: "ws-1",
             db: &db,
             encryption_key: &key,
             ws_manager: &manager,

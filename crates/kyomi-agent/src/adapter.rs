@@ -2965,6 +2965,7 @@ mod tests {
         );
 
         let tracker = crate::thinking::AgentThinkingTracker::new(crate::thinking::AgentThinkingTrackerConfig {
+            workspace_id: "ws-1".to_string(),
             session_id: session_id.to_string(),
             user_id: "user-a".to_string(),
             message_id: assistant_message_id.to_string(),
@@ -3446,6 +3447,7 @@ mod tests {
         assert_eq!(heartbeat.message_type,kyomi_core::MessageType::Heartbeat);
         assert!(receiver.try_recv().is_err(),"fixture begins without progress");
         let tracker=Arc::new(tokio::sync::Mutex::new(crate::thinking::AgentThinkingTracker::new(crate::thinking::AgentThinkingTrackerConfig {
+            workspace_id: "ws-1".into(),
             session_id:session.clone(),user_id:"user-a".into(),message_id:assistant.tag_id().unwrap().into(),ws_manager:manager,workspace_user_ids:None,context_type:Some("chat".into()),context_window:0,incremental_flush:None,
         })));
         adapter.set_thinking_tracker(tracker.clone());
@@ -3561,6 +3563,7 @@ mod tests {
         let (_,assistant)=claim_durable_turn(&db,&key,&session,chrono::Utc::now().timestamp_millis(),30_000).await;
         let run=assistant.durable_run().unwrap().clone();
         let tracker=Arc::new(tokio::sync::Mutex::new(crate::thinking::AgentThinkingTracker::new(crate::thinking::AgentThinkingTrackerConfig {
+            workspace_id: "ws-1".into(),
             session_id:session,user_id:"user-a".into(),message_id:assistant.tag_id().unwrap().into(),
             ws_manager:kyomi_auth::websocket::WebSocketManager::new(Some((redis,redis_url)),db.clone()),
             workspace_user_ids:None,context_type:Some("chat".into()),context_window:0,incremental_flush:None,
@@ -3629,6 +3632,7 @@ mod tests {
         let agent = CustomAgent::new(Box::new(provider),crate::agent::AgentConfig::default(),Arc::new(registry),crate::test_support::build_ctx(db.clone()),std::collections::HashMap::new());
         let mut adapter = ChatAgentAdapter::new(agent,"user-a".into(),"ws-1".into(),Some(session.clone()),"custom_agent".into(),db.clone(),key.clone());
         let tracker = Arc::new(tokio::sync::Mutex::new(crate::thinking::AgentThinkingTracker::new(crate::thinking::AgentThinkingTrackerConfig {
+            workspace_id: "ws-1".into(),
             session_id:session.clone(),user_id:"user-a".into(),message_id:assistant.tag_id().unwrap().into(),ws_manager:kyomi_auth::websocket::WebSocketManager::new(None,db.clone()),workspace_user_ids:None,context_type:Some("chat".into()),context_window:0,incremental_flush:None,
         })));
         adapter.set_thinking_tracker(tracker);
