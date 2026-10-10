@@ -3022,7 +3022,7 @@ mod restore_tests {
         update_dashboard(UpdateDashboardParams {
             db, embed: None, dashboard_id: &id, workspace_id: "workspace", user_id: "owner",
             title: Some("Updated dashboard"), content: Some(V2_CONTENT), change_summary: None,
-            expected_content_hash: None,
+            expected_content_hash: None, copilot_receipt: None,
         }).await.expect("edit to v2");
         rechunk_document(db, embed, &id, V2_CONTENT, "workspace").await.expect("chunk v2");
         assert_eq!(chunk_contents(db, &id).await, vec![V2_CONTENT.to_string()]);
