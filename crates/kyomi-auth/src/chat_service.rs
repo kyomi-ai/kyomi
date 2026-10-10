@@ -2433,7 +2433,7 @@ pub async fn prepare_chat_dispatch(
             {
                 if let Ok(data) = serde_json::to_value(&info) {
                     crate::websocket::helpers::send_session_created(
-                        manager,
+                        manager.for_workspace(p.workspace_id),
                         p.user_id,
                         p.session_id,
                         data,
@@ -3418,11 +3418,13 @@ mod tests {
         seed_workspace(sq, "ws-1", "user-a").await;
         crate::test_support::seed_membership(sq, "ws-1", "user-a", "member", true).await;
 
+        let manager = crate::websocket::WebSocketManager::new(None, db.clone());
+        let (_, mut receiver) = manager.connect("user-a").expect("notification receiver");
         let client_sid = uuid::Uuid::new_v4().to_string();
         let outcome = prepare_chat_dispatch(ChatDispatchParams {
             db: &db,
             encryption_key: &key,
-            ws_manager: None,
+            ws_manager: Some(&manager),
             user_id: "user-a",
             workspace_id: "ws-1",
             user_display_name: "User A",
@@ -3442,6 +3444,17 @@ mod tests {
         let ChatDispatchOutcome::Ready { user_message_id, .. } = outcome else {
             panic!("skip_ai=false must return Ready");
         };
+
+        let mut created = None;
+        while let Ok(frame) = receiver.try_recv() {
+            let frame: kyomi_core::WebSocketMessage = serde_json::from_str(&frame).expect("notification JSON");
+            if frame.message_type == kyomi_core::MessageType::SessionCreated {
+                created = Some(frame);
+            }
+        }
+        let created = created.expect("durable new-session dispatch emits session_created");
+        assert_eq!(created.workspace_id.as_deref(), Some("ws-1"));
+        assert_eq!(created.session_id.as_deref(), Some(client_sid.as_str()));
 
         let messages = get_session_messages(&db, &key, &client_sid, 100)
             .await
