@@ -39,8 +39,13 @@ async fn ssh_tunnel_end_to_end_encrypt_decrypt_connect() {
     });
 
     // 2. Encrypt at rest — what create_datasource now does on save.
-    kyomi_auth::credential_service::finalize_connection_config_secrets(&mut config, None, &enc_key)
-        .expect("finalize (encrypt) should succeed");
+    kyomi_auth::credential_service::finalize_connection_config_secrets(
+        &mut config,
+        None,
+        "postgres",
+        &enc_key,
+    )
+    .expect("finalize (encrypt) should succeed");
     let at_rest = config["ssh_private_key"].as_str().unwrap();
     assert_ne!(
         at_rest, private_key_pem,

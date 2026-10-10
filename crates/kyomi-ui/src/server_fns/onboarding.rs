@@ -44,7 +44,7 @@ pub enum AcceptTermsResult {
 ///
 /// Mirrors `POST /auth/accept-terms` in
 /// `apps/server/src/routes/auth_google_oauth.rs`.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn accept_terms(
     temp_token: String,
     marketing_consent: bool,
@@ -109,7 +109,7 @@ pub async fn accept_terms(
 /// Delegates all business logic to
 /// [`kyomi_auth::onboarding_service::get_onboarding_state`].
 /// Mirrors the logic in `DatasourceOnboarding.jsx`'s `checkWorkspaceState()`.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_onboarding_state() -> Result<OnboardingState, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -123,7 +123,7 @@ pub async fn get_onboarding_state() -> Result<OnboardingState, ServerFnError> {
 }
 
 /// Create the sample datasource for the workspace (admin only).
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn create_sample_datasource() -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -223,7 +223,7 @@ pub struct SampleDatasourceAvailability {
 ///
 /// Used by the "Add Datasource" modal to show the sample quick-add tile.
 /// Mirrors the React `GET /api/v1/datasources/sample/available` call.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn check_sample_datasource_available()
 -> Result<SampleDatasourceAvailability, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
@@ -258,7 +258,7 @@ pub async fn check_sample_datasource_available()
 /// The URL is constructed server-side so that the frontend does not need to
 /// know about per-provider path conventions. The frontend opens this URL
 /// in a centered popup window.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_oauth_connect_url(
     datasource_type: String,
     auth_mode: String,

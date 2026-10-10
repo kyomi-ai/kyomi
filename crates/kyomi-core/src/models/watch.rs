@@ -33,8 +33,12 @@ pub struct Watch {
     /// The monitoring instruction for the AI agent.
     pub prompt: String,
 
-    /// Cron expression (5 fields, UTC).
+    /// Cron expression (5 fields, wall time in `timezone`, or UTC when omitted).
     pub schedule: String,
+
+    /// Named IANA schedule timezone. Legacy/omitted zones mean UTC.
+    #[serde(default)]
+    pub timezone: Option<String>,
 
     /// Watch mode: `"alert"` (conditional) or `"report"` (always sends).
     pub mode: WatchMode,

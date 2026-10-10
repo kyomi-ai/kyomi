@@ -14,15 +14,17 @@
 # exercised by the exact same file this suite asserts against
 # (docs/standards/testing/mutate-by-relocating-real-code.md).
 #
-# Each fixture repo also gets a tiny stand-in "guarded script"
-# (scripts/fixture-guarded.sh) instead of a copy of one of the seven real
-# guarded scripts: it sources the guard, calls it on its own
+# Tests 1-10 use a tiny stand-in "guarded script"
+# (scripts/fixture-guarded.sh): it sources the guard, calls it on its own
 # `${BASH_SOURCE[0]}`, prints a marker ("REAL WORK RAN") and exits with a
-# caller-chosen code. That marker plus that exit code are what let a test
-# tell "the guard ran and warned" apart from "the guard's STRICT escalation
-# stopped the real work from running at all" — the single property this
-# whole ticket is about (a guard must never be the reason the caller's real
-# work does not run, except via the one deliberate, documented STRICT path).
+# caller-chosen code. That marker plus that exit code let these tests tell
+# "the guard ran and warned" apart from "the guard's STRICT escalation
+# stopped the real work from running at all". The guard must preserve the
+# caller's work and exit status except on its documented STRICT mismatch path.
+#
+# Test 11 (KYO-647) copies the real preflight-clippy.sh entrypoint. It verifies their original exit statuses
+# on matching copies, then checks that deliberate mismatches invoke STRICT
+# escalation, covering the guard wiring in each production gate script.
 #
 # KNOWN DUPLICATION, DEFERRED RATHER THAN FIXED HERE: the git-repo bootstrap
 # helpers below (new_bare_remote / init_and_push / clone_repo) are a fourth
@@ -330,6 +332,46 @@ assert_contains "STRICT=0 still warns" "STALE TOOLING WARNING" "$RUN_OUTPUT"
 run_fixture "$t10/worker" KYOMI_STALE_TOOLING_STRICT=true
 assert_exit "STRICT=true (not the literal '1') behaves like unset (warn only)" 7 "$RUN_STATUS" "$RUN_OUTPUT"
 assert_contains "STRICT=true still warns" "STALE TOOLING WARNING" "$RUN_OUTPUT"
+echo
+
+# ─── Test 11: real KYO-647 entrypoints preserve status and invoke the guard ──
+# Copy the actual entrypoints into a hermetic repository so origin/main
+# matches their bytes. Invalid arguments stop before cargo, gh or signing.
+# Then change only their on-disk bytes: STRICT must stop each entrypoint,
+# proving its guard call is wired rather than merely testing the library.
+echo "-- Test 11: newly guarded gate scripts (KYO-647)"
+t11="$tmpdir/t11"
+mkdir -p "$t11/scripts/lib"
+cp "$GUARD_SRC" "$t11/scripts/lib/stale-tooling-guard.sh"
+for entrypoint in preflight-clippy.sh; do
+    cp "$SCRIPT_DIR/../$entrypoint" "$t11/scripts/$entrypoint"
+done
+git -C "$t11" init -q -b main
+git -C "$t11" add -A
+git -C "$t11" commit -q -m fixture
+git -C "$t11" update-ref refs/remotes/origin/main HEAD
+for entrypoint in preflight-clippy.sh; do
+    expected=1
+    args=()
+    case "$entrypoint" in
+        preflight-clippy.sh) expected=2; args=(--invalid);;
+    esac
+    if out="$(cd "$t11" && env KYOMI_STALE_TOOLING_STRICT=1 bash "scripts/$entrypoint" "${args[@]}" 2>&1)"; then
+        status=0
+    else
+        status=$?
+    fi
+    assert_exit "$entrypoint: matching copy retains original status" "$expected" "$status" "$out"
+    assert_not_contains "$entrypoint: matching copy has no guard warning" "[stale-tooling-guard]" "$out"
+    echo '# deliberate stale-tooling test mismatch' >>"$t11/scripts/$entrypoint"
+    if out="$(cd "$t11" && env KYOMI_STALE_TOOLING_STRICT=1 bash "scripts/$entrypoint" "${args[@]}" 2>&1)"; then
+        status=0
+    else
+        status=$?
+    fi
+    assert_exit "$entrypoint: stale copy invokes STRICT guard" 42 "$status" "$out"
+    assert_contains "$entrypoint: stale copy diagnoses mismatch" "STALE TOOLING WARNING" "$out"
+done
 echo
 
 echo "Results: $PASS passed, $FAIL failed"

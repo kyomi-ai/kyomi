@@ -22,13 +22,9 @@ use crate::components::{
 };
 use crate::server_fns::context::UserContext;
 use crate::server_fns::usage::{get_ai_usage_status, UsageData};
+use crate::utils::permissions::analytics_quota_applies;
 
 use super::billing::format_number;
-/// Included analytics events per month for Cloud subscribers.
-/// Mirrors `kyomi_core::capability::ANALYTICS_EVENTS_INCLUDED` — defined here
-/// because kyomi-core is SSR-only and not available on the WASM target.
-const ANALYTICS_EVENTS_INCLUDED: u64 = 100_000;
-
 /// Feature definition for the stacked bar chart legend.
 struct FeatureDef {
     key: &'static str,
@@ -196,27 +192,11 @@ pub fn UsagePage() -> impl IntoView {
                     if is_self_hosted {
                         let is_owner = ctx_result.map(|c| c.is_owner).unwrap_or(false);
                         match usage_resource.await {
-                            Ok(data) => view! { <UsageContent data=data is_owner=is_owner/> }.into_any(),
+                            Ok(data) => view! { <UsageContent data=data is_owner=is_owner is_self_hosted=is_self_hosted/> }.into_any(),
                             Err(_) => {
                                 // Don't leak raw SQL or internal errors to the UI.
                                 view! {
-                                    <UsageContent is_owner=is_owner data=UsageData {
-                                        percentage_used: 0.0,
-                                        warning_level: None,
-                                        allowed: true,
-                                        blocked: false,
-                                        ai_reset_date: None,
-                                        trial_ends_at: None,
-                                        per_user: crate::server_fns::usage::PerUserUsage {
-                                            percentage_used: 0.0,
-                                            fair_share_percentage: 100.0,
-                                        },
-                                        by_feature: std::collections::HashMap::new(),
-                                        ai_bundle_balance_usd: 0.0,
-                                        analytics_events_used: 0,
-                                        analytics_events_included: ANALYTICS_EVENTS_INCLUDED,
-                                        analytics_bundle_events: 0,
-                                    }/>
+                                    <UsageContent is_owner=is_owner is_self_hosted=is_self_hosted data=UsageData::unmetered()/>
                                 }.into_any()
                             }
                         }
@@ -281,14 +261,13 @@ fn UsageLoadingSkeleton() -> impl IntoView {
 
 /// Main usage content — renders all cards from the fetched data.
 #[component]
-fn UsageContent(data: UsageData, is_owner: bool) -> impl IntoView {
+fn UsageContent(data: UsageData, is_owner: bool, is_self_hosted: bool) -> impl IntoView {
     let percentage = data.percentage_used;
     let is_exhausted = data.blocked;
     let by_feature = data.by_feature.clone();
     let ai_bundle_balance_usd = data.ai_bundle_balance_usd;
-    let analytics_events_used = data.analytics_events_used;
-    let analytics_events_included = data.analytics_events_included;
-    let analytics_bundle_events = data.analytics_bundle_events;
+    let analytics_events = data.analytics_events
+        .filter(|_| analytics_quota_applies(is_self_hosted));
 
     view! {
         <div class="space-y-6" style:display="block">
@@ -300,13 +279,15 @@ fn UsageContent(data: UsageData, is_owner: bool) -> impl IntoView {
                 is_owner=is_owner
             />
 
-            // Analytics Events card
-            <AnalyticsEventsCard
-                events_used=analytics_events_used
-                events_included=analytics_events_included
-                bundle_events=analytics_bundle_events
-                is_owner=is_owner
-            />
+            // Self-hosted must never render quota data, including stale Cloud responses.
+            {analytics_events.map(|quota| view! {
+                <AnalyticsEventsCard
+                    events_used=quota.events_used
+                    events_included=quota.events_included
+                    bundle_events=quota.bundle_events
+                    is_owner=is_owner
+                />
+            })}
 
             // Feature Breakdown card
             <FeatureBreakdownCard by_feature=by_feature/>
@@ -530,3 +511,7 @@ fn AnalyticsEventsCard(
         </UsageCardShell>
     }
 }
+
+#[cfg(all(test, feature = "ssr"))]
+#[path = "usage/analytics_quota_tests.rs"]
+mod analytics_quota_tests;

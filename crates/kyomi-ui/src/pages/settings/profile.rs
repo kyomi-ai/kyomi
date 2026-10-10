@@ -309,6 +309,12 @@ fn PreferencesCard(data: ProfileData, dashboards: Vec<DashboardSummary>) -> impl
                     // Landing Page
                     <div class="space-y-2">
                         <Label>"Landing Page"</Label>
+                        // KYO-793: correct one-time seed, not a stale-render bug.
+                        // `PreferencesCard` is constructed fresh inside the `profile`
+                        // Resource's `{move || ...}` body in `ProfilePage` (see above),
+                        // so a reload of `profile` rebuilds this whole card — and its
+                        // `landing` signal — from the newly loaded data; `_set_landing`
+                        // is intentionally unused since nothing else ever mutates it.
                         <StaticSelect
                             value=landing.get_untracked()
                             options=landing_options

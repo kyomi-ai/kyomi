@@ -37,7 +37,7 @@ pub struct CopilotResponse {
 /// `"watch_copilot"`. Defaults to `"dashboard_copilot"` if unrecognized.
 ///
 /// Returns the new session ID.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn create_copilot_session(
     context_type: String,
 ) -> Result<String, ServerFnError> {
@@ -89,7 +89,7 @@ pub async fn create_copilot_session(
 /// this is an additional restriction layered on top of each tool's own
 /// ownership checks, not a substitute for them, so a client sending an
 /// id it doesn't actually have access to gains nothing.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn send_copilot_message(
     session_id: String,
     message: String,
@@ -201,7 +201,12 @@ pub async fn send_copilot_message(
         user_message_persistence: kyomi_agent::UserMessagePersistence::CallerPersisted(
             prep.user_message_id,
         ),
-        assistant_message_id: Some(prep.assistant_message_id.clone()),
+        // KYO-572: copilot deliberately never pre-inserts a placeholder for
+        // this id (see `CopilotMessagePrep::assistant_message_id`'s doc) —
+        // AdapterInserts, not CallerPreInserted.
+        assistant_message_persistence: kyomi_agent::AssistantMessagePersistence::AdapterInserts(
+            Some(prep.assistant_message_id.clone()),
+        ),
         conversation_history: None,
         user_display_name: ac.auth.name.clone().unwrap_or_else(|| ac.auth.email.clone()),
         context_window: 0,
@@ -309,7 +314,7 @@ pub async fn send_copilot_message(
 /// Delete/cleanup a copilot session.
 ///
 /// Called when the copilot sidebar/modal closes to clean up the ephemeral session.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn delete_copilot_session(session_id: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 

@@ -32,10 +32,18 @@
 //! when a local entity type must be wiped and re-fetched (KYO-480). Same
 //! split as `schema_hash`, for the same reason: unit-testable on the host
 //! target even though the wiring that calls it (`sync_engine`) cannot be.
+//!
+//! ### `sync_engine_lifecycle` — engine (re)start decision (all targets)
+//!
+//! [`sync_engine_lifecycle::sync_engine_action`] is the pure "keep / start /
+//! restart" decision `components::layout::SyncEngineStarter` uses to decide
+//! what to do with the running sync engine scope on every effect run (KYO-833).
+//! Same split as `schema_hash`/`reconcile`, for the same reason.
 
 pub mod reconcile;
 pub mod schema_hash;
 pub mod store;
+pub mod sync_engine_lifecycle;
 
 #[cfg(target_arch = "wasm32")]
 pub mod db;

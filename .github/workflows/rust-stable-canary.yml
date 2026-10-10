@@ -1,0 +1,148 @@
+# Standalone and deliberately non-required: compiler drift must not block PRs.
+name: Rust latest-stable canary
+
+on:
+  schedule:
+    # 03:17 UTC nightly, away from the UTC workday. This is stable, not nightly Rust.
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: rust-stable-canary-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  clippy:
+    name: Latest stable (${{ matrix.configuration }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    strategy:
+      # All configurations finish even when another discovers a new diagnostic.
+      fail-fast: false
+      matrix:
+        configuration: [workspace, all-targets, wasm-hydration]
+    env:
+      CARGO_TERM_COLOR: always
+      # Also overrides the pin for subprocesses (including trunk's cargo calls).
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev clang poppler-utils
+
+      - name: Install latest stable (intentional exception to the pin)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: wasm32-unknown-unknown
+
+      - name: Record effective compiler and Cargo versions
+        id: versions
+        run: |
+          rustup show active-toolchain
+          rustc +stable --version --verbose | tee rust-versions.log
+          cargo +stable --version --verbose | tee -a rust-versions.log
+          echo "release=$(rustc +stable --version | cut -d ' ' -f 2)" >> "$GITHUB_OUTPUT"
+
+      # Separate from normal sccache and from the other two canary configs.
+      # rust-cache additionally hashes rustc, Cargo.lock and cargo flags.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: latest-stable-canary-${{ matrix.configuration }}
+          shared-key: ${{ steps.versions.outputs.release }}
+
+      - name: Log cache isolation
+        run: echo "cache namespace latest-stable-canary-${{ matrix.configuration }} / ${{ steps.versions.outputs.release }}"
+
+      - name: Add cargo bin to PATH
+        run: echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Install trunk
+        uses: taiki-e/install-action@trunk
+
+      - name: Install tailwindcss
+        run: |
+          curl -fsSLO https://github.com/tailwindlabs/tailwindcss/releases/download/v4.2.2/tailwindcss-linux-x64
+          chmod +x tailwindcss-linux-x64
+          sudo mv tailwindcss-linux-x64 /usr/local/bin/tailwindcss
+
+      - name: Build MCP chart app WASM (same prerequisite as blocking CI)
+        working-directory: apps/mcp-chart-app-wasm
+        run: bash build.sh
+
+      - name: Prepare RustEmbed assets and CI linker configuration
+        run: |
+          mkdir -p crates/kyomi-ui/dist
+          sed -i '/# BEGIN_LOCAL_DEV_LINKER/,/# END_LOCAL_DEV_LINKER/d' .cargo/config.toml
+
+      - name: Run Clippy configuration from blocking CI with latest stable
+        env:
+          CANARY_CONFIGURATION: ${{ matrix.configuration }}
+        run: |
+          set -euo pipefail
+          # Derive argv from CI rather than maintaining a fourth copy of the gates.
+          python3 - <<'PYTHON' > canary-command.sh
+          import os, re
+          from pathlib import Path
+          commands = re.findall(r"^\s*run: (cargo clippy .+)$", Path(".github/workflows/ci.yml").read_text(), re.M)
+          configurations = ["workspace", "all-targets", "wasm-hydration"]
+          if len(commands) != len(configurations):
+              raise SystemExit("Expected exactly three blocking CI Clippy configurations")
+          command = commands[configurations.index(os.environ["CANARY_CONFIGURATION"])]
+          print(command.replace("cargo clippy ", "cargo +stable clippy ", 1))
+          PYTHON
+          cat canary-command.sh
+          bash -e -o pipefail canary-command.sh 2>&1 | tee clippy.log
+
+      - name: Publish configuration result and log links
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANARY_CONFIGURATION: ${{ matrix.configuration }}
+          CANARY_STATUS: ${{ job.status }}
+        run: |
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          job_name="Latest stable ($CANARY_CONFIGURATION)"
+          # Jobs are already registered while the run is active. If API lookup
+          # fails, the run link still exposes every job and its logs.
+          job_url=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100" \
+            --jq ".jobs[] | select(.name == \"$job_name\") | .html_url" 2>/dev/null) || job_url=""
+          {
+            echo "### Latest stable: $CANARY_CONFIGURATION — $CANARY_STATUS"
+            echo "[Job logs](${job_url:-$run_url}) · [Workflow run]($run_url)"
+            echo "Cache: latest-stable-canary-$CANARY_CONFIGURATION / ${{ steps.versions.outputs.release }}"
+            echo '```text'
+            if [ -f rust-versions.log ]; then cat rust-versions.log; else echo 'Toolchain setup did not complete; see job logs.'; fi
+            if [ -f canary-command.sh ]; then cat canary-command.sh; fi
+            echo '```'
+            if [ "$CANARY_STATUS" != success ]; then
+              echo 'The latest-stable canary failed. Review the diagnostic logs before upgrading the repository pin.'
+              if [ -f clippy.log ]; then
+                echo '<details><summary>Diagnostic tail (full output in job logs/artifact)</summary>'
+                echo
+                echo '```text'
+                tail -80 clippy.log
+                echo '```'
+                echo '</details>'
+              fi
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload compiler and diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: latest-stable-${{ matrix.configuration }}-logs
+          path: |
+            rust-versions.log
+            canary-command.sh
+            clippy.log
+          retention-days: 14
+          if-no-files-found: warn

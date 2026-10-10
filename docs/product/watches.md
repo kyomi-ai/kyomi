@@ -36,6 +36,14 @@ Receive a summary on every scheduled run, regardless of what the data shows.
 
 ![Creating a watch](/images/docs/watch-creation-sidebar.png)
 
+## Schedule Timezones
+
+Schedules use five cron fields: minute, hour, day of month, month and weekday (0 or 7 is Sunday; 1 is Monday). Choose a named IANA timezone such as `Australia/Sydney` to keep a recurring schedule at the same local time through daylight saving changes. Monday at 09:00 Sydney is `0 9 * * 1` with `Australia/Sydney`: Sunday 23:00 UTC in winter and Sunday 22:00 UTC in summer.
+
+The editor and next execution preview show the saved timezone, including when you edit from a browser in another timezone. The preview includes the next actual local and UTC execution dates. Changing the timezone keeps the cron wall time and recalculates the next execution. Missing local times during a daylight saving jump are skipped; repeated local times run once at their first occurrence.
+
+Existing watches and schedules without a timezone retain UTC semantics. Choose `UTC` for a schedule that must fire at a fixed UTC time. A timezone mentioned only in a report's prompt does not change its schedule or set query date boundaries.
+
 ## Notification Channels
 
 ### Slack

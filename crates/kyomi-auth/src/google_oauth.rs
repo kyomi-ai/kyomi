@@ -291,13 +291,56 @@ fn select_revocation_token(tokens: &GoogleOAuthTokens) -> &str {
         .unwrap_or(&tokens.access_token)
 }
 
+/// Which Google grant a revocation request is about, so the failure text
+/// names the thing the user actually tried to disconnect (KYO-714).
+///
+/// The revocation path was written for KYO-700's single call site — the
+/// user's own Google account link — and hardcoded "Your Google account is
+/// still connected". The per-datasource BigQuery Enterprise disconnect now
+/// shares the same code, and there that sentence reads as the user's Kyomi
+/// login rather than the datasource's grant. The noun is a parameter rather
+/// than a second copy of the function so the 400-means-already-invalid rule
+/// stays in exactly one place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GoogleGrantSubject {
+    /// The user's own Google account link — KYO-700's
+    /// `google_oauth_disconnect_service`.
+    SignInAccount,
+
+    /// One datasource's stored Google OAuth grant — KYO-714's
+    /// `crate::datasource_oauth::datasource_oauth_disconnect_service`.
+    Datasource,
+}
+
+impl GoogleGrantSubject {
+    /// Build the user-facing error for a revocation that did not definitely
+    /// succeed. `detail` says what went wrong (a status, a transport error).
+    ///
+    /// `SignInAccount`'s wording is KYO-700's, preserved verbatim.
+    fn revocation_failure(self, detail: &str) -> kyomi_core::Error {
+        kyomi_core::Error::Internal(match self {
+            Self::SignInAccount => format!(
+                "Google did not confirm the account was disconnected ({detail}). Your \
+                 Google account is still connected — please try again."
+            ),
+            Self::Datasource => format!(
+                "Google did not confirm the datasource was disconnected ({detail}). This \
+                 datasource is still connected to Google — please try again."
+            ),
+        })
+    }
+}
+
 /// Map a `/revoke` response status to an outcome, or an error for anything
 /// that isn't a definite "the grant is gone" answer.
 ///
 /// Split out as a pure function (no I/O) so the success/failure decision can
 /// be unit tested without a live call to Google — see `mod tests` below.
+/// `subject` only selects the wording of the failure; the classification
+/// itself is identical for every caller.
 fn classify_revoke_status(
     status: reqwest::StatusCode,
+    subject: GoogleGrantSubject,
 ) -> kyomi_core::Result<GoogleRevokeOutcome> {
     if status.is_success() {
         Ok(GoogleRevokeOutcome::Revoked)
@@ -307,24 +350,37 @@ fn classify_revoke_status(
         // desired end state, not a failure.
         Ok(GoogleRevokeOutcome::AlreadyInvalid)
     } else {
-        Err(kyomi_core::Error::Internal(format!(
-            "Google did not confirm the account was disconnected (revocation failed with \
-             status {status}). Your Google account is still connected — please try again."
-        )))
+        Err(subject.revocation_failure(&format!("revocation failed with status {status}")))
     }
 }
 
-/// Revoke a Google OAuth grant at the given `/revoke` endpoint.
+/// Revoke a single Google OAuth token **string** at the given `/revoke`
+/// endpoint.
 ///
-/// Internal seam so `mod tests` can point this at a local
+/// This is the HTTP call itself, split out from [`revoke_google_token_at`]
+/// (KYO-714) so a caller that holds a bare token string rather than a
+/// [`GoogleOAuthTokens`] can reuse it. The per-datasource BigQuery
+/// Enterprise disconnect path is exactly that caller: its tokens come out of
+/// an encrypted `user_datasource_credentials.credentials` JSON blob as two
+/// loose strings — see
+/// `crate::datasource_oauth::datasource_oauth_disconnect_service`.
+///
+/// Google-specific by design, not merely by name: the 400-means-already-
+/// invalid rule encoded in [`classify_revoke_status`] and the user-facing
+/// wording are Google's, and both of this function's callers are revoking a
+/// Google grant. A provider with different revocation semantics needs its
+/// own function, not a caller of this one.
+///
+/// `revoke_uri` is a parameter so `mod tests` can point it at a local
 /// `wiremock::MockServer` and exercise the real HTTP path (status handling,
-/// transport failures) without ever reaching Google. Production code should
-/// call [`revoke_google_token`], not this directly.
-async fn revoke_google_token_at(
+/// transport failures) without ever reaching Google. `subject` names which
+/// grant is being revoked, so the two call sites do not describe each
+/// other's failure — see [`GoogleGrantSubject`].
+pub(crate) async fn revoke_google_token_string_at(
     revoke_uri: &str,
-    tokens: &GoogleOAuthTokens,
+    token: &str,
+    subject: GoogleGrantSubject,
 ) -> kyomi_core::Result<GoogleRevokeOutcome> {
-    let token = select_revocation_token(tokens);
     let client = crate::http_client()?;
 
     let resp = client
@@ -333,14 +389,27 @@ async fn revoke_google_token_at(
         .timeout(std::time::Duration::from_secs(10))
         .send()
         .await
-        .map_err(|e| {
-            kyomi_core::Error::Internal(format!(
-                "Google did not confirm the account was disconnected (revocation request \
-                 failed: {e}). Your Google account is still connected — please try again."
-            ))
-        })?;
+        .map_err(|e| subject.revocation_failure(&format!("revocation request failed: {e}")))?;
 
-    classify_revoke_status(resp.status())
+    classify_revoke_status(resp.status(), subject)
+}
+
+/// Revoke a Google OAuth grant at the given `/revoke` endpoint.
+///
+/// Internal seam so `mod tests` can point this at a local
+/// `wiremock::MockServer` and exercise the real HTTP path without ever
+/// reaching Google. Production code should call [`revoke_google_token`], not
+/// this directly.
+async fn revoke_google_token_at(
+    revoke_uri: &str,
+    tokens: &GoogleOAuthTokens,
+) -> kyomi_core::Result<GoogleRevokeOutcome> {
+    revoke_google_token_string_at(
+        revoke_uri,
+        select_revocation_token(tokens),
+        GoogleGrantSubject::SignInAccount,
+    )
+    .await
 }
 
 /// Revoke a Google OAuth grant.
@@ -900,19 +969,28 @@ mod tests {
 
     #[test]
     fn classify_2xx_is_revoked() {
-        let outcome = classify_revoke_status(reqwest::StatusCode::OK).unwrap();
+        let outcome =
+            classify_revoke_status(reqwest::StatusCode::OK, GoogleGrantSubject::SignInAccount)
+                .unwrap();
         assert_eq!(outcome, GoogleRevokeOutcome::Revoked);
     }
 
     #[test]
     fn classify_400_is_already_invalid_not_an_error() {
-        let outcome = classify_revoke_status(reqwest::StatusCode::BAD_REQUEST).unwrap();
+        let outcome = classify_revoke_status(
+            reqwest::StatusCode::BAD_REQUEST,
+            GoogleGrantSubject::SignInAccount,
+        )
+        .unwrap();
         assert_eq!(outcome, GoogleRevokeOutcome::AlreadyInvalid);
     }
 
     #[test]
     fn classify_500_is_err() {
-        let result = classify_revoke_status(reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+        let result = classify_revoke_status(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            GoogleGrantSubject::SignInAccount,
+        );
         assert!(
             result.is_err(),
             "a 500 must not be treated as a successful revocation"
@@ -925,8 +1003,46 @@ mod tests {
         // mean the token itself is already invalid. Only 400 gets the
         // "already gone" treatment; every other non-2xx status is a real
         // failure that must block clearing local state.
-        let result = classify_revoke_status(reqwest::StatusCode::UNAUTHORIZED);
+        let result = classify_revoke_status(
+            reqwest::StatusCode::UNAUTHORIZED,
+            GoogleGrantSubject::SignInAccount,
+        );
         assert!(result.is_err());
+    }
+
+    /// KYO-714 gave the revocation path a second caller — a BigQuery
+    /// *datasource* — so the failure text can no longer assume it is talking
+    /// about the user's own Google account link. Each subject must name its
+    /// own grant, and KYO-700's original sentence must survive verbatim on
+    /// its original path.
+    #[test]
+    fn revocation_failure_names_the_grant_it_was_asked_about() {
+        let status = reqwest::StatusCode::INTERNAL_SERVER_ERROR;
+
+        let sign_in = classify_revoke_status(status, GoogleGrantSubject::SignInAccount)
+            .expect_err("a 500 is a failure");
+        assert_eq!(
+            sign_in.user_message(),
+            format!(
+                "Google did not confirm the account was disconnected (revocation failed \
+                 with status {status}). Your Google account is still connected — please \
+                 try again."
+            ),
+            "KYO-700's wording must not regress on its own path"
+        );
+
+        let datasource = classify_revoke_status(status, GoogleGrantSubject::Datasource)
+            .expect_err("a 500 is a failure");
+        let message = datasource.user_message();
+        assert!(
+            !message.contains("Your Google account"),
+            "a datasource revocation failure must not tell the user their Kyomi \
+             sign-in account is still connected: {message}"
+        );
+        assert!(
+            message.contains("datasource"),
+            "the message must name the datasource grant it is about: {message}"
+        );
     }
 
     // ── revoke_google_token_at — real HTTP boundary via wiremock ─────────

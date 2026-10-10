@@ -31,15 +31,35 @@ pub struct Claims {
     pub exp: i64,
     /// Issued-at (Unix timestamp).
     pub iat: i64,
+    /// Signed microsecond issuance for browser sessions; absent on legacy/other-purpose tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_iat_us: Option<i64>,
     /// JWT ID — unique per token, used for revocation tracking.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jti: Option<String>,
+    /// Restricts OAuth access tokens to the MCP resource. Missing on existing
+    /// browser session tokens for backwards compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_purpose")]
+    pub purpose: Option<TokenPurpose>,
     /// Extra fields from the Python backend (user_id, email, name, roles, etc.).
     ///
     /// Rust-created tokens won't include these, but Python-created tokens will.
     /// Captured here for wire compatibility during the migration period.
     #[serde(flatten)]
     pub extra: std::collections::HashMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenPurpose {
+    Mcp,
+}
+
+fn deserialize_purpose<'de, D>(deserializer: D) -> Result<Option<TokenPurpose>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    TokenPurpose::deserialize(deserializer).map(Some)
 }
 
 /// Create a JWT access token for the given user (UUID version, for backwards compat).
@@ -64,6 +84,48 @@ pub fn create_access_token_str(
     expires_minutes: i64,
     extra: std::collections::HashMap<String, serde_json::Value>,
 ) -> kyomi_core::Result<String> {
+    create_session_access_token_str(sub, secret, expires_minutes, extra, None)
+}
+
+/// Mint a session using freshly loaded revocation state. The strict successor
+/// handles clock rollback and repeated revocations without sleeps or cutoff leeway.
+pub fn create_session_access_token_str(
+    sub: &str,
+    secret: &str,
+    expires_minutes: i64,
+    extra: std::collections::HashMap<String, serde_json::Value>,
+    sessions_valid_from: Option<i64>,
+) -> kyomi_core::Result<String> {
+    let issued = Utc::now().timestamp_micros().max(sessions_valid_from.unwrap_or(0) + 1);
+    create_access_token_with_purpose(sub, secret, expires_minutes, extra, None, Some(issued))
+}
+
+/// Issue an access token usable only by the MCP resource.
+pub fn create_mcp_access_token_str(
+    sub: &str,
+    secret: &str,
+    expires_minutes: i64,
+    extra: std::collections::HashMap<String, serde_json::Value>,
+) -> kyomi_core::Result<String> {
+    create_access_token_with_purpose(sub, secret, expires_minutes, extra, Some(TokenPurpose::Mcp), None)
+}
+
+fn create_access_token_with_purpose(
+    sub: &str,
+    secret: &str,
+    expires_minutes: i64,
+    mut extra: std::collections::HashMap<String, serde_json::Value>,
+    purpose: Option<TokenPurpose>,
+    session_iat_us: Option<i64>,
+) -> kyomi_core::Result<String> {
+    extra.remove("purpose");
+    extra.remove("session_iat_us");
+    // Restricted recovery JWTs are validated by their own flow, not session revocation.
+    let session_iat_us = if extra.get("scope").and_then(|scope| scope.as_str()) == Some("passkey_recovery") {
+        None
+    } else {
+        session_iat_us
+    };
     let now = Utc::now();
     let jti = generate_jti();
     let claims = Claims {
@@ -71,6 +133,8 @@ pub fn create_access_token_str(
         iat: now.timestamp(),
         exp: (now + Duration::minutes(expires_minutes)).timestamp(),
         jti: Some(jti),
+        purpose,
+        session_iat_us,
         extra,
     };
 
@@ -80,6 +144,36 @@ pub fn create_access_token_str(
         &EncodingKey::from_secret(secret.as_bytes()),
     )
     .map_err(|e| kyomi_core::Error::Internal(format!("jwt encode: {e}")))
+}
+
+impl Claims {
+    /// MCP and restricted recovery tokens retain their independent authorization scope.
+    pub fn require_current_session(&self, cutoff: Option<i64>) -> kyomi_core::Result<()> {
+        if self.purpose.is_some()
+            || self.extra.get("scope").and_then(|scope| scope.as_str()) == Some("passkey_recovery")
+        {
+            return Ok(());
+        }
+        if let Some(cutoff) = cutoff {
+            // A legacy second can straddle the event: reject that whole second.
+            let revoked = self.session_iat_us.map_or_else(
+                || self.iat <= cutoff.div_euclid(1_000_000),
+                |issued| issued <= cutoff,
+            );
+            if revoked {
+                return Err(kyomi_core::Error::Unauthorized("Session revoked. Please log in again.".into()));
+            }
+        }
+        Ok(())
+    }
+
+    /// Existing session tokens may omit purpose; MCP tokens have no session authority.
+    pub fn require_session(&self) -> kyomi_core::Result<()> {
+        if self.purpose.is_some() {
+            return Err(kyomi_core::Error::Unauthorized("Token is not a browser session".into()));
+        }
+        Ok(())
+    }
 }
 
 /// Create an opaque refresh token.
@@ -146,6 +240,31 @@ mod tests {
         assert_eq!(decoded.claims.sub, user_id.to_string());
         assert!(decoded.claims.jti.is_some(), "access tokens must have jti");
         assert!(decoded.claims.extra.is_empty(), "Rust-created tokens have no extra fields");
+        decoded.claims.require_session().unwrap();
+    }
+
+    #[test]
+    fn mcp_purpose_is_signed_and_cannot_be_used_as_session() {
+        let token = create_mcp_access_token_str("user-1", "secret", 15, Default::default()).unwrap();
+        let decoded = validate_token(&token, "secret").unwrap();
+        assert_eq!(decoded.claims.purpose, Some(TokenPurpose::Mcp));
+        assert!(decoded.claims.require_session().is_err());
+        assert!(validate_token(&token, "other-secret").is_err());
+    }
+
+    #[test]
+    fn malformed_or_unknown_purpose_is_rejected() {
+        let now = Utc::now();
+        for purpose in [serde_json::json!("browser"), serde_json::json!(["mcp"]), serde_json::json!(7), serde_json::Value::Null] {
+            let payload = serde_json::json!({
+                "sub": "user-1",
+                "iat": now.timestamp(),
+                "exp": (now + Duration::minutes(15)).timestamp(),
+                "purpose": purpose,
+            });
+            let token = jsonwebtoken::encode(&Header::default(), &payload, &EncodingKey::from_secret(b"secret")).unwrap();
+            assert!(validate_token(&token, "secret").is_err());
+        }
     }
 
     #[test]

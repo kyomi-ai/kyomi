@@ -13,6 +13,13 @@ value, not at the wiring. The run compiled the changed line. What went wrong is 
 all three: the fixtures differ from each other along *more* axes than the one under test, so
 a cruder rule than the one being asserted already sorts, ranks or classifies them correctly.
 
+[prove-test-fails-without-fix.md](prove-test-fails-without-fix.md) is the check that surfaces
+this: revert the fix, watch the test stay green. But a green mutation only proves the test is
+vacuous — it does not say what to change, and the instinct that follows, strengthen the
+assertion, is often the wrong half of the fix. In both incidents below the assertion was
+already looking at the right value; the fixtures were what made that value the same either
+way.
+
 Two shapes have appeared:
 
 - **The fixtures differ on a coarser axis than the one under test.** A comparison is meant to
@@ -29,8 +36,13 @@ build the fixtures so they are identical on every *other* axis the code could ke
 — derive them from the same reference value where you can, rather than hand-writing
 independent literals. Pick the specific pair the broken code gets backwards, and assert the
 relationship *among the fixtures that carry the variation*, not only the position of the item
-you injected. Where the observable is a failure, seed the state in which only the cause under
-test can produce it. Then mutate: if the mutation is green, the fixture is the first thing to
+you injected. If the code under test is a guard or a branch, seed everything the *earlier*
+guards need so the call genuinely reaches the branch, and assert something only that branch can
+produce — the mock server received the request, the specific error variant, the relative order
+of the items that a wrong comparator inverts. Where the observable is a failure, seed the state
+in which only the cause under test can produce it. When a fixture must be older/newer/different
+than a value the code generates at run time, derive it from that value rather than hand-writing
+a literal beside it. Then mutate: if the mutation is green, the fixture is the first thing to
 suspect, not the last.
 
 ```rust
@@ -78,7 +90,8 @@ Real precedent — two tickets, one 🔴 that blocked signing:
 
 - **KYO-498, the `chat session live-insert regression coverage` review and its cycle-2
   re-review** (`2026-09-12` log) — 🔴, *Test Manipulation / False Success Claim*. The reviewer
-  reverted `sort_sessions_by_recency` to `Reverse(s.updated_at.clone())` and **both tests
+  reverted `sort_sessions_by_recency` (`crates/kyomi-ui/src/pages/chat/chat_list.rs`) to
+  `Reverse(s.updated_at.clone())` — the pre-KYO-490 bug — and **both tests
   still passed**: *"the month digit alone decides `sessions.first()` under a naive byte
   compare, so the mixed RFC3339-vs-Postgres-text format defect this test exists to catch is
   never actually exercised. The test asserts only `sessions.first()`, never the relative
@@ -87,9 +100,13 @@ Real precedent — two tickets, one 🔴 that blocked signing:
   had been run; it was the fixtures that made its verdict meaningless. Cycle 2 fixed both
   halves at once: fixtures re-derived from the wire timestamp so they share a calendar day,
   and a second assertion over the four fixtures' order among themselves. The reviewer re-ran
-  the same mutation and confirmed the new assertion is the one that goes red.
+  the same mutation and confirmed the new assertion is the one that goes red. Landed on `main`
+  in `9acc7a87` (PR #520, squash-merge of branch `origin/jason/kyo-498-chat-session-live-insert`
+  at `eb39e875`) — unmerged at authoring time, merged by the time this rule was rescued.
 - **KYO-701, the `last-auth-method guard on Google disconnect` review** (`2026-09-10` log) —
-  the second shape, found while checking an untouched pre-existing test. The reviewer
+  the second shape, found while checking an untouched pre-existing test
+  (`disconnect_preserves_local_state_when_revocation_fails`,
+  `crates/kyomi-auth/src/google_oauth.rs`). The reviewer
   *"confirmed the pre-existing `disconnect_preserves_local_state_when_revocation_fails` test
   was passing for the wrong reason pre-fix: it seeded only `google_oauth` (no password) and
   asserted only `result.is_err()`, which the new guard's `Conflict` also satisfies"*. With
@@ -97,7 +114,7 @@ Real precedent — two tickets, one 🔴 that blocked signing:
   reached, so the assertion could not distinguish the two failures. The fix is the shape this
   rule asks for — *"added password fixture + `requests.len() == 1` assertion"* — seeding the
   state in which only the cause under test can produce the observable, and asserting on the
-  side effect that separates them.
+  side effect that separates them. Landed on `main` in `30b21c88` (PR #507).
 
 Sibling of
 [cover-the-path-the-criterion-names-not-an-adjacent-one.md](cover-the-path-the-criterion-names-not-an-adjacent-one.md)
@@ -106,7 +123,15 @@ and
 the three are the same instinct on the three parts of a test. That rule asks *which entry
 point* you drive; the other asks *what the assertion looks at* once you are there; this one
 asks *which inputs you hand it* — because a correct entry point and a correct assertion still
-prove nothing about an axis the data never varies along on its own.
+prove nothing about an axis the data never varies along on its own. The same vacuity can also
+arrive through the assertion instead of the fixture: **KYO-716** (review log `2026-09-12`,
+heading *"KYO-716: migration schema drift detection"*, a 🟡 fixed in the re-review) is that
+shape, not this one — `assert!(status == "healthy" || status == "degraded")` in
+`apps/server/tests/contract_health.rs` enumerated every value the field can hold by
+construction, so it could not fail under a mutation that flipped `status` to `"degraded"` on
+drift. It now reads `assert_eq!(status, "healthy", "drift must not change status")`. Counted
+there rather than here, per
+[count-only-the-incidents-that-instantiate-the-rule.md](../comments-documentation/count-only-the-incidents-that-instantiate-the-rule.md).
 
 Distinct from
 [a-mutation-only-counts-if-the-run-could-have-failed.md](a-mutation-only-counts-if-the-run-could-have-failed.md):
@@ -123,6 +148,17 @@ what else the query returned, and the remedy is to assert the result's size. Her
 assertion's scope is not the problem; widening it would not help while the injected item wins
 on the month digit. The remedy is to change the inputs so the comparison under test is the
 one that decides the answer.
+
+Distinct from
+[a-tests-verdict-must-not-depend-on-the-ambient-environment.md](a-tests-verdict-must-not-depend-on-the-ambient-environment.md):
+that rule keeps an *uncontrolled* input out of the assertion. KYO-498's `Utc::now()` is not
+uncontrolled — it is the value under test, arriving through the real dispatch path, which is
+precisely why the fixtures must be derived from it rather than written beside it. The KYO-498
+re-review did record one residual timing edge in the derived form (whole-second Postgres-format
+fixtures could collide within ~1.6s of UTC midnight, judged non-blocking); if a derivation
+cannot be made total,
+[nondeterministic-verdict-is-a-failing-test.md](nondeterministic-verdict-is-a-failing-test.md)
+governs what to do about it.
 
 See also [prove-test-fails-without-fix.md](prove-test-fails-without-fix.md): the mutation it
 requires is how this defect is found, and KYO-498 is the case where that mutation was

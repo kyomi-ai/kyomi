@@ -10,7 +10,7 @@
     <!-- Detect theme before CSS loads — prevents flash of wrong theme.
          Reads kyomi-theme from localStorage (light|dark|system).
          Migrates old theme-preference key if present. -->
-    <script>
+    <script nonce="__KYOMI_CSP_NONCE__">
         (function() {
             var d = document.documentElement;
             try {
@@ -117,7 +117,7 @@
         }
     </style>
 
-    <script type="module">
+    <script type="module" nonce="__KYOMI_CSP_NONCE__">
         // Ensure auth session is fresh before WASM boots.
         // Access tokens expire after 15 min — refresh to get a new one.
         await fetch('/api/v1/auth/refresh', { method: 'POST', credentials: 'same-origin' }).catch(() => {});

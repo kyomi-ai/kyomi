@@ -57,7 +57,8 @@ Kyomi is built with:
 
 ### Prerequisites
 
-- Rust 1.85+ (2024 edition)
+- Rust via rustup; the exact compiler, Clippy and WASM target are installed from
+  [`rust-toolchain.toml`](rust-toolchain.toml). See [upgrade instructions](CLAUDE.md#rust-toolchain).
 - Node.js 20+
 - PostgreSQL 15+ with pgvector extension
 - Redis 7+

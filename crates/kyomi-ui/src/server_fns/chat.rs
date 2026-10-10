@@ -87,6 +87,10 @@ pub struct ChatMessageItem {
     pub content: String,
     pub timestamp: String,
     pub pinned: bool,
+    /// Lifecycle of the row — one of the `chat_messages.status` CHECK values
+    /// (`kyomi_auth::chat_service::MessageStatus::as_str`). The UI keys the
+    /// interrupted affordance off `"interrupted"` (KYO-493).
+    pub status: String,
     pub sent_by: Option<SessionUser>,
     pub thinking_events: Vec<serde_json::Value>,
     pub token_usage: Option<serde_json::Value>,
@@ -110,14 +114,15 @@ pub struct SessionMessagesResponse {
 
 /// Response from sending a chat message.
 ///
-/// The AI response is delivered asynchronously via WebSocket streaming events
-/// (`chat_stream`, `chat_complete`). This response contains the message IDs
-/// for tracking.
+/// The AI response is delivered asynchronously as a complete WebSocket event.
+/// This response contains durable run and message identities for tracking.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SendMessageResponse {
     pub session_id: String,
     pub user_message_id: String,
     pub assistant_message_id: String,
+    #[serde(default)]
+    pub run_id: Option<String>,
     pub status: String,
     pub thinking_events: Vec<serde_json::Value>,
     pub token_usage: Option<serde_json::Value>,
@@ -149,7 +154,7 @@ pub struct ChartContext {
 /// Returns `None` if the context has expired (TTL) or the ID is invalid.
 ///
 /// Mirrors `GET /api/v1/chart-context/:id` in the REST API.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_chart_context(chart_id: String) -> Result<Option<ChartContext>, ServerFnError> {
     let _auth = super::extract_auth().await?;
     let ctx = super::extract_context()?;
@@ -184,7 +189,7 @@ pub async fn get_chart_context(chart_id: String) -> Result<Option<ChartContext>,
 /// used by MCP "Continue in Kyomi" deep-links.
 ///
 /// Uses a 30-day TTL matching `CHART_CONTEXT_TTL_SECS` in `kyomi-agent`.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn store_chart_context_for_ask(
     chart_markdown: String,
     title: String,
@@ -228,9 +233,31 @@ pub async fn store_chart_context_for_ask(
 /// Generates a short-lived JWT (15 minutes) signed with the app's JWT secret,
 /// matching the token format produced by `GET /api/v1/auth/websocket-token`.
 /// The client uses this token to authenticate the WebSocket upgrade request.
-#[server(prefix = "/leptos-api")]
+///
+/// Deliberately allowlisted for the KYO-805 billing gate
+/// (`AuthenticatedContext::extract_allow_lapsed`, not `extract`) — KYO-833.
+/// `apps/server/src/routes/websocket.rs`'s `ws_handler`/`handle_authenticated_ws`
+/// never checks billing status when accepting the upgrade (it only validates
+/// the JWT, matches the path user id, and checks `user.active`); the gate on a
+/// lapsed workspace is enforced per-message, inside `handle_client_message`,
+/// by `refuse_if_billing_gate_blocks` — called once each from
+/// `handle_sync_bootstrap` and `handle_sync_delta` against a live DB read, not
+/// against anything carried in the token. So a token minted here for a lapsed
+/// workspace grants its holder nothing beyond "can open the socket and send
+/// messages" — every other REST/server-fn endpoint the client would need to
+/// actually read or mutate data still re-checks the workspace's *current*
+/// billing state through its own `AuthenticatedContext::extract()` (or
+/// doesn't, and is on the small named allowlist for its own KYO-805 reason),
+/// independent of how the caller authenticated. Gating this call was the
+/// KYO-833 bug: `crate::components::chat::websocket_client`'s `connect()`
+/// calls this on every connect *and* reconnect, so a lapsed workspace could
+/// never obtain a socket at all — not on first load after lapsing, and not
+/// when reconnecting — which cut it off from the one channel
+/// (`billing_status_changed`, see `cache::sync_engine`) a tab needs to learn
+/// it has been unlocked without a manual reload.
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_websocket_config() -> Result<WebSocketConfig, ServerFnError> {
-    let ac = AuthenticatedContext::extract().await?;
+    let ac = AuthenticatedContext::extract_allow_lapsed().await?;
 
     let mut extra = std::collections::HashMap::new();
     extra.insert("user_id".into(), serde_json::json!(ac.auth.user_id));
@@ -240,12 +267,14 @@ pub async fn get_websocket_config() -> Result<WebSocketConfig, ServerFnError> {
 
     // Short-lived token (15 minutes) — matches the standard access-token
     // expiry used elsewhere (see `jwt.access_token_expire_minutes`).
-    let token = kyomi_auth::jwt::create_access_token_str(
+    let token = kyomi_auth::session::create_user_access_token(
+        &ac.ctx.db,
         &ac.auth.user_id,
         &ac.ctx.config.jwt_secret,
         15,
         extra,
     )
+    .await
     // user_message() (KYO-448) — Display would leak the variant tag
     // (jwt encode failures surface as kyomi_core::Error::Internal).
     .map_err(|e| ServerFnError::new(format!("Failed to create WebSocket token: {}", e.user_message())))?;
@@ -265,7 +294,7 @@ pub async fn get_websocket_config() -> Result<WebSocketConfig, ServerFnError> {
 ///
 /// Verifies the user has access (owner or shared in workspace) before
 /// returning messages. Returns up to 200 messages, oldest first.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_session_messages(
     session_id: String,
 ) -> Result<SessionMessagesResponse, ServerFnError> {
@@ -306,7 +335,7 @@ pub async fn get_session_messages(
 ///
 /// Only the session owner can update the title. Returns an error if the
 /// session is not found, access is denied, or the user is not the owner.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn update_session_title(
     session_id: String,
     title: String,
@@ -357,7 +386,7 @@ pub async fn update_session_title(
 ///
 /// Only the session owner can delete. Returns an error if the session is
 /// not found or the user is not the owner.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn delete_chat_session(session_id: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -396,7 +425,7 @@ pub async fn delete_chat_session(session_id: String) -> Result<(), ServerFnError
 ///
 /// Validates that the list is non-empty and capped at 100. Only deletes
 /// sessions owned by the current user in the current workspace.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn bulk_delete_sessions(session_ids: Vec<String>) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -441,7 +470,7 @@ pub async fn bulk_delete_sessions(session_ids: Vec<String>) -> Result<(), Server
 ///
 /// Returns sessions (owned + shared) whose title matches the query (ILIKE).
 /// Returns an empty list when the query is empty.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn search_chat_messages(query: String) -> Result<Vec<ChatSessionItem>, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
@@ -471,13 +500,10 @@ pub async fn search_chat_messages(query: String) -> Result<Vec<ChatSessionItem>,
 
 /// Send a user message and trigger AI agent execution.
 ///
-/// Thin wrapper around `chat_service::prepare_chat_dispatch` + agent spawn.
-/// Pre-spawn orchestration (find/create session, skip_ai store, shared
-/// broadcast) lives in the service layer. This function handles only the
-/// Leptos-specific context extraction, agent config construction, and spawn.
-///
-/// The AI response is delivered asynchronously via WebSocket streaming events.
-#[server(prefix = "/leptos-api")]
+/// The service atomically accepts a durable turn. Startup workers discover
+/// committed work independently of this request and deliver complete responses.
+/// This function supplies authenticated execution context and handles skip_ai.
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn send_chat_message(
     message: String,
     // KYO-494: always the session this message belongs to — never a
@@ -536,6 +562,12 @@ pub async fn send_chat_message(
     // would silently disagree with what the model actually saw.
     const MESSAGE_SOURCE: &str = "web";
 
+    let execution_context = serde_json::json!({
+        "model_name": model,
+        "workspace_roles": ac.auth.workspace.workspace_roles,
+        "user_display_name": user_display_name,
+    });
+
     // 3–5. Find/create session, handle skip_ai, broadcast user message.
     // Callout 1 of 3.
     let outcome = kyomi_auth::chat_service::prepare_chat_dispatch(
@@ -553,13 +585,15 @@ pub async fn send_chat_message(
             message_source: Some(MESSAGE_SOURCE),
             skip_ai,
             client_msg_id: client_msg_id.as_deref(),
+            owner_instance: &ac.ctx.process_instance,
+            execution_context: Some(&execution_context),
         },
     )
     .await
     .into_sfn_core()?;
 
     // Early return for skip_ai path (service handled storage).
-    let (session_id, is_new_session, user_message_id, assistant_message_id, is_shared) =
+    let (session_id, is_new_session, user_message_id, assistant_message_id, run_id, duplicate) =
         match outcome {
             kyomi_auth::chat_service::ChatDispatchOutcome::SkippedAi {
                 session_id,
@@ -569,6 +603,7 @@ pub async fn send_chat_message(
                     session_id,
                     user_message_id,
                     assistant_message_id: String::new(),
+                    run_id: None,
                     status: "skipped".to_string(),
                     thinking_events: Vec::new(),
                     token_usage: None,
@@ -580,189 +615,21 @@ pub async fn send_chat_message(
                 is_new_session,
                 user_message_id,
                 assistant_message_id,
-                is_shared,
-            } => (session_id, is_new_session, user_message_id, assistant_message_id, is_shared),
+                run_id,
+                duplicate,
+                ..
+            } => (session_id, is_new_session, user_message_id, assistant_message_id, run_id, duplicate),
         };
 
-    // 6. Build execution config and spawn agent task.
-    // Requires ws_manager and cancel_registry to be provided in ServerContext.
-    let ws_manager = ac.ctx
-        .ws_manager
-        .as_ref()
-        .ok_or_else(|| ServerFnError::new("WebSocket manager not configured"))?
-        .clone();
-
-    let cancel_registry = ac.ctx
-        .cancel_registry
-        .as_ref()
-        .ok_or_else(|| ServerFnError::new("Cancel registry not configured"))?
-        .clone();
-
-    let platforms = ac.ctx
-        .platforms
-        .as_ref()
-        .ok_or_else(|| ServerFnError::new("Platform registry not configured"))?
-        .clone();
-
-    let cancel_token = tokio_util::sync::CancellationToken::new();
-
-    let exec_config = kyomi_agent::AgentExecutionConfig {
-        session_id: session_id.clone(),
-        user_id: ac.auth.user_id.clone(),
-        workspace_id: ac.ws_id.clone(),
-        message: message.clone(),
-        model_name: model,
-        temperature: 0.7,
-        is_shared_conversation: is_shared,
-        context_type: "chat".to_string(),
-        workspace_user_ids: None,
-        cancel_token: cancel_token.clone(),
-        current_time_user_tz: current_time_user_tz.clone(),
-        message_source: Some(MESSAGE_SOURCE.to_string()),
-        system_prompt: None,
-        tools_subset: None,
-        // Main chat: a human is waiting and benefits from the extra room —
-        // real warehouse analysis routinely needs more than 25 round-trips.
-        // Raised from 25 to 50 in KYO-345; the paired duration/token guards
-        // below exist so this higher ceiling cannot double worst-case spend
-        // on a pathological tool loop.
-        max_iterations: 50,
-        max_duration: Some(std::time::Duration::from_secs(15 * 60)),
-        max_total_tokens: Some(1_500_000),
-        // Chat responses routinely include one or more ChartML blocks plus
-        // explanatory prose, which can exceed the library's 4096-token
-        // default on its own — but unlike the dashboard copilot, chat never
-        // has to resend an entire existing document on every turn, so it
-        // doesn't need the copilot's 16384 ceiling (KYO-534).
-        max_tokens: 8192,
-        component: "custom_agent".to_string(),
-        user_message_persistence: kyomi_agent::UserMessagePersistence::CallerPersisted(
-            user_message_id.clone(),
-        ),
-        assistant_message_id: Some(assistant_message_id.clone()),
-        conversation_history: None,
-        user_display_name: ac.auth.name.clone().unwrap_or_else(|| ac.auth.email.clone()),
-        context_window: 0,
-        workspace_roles: ac.auth.workspace.workspace_roles.clone(),
-        // Main chat has no single open document — see `ToolContext::document_id`.
-        document_id: None,
-    };
-
-    // Register cancel token so WebSocket cancel_request can stop this task.
-    cancel_registry.register(&ac.auth.user_id, &session_id, cancel_token.clone());
-
-    // Spawn async task for AI execution + response delivery.
-    let db = ac.ctx.db.clone();
-    let kv = ac.kv()?;
-
-    let embedding = ac.ctx.embedding.clone();
-    let app_config = ac.ctx.config.clone();
-    let connect_registry = ac.ctx.connect_registry.clone();
-    let spawn_user_id = ac.auth.user_id.clone();
-    let spawn_session_id = session_id.clone();
-    let spawn_assistant_message_id = assistant_message_id.clone();
-    let spawn_workspace_id = ac.ws_id.clone();
-    let spawn_is_shared = is_shared;
-    let context_type = "chat".to_string();
-
-    tokio::spawn(async move {
-        let result = kyomi_agent::execute_agent_chat(
-            exec_config,
-            kyomi_agent::AgentExecutionEnv {
-                db: &db,
-                kv: &kv,
-                encryption_key: &encryption_key,
-                embedding: &embedding,
-                ws_manager: &ws_manager,
-                app_config: &app_config,
-                connect_registry,
-                platforms,
-            },
-        )
-        .await;
-
-        match result {
-            Ok(exec_result) if exec_result.status == "cancelled" => {
-                // Notify the frontend that the request was cancelled so it can
-                // transition out of Cancelling state. Do NOT call deliver_response
-                // or broadcast — the partial response is discarded.
-                kyomi_auth::websocket::helpers::send_request_cancelled(
-                    &ws_manager,
-                    &spawn_user_id,
-                    &spawn_session_id,
-                    &exec_result.assistant_message_id,
-                    Some(&context_type),
-                )
-                .await;
-            }
-            Ok(exec_result) => {
-                // Deliver response via WebSocket.
-                kyomi_agent::deliver_response(
-                    &ws_manager,
-                    &spawn_user_id,
-                    &spawn_session_id,
-                    &exec_result.assistant_message_id,
-                    &exec_result.response_text,
-                    exec_result.model.as_deref().unwrap_or("unknown"),
-                    exec_result.token_usage,
-                    &context_type,
-                    None,
-                    None,
-                )
-                .await;
-
-                // Broadcast assistant message to shared conversation members.
-                // Callout 2 of 3.
-                if spawn_is_shared {
-                    kyomi_auth::websocket::helpers::send_shared_chat_message(
-                        &ws_manager,
-                        &spawn_workspace_id,
-                        &spawn_session_id,
-                        &exec_result.assistant_message_id,
-                        "assistant",
-                        &exec_result.response_text,
-                        &chrono::Utc::now().to_rfc3339(),
-                        None,
-                        None,
-                        None,
-                    )
-                    .await;
-                }
-            }
-            Err(e) => {
-                tracing::error!(
-                    session_id = %spawn_session_id,
-                    error = %e,
-                    "Agent execution failed"
-                );
-
-                // Persist error message and notify the user. Callout 3 of 3.
-                kyomi_auth::chat_service::save_agent_error(
-                    kyomi_auth::chat_service::SaveAgentErrorParams {
-                        db: &db,
-                        encryption_key: &encryption_key,
-                        ws_manager: &ws_manager,
-                        session_id: &spawn_session_id,
-                        user_id: &spawn_user_id,
-                        assistant_message_id: &spawn_assistant_message_id,
-                        context_type: &context_type,
-                        error: e.user_message(),
-                    },
-                )
-                .await;
-            }
-        }
-
-        // Clean up cancel token so it doesn't leak.
-        cancel_registry.remove(&spawn_user_id, &spawn_session_id);
-    });
+    // The startup worker discovers the committed queue independently of this
+    // handler. A successful submission never depends on spawning an execution task.
 
     // 8. Fire-and-forget title generation for new sessions. The spawned task
     // loads WorkspaceAiConfig (Kyomi or BYOK) and logs a warning on failure;
     // no server-side config guard is needed — gating on
     // `resolve_provider_config` would silently skip titles for BYOK-only
     // deployments that never set server Kyomi keys.
-    if is_new_session
+    if is_new_session && !duplicate
         && let Some(ref ws_mgr) = ac.ctx.ws_manager
     {
         kyomi_agent::generate_session_title(
@@ -787,7 +654,8 @@ pub async fn send_chat_message(
         session_id,
         user_message_id,
         assistant_message_id,
-        status: "processing".to_string(),
+        run_id: Some(run_id),
+        status: "queued".to_string(),
         thinking_events: Vec::new(),
         token_usage: None,
         skip_ai: false,
@@ -804,7 +672,7 @@ pub async fn send_chat_message(
 /// `shared_at` timestamp via `chat_service::set_session_shared`, which also
 /// persists the visibility transition to `sync_log` so an offline
 /// workspace member converges on their next delta sync.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn share_session(session_id: String) -> Result<(), ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -868,7 +736,7 @@ pub async fn share_session(session_id: String) -> Result<(), ServerFnError> {
 /// conversations (they're visible on the platform). Delegates the
 /// `shared` flip and matching `sync_log` write to
 /// `chat_service::set_session_shared`.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn unshare_session(session_id: String) -> Result<(), ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -946,7 +814,7 @@ pub async fn unshare_session(session_id: String) -> Result<(), ServerFnError> {
 ///
 /// Upserts into `conversation_read_status` to track the user's read position.
 /// Used for computing `unread_count` in session listings.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn mark_session_read(
     session_id: String,
     last_message_id: Option<String>,
@@ -1022,7 +890,7 @@ pub async fn mark_session_read(
 /// Requires access to the session (owner or shared in workspace).
 /// Returns `true` if the toggle was successful (message found), `false`
 /// otherwise.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn toggle_message_pin(
     session_id: String,
     message_id: String,
@@ -1054,7 +922,7 @@ pub async fn toggle_message_pin(
 ///
 /// Only the session owner can edit messages. Re-encrypts the content before
 /// storing. Thin wrapper around `chat_service::update_message_content_owned`.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn update_message_content(
     session_id: String,
     message_id: String,
@@ -1101,7 +969,7 @@ pub async fn update_message_content(
 ///
 /// Returns `None` if no full text was stored (the event was short enough to
 /// fit within the 200-char display limit).
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_thinking_event_detail(
     message_id: String,
     event_id: String,
@@ -1182,6 +1050,7 @@ fn message_item_to_chat_message_item(
         content: m.content,
         timestamp: m.timestamp.unwrap_or_default(),
         pinned: m.pinned,
+        status: m.status,
         sent_by: m.sent_by.map(|cb| SessionUser {
             user_id: cb.user_id,
             display_name: cb.display_name.unwrap_or_default(),

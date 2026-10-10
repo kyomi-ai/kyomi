@@ -5,6 +5,7 @@
 //! Provides: configuration, database pool, Redis pool, error types,
 //! structured logging setup, and capability service.
 
+pub mod chartml_validation;
 pub mod ai_budget;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cancel_registry;
@@ -36,7 +37,7 @@ pub mod error_sanitizer;
 pub mod retry;
 pub mod sql_compat;
 
-pub use config::Config;
+pub use config::{Config, resolve_process_instance};
 pub use db::DbPool;
 pub use enums::{
     CatalogRefreshStatus, ChatMessageRole, DatasourceType, FeedbackStatus, FeedbackType,
@@ -44,7 +45,7 @@ pub use enums::{
     SubscriptionTier, TransferStatus, WatchExecutionStatus, WatchMode, WorkspaceRole,
     WorkspaceStatus,
 };
-pub use error::{Error, Result};
+pub use error::{Error, Result, PAYMENT_REQUIRED_CODE};
 pub use error_sanitizer::sanitize_error;
 pub use kv_store::{KVPool, KVStore, create_kv_store, kv_consume_json, kv_peek_json, kv_store_json};
 pub use redis::RedisPool;

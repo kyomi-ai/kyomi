@@ -34,7 +34,7 @@ pub struct LandingConfig {
 /// system configuration flags needed for the redirect decision.
 ///
 /// Mirrors the data consumed by `apps/frontend/src/components/LandingRedirect.jsx`.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_landing_config() -> Result<LandingConfig, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;

@@ -192,6 +192,15 @@ pub fn ChatMessage(
                 && active_message_id.try_get().flatten().as_deref() == Some(&msg_id_for_streaming)
         });
 
+        // KYO-493: a row the stuck-row sweep reclassified as `interrupted`
+        // renders as exactly that — a muted note — instead of a blank
+        // bubble the reader waits on forever. Whatever partial content the
+        // incremental flushes managed to land stays visible above the note.
+        let is_interrupted = message.status == "interrupted";
+        let show_interrupted = Signal::derive(move || {
+            is_interrupted && !is_streaming_this_msg.try_get().unwrap_or(false)
+        });
+
         // force_show_thinking: true when this is the active streaming message but
         // no thinking events have arrived yet (timer must start immediately).
         let message_id_for_force = message_id_for_thinking.clone();
@@ -223,6 +232,11 @@ pub fn ChatMessage(
                         force_show_thinking=force_show_thinking
                         on_chart_info=on_show_chart_info
                     />
+                    <Show when=move || show_interrupted.get()>
+                        <div class="text-xs text-muted-foreground mt-2">
+                            "Response interrupted"
+                        </div>
+                    </Show>
                 </div>
 
                 // Footer: sender · timestamp on left, pin + save-to-dashboard on right.

@@ -186,7 +186,7 @@ pub async fn get_datasource_by_slug(
 /// Resolution order:
 /// 1. Try slug match first (most common case)
 /// 2. If identifier starts with `"ds-"`, try UUID match
-/// 3. If not found, return error with available slugs
+/// 3. If not found, return a workspace-scoped error without listing other datasources
 ///
 /// When `include_inactive` is false, inactive datasources are excluded.
 pub async fn resolve_datasource(
@@ -271,16 +271,8 @@ pub async fn resolve_datasource(
         }
     }
 
-    // Not found — build error with available slugs
-    let slugs = list_datasource_slugs(pool, workspace_id).await?;
-    let available = if slugs.is_empty() {
-        String::new()
-    } else {
-        format!(" Available: {}", slugs.join(", "))
-    };
-
     Err(kyomi_core::Error::NotFound(format!(
-        "Datasource '{identifier}' not found in this workspace.{available}"
+        "Datasource '{identifier}' not found in this workspace."
     )))
 }
 
@@ -372,9 +364,20 @@ pub async fn create_datasource(
         encryption_key,
     } = params;
 
+    // KYO-702: strip any connection_config field owned by an auth mode
+    // other than the one this config's own `auth_mode` names, before
+    // finalize_connection_config_secrets runs. On create there is no prior
+    // stored config to have leaked from, but the client can still submit a
+    // connection_config assembled from stale form state (e.g. a copy/paste
+    // or a race between two in-flight auth-mode switches in the same
+    // session) — enforcing this here as well as on update keeps both write
+    // paths identical rather than trusting create's freshness.
+    credential_service::strip_inactive_auth_mode_fields(&mut connection_config, ds_type);
+
     credential_service::finalize_connection_config_secrets(
         &mut connection_config,
         None,
+        ds_type,
         encryption_key,
     )?;
 
@@ -524,9 +527,24 @@ pub async fn update_datasource(
     // before being persisted.
     let final_config = match connection_config {
         Some(mut cfg) => {
+            // KYO-702: strip any connection_config field owned by an auth
+            // mode other than the one *this* update's `auth_mode` names,
+            // before finalize_connection_config_secrets runs. This is the
+            // case the bug lived in: switching BigQuery from
+            // enterprise_oauth to service_account (or back) previously left
+            // the old mode's oauth_client_id/oauth_client_secret or
+            // service_account_json sitting in `existing.connection_config`
+            // forever, because build_connection_config's wholesale replace
+            // only omits fields the *client* knows to omit — it cannot see
+            // what an earlier save under a different mode persisted.
+            credential_service::strip_inactive_auth_mode_fields(
+                &mut cfg,
+                existing.datasource_type.as_ref(),
+            );
             credential_service::finalize_connection_config_secrets(
                 &mut cfg,
                 Some(&existing.connection_config),
+                existing.datasource_type.as_ref(),
                 encryption_key,
             )?;
             cfg
@@ -1427,6 +1445,15 @@ pub async fn prepare_manual_catalog_refresh(
     let ds_type: kyomi_core::datasource_registry::DatasourceType =
         p.datasource.datasource_type.into();
 
+    // `p.datasource.connection_config` came straight from the database and
+    // may hold encrypted COMMON_SENSITIVE fields (e.g. `oauth_client_secret`,
+    // KYO-786) — `ensure_valid_oauth_credentials` needs plaintext to refresh
+    // against the provider's token endpoint.
+    let decrypted_connection_config = credential_service::decrypt_connection_config_secrets(
+        &p.datasource.connection_config,
+        p.encryption_key,
+    )?;
+
     // Refresh OAuth credentials if needed. This runs directly here (before
     // `build_provider_for_datasource` below), so an OAuth-refresh failure
     // surfaces from this call rather than from `create_provider_from_parts`.
@@ -1435,7 +1462,7 @@ pub async fn prepare_manual_catalog_refresh(
     // prefix-free, exactly like the connect/timeout failures.
     let credentials = kyomi_datasource_server::ensure_valid_oauth_credentials(
         &credentials,
-        &p.datasource.connection_config,
+        &decrypted_connection_config,
         &ds_type,
     )
     .await
@@ -2104,7 +2131,20 @@ pub async fn get_datasource_settings_detail(
         None => serde_json::json!({}),
     };
 
-    let connection_config = &ds.connection_config;
+    // `ds.connection_config` came straight from the database and may hold
+    // an encrypted `service_account_json` (COMMON_SENSITIVE, KYO-786) —
+    // `service_account_email_from` below needs the plaintext key file to
+    // read `client_email` out of it. Decrypted once here and reused for
+    // every read below, including `mask_connection_config`: masking a
+    // decrypted config is still correct because masking is presence-based
+    // (any non-empty string becomes `MASKED_VALUE`, ciphertext or plaintext
+    // alike) — this is not a leak, just a single canonical config value for
+    // the rest of this function instead of two.
+    let connection_config = credential_service::decrypt_connection_config_secrets(
+        &ds.connection_config,
+        encryption_key,
+    )?;
+    let connection_config = &connection_config;
     let cred_result = crate::datasource_auth_service::check_credential_status(
         ds.datasource_type.as_ref(),
         connection_config,
@@ -2191,6 +2231,68 @@ mod tests {
     use serde_json::json;
 
     use crate::test_support::{seed_user, seed_workspace, sqlite_pool, test_key, test_pool};
+
+    #[tokio::test]
+    async fn resolve_datasource_missing_lookup_does_not_disclose_other_slugs() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        let key = test_key();
+        seed_user(sq, "user-a", "a@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+        seed_workspace(sq, "ws-2", "user-a").await;
+        let ds = create_datasource(
+            &db,
+            CreateDatasourceParams {
+                workspace_id: "ws-1",
+                name: "Private datasource",
+                slug: Some("private-workspace-slug"),
+                ds_type: "postgres",
+                connection_config: json!({}),
+                connection_type: None,
+                encryption_key: &key,
+            },
+        )
+        .await
+        .expect("create datasource fixture");
+
+        // The fixture is resolvable by both supported identifiers.
+        for identifier in [ds.slug.as_str(), ds.id.as_str()] {
+            assert_eq!(
+                resolve_datasource(&db, identifier, "ws-1", false)
+                    .await
+                    .expect("existing datasource")
+                    .id,
+                ds.id
+            );
+        }
+        for include_inactive in [false, true] {
+            for identifier in ["", "missing", "ds-missing"] {
+                let error = resolve_datasource(&db, identifier, "ws-1", include_inactive)
+                    .await
+                    .expect_err("missing identifiers must still be rejected");
+                assert!(matches!(error, kyomi_core::Error::NotFound(_)));
+                assert_eq!(
+                    error.to_string(),
+                    format!("not found: Datasource '{identifier}' not found in this workspace.")
+                );
+            }
+        }
+        assert!(
+            matches!(
+                resolve_datasource(&db, &ds.id, "ws-2", true).await,
+                Err(kyomi_core::Error::NotFound(_))
+            ),
+            "UUID resolution must remain workspace-scoped"
+        );
+        sq.close().await;
+        assert!(
+            matches!(
+                resolve_datasource(&db, "missing", "ws-1", false).await,
+                Err(kyomi_core::Error::Sqlx(_))
+            ),
+            "a failed database lookup must preserve its genuine error"
+        );
+    }
 
     // -- generate_slug tests --
 
@@ -2413,6 +2515,133 @@ mod tests {
         assert_eq!(
             service_account_email_from(Some("kyomi_oauth"), &connection_config),
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn get_datasource_settings_detail_extracts_service_account_email_from_encrypted_json() {
+        // KYO-786 regression guard: before the fix, `service_account_json`
+        // was stored at rest as plaintext and `get_datasource_settings_detail`
+        // read `ds.connection_config` raw. Now that it's encrypted
+        // (COMMON_SENSITIVE), a caller that forgot to decrypt first would
+        // hand `service_account_email_from` ciphertext — `from_str(ciphertext)`
+        // fails, `.ok()` swallows the error, and `service_account_email`
+        // silently comes back `None` instead of erroring or the real email.
+        // This seeds a real datasource through `create_datasource` (so
+        // `service_account_json` is genuinely encrypted at rest, not just
+        // plaintext dressed up as a test fixture) and proves the email still
+        // comes back correctly.
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        let key = test_key();
+        seed_user(sq, "user-a", "a@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+
+        let ds = create_datasource(
+            &db,
+            CreateDatasourceParams {
+                workspace_id: "ws-1",
+                name: "BQ",
+                slug: Some("bq-settings-test"),
+                ds_type: "bigquery",
+                connection_config: json!({
+                    "auth_mode": "service_account",
+                    "service_account_json": "{\"type\":\"service_account\",\"client_email\":\"test-service-account@test-project\"}"
+                }),
+                connection_type: None,
+                encryption_key: &key,
+            },
+        )
+        .await
+        .expect("create_datasource");
+
+        // Sanity: the stored value really is ciphertext, not the plaintext
+        // JSON the test above supplied — otherwise this test wouldn't be
+        // exercising the KYO-786 fix at all.
+        let stored = ds.connection_config["service_account_json"]
+            .as_str()
+            .expect("service_account_json stored as a string");
+        assert!(
+            credential_service::looks_encrypted(stored),
+            "test fixture sanity: service_account_json must be encrypted at rest, got: {stored}"
+        );
+
+        let detail = get_datasource_settings_detail(&db, &ds.id, "ws-1", "user-a", true, &key)
+            .await
+            .expect("get_datasource_settings_detail");
+
+        assert_eq!(
+            detail.service_account_email.as_deref(),
+            Some("test-service-account@test-project"),
+            "service_account_email must be extracted from the decrypted service_account_json"
+        );
+        // The response sent to the browser must still be masked, never the
+        // decrypted plaintext this function now holds internally.
+        assert_eq!(detail.connection_config["service_account_json"], credential_service::MASKED_VALUE);
+    }
+
+    #[tokio::test]
+    async fn prepare_manual_catalog_refresh_errors_when_connection_config_cannot_be_decrypted() {
+        // KYO-786 regression guard: `p.datasource.connection_config` may
+        // hold an encrypted `oauth_client_secret`. Before the fix, this
+        // function handed it raw to `ensure_valid_oauth_credentials`, which
+        // would attempt an OAuth refresh using ciphertext as if it were the
+        // real client secret. It must now decrypt first and fail loudly on
+        // a corrupted/mismatched-key config rather than attempting a
+        // refresh with garbage credentials — the success path (a real
+        // refresh against a live OAuth provider) can't be exercised without
+        // a live/mocked external service, but the decrypt-and-fail-fast
+        // wiring is directly testable this way.
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        let key = test_key();
+        seed_user(sq, "user-a", "a@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+
+        let mut ds = create_datasource(
+            &db,
+            CreateDatasourceParams {
+                workspace_id: "ws-1",
+                name: "BQ",
+                slug: Some("bq-refresh-test"),
+                ds_type: "bigquery",
+                connection_config: json!({ "auth_mode": "enterprise_oauth" }),
+                connection_type: None,
+                encryption_key: &key,
+            },
+        )
+        .await
+        .expect("create_datasource");
+
+        // Corrupt the in-memory config with ciphertext encrypted under a
+        // different key — a guaranteed decrypt failure, not the
+        // legacy-plaintext passthrough.
+        let wrong_key = [7u8; 32];
+        let bogus = encryption::encrypt("bogus-secret", &wrong_key).unwrap();
+        ds.connection_config["oauth_client_secret"] = json!(bogus);
+
+        let result = prepare_manual_catalog_refresh(PrepareManualRefreshParams {
+            db: &db,
+            user_id: "user-a",
+            email: "a@test.local".to_string(),
+            ws_id: "ws-1",
+            datasource: &ds,
+            encryption_key: &key,
+            connect_registry: None,
+            google_oauth_client_id: None,
+            google_oauth_client_secret: None,
+            guard_minutes: 60,
+            connect_timeout: std::time::Duration::from_secs(5),
+        })
+        .await;
+
+        let err = match result {
+            Ok(_) => panic!("an undecryptable connection_config must error, not proceed"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(err, kyomi_core::Error::CredentialDecryptionFailed(_)),
+            "expected CredentialDecryptionFailed, got: {err:?}"
         );
     }
 

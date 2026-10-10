@@ -7,7 +7,7 @@
 //! Wire-compatible with Python's `get_current_user` dependency.
 
 use axum::{
-    extract::{FromRef, FromRequestParts},
+    extract::{FromRef, FromRequestParts, OriginalUri},
     http::request::Parts,
 };
 use chrono::Utc;
@@ -23,6 +23,14 @@ pub struct AuthState {
     pub db: kyomi_core::DbPool,
     /// When true, skip JWT validation and inject the local user context.
     pub is_personal: bool,
+    /// Mirrors `kyomi_core::Config::self_hosted` — `true` for **both**
+    /// `KyomiMode::SelfHosted` and `KyomiMode::Personal` (see that field's
+    /// doc comment). Threaded explicitly into `AuthState` rather than read
+    /// from an env var here, so the billing gate below (and anything else
+    /// that needs to know "does this deployment enforce billing") has one
+    /// source of truth (KYO-805) — see
+    /// `kyomi_core::capability::billing_gate_blocks`.
+    pub self_hosted: bool,
 }
 
 /// Workspace context enriched from the database.
@@ -36,6 +44,15 @@ pub struct WorkspaceContext {
     pub subscription_status: SubscriptionStatus,
     pub trial_ends_at: Option<chrono::DateTime<chrono::Utc>>,
     pub is_owner: bool,
+    /// Whether this workspace must pay before continuing to use the app,
+    /// per `kyomi_core::capability::billing_gate_blocks` — computed exactly
+    /// once, here, from the freshly-loaded `Workspace` row and the
+    /// deployment's `self_hosted` flag (KYO-805). Every other consumer
+    /// (`get_sidebar_user`, the WS sync handlers) reads this field rather
+    /// than re-deriving it, so there is one computation site. Always
+    /// `false` when there is no resolved workspace (`workspace_id` is
+    /// `None`) — there is nothing to be lapsed on.
+    pub billing_lapsed: bool,
 }
 
 impl Default for WorkspaceContext {
@@ -49,6 +66,7 @@ impl Default for WorkspaceContext {
             subscription_status: SubscriptionStatus::Active,
             trial_ends_at: None,
             is_owner: false,
+            billing_lapsed: false,
         }
     }
 }
@@ -81,6 +99,142 @@ pub struct AuthUser {
     pub token_jti: Option<String>,
 }
 
+/// Load and fully populate an [`AuthUser`] — JWT validation, user lookup,
+/// membership lookup, and the billing-gate verdict on
+/// [`WorkspaceContext::billing_lapsed`] — **without** enforcing that gate.
+///
+/// This is the one code path both [`AuthUser`]'s and [`AuthUserAllowLapsed`]'s
+/// `FromRequestParts` impls call (KYO-805): everything through "is this a
+/// valid, active, still-a-member request" is identical for both, so there is
+/// exactly one place that can load a user incorrectly. The two extractors
+/// differ only in what they do with `billing_lapsed` once it's computed —
+/// see [`AuthUser`]'s impl below.
+async fn load_auth_user<S>(parts: &mut Parts, state: &S) -> kyomi_core::Result<AuthUser>
+where
+    S: Send + Sync,
+    AuthState: FromRef<S>,
+{
+    let auth_state = AuthState::from_ref(state);
+
+    // ── Personal mode: skip JWT, inject local user ──────────────
+    if auth_state.is_personal {
+        return load_personal_user(&auth_state.db, auth_state.self_hosted).await;
+    }
+
+    // Try Authorization header first, then cookie
+    let token = extract_token(parts)?;
+
+    let token_data = jwt::validate_token(&token, &auth_state.jwt_secret)?;
+
+    // Nested routers can strip their mount prefix from `parts.uri`.
+    // Only the actual MCP resource accepts an MCP OAuth access token.
+    let path = parts.extensions.get::<OriginalUri>()
+        .map(|uri| uri.0.path())
+        .unwrap_or_else(|| parts.uri.path());
+    if path != "/mcp" && path != "/mcp/" {
+        token_data.claims.require_session()?;
+    }
+
+    // Get user_id from claims — Python puts it in the `extra` map as "user_id"
+    let user_id = token_data.claims.extra
+        .get("user_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| token_data.claims.sub.clone());
+
+    // Load user from database
+    let user = crate::user_service::get_user_by_id(&auth_state.db, &user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("database error loading user: {e}");
+            kyomi_core::Error::Internal("database error".into())
+        })?
+        .ok_or_else(|| kyomi_core::Error::Unauthorized("User not found".into()))?;
+
+    token_data.claims.require_current_session(user.sessions_valid_from)?;
+
+    if !user.active {
+        return Err(kyomi_core::Error::Unauthorized("User account is inactive".into()));
+    }
+
+    // Build workspace context from JWT's workspace_id claim
+    let mut workspace_ctx = WorkspaceContext::default();
+
+    let jwt_workspace_id = token_data.claims.extra
+        .get("workspace_id")
+        .and_then(|v| v.as_str());
+
+    if let Some(ws_id) = jwt_workspace_id {
+        // Fetch fresh workspace details from database
+        match crate::user_service::get_workspace(&auth_state.db, ws_id).await {
+            Ok(Some(ws)) => {
+                match crate::user_service::get_workspace_user(&auth_state.db, ws_id, &user_id).await {
+                    Ok(Some(wu)) => {
+                        workspace_ctx.billing_lapsed = kyomi_core::capability::billing_gate_blocks(
+                            &ws,
+                            auth_state.self_hosted,
+                            Utc::now(),
+                        );
+                        workspace_ctx.workspace_id = Some(ws_id.to_string());
+                        workspace_ctx.workspace_name = ws.name.clone();
+                        workspace_ctx.workspace_roles = vec![wu.role];
+                        workspace_ctx.workspace_status = Some(ws.status);
+                        workspace_ctx.subscription_tier = ws.subscription_tier;
+                        workspace_ctx.subscription_status = ws.subscription_status;
+                        workspace_ctx.trial_ends_at = ws.trial_ends_at;
+                        workspace_ctx.is_owner = ws.owner_user_id == user_id;
+                    }
+                    Ok(None) => {
+                        // User was removed from this workspace
+                        return Err(kyomi_core::Error::Unauthorized(
+                            "Workspace membership revoked. Please log in again.".into()
+                        ));
+                    }
+                    Err(e) => {
+                        // Fail closed (KYO-805): a DB error here previously
+                        // fell through to the default (Active, not lapsed)
+                        // WorkspaceContext, which — once a billing gate reads
+                        // that context — would silently let a request
+                        // through a database outage should have blocked.
+                        tracing::error!("database error loading workspace membership: {e}");
+                        return Err(kyomi_core::Error::Internal("database error".into()));
+                    }
+                }
+            }
+            Ok(None) => {
+                // Workspace genuinely doesn't exist — not a DB failure, and
+                // not the fail-closed case above. Left exactly as before:
+                // the caller proceeds with the default WorkspaceContext.
+                tracing::warn!("workspace {ws_id} not found");
+            }
+            Err(e) => {
+                // Same fail-closed reasoning as the membership lookup above.
+                tracing::error!("database error loading workspace: {e}");
+                return Err(kyomi_core::Error::Internal("database error".into()));
+            }
+        }
+    }
+
+    // Check if token is near expiry (< 5 min) — set header via extensions
+    // The actual header is set in the response layer, not here.
+    // We store the expiry time for the handler to check.
+    let token_exp = Some(token_data.claims.exp);
+    let token_jti = token_data.claims.jti.clone();
+
+    let roles = user.roles();
+    Ok(AuthUser {
+        user_id: user.user_id,
+        email: user.email,
+        name: user.name,
+        roles,
+        active: user.active,
+        verified: user.verified,
+        workspace: workspace_ctx,
+        token_exp,
+        token_jti,
+    })
+}
+
 impl<S> FromRequestParts<S> for AuthUser
 where
     S: Send + Sync,
@@ -88,99 +242,58 @@ where
 {
     type Rejection = kyomi_core::Error;
 
+    /// Fails closed on a lapsed SaaS workspace (KYO-805): every handler that
+    /// takes a bare `AuthUser` — including a brand-new one nobody has
+    /// thought about billing for yet — is gated by default. An endpoint that
+    /// must keep working while billing is lapsed (login/logout, the billing
+    /// settings themselves, ...) opts out explicitly by taking
+    /// [`AuthUserAllowLapsed`] instead; there is no opt-*in* list of gated
+    /// routes to forget an entry in.
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        let auth_state = AuthState::from_ref(state);
-
-        // ── Personal mode: skip JWT, inject local user ──────────────
-        if auth_state.is_personal {
-            return load_personal_user(&auth_state.db).await;
+        let user = load_auth_user(parts, state).await?;
+        if user.workspace.billing_lapsed {
+            return Err(kyomi_core::Error::PaymentRequired(
+                "This workspace's billing is past due.".into(),
+            ));
         }
+        Ok(user)
+    }
+}
 
-        // Try Authorization header first, then cookie
-        let token = extract_token(parts)?;
+/// The explicit opt-out from [`AuthUser`]'s billing gate.
+///
+/// Wraps the same fully-loaded [`AuthUser`] — via [`load_auth_user`], the one
+/// shared loading path — but never rejects on `billing_lapsed`. Use this only
+/// for the small, named set of endpoints the KYO-805 ticket allowlists (login/
+/// logout/session refresh, the billing settings surfaces themselves,
+/// workspace-switching, and user/sidebar context); everything else should
+/// take a bare [`AuthUser`] and get the gate for free.
+#[derive(Debug, Clone)]
+pub struct AuthUserAllowLapsed(pub AuthUser);
 
-        let token_data = jwt::validate_token(&token, &auth_state.jwt_secret)?;
+impl std::ops::Deref for AuthUserAllowLapsed {
+    type Target = AuthUser;
+    fn deref(&self) -> &AuthUser {
+        &self.0
+    }
+}
 
-        // Get user_id from claims — Python puts it in the `extra` map as "user_id"
-        let user_id = token_data.claims.extra
-            .get("user_id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| token_data.claims.sub.clone());
+impl AuthUserAllowLapsed {
+    /// Unwrap into the inner [`AuthUser`].
+    pub fn into_inner(self) -> AuthUser {
+        self.0
+    }
+}
 
-        // Load user from database
-        let user = crate::user_service::get_user_by_id(&auth_state.db, &user_id)
-            .await
-            .map_err(|e| {
-                tracing::error!("database error loading user: {e}");
-                kyomi_core::Error::Internal("database error".into())
-            })?
-            .ok_or_else(|| kyomi_core::Error::Unauthorized("User not found".into()))?;
+impl<S> FromRequestParts<S> for AuthUserAllowLapsed
+where
+    S: Send + Sync,
+    AuthState: FromRef<S>,
+{
+    type Rejection = kyomi_core::Error;
 
-        if !user.active {
-            return Err(kyomi_core::Error::Unauthorized("User account is inactive".into()));
-        }
-
-        // Build workspace context from JWT's workspace_id claim
-        let mut workspace_ctx = WorkspaceContext::default();
-
-        let jwt_workspace_id = token_data.claims.extra
-            .get("workspace_id")
-            .and_then(|v| v.as_str());
-
-        if let Some(ws_id) = jwt_workspace_id {
-            // Fetch fresh workspace details from database
-            match crate::user_service::get_workspace(&auth_state.db, ws_id).await {
-                Ok(Some(ws)) => {
-                    match crate::user_service::get_workspace_user(&auth_state.db, ws_id, &user_id).await {
-                        Ok(Some(wu)) => {
-                            workspace_ctx.workspace_id = Some(ws_id.to_string());
-                            workspace_ctx.workspace_name = ws.name.clone();
-                            workspace_ctx.workspace_roles = vec![wu.role];
-                            workspace_ctx.workspace_status = Some(ws.status);
-                            workspace_ctx.subscription_tier = ws.subscription_tier;
-                            workspace_ctx.subscription_status = ws.subscription_status;
-                            workspace_ctx.trial_ends_at = ws.trial_ends_at;
-                            workspace_ctx.is_owner = ws.owner_user_id == user_id;
-                        }
-                        Ok(None) => {
-                            // User was removed from this workspace
-                            return Err(kyomi_core::Error::Unauthorized(
-                                "Workspace membership revoked. Please log in again.".into()
-                            ));
-                        }
-                        Err(e) => {
-                            tracing::warn!("could not load workspace user: {e}");
-                        }
-                    }
-                }
-                Ok(None) => {
-                    tracing::warn!("workspace {ws_id} not found");
-                }
-                Err(e) => {
-                    tracing::warn!("could not load workspace: {e}");
-                }
-            }
-        }
-
-        // Check if token is near expiry (< 5 min) — set header via extensions
-        // The actual header is set in the response layer, not here.
-        // We store the expiry time for the handler to check.
-        let token_exp = Some(token_data.claims.exp);
-        let token_jti = token_data.claims.jti.clone();
-
-        let roles = user.roles();
-        Ok(AuthUser {
-            user_id: user.user_id,
-            email: user.email,
-            name: user.name,
-            roles,
-            active: user.active,
-            verified: user.verified,
-            workspace: workspace_ctx,
-            token_exp,
-            token_jti,
-        })
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        Ok(AuthUserAllowLapsed(load_auth_user(parts, state).await?))
     }
 }
 
@@ -238,7 +351,7 @@ fn extract_token(parts: &Parts) -> kyomi_core::Result<String> {
 /// loads them from the database and returns a fully-populated `AuthUser`.
 ///
 /// Returns 503 if the local user doesn't exist yet (first-boot race condition).
-async fn load_personal_user(db: &kyomi_core::DbPool) -> kyomi_core::Result<AuthUser> {
+async fn load_personal_user(db: &kyomi_core::DbPool, self_hosted: bool) -> kyomi_core::Result<AuthUser> {
     let user = crate::user_service::get_user_by_id(db, "user-local")
         .await
         .map_err(|e| {
@@ -265,6 +378,13 @@ async fn load_personal_user(db: &kyomi_core::DbPool) -> kyomi_core::Result<AuthU
             )
         })?;
 
+    // Personal mode is always self_hosted (see AuthState::self_hosted's doc
+    // comment), so this is always `false` in practice — routed through the
+    // same shared predicate as every other caller rather than hardcoded,
+    // so there's one place that could ever disagree (KYO-805).
+    let billing_lapsed =
+        kyomi_core::capability::billing_gate_blocks(&workspace, self_hosted, Utc::now());
+
     let workspace_ctx = WorkspaceContext {
         workspace_id: Some(workspace.workspace_id),
         workspace_name: workspace.name,
@@ -274,6 +394,7 @@ async fn load_personal_user(db: &kyomi_core::DbPool) -> kyomi_core::Result<AuthU
         subscription_status: workspace.subscription_status,
         trial_ends_at: workspace.trial_ends_at,
         is_owner: true,
+        billing_lapsed,
     };
 
     let roles = user.roles();
@@ -335,7 +456,262 @@ mod tests {
             jwt_secret: SECRET.to_string(),
             db: pool.clone(),
             is_personal,
+            self_hosted: false,
         }
+    }
+
+
+    // KYO-341: signed JWTs through actual normal and allow-lapsed middleware.
+    async fn cutoff_regression(db: &kyomi_core::DbPool, user_id: &str) {
+        use crate::test_support::authenticate_session;
+        use crate::{session, token_refresh, token_service, user_service};
+        let user = user_service::create_user(db, &format!("{user_id}@test.local"), None, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            user.sessions_valid_from, None,
+            "additive migration preserves existing users"
+        );
+        let kv = kyomi_core::kv_store_memory::InMemoryKVStore::new_pool();
+        let device = token_service::DeviceInfo {
+            user_agent: None,
+            ip_address: None,
+            country_code: None,
+            oauth_client_id: None,
+        };
+        let initiating = session::create_authenticated_session(db, &kv, SECRET, &user, &device)
+            .await
+            .unwrap();
+        let other = session::create_authenticated_session(db, &kv, SECRET, &user, &device)
+            .await
+            .unwrap();
+        for token in [&initiating.access_token, &other.access_token] {
+            authenticate_session(db, SECRET, token, "/", false)
+                .await
+                .unwrap();
+        }
+        let mcp = jwt::create_mcp_access_token_str(&user.user_id, SECRET, 15, Default::default())
+            .unwrap();
+        // Per-device revocation leaves both access tokens and the other refresh usable.
+        let verified = token_service::verify_refresh_token(db, &initiating.refresh_token)
+            .await
+            .unwrap();
+        let token_service::RefreshTokenVerifyResult::Valid(data) = verified else {
+            panic!("valid token");
+        };
+        token_service::revoke_user_refresh_token(db, &user.user_id, &data.token_id)
+            .await
+            .unwrap();
+        assert!(
+            token_refresh::refresh_tokens(db, SECRET, &initiating.refresh_token, &device)
+                .await
+                .is_err()
+        );
+        for token in [&initiating.access_token, &other.access_token] {
+            authenticate_session(db, SECRET, token, "/", false)
+                .await
+                .unwrap();
+        }
+        let rotated = token_refresh::refresh_tokens(db, SECRET, &other.refresh_token, &device)
+            .await
+            .unwrap();
+        token_service::revoke_all_user_sessions(db, &user.user_id)
+            .await
+            .unwrap();
+        for token in [
+            &initiating.access_token,
+            &other.access_token,
+            &rotated.access_token,
+        ] {
+            for allow_lapsed in [false, true] {
+                assert!(
+                    matches!(
+                        authenticate_session(db, SECRET, token, "/", allow_lapsed).await,
+                        Err(kyomi_core::Error::Unauthorized(_))
+                    ),
+                    "old session must fail next authenticated request"
+                );
+            }
+            assert!(
+                authenticate_session(db, SECRET, token, "/mcp", false)
+                    .await
+                    .is_err(),
+                "browser sessions on MCP are also revoked"
+            );
+        }
+        for refresh in [&other.refresh_token, &rotated.raw_refresh_token] {
+            assert!(
+                token_refresh::refresh_tokens(db, SECRET, refresh, &device)
+                    .await
+                    .is_err()
+            );
+        }
+        authenticate_session(db, SECRET, &mcp, "/mcp", false)
+            .await
+            .unwrap();
+        assert!(
+            authenticate_session(db, SECRET, &mcp, "/", false)
+                .await
+                .is_err(),
+            "MCP cannot gain browser authority"
+        );
+        // A stale pre-event user is deliberately supplied: session creation must reload.
+        let fresh = session::create_authenticated_session(db, &kv, SECRET, &user, &device)
+            .await
+            .unwrap();
+        authenticate_session(db, SECRET, &fresh.access_token, "/", false)
+            .await
+            .unwrap();
+        token_refresh::refresh_tokens(db, SECRET, &fresh.refresh_token, &device)
+            .await
+            .unwrap();
+        let id = &user.user_id;
+        let first = user_service::get_user_by_id(db, id)
+            .await
+            .unwrap()
+            .unwrap()
+            .sessions_valid_from
+            .unwrap();
+        // Concurrent revocations each advance the persisted cutoff.
+        let (a, b) = tokio::join!(
+            token_service::revoke_all_user_sessions(db, id),
+            token_service::revoke_all_user_sessions(db, id)
+        );
+        a.unwrap();
+        b.unwrap();
+        let last = user_service::get_user_by_id(db, id)
+            .await
+            .unwrap()
+            .unwrap()
+            .sessions_valid_from
+            .unwrap();
+        assert!(last >= first + 2);
+        kyomi_core::db_execute!(db, "DELETE FROM refresh_tokens WHERE user_id = $1", id).unwrap();
+        kyomi_core::db_execute!(db, "DELETE FROM users WHERE user_id = $1", id).unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_cutoff_signed_tokens_sqlite() {
+        cutoff_regression(&test_pool().await, "cutoff-sqlite").await;
+    }
+
+    #[tokio::test]
+    async fn session_cutoff_signed_tokens_postgres() {
+        let Some(db) =
+            crate::test_pg::postgres_test_pool_or_skip("session_cutoff_signed_tokens_postgres")
+                .await
+        else {
+            return;
+        };
+        cutoff_regression(&db, &crate::test_pg::unique_test_id("cutoff")).await;
+    }
+
+    #[tokio::test]
+    async fn session_cutoff_same_second_legacy_and_no_refresh_tokens() {
+        use crate::test_support::authenticate_session;
+        let db = test_pool().await;
+        seed_user_with_active(sqlite_pool(&db), "user-1", "legacy@test.local", true).await;
+        let second = Utc::now().timestamp();
+        let cutoff = second * 1_000_000 + 500_000;
+        let signed = |iat: i64, precise: Option<i64>| {
+            let mut payload =
+                serde_json::json!({ "sub": "user-1", "iat": iat, "exp": second + 900 });
+            if let Some(issued) = precise {
+                payload["session_iat_us"] = serde_json::json!(issued);
+            }
+            jsonwebtoken::encode(
+                &jsonwebtoken::Header::default(),
+                &payload,
+                &jsonwebtoken::EncodingKey::from_secret(SECRET.as_bytes()),
+            )
+            .unwrap()
+        };
+        let legacy = signed(second, None);
+        authenticate_session(&db, SECRET, &legacy, "/", false)
+            .await
+            .unwrap();
+        // Seed a future cutoff to deterministically cover clock rollback and repeated events.
+        sqlx::query("UPDATE users SET sessions_valid_from = $1 WHERE user_id = 'user-1'")
+            .bind(cutoff)
+            .execute(sqlite_pool(&db))
+            .await
+            .unwrap();
+        for token in [
+            signed(second, Some(cutoff - 1)),
+            signed(second, Some(cutoff)),
+            legacy,
+        ] {
+            for allow in [false, true] {
+                assert!(
+                    matches!(
+                        authenticate_session(&db, SECRET, &token, "/", allow).await,
+                        Err(kyomi_core::Error::Unauthorized(_))
+                    ),
+                    "same-second old or legacy session must be rejected"
+                );
+            }
+        }
+        authenticate_session(&db, SECRET, &signed(second, Some(cutoff + 1)), "/", false)
+            .await
+            .unwrap();
+        authenticate_session(&db, SECRET, &signed(second + 1, None), "/", false)
+            .await
+            .unwrap();
+        let baseline = cutoff + 10_000_000;
+        sqlx::query("UPDATE users SET sessions_valid_from = $1 WHERE user_id = 'user-1'")
+            .bind(baseline)
+            .execute(sqlite_pool(&db))
+            .await
+            .unwrap();
+        for step in 1..=2 {
+            assert_eq!(
+                crate::token_service::revoke_all_user_sessions(&db, "user-1")
+                    .await
+                    .unwrap(),
+                0
+            );
+            let user = crate::user_service::get_user_by_id(&db, "user-1")
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(user.sessions_valid_from, Some(baseline + step));
+            let fresh = jwt::create_session_access_token_str(
+                "user-1",
+                SECRET,
+                15,
+                Default::default(),
+                user.sessions_valid_from,
+            )
+            .unwrap();
+            authenticate_session(&db, SECRET, &fresh, "/", false)
+                .await
+                .unwrap();
+        }
+        // Restricted recovery claims keep the previous independent cutoff behavior.
+        let recovery = jwt::create_access_token_str(
+            "user-1",
+            SECRET,
+            15,
+            [("scope".into(), serde_json::json!("passkey_recovery"))]
+                .into_iter()
+                .collect(),
+        )
+        .unwrap();
+        let claims = jwt::validate_token(&recovery, SECRET).unwrap().claims;
+        assert!(claims.session_iat_us.is_none());
+        claims.require_current_session(Some(baseline + 2)).unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_cutoff_without_refresh_tokens_rejects_allow_lapsed() {
+        let db = test_pool().await;
+        seed_user_with_active(sqlite_pool(&db), "user-1", "no-refresh@test.local", true).await;
+        let token = mint_token("user-1", None, 15);
+        crate::test_support::authenticate_session(&db, SECRET, &token, "/", true).await.unwrap();
+        assert_eq!(crate::token_service::revoke_all_user_sessions(&db, "user-1").await.unwrap(), 0);
+        let error = crate::test_support::authenticate_session(&db, SECRET, &token, "/", true).await
+            .expect_err("allow-lapsed must reject an old session even without refresh tokens");
+        assert!(matches!(error, kyomi_core::Error::Unauthorized(_)));
     }
 
     // ── Case 1: valid token + active user + active membership ──────────────
@@ -711,5 +1087,152 @@ mod tests {
             .await
             .expect_err("missing local workspace must reject");
         assert!(matches!(err, kyomi_core::Error::ServiceUnavailable(_)));
+    }
+
+    // ── KYO-805: billing gate ────────────────────────────────────────────
+
+    fn self_hosted_state(pool: &kyomi_core::DbPool) -> AuthState {
+        AuthState {
+            self_hosted: true,
+            ..auth_state(pool, false)
+        }
+    }
+
+    async fn set_subscription_status(sq: &sqlx::SqlitePool, workspace_id: &str, status: &str) {
+        sqlx::query("UPDATE workspaces SET subscription_status = $1 WHERE workspace_id = $2")
+            .bind(status)
+            .bind(workspace_id)
+            .execute(sq)
+            .await
+            .expect("update subscription_status");
+    }
+
+    #[tokio::test]
+    async fn lapsed_saas_workspace_is_rejected_with_payment_required() {
+        let pool = test_pool().await;
+        seed_user_with_active(sqlite_pool(&pool), "user-1", "user-1@test.local", true).await;
+        seed_workspace(sqlite_pool(&pool), "ws-1", "user-1").await;
+        seed_membership(sqlite_pool(&pool), "ws-1", "user-1", "workspace_admin", true).await;
+        set_subscription_status(sqlite_pool(&pool), "ws-1", "past_due").await;
+
+        let token = mint_token("user-1", Some("ws-1"), 15);
+        let mut parts = parts_with_bearer(&token);
+        let state = auth_state(&pool, false);
+
+        let err = AuthUser::from_request_parts(&mut parts, &state)
+            .await
+            .expect_err("a lapsed SaaS workspace must be rejected by the default AuthUser extractor");
+        assert!(
+            matches!(err, kyomi_core::Error::PaymentRequired(_)),
+            "expected PaymentRequired, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn active_saas_workspace_is_not_gated() {
+        let pool = test_pool().await;
+        seed_user_with_active(sqlite_pool(&pool), "user-1", "user-1@test.local", true).await;
+        seed_workspace(sqlite_pool(&pool), "ws-1", "user-1").await;
+        seed_membership(sqlite_pool(&pool), "ws-1", "user-1", "workspace_admin", true).await;
+        // seed_workspace's default subscription_status is 'active' (schema default) —
+        // no explicit set_subscription_status call needed.
+
+        let token = mint_token("user-1", Some("ws-1"), 15);
+        let mut parts = parts_with_bearer(&token);
+        let state = auth_state(&pool, false);
+
+        let auth_user = AuthUser::from_request_parts(&mut parts, &state)
+            .await
+            .expect("an active SaaS workspace must not be gated");
+        assert!(!auth_user.workspace.billing_lapsed);
+    }
+
+    #[tokio::test]
+    async fn self_hosted_mode_is_never_gated_even_with_past_due_workspace() {
+        let pool = test_pool().await;
+        seed_user_with_active(sqlite_pool(&pool), "user-1", "user-1@test.local", true).await;
+        seed_workspace(sqlite_pool(&pool), "ws-1", "user-1").await;
+        seed_membership(sqlite_pool(&pool), "ws-1", "user-1", "workspace_admin", true).await;
+        set_subscription_status(sqlite_pool(&pool), "ws-1", "past_due").await;
+
+        let token = mint_token("user-1", Some("ws-1"), 15);
+        let mut parts = parts_with_bearer(&token);
+        let state = self_hosted_state(&pool);
+
+        let auth_user = AuthUser::from_request_parts(&mut parts, &state)
+            .await
+            .expect("self-hosted/personal mode must never be gated on billing, even with a past_due row");
+        assert!(!auth_user.workspace.billing_lapsed);
+    }
+
+    #[tokio::test]
+    async fn allow_lapsed_extractor_succeeds_on_a_lapsed_workspace_and_flags_it() {
+        let pool = test_pool().await;
+        seed_user_with_active(sqlite_pool(&pool), "user-1", "user-1@test.local", true).await;
+        seed_workspace(sqlite_pool(&pool), "ws-1", "user-1").await;
+        seed_membership(sqlite_pool(&pool), "ws-1", "user-1", "workspace_admin", true).await;
+        set_subscription_status(sqlite_pool(&pool), "ws-1", "past_due").await;
+
+        let token = mint_token("user-1", Some("ws-1"), 15);
+        let mut parts = parts_with_bearer(&token);
+        let state = auth_state(&pool, false);
+
+        let wrapped = AuthUserAllowLapsed::from_request_parts(&mut parts, &state)
+            .await
+            .expect("AuthUserAllowLapsed must succeed on a lapsed workspace — that's the opt-out's entire point");
+        assert!(
+            wrapped.workspace.billing_lapsed,
+            "the allow-lapsed extractor must still report billing_lapsed=true so callers can branch on it"
+        );
+        assert_eq!(wrapped.user_id, "user-1");
+    }
+
+    #[tokio::test]
+    async fn db_error_loading_workspace_fails_closed() {
+        let pool = test_pool().await;
+        seed_user_with_active(sqlite_pool(&pool), "user-1", "user-1@test.local", true).await;
+        seed_workspace(sqlite_pool(&pool), "ws-1", "user-1").await;
+        seed_membership(sqlite_pool(&pool), "ws-1", "user-1", "workspace_admin", true).await;
+        // Corrupt subscription_status so `SELECT * FROM workspaces` fails to
+        // decode — the cheapest way to force a genuine DB/decode error out
+        // of `user_service::get_workspace` without dropping a table out
+        // from under a live pool. KYO-805: this must now reject the
+        // request (Internal), not silently continue with a default
+        // (Active, not-lapsed) WorkspaceContext — that would be a
+        // fail-open hole in the billing gate this same change adds.
+        set_subscription_status(sqlite_pool(&pool), "ws-1", "not-a-real-status").await;
+
+        let token = mint_token("user-1", Some("ws-1"), 15);
+        let mut parts = parts_with_bearer(&token);
+        let state = auth_state(&pool, false);
+
+        let err = AuthUser::from_request_parts(&mut parts, &state)
+            .await
+            .expect_err("a DB/decode error loading the workspace must fail closed");
+        assert!(matches!(err, kyomi_core::Error::Internal(_)), "expected Internal, got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn db_error_loading_workspace_membership_fails_closed() {
+        let pool = test_pool().await;
+        seed_user_with_active(sqlite_pool(&pool), "user-1", "user-1@test.local", true).await;
+        seed_workspace(sqlite_pool(&pool), "ws-1", "user-1").await;
+        seed_membership(sqlite_pool(&pool), "ws-1", "user-1", "workspace_admin", true).await;
+        // Corrupt the membership row's role enum so decoding
+        // `workspace_users` fails — same technique as the workspace-load
+        // test above, applied to the second lookup in the same function.
+        sqlx::query("UPDATE workspace_users SET role = 'not-a-real-role' WHERE workspace_id = 'ws-1' AND user_id = 'user-1'")
+            .execute(sqlite_pool(&pool))
+            .await
+            .expect("corrupt role");
+
+        let token = mint_token("user-1", Some("ws-1"), 15);
+        let mut parts = parts_with_bearer(&token);
+        let state = auth_state(&pool, false);
+
+        let err = AuthUser::from_request_parts(&mut parts, &state)
+            .await
+            .expect_err("a DB/decode error loading workspace membership must fail closed");
+        assert!(matches!(err, kyomi_core::Error::Internal(_)), "expected Internal, got {err:?}");
     }
 }

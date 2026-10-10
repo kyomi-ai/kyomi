@@ -169,6 +169,11 @@ column = "version_id"
 reason = "Postgres SERIAL vs SQLite INTEGER PRIMARY KEY AUTOINCREMENT — see the SERIAL/AUTOINCREMENT note above this section."
 
 [[entry]]
+table = "datasource_container_cache"
+column = "id"
+reason = "Postgres SERIAL PRIMARY KEY (apps/server/migrations/20260905000000_add_datasource_container_cache.sql:57) vs SQLite INTEGER PRIMARY KEY AUTOINCREMENT (apps/server/migrations-sqlite/00046_add_datasource_container_cache.sql:13) — the same pairing as its sibling datasource_table_cache.id below; see the SERIAL/AUTOINCREMENT note above this section."
+
+[[entry]]
 table = "datasource_search_embeddings"
 column = "id"
 reason = "Postgres SERIAL vs SQLite INTEGER PRIMARY KEY AUTOINCREMENT — see the SERIAL/AUTOINCREMENT note above this section."
@@ -262,16 +267,3 @@ reason = "Postgres default `(now() + '7 days'::interval)` — SQLite has no INTE
 table = "workspace_invitations"
 column = "expires_at"
 reason = "Postgres default `(now() + '7 days'::interval)` — SQLite has no INTERVAL arithmetic; apps/server/migrations-sqlite/00001_baseline.sql computes the same 7-day expiry in the Rust application layer before insert instead (see its 'skip INTERVAL default' comment)."
-
-# ---------------------------------------------------------------------------
-# KYO-296 findings: a real bug surfaced by the new index/foreign-key checks.
-# Not a deliberate design difference. Filed as a new ticket rather than fixed
-# in this PR — fixing it here would destroy the evidence that the check
-# works (this is exactly how KYO-293/294 came out of KYO-206). Delete this
-# waiver as soon as its ticket lands.
-# ---------------------------------------------------------------------------
-
-[[entry]]
-table = "watches"
-index = "idx_watches_name_workspace_unique"
-reason = "KYO-295 (open bug, not a deliberate design difference): Postgres enforces case-insensitive uniqueness via lower(name) (apps/server/migrations/20260215000000_baseline.sql:3134); SQLite's index is case-sensitive on the raw name column (apps/server/migrations-sqlite/00001_baseline.sql:755). Delete this waiver when KYO-295 lands."

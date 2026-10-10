@@ -8,6 +8,9 @@
 # Build context must be the repo root:
 #   docker build -t kyomi .
 #
+# Rust compiler: rust-toolchain.toml on the build host (release.yml installs it).
+# This scratch image contains no Rust installer or compiler.
+#
 # Prerequisites: the CI workflow (or manual build) must produce these
 # artifacts BEFORE running docker build:
 #   1. target/release/kyomi                — server binary

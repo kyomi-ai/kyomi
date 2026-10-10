@@ -146,12 +146,12 @@ Rotate your Connect token when:
 6. Connect will authenticate with the new token on its next connection
 
 ::: warning
-The old token is invalidated instantly when you click "Rotate Token". Any running Connect instance using the old token will be disconnected on its next handshake attempt. Update the token and restart Connect promptly.
+The old token is invalidated when you click "Rotate Token". Its active WebSocket session is closed immediately, pending requests fail, and later handshakes using that token are rejected. Update the token and restart Connect promptly.
 :::
 
 ### Disconnecting Entirely
 
-To fully revoke access, click **Disconnect** on the datasource settings page. This deletes the `jti` entirely -- the token can never be used again, even if someone has a copy.
+To fully revoke access, click **Disconnect** on the datasource settings page. This closes the active WebSocket session immediately and deletes the `jti` entirely -- the token can never be used again, even if someone has a copy.
 
 ## Network Requirements
 

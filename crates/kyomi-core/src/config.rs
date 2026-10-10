@@ -634,5 +634,67 @@ fn required_env(key: &str) -> String {
     env::var(key).unwrap_or_else(|_| panic!("{key} environment variable is required"))
 }
 
+/// Resolve this process's identity for owning `chat_messages` rows that are
+/// `in_progress` (KYO-493's `owner_instance` column — see
+/// `kyomi_auth::chat_service::prepare_chat_dispatch`).
+///
+/// Called exactly once, at server startup (`apps/server/src/main.rs`,
+/// building `AppState`) — not lazily on a caller's first chat message — so
+/// that a misconfigured `HOSTNAME` fails the server at boot instead of
+/// panicking mid-request. The result is stored on `AppState`/`ServerContext`
+/// for `send_chat_message` (and, later, KYO-493 Phase 4's startup sweep) to
+/// read; nothing else in this crate re-derives it, and `HOSTNAME` is read
+/// from the environment exactly here — never a second time.
+///
+/// - **SaaS and self-hosted (server) modes:** `"{hostname}:{port}"`. Both
+///   Kubernetes and Docker set `HOSTNAME` automatically to the pod/container
+///   name, but `HOSTNAME` alone collides on a single dev machine running
+///   several server processes against the same Postgres on the same host —
+///   dev.kyomi.ai on `:3000` plus per-worktree verifier servers on
+///   `:3100+`. Appending `port` (`Config::port`, i.e. the same `PORT` this
+///   process is actually listening on — read from nowhere else) makes the
+///   identity unique per process while staying stable across restarts of
+///   *that same* instance, which the later stuck-row sweep (KYO-493 Phase 4)
+///   needs: a restart must recognize its own prior `in_progress` rows, not
+///   treat every restart as a brand-new, indistinguishable owner. It also
+///   still differs correctly between real Kubernetes pods (different `hostname`,
+///   typically the same `port`). A missing `hostname` is not a
+///   degraded-but-usable case to paper over with an invented name —
+///   inventing one would make every row from this process indistinguishable
+///   from every other unconfigured process's rows, which defeats the
+///   column's entire purpose. So this panics instead, exactly like
+///   [`required_env`] does for the handful of env vars this module already
+///   treats as mandatory.
+/// - **Personal (desktop) mode:** [`Config::is_personal`] is a structural,
+///   compile-time-knowable deployment fact, not an ambient environment
+///   accident, and personal mode is by definition a single local process —
+///   never more than one instance that could contend for a row, so `port`
+///   is irrelevant. A fixed literal, `"desktop"`, is therefore the correct
+///   identity for it, not a fallback for a value that happens to be
+///   missing.
+///
+/// Pure — takes `hostname` as an explicit parameter rather than reading
+/// `env::var` itself — per
+/// `docs/standards/testing/a-tests-verdict-must-not-depend-on-the-ambient-environment.md`
+/// ("prefer a parameter over a lookup"), so the personal-vs-server branch,
+/// the `"{hostname}:{port}"` format, and the panic condition are all
+/// unit-testable without depending on whatever the process environment
+/// happens to hold.
+pub fn resolve_process_instance(config: &Config, hostname: Option<&str>, port: u16) -> String {
+    if config.is_personal() {
+        "desktop".to_string()
+    } else {
+        let hostname = hostname.unwrap_or_else(|| {
+            panic!(
+                "HOSTNAME environment variable is required outside personal mode — it \
+                 identifies this process as the owner of in_progress chat_messages rows \
+                 (owner_instance). Kubernetes and Docker set it automatically; if this \
+                 process runs as neither, set HOSTNAME explicitly."
+            )
+        });
+        format!("{hostname}:{port}")
+    }
+}
+
 #[cfg(test)]
 mod tests;

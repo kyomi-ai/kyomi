@@ -13,6 +13,16 @@
 # under a fresh mktemp -d fixture git repo, removed on exit; the real kyomi
 # repo, the real cargo, and the real rustup are never touched.
 #
+# KYO-723 dependency note: `jq` is NOT stubbed. preflight-clippy.sh's -p
+# narrowing now derives a unified --features set by piping real `cargo
+# metadata` output through real `jq` (see derive_unified_features() in
+# preflight-clippy.sh) — only `cargo` itself is stubbed, via the
+# CARGO_METADATA_FIXTURE JSON below, to answer `cargo metadata` without a
+# real Cargo.toml/workspace. That means this suite now depends on `jq`
+# being installed on whatever box runs it, same as preflight-clippy.sh
+# itself; it ships preinstalled on GitHub's hosted ubuntu runners and was
+# already present on the machine this was written and verified on.
+#
 # Test 10 is the load-bearing one: it parses the three `run: cargo clippy`
 # lines back out of THIS repo's real .github/workflows/ci.yml (located by
 # grepping for that content, never by a hardcoded line number — see
@@ -63,6 +73,50 @@ export CARGO_LOG="$tmpdir/cargo.log"
 export RUSTUP_LOG="$tmpdir/rustup.log"
 export RUSTUP_TARGETS_FILE="$tmpdir/rustup_targets"
 
+# ─── fixture `cargo metadata` output (KYO-723) ──────────────────────────────
+# What derive_unified_features() in preflight-clippy.sh actually reads:
+# .packages[].name/.id to find a crate's package id, .resolve.nodes[].id to
+# match it, .resolve.nodes[].features to read its unified feature set. Every
+# other field cargo metadata normally emits (workspace_members,
+# target_directory, workspace_root, ...) is omitted — the derivation never
+# touches them, and keeping the fixture minimal keeps it obviously hermetic.
+# Five fixture packages, chosen to cover every derivation case the tests
+# below exercise:
+#   kyomi-auth, kyomi-agent   — resolve to ["default"] only (no extra
+#                               feature), reusing the crate names Test 6
+#                               already narrows to, so "narrowing to a
+#                               default-only crate adds no --features" is
+#                               proven on real per-crate identities.
+#   kyomi-ui                  — resolves to ["default","slack","ssr"], the
+#                               exact KYO-723 bug scenario: apps/server's
+#                               feature unification turning on kyomi-ui's
+#                               ssr (and slack) features that a bare `-p
+#                               kyomi-ui` never would.
+#   fixture-multi-a/-b        — each carry one distinct extra feature, used
+#                               only to prove multiple -p crates combine and
+#                               sort correctly across crates.
+export CARGO_METADATA_FIXTURE="$tmpdir/cargo-metadata-fixture.json"
+cat >"$CARGO_METADATA_FIXTURE" <<'JSON'
+{
+  "packages": [
+    {"name": "kyomi-auth", "id": "path+file:///fixture/kyomi-auth#0.1.0"},
+    {"name": "kyomi-agent", "id": "path+file:///fixture/kyomi-agent#0.1.0"},
+    {"name": "kyomi-ui", "id": "path+file:///fixture/kyomi-ui#0.1.0"},
+    {"name": "fixture-multi-a", "id": "path+file:///fixture/fixture-multi-a#0.1.0"},
+    {"name": "fixture-multi-b", "id": "path+file:///fixture/fixture-multi-b#0.1.0"}
+  ],
+  "resolve": {
+    "nodes": [
+      {"id": "path+file:///fixture/kyomi-auth#0.1.0", "features": ["default"]},
+      {"id": "path+file:///fixture/kyomi-agent#0.1.0", "features": ["default"]},
+      {"id": "path+file:///fixture/kyomi-ui#0.1.0", "features": ["default", "slack", "ssr"]},
+      {"id": "path+file:///fixture/fixture-multi-a#0.1.0", "features": ["default", "alpha"]},
+      {"id": "path+file:///fixture/fixture-multi-b#0.1.0", "features": ["default", "beta"]}
+    ]
+  }
+}
+JSON
+
 cat >"$STUB_BIN/cargo" <<'STUB'
 #!/usr/bin/env bash
 # Test-only stand-in for `cargo`. Ignores what it's asked to do and instead
@@ -71,12 +125,20 @@ cat >"$STUB_BIN/cargo" <<'STUB'
 # CARGO_LOG, one call per line. Exits 0 unless the recorded line is an exact
 # match for CARGO_FAIL_LINE, in which case it exits CARGO_FAIL_EXIT (default
 # 1) — lets a test make exactly one of several passes "fail" by naming its
-# full expected command line. Ships only inside this test's own $tmpdir/bin,
-# first on PATH for the duration of the run — never touches the real cargo.
+# full expected command line. For a `cargo metadata ...` call that is not
+# the configured failure line, prints the fixture JSON at
+# CARGO_METADATA_FIXTURE to stdout (KYO-723) before exiting 0 — that JSON is
+# then parsed by the REAL jq binary inside preflight-clippy.sh's
+# derive_unified_features(), exactly as a real `cargo metadata` invocation's
+# output would be. Ships only inside this test's own $tmpdir/bin, first on
+# PATH for the duration of the run — never touches the real cargo.
 line="cargo $*"
 printf '%s\n' "$line" >>"$CARGO_LOG"
 if [ -n "${CARGO_FAIL_LINE:-}" ] && [ "$line" = "$CARGO_FAIL_LINE" ]; then
     exit "${CARGO_FAIL_EXIT:-1}"
+fi
+if [ "${1:-}" = "metadata" ]; then
+    cat "$CARGO_METADATA_FIXTURE"
 fi
 exit 0
 STUB
@@ -264,17 +326,26 @@ assert_line_contains "pass 3 has --locked" "$CARGO_LOG" 3 "--locked"
 echo
 
 # ─── Test 6: narrowed run replaces scope, keeps every other flag ───────────
+# (KYO-723: narrowing now also derives a --features set via `cargo
+# metadata`, so a narrowed run logs a leading `cargo metadata` call ahead of
+# the two clippy passes. kyomi-auth and kyomi-agent are fixtured to resolve
+# to ["default"] only — see CARGO_METADATA_FIXTURE above — so this test also
+# covers "a crate whose resolved features are only default produces no
+# --features flag" on two real per-crate identities.)
 echo "-- Test 6: -p kyomi-auth -p kyomi-agent replaces scope, keeps every other flag"
 reset_stubs
 run_preflight -p kyomi-auth -p kyomi-agent
 assert_exit "narrowed run to two non-kyomi-ui crates" 0
-assert_line_count "only two invocations — pass 3 skipped" "$CARGO_LOG" 2
-assert_eq "pass 1 argv, narrowed" \
-    "cargo clippy --locked -p kyomi-auth -p kyomi-agent -- -D warnings" \
+assert_line_count "cargo metadata lookup + two clippy invocations — pass 3 skipped" "$CARGO_LOG" 3
+assert_eq "line 1 is the KYO-723 cargo metadata derivation lookup" \
+    "cargo metadata --locked --format-version 1" \
     "$(sed -n '1p' "$CARGO_LOG")"
-assert_eq "pass 2 argv, narrowed — keeps --all-targets and the unwrap_used allow" \
-    "cargo clippy --locked -p kyomi-auth -p kyomi-agent --all-targets -- -D warnings -A clippy::unwrap_used" \
+assert_eq "pass 1 argv, narrowed — both fixture crates resolve only to 'default', so no --features flag" \
+    "cargo clippy --locked -p kyomi-auth -p kyomi-agent -- -D warnings" \
     "$(sed -n '2p' "$CARGO_LOG")"
+assert_eq "pass 2 argv, narrowed — keeps --all-targets and the unwrap_used allow, still no --features" \
+    "cargo clippy --locked -p kyomi-auth -p kyomi-agent --all-targets -- -D warnings -A clippy::unwrap_used" \
+    "$(sed -n '3p' "$CARGO_LOG")"
 assert_contains "summary names pass 3 as explicitly skipped" "SKIPPED"
 assert_contains "skip reason names kyomi-ui" "kyomi-ui"
 echo
@@ -283,16 +354,29 @@ echo
 # (kyomi-ui being IN the narrowed set is the other half of test 6's logic —
 # not one of the ten required tests, but the acceptance criteria explicitly
 # describe this branch and it would be silent regression risk otherwise.)
-echo "-- Test 6b: -p kyomi-ui keeps pass 3 running, with its own fixed argv"
+# KYO-723: this is the headline bug scenario. The fixture resolves kyomi-ui
+# to ["default","slack","ssr"] (mirroring apps/server's real feature
+# unification), so passes 1 and 2 must now carry
+# --features kyomi-ui/slack,kyomi-ui/ssr — without it, pass 2 is exactly the
+# narrowed run that used to misreport credential_status_indicates_connected
+# as dead_code. Pass 3's argv stays the CI-hardcoded literal, unaffected by
+# any derivation, exactly as before this ticket.
+echo "-- Test 6b: -p kyomi-ui keeps pass 3 running, with derived --features on passes 1-2"
 reset_stubs
 run_preflight -p kyomi-ui
 assert_exit "narrowed run including kyomi-ui" 0
-assert_line_count "all three invocations still run" "$CARGO_LOG" 3
-assert_eq "pass 1 argv, narrowed to kyomi-ui" \
-    "cargo clippy --locked -p kyomi-ui -- -D warnings" \
+assert_line_count "cargo metadata lookup + all three clippy invocations still run" "$CARGO_LOG" 4
+assert_eq "line 1 is the KYO-723 cargo metadata derivation lookup" \
+    "cargo metadata --locked --format-version 1" \
     "$(sed -n '1p' "$CARGO_LOG")"
-assert_eq "pass 3 argv is unaffected by narrowing (CI hardcodes -p kyomi-ui)" \
-    "$PASS3_LINE" "$(sed -n '3p' "$CARGO_LOG")"
+assert_eq "pass 1 argv, narrowed to kyomi-ui — carries the derived --features (the KYO-723 fix)" \
+    "cargo clippy --locked -p kyomi-ui --features kyomi-ui/slack,kyomi-ui/ssr -- -D warnings" \
+    "$(sed -n '2p' "$CARGO_LOG")"
+assert_eq "pass 2 argv, narrowed to kyomi-ui — same derived --features, plus --all-targets and the unwrap_used allow" \
+    "cargo clippy --locked -p kyomi-ui --features kyomi-ui/slack,kyomi-ui/ssr --all-targets -- -D warnings -A clippy::unwrap_used" \
+    "$(sed -n '3p' "$CARGO_LOG")"
+assert_eq "pass 3 argv is unaffected by narrowing or derivation (CI hardcodes -p kyomi-ui)" \
+    "$PASS3_LINE" "$(sed -n '4p' "$CARGO_LOG")"
 echo
 
 # ─── Test 7: a failing pass 1 does not prevent passes 2 and 3 from running ──
@@ -394,6 +478,68 @@ reset_stubs
 run_preflight -p
 assert_exit "-p with no value exits 2" 2
 assert_line_count "no cargo invocations when -p has no value" "$CARGO_LOG" 0
+echo
+
+# ─── Test 13: multiple -p crates combine and sort features ACROSS crates ───
+# (KYO-723) fixture-multi-a resolves to ["default","alpha"], fixture-multi-b
+# to ["default","beta"]. Given in reverse (-b before -a) to prove the
+# combined --features value is sorted independently of -p order — SCOPE_ARGS
+# keeps the crates in the order given (CI parity for -p itself), but the
+# derived --features list does not inherit that order.
+echo "-- Test 13: multiple -p crates each contribute correctly package-qualified, sorted features"
+reset_stubs
+run_preflight -p fixture-multi-b -p fixture-multi-a
+assert_exit "narrowed run across two feature-bearing fixture crates" 0
+assert_line_count "cargo metadata lookup + two clippy invocations — pass 3 skipped" "$CARGO_LOG" 3
+assert_eq "pass 1 argv carries both crates' features, sorted across crates regardless of -p order" \
+    "cargo clippy --locked -p fixture-multi-b -p fixture-multi-a --features fixture-multi-a/alpha,fixture-multi-b/beta -- -D warnings" \
+    "$(sed -n '2p' "$CARGO_LOG")"
+assert_eq "pass 2 argv carries the same derived --features plus --all-targets and the unwrap_used allow" \
+    "cargo clippy --locked -p fixture-multi-b -p fixture-multi-a --features fixture-multi-a/alpha,fixture-multi-b/beta --all-targets -- -D warnings -A clippy::unwrap_used" \
+    "$(sed -n '3p' "$CARGO_LOG")"
+echo
+
+# ─── Test 14: a single default-only crate emits no --features flag ─────────
+# (KYO-723) The single-crate mirror of Test 6's two-crate case, so "resolves
+# only to default -> no --features" is proven on a single -p too, not only
+# in combination.
+echo "-- Test 14: a single narrowed crate resolving only to 'default' emits no --features flag"
+reset_stubs
+run_preflight -p kyomi-auth
+assert_exit "narrowed run to a single default-only fixture crate" 0
+assert_line_count "cargo metadata lookup + two clippy invocations — pass 3 skipped" "$CARGO_LOG" 3
+assert_eq "pass 1 argv has no --features flag" \
+    "cargo clippy --locked -p kyomi-auth -- -D warnings" \
+    "$(sed -n '2p' "$CARGO_LOG")"
+echo
+
+# ─── Test 15: cargo metadata failing exits 3, never 0 and never 1 ──────────
+# (KYO-723 FAIL CLOSED) A derivation that could not run must never look like
+# a narrowed run with no extra features needed — that would silently
+# recreate the exact false dead_code this ticket exists to eliminate. No
+# clippy pass may run once the metadata lookup itself has failed.
+echo "-- Test 15: cargo metadata failing makes the script exit 3, not 0 or 1"
+reset_stubs
+export CARGO_FAIL_LINE="cargo metadata --locked --format-version 1"
+export CARGO_FAIL_EXIT=1
+run_preflight -p kyomi-ui
+unset CARGO_FAIL_LINE CARGO_FAIL_EXIT
+assert_exit "a derivation that could not run must fail closed" 3
+assert_line_count "only the failed metadata call happened — no clippy invocation was ever attempted" "$CARGO_LOG" 1
+assert_contains "names cargo metadata as the failure" "cargo metadata"
+reset_stubs
+echo
+
+# ─── Test 16: -p naming a crate cargo metadata cannot find exits 3 ─────────
+# (KYO-723 FAIL CLOSED) A typo'd or nonexistent crate name must not silently
+# degrade to "no extra features" — see
+# docs/standards/error-handling/empty-on-failure-must-not-look-like-a-real-result.md.
+echo "-- Test 16: -p naming a crate absent from cargo metadata output exits 3"
+reset_stubs
+run_preflight -p this-crate-does-not-exist
+assert_exit "an unresolvable crate name must fail closed" 3
+assert_line_count "only the metadata call happened — no clippy invocation was ever attempted" "$CARGO_LOG" 1
+assert_contains "names the crate that could not be found" "this-crate-does-not-exist"
 echo
 
 echo "Results: $PASS passed, $FAIL failed"

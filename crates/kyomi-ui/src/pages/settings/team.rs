@@ -651,6 +651,11 @@ fn TeamPageInner() -> impl IntoView {
                             <label class="block text-sm font-medium text-foreground mb-1">
                                 "Role"
                             </label>
+                            // KYO-793: correct one-time seed, not a stale-render bug.
+                            // This is inside `Modal`'s `ChildrenFn`, which lives in a
+                            // `<Show>` and is unmounted/re-invoked fresh on every open
+                            // (see modal.rs); `invite_role` is reset to "user" before
+                            // each close, so this snapshot is retaken on every reopen.
                             <crate::components::StaticSelect
                                 value=invite_role.get_untracked()
                                 options=vec![
@@ -675,12 +680,17 @@ fn TeamPageInner() -> impl IntoView {
                     </div>
                 </Modal>
 
-            // Confirm Dialog
+            // Confirm Dialog — pass the signals through so `ConfirmDialog`
+            // re-reads them reactively when it opens (KYO-726). The
+            // request_* helpers above set these signals right before
+            // flipping `dialog_open`, so `.get_untracked()` here would
+            // freeze the title/message/confirm text at the empty values
+            // they held at initial render, before any dialog request fired.
             <ConfirmDialog
                 open=Signal::from(dialog_open)
-                title=dialog_title.get_untracked()
-                message=dialog_message.get_untracked()
-                confirm_text=dialog_confirm_text.get_untracked()
+                title=dialog_title
+                message=dialog_message
+                confirm_text=dialog_confirm_text
                 on_confirm=on_confirm
                 on_cancel=on_cancel
             />
@@ -1246,6 +1256,7 @@ mod tests {
             is_personal_mode: false,
             is_self_hosted: false,
             billing_enabled: false,
+            billing_lapsed: false,
             capabilities: HashMap::new(),
             chart_palette: "balanced".to_string(),
             permissions: Vec::new(),

@@ -56,11 +56,86 @@ pub struct GoogleOAuthDisconnectResult {
     pub disconnected_email: Option<String>,
 }
 
+/// What happened to the OAuth grant **at the provider** when a datasource
+/// credential was disconnected (KYO-714).
+///
+/// Deleting Kyomi's stored credential and revoking the grant at the provider
+/// are two different things, and only one provider Kyomi supports exposes a
+/// revocation endpoint it can call. Reporting them as one ("Account
+/// disconnected") told users their access had been revoked when for three of
+/// four providers it had not. This enum is what lets the caller — the
+/// settings page toast, and the REST response body — say only what actually
+/// happened.
+///
+/// Lives here rather than in `kyomi_auth` because it is part of a server_fn
+/// response and so must serialize into the WASM client.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DatasourceOAuthRevocationOutcome {
+    /// The provider confirmed the grant was live and has now revoked it.
+    /// Kyomi's stored credential is deleted *and* the provider-side access is
+    /// gone — nothing further for the user to do.
+    Revoked,
+
+    /// The provider reported the token as already invalid (Google answers
+    /// HTTP 400 for this). The grant was already gone before Kyomi asked, so
+    /// this is the desired end state and counts as a success, not a failure.
+    AlreadyInvalid,
+
+    /// The provider exposes no revocation mechanism Kyomi can call from an
+    /// OAuth-authenticated session, so only the locally stored credential was
+    /// deleted. **The grant is still live at the provider** and the user must
+    /// remove Kyomi's access from that provider's own account settings to
+    /// fully revoke it. See
+    /// `kyomi_auth::datasource_oauth::OAuthProvider::revocation_capability`
+    /// for the per-provider evidence.
+    NotSupported,
+
+    /// There was no stored token to revoke — either no credential row existed
+    /// at all (in which case `already_disconnected` is also `true`), or the
+    /// row held no `oauth_access_token`/`oauth_refresh_token`. Nothing was
+    /// sent to the provider.
+    NoStoredToken,
+}
+
+impl DatasourceOAuthRevocationOutcome {
+    /// Whether Kyomi is left holding nothing that represents live access at
+    /// the provider — i.e. whether plain "disconnected" wording is honest.
+    ///
+    /// This is the single place that decides it. Both user-facing surfaces
+    /// derive their wording from this one predicate — the settings-page toast
+    /// (`kyomi_ui::pages::settings::datasources::datasource_disconnect_message`)
+    /// and the `POST /api/v1/auth/oauth/{provider}/disconnect` response
+    /// `message` — so the two cannot drift into disagreeing about whether
+    /// access was actually revoked, which is the defect KYO-714 exists to fix.
+    ///
+    /// [`Self::NoStoredToken`] counts as cleared: Kyomi held no token, so
+    /// there is nothing it could revoke and nothing it retains. The dominant
+    /// case is a disconnect of a datasource that had no credential row at
+    /// all, where warning about a live grant would be nonsense.
+    ///
+    /// Exhaustive with no wildcard arm on purpose: a variant added later must
+    /// be classified here before this compiles.
+    pub fn grant_cleared_at_provider(self) -> bool {
+        match self {
+            Self::Revoked | Self::AlreadyInvalid | Self::NoStoredToken => true,
+            Self::NotSupported => false,
+        }
+    }
+}
+
 /// Result of `kyomi_auth::datasource_oauth::datasource_oauth_disconnect_service`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DatasourceOAuthDisconnectResult {
     pub success: bool,
     pub already_disconnected: bool,
+
+    /// What happened to the grant at the provider (KYO-714). `success: true`
+    /// only ever means "Kyomi's stored credential is gone"; this field is the
+    /// only thing that says whether the provider-side grant went with it, so
+    /// callers must key any "revoked" wording off this rather than off
+    /// `success`.
+    pub revocation: DatasourceOAuthRevocationOutcome,
 }
 
 /// Result of `kyomi_auth::google_oauth::google_oauth_status_service`.
@@ -140,6 +215,29 @@ mod tests {
         assert_eq!(value["google_email"], serde_json::Value::Null);
     }
 
+    /// `grant_cleared_at_provider` is what both user-facing surfaces key
+    /// their wording off, so every variant is enumerated here rather than
+    /// spot-checked: a new variant that defaulted to "cleared" would quietly
+    /// reintroduce the over-claim KYO-714 removed.
+    #[test]
+    fn only_not_supported_leaves_the_grant_live_at_the_provider() {
+        use DatasourceOAuthRevocationOutcome as Outcome;
+
+        for outcome in [Outcome::Revoked, Outcome::AlreadyInvalid, Outcome::NoStoredToken] {
+            assert!(
+                outcome.grant_cleared_at_provider(),
+                "{outcome:?} leaves nothing live at the provider, so plain \
+                 \"disconnected\" wording is honest for it"
+            );
+        }
+
+        assert!(
+            !Outcome::NotSupported.grant_cleared_at_provider(),
+            "NotSupported means the grant is still live at the provider — the \
+             one outcome that must never be described as a disconnect"
+        );
+    }
+
     #[test]
     fn datasource_oauth_status_wire_shape_is_stable() {
         let value = serde_json::to_value(DatasourceOAuthStatus {
@@ -163,6 +261,57 @@ mod tests {
                 "disconnect_url": "/oauth/disconnect",
             })
         );
+    }
+
+    /// The disconnect result gained a `revocation` field in KYO-714, and the
+    /// WASM settings page keys its toast wording off it. Asserting the whole
+    /// object pins both the new key's name and the enum's serialized
+    /// spelling — a `#[serde(rename_all)]` change or a variant rename would
+    /// otherwise silently degrade the client to its `_ =>` fallback wording.
+    #[test]
+    fn datasource_oauth_disconnect_wire_shape_is_stable() {
+        let value = serde_json::to_value(DatasourceOAuthDisconnectResult {
+            success: true,
+            already_disconnected: false,
+            revocation: DatasourceOAuthRevocationOutcome::Revoked,
+        })
+        .expect("DatasourceOAuthDisconnectResult must serialize");
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "success": true,
+                "already_disconnected": false,
+                "revocation": "revoked",
+            })
+        );
+    }
+
+    /// Every variant's spelling is part of the wire contract, not just the
+    /// one the happy path produces.
+    #[test]
+    fn revocation_outcome_variants_serialize_as_snake_case() {
+        let cases = [
+            (DatasourceOAuthRevocationOutcome::Revoked, "revoked"),
+            (
+                DatasourceOAuthRevocationOutcome::AlreadyInvalid,
+                "already_invalid",
+            ),
+            (DatasourceOAuthRevocationOutcome::NotSupported, "not_supported"),
+            (
+                DatasourceOAuthRevocationOutcome::NoStoredToken,
+                "no_stored_token",
+            ),
+        ];
+
+        for (variant, expected) in cases {
+            let value = serde_json::to_value(variant).expect("variant must serialize");
+            assert_eq!(value, serde_json::Value::String(expected.to_string()));
+
+            let back: DatasourceOAuthRevocationOutcome =
+                serde_json::from_value(value).expect("variant must round-trip");
+            assert_eq!(back, variant);
+        }
     }
 
     /// Round-trip guards the `Deserialize` side: the client parses what the
