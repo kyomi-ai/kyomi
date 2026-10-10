@@ -437,17 +437,181 @@ async fn conformance(db: &DbPool) {
         assert_eq!(count(db, table, &sid).await, 0, "{table}");
     }
 }
+// Trigger DDL needs table-wide locks. Give each schema-mutating suite its own
+// database so it cannot queue behind another suite's deliberately held transaction.
+// Migrations explicitly target public, so a search_path override is insufficient.
+struct IsolatedPostgres {
+    db: DbPool,
+    admin: sqlx::PgPool,
+    name: String,
+}
+impl IsolatedPostgres {
+    async fn connect(test_name: &str) -> Option<Self> {
+        let shared = crate::test_pg::postgres_test_pool_or_skip(test_name).await?;
+        crate::test_pg::postgres_pool(&shared).close().await;
+        let url = kyomi_core::test_db::test_database_url();
+        let (server, _) = kyomi_core::test_db::split_database_url(&url);
+        let admin = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&format!("{server}/postgres"))
+            .await
+            .expect("connect isolated test database administrator");
+        let name = format!("conversation_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(&format!("CREATE DATABASE {name}"))
+            .execute(&admin)
+            .await
+            .expect("create isolated test database");
+        let pg = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(10)
+            .acquire_timeout(std::time::Duration::from_secs(5))
+            .after_connect(|connection, _| {
+                Box::pin(async move {
+                    sqlx::query("SET lock_timeout = '5s'")
+                        .execute(&mut *connection)
+                        .await?;
+                    sqlx::query("SET statement_timeout = '30s'")
+                        .execute(connection)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect(&format!("{server}/{name}"))
+            .await
+            .expect("connect isolated test database");
+        sqlx::migrate!("../../apps/server/migrations")
+            .run(&pg)
+            .await
+            .expect("migrate isolated test database");
+        Some(Self {
+            db: DbPool::Postgres(pg),
+            admin,
+            name,
+        })
+    }
+    async fn run(&self, test: impl std::future::Future<Output = ()>) {
+        if tokio::time::timeout(std::time::Duration::from_secs(60), test)
+            .await
+            .is_err()
+        {
+            let diagnostics = tokio::time::timeout(std::time::Duration::from_secs(5),
+                sqlx::query_as::<_, (i32, String, String, String, bool)>(
+                    "SELECT a.pid, a.query, COALESCE(a.wait_event, ''), l.mode, l.granted FROM pg_stat_activity a JOIN pg_locks l ON l.pid = a.pid WHERE a.datname = current_database()"
+                ).fetch_all(crate::test_pg::postgres_pool(&self.db))
+            ).await;
+            panic!("isolated conformance timed out: {diagnostics:?}");
+        }
+    }
+    async fn close(self) {
+        crate::test_pg::postgres_pool(&self.db).close().await;
+        sqlx::query(&format!("DROP DATABASE {}", self.name))
+            .execute(&self.admin)
+            .await
+            .expect("drop isolated test database");
+        self.admin.close().await;
+    }
+}
+#[tokio::test]
+async fn postgres_trigger_cleanup_blocks_shared_readers_but_not_isolated_suites() {
+    let Some(scratch) = IsolatedPostgres::connect(
+        "postgres_trigger_cleanup_blocks_shared_readers_but_not_isolated_suites",
+    )
+    .await
+    else {
+        return;
+    };
+    let isolated = IsolatedPostgres::connect("postgres_trigger_cleanup_isolated_suite")
+        .await
+        .unwrap();
+    let (_, _, _, sid) = seed(&scratch.db).await;
+    let pg = crate::test_pg::postgres_pool(&scratch.db);
+    sqlx::query("CREATE FUNCTION lock_probe() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$")
+        .execute(pg).await.unwrap();
+    sqlx::query("CREATE TRIGGER lock_probe BEFORE UPDATE ON chat_sessions FOR EACH ROW EXECUTE FUNCTION lock_probe()")
+        .execute(pg).await.unwrap();
+    let mut held = pg.begin().await.unwrap();
+    sqlx::query("UPDATE chat_sessions SET event_sequence = event_sequence WHERE session_id = $1")
+        .bind(&sid)
+        .execute(&mut *held)
+        .await
+        .unwrap();
+    let workspace = format!("empty-{}", uuid::Uuid::new_v4());
+    let (owner,): (String,) =
+        sqlx::query_as("SELECT user_id FROM chat_sessions WHERE session_id = $1")
+            .bind(&sid)
+            .fetch_one(pg)
+            .await
+            .unwrap();
+    crate::test_pg::seed_workspace_pg(pg, &workspace, &owner).await;
+    let cleanup_pg = pg.clone();
+    let cleanup = tokio::spawn(async move {
+        sqlx::query("DROP TRIGGER lock_probe ON chat_sessions")
+            .execute(&cleanup_pg)
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let queued: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_locks WHERE relation = 'chat_sessions'::regclass AND mode = 'AccessExclusiveLock' AND NOT granted)")
+                .fetch_one(pg).await.unwrap();
+            if queued { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("trigger cleanup queues a table-exclusive lock");
+    let diagnostics: Vec<(String, bool, String)> = sqlx::query_as("SELECT l.mode, l.granted, a.query FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid WHERE l.relation = 'chat_sessions'::regclass")
+        .fetch_all(pg).await.unwrap();
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            sqlx::query("SELECT event_sequence FROM chat_sessions WHERE session_id = $1")
+                .bind(&sid)
+                .fetch_optional(pg)
+        )
+        .await
+        .is_err(),
+        "shared reader bypassed queued DDL: {diagnostics:?}"
+    );
+    // Dashboard embedding tests clean up an unrelated workspace. Its FK
+    // check reads chat_sessions too, explaining their apparent embedding hang.
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            sqlx::query("DELETE FROM workspaces WHERE workspace_id = $1")
+                .bind(&workspace)
+                .execute(pg)
+        )
+        .await
+        .is_err(),
+        "workspace cleanup bypassed queued DDL: {diagnostics:?}"
+    );
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        sqlx::query("SELECT event_sequence FROM chat_sessions")
+            .fetch_all(crate::test_pg::postgres_pool(&isolated.db)),
+    )
+    .await
+    .expect("isolated suite cannot share DDL lock cycle")
+    .unwrap();
+    held.rollback().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), cleanup)
+        .await
+        .expect("cleanup completes when held transaction ends")
+        .unwrap()
+        .unwrap();
+    isolated.close().await;
+    scratch.close().await;
+}
+
 #[tokio::test]
 async fn sqlite_journal_conformance() {
     conformance(&crate::test_support::test_pool().await).await;
 }
 #[tokio::test]
 async fn postgres_journal_conformance() {
-    let Some(db) = crate::test_pg::postgres_test_pool_or_skip("postgres_journal_conformance").await
+    let Some(scratch) = IsolatedPostgres::connect("postgres_journal_conformance").await
     else {
         return;
     };
-    conformance(&db).await;
+    scratch.run(conformance(&scratch.db)).await;
+    scratch.close().await;
 }
 
 async fn concurrent_writers(db: &DbPool, other: &DbPool) {
@@ -2114,14 +2278,17 @@ async fn sqlite_lifecycle_conformance() {
 }
 #[tokio::test]
 async fn postgres_lifecycle_conformance() {
-    let Some(db) =
-        crate::test_pg::postgres_test_pool_or_skip("postgres_lifecycle_conformance").await
+    let Some(scratch) =
+        IsolatedPostgres::connect("postgres_lifecycle_conformance").await
     else {
         return;
     };
-    lifecycle_conformance(&db, &db).await;
-    lifecycle_review_regressions(&db).await;
-    lease_wait_cannot_resurrect(&db, &db).await;
+    scratch.run(async {
+        lifecycle_conformance(&scratch.db, &scratch.db).await;
+        lifecycle_review_regressions(&scratch.db).await;
+        lease_wait_cannot_resurrect(&scratch.db, &scratch.db).await;
+    }).await;
+    scratch.close().await;
 }
 
 #[tokio::test]
@@ -2300,6 +2467,7 @@ async fn sqlite_awaited_execution_sink_conformance() {
 }
 #[tokio::test]
 async fn postgres_awaited_execution_sink_conformance() {
-    let Some(db) = crate::test_pg::postgres_test_pool_or_skip("postgres_awaited_execution_sink_conformance").await else { return; };
-    execution_sink_conformance(&db).await;
+    let Some(scratch) = IsolatedPostgres::connect("postgres_awaited_execution_sink_conformance").await else { return; };
+    scratch.run(execution_sink_conformance(&scratch.db)).await;
+    scratch.close().await;
 }
