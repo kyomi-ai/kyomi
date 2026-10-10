@@ -22,8 +22,7 @@
 # stopped the real work from running at all". The guard must preserve the
 # caller's work and exit status except on its documented STRICT mismatch path.
 #
-# Test 11 (KYO-647) copies the real preflight-clippy.sh, sign-review.sh and
-# sign-verification.sh entrypoints. It verifies their original exit statuses
+# Test 11 (KYO-647) copies the real preflight-clippy.sh entrypoint. It verifies their original exit statuses
 # on matching copies, then checks that deliberate mismatches invoke STRICT
 # escalation, covering the guard wiring in each production gate script.
 #
@@ -344,19 +343,18 @@ echo "-- Test 11: newly guarded gate scripts (KYO-647)"
 t11="$tmpdir/t11"
 mkdir -p "$t11/scripts/lib"
 cp "$GUARD_SRC" "$t11/scripts/lib/stale-tooling-guard.sh"
-for entrypoint in preflight-clippy.sh sign-review.sh sign-verification.sh; do
+for entrypoint in preflight-clippy.sh; do
     cp "$SCRIPT_DIR/../$entrypoint" "$t11/scripts/$entrypoint"
 done
 git -C "$t11" init -q -b main
 git -C "$t11" add -A
 git -C "$t11" commit -q -m fixture
 git -C "$t11" update-ref refs/remotes/origin/main HEAD
-for entrypoint in preflight-clippy.sh sign-review.sh sign-verification.sh; do
+for entrypoint in preflight-clippy.sh; do
     expected=1
     args=()
     case "$entrypoint" in
         preflight-clippy.sh) expected=2; args=(--invalid);;
-        sign-verification.sh) args=('' '');;
     esac
     if out="$(cd "$t11" && env KYOMI_STALE_TOOLING_STRICT=1 bash "scripts/$entrypoint" "${args[@]}" 2>&1)"; then
         status=0

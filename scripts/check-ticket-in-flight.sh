@@ -108,7 +108,7 @@
 # The fix is to remove the ceiling rather than to raise it, so there is no
 # truncation condition left to detect:
 #
-#   `gh api --paginate 'repos/{owner}/{repo}/pulls?state=all&per_page=100'`
+#   `gh api --paginate "$PR_ENDPOINT"`
 #
 # follows the REST Link header to exhaustion. A run that exits 0 has walked
 # the whole corpus by construction — there is no N for it to stop at — and a
@@ -474,6 +474,17 @@
 # could not be completed, full stop — it does not get the benefit of the
 # doubt any more than an unparseable createdAt does above.
 #
+# SIBLING SCOPE (KYO-910)
+# Known project origins sweep kyomi, kyomi-connect, kyomi-private, chartml
+# and kode under ${KYOMI_REPOS_ROOT:-$HOME/repos}, plus the invoking clone.
+# GitHub identities: kyomi-ai/{kyomi,kyomi-connect,kyomi-private,kode},
+# chartml/chartml (verified against canonical clones, not assumed by name).
+# Missing checkouts or mismatched origins fail closed (exit 3). Unknown
+# origins retain reusable single-repository behavior and announce that scope.
+# --self, cwd and --ignore-branch exclusions apply only to the invoking
+# repository identity; sibling branches with the same name remain evidence.
+# Every repository has isolated rework/recycled/tombstone classification.
+#
 # USAGE
 #
 #   check-ticket-in-flight.sh <TICKET> [--remote <name>] [--ignore-branch <name>]... [--self <branch>]
@@ -567,6 +578,8 @@ Usage: $SCRIPT_NAME <TICKET> [--remote <name>] [--ignore-branch <name>]... [--se
                            against TICKET (must be given at most once)
 
 Environment:
+  KYOMI_REPOS_ROOT         canonical project clones root (default: $HOME/repos);
+                           all declared siblings remain mandatory
   KEY_RESTART_CUTOFF       ISO-8601 Z instant (YYYY-MM-DDTHH:MM:SSZ) at which
                            Trakkt's ticket-key numbering restarted (default:
                            2026-05-12T00:00:00Z). PRs created before it belong
@@ -741,17 +754,26 @@ tombstone_names_ticket() {
     return 1
 }
 
+# Each repository runs in a subshell: PR classifications and tombstones must
+# never leak to an identically named branch in a different repository.
+check_repository() (
+cd "$1" || { echo "RESULT: COULD NOT COMPLETE ALL CHECKS — cannot enter $1"; exit 3; }
+REPO_ID="$2"
+ALLOW_SELF="$3"
+# Only the invoking checkout can identify self through its current branch.
+# Explicit self/ignore names may also apply to another clone of that repo.
+echo "Repository: ${REPO_ID:-single repository} ($1)"
 # ---- self-exclusion set -----------------------------------------------------
 CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)"
 
 declare -a EXCLUDE=()
-if [ "$CURRENT_BRANCH" != "HEAD" ] && [ "$CURRENT_BRANCH" != "main" ]; then
+if [ "$4" = 1 ] && [ "$CURRENT_BRANCH" != "HEAD" ] && [ "$CURRENT_BRANCH" != "main" ]; then
     EXCLUDE+=("$CURRENT_BRANCH")
 fi
-if [ -n "$SELF_BRANCH_SET" ]; then
+if [ "$ALLOW_SELF" = 1 ] && [ -n "$SELF_BRANCH_SET" ]; then
     EXCLUDE+=("$SELF_BRANCH")
 fi
-if [ "${#IGNORE_BRANCHES[@]}" -gt 0 ]; then
+if [ "$ALLOW_SELF" = 1 ] && [ "${#IGNORE_BRANCHES[@]}" -gt 0 ]; then
     EXCLUDE+=("${IGNORE_BRANCHES[@]}")
 fi
 
@@ -893,8 +915,10 @@ is_rework_target_branch() {
 # constant, not user input, so plain interpolation is safe) doesn't collide
 # with the surrounding single-quoted jq literal.
 pr_jq_filter=".[] | [.number, (if .merged_at then \"MERGED\" elif .state == \"closed\" then \"CLOSED\" else \"OPEN\" end), .created_at, .head.ref, (if ([(.labels // [])[]?.name] | index(\"$REWORK_LABEL\")) then \"1\" else \"0\" end)] | @tsv"
+PR_ENDPOINT="repos/{owner}/{repo}/pulls?state=all&per_page=100"
+if [ -n "$REPO_ID" ]; then PR_ENDPOINT="repos/$REPO_ID/pulls?state=all&per_page=100"; fi
 gh_stderr_file="$(mktemp)"
-if pr_lines="$(gh api --paginate 'repos/{owner}/{repo}/pulls?state=all&per_page=100' \
+if pr_lines="$(gh api --paginate "$PR_ENDPOINT" \
     --jq "$pr_jq_filter" 2>"$gh_stderr_file")"; then
     declare -a pr_fields=()
     while IFS= read -r pr_line; do
@@ -1032,6 +1056,7 @@ flush_worktree_entry() {
     wt_path=""
     wt_branch=""
 }
+if wt_lines="$(git worktree list --porcelain 2>&1)"; then
 while IFS= read -r line; do
     case "$line" in
         "worktree "*) wt_path="${line#worktree }" ;;
@@ -1039,8 +1064,11 @@ while IFS= read -r line; do
         "") flush_worktree_entry ;;
         *) ;;
     esac
-done < <(git worktree list --porcelain)
+done <<<"$wt_lines"
 flush_worktree_entry # in case the porcelain output has no trailing blank line
+else
+    FAILURES+=("local worktrees: $wt_lines")
+fi
 
 # ---- Check 4: local branches ------------------------------------------------
 # Same `stranded/` handling as check 1, for the symmetric local rename
@@ -1058,6 +1086,7 @@ flush_worktree_entry # in case the porcelain output has no trailing blank line
 # its branch never enters TOMBSTONED_BRANCHES and is no longer skipped here.
 # The extra line is more evidence, not less, so the direction is safe.) The
 # tombstone skip above exists for a different reason and is left as it was.
+if local_branches="$(git branch --list --format='%(refname:short)' 2>&1)"; then
 while IFS= read -r branch; do
     [ -n "$branch" ] || continue
     case "$branch" in
@@ -1081,7 +1110,10 @@ while IFS= read -r branch; do
             fi
             ;;
     esac
-done < <(git branch --list --format='%(refname:short)')
+done <<<"$local_branches"
+else
+    FAILURES+=("local branches: $local_branches")
+fi
 
 # ---- verdict -----------------------------------------------------------------
 echo
@@ -1151,3 +1183,101 @@ fi
 
 echo "RESULT: CLEAR — nothing in flight for KYO-${ticket_num}"
 exit 0
+
+)
+
+# CLAUDE.md's "Sibling repositories" table defines this scope. Use explicit
+# canonical roots, never the parent of a linked /tmp worktree. A relocation
+# changes the root, not the list of repositories that must be checked.
+REPOS_ROOT="${KYOMI_REPOS_ROOT:-$HOME/repos}"
+SCOPE=(kyomi-ai/kyomi kyomi-ai/kyomi-connect kyomi-ai/kyomi-private chartml/chartml kyomi-ai/kode)
+repo_identity() {
+    local url scheme authority host user path
+    url="$(git -C "$1" config --get "remote.origin.url")" || return 1
+    # Parse URI authorities and SCP-style SSH origins separately. Validate
+    # the host after extracting user information, rather than matching an
+    # entire transport-specific origin prefix.
+    case "$url" in
+        *://*)
+            scheme="${url%%://*}"
+            url="${url#*://}"
+            authority="${url%%/*}"
+            path="${url#*/}"
+            ;;
+        *:*)
+            scheme=ssh
+            authority="${url%%:*}"
+            path="${url#*:}"
+            ;;
+        *) return 1 ;;
+    esac
+    host="${authority##*@}"
+    user="${authority%@*}"
+    case "$scheme" in
+        https) [ "$authority" = "$host" ] || return 1 ;;
+        ssh) [ "$user" = git ] && [ "$authority" != "$host" ] || return 1 ;;
+        *) return 1 ;;
+    esac
+    [ "$host" = github.com ] || return 1
+    case "$path" in
+        */*) ;;
+        *) return 1 ;;
+    esac
+    printf '%s' "${path%.git}"
+}
+invoking_path="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+    echo "RESULT: COULD NOT COMPLETE ALL CHECKS — not in a repository"; exit 3;
+}
+invoking_id="$(repo_identity "$invoking_path")" || invoking_id=""
+in_scope=0
+for repo in "${SCOPE[@]}"; do
+    if [ "$invoking_id" = "$repo" ] || [ "$invoking_path" = "$REPOS_ROOT/${repo##*/}" ]; then in_scope=1; fi
+done
+if [ "$in_scope" = 0 ]; then
+    echo "Scope: single repository (origin is not a known Kyomi project repository)"
+    check_repository "$invoking_path" "$invoking_id" 1 1
+    exit $?
+fi
+
+if [ -z "$invoking_id" ]; then
+    echo "RESULT: COULD NOT COMPLETE ALL CHECKS — invoking project origin is unreadable or unsupported"
+    exit 3
+fi
+echo "Scope: ${SCOPE[*]}; local roots: $REPOS_ROOT"
+overall_status=0
+record_status() {
+    case "$1" in
+        0) ;;
+        1) if [ "$overall_status" = 0 ]; then overall_status=1; fi ;;
+        *) overall_status=3 ;;
+    esac
+}
+# Always include the invoking checkout, even if it is a separate clone.
+if check_repository "$invoking_path" "$invoking_id" 1 1; then :; else record_status "$?"; fi
+invoking_common="$(git -C "$invoking_path" rev-parse --path-format=absolute --git-common-dir)" || {
+    echo "Cannot identify invoking clone"; overall_status=3;
+}
+for repo in "${SCOPE[@]}"; do
+    path="$REPOS_ROOT/${repo##*/}"
+    expected="$repo"
+    if ! actual="$(repo_identity "$path")" || [ "$actual" != "$expected" ]; then
+        echo "Repository: $expected ($path) — missing/unreadable checkout or origin identity mismatch"
+        overall_status=3
+        continue
+    fi
+    if ! common="$(git -C "$path" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"; then
+        echo "Repository: $expected ($path) — could not identify clone"
+        overall_status=3
+        continue
+    fi
+    [ "$common" != "$invoking_common" ] || continue
+    allow_self=0
+    [ "$expected" != "$invoking_id" ] || allow_self=1
+    if check_repository "$path" "$expected" "$allow_self" 0; then :; else record_status "$?"; fi
+done
+case "$overall_status" in
+    0) echo "SIBLING SWEEP RESULT: CLEAR — all in-scope repositories checked" ;;
+    1) echo "SIBLING SWEEP RESULT: IN FLIGHT — do not claim KYO-$ticket_num" ;;
+    3) echo "SIBLING SWEEP RESULT: COULD NOT COMPLETE ALL CHECKS — failing closed, do not claim KYO-$ticket_num" ;;
+esac
+exit "$overall_status"
