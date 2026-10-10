@@ -337,6 +337,12 @@ async fn serve() {
         kyomi_datasource_server::ConnectRegistry::new_local()
     };
 
+    let connect_registry = match std::env::var_os("CONNECT_OWNER_RECOVERY_DIR") {
+        Some(directory) => connect_registry.with_owner_recovery(std::path::Path::new(&directory))
+            .expect("CONNECT_OWNER_RECOVERY_DIR must be a persistent local Linux lock directory"),
+        None => connect_registry,
+    };
+
     // Platform registry — register messaging platform implementations.
     #[cfg_attr(not(feature = "slack"), allow(unused_mut))]
     let mut registry = kyomi_core::platform::PlatformRegistry::new();
@@ -402,6 +408,19 @@ async fn serve() {
 
     // Shared cancellation token for graceful shutdown of all background tasks
     let shutdown_token = CancellationToken::new();
+
+    let _durable_chat_worker = kyomi_agent::durable_chat::DurableChatWorker {
+        db: state.db.clone(),
+        kv: state.kv.clone(),
+        encryption_key: state.encryption_key.clone(),
+        embedding: state.embedding.clone(),
+        ws_manager: state.ws_manager.clone(),
+        app_config: state.config.clone(),
+        connect_registry: Some(state.connect_registry.clone()),
+        platforms: state.platforms.clone(),
+        owner: state.process_instance.clone(),
+        shutdown: shutdown_token.child_token(),
+    }.start();
 
     // Start background schedulers (if enabled)
     let watch_scheduler: Option<Arc<kyomi_agent::WatchScheduler>> = if enable_schedulers {

@@ -345,14 +345,13 @@ pub(crate) async fn apply_create(
         return Ok(ApplyCreateOutcome::ValidationFailed(errors));
     }
 
-    let dashboard_id = kyomi_auth::dashboard_service::create_dashboard(
-        params.db,
-        params.user_id,
-        params.workspace_id,
-        params.title,
-        params.content,
-        params.doc_type,
-        None, // rechunk happens synchronously below — see the NOTE above.
+    let dashboard_id = kyomi_auth::dashboard_service::create_dashboard_with_context(
+        kyomi_auth::dashboard_service::CreateDashboardParams {
+            db: params.db, user_id: params.user_id, workspace_id: params.workspace_id,
+            title: params.title, content: params.content, doc_type: params.doc_type,
+            embed: None, // rechunk happens synchronously below
+            validation_context: Some(&params.query_context),
+        },
     )
     .await?;
 
@@ -438,7 +437,7 @@ pub(crate) async fn apply_update(
         return Ok(ApplyUpdateOutcome::ValidationFailed(errors));
     }
 
-    match kyomi_auth::dashboard_service::update_dashboard(
+    match kyomi_auth::dashboard_service::update_dashboard_with_context(
         kyomi_auth::dashboard_service::UpdateDashboardParams {
             db: params.db,
             embed: None,
@@ -450,6 +449,7 @@ pub(crate) async fn apply_update(
             change_summary: params.change_summary,
             expected_content_hash: params.expected_content_hash,
         },
+        Some(&params.query_context),
     )
     .await
     {

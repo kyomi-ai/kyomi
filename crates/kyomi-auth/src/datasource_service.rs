@@ -186,7 +186,7 @@ pub async fn get_datasource_by_slug(
 /// Resolution order:
 /// 1. Try slug match first (most common case)
 /// 2. If identifier starts with `"ds-"`, try UUID match
-/// 3. If not found, return error with available slugs
+/// 3. If not found, return a workspace-scoped error without listing other datasources
 ///
 /// When `include_inactive` is false, inactive datasources are excluded.
 pub async fn resolve_datasource(
@@ -271,16 +271,8 @@ pub async fn resolve_datasource(
         }
     }
 
-    // Not found — build error with available slugs
-    let slugs = list_datasource_slugs(pool, workspace_id).await?;
-    let available = if slugs.is_empty() {
-        String::new()
-    } else {
-        format!(" Available: {}", slugs.join(", "))
-    };
-
     Err(kyomi_core::Error::NotFound(format!(
-        "Datasource '{identifier}' not found in this workspace.{available}"
+        "Datasource '{identifier}' not found in this workspace."
     )))
 }
 
@@ -2239,6 +2231,68 @@ mod tests {
     use serde_json::json;
 
     use crate::test_support::{seed_user, seed_workspace, sqlite_pool, test_key, test_pool};
+
+    #[tokio::test]
+    async fn resolve_datasource_missing_lookup_does_not_disclose_other_slugs() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        let key = test_key();
+        seed_user(sq, "user-a", "a@test.local").await;
+        seed_workspace(sq, "ws-1", "user-a").await;
+        seed_workspace(sq, "ws-2", "user-a").await;
+        let ds = create_datasource(
+            &db,
+            CreateDatasourceParams {
+                workspace_id: "ws-1",
+                name: "Private datasource",
+                slug: Some("private-workspace-slug"),
+                ds_type: "postgres",
+                connection_config: json!({}),
+                connection_type: None,
+                encryption_key: &key,
+            },
+        )
+        .await
+        .expect("create datasource fixture");
+
+        // The fixture is resolvable by both supported identifiers.
+        for identifier in [ds.slug.as_str(), ds.id.as_str()] {
+            assert_eq!(
+                resolve_datasource(&db, identifier, "ws-1", false)
+                    .await
+                    .expect("existing datasource")
+                    .id,
+                ds.id
+            );
+        }
+        for include_inactive in [false, true] {
+            for identifier in ["", "missing", "ds-missing"] {
+                let error = resolve_datasource(&db, identifier, "ws-1", include_inactive)
+                    .await
+                    .expect_err("missing identifiers must still be rejected");
+                assert!(matches!(error, kyomi_core::Error::NotFound(_)));
+                assert_eq!(
+                    error.to_string(),
+                    format!("not found: Datasource '{identifier}' not found in this workspace.")
+                );
+            }
+        }
+        assert!(
+            matches!(
+                resolve_datasource(&db, &ds.id, "ws-2", true).await,
+                Err(kyomi_core::Error::NotFound(_))
+            ),
+            "UUID resolution must remain workspace-scoped"
+        );
+        sq.close().await;
+        assert!(
+            matches!(
+                resolve_datasource(&db, "missing", "ws-1", false).await,
+                Err(kyomi_core::Error::Sqlx(_))
+            ),
+            "a failed database lookup must preserve its genuine error"
+        );
+    }
 
     // -- generate_slug tests --
 

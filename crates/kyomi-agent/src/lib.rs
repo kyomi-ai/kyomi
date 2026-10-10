@@ -24,6 +24,7 @@
 //! 11. **Catalog Scheduler** ([`catalog_scheduler`]) -- Background catalog refresh + token cleanup.
 
 pub mod adapter;
+mod runtime_adapter;
 pub mod agent;
 pub mod alert;
 pub mod anthropic;
@@ -35,6 +36,7 @@ pub mod chartml_utils;
 pub mod compaction;
 pub mod d3_format;
 pub mod execution;
+pub mod durable_chat;
 pub mod forecast;
 pub mod gemini;
 pub mod openai;

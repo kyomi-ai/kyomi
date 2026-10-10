@@ -254,6 +254,7 @@ pub async fn get_sessions() -> Result<Vec<SessionEntry>, ServerFnError> {
 
 /// Revoke a specific session by token ID.
 ///
+/// Existing access tokens retain their validity until expiry (up to 15 minutes).
 /// Revokes the entire token family so rotated tokens in the same session are
 /// also invalidated.
 #[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
@@ -310,7 +311,8 @@ pub async fn logout() -> Result<(), ServerFnError> {
     Ok(())
 }
 
-/// Log out from all devices by revoking every refresh token for the user.
+/// Log out from all devices by immediately invalidating browser access sessions
+/// and revoking every refresh token for the user (KYO-341).
 ///
 /// Uses `extract_auth_allow_lapsed()` (KYO-805) — a lapsed workspace must
 /// still be able to log out everywhere; billing status is orthogonal to
@@ -321,7 +323,7 @@ pub async fn logout_all_sessions() -> Result<String, ServerFnError> {
     let ctx = extract_context()?;
 
     let revoked_count =
-        kyomi_auth::token_service::revoke_all_user_refresh_tokens(&ctx.db, &auth.user_id)
+        kyomi_auth::token_service::revoke_all_user_sessions(&ctx.db, &auth.user_id)
             .await
             .into_sfn_core()?;
 

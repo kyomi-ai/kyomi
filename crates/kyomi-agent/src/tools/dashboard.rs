@@ -354,6 +354,7 @@ impl AgentTool for CreateDashboardTool {
         {
             crate::execution::generate_dashboard_summary(
                 crate::execution::DashboardSummaryParams {
+                    validation_context: ctx.query_context(),
                     db: ctx.db.clone(),
                     ws_manager: ctx.ws_manager.clone(),
                     dashboard_id: dashboard_id.clone(),
@@ -599,6 +600,7 @@ impl AgentTool for ModifyDashboardTool {
             if kyomi_auth::dashboard_service::extract_summary(c).is_none() {
                 crate::execution::generate_dashboard_summary(
                     crate::execution::DashboardSummaryParams {
+                    validation_context: ctx.query_context(),
                         db: ctx.db.clone(),
                         ws_manager: ctx.ws_manager.clone(),
                         dashboard_id: dashboard_id.to_string(),

@@ -64,6 +64,21 @@ fn generate_slug(name: &str) -> String {
 // Main Page
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Skip quota requests when analytics content cannot be rendered.
+async fn fetch_analytics_usage<F>(
+    access: AnalyticsAccess,
+    fetch: impl FnOnce() -> F,
+) -> Result<Option<AnalyticsUsageData>, ServerFnError>
+where
+    F: std::future::Future<Output = Result<Option<AnalyticsUsageData>, ServerFnError>>,
+{
+    if access == AnalyticsAccess::Allowed {
+        fetch().await
+    } else {
+        Ok(None)
+    }
+}
+
 /// Analytics settings page content.
 #[component]
 pub fn AnalyticsPage() -> impl IntoView {
@@ -71,7 +86,16 @@ pub fn AnalyticsPage() -> impl IntoView {
     let user_ctx = expect_context::<LocalResource<Result<UserContext, ServerFnError>>>();
 
     let sites_resource = Resource::new(|| (), |_| list_analytics_sites());
-    let usage_resource = Resource::new(|| (), |_| get_analytics_usage());
+    // UserContext is client-only: this quota load must also stay local,
+    // so SSR falls back without eagerly awaiting it outside Transition.
+    // LocalResource does not consume serialized hydration resource IDs.
+    let usage_resource = LocalResource::new(move || async move {
+        let access = user_ctx
+            .await
+            .map(|ctx| analytics_access(&ctx))
+            .unwrap_or(AnalyticsAccess::Denied);
+        fetch_analytics_usage(access, get_analytics_usage).await
+    });
 
     view! {
         <div class="p-4 sm:p-6">
@@ -206,7 +230,7 @@ fn AnalyticsLoadingSkeleton() -> impl IntoView {
 fn AnalyticsContent(
     initial_sites: Vec<AnalyticsSiteData>,
     sites_resource: Resource<Result<Vec<AnalyticsSiteData>, ServerFnError>>,
-    usage: Result<AnalyticsUsageData, ServerFnError>,
+    usage: Result<Option<AnalyticsUsageData>, ServerFnError>,
 ) -> impl IntoView {
     // Reactive state
     let (sites, set_sites) = signal(initial_sites);
@@ -381,7 +405,8 @@ fn AnalyticsContent(
             // only mounts on the AnalyticsAccess::Allowed path (not self-hosted,
             // has ManageAnalytics, billing enabled). No second gate needed.
             {match usage {
-                Ok(data) => view! { <AnalyticsUsageCard data=data/> }.into_any(),
+                Ok(Some(data)) => view! { <AnalyticsUsageCard data=data/> }.into_any(),
+                Ok(None) => ().into_any(),
                 Err(e) => view! { <AnalyticsUsageErrorCard message=e.to_string()/> }.into_any(),
             }}
 
@@ -594,9 +619,7 @@ fn usage_bar_width_percent(usage_percent: f64) -> f64 {
 /// an over-quota status banner. Not gated on self-hosted here: the page's
 /// `analytics_access()` guard already keeps this component from mounting
 /// for self-hosted workspaces (see `AnalyticsPage`), so `data` is only ever
-/// constructed from a real Cloud quota — never the zeroed-out struct
-/// `get_analytics_usage` returns for self-hosted (that branch is simply
-/// never reached from this page).
+/// constructed from a real Cloud quota. Self-hosted responses contain no quota.
 #[component]
 fn AnalyticsUsageCard(data: AnalyticsUsageData) -> impl IntoView {
     let bar_class = analytics_status_bar_class(&data.status);
@@ -1057,14 +1080,7 @@ mod tests {
 
     #[test]
     fn bar_class_is_primary_for_reserve_status() {
-        // "reserve" is deliberately NOT error-colored — drawing from a paid,
-        // non-expiring bundle is the system working as designed, not a
-        // problem state. This is the exact distinction a client-side
-        // percentage-only threshold (as in usage.rs's AnalyticsEventsCard,
-        // which renders live on self-hosted deployments via UsagePage —
-        // see the self-hosted quota-data notes on get_analytics_usage and
-        // get_ai_usage_status in server_fns/) cannot make without
-        // re-deriving what the server already knows.
+        // Drawing from a purchased bundle is an expected state, not an error.
         assert_eq!(
             analytics_status_bar_class("reserve"),
             "h-2 rounded-full transition-all bg-primary"
@@ -1150,3 +1166,7 @@ mod tests {
         assert_eq!(usage_bar_width_percent(142.0), 100.0);
     }
 }
+
+#[cfg(all(test, feature = "ssr"))]
+#[path = "analytics/quota_fetch_tests.rs"]
+mod quota_fetch_tests;

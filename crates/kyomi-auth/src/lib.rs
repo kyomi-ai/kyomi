@@ -12,6 +12,7 @@
 //! - Cookie helpers
 //! - Redis-backed rate limiting
 
+pub mod chartml_validation;
 pub mod analytics_clickhouse;
 pub mod analytics_notifications;
 pub mod analytics_quota;
@@ -22,6 +23,7 @@ pub mod billing_service;
 pub mod billing_webhook;
 pub mod catalog;
 pub mod chat_service;
+pub mod conversation_events;
 pub mod collection_service;
 pub mod connect_token;
 pub mod copilot_service;
@@ -89,6 +91,9 @@ pub(crate) mod test_pg;
 /// module docs for what belongs here vs. in the calling module.
 #[cfg(test)]
 mod test_support;
+
+#[cfg(test)]
+mod token_sliding_expiry_tests;
 
 /// Build a shared HTTP client with a proper User-Agent header.
 ///

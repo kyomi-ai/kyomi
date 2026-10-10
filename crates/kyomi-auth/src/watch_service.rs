@@ -13,7 +13,7 @@
 //! - Rate limiting: max 5 manual runs per hour
 //! - Soft-delete for alerts (deleted_at / deleted_by)
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, LocalResult, TimeZone, Utc};
 use cron::Schedule;
 use kyomi_core::sql_compat;
 use kyomi_core::{DbPool, Result};
@@ -84,6 +84,8 @@ pub struct WatchUpdate {
     pub name: Option<String>,
     pub prompt: Option<String>,
     pub schedule: Option<String>,
+    /// Omission preserves the saved zone; use "UTC" to switch to UTC.
+    pub timezone: Option<String>,
     pub mode: Option<String>,
     pub enabled: Option<bool>,
     pub alert_emails: Option<String>,
@@ -139,75 +141,62 @@ pub fn validate_prompt_length(prompt: &str) -> Result<()> {
 
 // ─── Schedule parsing ───────────────────────────────────────────────────────
 
-/// Convert a 5-field cron expression to the 7-field format required by the `cron` crate.
-///
-/// The `cron` crate expects: `sec min hour dom month dow year`
-/// Standard cron is: `min hour dom month dow`
-///
-/// We prepend `"0"` (run at second 0) and append `"*"` (any year).
-fn to_seven_field(five_field: &str) -> String {
-    format!("0 {} *", five_field.trim())
+/// Adapt public five-field cron to cron 0.15's seven fields and Sunday=1.
+/// The evaluated weekday set prevents range/step semantics from shifting.
+fn library_schedule(expression: &str) -> Result<Schedule> {
+    let fields: Vec<&str> = expression.split_whitespace().collect();
+    let invalid = |detail: &str| {
+        kyomi_core::Error::BadRequest(format!(
+            "Invalid cron expression '{}': {detail}. Use standard cron format (5 fields): \
+         'minute hour day-of-month month day-of-week'. Example: '0 9 * * *' (daily at 9am UTC).",
+            expression.trim()
+        ))
+    };
+    if fields.len() != 5 {
+        return Err(invalid("expected 5 fields"));
+    }
+    if !fields.iter().all(|field| {
+        field
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || matches!(ch, '*' | '-' | ',' | '/'))
+    }) {
+        return Err(invalid("fields must contain numeric cron syntax"));
+    }
+    let days = kyomi_types::cron_weekdays::evaluate_weekdays(fields[4]).map_err(invalid)?;
+    let library_days = days
+        .iter()
+        .map(|day| (day + 1).to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let expanded = format!(
+        "0 {} {} {} {} {} *",
+        fields[0], fields[1], fields[2], fields[3], library_days
+    );
+    Schedule::from_str(&expanded).map_err(|_| {
+        // Diagnose only public fields, never expose the internal seven-field input.
+        for (index, name) in ["minute", "hour", "day-of-month", "month"]
+            .iter()
+            .enumerate()
+        {
+            let mut probe = ["0", "0", "*", "*"];
+            probe[index] = fields[index];
+            if Schedule::from_str(&format!(
+                "0 {} {} {} {} * *",
+                probe[0], probe[1], probe[2], probe[3]
+            ))
+            .is_err()
+            {
+                return invalid(&format!("invalid {name} field '{}'", fields[index]));
+            }
+        }
+        invalid("invalid cron fields")
+    })
 }
 
-/// Validate and parse a 5-field cron expression.
-///
-/// Returns the cleaned cron string on success.
+/// Validate a standard numeric five-field cron expression, preserving its numbering.
 pub fn parse_schedule(schedule: &str) -> Result<String> {
-    let stripped = schedule.trim();
-
-    // Must have exactly 5 fields
-    let fields: Vec<&str> = stripped.split_whitespace().collect();
-    if fields.len() != 5 {
-        return Err(kyomi_core::Error::BadRequest(
-            "Invalid cron expression. Use standard cron format (5 fields): \
-             'minute hour day-of-month month day-of-week'. \
-             Example: '0 9 * * *' (daily at 9am UTC), '0 15 * * 1-5' (weekdays at 3pm UTC)."
-                .into(),
-        ));
-    }
-
-    // Only allow valid cron characters
-    for ch in stripped.chars() {
-        if !ch.is_ascii_digit()
-            && ch != '*'
-            && ch != '-'
-            && ch != ','
-            && ch != '/'
-            && !ch.is_ascii_whitespace()
-        {
-            return Err(kyomi_core::Error::BadRequest(
-                "Invalid cron expression. Use standard cron format (5 fields): \
-                 'minute hour day-of-month month day-of-week'. \
-                 Example: '0 9 * * *' (daily at 9am UTC), '0 15 * * 1-5' (weekdays at 3pm UTC)."
-                    .into(),
-            ));
-        }
-    }
-
-    // Parse with the cron crate to validate field ranges
-    let seven_field = to_seven_field(stripped);
-    let schedule_parsed = Schedule::from_str(&seven_field).map_err(|e| {
-        kyomi_core::Error::BadRequest(format!(
-            "Invalid cron expression: {e}. Use standard cron format (5 fields): \
-             'minute hour day-of-month month day-of-week'. \
-             Example: '0 9 * * *' (daily at 9am UTC)."
-        ))
-    })?;
-
-    // Validate minimum interval (must be >= 60 seconds between runs)
-    let now = Utc::now();
-    let mut upcoming = schedule_parsed.after(&now);
-    if let (Some(first), Some(second)) = (upcoming.next(), upcoming.next()) {
-        let interval = second.signed_duration_since(first);
-        if interval.num_seconds() < 60 {
-            return Err(kyomi_core::Error::BadRequest(
-                "Watch schedules cannot run more frequently than once per minute.".into(),
-            ));
-        }
-    }
-
-    // Reconstruct the canonical 5-field form
-    Ok(fields.join(" "))
+    library_schedule(schedule)?;
+    Ok(schedule.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
 // ─── Cron description ───────────────────────────────────────────────────────
@@ -251,52 +240,21 @@ fn format_days_of_week(dow: &str) -> String {
     if dow == "*" {
         return String::new();
     }
-
-    // Range like "1-5" (Mon-Fri)
-    if dow.contains('-') && !dow.contains(',') {
-        let parts: Vec<&str> = dow.split('-').collect();
-        if parts.len() == 2
-            && let (Ok(start), Ok(end)) =
-                (parts[0].parse::<usize>(), parts[1].parse::<usize>())
-        {
-            if (start == 1 && end == 5) || (start == 0 && end == 4) {
-                return "Weekdays".into();
-            }
-            if start < WEEKDAY_NAMES.len() && end < WEEKDAY_NAMES.len() {
-                return format!("{}-{}", WEEKDAY_NAMES[start], WEEKDAY_NAMES[end]);
-            }
-        }
+    let Ok(days) = kyomi_types::cron_weekdays::evaluate_weekdays(dow) else {
         return dow.into();
+    };
+    if days == [1, 2, 3, 4, 5] {
+        return "Weekdays".into();
     }
-
-    // List like "1,3,5" (Mon, Wed, Fri)
-    if dow.contains(',') {
-        let names: Vec<&str> = dow
-            .split(',')
-            .filter_map(|d| {
-                d.trim()
-                    .parse::<usize>()
-                    .ok()
-                    .and_then(|i| WEEKDAY_NAMES.get(i).copied())
-            })
-            .collect();
-        if names.len() >= 2 {
-            let (init, last) = names.split_at(names.len() - 1);
-            return format!("{} and {}", init.join(", "), last[0]);
-        }
-        if names.len() == 1 {
-            return names[0].into();
-        }
-        return dow.into();
+    if days.len() == 1 {
+        return WEEKDAY_FULL_NAMES[days[0] as usize].into();
     }
-
-    // Single day
-    if let Ok(idx) = dow.parse::<usize>()
-        && let Some(name) = WEEKDAY_FULL_NAMES.get(idx)
-    {
-        return (*name).into();
-    }
-    dow.into()
+    let names: Vec<&str> = days
+        .iter()
+        .map(|&day| WEEKDAY_NAMES[day as usize])
+        .collect();
+    let (init, last) = names.split_at(names.len() - 1);
+    format!("{} and {}", init.join(", "), last[0])
 }
 
 /// Format a day-of-month cron field into a human-readable string.
@@ -405,14 +363,121 @@ pub fn describe_cron(cron_expr: &str) -> String {
 
 /// Calculate the next fire time for a 5-field cron expression from now.
 pub fn calculate_next_run(cron_expr: &str) -> Result<DateTime<Utc>> {
-    let seven_field = to_seven_field(cron_expr);
-    let schedule = Schedule::from_str(&seven_field).map_err(|e| {
-        kyomi_core::Error::BadRequest(format!("Invalid cron expression: {e}"))
-    })?;
+    calculate_next_run_after(cron_expr, Utc::now())
+}
 
-    schedule.upcoming(Utc).next().ok_or_else(|| {
-        kyomi_core::Error::BadRequest("Cron expression has no upcoming fire times".into())
+/// Calculate the first occurrence strictly after a supplied UTC instant.
+/// Used by execution, deterministic previews/tests and explicit repairs.
+pub fn calculate_next_run_after(cron_expr: &str, after: DateTime<Utc>) -> Result<DateTime<Utc>> {
+    calculate_next_run_in_timezone_after(cron_expr, None, after)
+}
+
+/// Validate a named IANA zone before any schedule is persisted.
+pub fn parse_timezone(timezone: Option<&str>) -> Result<chrono_tz::Tz> {
+    timezone.unwrap_or("UTC").parse().map_err(|_| {
+        kyomi_core::Error::BadRequest("Schedule timezone must be a valid IANA name (for example Australia/Sydney or UTC), not a numeric offset".into())
     })
+}
+
+/// One recurrence policy for creation, editing, enabling, previews and advancement.
+pub fn calculate_next_run_in_timezone(cron_expr: &str, timezone: Option<&str>) -> Result<DateTime<Utc>> {
+    calculate_next_run_in_timezone_after(cron_expr, timezone, Utc::now())
+}
+
+/// Enumerate wall-clock cron occurrences independently of timezone transitions.
+/// Missing local times are skipped; a fold fires once at its earliest UTC instant.
+/// Filtering that earliest instant also prevents a second firing after the fold's
+/// first occurrence, even when the reference is in the repeated hour.
+pub fn calculate_next_run_in_timezone_after(
+    cron_expr: &str,
+    timezone: Option<&str>,
+    after: DateTime<Utc>,
+) -> Result<DateTime<Utc>> {
+    let zone = parse_timezone(timezone)?;
+    let local_after = after.with_timezone(&zone).naive_local().and_utc();
+    for wall in library_schedule(cron_expr)?.after(&local_after) {
+        let candidate = match zone.from_local_datetime(&wall.naive_utc()) {
+            LocalResult::None => continue,
+            LocalResult::Single(time) => time.with_timezone(&Utc),
+            LocalResult::Ambiguous(first, second) => first.min(second).with_timezone(&Utc),
+        };
+        if candidate > after {
+            return Ok(candidate);
+        }
+    }
+    Err(kyomi_core::Error::BadRequest(format!(
+        "Cron expression '{cron_expr}' has no upcoming fire times"
+    )))
+}
+
+/// Describe the stored wall time in its own zone, never a guessed current offset.
+pub fn describe_cron_in_timezone(cron_expr: &str, timezone: Option<&str>) -> String {
+    let description = describe_cron(cron_expr);
+    let zone = timezone.unwrap_or("UTC");
+    if description.contains("UTC") {
+        description.replace("UTC", zone)
+    } else {
+        format!("{description} ({zone})")
+    }
+}
+
+/// Dated local and UTC execution text for tools and UI previews.
+pub fn describe_execution(instant: DateTime<Utc>, timezone: Option<&str>) -> Result<String> {
+    let zone = parse_timezone(timezone)?;
+    Ok(format!("{} {} / {} UTC", instant.with_timezone(&zone).format("%Y-%m-%d %H:%M %:z"), zone, instant.format("%Y-%m-%d %H:%M")))
+}
+
+/// Explicit maintenance repair for persisted watch fire times. No startup hook
+/// calls this. Pause all watch schedulers/writers first, then use the same fixed
+/// cutoff for retries. A transaction validates enabled schedules before committing;
+/// disabled watches have their fire time cleared. Stored public cron is untouched.
+/// Returns the number of changed rows; a repeated repair at the same cutoff is 0.
+pub async fn recalculate_watch_next_runs(db: &DbPool, cutoff: DateTime<Utc>) -> Result<u64> {
+    #[derive(sqlx::FromRow)]
+    struct RepairWatch {
+        watch_id: String,
+        schedule: String,
+        timezone: Option<String>,
+        enabled: bool,
+        next_run_at: Option<DateTime<Utc>>,
+    }
+    macro_rules! repair {
+        ($pool:expr, $select:expr) => {{
+            let mut tx = $pool.begin().await?;
+            let watches = sqlx::query_as::<_, RepairWatch>($select)
+                .fetch_all(&mut *tx)
+                .await?;
+            let mut changed = 0;
+            for watch in watches {
+                let next = if watch.enabled {
+                    Some(calculate_next_run_in_timezone_after(&watch.schedule, watch.timezone.as_deref(), cutoff)?)
+                } else {
+                    None
+                };
+                if watch.next_run_at != next {
+                    changed +=
+                        sqlx::query("UPDATE watches SET next_run_at = $1 WHERE watch_id = $2")
+                            .bind(next)
+                            .bind(&watch.watch_id)
+                            .execute(&mut *tx)
+                            .await?
+                            .rows_affected();
+                }
+            }
+            tx.commit().await?;
+            Ok(changed)
+        }};
+    }
+    match db {
+        DbPool::Postgres(pool) => repair!(
+            pool,
+            "SELECT watch_id, schedule, timezone, enabled, next_run_at FROM watches ORDER BY watch_id FOR UPDATE"
+        ),
+        DbPool::Sqlite(pool) => repair!(
+            pool,
+            "SELECT watch_id, schedule, timezone, enabled, next_run_at FROM watches ORDER BY watch_id"
+        ),
+    }
 }
 
 // ─── Tier limit helper ──────────────────────────────────────────────────────
@@ -430,9 +495,9 @@ fn watch_limit_for_tier(tier: kyomi_core::SubscriptionTier) -> i64 {
 
 /// Create a new watch.
 ///
-/// Validates name, prompt, mode, schedule. Checks tier-based limits and
-/// duplicate names within the workspace. Calculates `next_run_at` from
-/// the cron schedule. INSERTs and returns the new watch.
+/// Validates name, prompt, mode, schedule and checks tier-based limits.
+/// Names may be reused; watches are identified by `watch_id`. Calculates
+/// `next_run_at` from the cron schedule. INSERTs and returns the new watch.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_watch(
     db: &DbPool,
@@ -441,6 +506,7 @@ pub async fn create_watch(
     name: &str,
     prompt: &str,
     schedule: &str,
+    timezone: Option<&str>,
     mode: &str,
     queries: Option<&serde_json::Value>,
     datasource_hints: Option<&serde_json::Value>,
@@ -452,6 +518,7 @@ pub async fn create_watch(
     validate_prompt_length(prompt)?;
     validate_watch_mode(mode)?;
     let cron_schedule = parse_schedule(schedule)?;
+    parse_timezone(timezone)?;
 
     let is_pg = db.is_postgres();
 
@@ -487,23 +554,8 @@ pub async fn create_watch(
         )));
     }
 
-    // Check duplicate name (case-insensitive)
-    let dup_sql =
-        "SELECT watch_id AS value FROM watches WHERE workspace_id = $1 AND LOWER(name) = LOWER($2) LIMIT 1";
-    let duplicate: Option<StringRow> =
-        kyomi_core::db_fetch_optional!(db, StringRow, dup_sql, workspace_id, name.trim())
-            .map_err(|e| {
-                kyomi_core::Error::Internal(format!("failed to check duplicate name: {e}"))
-            })?;
-
-    if duplicate.is_some() {
-        return Err(kyomi_core::Error::Conflict(format!(
-            "A watch with the name '{name}' already exists in this workspace"
-        )));
-    }
-
     // Calculate next run
-    let next_run_at = calculate_next_run(&cron_schedule)?;
+    let next_run_at = calculate_next_run_in_timezone(&cron_schedule, timezone)?;
     let watch_id = generate_watch_id();
     let now = Utc::now();
 
@@ -520,12 +572,12 @@ pub async fn create_watch(
     let sql = format!(
         r#"
         INSERT INTO watches (
-            watch_id, workspace_id, created_by, name, prompt, schedule, mode,
+            watch_id, workspace_id, created_by, name, prompt, schedule, timezone, mode,
             datasource_hints, queries, alert_emails,
             alert_emails_enabled, enabled, next_run_at, created_at, updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, {enabled}, $12, $13, $13)
-        RETURNING watch_id, workspace_id, created_by, name, prompt, schedule,
+        VALUES ($1, $2, $3, $4, $5, $6, $14, $7, $8::jsonb, $9::jsonb, $10, $11, {enabled}, $12, $13, $13)
+        RETURNING watch_id, workspace_id, created_by, name, prompt, schedule, timezone,
                   mode, datasource_hints, queries, alert_emails,
                   alert_emails_enabled, enabled, last_run_at, last_run_status,
                   next_run_at, created_at, updated_at
@@ -549,7 +601,8 @@ pub async fn create_watch(
         alert_emails,
         alert_emails_enabled,
         next_run_at,
-        now
+        now,
+        timezone
     )
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to create watch: {e}")))?;
 
@@ -604,7 +657,7 @@ pub async fn get_watch(
     user_id: &str,
 ) -> Result<Option<kyomi_core::models::Watch>> {
     let sql = r#"
-        SELECT watch_id, workspace_id, created_by, name, prompt, schedule,
+        SELECT watch_id, workspace_id, created_by, name, prompt, schedule, timezone,
                mode, datasource_hints, queries, alert_emails,
                alert_emails_enabled, enabled, last_run_at, last_run_status,
                next_run_at, created_at, updated_at
@@ -638,7 +691,7 @@ pub async fn list_watches(
     user_id: &str,
 ) -> Result<Vec<kyomi_core::models::Watch>> {
     let sql = r#"
-        SELECT watch_id, workspace_id, created_by, name, prompt, schedule,
+        SELECT watch_id, workspace_id, created_by, name, prompt, schedule, timezone,
                mode, datasource_hints, queries, alert_emails,
                alert_emails_enabled, enabled, last_run_at, last_run_status,
                next_run_at, created_at, updated_at
@@ -668,7 +721,7 @@ pub async fn list_watches_for_sync(
     user_id: &str,
 ) -> Result<Vec<serde_json::Value>> {
     let sql = r#"
-        SELECT watch_id, workspace_id, created_by, name, prompt, schedule,
+        SELECT watch_id, workspace_id, created_by, name, prompt, schedule, timezone,
                mode, datasource_hints, queries, alert_emails,
                alert_emails_enabled, enabled, last_run_at, last_run_status,
                next_run_at, created_at, updated_at
@@ -718,7 +771,7 @@ pub async fn list_enabled_watches(db: &DbPool) -> Result<Vec<kyomi_core::models:
     let is_pg = db.is_postgres();
     let sql = format!(
         r#"
-        SELECT watch_id, workspace_id, created_by, name, prompt, schedule,
+        SELECT watch_id, workspace_id, created_by, name, prompt, schedule, timezone,
                mode, datasource_hints, queries, alert_emails,
                alert_emails_enabled, enabled, last_run_at, last_run_status,
                next_run_at, created_at, updated_at
@@ -778,21 +831,16 @@ pub async fn update_watch(
         .map(parse_schedule)
         .transpose()?;
 
-    // Compute next_run_at based on schedule and/or enabled changes
-    let next_run_at: Option<Option<DateTime<Utc>>> =
-        if let Some(ref sched) = parsed_schedule {
-            // Schedule changed — always recalculate
-            Some(Some(calculate_next_run(sched)?))
-        } else if let Some(enabled) = updates.enabled {
-        if enabled {
-            // Re-enabling: compute from current schedule
-            Some(Some(calculate_next_run(&current.schedule)?))
+    let timezone = updates.timezone.as_deref().or(current.timezone.as_deref());
+    parse_timezone(timezone)?;
+    let next_run_at = if parsed_schedule.is_some() || updates.timezone.is_some() || updates.enabled.is_some() {
+        Some(if updates.enabled.unwrap_or(current.enabled) {
+            Some(calculate_next_run_in_timezone(parsed_schedule.as_deref().unwrap_or(&current.schedule), timezone)?)
         } else {
-            // Disabling: clear next_run_at
-            Some(None)
-        }
+            None
+        })
     } else {
-        None // No change to next_run_at
+        None
     };
 
     // Build dynamic UPDATE
@@ -809,6 +857,10 @@ pub async fn update_watch(
     }
     if parsed_schedule.is_some() {
         set_parts.push(format!("schedule = ${param_idx}"));
+        param_idx += 1;
+    }
+    if updates.timezone.is_some() {
+        set_parts.push(format!("timezone = ${param_idx}"));
         param_idx += 1;
     }
     if updates.mode.is_some() {
@@ -850,7 +902,7 @@ pub async fn update_watch(
 
     let sql = format!(
         r#"UPDATE watches SET {} WHERE watch_id = $1 AND workspace_id = $2 AND created_by = $3
-           RETURNING watch_id, workspace_id, created_by, name, prompt, schedule, mode,
+           RETURNING watch_id, workspace_id, created_by, name, prompt, schedule, timezone, mode,
                      datasource_hints, queries, alert_emails,
                      alert_emails_enabled, enabled, last_run_at, last_run_status,
                      next_run_at, created_at, updated_at"#,
@@ -871,6 +923,9 @@ pub async fn update_watch(
             }
             if let Some(ref sched) = parsed_schedule {
                 q = q.bind(sched.as_str());
+            }
+            if let Some(ref timezone) = updates.timezone {
+                q = q.bind(timezone.as_str());
             }
             if let Some(ref mode) = updates.mode {
                 q = q.bind(mode.as_str());
@@ -1489,7 +1544,7 @@ pub async fn search_watches(
     let sql = if has_query {
         format!(
             r#"
-            SELECT watch_id, workspace_id, created_by, name, prompt, schedule, mode,
+            SELECT watch_id, workspace_id, created_by, name, prompt, schedule, timezone, mode,
                    datasource_hints, queries, alert_emails,
                    alert_emails_enabled, enabled, last_run_at, last_run_status,
                    next_run_at, created_at, updated_at
@@ -1505,7 +1560,7 @@ pub async fn search_watches(
         )
     } else {
         r#"
-        SELECT watch_id, workspace_id, created_by, name, prompt, schedule, mode,
+        SELECT watch_id, workspace_id, created_by, name, prompt, schedule, timezone, mode,
                datasource_hints, queries, alert_emails,
                alert_emails_enabled, enabled, last_run_at, last_run_status,
                next_run_at, created_at, updated_at
@@ -2276,6 +2331,82 @@ pub async fn create_chat_session_from_alert(
 mod tests {
     use super::*;
 
+    fn instant(value: &str) -> DateTime<Utc> {
+        value.parse().unwrap()
+    }
+
+    #[test]
+    fn standard_weekday_occurrences_use_fixed_utc_dates() {
+        let after = instant("2026-10-03T00:00:00Z"); // Saturday
+        for (field, expected) in [
+            ("0", "2026-10-04T09:00:00Z"),
+            ("7", "2026-10-04T09:00:00Z"),
+            ("1", "2026-10-05T09:00:00Z"),
+            ("1-5", "2026-10-05T09:00:00Z"),
+            ("5-7", "2026-10-03T09:00:00Z"),
+            ("*", "2026-10-03T09:00:00Z"),
+            ("*/2", "2026-10-03T09:00:00Z"),
+            ("1-7/2", "2026-10-04T09:00:00Z"),
+        ] {
+            let expression = format!("0 9 * * {field}");
+            assert_eq!(parse_schedule(&expression).unwrap(), expression);
+            assert_eq!(
+                calculate_next_run_after(&expression, after).unwrap(),
+                instant(expected),
+                "{field}"
+            );
+        }
+        // UI Monday 09:00 at UTC+10 emits Sunday 23:00 UTC.
+        assert_eq!(
+            calculate_next_run_after("0 23 * * 0", after).unwrap(),
+            instant("2026-10-04T23:00:00Z")
+        );
+        let schedule = library_schedule("0 9 * * 0,1,7").unwrap();
+        let dates = schedule.after(&after).take(4).collect::<Vec<_>>();
+        assert_eq!(
+            dates,
+            [
+                "2026-10-04T09:00:00Z",
+                "2026-10-05T09:00:00Z",
+                "2026-10-11T09:00:00Z",
+                "2026-10-12T09:00:00Z"
+            ]
+            .map(instant)
+        );
+        assert_eq!(
+            calculate_next_run_after("30 14 15 11 *", after).unwrap(),
+            instant("2026-11-15T14:30:00Z")
+        );
+    }
+
+    #[test]
+    fn errors_identify_submitted_five_field_expression() {
+        for expression in [
+            "0 9 * * 8",
+            "0 9 * * 1-8",
+            "0 9 * * */0",
+            "0 9 * * 1,",
+            "60 9 * * 0",
+            "0 9 * *",
+            "0 9 * * MON",
+        ] {
+            let error = parse_schedule(expression).unwrap_err();
+            let err = error.user_message();
+            assert!(err.contains(expression), "{err}");
+            assert!(err.contains("5 fields"), "{err}");
+            assert_eq!(
+                err,
+                calculate_next_run_after(expression, instant("2026-10-03T00:00:00Z"))
+                    .unwrap_err()
+                    .user_message()
+            );
+        }
+        assert_eq!(format_days_of_week("7"), "Sunday");
+        assert_eq!(format_days_of_week("0,7"), "Sunday");
+        assert_eq!(format_days_of_week("0-4"), "Sun, Mon, Tue, Wed and Thu");
+        assert_eq!(format_days_of_week("*/2"), "Sun, Tue, Thu and Sat");
+    }
+
     // ── generate_watch_id ───────────────────────────────────────────────
 
     #[test]
@@ -2450,7 +2581,7 @@ mod contract_tests {
 
     #[test]
     fn parse_specific_day_of_week() {
-        // Every Sunday at 9am (cron library uses 1=Mon..7=Sun)
+        // Every Sunday at 9am (standard cron uses 0 or 7 = Sunday)
         assert_eq!(parse_schedule("0 9 * * 7").unwrap(), "0 9 * * 7");
         // Every Friday at 5pm
         assert_eq!(parse_schedule("0 17 * * 5").unwrap(), "0 17 * * 5");
@@ -2711,6 +2842,7 @@ mod privacy_tests {
             name,
             "Check if revenue drops more than 10 percent",
             "0 9 * * *",
+            None,
             "alert",
             None,
             None,
@@ -2744,6 +2876,77 @@ mod privacy_tests {
         .await
         .expect("insert triggered alert");
         row.0
+    }
+
+    #[tokio::test]
+    async fn create_and_update_use_standard_weekdays_and_disabled_state() {
+        use chrono::Datelike;
+        let pool = test_pool().await;
+        seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
+        let watch = create_watch(
+            &pool,
+            "ws-1",
+            "user-a",
+            "Sunday Watch",
+            "Report weekly revenue trends",
+            "0 23 * * 0",
+            None,
+            "report",
+            None,
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(watch.schedule, "0 23 * * 0");
+        assert_eq!(watch.next_run_at.unwrap().weekday(), chrono::Weekday::Sun);
+        let monday = update_watch(
+            &pool,
+            &watch.watch_id,
+            "ws-1",
+            "user-a",
+            &WatchUpdate {
+                schedule: Some("0 9 * * 1".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(monday.schedule, "0 9 * * 1");
+        assert_eq!(monday.next_run_at.unwrap().weekday(), chrono::Weekday::Mon);
+        let disabled = update_watch(
+            &pool,
+            &watch.watch_id,
+            "ws-1",
+            "user-a",
+            &WatchUpdate {
+                schedule: Some("0 9 * * 7".into()),
+                enabled: Some(false),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!disabled.enabled);
+        assert_eq!(disabled.next_run_at, None);
+        let still_disabled = update_watch(
+            &pool,
+            &watch.watch_id,
+            "ws-1",
+            "user-a",
+            &WatchUpdate {
+                schedule: Some("0 9 * * 0".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(still_disabled.next_run_at, None);
+        let enabled = toggle_watch(&pool, &watch.watch_id, "ws-1", "user-a", true)
+            .await
+            .unwrap();
+        assert_eq!(enabled.next_run_at.unwrap().weekday(), chrono::Weekday::Sun);
     }
 
     // ── list_watches_for_sync ────────────────────────────────────────────
@@ -2835,15 +3038,13 @@ mod privacy_tests {
         let pool = test_pool().await;
         seed_two_users_one_workspace(sqlite_pool(&pool), "a@test.local", "b@test.local").await;
 
-        // Both users have a watch whose name matches the same search term
-        // (watch names are unique per workspace, so the names differ but
-        // both contain "Revenue"), exercising the `has_query` branch (ILIKE
-        // on name/prompt) — this is what proves the renumbered
+        // Both users have identically named watches matching the search term,
+        // exercising the `has_query` branch (ILIKE on name/prompt) — this is what proves the renumbered
         // $3=user_id / $4=query bind chain is correct, since a bind-order
         // mistake would either error or silently leak user-a's row into
         // user-b's results.
-        let wa = create_test_watch(&pool, "user-a", "Revenue Alert Watch A").await;
-        let wb = create_test_watch(&pool, "user-b", "Revenue Alert Watch B").await;
+        let wa = create_test_watch(&pool, "user-a", "Revenue Alert Watch").await;
+        let wb = create_test_watch(&pool, "user-b", "Revenue Alert Watch").await;
 
         let results = search_watches(&pool, "ws-1", "user-b", Some("revenue"), 50)
             .await
@@ -3964,3 +4165,118 @@ mod privacy_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod weekday_repair_tests {
+    use super::*;
+
+    async fn assert_repair(db: &DbPool) {
+        let old: DateTime<Utc> = "2026-10-03T09:00:00Z".parse().unwrap();
+        let cutoff: DateTime<Utc> = "2026-10-03T00:00:00Z".parse().unwrap();
+        for (id, schedule, enabled) in [
+            ("a", "0 9 * * 7", true),
+            ("b", "0 9 * * 1", true),
+            ("c", "invalid disabled schedule", false),
+        ] {
+            kyomi_core::db_execute!(db,
+                "INSERT INTO watches (watch_id, schedule, enabled, next_run_at) VALUES ($1, $2, $3, $4)",
+                id, schedule, enabled, old).unwrap();
+        }
+        assert_eq!(recalculate_watch_next_runs(db, cutoff).await.unwrap(), 3);
+        assert_eq!(recalculate_watch_next_runs(db, cutoff).await.unwrap(), 0);
+        #[derive(Debug, sqlx::FromRow)]
+        struct Row {
+            watch_id: String,
+            schedule: String,
+            enabled: bool,
+            next_run_at: Option<DateTime<Utc>>,
+        }
+        let rows = kyomi_core::db_fetch_all!(
+            db,
+            Row,
+            "SELECT watch_id, schedule, enabled, next_run_at FROM watches ORDER BY watch_id"
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].watch_id, "a");
+        assert_eq!(rows[0].schedule, "0 9 * * 7");
+        assert!(rows[0].enabled);
+        assert_eq!(
+            rows[0].next_run_at,
+            Some("2026-10-04T09:00:00Z".parse().unwrap())
+        );
+        assert_eq!(rows[1].schedule, "0 9 * * 1");
+        assert_eq!(
+            rows[1].next_run_at,
+            Some("2026-10-05T09:00:00Z".parse().unwrap())
+        );
+        assert!(!rows[2].enabled);
+        assert_eq!(rows[2].next_run_at, None);
+
+        // Ensure an invalid enabled schedule aborts and rolls back preceding writes.
+        kyomi_core::db_execute!(
+            db,
+            "UPDATE watches SET next_run_at = $1 WHERE watch_id = 'a'",
+            old
+        )
+        .unwrap();
+        kyomi_core::db_execute!(
+            db,
+            "UPDATE watches SET enabled = $1 WHERE watch_id = 'c'",
+            true
+        )
+        .unwrap();
+        assert!(recalculate_watch_next_runs(db, cutoff).await.is_err());
+        let row = kyomi_core::db_fetch_one!(
+            db,
+            Row,
+            "SELECT watch_id, schedule, enabled, next_run_at FROM watches WHERE watch_id = 'a'"
+        )
+        .unwrap();
+        assert_eq!(row.next_run_at, Some(old), "repair must be atomic");
+    }
+
+    #[tokio::test]
+    async fn repair_sqlite_is_atomic_and_idempotent() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE watches (watch_id TEXT PRIMARY KEY, schedule TEXT NOT NULL, timezone TEXT, enabled BOOLEAN NOT NULL, next_run_at TEXT)")
+            .execute(&pool).await.unwrap();
+        assert_repair(&DbPool::Sqlite(pool)).await;
+    }
+
+    #[tokio::test]
+    async fn repair_postgres_is_atomic_and_idempotent() {
+        let Some(db) =
+            crate::test_pg::postgres_test_pool_or_skip("repair_postgres_is_atomic_and_idempotent")
+                .await
+        else {
+            return;
+        };
+        // A dedicated single connection and temporary table isolate this repair
+        // from every other test and its real watches table in the test database.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with((*db.pg_pool().connect_options()).clone())
+            .await
+            .unwrap();
+        sqlx::query("CREATE TEMPORARY TABLE watches (watch_id TEXT PRIMARY KEY, schedule TEXT NOT NULL, timezone TEXT, enabled BOOLEAN NOT NULL, next_run_at TIMESTAMPTZ)")
+            .execute(&pool).await.unwrap();
+        assert_repair(&DbPool::Postgres(pool)).await;
+    }
+}
+
+#[cfg(test)]
+#[path = "watch_timezone_tests.rs"]
+mod timezone_tests;
+
+#[cfg(test)]
+#[path = "watch_service/duplicate_names_tests.rs"]
+mod duplicate_names_tests;
+
+#[cfg(test)]
+#[path = "watch_service/name_uniqueness_migration_tests.rs"]
+mod name_uniqueness_migration_tests;

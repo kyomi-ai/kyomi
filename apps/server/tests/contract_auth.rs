@@ -7,24 +7,31 @@
 
 use serde_json::Value;
 
+fn load_constants() {
+    static LOAD: std::sync::Once = std::sync::Once::new();
+    LOAD.call_once(|| {
+        kyomi_core::constants::load_with_fallback().expect("test constants");
+    });
+}
+
 /// Get the base URL — either from env (for Python) or start a Rust server.
 async fn base_url() -> String {
     if let Ok(url) = std::env::var("CONTRACT_TEST_BASE_URL") {
         return url;
     }
 
-    // Load shared constants (idempotent — OnceLock ignores second call)
-    if let Ok(path) = kyomi_core::constants::find_constants_file() {
-        let _ = kyomi_core::constants::load(&path);
-    }
-
-    let config = kyomi_core::Config::test_config();
-    // KYO-242: connects to (and provisions/self-heals) this worktree's
-    // private test database rather than the shared `kyomi_test` database.
     let db = kyomi_core::test_db::connect_test_pool()
         .await
         .expect("test DB should be reachable and migratable — see the error for the remedy");
-    let kv: kyomi_core::KVPool = kyomi_core::kv_store::create_kv_store(config.redis_url.as_deref())
+    let (url, _server) = start_server(db).await;
+    url
+}
+
+/// Exercise the compiled browser route against the supplied real database.
+async fn start_server(db: kyomi_core::DbPool) -> (String, tokio::task::JoinHandle<()>) {
+    load_constants();
+    let config = kyomi_core::Config::test_config();
+    let kv: kyomi_core::KVPool = kyomi_core::kv_store::create_kv_store(None)
         .await
         .expect("failed to create KV store");
 
@@ -48,7 +55,7 @@ async fn base_url() -> String {
         config: std::sync::Arc::new(config.clone()),
         encryption_key: std::sync::Arc::new(encryption_key),
         webauthn: std::sync::Arc::new(webauthn),
-        embedding: kyomi_embed::LazyEmbedding::loaded(kyomi_embed::EmbeddingService::new().expect("embedding model")),
+        embedding: kyomi_embed::LazyEmbedding::new(),
         ws_manager,
         stripe: None,
         mcp_sessions: kyomi_auth::mcp_session_manager::MCPSessionManager::new(kv.clone()),
@@ -66,12 +73,11 @@ async fn base_url() -> String {
         .unwrap();
     let addr = listener.local_addr().unwrap();
 
-    tokio::spawn(async move {
+    let server = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
 
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    format!("http://{addr}")
+    (format!("http://{addr}"), server)
 }
 
 fn client() -> reqwest::Client {
@@ -111,4 +117,156 @@ async fn refresh_returns_401_with_invalid_token() {
         .unwrap();
 
     assert_eq!(resp.status(), 401, "refresh with invalid token should be 401");
+}
+
+struct BrowserContext {
+    base: String,
+    db: kyomi_core::DbPool,
+    user_id: String,
+    server: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for BrowserContext {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
+impl BrowserContext {
+    async fn new(db: kyomi_core::DbPool) -> Self {
+        load_constants();
+        let email = format!("browser-expiry-{}@example.com", uuid::Uuid::new_v4());
+        let user = kyomi_auth::user_service::create_user(&db, &email, Some("Expiry test"), true)
+            .await.expect("create browser user");
+        let (base, server) = start_server(db.clone()).await;
+        Self { base, db, user_id: user.user_id, server }
+    }
+
+    async fn token(&self, expires_at: chrono::DateTime<chrono::Utc>) -> (String, String) {
+        let raw = kyomi_auth::jwt::create_refresh_token();
+        let hash = kyomi_auth::token_service::hash_refresh_token(&raw);
+        let family = kyomi_auth::token_service::generate_family_id();
+        let device = kyomi_auth::token_service::DeviceInfo {
+            user_agent: None, ip_address: None, country_code: None, oauth_client_id: None,
+        };
+        let id = kyomi_auth::token_service::store_refresh_token(
+            &self.db, &self.user_id, &hash, expires_at, &device, &family,
+        ).await.expect("store real browser refresh token");
+        (raw, id)
+    }
+
+    async fn refresh(&self, raw: &str) -> reqwest::Response {
+        let cookie_name = &kyomi_core::constants::get().cookies.refresh_token_name;
+        client().post(format!("{}/api/v1/auth/refresh", self.base))
+            .header("origin", "http://localhost:5173")
+            .header("cookie", format!("{cookie_name}={raw}"))
+            .send().await.expect("browser refresh request")
+    }
+
+    async fn deny(&self, raw: &str) {
+        let response = self.refresh(raw).await;
+        assert_eq!(response.status(), 401);
+        assert!(!response.headers().contains_key("set-cookie"), "denial must not mint cookies");
+        let body: Value = response.json().await.expect("denial JSON");
+        assert!(body["detail"].is_string());
+    }
+
+    async fn rotate(&self, raw: &str) -> String {
+        let response = self.refresh(raw).await;
+        assert_eq!(response.status(), 200, "future token must refresh a browser session");
+        let cookie_name = &kyomi_core::constants::get().cookies.refresh_token_name;
+        let access_name = &kyomi_core::constants::get().cookies.access_token_name;
+        let cookies: Vec<_> = response.headers().get_all("set-cookie").iter()
+            .map(|header| header.to_str().expect("cookie text").to_string()).collect();
+        assert!(cookies.iter().any(|cookie| cookie.starts_with(&format!("{access_name}="))));
+        // The browser applies the last cookie when middleware and the explicit
+        // handler both refresh a request that lacks an access cookie.
+        let rotated = cookies.iter().rev().find_map(|cookie| {
+            cookie.strip_prefix(&format!("{cookie_name}="))
+                .map(|value| value.split(';').next().unwrap().to_string())
+        }).expect("rotated refresh cookie");
+        assert_ne!(rotated, raw);
+        let body: Value = response.json().await.expect("refresh JSON");
+        assert_eq!(body["token_type"], "bearer");
+        assert_eq!(body["user"]["user_id"], self.user_id);
+        assert!(body["access_token"].as_str().is_some_and(|value| !value.is_empty()));
+        assert!(body["expires_in"].as_i64().is_some_and(|value| value > 0));
+        rotated
+    }
+}
+
+async fn browser_expiry_contract(db: kyomi_core::DbPool) {
+    let ctx = BrowserContext::new(db).await;
+    // Same UTC date is essential: the old SQLite comparator admits RFC3339
+    // midnight because 'T' sorts after the space in datetime('now').
+    let midnight = chrono::Utc::now().date_naive().and_hms_opt(0, 0, 0)
+        .unwrap().and_utc();
+    let (expired, expired_id) = ctx.token(midnight).await;
+    ctx.deny(&expired).await;
+    let (untouched,): (bool,) = kyomi_core::db_fetch_one!(
+        &ctx.db, (bool,),
+        "SELECT last_used IS NULL AND replaced_at IS NULL FROM refresh_tokens WHERE token_id = $1",
+        &expired_id
+    ).unwrap();
+    assert!(untouched, "expired token must not be used or rotated");
+
+    let (boundary, boundary_id) = ctx.token(chrono::Utc::now()).await;
+    // Capture the database clock at the expiry boundary in RFC3339 on SQLite.
+    // By the HTTP request it is at or before now and must be denied.
+    let clock = if ctx.db.is_postgres() { "NOW()" } else { "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')" };
+    let sql = format!("UPDATE refresh_tokens SET expires_at = {clock} WHERE token_id = $1");
+    kyomi_core::db_execute!(&ctx.db, &sql, &boundary_id).unwrap();
+    ctx.deny(&boundary).await;
+
+    let (future, future_id) = ctx.token(chrono::Utc::now() + chrono::Duration::days(1)).await;
+    let rotated = ctx.rotate(&future).await;
+    let (replaced,): (bool,) = kyomi_core::db_fetch_one!(
+        &ctx.db, (bool,), "SELECT replaced_at IS NOT NULL FROM refresh_tokens WHERE token_id = $1", &future_id
+    ).unwrap();
+    assert!(replaced);
+    let next = ctx.rotate(&rotated).await;
+    let grace = ctx.rotate(&future).await;
+    assert_ne!(grace, next, "a concurrent tab inside grace gets its own token");
+
+    let grace_seconds = kyomi_core::constants::get().jwt.refresh_token_grace_period_seconds;
+    let outside_grace = chrono::Utc::now() - chrono::Duration::seconds(grace_seconds + 60);
+    kyomi_core::db_execute!(
+        &ctx.db, "UPDATE refresh_tokens SET replaced_at = $1 WHERE token_id = $2",
+        outside_grace, &future_id
+    ).unwrap();
+    ctx.deny(&future).await;
+    ctx.deny(&next).await;
+    ctx.deny(&grace).await;
+    let (active_family,): (i64,) = kyomi_core::db_fetch_one!(
+        &ctx.db, (i64,),
+        "SELECT COUNT(*) FROM refresh_tokens WHERE family_id = (SELECT family_id FROM refresh_tokens WHERE token_id = $1) AND is_active = $2",
+        &future_id, true
+    ).unwrap();
+    assert_eq!(active_family, 0, "theft must revoke the whole family");
+
+    let (revoked, _) = ctx.token(chrono::Utc::now() + chrono::Duration::days(1)).await;
+    kyomi_auth::token_service::revoke_all_user_refresh_tokens(&ctx.db, &ctx.user_id)
+        .await.expect("revoke browser sessions");
+    ctx.deny(&revoked).await;
+    let (inactive, _) = ctx.token(chrono::Utc::now() + chrono::Duration::days(1)).await;
+    kyomi_core::db_execute!(&ctx.db, "UPDATE users SET active = $1 WHERE user_id = $2", false, &ctx.user_id)
+        .unwrap();
+    ctx.deny(&inactive).await;
+    kyomi_core::db_execute!(&ctx.db, "DELETE FROM refresh_tokens WHERE user_id = $1", &ctx.user_id)
+        .unwrap();
+    kyomi_core::db_execute!(&ctx.db, "DELETE FROM users WHERE user_id = $1", &ctx.user_id)
+        .unwrap();
+}
+
+#[tokio::test]
+async fn sqlite_browser_refresh_rejects_expiry_and_preserves_rotation_security() {
+    browser_expiry_contract(kyomi_core::DbPool::connect("sqlite::memory:").await.unwrap()).await;
+}
+
+#[tokio::test]
+async fn postgres_browser_refresh_rejects_expiry_and_preserves_rotation_security() {
+    let db = kyomi_core::test_db::connect_test_pool().await
+        .expect("worktree Postgres contract database must be available");
+    assert!(db.is_postgres(), "Postgres contract must exercise Postgres");
+    browser_expiry_contract(db).await;
 }
