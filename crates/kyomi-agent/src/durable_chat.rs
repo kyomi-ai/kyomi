@@ -544,6 +544,16 @@ mod tests {
         let DbPool::Sqlite(pool) = &db else {
             panic!("SQLite fixture");
         };
+        // claim() returns its connection asynchronously. Wait for that return
+        // before observing the heartbeat's idle-to-busy transition, otherwise
+        // the executor can mistake fixture cleanup for an in-flight renewal.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while pool.num_idle() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("claim connection returned before heartbeat observation");
         let execution = async {
             tokio::time::timeout(Duration::from_secs(2), async {
                 // The executor completes precisely while renewal owns the sole
