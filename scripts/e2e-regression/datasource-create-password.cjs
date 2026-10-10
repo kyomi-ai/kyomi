@@ -154,16 +154,20 @@ async function selectByLabel(page, labelText, optionText) {
 
   try {
     // ── Login ──────────────────────────────────────────────────────────
-    await page.goto(`${BASE}/login`, { waitUntil: 'networkidle', timeout: 30000 });
+    await page.goto(`${BASE}/login`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    // SSR inputs exist before WASM attaches listeners; wait before filling them.
+    await page.locator('body:not([data-ssr]) input[type="email"]').waitFor({ timeout: 120000 });
     await page.fill('input[type="email"]', ADMIN_EMAIL, { timeout: 10000 });
     await page.fill('input[type="password"]', ADMIN_PASSWORD, { timeout: 10000 });
-    await page.click('button[type="submit"]', { timeout: 10000 });
-    await page.waitForURL(u => !u.toString().includes('/login'), { timeout: 20000 });
+    await Promise.all([
+      page.waitForURL(u => !u.toString().includes('/login'), { waitUntil: 'domcontentloaded', timeout: 20000 }),
+      page.click('button[type="submit"]', { timeout: 10000 }),
+    ]);
     check('login as admin', true);
 
     // ── Open create modal ─────────────────────────────────────────────
-    await page.goto(`${BASE}/settings/datasources`, { waitUntil: 'networkidle', timeout: 30000 });
-    await page.waitForTimeout(3000);
+    await page.goto(`${BASE}/settings/datasources`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.getByRole('button', { name: 'Add Datasource', exact: true }).waitFor({ timeout: 120000 });
 
     await page.locator('button:has-text("Add Datasource")').first().click({ timeout: 10000 });
     await page.waitForTimeout(1500);
@@ -277,8 +281,8 @@ async function selectByLabel(page, labelText, optionText) {
 
       if (createdSuccessfully) {
         // ── Queryable: run a real query against it from the SQL Editor ──────
-        await page.goto(`${BASE}/sql-editor`, { waitUntil: 'networkidle', timeout: 30000 });
-        await page.waitForTimeout(5000);
+        await page.goto(`${BASE}/sql-editor`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await page.locator('div[class*="w-[140px]"] button[aria-haspopup="listbox"]').first().waitFor({ timeout: 120000 });
 
         // Datasource selector — the <Select> in the header, scoped by its
         // known fixed-width wrapper (no visible <label> next to it).
@@ -332,8 +336,8 @@ async function selectByLabel(page, labelText, optionText) {
     // ── Cleanup: delete the datasource we created, so re-runs don't pollute ──
     if (createdSuccessfully) {
       try {
-        await page.goto(`${BASE}/settings/datasources`, { waitUntil: 'networkidle', timeout: 30000 });
-        await page.waitForTimeout(3000);
+        await page.goto(`${BASE}/settings/datasources`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await page.locator('span.font-medium.truncate', { hasText: dsName }).first().waitFor({ timeout: 120000 });
 
         const nameSpan = page.locator('span.font-medium.truncate', { hasText: dsName }).first();
         const row = nameSpan.locator('xpath=ancestor::div[contains(@class,"hover:bg-muted")][1]');
