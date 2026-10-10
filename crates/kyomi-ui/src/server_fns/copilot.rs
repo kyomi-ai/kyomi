@@ -70,7 +70,7 @@ pub struct DashboardCopilotReceipt {
     pub created_at: String,
 }
 
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn list_dashboard_copilot_receipts(
     dashboard_id: String,
 ) -> Result<Vec<DashboardCopilotReceipt>, ServerFnError> {
@@ -101,7 +101,7 @@ pub async fn list_dashboard_copilot_receipts(
     }).collect())
 }
 
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_dashboard_copilot_access(
     dashboard_id: String,
 ) -> Result<DashboardCopilotAccess, ServerFnError> {
@@ -125,7 +125,7 @@ pub async fn get_dashboard_copilot_access(
 /// Restore the exact snapshot named by a persisted copilot write receipt.
 /// The service rejects stale receipts atomically, including title-only
 /// intervening edits.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn undo_copilot_change(receipt_id: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
     kyomi_auth::dashboard_service::undo_copilot_change_and_refresh(
