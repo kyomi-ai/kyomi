@@ -95,11 +95,24 @@ mod test_support;
 #[cfg(test)]
 mod token_sliding_expiry_tests;
 
+/// Select Ring as the fallback TLS provider, preserving an embedding application's choice.
+///
+/// Call before constructing clients that use Rustls's implicit provider builder.
+/// Rustls 0.23.45 `CryptoProvider::install_default` installs atomically and cannot
+/// replace an existing provider; a concurrent install losing the race is harmless.
+/// Ring matches our existing Reqwest, SQLx and Stripe backend selection.
+pub fn initialize_tls_provider() {
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+}
+
 /// Build a shared HTTP client with a proper User-Agent header.
 ///
 /// Some APIs (notably Snowflake) reject requests without a User-Agent.
 /// All HTTP clients in this crate should use this function.
 pub fn http_client() -> kyomi_core::Result<reqwest::Client> {
+    initialize_tls_provider();
     reqwest::Client::builder()
         .user_agent("Kyomi/1.0")
         .build()
