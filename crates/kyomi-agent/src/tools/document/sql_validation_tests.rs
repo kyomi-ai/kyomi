@@ -13,7 +13,7 @@ use crate::tools::knowledge::{EditDocumentTool, WriteDocumentTool};
 use super::DocType;
 
 pub(crate) fn chartml(sql: &str) -> String {
-    format!("```chartml\ndata:\n  datasource: sales\n  query: {sql}\nvisualize:\n  type: bar\n```")
+    format!("```chartml\ntype: source\nversion: 1\nname: sales_data\ndatasource: sales\nquery: {sql}\n```")
 }
 
 /// Exercise the production Connect provider and registry against a real
@@ -147,8 +147,10 @@ async fn targeted_edit_validates_full_result_for_both_doc_types() {
         let title = format!("Targeted {doc_type:?}");
         let content = chartml("SELECT 1");
         let id = kyomi_auth::dashboard_service::create_dashboard(
-            &ctx.db, "user-a", "ws-1", &title, &content, doc_type, None,
+            &ctx.db, "user-a", "ws-1", &title, &content, DocType::Knowledge, None,
         ).await.expect("seed");
+        // Model a stored document without re-running the service write gate.
+        kyomi_core::db_execute!(&ctx.db, "UPDATE dashboards SET doc_type = $1 WHERE dashboard_id = $2", doc_type.as_str(), &id).expect("seed document type");
         let result = EditDocumentTool.execute(serde_json::json!({
             "path": title, "old_text": "SELECT 1", "new_text": "SELECT FROM",
         }), &ctx).await.expect("retry result");
@@ -165,8 +167,10 @@ async fn dashboard_updates_and_title_only_writes_share_sql_retry() {
     let (calls, handler, connection_id) = attach_sql_datasource(&mut ctx).await;
     let content = chartml("SELECT FROM");
     let id = kyomi_auth::dashboard_service::create_dashboard(
-        &ctx.db, "user-a", "ws-1", "Existing", &content, DocType::Dashboard, None,
+        &ctx.db, "user-a", "ws-1", "Existing", &content, DocType::Knowledge, None,
     ).await.expect("seed");
+    // Legacy stored dashboard with invalid SQL: service writes now reject it.
+    kyomi_core::db_execute!(&ctx.db, "UPDATE dashboards SET doc_type = $1 WHERE dashboard_id = $2", DocType::Dashboard.as_str(), &id).expect("seed legacy dashboard");
     for args in [
         serde_json::json!({"dashboard_id": id, "content": content}),
         serde_json::json!({"dashboard_id": id, "title": "Renamed"}),

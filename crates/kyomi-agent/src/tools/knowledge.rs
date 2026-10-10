@@ -1790,7 +1790,7 @@ mod tests {
     async fn edit_knowledge_file_leaves_untouched_chartml_block_byte_identical() {
         let db = test_pool().await;
         seed_user_and_workspace(&db).await;
-        let chartml_block = "```chartml\ntype: bar\ndata:\n  datasource: sales\n  query: |\n    SELECT 1\n```";
+        let chartml_block = "```chartml\ntype: source\nversion: 1\nname: sales_data\ndatasource: sales\nquery: |\n  SELECT 1\n```";
         let content = format!(
             "# Regional Notes\n\nThe west region underperformed this quarter.\n\n{chartml_block}\n\nEnd of notes."
         );
