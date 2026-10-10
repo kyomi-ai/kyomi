@@ -249,6 +249,46 @@ impl CatalogIndexingService {
             );
         }
 
+        // `connection_config` came straight off the SELECT above and may
+        // hold encrypted `COMMON_SENSITIVE` fields — `shared_password`,
+        // `ssh_private_key`, `ssh_passphrase`, and (KYO-786)
+        // `oauth_client_secret`/`service_account_json`. Decrypt once here so
+        // every `CatalogIndexer` impl gets plaintext via
+        // `IndexerContext.connection_config`, rather than each one needing
+        // its own decrypt call. This is what makes `index_catalog_sql`'s own
+        // decrypt (`traits.rs`) redundant — removed there — and incidentally
+        // fixes `resolve_indexing_credentials`'s pass-through of
+        // `ctx.connection_config` to `resolve_shared_credentials`, which read
+        // the same raw ciphertext.
+        //
+        // A decrypt failure is reported as a `"failed"` status with an
+        // actionable reason before this indexer ever starts, mirroring how
+        // `BigQueryIndexer::record_failure` (KYO-449) skips straight to
+        // `"failed"` on its own early validation failures rather than first
+        // writing `"running"`. Nothing before this point has done any work
+        // worth showing as `"running"`, so this keeps every indexer's
+        // early-failure behavior consistent rather than diverging by type.
+        let connection_config = match kyomi_auth::credential_service::decrypt_connection_config_secrets(
+            &connection_config,
+            &encryption_key,
+        ) {
+            Ok(config) => config,
+            Err(e) => {
+                let msg = format!("Failed to decrypt connection_config: {e}");
+                let _ = kyomi_auth::catalog::helpers::update_datasource_status(
+                    db,
+                    workspace_id,
+                    datasource_config_id,
+                    "failed",
+                    None,
+                    Some(&msg),
+                    &[],
+                )
+                .await;
+                return CatalogIndexResult::error(&msg);
+            }
+        };
+
         let ctx = IndexerContext {
             workspace_id: workspace_id.to_string(),
             datasource_config_id: datasource_config_id.to_string(),
@@ -646,5 +686,89 @@ mod tests {
             report, None,
             "a clean run with nothing vanishing must not be reported as a failure"
         );
+    }
+
+    // -- KYO-786: decrypt happens once, at IndexerContext construction -------
+
+    /// A `connection_config` `COMMON_SENSITIVE` field that looks like Kyomi
+    /// ciphertext but was encrypted with a different key must fail to
+    /// decrypt — proving `index_datasource` actually calls
+    /// `decrypt_connection_config_secrets` before dispatching to an indexer,
+    /// rather than silently handing ciphertext through.
+    #[tokio::test]
+    async fn index_datasource_reports_failed_status_when_connection_config_cannot_be_decrypted() {
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+
+        let sq = match &db {
+            DbPool::Sqlite(pool) => pool,
+            DbPool::Postgres(_) => unreachable!("test pool is always sqlite"),
+        };
+
+        // Ciphertext encrypted with a key other than the one passed to
+        // `index_datasource` below — `looks_encrypted` recognizes the
+        // format, so this is a guaranteed decrypt failure, not the
+        // legacy-plaintext passthrough.
+        let wrong_key = [7u8; 32];
+        let bogus_ciphertext =
+            kyomi_auth::encryption::encrypt("irrelevant", &wrong_key).expect("encrypt fixture");
+        let connection_config =
+            serde_json::json!({ "shared_password": bogus_ciphertext }).to_string();
+
+        sqlx::query(
+            "INSERT INTO datasource_configs \
+                 (id, workspace_id, name, datasource_type, slug, connection_config) \
+             VALUES ('ds-decrypt-fail', 'ws-1', 'Test DS', 'postgres', 'test-ds-decrypt-fail', $1)",
+        )
+        .bind(connection_config)
+        .execute(sq)
+        .await
+        .expect("seed datasource_configs");
+
+        let lazy_embedding = crate::test_support::loaded_embedding();
+        let embed = lazy_embedding
+            .wait_ready()
+            .await
+            .expect("embedding model is already loaded by loaded_embedding()");
+
+        let result = CatalogIndexingService::index_datasource(IndexDatasourceParams {
+            db: &db,
+            encryption_key: Arc::new([0u8; 32]),
+            embedding: embed,
+            workspace_id: "ws-1",
+            datasource_config_id: "ds-decrypt-fail",
+            user_email: None,
+            credentials: None,
+            max_tables_per_dataset: None,
+            force: false,
+            connect_registry: None,
+        })
+        .await;
+
+        assert_eq!(
+            result.status, "error",
+            "a decrypt failure must be reported as an error result, not silently swallowed"
+        );
+        let errors = result.errors.expect("error result must carry a reason");
+        assert!(
+            errors.iter().any(|e| e.contains("Failed to decrypt connection_config")),
+            "errors must name the decrypt failure, got: {errors:?}"
+        );
+
+        // The datasource's own persisted status must be "failed" — the
+        // observable status behaviour KYO-786 requires stays correct even
+        // though the decrypt now runs before any indexer-specific status
+        // write (e.g. the generic SQL path's old "running" write).
+        #[derive(sqlx::FromRow)]
+        struct StatusRow {
+            catalog_refresh_status: Option<String>,
+        }
+        let row: StatusRow = sqlx::query_as(
+            "SELECT catalog_refresh_status FROM datasource_configs WHERE id = 'ds-decrypt-fail'",
+        )
+        .fetch_one(sq)
+        .await
+        .expect("fetch status row");
+        assert_eq!(row.catalog_refresh_status.as_deref(), Some("failed"));
     }
 }

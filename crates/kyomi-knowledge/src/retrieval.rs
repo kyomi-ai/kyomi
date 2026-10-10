@@ -95,7 +95,8 @@ pub async fn retrieve(
     // 1. Embed the query with BGE prefix
     let embed_start = std::time::Instant::now();
     let query_vec = embed
-        .embed_query(query)
+        .embed_query_offloaded(query)
+        .await
         .map_err(|e| kyomi_core::Error::Internal(format!("embedding failed: {e}")))?;
     tracing::debug!(elapsed_ms = embed_start.elapsed().as_millis(), "Query embedding");
 

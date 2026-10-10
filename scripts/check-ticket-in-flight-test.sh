@@ -70,6 +70,18 @@ cat >"$STUB_BIN/gh" <<'STUB'
 # whatever the test harness staged in GH_STDOUT_FILE / GH_STDERR_FILE /
 # GH_EXIT_FILE. Ships only inside this test's own $tmpdir/bin, first on
 # PATH for the duration of the run — never touches the real `gh` or network.
+if [ -n "${GH_REPO_FIXTURES:-}" ]; then
+    case "$3" in
+        repos/kyomi-ai/kyomi/pulls* | repos/kyomi-ai/kyomi-connect/pulls* | repos/kyomi-ai/kyomi-private/pulls* | repos/chartml/chartml/pulls* | repos/kyomi-ai/kode/pulls*) ;;
+        *) echo "Unqualified or unexpected endpoint: $3" >&2; exit 1 ;;
+    esac
+    repo="${3#repos/}"
+    repo="${repo#*/}"
+    repo="${repo%%/*}"
+    cat "$GH_REPO_FIXTURES/$repo.out"
+    cat "$GH_REPO_FIXTURES/$repo.err" >&2
+    exit "$(cat "$GH_REPO_FIXTURES/$repo.exit")"
+fi
 cat "$GH_STDOUT_FILE"
 cat "$GH_STDERR_FILE" >&2
 exit "$(cat "$GH_EXIT_FILE")"
@@ -90,13 +102,18 @@ PRE_RESTART_TS='2026-05-08T12:00:00Z'
 POST_RESTART_TS='2026-08-21T09:00:00Z'
 
 pr_row() {
-    # pr_row <number> <state> <createdAt> <headRefName> — one PR row in the
-    # exact 4-column TSV shape check-ticket-in-flight.sh asks `gh` to produce
-    # via `--jq '.[] | [.number, .state, .createdAt, .headRefName] | @tsv'`.
-    # A helper rather than a `$'...\t...'` literal at each call site because
-    # createdAt is usually one of the two named constants above, and `$'...'`
-    # does not interpolate.
-    printf '%s\t%s\t%s\t%s' "$1" "$2" "$3" "$4"
+    # pr_row <number> <state> <createdAt> <headRefName> [reworkLabelFlag] —
+    # one PR row in the exact 5-column TSV shape check-ticket-in-flight.sh
+    # asks `gh` to produce. A helper rather than a `$'...\t...'` literal at
+    # each call site because createdAt is usually one of the two named
+    # constants above, and `$'...'` does not interpolate.
+    #
+    # reworkLabelFlag (KYO-778) is the 5th column added when the script
+    # started asking `gh` whether the PR carries `rework-requested`: "1" if
+    # it does, "0" otherwise. It defaults to "0" so every call site written
+    # before KYO-778 keeps meaning "not labelled" without being touched —
+    # only the KYO-778 test block below passes it explicitly.
+    printf '%s\t%s\t%s\t%s\t%s' "$1" "$2" "$3" "$4" "${5:-0}"
 }
 
 gh_ok_empty() { : >"$GH_STDOUT_FILE"; : >"$GH_STDERR_FILE"; echo 0 >"$GH_EXIT_FILE"; }
@@ -119,7 +136,7 @@ gh_ok_prs_n() {
     shift
     : >"$GH_STDOUT_FILE"
     for ((i = 1; i <= count; i++)); do
-        printf '%d\tMERGED\t%s\tjason/kyo-90%d-filler\n' "$((9000 + i))" "$POST_RESTART_TS" "$i" >>"$GH_STDOUT_FILE"
+        printf '%d\tMERGED\t%s\tjason/kyo-90%d-filler\t0\n' "$((9000 + i))" "$POST_RESTART_TS" "$i" >>"$GH_STDOUT_FILE"
     done
     if [ "$#" -gt 0 ]; then
         printf '%s\n' "$@" >>"$GH_STDOUT_FILE"
@@ -1041,7 +1058,7 @@ assert_not_contains "does not classify it as pre-restart" "$RECYCLED_HEADING"
 gh_ok_empty
 echo
 
-# ─── Test 39: a PR row that cannot be split into four fields exits 3 ────────
+# ─── Test 39: a PR row that cannot be split into five fields exits 3 ────────
 # The reason check 2 stopped splitting rows with `IFS=$'\t' read` (KYO-607):
 # tab is an IFS *whitespace* character, so that form collapses `a\tb\t\td` to
 # three fields and silently moved the branch name into the createdAt slot,
@@ -1050,7 +1067,8 @@ echo
 # 3 like any other incomplete check rather than being skipped.
 #
 # Test 38's empty-createdAt row is the one that used to hit this path by
-# accident; the rows here are short and long by construction. Both use a
+# accident; the rows here are short and long by construction (KYO-778 added a
+# 5th column, so "long" is now six fields rather than five). Both use a
 # BRANCH THAT MATCHES the ticket where a branch is present, so an
 # implementation that skipped the row would report CLEAR — the fail-open this
 # pins shut.
@@ -1065,15 +1083,326 @@ run_check "$t39/workerB" 299
 assert_exit "a three-field row is a check that could not be completed" 3
 assert_contains "says which row it could not read" "could not read row"
 
-gh_ok_prs "$(printf '42\tMERGED\t%s\tjason/kyo-299-extra\tstray' "$POST_RESTART_TS")"
+gh_ok_prs "$(printf '42\tMERGED\t%s\tjason/kyo-299-extra\tstray\t0' "$POST_RESTART_TS")"
 run_check "$t39/workerB" 299
-assert_exit "a five-field row is a check that could not be completed" 3
+assert_exit "a six-field row is a check that could not be completed" 3
 
 gh_ok_prs "$(pr_row 43 MERGED "$POST_RESTART_TS" '')"
 run_check "$t39/workerB" 299
 assert_exit "a row with an empty headRefName is a check that could not be completed" 3
 gh_ok_empty
 echo
+
+# ─── Tests 40-46: rework targets (KYO-778) ───────────────────────────────────
+#
+# /merge-sweeper deliberately leaves a rejected PR OPEN when it routes a
+# ticket back for rework, so that PR (and its still-live remote head branch)
+# was previously an unconditional in-flight hit on every rework ticket, by
+# construction. The `rework-requested` PR label is the fix: /merge-sweeper's
+# Step 6 applies it when it routes a PR back, and the rework worker removes
+# it — removing the label IS the claim — when it picks the ticket back up.
+#
+# Fixtures use ticket 778 so they read as the case they were written for.
+REWORK_HEADING="REWORK TARGET(S)"
+
+# ─── Test 40: THE KYO-778 ACCEPTANCE CRITERION ──────────────────────────────
+# An open, labelled PR plus its own remote head branch, and nothing else,
+# must together be CLEAR — the label reclassifies both, and neither is a HIT.
+echo "-- Test 40: open PR with rework-requested + its remote head branch alone is CLEAR (KYO-778 acceptance criterion)"
+t40="$tmpdir/t40"
+mkdir -p "$t40"
+bare40="$(new_bare_remote "$t40/remote.git")"
+seed_main "$bare40"
+clone_repo "$bare40" "$t40/helper"
+git -C "$t40/helper" push -q origin main:refs/heads/jason/kyo-778-guard
+clone_repo "$bare40" "$t40/workerB"
+gh_ok_prs "$(pr_row 600 OPEN "$POST_RESTART_TS" jason/kyo-778-guard 1)"
+run_check "$t40/workerB" 778
+assert_exit "a labelled open PR and its own head branch alone are CLEAR" 0
+assert_contains "under the rework-target heading" "$REWORK_HEADING"
+assert_contains "names the PR" "PR #600 (OPEN) branch jason/kyo-778-guard"
+assert_contains "names the remote branch as a rework target too" "remote branch origin/jason/kyo-778-guard — head of the rework-target PR above"
+assert_contains "gives the label-removal claim instruction" "gh pr edit <N> --remove-label rework-requested"
+echo
+
+# ─── Test 41: open PR WITHOUT the label — unchanged, still IN FLIGHT ───────
+# The durability guard from KYO-471 must be completely unaffected by the
+# label's mere existence as a feature: no label means no reclassification.
+echo "-- Test 41: open PR without the label is IN FLIGHT, unchanged"
+t41="$tmpdir/t41"
+mkdir -p "$t41"
+bare41="$(new_bare_remote "$t41/remote.git")"
+seed_main "$bare41"
+clone_repo "$bare41" "$t41/helper"
+git -C "$t41/helper" push -q origin main:refs/heads/jason/kyo-778-guard
+clone_repo "$bare41" "$t41/workerB"
+gh_ok_prs "$(pr_row 601 OPEN "$POST_RESTART_TS" jason/kyo-778-guard 0)"
+run_check "$t41/workerB" 778
+assert_exit "an open PR without the label is IN FLIGHT" 1
+assert_not_contains "not classified as a rework target" "$REWORK_HEADING"
+assert_contains "counted as an ordinary hit" "  - PR #601 (OPEN) branch jason/kyo-778-guard"
+echo
+
+# ─── Test 42: labelled PR, plus a DIFFERENT remote branch for the ticket ───
+# The label only reclassifies the PR's own head branch. A second, genuinely
+# different branch for the same ticket is still a real hit, and the rework
+# target is still printed alongside it — a PR is never made invisible.
+echo "-- Test 42: labelled PR plus a different remote branch is IN FLIGHT, rework target still printed"
+t42="$tmpdir/t42"
+mkdir -p "$t42"
+bare42="$(new_bare_remote "$t42/remote.git")"
+seed_main "$bare42"
+clone_repo "$bare42" "$t42/helper"
+git -C "$t42/helper" push -q origin main:refs/heads/jason/kyo-778-guard
+git -C "$t42/helper" push -q origin main:refs/heads/jason/kyo-778-other
+clone_repo "$bare42" "$t42/workerB"
+gh_ok_prs "$(pr_row 602 OPEN "$POST_RESTART_TS" jason/kyo-778-guard 1)"
+run_check "$t42/workerB" 778
+assert_exit "a different remote branch for the same ticket still blocks" 1
+assert_contains "names the other branch as an ordinary hit" "remote branch: origin/jason/kyo-778-other"
+assert_not_contains "does not count the PR's own branch as a hit" "remote branch: origin/jason/kyo-778-guard"
+assert_contains "still reports the rework target" "$REWORK_HEADING"
+assert_contains "still names the labelled PR" "PR #602 (OPEN) branch jason/kyo-778-guard"
+echo
+
+# ─── Test 43: labelled PR, plus LOCAL evidence of the same name ────────────
+# Local worktrees/branches are never suppressed by a remote label, even when
+# the name matches exactly — a remote label describes what /merge-sweeper
+# saw, not what is physically on this machine.
+echo "-- Test 43: labelled PR does not suppress local worktree/branch evidence"
+t43="$tmpdir/t43"
+mkdir -p "$t43"
+bare43="$(new_bare_remote "$t43/remote.git")"
+seed_main "$bare43"
+clone_repo "$bare43" "$t43/workerB"
+git -C "$t43/workerB" worktree add -q -b jason/kyo-778-guard "$t43/wt-live"
+gh_ok_prs "$(pr_row 603 OPEN "$POST_RESTART_TS" jason/kyo-778-guard 1)"
+run_check "$t43/workerB" 778
+assert_exit "a same-named local worktree still blocks despite the label" 1
+assert_contains "names the local worktree as an ordinary hit" "local worktree at $t43/wt-live (branch jason/kyo-778-guard)"
+assert_contains "still reports the rework target" "$REWORK_HEADING"
+echo
+
+# ─── Test 44: closed/merged PR with the label — unchanged ─────────────────
+# A rework target is by definition still open. A closed or merged PR that
+# happens to carry a stale label is handled exactly as if it had none.
+echo "-- Test 44: closed/merged PR with the label is handled exactly as without it"
+t44="$tmpdir/t44"
+mkdir -p "$t44"
+bare44="$(new_bare_remote "$t44/remote.git")"
+seed_main "$bare44"
+clone_repo "$bare44" "$t44/workerB"
+gh_ok_prs "$(pr_row 604 MERGED "$POST_RESTART_TS" jason/kyo-778-merged 1)"
+run_check "$t44/workerB" 778
+CHECK_OUTPUT_LABELLED="$CHECK_OUTPUT"
+CHECK_STATUS_LABELLED="$CHECK_STATUS"
+gh_ok_prs "$(pr_row 604 MERGED "$POST_RESTART_TS" jason/kyo-778-merged 0)"
+run_check "$t44/workerB" 778
+assert_exit "a merged PR with the label still blocks" 1
+assert_exit "a merged PR without the label also blocks (sanity)" "$CHECK_STATUS_LABELLED"
+assert_not_contains "a merged, labelled PR is not a rework target" "$REWORK_HEADING"
+if [ "$CHECK_OUTPUT_LABELLED" = "$CHECK_OUTPUT" ]; then
+    printf "  \xe2\x9c\x93 %s\n" "output is byte-identical whether or not a closed/merged PR carries the label"
+    PASS=$((PASS + 1))
+else
+    printf "  \xe2\x9c\x97 %s\n" "output differs between a labelled and unlabelled merged PR"
+    printf '    labelled:\n%s\n    unlabelled:\n%s\n' "$CHECK_OUTPUT_LABELLED" "$CHECK_OUTPUT" | sed 's/^/    | /'
+    FAIL=$((FAIL + 1))
+fi
+echo
+
+# ─── Test 45: removing the label IS the claim — simulated double pickup ───
+# The KYO-778 analogue of Test 2: a rework worker claims the ticket by
+# removing the label from the SAME PR, and a second check right after must
+# see an ordinary open PR with no label and report IN FLIGHT — exactly the
+# double-pickup guard this whole script exists for.
+echo "-- Test 45: removing the label is the claim; a second check afterward is IN FLIGHT"
+t45="$tmpdir/t45"
+mkdir -p "$t45"
+bare45="$(new_bare_remote "$t45/remote.git")"
+seed_main "$bare45"
+clone_repo "$bare45" "$t45/helper"
+git -C "$t45/helper" push -q origin main:refs/heads/jason/kyo-778-guard
+clone_repo "$bare45" "$t45/workerB"
+gh_ok_prs "$(pr_row 605 OPEN "$POST_RESTART_TS" jason/kyo-778-guard 1)"
+run_check "$t45/workerB" 778
+assert_exit "before the label is removed, the rework target is CLEAR to claim" 0
+
+# The rework worker claims the ticket by removing the label from PR #605.
+gh_ok_prs "$(pr_row 605 OPEN "$POST_RESTART_TS" jason/kyo-778-guard 0)"
+run_check "$t45/workerB" 778
+assert_exit "after the label is removed, a second check sees an ordinary open PR" 1
+assert_contains "counts it as a hit now" "  - PR #605 (OPEN) branch jason/kyo-778-guard"
+echo
+
+# ─── Test 46: a malformed rework-label field fails CLOSED ─────────────────
+# The asymmetry from FAIL CLOSED above applies to the new 5th column too: a
+# label flag that is not exactly "0" or "1" must never be read as "not
+# labelled" (which would fail OPEN by re-admitting a genuine rework target
+# as an ordinary hit and silently hide a problem in the fetch behind a
+# plausible-looking "0"). It is a row the check could not read.
+echo "-- Test 46: a malformed rework-label field is a check that could not be completed"
+t46="$tmpdir/t46"
+mkdir -p "$t46"
+bare46="$(new_bare_remote "$t46/remote.git")"
+seed_main "$bare46"
+clone_repo "$bare46" "$t46/workerB"
+gh_ok_prs "$(pr_row 606 OPEN "$POST_RESTART_TS" jason/kyo-778-guard yes)"
+run_check "$t46/workerB" 778
+assert_exit "a label flag that is not 0 or 1 is a check that could not be completed" 3
+assert_contains "names the unrecognised flag" "unrecognised rework-label flag 'yes'"
+gh_ok_empty
+echo
+
+# KYO-910: real independent clones and remotes; only GitHub is synthetic.
+# URL rewrites keep actual git ls-remote/push local while origins carry the
+# identities the production sweep must validate and route explicitly.
+echo "-- Sibling repository sweep (KYO-910)"
+export KYOMI_REPOS_ROOT="$tmpdir/sibling-root"
+export GH_REPO_FIXTURES="$tmpdir/sibling-gh"
+mkdir -p "$KYOMI_REPOS_ROOT" "$GH_REPO_FIXTURES"
+for repo in kyomi kyomi-connect kyomi-private chartml kode; do
+    bare="$(new_bare_remote "$tmpdir/$repo.git")"
+    seed_main "$bare"
+    clone_repo "$bare" "$KYOMI_REPOS_ROOT/$repo"
+    owner=kyomi-ai
+    [ "$repo" != chartml ] || owner=chartml
+    git -C "$KYOMI_REPOS_ROOT/$repo" config "url.$bare.insteadOf" "https://github.com/$owner/$repo.git"
+    git -C "$KYOMI_REPOS_ROOT/$repo" remote set-url origin "https://github.com/$owner/$repo.git"
+    : >"$GH_REPO_FIXTURES/$repo.out"
+    : >"$GH_REPO_FIXTURES/$repo.err"
+    echo 0 >"$GH_REPO_FIXTURES/$repo.exit"
+done
+primary="$KYOMI_REPOS_ROOT/kyomi"
+sibling="$KYOMI_REPOS_ROOT/kyomi-connect"
+branch="jason/kyo-910-sibling"
+run_check "$primary" 910
+assert_exit "all declared repositories clean" 0
+pr_row 21 OPEN "$POST_RESTART_TS" "$branch" >"$GH_REPO_FIXTURES/kyomi-connect.out"
+run_check "$primary" 910
+assert_exit "sibling PR reproduces false CLEAR" 1
+assert_contains "names sibling repository" "Repository: kyomi-ai/kyomi-connect"
+assert_contains "reports sibling PR" "PR #21 (OPEN) branch $branch"
+run_check "$primary" 910 --self "$branch" --ignore-branch "$branch"
+assert_exit "self and ignore names cannot hide sibling PR" 1
+: >"$GH_REPO_FIXTURES/kyomi-connect.out"
+git -C "$sibling" branch "$branch"
+run_check "$primary" 910
+assert_exit "sibling local branch" 1
+git -C "$sibling" worktree add -q "$tmpdir/sibling-worktree" "$branch"
+run_check "$primary" 910
+assert_exit "sibling local worktree" 1
+assert_contains "reports sibling worktree" "local worktree at $tmpdir/sibling-worktree"
+# Even the sibling's current branch is somebody else's evidence.
+git -C "$sibling" worktree remove "$tmpdir/sibling-worktree"
+git -C "$sibling" checkout -q "$branch"
+run_check "$primary" 910
+assert_exit "sibling current branch is not caller self" 1
+git -C "$sibling" push -q origin "$branch"
+git -C "$sibling" checkout -q main
+git -C "$sibling" branch -D "$branch" >/dev/null
+run_check "$primary" 910
+assert_exit "sibling pushed branch" 1
+assert_contains "reports remote evidence" "remote branch: origin/$branch"
+# A recycled PR in one repo cannot retire another repo's identical branch.
+pr_row 99 MERGED "$PRE_RESTART_TS" "$branch" >"$GH_REPO_FIXTURES/kyomi.out"
+run_check "$primary" 910
+assert_exit "recycled classification does not leak across identities" 1
+: >"$GH_REPO_FIXTURES/kyomi.out"
+pr_row 21 OPEN "$POST_RESTART_TS" "$branch" 1 >"$GH_REPO_FIXTURES/kyomi-connect.out"
+run_check "$primary" 910
+assert_exit "sibling rework target and remote retain existing rules" 0
+git -C "$sibling" branch "$branch"
+run_check "$primary" 910
+assert_exit "rework label cannot hide sibling local branch" 1
+git -C "$sibling" worktree add -q "$tmpdir/sibling-worktree" "$branch"
+printf 'Stranded KYO-910\n' >"$tmpdir/sibling-worktree/STRANDED.md"
+run_check "$primary" 910
+assert_exit "sibling tombstone suppresses only local evidence" 0
+assert_contains "preserved sibling work is visible" "worktree $tmpdir/sibling-worktree"
+: >"$GH_REPO_FIXTURES/kyomi-connect.out"
+run_check "$primary" 910
+assert_exit "local tombstone cannot suppress sibling remote" 1
+git -C "$sibling" push -q origin ":$branch"
+git -C "$sibling" worktree remove --force "$tmpdir/sibling-worktree"
+git -C "$sibling" branch -D "$branch" >/dev/null
+printf 'network error\n' >"$GH_REPO_FIXTURES/chartml.err"
+echo 1 >"$GH_REPO_FIXTURES/chartml.exit"
+run_check "$primary" 910
+assert_exit "sibling GitHub failure fails closed" 3
+assert_contains "failed repository is named" "Repository: chartml/chartml"
+echo 0 >"$GH_REPO_FIXTURES/chartml.exit"
+: >"$GH_REPO_FIXTURES/chartml.err"
+git -C "$sibling" config "url.$tmpdir/missing.git.insteadOf" "https://github.com/kyomi-ai/kyomi-connect.git"
+git -C "$sibling" config --unset "url.$tmpdir/kyomi-connect.git.insteadOf"
+run_check "$primary" 910
+assert_exit "unreachable sibling remote fails closed" 3
+git -C "$sibling" config --unset "url.$tmpdir/missing.git.insteadOf"
+git -C "$sibling" config "url.$tmpdir/kyomi-connect.git.insteadOf" "https://github.com/kyomi-ai/kyomi-connect.git"
+git -C "$sibling" remote set-url origin https://github.com/kyomi-ai/kode.git
+run_check "$primary" 910
+assert_exit "wrong repository in sibling directory fails closed" 3
+git -C "$sibling" remote set-url origin https://github.com/kyomi-ai/kyomi-connect.git
+mv "$KYOMI_REPOS_ROOT/kode" "$tmpdir/missing-kode"
+run_check "$primary" 910
+assert_exit "missing sibling checkout fails closed" 3
+mv "$tmpdir/missing-kode" "$KYOMI_REPOS_ROOT/kode"
+# Force failures of the local git reads. Process substitution used to hide
+# these exit statuses and could return CLEAR from incomplete local evidence.
+export TEST_REAL_GIT="$(command -v git)"
+export TEST_GIT_FAILURE_DIR="$sibling"
+cat >"$STUB_BIN/git" <<'GIT_STUB'
+#!/usr/bin/env bash
+if [ "$PWD" = "$TEST_GIT_FAILURE_DIR" ]; then
+    if [ "${TEST_GIT_FAILURE_KIND:-}" = worktree ] && [ "${1:-}" = worktree ] && [ "${2:-}" = list ]; then
+        echo "worktree read failed" >&2; exit 1
+    fi
+    if [ "${TEST_GIT_FAILURE_KIND:-}" = branch ] && [ "${1:-}" = branch ] && [ "${2:-}" = --list ]; then
+        echo "branch read failed" >&2; exit 1
+    fi
+fi
+exec "$TEST_REAL_GIT" "$@"
+GIT_STUB
+chmod +x "$STUB_BIN/git"
+export TEST_GIT_FAILURE_KIND=worktree
+run_check "$primary" 910
+assert_exit "failed sibling worktree listing fails closed" 3
+assert_contains "worktree failure is visible" "worktree read failed"
+export TEST_GIT_FAILURE_KIND=branch
+run_check "$primary" 910
+assert_exit "failed sibling branch listing fails closed" 3
+assert_contains "branch failure is visible" "branch read failed"
+rm "$STUB_BIN/git"
+unset TEST_REAL_GIT TEST_GIT_FAILURE_DIR TEST_GIT_FAILURE_KIND
+# Running from a linked /tmp tree must still resolve the declared root.
+git -C "$primary" worktree add -q -b jason/kyo-910-own "$tmpdir/invoking-worktree"
+run_check "$tmpdir/invoking-worktree" 910 --self jason/kyo-910-own
+assert_exit "linked invoking worktree keeps canonical sibling scope" 0
+# A separate invoking clone must not hide the canonical clone's current
+# branch merely because both clones have the same repository identity.
+clone_repo "$tmpdir/kyomi.git" "$tmpdir/separate-invoking"
+git -C "$tmpdir/separate-invoking" config "url.$tmpdir/kyomi.git.insteadOf" https://github.com/kyomi-ai/kyomi.git
+git -C "$tmpdir/separate-invoking" remote set-url origin https://github.com/kyomi-ai/kyomi.git
+git -C "$primary" checkout -q -b jason/kyo-910-other-worker
+run_check "$tmpdir/separate-invoking" 910
+assert_exit "canonical current branch is evidence from a separate clone" 1
+# Failures have precedence even if another repository already supplied hits.
+echo 1 >"$GH_REPO_FIXTURES/chartml.exit"
+run_check "$tmpdir/separate-invoking" 910
+assert_exit "sibling failure dominates confirmed work elsewhere" 3
+echo 0 >"$GH_REPO_FIXTURES/chartml.exit"
+# Real Git reads remain local for each supported SSH transport shape.
+# Build authorities from their user and host components, as the parser does.
+ssh_user=git
+ssh_host=github.com
+for ssh_origin in "$ssh_user@$ssh_host:kyomi-ai/kyomi.git" "ssh://$ssh_user@$ssh_host/kyomi-ai/kyomi.git"; do
+    git -C "$tmpdir/separate-invoking" config "url.$tmpdir/kyomi.git.insteadOf" "$ssh_origin"
+    git -C "$tmpdir/separate-invoking" remote set-url origin "$ssh_origin"
+    run_check "$tmpdir/separate-invoking" 910
+    assert_exit "SSH origin retains full sibling scope: $ssh_origin" 1
+    assert_contains "SSH authority resolves project identity" "Scope: kyomi-ai/kyomi"
+done
+unset KYOMI_REPOS_ROOT GH_REPO_FIXTURES
 
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

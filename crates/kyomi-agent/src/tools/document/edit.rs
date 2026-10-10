@@ -127,6 +127,7 @@ impl DocumentEditTool {
 
         // Update via dashboard_service with CAS
         let outcome = apply_update(ApplyUpdateParams {
+            validation_context: Some(&ctx.query_context()),
             db: &ctx.db,
             dashboard_id: &doc.dashboard_id,
             workspace_id: &ctx.workspace_id,

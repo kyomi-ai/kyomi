@@ -3,8 +3,8 @@
 //! Unified chat engine — reactive state container for all chat UIs.
 //!
 //! `ChatEngine` is NOT a Leptos component. It's a struct with reactive signals
-//! and methods that consumers create in their component bodies. It owns all chat
-//! state and WebSocket logic so that both `CopilotChat` (copilot sidebars) and
+//! and methods that consumers create in their component bodies. It projects a
+//! retained ChatRunStore session so that both `CopilotChat` (copilot sidebars) and
 //! `chat_page.rs` (main chat page) can use the same engine with different configs.
 //!
 //! ## Session modes
@@ -26,11 +26,11 @@
 
 use leptos::prelude::*;
 
+use super::ChatState;
+use super::chat_run_store::{ChatRun, ChatRunStore};
 #[cfg(target_arch = "wasm32")]
 use super::websocket_client::WebSocketContext;
 use super::{ChatStateMachine, ThinkingManager};
-#[cfg(target_arch = "wasm32")]
-use super::ChatState;
 use crate::server_fns::chat::ChatMessageItem;
 use crate::server_fns::copilot::{
     create_copilot_session, delete_copilot_session, send_copilot_message,
@@ -128,20 +128,26 @@ pub struct SendRequest {
 
 /// Unified reactive state container for chat UIs.
 ///
-/// Owns all chat state (messages, thinking, session, chat state machine) and
-/// WebSocket subscriptions. Consumers create this in their component body and
+/// Projects shared messages, thinking and state for its selected session.
+/// Consumers create this in their component body and
 /// use the public API to drive the UI.
 #[derive(Clone)]
 pub struct ChatEngine {
     // Public read signals
-    messages: RwSignal<Vec<ChatMessageItem>>,
+    run: RwSignal<ChatRun>,
+    store: ChatRunStore,
+    view_id: u64,
+    generation: RwSignal<u64>,
+    // Captured ONCE at construction time (see `messages()` below for why —
+    // KYO-781) rather than derived on every accessor call.
+    messages_read: Signal<Vec<ChatMessageItem>>,
     chat_state: ChatStateMachine,
     thinking: ThinkingManager,
     session_id: RwSignal<Option<String>>,
+    session_id_read: ReadSignal<Option<String>>,
 
     // Internal state
     has_sent_first: RwSignal<bool>,
-    user_msg_counter: RwSignal<u32>,
     context_type: StoredValue<Option<String>>,
     context_content: Option<Signal<String>>,
     context_label: StoredValue<Option<String>>,
@@ -152,76 +158,89 @@ pub struct ChatEngine {
 }
 
 impl ChatEngine {
-    /// Create a new engine. Sets up session lifecycle and WS subscriptions.
+    /// Create a view and set up its session lifecycle.
     ///
     /// Must be called inside a Leptos reactive owner (component body or
     /// `Owner::with`). The engine registers effects and cleanup handlers
     /// that are tied to the component lifecycle.
     pub fn new(config: ChatEngineConfig) -> Self {
-        let messages = RwSignal::new(Vec::<ChatMessageItem>::new());
-        let chat_state = ChatStateMachine::new();
-        let thinking = ThinkingManager::new();
-        let session_id = RwSignal::new(None::<String>);
-        let has_sent_first = RwSignal::new(false);
-        let user_msg_counter = RwSignal::new(0u32);
-        let context_type = StoredValue::new(config.context_type);
-        let context_content = config.context_content;
-        let context_label = StoredValue::new(config.context_label);
-        let document_id = config.document_id;
-        let view_context = config.view_context;
-        let historical_preview = config.historical_preview;
-        let before_send = config.before_send;
+        let (engine, session_mode) = Self::create_view(config);
+        let store = engine.store;
+        let session_id = engine.session_id;
 
         // ── Session lifecycle ──────────────────────────────────────────
-        match &config.session_mode {
+        match session_mode {
             SessionMode::Ephemeral {
                 context_type: ctx_type,
                 active,
             } => {
                 let ctx_type_stored = StoredValue::new(ctx_type.clone());
-                let active_signal = *active;
-                let chat_state_for_session = chat_state.clone();
-                let thinking_for_session = thinking.clone();
+                let active_signal = active;
+                let engine_for_session = engine.clone();
                 // Guard against concurrent session creation (Effect can fire
                 // multiple times before the async create completes).
-                let is_creating = RwSignal::new(false);
+                let is_creating = RwSignal::new(None::<u64>);
 
                 Effect::new(move || {
-                    let should_be_active =
-                        active_signal.is_none_or(|s| s.get());
+                    let generation = store.generation.get();
+                    if engine_for_session.generation.get_untracked() != generation {
+                        let old_session = session_id.get_untracked();
+                        engine_for_session.select_session(None);
+                        is_creating.set(None);
+                        if let Some(sid) = old_session {
+                            leptos::task::spawn_local(async move {
+                                let _ = delete_copilot_session(sid).await;
+                            });
+                        }
+                    }
+                    let should_be_active = active_signal.is_none_or(|s| s.get());
 
                     if should_be_active
                         && session_id.get_untracked().is_none()
-                        && !is_creating.get_untracked()
+                        && is_creating.get_untracked().is_none()
                     {
                         // Reset all state for fresh session.
-                        messages.set(Vec::new());
-                        chat_state_for_session.reset();
-                        thinking_for_session.clear_all();
-                        has_sent_first.set(false);
-                        is_creating.set(true);
+                        engine_for_session.select_session(None);
+                        engine_for_session.reset();
+                        is_creating.set(Some(generation));
 
-                        let Some(ctx_type) = ctx_type_stored.try_get_value() else { return };
-                        let chat_state_err = chat_state_for_session.clone();
+                        let Some(ctx_type) = ctx_type_stored.try_get_value() else {
+                            return;
+                        };
+                        let engine_created = engine_for_session.clone();
                         leptos::task::spawn_local(async move {
                             match create_copilot_session(ctx_type).await {
-                                Ok(sid) => { session_id.try_set(Some(sid)); }
+                                Ok(sid) => {
+                                    if is_creating.try_get_untracked() == Some(Some(generation))
+                                        && store.generation.try_get_untracked() == Some(generation)
+                                        && active_signal.is_none_or(|active| {
+                                            active.try_get_untracked() == Some(true)
+                                        })
+                                    {
+                                        engine_created.select_session(Some(sid));
+                                    } else {
+                                        let _ = delete_copilot_session(sid).await;
+                                    }
+                                }
                                 Err(e) => {
                                     // Guard: the component may have been disposed
                                     // while the async create was in flight.
-                                    if chat_state_err.state().try_get_untracked().is_some() {
-                                        chat_state_err.set_error(&format!(
-                                            "Failed to start copilot: {e}"
-                                        ));
+                                    if is_creating.try_get_untracked() == Some(Some(generation))
+                                        && store.generation.try_get_untracked() == Some(generation)
+                                    {
+                                        engine_created
+                                            .chat_state()
+                                            .set_error(&format!("Failed to start copilot: {e}"));
                                     }
                                 }
                             }
-                            is_creating.try_set(false);
+                            if is_creating.try_get_untracked() == Some(Some(generation)) {
+                                is_creating.try_set(None);
+                            }
                         });
-                    } else if !should_be_active
-                        && let Some(sid) = session_id.get_untracked()
-                    {
-                        session_id.set(None);
+                    } else if !should_be_active && let Some(sid) = session_id.get_untracked() {
+                        engine_for_session.select_session(None);
+                        store.forget(&sid);
                         leptos::task::spawn_local(async move {
                             let _ = delete_copilot_session(sid).await;
                         });
@@ -230,7 +249,8 @@ impl ChatEngine {
 
                 // Cleanup session on component unmount.
                 on_cleanup(move || {
-                    if let Some(sid) = session_id.get_untracked() {
+                    if let Some(sid) = session_id.try_get_untracked().flatten() {
+                        store.forget(&sid);
                         leptos::task::spawn_local(async move {
                             let _ = delete_copilot_session(sid).await;
                         });
@@ -240,57 +260,61 @@ impl ChatEngine {
             SessionMode::External {
                 session_id: external_sid,
             } => {
-                // Sync external session_id signal into our internal session_id.
-                let external_sid = *external_sid;
+                engine.select_session(external_sid.get_untracked());
+                let engine_for_session = engine.clone();
                 Effect::new(move || {
-                    let sid = external_sid.get();
-                    session_id.set(sid);
+                    let _ = store.generation.get();
+                    engine_for_session.select_session(external_sid.get());
                 });
             }
         }
 
-        // ── WebSocket subscriptions ────────────────────────────────────
-        #[cfg(target_arch = "wasm32")]
-        {
-            let ws_ctx = use_context::<WebSocketContext>();
-            let chat_state_ws = chat_state.clone();
-            let thinking_ws = thinking.clone();
-            let custom_events = config.custom_ws_events;
-            let on_custom_event = config.on_custom_ws_event;
+        engine
+    }
 
-            Effect::new(move |_| {
-                let Some(ws) = ws_ctx.as_ref().cloned() else {
-                    return;
-                };
+    /// Construct the view handles without starting session effects. Keeping
+    /// this separate also lets native tests exercise the real ownership path.
+    fn create_view(config: ChatEngineConfig) -> (Self, SessionMode) {
+        let store = expect_context::<ChatRunStore>();
+        let view_id = store.register_view(config.custom_ws_events, config.on_custom_ws_event);
+        let run = RwSignal::new(ChatRun::new(config.context_type.clone()));
+        let messages_read = Memo::new(move |_| {
+            run.try_get()
+                .and_then(|run| run.messages.try_get())
+                .unwrap_or_default()
+        }).into();
+        let chat_state = ChatStateMachine::from_source(Signal::derive(move || {
+            run.try_get()
+                .map(|run| run.chat_state)
+                .unwrap_or_else(super::chat_state::ChatStateData::new)
+        }));
+        let thinking = ThinkingManager::from_source(Signal::derive(move || {
+            run.try_get()
+                .map(|run| run.thinking)
+                .unwrap_or_else(super::thinking::ThinkingData::new)
+        }));
+        let session_id = RwSignal::new(None::<String>);
+        let session_id_read = session_id.read_only();
+        let has_sent_first = RwSignal::new(false);
+        let context_type = StoredValue::new(config.context_type);
+        let context_content = config.context_content;
+        let context_label = StoredValue::new(config.context_label);
+        let document_id = config.document_id;
+        let view_context = config.view_context;
+        let historical_preview = config.historical_preview;
+        let before_send = config.before_send;
 
-                setup_ws_subscriptions(
-                    &ws,
-                    EngineSignals {
-                        session_id,
-                        messages,
-                        chat_state: &chat_state_ws,
-                        thinking: &thinking_ws,
-                        context_type,
-                    },
-                    &custom_events,
-                    on_custom_event,
-                );
-            });
-        }
-
-        // Suppress unused variable warnings on SSR.
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let _ = (&config.custom_ws_events, &config.on_custom_ws_event);
-        }
-
-        Self {
-            messages,
+        let engine = Self {
+            run,
+            store,
+            view_id,
+            generation: RwSignal::new(store.generation.get_untracked()),
+            messages_read,
             chat_state,
             thinking,
             session_id,
+            session_id_read,
             has_sent_first,
-            user_msg_counter,
             context_type,
             context_content,
             context_label,
@@ -298,14 +322,76 @@ impl ChatEngine {
             view_context,
             historical_preview,
             before_send,
+        };
+        on_cleanup(move || store.release_view(view_id));
+
+        (engine, config.session_mode)
+    }
+
+    /// Attach this view to a retained session. New-chat sends call this
+    /// synchronously before dispatch, so the first frame always has a home.
+    pub fn select_session(&self, sid: Option<String>) {
+        let previous = self.session_id.get_untracked();
+        let generation = self.store.generation.get_untracked();
+        let same_workspace = self.generation.get_untracked() == generation;
+        if previous == sid && same_workspace {
+            return;
         }
+        let draft = if same_workspace && previous.is_none() && sid.is_some() {
+            self.run.get_untracked()
+        } else {
+            ChatRun::new(self.context_type.get_value())
+        };
+        let selected = self.store.attach(self.view_id, sid.as_deref(), draft);
+        self.run.set(selected);
+        self.session_id.set(sid);
+        self.generation.set(generation);
+        if previous.is_some() {
+            self.has_sent_first.set(false);
+        }
+    }
+
+    /// Return a rejected new-chat send to its draft without losing the prompt
+    /// or error. This is explicit: normal navigation to a blank draft must not
+    /// carry messages from an unrelated failed session.
+    pub(crate) fn return_failed_draft(&self, failed_session_id: &str) -> bool {
+        if self.session_id.try_get_untracked().flatten().as_deref() != Some(failed_session_id)
+            || self.generation.try_get_untracked() != self.store.generation.try_get_untracked()
+        {
+            return false;
+        }
+        let Some(run) = self.run.try_get_untracked() else {
+            return false;
+        };
+        if run.chat_state.state().get_untracked() != ChatState::Error {
+            return false;
+        }
+        let selected = self.store.attach(self.view_id, None, run);
+        self.run.set(selected);
+        self.session_id.set(None);
+        true
+    }
+
+    /// Capture retained state before an async send; it must never follow a
+    /// subsequent navigation to a different session.
+    pub(crate) fn run(&self) -> ChatRun {
+        self.run.get_untracked()
+    }
+
+    pub(crate) fn sweep(&self) {
+        self.store.sweep();
     }
 
     // ── Read signals ───────────────────────────────────────────────────
 
     /// Read signal for messages.
-    pub fn messages(&self) -> ReadSignal<Vec<ChatMessageItem>> {
-        self.messages.read_only()
+    ///
+    /// Returns the handle captured once in [`ChatEngine::new`] — see that
+    /// site's comment (KYO-781) for why this must not call `.read_only()`
+    /// here: doing so on every access re-panics on a disposed owner instead
+    /// of letting the caller's `try_get_untracked()` guard handle it.
+    pub fn messages(&self) -> Signal<Vec<ChatMessageItem>> {
+        self.messages_read
     }
 
     /// Access the thinking manager.
@@ -319,8 +405,12 @@ impl ChatEngine {
     }
 
     /// Read signal for session ID.
+    ///
+    /// Same disposal-safety rationale as [`ChatEngine::messages`] (KYO-781):
+    /// returns the handle captured once in [`ChatEngine::new`] instead of
+    /// re-deriving a `ReadSignal` (and re-risking a panic) on every call.
     pub fn session_id(&self) -> ReadSignal<Option<String>> {
-        self.session_id.read_only()
+        self.session_id_read
     }
 
     // ── Send / add message ─────────────────────────────────────────────
@@ -345,7 +435,8 @@ impl ChatEngine {
         let ctx_type = self.context_type.try_get_value().flatten();
         self.chat_state.start_sending(&sid);
 
-        let chat_state_err = self.chat_state.clone();
+        let chat_state_err = self.chat_state.snapshot();
+        let store = self.store;
 
         // Compute timezone and time context before entering the async closure.
         let timezone = Some(crate::utils::time::get_user_timezone());
@@ -398,6 +489,7 @@ impl ChatEngine {
                 // call was in flight (user navigated away mid-send).
                 if chat_state_err.state().try_get_untracked().is_some() {
                     chat_state_err.set_error(&format!("Failed to send: {e}"));
+                    store.sweep();
                 }
             }
         });
@@ -408,17 +500,18 @@ impl ChatEngine {
     /// Used by External mode callers who handle their own server call.
     /// Also used internally by `send()` for Ephemeral mode.
     pub fn add_user_message(&self, content: &str) -> String {
-        let counter = self.user_msg_counter.get_untracked();
-        self.user_msg_counter.set(counter + 1);
-        let user_msg_id = format!("user_{counter}");
+        // A view can remount while its previous send is still awaiting HTTP.
+        // Its optimistic identity must never collide with that earlier turn.
+        let user_msg_id = generate_optimistic_message_id();
 
-        self.messages.update(|msgs| {
+        self.run.get_untracked().messages.update(|msgs| {
             msgs.push(ChatMessageItem {
                 message_id: user_msg_id.clone(),
                 message_type: "user".to_string(),
                 content: content.to_string(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
                 pinned: false,
+                status: "complete".to_string(),
                 sent_by: None,
                 thinking_events: Vec::new(),
                 token_usage: None,
@@ -440,7 +533,11 @@ impl ChatEngine {
             return None;
         }
 
-        let label = self.context_label.try_get_value().flatten().unwrap_or_default();
+        let label = self
+            .context_label
+            .try_get_value()
+            .flatten()
+            .unwrap_or_default();
         let is_first = !self.has_sent_first.get_untracked();
         self.has_sent_first.set(true);
 
@@ -473,15 +570,10 @@ impl ChatEngine {
             return;
         }
 
-        let session_id = self
-            .session_id
-            .get_untracked()
-            .unwrap_or_default();
+        let session_id = self.session_id.get_untracked().unwrap_or_default();
 
-        let message_id = self
-            .chat_state
-            .active_message_id()
-            .get_untracked();
+        let message_id = self.chat_state.active_message_id().get_untracked()
+            .or_else(|| self.chat_state.snapshot().expected_assistant_id().get_untracked());
 
         let mut payload = serde_json::json!({
             "type": "cancel_request",
@@ -508,7 +600,7 @@ impl ChatEngine {
     /// Scrolls to bottom only when within 100px of bottom, with 50ms debounce
     /// and smooth scroll. Ported from chat_page.rs lines 520-568.
     pub fn setup_scroll(&self, container_ref: NodeRef<leptos::html::Div>) {
-        let messages = self.messages;
+        let messages = self.messages_read;
 
         #[cfg(target_arch = "wasm32")]
         {
@@ -534,16 +626,14 @@ impl ChatEngine {
                 // Fire-and-forget is acceptable — the timeout fires once after 50ms.
                 if distance_from_bottom < 100 {
                     let container = container.clone();
-                    let timeout =
-                        gloo_timers::callback::Timeout::new(50, move || {
-                            let opts = web_sys::ScrollIntoViewOptions::new();
-                            opts.set_behavior(web_sys::ScrollBehavior::Smooth);
-                            // Scroll the last child element into view smoothly.
-                            if let Some(last_child) = container.last_element_child() {
-                                last_child
-                                    .scroll_into_view_with_scroll_into_view_options(&opts);
-                            }
-                        });
+                    let timeout = gloo_timers::callback::Timeout::new(50, move || {
+                        let opts = web_sys::ScrollIntoViewOptions::new();
+                        opts.set_behavior(web_sys::ScrollBehavior::Smooth);
+                        // Scroll the last child element into view smoothly.
+                        if let Some(last_child) = container.last_element_child() {
+                            last_child.scroll_into_view_with_scroll_into_view_options(&opts);
+                        }
+                    });
                     std::mem::forget(send_wrapper::SendWrapper::new(timeout));
                 }
             });
@@ -557,120 +647,123 @@ impl ChatEngine {
 
     /// Reset all state (for session switches in External mode).
     pub fn reset(&self) {
-        self.messages.set(Vec::new());
+        self.run.get_untracked().messages.set(Vec::new());
         self.chat_state.reset();
         self.thinking.clear_all();
         self.has_sent_first.set(false);
-        self.user_msg_counter.set(0);
     }
 
     /// Set messages directly (for loading history in External mode).
     pub fn set_messages(&self, msgs: Vec<ChatMessageItem>) {
-        self.messages.set(msgs);
+        self.run.get_untracked().messages.set(msgs);
     }
 
     /// Set messages from a deferred context (async block inside `spawn_local`,
     /// WebSocket callback, timer, etc.) where the component may have been
     /// disposed before this fires. Silently no-ops if the signal is disposed.
     pub fn try_set_messages(&self, msgs: Vec<ChatMessageItem>) {
-        let _ = self.messages.try_set(msgs);
+        if let Some(run) = self.run.try_get_untracked() {
+            run.messages.set(msgs);
+        }
     }
 }
 
-// ─── WS event filtering (KYO-494) ──────────────────────────────────────────
-//
-// Pulled out of the WS-subscription closures as plain functions — no
-// signals, no reactivity — so the default-deny invariant below is directly
-// unit-testable without a WASM/reactive-owner harness, and so every
-// subscription handler (there were four independent copies of this logic
-// before KYO-494: `should_handle` itself, plus ad hoc duplicates in the
-// token_usage_update, request_cancelled, and custom-event handlers) goes
-// through one implementation instead of four that could silently drift.
+/// Reconcile exactly one send's optimistic row with its persisted identity.
+/// History can already contain the durable row when HTTP finally returns.
+pub(crate) fn reconcile_user_message_id(
+    messages: &mut Vec<ChatMessageItem>,
+    optimistic_id: &str,
+    persisted_id: &str,
+) {
+    if persisted_id.is_empty() || optimistic_id == persisted_id {
+        return;
+    }
+    if messages
+        .iter()
+        .any(|message| message.message_id == persisted_id)
+    {
+        messages.retain(|message| message.message_id != optimistic_id);
+    } else if let Some(message) = messages
+        .iter_mut()
+        .find(|message| message.message_id == optimistic_id)
+    {
+        message.message_id = persisted_id.to_string();
+    }
+}
 
-/// Whether an event's `context_type` matches the engine's own filter.
-///
-/// `filter = None` means "no context filtering" — the main chat page's
-/// mode, where every event that reaches the WS layer already belongs to
-/// this user's connection. Copilot sidebars set `filter = Some(ctx)` and
-/// require an exact match.
-///
-/// `cfg(any(test, wasm32))`: the only production caller is
-/// `should_handle_event` inside the wasm32-only `setup_ws_subscriptions`
-/// below. Compiled unconditionally would make this "unused" on a plain
-/// non-wasm32, non-test host build; gating it here keeps that build clean
-/// while still compiling for `cargo test` (host) and the real wasm32
-/// target.
-#[cfg(any(test, target_arch = "wasm32"))]
-fn context_type_matches(filter: Option<&str>, event_context_type: Option<&str>) -> bool {
+fn generate_optimistic_message_id() -> String {
+    #[cfg(target_arch = "wasm32")]
+    let identity = {
+        let mut bytes = [0u8; 16];
+        let random_filled = leptos::prelude::window()
+            .crypto()
+            .ok()
+            .is_some_and(|crypto| crypto.get_random_values_with_u8_array(&mut bytes).is_ok());
+        if !random_filled {
+            for byte in &mut bytes {
+                *byte = (js_sys::Math::random() * 256.0) as u8;
+            }
+        }
+        bytes[6] = (bytes[6] & 0x0f) | 0x40;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        format!(
+            "{}-{}-{}-{}-{}",
+            &hex[..8],
+            &hex[8..12],
+            &hex[12..16],
+            &hex[16..20],
+            &hex[20..]
+        )
+    };
+    #[cfg(all(not(target_arch = "wasm32"), feature = "ssr"))]
+    let identity = uuid::Uuid::new_v4().to_string();
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "ssr")))]
+    let identity = {
+        static NEXT_MESSAGE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        format!(
+            "{nanos}-{}",
+            NEXT_MESSAGE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        )
+    };
+    format!("user-{identity}")
+}
+
+// ─── Event identity checks ─────────────────────────────────────────────────
+
+/// Copilot events must match their retained run's context. Main chat uses the
+/// session identity established before dispatch (KYO-494).
+pub(crate) fn context_type_matches(filter: Option<&str>, event_context_type: Option<&str>) -> bool {
     match filter {
         Some(expected) => event_context_type == Some(expected),
         None => true,
     }
 }
 
-/// Whether a WS event's `session_id` matches the engine's current session.
-///
-/// **Default-deny**: `should_handle` must never return `true` when either
-/// side is missing an identity. Before KYO-494, a `None` engine session
-/// (the state of a brand-new, not-yet-persisted chat) was treated as "no
-/// filter" and admitted events for *every* session — on the `/chat` route a
-/// new chat sits in exactly that state, so another in-flight conversation's
-/// `chat_stream`/`chat_complete`/`agent_thinking` frames rendered straight
-/// into the empty new-chat window. The fix on the caller's side is for the
-/// client to mint a session id before the first message ever leaves (see
-/// `chat_page.rs`), so `current_session_id` should already be `Some` by the
-/// time this engine's *own* new session starts producing events. This
-/// function still gets called with `current_session_id = None` routinely
-/// though — e.g. sitting on an empty `/chat` while another of the user's
-/// sessions is still streaming — and must keep refusing to guess there too.
-///
-/// `cfg(any(test, wasm32))`: see `context_type_matches` above — same
-/// reasoning, same set of production callers.
-#[cfg(any(test, target_arch = "wasm32"))]
-pub(crate) fn should_handle(current_session_id: Option<&str>, msg_session_id: Option<&str>) -> bool {
+/// Default-deny identity comparison: two missing session IDs are not a match.
+pub(crate) fn should_handle(
+    current_session_id: Option<&str>,
+    msg_session_id: Option<&str>,
+) -> bool {
     match (current_session_id, msg_session_id) {
         (Some(current), Some(msg)) => current == msg,
         _ => false,
     }
 }
 
-/// Extract `context_type` from a raw `error` event's `data` payload.
-///
-/// Pulled out as a plain function (rather than left inline in the
-/// `error` subscription closure, KYO-501) purely so the JSON shape is
-/// directly unit-testable: `error` events carry `context_type` at the
-/// *top level* (`data.context_type`), unlike `agent_thinking`'s, which
-/// nests it at `data.event.context_type`. Getting that path wrong is
-/// exactly the kind of mistake that would compile fine and silently
-/// disable the context filter (or, if copied the other way, silently
-/// disable it for `agent_thinking`).
-///
-/// `cfg(any(test, wasm32))`: see `context_type_matches` above — same
-/// reasoning, same set of production callers (the `error` handler in
-/// `setup_ws_subscriptions` below).
-#[cfg(any(test, target_arch = "wasm32"))]
-fn error_event_context_type(data: Option<&serde_json::Value>) -> Option<&str> {
-    data.and_then(|d| d.get("context_type")).and_then(|v| v.as_str())
+/// Errors carry context at data.context_type, unlike thinking events whose
+/// context is nested under data.event.context_type (KYO-501).
+pub(crate) fn error_event_context_type(data: Option<&serde_json::Value>) -> Option<&str> {
+    data.and_then(|d| d.get("context_type"))
+        .and_then(|v| v.as_str())
 }
 
-/// Extract the human-readable reason from a `send_error` WS payload.
-///
-/// KYO-550: `send_error` (`kyomi-auth::websocket::helpers`) writes the
-/// reason under the key `"error"`. This reads that same key — and only
-/// that key. It deliberately does NOT also check `"message"`: a dual-key
-/// fallback would let a producer/consumer key mismatch keep working by
-/// accident, which is the exact bug this ticket fixes. If the producer's
-/// key ever changes again, this function must change with it, not grow a
-/// second key to try.
-///
-/// The generic fallback is for the case the payload genuinely carries no
-/// reason (e.g. a caller passes an empty error path some day) — it is not
-/// a substitute for agreeing on the key name.
-///
-/// `cfg(any(test, wasm32))`: see `context_type_matches` above — the only
-/// production caller is the wasm32-only `"error"` subscription in
-/// `setup_ws_subscriptions` below.
-#[cfg(any(test, target_arch = "wasm32"))]
+/// Read the server's error key exactly; do not conceal a producer/consumer
+/// mismatch by accepting a different key (KYO-550).
 fn error_event_message(data: Option<&serde_json::Value>) -> String {
     data.and_then(|d| d.get("error"))
         .and_then(|v| v.as_str())
@@ -678,383 +771,454 @@ fn error_event_message(data: Option<&serde_json::Value>) -> String {
         .to_string()
 }
 
-// ─── WebSocket subscription setup ──────────────────────────────────────────
-
-/// Reactive signals owned by the engine — passed as a unit to `setup_ws_subscriptions`
-/// to avoid exceeding the function argument limit.
-#[cfg(target_arch = "wasm32")]
-struct EngineSignals<'a> {
-    session_id: RwSignal<Option<String>>,
-    messages: RwSignal<Vec<ChatMessageItem>>,
-    chat_state: &'a ChatStateMachine,
-    thinking: &'a ThinkingManager,
-    context_type: StoredValue<Option<String>>,
+/// The server sends the entire final answer under `full_content`, not `content`.
+fn completion_content(data: Option<&serde_json::Value>) -> Option<&str> {
+    data.and_then(|d| d.get("full_content"))
+        .and_then(|v| v.as_str())
 }
 
-/// Set up all WebSocket subscriptions for the chat engine.
-///
-/// Extracted to a standalone function so it can be conditionally compiled
-/// for `wasm32` only without making the entire `ChatEngine::new` conditional.
-#[cfg(target_arch = "wasm32")]
-fn setup_ws_subscriptions(
-    ws: &WebSocketContext,
-    signals: EngineSignals<'_>,
-    custom_events: &[String],
-    on_custom_event: Option<Callback<(String, serde_json::Value)>>,
-) {
-    let EngineSignals { session_id, messages, chat_state, thinking, context_type } = signals;
-    use super::{ThinkingEvent, TokenUsage};
-
-    // Disposed guard: shared flag set by on_cleanup. Every WS callback
-    // checks this before touching any signal to prevent "already disposed"
-    // panics during the race between cleanup and async WS delivery.
-    let disposed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-
-    // Helper: check if an event belongs to this engine instance. Reads the
-    // engine's reactive state and delegates to the pure, unit-tested
-    // `context_type_matches` / `should_handle` functions above — see their
-    // doc comments for the KYO-494 default-deny invariant this must uphold.
-    let should_handle_event = move |event_context_type: Option<&str>,
-                                    msg_session_id: Option<&str>|
-          -> bool {
-        let ctx_type = context_type.try_get_value().flatten();
-        if !context_type_matches(ctx_type.as_deref(), event_context_type) {
+/// Place a chunk at its absolute byte offset in the final answer. A DB
+/// snapshot may already include it, or earlier WS frames may have been missed.
+/// A gap must wait for the full-content completion rather than fabricating
+/// an answer by joining unrelated spans.
+fn apply_stream_chunk(
+    msgs: &mut Vec<ChatMessageItem>,
+    message_id: &str,
+    content: &str,
+    content_offset: usize,
+    timestamp: &str,
+) -> bool {
+    if let Some(existing) = msgs
+        .iter_mut()
+        .find(|m| m.message_id == message_id && m.message_type == "assistant")
+    {
+        if matches!(existing.status.as_str(), "complete" | "error" | "cancelled" | "interrupted") {
             return false;
         }
-
-        let current_sid = session_id.try_get_untracked().flatten();
-        should_handle(current_sid.as_deref(), msg_session_id)
-    };
-
-    // ── agent_thinking ─────────────────────────────────────────────
-    let chat_state_thinking = chat_state.clone();
-    let thinking_for_thinking = thinking.clone();
-    let disposed_thinking = disposed.clone();
-    let unsub_agent_thinking = ws.subscribe("agent_thinking", move |msg| {
-        if disposed_thinking.load(std::sync::atomic::Ordering::Relaxed) { return; }
-        let data = match &msg.data {
-            Some(d) => d,
-            None => return,
-        };
-
-        let thinking_event: ThinkingEvent = match data
-            .get("event")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
+        if content_offset > existing.content.len() {
+            return true;
+        }
+        let overlap = (existing.content.len() - content_offset).min(content.len());
+        if existing.content.as_bytes()[content_offset..content_offset + overlap]
+            != content.as_bytes()[..overlap]
+            || !content.is_char_boundary(overlap)
         {
-            Some(e) => e,
-            None => return,
-        };
-
-        // For agent_thinking events, context_type is nested at
-        // data.event.context_type (not data.context_type).
-        let event_context_type = data
-            .get("event")
-            .and_then(|v| v.get("context_type"))
-            .and_then(|v| v.as_str());
-
-        if !should_handle_event(event_context_type, msg.session_id.as_deref()) {
-            return;
+            return false;
         }
-
-        let token_usage: Option<TokenUsage> = data
-            .get("token_usage")
-            .and_then(|v| serde_json::from_value(v.clone()).ok());
-
-        let msg_message_id = match &msg.message_id {
-            Some(m) => m.clone(),
-            None => return,
-        };
-
-        // Create assistant message placeholder if needed.
-        // try_update: signal may be disposed if user navigated away.
-        messages.try_update(|msgs| {
-            if !msgs.iter().any(|m| m.message_id == msg_message_id) {
-                msgs.push(ChatMessageItem {
-                    message_id: msg_message_id.clone(),
-                    message_type: "assistant".to_string(),
-                    content: String::new(),
-                    timestamp: msg.timestamp.clone(),
-                    pinned: false,
-                    sent_by: None,
-                    thinking_events: Vec::new(),
-                    token_usage: None,
-                });
-            }
-        });
-
-        // Transition to streaming state if still in Sending.
-        if let Some(state) = chat_state_thinking.state().try_get_untracked()
-            && state == ChatState::Sending {
-                chat_state_thinking.start_streaming(&msg_message_id);
-        }
-
-        // Process thinking event via ThinkingManager.
-        thinking_for_thinking.handle_thinking_event(
-            &msg_message_id,
-            thinking_event,
-            token_usage,
-        );
-    });
-
-    // ── chat_stream ────────────────────────────────────────────────
-    let chat_state_stream = chat_state.clone();
-    let disposed_stream = disposed.clone();
-    let unsub_chat_stream = ws.subscribe("chat_stream", move |msg| {
-        if disposed_stream.load(std::sync::atomic::Ordering::Relaxed) { return; }
-        let event_context_type = msg
-            .data
-            .as_ref()
-            .and_then(|d| d.get("context_type"))
-            .and_then(|v| v.as_str());
-
-        if !should_handle_event(event_context_type, msg.session_id.as_deref()) {
-            return;
-        }
-
-        let content = msg
-            .data
-            .as_ref()
-            .and_then(|d| d.get("content"))
-            .and_then(|v| v.as_str());
-
-        let content = match content {
-            Some(c) if !c.is_empty() => c.to_string(),
-            _ => return,
-        };
-
-        let msg_message_id = match &msg.message_id {
-            Some(m) => m.clone(),
-            None => return,
-        };
-
-        // State recovery: if state is Idle, force start_streaming.
-        if let Some(stream_state) = chat_state_stream.state().try_get_untracked()
-            && stream_state == ChatState::Idle {
-                chat_state_stream.start_streaming(&msg_message_id);
-        }
-
-        messages.try_update(|msgs| {
-            if let Some(existing) = msgs
-                .iter_mut()
-                .find(|m| m.message_id == msg_message_id && m.message_type == "assistant")
-            {
-                existing.content.push_str(&content);
+        existing.content.push_str(&content[overlap..]);
+    } else {
+        msgs.push(ChatMessageItem {
+            message_id: message_id.to_string(),
+            message_type: "assistant".to_string(),
+            content: if content_offset == 0 {
+                content.to_string()
             } else {
-                msgs.push(ChatMessageItem {
-                    message_id: msg_message_id,
-                    message_type: "assistant".to_string(),
-                    content,
-                    timestamp: msg.timestamp.clone(),
-                    pinned: false,
-                    sent_by: None,
-                    thinking_events: Vec::new(),
-                    token_usage: None,
-                });
-            }
+                String::new()
+            },
+            timestamp: timestamp.to_string(),
+            pinned: false,
+            status: "in_progress".to_string(),
+            sent_by: None,
+            thinking_events: Vec::new(),
+            token_usage: None,
         });
-    });
+    }
+    true
+}
 
-    // ── chat_complete ──────────────────────────────────────────────
-    let chat_state_complete = chat_state.clone();
-    let thinking_for_complete = thinking.clone();
-    let disposed_complete = disposed.clone();
-    let unsub_chat_complete = ws.subscribe("chat_complete", move |msg| {
-        if disposed_complete.load(std::sync::atomic::Ordering::Relaxed) { return; }
-        let event_context_type = msg
-            .data
-            .as_ref()
-            .and_then(|d| d.get("context_type"))
-            .and_then(|v| v.as_str());
-
-        if !should_handle_event(event_context_type, msg.session_id.as_deref()) {
-            return;
+fn apply_chat_completion(
+    msgs: &mut Vec<ChatMessageItem>,
+    message_id: &str,
+    full_content: Option<&str>,
+    timestamp: &str,
+) {
+    if let Some(m) = msgs
+        .iter_mut()
+        .find(|m| m.message_id == message_id && m.message_type == "assistant")
+    {
+        if let Some(content) = full_content {
+            m.content = content.to_string();
         }
-
-        let msg_message_id = match &msg.message_id {
-            Some(m) => m.clone(),
-            None => return,
-        };
-
-        let state = match chat_state_complete.state().try_get_untracked() {
-            Some(s) => s,
-            None => return,
-        };
-
-        // Cancellation guard: skip if we're in Cancelling or Cancelled state.
-        if state == ChatState::Cancelling || state == ChatState::Cancelled {
-            return;
-        }
-
-        let full_content = msg
-            .data
-            .as_ref()
-            .and_then(|d| d.get("content"))
-            .and_then(|v| v.as_str())
-            .map(String::from);
-
-        // Update message with full content.
-        messages.try_update(|msgs| {
-            for m in msgs.iter_mut() {
-                if m.message_id == msg_message_id && m.message_type == "assistant"
-                    && let Some(ref content) = full_content {
-                        m.content = content.clone();
-                    }
-            }
+        m.status = "complete".to_string();
+    } else if let Some(content) = full_content {
+        msgs.push(ChatMessageItem {
+            message_id: message_id.to_string(),
+            message_type: "assistant".to_string(),
+            content: content.to_string(),
+            timestamp: timestamp.to_string(),
+            pinned: false,
+            status: "complete".to_string(),
+            sent_by: None,
+            thinking_events: Vec::new(),
+            token_usage: None,
         });
+    }
+}
 
-        // Complete thinking via ThinkingManager.
-        thinking_for_complete.complete_thinking(&msg_message_id);
-
-        // Only transition state machine if we're actually in Sending or Streaming.
-        if state == ChatState::Sending || state == ChatState::Streaming {
-            chat_state_complete.complete();
+fn completion_matches_active_turn(
+    state: ChatState,
+    active_message_id: Option<&str>,
+    active_session_id: Option<&str>,
+    event_message_id: &str,
+    event_session_id: Option<&str>,
+    // None: copilot has no assistant ID in its HTTP response;
+    // Some(None): main chat is still awaiting the HTTP-assigned ID.
+    required_assistant_id: Option<Option<&str>>,
+    messages: &[ChatMessageItem],
+) -> bool {
+    match state {
+        ChatState::Streaming => active_message_id == Some(event_message_id),
+        ChatState::Sending => {
+            event_session_id.is_some()
+            && active_session_id == event_session_id
+            // For the main chat, the session alone cannot identify a turn:
+            // defer zero-chunk completion until the HTTP send supplies its ID.
+            && required_assistant_id.is_none_or(|expected| expected == Some(event_message_id))
+            // A delayed duplicate for a completed turn (or an assistant
+            // preceding the latest user message) cannot finish a new send.
+            && messages.iter().position(|m|
+                m.message_type == "assistant" && m.message_id == event_message_id
+            ).is_none_or(|idx| idx == messages.len() - 1 && messages[idx].status != "complete")
         }
-    });
+        _ => false,
+    }
+}
 
-    // ── token_usage_update ─────────────────────────────────────────
-    let thinking_for_token = thinking.clone();
-    let disposed_token = disposed.clone();
-    let unsub_token_usage = ws.subscribe("token_usage_update", move |msg| {
-        if disposed_token.load(std::sync::atomic::Ordering::Relaxed) { return; }
-        let data = match &msg.data {
-            Some(d) => d,
-            None => return,
-        };
+// ─── Session event reducer ─────────────────────────────────────────────────
 
-        let token_update: TokenUsage = match data
-            .get("token_usage")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-        {
-            Some(t) => t,
-            None => return,
-        };
+/// Apply one session-routed event to retained state. This is shared by the
+/// browser subscription and native lifecycle regression tests.
+pub(crate) fn handle_run_event(
+    run: &super::chat_run_store::ChatRun,
+    event: &str,
+    msg: &super::websocket_client::WebSocketMessage,
+) {
+    use super::{ThinkingEvent, TokenUsage};
+    let messages = &run.messages;
+    let chat_state = &run.chat_state;
+    let thinking = &run.thinking;
+    match event {
+        "agent_thinking" => {
+            let data = match &msg.data {
+                Some(d) => d,
+                None => return,
+            };
 
-        let msg_message_id = match &msg.message_id {
-            Some(m) => m.clone(),
-            None => return,
-        };
+            let thinking_event: ThinkingEvent = match data
+                .get("event")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+            {
+                Some(e) => e,
+                None => return,
+            };
 
-        // Filter by session_id (no context_type filter for token updates).
-        // Default-deny — see `should_handle`'s doc comment (KYO-494).
-        let current_sid = session_id.try_get_untracked().flatten();
-        if !should_handle(current_sid.as_deref(), msg.session_id.as_deref()) {
-            return;
-        }
+            let token_usage: Option<TokenUsage> = data
+                .get("token_usage")
+                .and_then(|v| serde_json::from_value(v.clone()).ok());
 
-        thinking_for_token.update_token_usage(&msg_message_id, token_update);
-    });
+            let msg_message_id = match &msg.message_id {
+                Some(m) => m.clone(),
+                None => return,
+            };
 
-    // ── error ──────────────────────────────────────────────────────
-    let chat_state_error = chat_state.clone();
-    let disposed_error = disposed.clone();
-    let unsub_error = ws.subscribe("error", move |msg| {
-        if disposed_error.load(std::sync::atomic::Ordering::Relaxed) { return; }
-        // For error events, context_type is at data.context_type (top
-        // level) — unlike agent_thinking's, which is nested at
-        // data.event.context_type. See `error_event_context_type`.
-        let event_context_type = error_event_context_type(msg.data.as_ref());
-
-        if !should_handle_event(event_context_type, msg.session_id.as_deref()) {
-            return;
-        }
-
-        let error_msg = error_event_message(msg.data.as_ref());
-
-        chat_state_error.set_error(&error_msg);
-    });
-
-    // ── request_cancelled ──────────────────────────────────────────
-    let chat_state_cancelled = chat_state.clone();
-    let thinking_for_cancelled = thinking.clone();
-    let disposed_cancelled = disposed.clone();
-    let unsub_request_cancelled = ws.subscribe("request_cancelled", move |msg| {
-        if disposed_cancelled.load(std::sync::atomic::Ordering::Relaxed) { return; }
-        let msg_message_id = match &msg.message_id {
-            Some(m) => m.clone(),
-            None => return,
-        };
-
-        // Confirm cancellation if this event belongs to the active message OR,
-        // when cancelling during Sending (no message_id set yet), if the event
-        // session matches the active session. Default-deny (KYO-494): two
-        // missing session ids are not a match, so this used `should_handle`
-        // instead of `==` — `None == None` would otherwise have been `true`.
-        let current_sid = session_id.try_get_untracked().flatten();
-        let is_ours = chat_state_cancelled.is_active_message(&msg_message_id)
-            || (chat_state_cancelled.active_message_id().try_get_untracked().flatten().is_none()
-                && should_handle(current_sid.as_deref(), msg.session_id.as_deref()));
-
-        if is_ours {
-            chat_state_cancelled.confirm_cancelled();
-        }
-
-        // Update the assistant message to show it was cancelled.
-        messages.try_update(|msgs| {
-            for m in msgs.iter_mut() {
-                if m.message_id == msg_message_id && m.message_type == "assistant" {
-                    m.content = "_Request cancelled by user._".to_string();
+            // Delayed reasoning can enrich a terminal reply, but must never
+            // restart its run or keep it retained after its view is released.
+            let terminal_status = messages.with_untracked(|messages| {
+                messages.iter().find(|message| message.message_id == msg_message_id)
+                    .filter(|message| matches!(message.status.as_str(), "complete" | "error" | "cancelled" | "interrupted"))
+                    .map(|message| message.status.clone())
+            });
+            if let Some(status) = terminal_status {
+                thinking.handle_thinking_event(&msg_message_id, thinking_event, token_usage);
+                if status == "cancelled" {
+                    thinking.cancel_thinking(&msg_message_id);
+                } else {
+                    thinking.complete_thinking(&msg_message_id);
                 }
+                return;
             }
-        });
 
-        // Cancel thinking via ThinkingManager.
-        thinking_for_cancelled.cancel_thinking(&msg_message_id);
-    });
+            // Create an assistant placeholder even when no view is mounted.
+            messages.try_update(|msgs| {
+                if !msgs.iter().any(|m| m.message_id == msg_message_id) {
+                    msgs.push(ChatMessageItem {
+                        message_id: msg_message_id.clone(),
+                        message_type: "assistant".to_string(),
+                        content: String::new(),
+                        timestamp: msg.timestamp.clone(),
+                        pinned: false,
+                        status: "in_progress".to_string(),
+                        sent_by: None,
+                        thinking_events: Vec::new(),
+                        token_usage: None,
+                    });
+                }
+            });
 
-    // ── Custom WS event subscriptions ──────────────────────────────
-    let mut custom_unsubs: Vec<send_wrapper::SendWrapper<Box<dyn FnOnce()>>> = Vec::new();
+            if chat_state.state().get_untracked() == ChatState::Idle
+                && let Some(sid) = msg.session_id.as_deref()
+            {
+                chat_state.start_sending(sid);
+                chat_state.start_streaming(&msg_message_id);
+            }
 
-    for event_name in custom_events {
-        let event_name_clone = event_name.clone();
-        let disposed_custom = disposed.clone();
-        let unsub = ws.subscribe(event_name, move |msg| {
-            if disposed_custom.load(std::sync::atomic::Ordering::Relaxed) { return; }
-            // Apply the same filtering as other events.
-            let ctx_type = context_type.try_get_value().flatten();
-            let event_context_type = msg
+            // Transition to streaming state if still in Sending.
+            if let Some(state) = chat_state.state().try_get_untracked()
+                && state == ChatState::Sending
+                && (run.context_type.is_some()
+                    || chat_state
+                        .expected_assistant_id()
+                        .try_get_untracked()
+                        .flatten()
+                        .as_deref()
+                        == Some(msg_message_id.as_str()))
+            {
+                chat_state.start_streaming(&msg_message_id);
+            }
+
+            // Process thinking event via ThinkingManager.
+            thinking.handle_thinking_event(&msg_message_id, thinking_event, token_usage);
+        }
+        "chat_stream" => {
+            let content = msg
                 .data
                 .as_ref()
-                .and_then(|d| d.get("context_type"))
+                .and_then(|d| d.get("content"))
                 .and_then(|v| v.as_str());
-            if !context_type_matches(ctx_type.as_deref(), event_context_type) {
+
+            let content = match content {
+                Some(c) if !c.is_empty() => c.to_string(),
+                _ => return,
+            };
+            let Some(content_offset) = msg
+                .data
+                .as_ref()
+                .and_then(|d| d.get("content_offset"))
+                .and_then(|v| v.as_u64())
+                .and_then(|offset| usize::try_from(offset).ok())
+            else {
+                return;
+            };
+
+            let msg_message_id = match &msg.message_id {
+                Some(m) => m.clone(),
+                None => return,
+            };
+
+            let applied = messages
+                .try_update(|msgs| {
+                    apply_stream_chunk(
+                        msgs,
+                        &msg_message_id,
+                        &content,
+                        content_offset,
+                        &msg.timestamp,
+                    )
+                })
+                .unwrap_or(false);
+            if !applied {
                 return;
             }
-
-            // Filter by session_id. Default-deny — see `should_handle`'s doc
-            // comment (KYO-494).
-            let current_sid = session_id.try_get_untracked().flatten();
-            if !should_handle(current_sid.as_deref(), msg.session_id.as_deref()) {
-                return;
-            }
-
-            if let Some(data) = msg.data
-                && let Some(cb) = on_custom_event {
-                    cb.run((event_name_clone.clone(), data));
+            if let Some(stream_state) = chat_state.state().try_get_untracked() {
+                if stream_state == ChatState::Idle {
+                    if let Some(sid) = msg.session_id.as_deref() {
+                        chat_state.start_sending(sid);
+                    }
+                    chat_state.start_streaming(&msg_message_id);
+                } else if stream_state == ChatState::Sending
+                    && (run.context_type.is_some()
+                        || chat_state
+                            .expected_assistant_id()
+                            .try_get_untracked()
+                            .flatten()
+                            .as_deref()
+                            == Some(msg_message_id.as_str()))
+                {
+                    chat_state.start_streaming(&msg_message_id);
                 }
-        });
-        custom_unsubs.push(send_wrapper::SendWrapper::new(unsub));
-    }
-
-    // ── Cleanup: unsubscribe all on component unmount ──────────────
-    let unsub_agent_thinking = send_wrapper::SendWrapper::new(unsub_agent_thinking);
-    let unsub_chat_stream = send_wrapper::SendWrapper::new(unsub_chat_stream);
-    let unsub_chat_complete = send_wrapper::SendWrapper::new(unsub_chat_complete);
-    let unsub_token_usage = send_wrapper::SendWrapper::new(unsub_token_usage);
-    let unsub_error = send_wrapper::SendWrapper::new(unsub_error);
-    let unsub_request_cancelled = send_wrapper::SendWrapper::new(unsub_request_cancelled);
-
-    on_cleanup(move || {
-        disposed.store(true, std::sync::atomic::Ordering::Relaxed);
-        unsub_agent_thinking.take()();
-        unsub_chat_stream.take()();
-        unsub_chat_complete.take()();
-        unsub_token_usage.take()();
-        unsub_error.take()();
-        unsub_request_cancelled.take()();
-        for unsub in custom_unsubs {
-            unsub.take()();
+            }
         }
-    });
+        "chat_complete" => {
+            let msg_message_id = match &msg.message_id {
+                Some(m) => m.clone(),
+                None => return,
+            };
+
+            let state = match chat_state.state().try_get_untracked() {
+                Some(s) => s,
+                None => return,
+            };
+
+            // Cancellation guard: skip if we're in Cancelling or Cancelled state.
+            if state == ChatState::Cancelling || state == ChatState::Cancelled {
+                return;
+            }
+
+            let expected = chat_state
+                .expected_assistant_id()
+                .try_get_untracked()
+                .flatten();
+            let required_id = run.context_type.is_none().then_some(expected.as_deref());
+            let should_complete = completion_matches_active_turn(
+                state,
+                chat_state
+                    .active_message_id()
+                    .try_get_untracked()
+                    .flatten()
+                    .as_deref(),
+                chat_state
+                    .active_session_id()
+                    .try_get_untracked()
+                    .flatten()
+                    .as_deref(),
+                &msg_message_id,
+                msg.session_id.as_deref(),
+                required_id,
+                &messages.get_untracked(),
+            );
+            let full_content = completion_content(msg.data.as_ref());
+            messages.try_update(|msgs| {
+                apply_chat_completion(msgs, &msg_message_id, full_content, &msg.timestamp);
+            });
+
+            // Complete thinking via ThinkingManager.
+            thinking.complete_thinking(&msg_message_id);
+
+            // Only transition state machine if we're actually in Sending or Streaming.
+            if should_complete {
+                chat_state.complete();
+            }
+        }
+        "token_usage_update" => {
+            let data = match &msg.data {
+                Some(d) => d,
+                None => return,
+            };
+
+            let token_update: TokenUsage = match data
+                .get("token_usage")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+            {
+                Some(t) => t,
+                None => return,
+            };
+
+            let msg_message_id = match &msg.message_id {
+                Some(m) => m.clone(),
+                None => return,
+            };
+
+            thinking.update_token_usage(&msg_message_id, token_update);
+        }
+        "error" => {
+            let error_msg = error_event_message(msg.data.as_ref());
+
+            chat_state.set_error(&error_msg);
+            messages.update(|messages| {
+                if let Some(last) = messages
+                    .last_mut()
+                    .filter(|message| message.status == "in_progress")
+                {
+                    last.status = "error".into();
+                }
+            });
+        }
+        "request_cancelled" => {
+            let msg_message_id = match &msg.message_id {
+                Some(m) => m.clone(),
+                None => return,
+            };
+
+            // Confirm cancellation if this event belongs to the active message OR,
+            // when cancelling during Sending (no message_id set yet), if the event
+            // session matches the active session. Default-deny (KYO-494): two
+            // missing session ids are not a match, so this used `should_handle`
+            // instead of `==` — `None == None` would otherwise have been `true`.
+            let current_sid = chat_state.active_session_id().get_untracked();
+            let is_ours = chat_state.is_active_message(&msg_message_id)
+                || (chat_state
+                    .active_message_id()
+                    .try_get_untracked()
+                    .flatten()
+                    .is_none()
+                    && should_handle(current_sid.as_deref(), msg.session_id.as_deref()));
+
+            if is_ours {
+                chat_state.confirm_cancelled();
+            }
+
+            // Update the assistant message to show it was cancelled.
+            messages.try_update(|msgs| {
+                for m in msgs.iter_mut() {
+                    if m.message_id == msg_message_id && m.message_type == "assistant" {
+                        m.content = "_Request cancelled by user._".to_string();
+                        m.status = "cancelled".to_string();
+                    }
+                }
+            });
+
+            // Cancel thinking via ThinkingManager.
+            thinking.cancel_thinking(&msg_message_id);
+        }
+        "shared_chat_message" => {
+            let Some(data) = &msg.data else { return };
+            // Extract message fields from data
+            let message_id = data
+                .get("message_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let client_msg_id = data
+                .get("client_msg_id")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let content = data
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let msg_type = data
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("user")
+                .to_string();
+            let timestamp = data
+                .get("timestamp")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let sent_by: Option<crate::server_fns::chat::SessionUser> = data
+                .get("sent_by")
+                .and_then(|v| serde_json::from_value(v.clone()).ok());
+
+            let mut msgs = messages.get_untracked();
+
+            // The durable row may already have arrived through history.
+            // Reconcile before deduplication so two rows cannot share its key.
+            if let Some(ref cid) = client_msg_id {
+                reconcile_user_message_id(&mut msgs, cid, &message_id);
+            }
+            let deduped = msgs.iter().any(|message| message.message_id == message_id);
+
+            if !deduped {
+                // Add new message from other user
+                msgs.push(ChatMessageItem {
+                    message_id,
+                    message_type: msg_type,
+                    content,
+                    timestamp,
+                    pinned: false,
+                    status: "complete".to_string(),
+                    sent_by,
+                    thinking_events: Vec::new(),
+                    token_usage: None,
+                });
+            }
+
+            messages.set(msgs);
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]
@@ -1067,6 +1231,103 @@ mod tests {
     //! `context_type_matches` take plain values, not signals.
 
     use super::*;
+
+    #[test]
+    fn completion_before_any_chunk_creates_terminal_message() {
+        let data = serde_json::json!({ "full_content": "entire answer" });
+        let mut msgs = Vec::new();
+        apply_chat_completion(&mut msgs, "a1", completion_content(Some(&data)), "now");
+        assert_eq!(msgs[0].content, "entire answer");
+        assert_eq!(msgs[0].status, "complete");
+        assert!(!apply_stream_chunk(&mut msgs, "a1", "entire", 0, "now"));
+        assert_eq!(msgs[0].content, "entire answer");
+        let empty = serde_json::json!({ "full_content": "" });
+        apply_chat_completion(&mut msgs, "a2", completion_content(Some(&empty)), "now");
+        assert_eq!(msgs[1].content, "");
+        assert_eq!(msgs[1].status, "complete");
+    }
+
+    #[test]
+    fn completion_replaces_partial_stream_content() {
+        let mut msgs = Vec::new();
+        assert!(apply_stream_chunk(&mut msgs, "a1", "part", 0, "now"));
+        let data = serde_json::json!({ "full_content": "partial answer" });
+        apply_chat_completion(&mut msgs, "a1", completion_content(Some(&data)), "now");
+        assert_eq!(msgs[0].content, "partial answer");
+        assert_eq!(msgs[0].status, "complete");
+    }
+
+    #[test]
+    fn stream_offset_places_repeated_chunks_after_db_prefix() {
+        let mut msgs = Vec::new();
+        apply_chat_completion(&mut msgs, "a1", Some("abc"), "now");
+        msgs[0].status = "in_progress".to_string();
+        // The first received frame repeats the DB prefix; its absolute
+        // offset proves it is new text, not a replay of earlier bytes.
+        assert!(apply_stream_chunk(&mut msgs, "a1", "abc", 3, "now"));
+        assert_eq!(msgs[0].content, "abcabc");
+        assert!(apply_stream_chunk(&mut msgs, "a1", "abc", 6, "now"));
+        assert_eq!(msgs[0].content, "abcabcabc");
+        // An older frame arriving after a newer DB snapshot cannot rewind it.
+        assert!(apply_stream_chunk(&mut msgs, "a1", "abc", 3, "now"));
+        assert_eq!(msgs[0].content, "abcabcabc");
+
+        let mut fresh = Vec::new();
+        apply_stream_chunk(&mut fresh, "a2", "ha", 0, "now");
+        apply_stream_chunk(&mut fresh, "a2", "ha", 2, "now");
+        assert_eq!(fresh[0].content, "haha");
+    }
+
+    #[test]
+    fn stream_gap_waits_for_full_completion_without_corrupting_answer() {
+        let mut msgs = Vec::new();
+        apply_chat_completion(&mut msgs, "a1", Some("abc"), "now");
+        msgs[0].status = "in_progress".to_string();
+        // A returning client missed the bytes at offsets 3..6. The later
+        // frame is retained only as progress state; it cannot be appended.
+        assert!(apply_stream_chunk(&mut msgs, "a1", "ghi", 6, "now"));
+        assert_eq!(msgs[0].content, "abc");
+        apply_chat_completion(&mut msgs, "a1", Some("abcdefghi"), "now");
+        assert_eq!(msgs[0].content, "abcdefghi");
+        assert_eq!(msgs[0].status, "complete");
+    }
+
+    #[test]
+    fn stream_offset_handles_overlap_and_utf8_bytes() {
+        let mut msgs = Vec::new();
+        apply_chat_completion(&mut msgs, "a1", Some("éab"), "now");
+        msgs[0].status = "in_progress".to_string();
+        assert!(apply_stream_chunk(&mut msgs, "a1", "abc", 2, "now"));
+        assert_eq!(msgs[0].content, "éabc");
+    }
+
+    #[test]
+    fn sending_requires_exact_assistant_id_even_when_the_row_is_absent() {
+        let mut msgs = Vec::new();
+        let accepts = |expected: Option<&str>, id: &str, rows: &[ChatMessageItem]| {
+            completion_matches_active_turn(
+                ChatState::Sending, None, Some("s1"), id, Some("s1"), Some(expected), rows,
+            )
+        };
+        // A may be another members turn. Before HTTP resolves, neither A
+        // nor the actual zero-chunk B can finish our send.
+        assert!(!accepts(None, "a", &msgs));
+        assert!(!accepts(None, "b", &msgs));
+        apply_chat_completion(&mut msgs, "b", Some(""), "now");
+        assert!(!accepts(None, "b", &msgs));
+        // The page reconciles this terminal B row when HTTP identifies B.
+        assert!(!accepts(Some("b"), "a", &msgs));
+        assert!(accepts(Some("b"), "b", &[]));
+        assert!(!completion_matches_active_turn(
+            ChatState::Sending, None, Some("s1"), "b", Some("s2"), Some(Some("b")), &[],
+        ));
+        assert!(completion_matches_active_turn(
+            ChatState::Streaming, Some("b"), Some("s1"), "b", Some("s1"), Some(Some("b")), &[],
+        ));
+        assert!(!completion_matches_active_turn(
+            ChatState::Streaming, Some("a"), Some("s1"), "b", Some("s1"), Some(Some("b")), &[],
+        ));
+    }
 
     // ── should_handle: default-deny on missing identity ─────────────────
 
@@ -1266,5 +1527,440 @@ mod tests {
         // instead of surfacing it.
         let payload = serde_json::json!({ "message": "should not be read" });
         assert_eq!(error_event_message(Some(&payload)), "An error occurred");
+    }
+}
+
+// KYO-781: requires `Owner`/`RwSignal` disposal directly from `reactive_graph`,
+// exercised natively (no WASM/browser needed — the panic is a pure reactive-graph
+// arena mechanism). Gated on `feature = "ssr"` to match this crate's convention
+// for tests that touch the reactive graph rather than pure functions — see
+// `chat_page.rs`'s `tests_disposal_scope` module (KYO-548) and
+// docs/standards (kyomi-ui tests need `--features ssr`, otherwise this module
+// silently does not compile and a zero-test run looks green).
+#[cfg(all(test, feature = "ssr"))]
+mod tests_disposal_safety {
+    //! Page-owned read projections remain safe to query after disposal. The
+    //! production create_view path is exercised without browser session effects.
+
+    use super::*;
+    use crate::components::chat::{ChatState, ThinkingEvent};
+
+    // ── ChatEngine's own accessor pattern (messages / session_id) ──────────
+    //
+    fn build_real_engine_for_disposal_test() -> ChatEngine {
+        if use_context::<ChatRunStore>().is_none() { provide_context(ChatRunStore::new()); }
+        ChatEngine::create_view(ChatEngineConfig {
+            session_mode: SessionMode::External { session_id: Signal::derive(|| None) },
+            context_type: None, custom_ws_events: vec![], on_custom_ws_event: None,
+            context_content: None, context_label: None, document_id: None, view_context: None, historical_preview: None, before_send: None,
+        }).0
+    }
+
+    #[test]
+    fn copilot_message_projection_tracks_frames_after_session_attachment() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let store = ChatRunStore::new();
+            provide_context(store);
+            let engine = ChatEngine::create_view(ChatEngineConfig {
+                session_mode: SessionMode::Ephemeral { context_type: "dashboard_copilot".into(), active: None },
+                context_type: Some("dashboard_copilot".into()),
+                custom_ws_events: vec![], on_custom_ws_event: None,
+                context_content: None, context_label: None, document_id: None, view_context: None, historical_preview: None, before_send: None,
+            }).0;
+            let messages = engine.messages();
+            let rendered = Memo::new(move |_| messages.get());
+            assert!(rendered.get().is_empty());
+            engine.select_session(Some("copilot-1".into()));
+            assert!(rendered.get().is_empty());
+            store.receive("chat_stream", serde_json::from_value(serde_json::json!({
+                "type": "chat_stream", "session_id": "copilot-1", "message_id": "reply",
+                "data": { "content": "visible reply", "content_offset": 0, "context_type": "dashboard_copilot" }
+            })).expect("valid copilot frame"));
+            assert_eq!(rendered.get()[0].content, "visible reply");
+        });
+        owner.cleanup();
+    }
+
+    #[test]
+    fn page_disposal_releases_only_the_view_and_returning_engine_reads_shared_run() {
+        let layout = Owner::new();
+        let store = layout.with(|| {
+            let store = ChatRunStore::new();
+            provide_context(store);
+            store
+        });
+        let page = layout.child();
+        let engine = page.with(build_real_engine_for_disposal_test);
+        engine.select_session(Some("session-a".into()));
+        engine.chat_state().start_sending("session-a");
+        let pending = engine.run();
+        page.cleanup();
+        assert!(engine.messages().try_get_untracked().is_none());
+        let frame = |text: &str, offset: usize| serde_json::from_value(serde_json::json!({
+            "type": "chat_stream", "session_id": "session-a", "message_id": "answer",
+            "data": { "content": text, "content_offset": offset }
+        })).expect("valid chat stream fixture");
+        store.receive("chat_stream", frame("received while away", 0));
+        // The HTTP continuation also holds the original run, not a page handle.
+        pending.chat_state.expect_assistant("session-a", "missing-token", "answer");
+        let returned_page = layout.child();
+        let returned = returned_page.with(build_real_engine_for_disposal_test);
+        returned.select_session(Some("session-a".into()));
+        assert_eq!(returned.messages().get_untracked()[0].content, "received while away");
+        store.receive("chat_stream", frame(" and after return", 19));
+        assert_eq!(returned.messages().get_untracked()[0].content, "received while away and after return");
+        returned.select_session(Some("session-b".into()));
+        assert!(returned.messages().get_untracked().is_empty());
+        store.receive("chat_stream", frame(" in background", 36));
+        assert!(returned.messages().get_untracked().is_empty());
+        returned.select_session(Some("session-a".into()));
+        assert!(returned.messages().get_untracked()[0].content.ends_with(" in background"));
+        returned_page.cleanup();
+        layout.cleanup();
+    }
+
+    #[test]
+    fn remounted_view_retry_keeps_both_optimistic_send_identities_distinct() {
+        let layout = Owner::new();
+        layout.with(|| provide_context(ChatRunStore::new()));
+        let page = layout.child();
+        let engine = page.with(build_real_engine_for_disposal_test);
+        engine.select_session(Some("session".into()));
+        let first_id = engine.add_user_message("same prompt");
+        engine.chat_state().start_sending("session");
+        let pending = engine.run();
+        page.cleanup();
+        let returned_page = layout.child();
+        let returned = returned_page.with(build_real_engine_for_disposal_test);
+        returned.select_session(Some("session".into()));
+        // A failed history request leaves the retained optimistic row intact.
+        returned.chat_state().request_cancel();
+        pending.chat_state.confirm_cancelled();
+        let second_id = returned.add_user_message("same prompt");
+        returned.chat_state().start_sending("session");
+        assert_ne!(first_id, second_id);
+        pending
+            .messages
+            .update(|messages| reconcile_user_message_id(messages, &first_id, "persisted-first"));
+        let rows = returned.messages().get_untracked();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].message_id, "persisted-first");
+        assert_eq!(rows[1].message_id, second_id);
+        returned_page.cleanup();
+        layout.cleanup();
+    }
+
+    #[test]
+    fn persisted_history_before_http_is_idempotent_and_preserves_next_prompt() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let engine = build_real_engine_for_disposal_test();
+            let first_id = engine.add_user_message("repeat");
+            let second_id = engine.add_user_message("repeat");
+            let mut durable = engine.messages().get_untracked()[0].clone();
+            durable.message_id = "persisted-first".into();
+            durable.pinned = true;
+            engine
+                .run()
+                .messages
+                .update(|messages| messages.push(durable));
+            for _ in 0..2 {
+                engine.run().messages.update(|messages| {
+                    reconcile_user_message_id(messages, &first_id, "persisted-first")
+                });
+            }
+            let rows = engine.messages().get_untracked();
+            assert_eq!(rows.len(), 2);
+            assert!(rows.iter().any(|row| row.message_id == second_id));
+            assert!(
+                rows.iter()
+                    .any(|row| row.message_id == "persisted-first" && row.pinned)
+            );
+        });
+        owner.cleanup();
+    }
+
+    #[test]
+    fn shared_broadcast_after_history_then_late_http_keeps_one_durable_key() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let engine = build_real_engine_for_disposal_test();
+            engine.select_session(Some("shared-session".into()));
+            let optimistic_id = engine.add_user_message("same prompt");
+            let run = engine.run();
+            let mut persisted = engine.messages().get_untracked()[0].clone();
+            persisted.message_id = "persisted-user".into();
+            persisted.pinned = true;
+            persisted.timestamp = "durable-timestamp".into();
+            run.messages.update(|messages| messages.insert(0, persisted));
+            let broadcast = serde_json::from_value(serde_json::json!({
+                "type": "shared_chat_message", "session_id": "shared-session",
+                "data": {
+                    "message_id": "persisted-user", "client_msg_id": optimistic_id,
+                    "content": "same prompt", "type": "user", "timestamp": "broadcast-timestamp"
+                }
+            })).expect("valid shared-chat broadcast");
+            for _ in 0..2 {
+                handle_run_event(&run, "shared_chat_message", &broadcast);
+                run.messages.update(|messages| {
+                    reconcile_user_message_id(messages, &optimistic_id, "persisted-user")
+                });
+            }
+            let messages = engine.messages().get_untracked();
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].message_id, "persisted-user");
+            assert!(messages[0].pinned);
+            assert_eq!(messages[0].timestamp, "durable-timestamp");
+        });
+        owner.cleanup();
+    }
+
+    #[test]
+    fn rejected_new_session_preserves_failed_draft_and_retry_but_navigation_is_clean() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let engine = build_real_engine_for_disposal_test();
+            let prompt_id = engine.add_user_message("first prompt");
+            engine.select_session(Some("rejected".into()));
+            let rejected_run = engine.run();
+            rejected_run.chat_state.start_sending("rejected");
+            let mut error_row = engine.messages().get_untracked()[0].clone();
+            error_row.message_id = "error-first-send".into();
+            error_row.message_type = "assistant".into();
+            error_row.status = "error".into();
+            error_row.content = "request rejected".into();
+            rejected_run.messages.update(|messages| messages.push(error_row));
+            rejected_run.chat_state.set_error("request rejected");
+            engine.return_failed_draft("rejected");
+            engine.select_session(None); // external pending SID effect
+            assert_eq!(engine.messages().get_untracked()[0].message_id, prompt_id);
+            assert_eq!(
+                engine.chat_state().state().get_untracked(),
+                ChatState::Error
+            );
+            assert_eq!(
+                engine.chat_state().error().get_untracked().as_deref(),
+                Some("request rejected")
+            );
+            assert!(!engine.chat_state().can_send.get_untracked());
+            // The browser's 100ms error timer makes the input available. SSR
+            // does not run timers, so advance via the public state reset.
+            // The failure banner and retained prompt were checked above.
+            engine.chat_state().reset();
+            assert!(engine.chat_state().can_send.get_untracked());
+            assert_eq!(engine.messages().get_untracked()[0].message_id, prompt_id);
+            assert_eq!(engine.messages().get_untracked()[1].content, "request rejected");
+            engine.add_user_message("retry prompt");
+            engine.select_session(Some("retry-session".into()));
+            engine.chat_state().start_sending("retry-session");
+            assert_eq!(engine.messages().get_untracked().len(), 3);
+            assert_eq!(engine.chat_state().error().get_untracked(), None);
+            engine.select_session(Some("unrelated".into()));
+            engine.return_failed_draft("rejected"); // stale HTTP failure
+            assert!(engine.messages().get_untracked().is_empty());
+            assert_eq!(
+                engine.session_id().get_untracked().as_deref(),
+                Some("unrelated")
+            );
+            engine.select_session(None);
+            assert!(engine.messages().get_untracked().is_empty());
+            assert_eq!(engine.chat_state().state().get_untracked(), ChatState::Idle);
+        });
+        owner.cleanup();
+    }
+
+    #[test]
+    fn chat_engine_accessors_read_and_track_correctly_while_owner_is_alive() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let engine = build_real_engine_for_disposal_test();
+            assert_eq!(engine.messages().try_get_untracked(), Some(Vec::new()));
+            assert_eq!(engine.session_id().try_get_untracked(), Some(None));
+
+            // Prove the read is live through the SAME stored handle, not a
+            // decoy that happens to match the initial value — drive the
+            // mutation through the engine's own real public API
+            // (`add_user_message`) rather than poking the private field
+            // directly, so this also exercises the real write path.
+            let msg_id = engine.add_user_message("hi");
+            engine.session_id.set(Some("sess-1".to_string()));
+            assert_eq!(
+                engine.messages().try_get_untracked().map(|m| m.len()),
+                Some(1)
+            );
+            assert_eq!(
+                engine
+                    .messages()
+                    .try_get_untracked()
+                    .and_then(|m| m.first().map(|m| m.message_id.clone())),
+                Some(msg_id)
+            );
+            assert_eq!(
+                engine.session_id().try_get_untracked(),
+                Some(Some("sess-1".to_string()))
+            );
+        });
+    }
+
+    #[test]
+    fn chat_engine_accessors_do_not_panic_after_owner_disposal() {
+        // Exact reproduction shape of the reported panic: construct the
+        // engine, dispose the owning scope (simulating navigating away from
+        // /chat mid-stream), THEN call the accessor for the first time —
+        // exactly as chat_page.rs's send-handler `spawn_local` continuation
+        // calls `engine.messages()` for the first time when it resumes
+        // post-`.await`, by which point the page may already be disposed.
+        // Calling the accessor BEFORE disposal would not distinguish this
+        // fix from the original bug: the original `.read_only()` only
+        // panics when it re-derives a handle from an already-disposed
+        // signal, which requires the call to happen after disposal.
+        let owner = Owner::new();
+        let engine = owner.with(build_real_engine_for_disposal_test);
+
+        // `Owner::cleanup()` is the same explicit disposal path used in
+        // production (route unmount), not reliance on Rust's Drop/refcounting
+        // — matches `chat_page.rs`'s `tests_disposal_scope` convention.
+        owner.cleanup();
+
+        assert_eq!(
+            engine.messages().try_get_untracked(),
+            None,
+            "ChatEngine::messages() must not panic after owner disposal"
+        );
+        assert_eq!(
+            engine.session_id().try_get_untracked(),
+            None,
+            "ChatEngine::session_id() must not panic after owner disposal"
+        );
+    }
+
+    // ── ChatStateMachine — real constructor, real accessors ────────────────
+
+    #[test]
+    fn chat_state_machine_accessors_read_and_track_correctly_while_owner_is_alive() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let chat_state = ChatStateMachine::new();
+            assert_eq!(
+                chat_state.state().try_get_untracked(),
+                Some(ChatState::Idle)
+            );
+            assert_eq!(chat_state.active_message_id().try_get_untracked(), Some(None));
+            assert_eq!(chat_state.active_session_id().try_get_untracked(), Some(None));
+            assert_eq!(chat_state.error().try_get_untracked(), Some(None));
+
+            // Prove reads are live through the SAME stored handle.
+            chat_state.start_sending("sess-1");
+            assert_eq!(
+                chat_state.state().try_get_untracked(),
+                Some(ChatState::Sending)
+            );
+            assert_eq!(
+                chat_state.active_session_id().try_get_untracked(),
+                Some(Some("sess-1".to_string()))
+            );
+
+            chat_state.start_streaming("msg-1");
+            assert_eq!(
+                chat_state.state().try_get_untracked(),
+                Some(ChatState::Streaming)
+            );
+            assert_eq!(
+                chat_state.active_message_id().try_get_untracked(),
+                Some(Some("msg-1".to_string()))
+            );
+        });
+    }
+
+    #[test]
+    fn chat_state_machine_accessors_do_not_panic_after_owner_disposal() {
+        // This is the real-world trigger from chat_page.rs's send handler:
+        // `chat_state_inner.state().try_get_untracked().is_some()` is used as
+        // a disposal guard before calling `.reset()`/`.set_error()` inside a
+        // `spawn_local` continuation — i.e. `.state()` is called for the
+        // FIRST time post-disposal, not obtained beforehand. Calling the
+        // accessor before disposal would not distinguish this fix from the
+        // original bug: `.read_only()` only panics when it re-derives a
+        // handle from an already-disposed signal, so the accessor call must
+        // happen after `owner.cleanup()` to reproduce it.
+        let owner = Owner::new();
+        let chat_state = owner.with(ChatStateMachine::new);
+
+        owner.cleanup();
+
+        assert_eq!(
+            chat_state.state().try_get_untracked(),
+            None,
+            "ChatStateMachine::state() must not panic after owner disposal"
+        );
+        assert_eq!(
+            chat_state.active_message_id().try_get_untracked(),
+            None,
+            "ChatStateMachine::active_message_id() must not panic after owner disposal"
+        );
+        assert_eq!(
+            chat_state.active_session_id().try_get_untracked(),
+            None,
+            "ChatStateMachine::active_session_id() must not panic after owner disposal"
+        );
+        assert_eq!(
+            chat_state.error().try_get_untracked(),
+            None,
+            "ChatStateMachine::error() must not panic after owner disposal"
+        );
+    }
+
+    // ── ThinkingManager — real constructor, real accessor ───────────────────
+
+    #[test]
+    fn thinking_manager_state_reads_and_tracks_correctly_while_owner_is_alive() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let thinking = ThinkingManager::new();
+            assert!(
+                thinking.state().try_get_untracked().is_some_and(|m| m.is_empty()),
+                "thinking state must start alive and empty"
+            );
+
+            thinking.handle_thinking_event(
+                "msg-1",
+                ThinkingEvent {
+                    event_id: "1-0".to_string(),
+                    event_type: "agent_thought".to_string(),
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    title: "Thinking".to_string(),
+                    description: None,
+                    data: None,
+                    duration_ms: None,
+                    has_full_text: false,
+                },
+                None,
+            );
+            assert!(
+                thinking
+                    .state()
+                    .try_get_untracked()
+                    .is_some_and(|m| m.contains_key("msg-1")),
+                "read must observe the write through the same stored handle"
+            );
+        });
+    }
+
+    #[test]
+    fn thinking_manager_state_does_not_panic_after_owner_disposal() {
+        // As with `ChatStateMachine` above: `.state()` must be called for
+        // the FIRST time after disposal to reproduce the original bug —
+        // `.read_only()` only panics when re-deriving from an
+        // already-disposed signal.
+        let owner = Owner::new();
+        let thinking = owner.with(ThinkingManager::new);
+
+        owner.cleanup();
+
+        assert!(
+            thinking.state().try_get_untracked().is_none(),
+            "ThinkingManager::state() must not panic after owner disposal"
+        );
     }
 }

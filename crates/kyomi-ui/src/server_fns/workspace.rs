@@ -28,9 +28,13 @@ pub struct WorkspaceSummary {
 }
 
 /// List all workspaces the caller belongs to, for the sidebar switcher.
-#[server(prefix = "/leptos-api")]
+///
+/// Uses `extract_auth_allow_lapsed()` (KYO-805): a member of several
+/// workspaces must not be trapped in a lapsed one — this is how they find
+/// the others to switch to.
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn list_my_workspaces() -> Result<Vec<WorkspaceSummary>, ServerFnError> {
-    let auth = extract_auth().await?;
+    let auth = extract_auth_allow_lapsed().await?;
     let ctx = extract_context()?;
 
     let current = auth.workspace.workspace_id.clone();
@@ -67,9 +71,12 @@ pub async fn list_my_workspaces() -> Result<Vec<WorkspaceSummary>, ServerFnError
 }
 
 /// Switch the caller's active workspace and re-mint their session.
-#[server(prefix = "/leptos-api")]
+///
+/// Uses `extract_auth_allow_lapsed()` (KYO-805) for the same reason as
+/// `list_my_workspaces`: switching *out of* the lapsed workspace must work.
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn switch_workspace(workspace_id: String) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
+    let auth = extract_auth_allow_lapsed().await?;
     let ctx = extract_context()?;
 
     let user = kyomi_auth::user_service::get_user_by_id(&ctx.db, &auth.user_id)
@@ -176,7 +183,7 @@ fn merge_custom_settings(
 ///
 /// Returns workspace name, default AI model, and chart palette.
 /// Requires workspace admin role.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_workspace_settings() -> Result<WorkspaceSettingsData, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
     ac.require(Permission::ManageWorkspaceSettings, "Workspace admin access required")?;
@@ -213,7 +220,7 @@ pub async fn get_workspace_settings() -> Result<WorkspaceSettingsData, ServerFnE
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Update the workspace name. Requires admin role.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn update_workspace_name(name: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
     ac.require(Permission::ManageWorkspaceSettings, "Workspace admin access required")?;
@@ -231,7 +238,7 @@ pub async fn update_workspace_name(name: String) -> Result<(), ServerFnError> {
 }
 
 /// Update the workspace default AI model. Requires admin role.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn update_workspace_model(
     model: String,
     context_window: Option<u64>,
@@ -275,7 +282,7 @@ pub async fn update_workspace_model(
 /// title generation logic uses this model instead of overriding to the cheapest
 /// model for the provider. Pass an empty string to clear the override and
 /// restore the cheapest-model fallback.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn update_workspace_title_model(model: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
     ac.require(Permission::ManageWorkspaceSettings, "Workspace admin access required")?;
@@ -307,7 +314,7 @@ pub async fn update_workspace_title_model(model: String) -> Result<(), ServerFnE
 }
 
 /// Update the workspace ChartML config (chart palette). Requires admin role.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn update_workspace_chartml_config(palette: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
     ac.require(Permission::ManageWorkspaceSettings, "Workspace admin access required")?;
@@ -349,7 +356,7 @@ pub async fn update_workspace_chartml_config(palette: String) -> Result<(), Serv
 /// Returns whether the Kyomi Slack app is installed in the workspace,
 /// along with the Slack team name and ID if installed.
 /// Requires workspace admin role.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_workspace_slack_status() -> Result<crate::types::WorkspaceSlackStatus, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
     ac.require(Permission::ManageIntegrations, "Workspace admin access required")?;
@@ -384,7 +391,7 @@ pub async fn get_workspace_slack_status() -> Result<crate::types::WorkspaceSlack
 /// to this URL to complete the Slack app installation.
 /// Requires workspace admin role.
 #[cfg(feature = "slack")]
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_slack_install_url() -> Result<String, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
     ac.require(Permission::ManageIntegrations, "Workspace admin access required")?;
@@ -433,7 +440,7 @@ pub async fn get_slack_install_url() -> Result<String, ServerFnError> {
 }
 
 #[cfg(not(feature = "slack"))]
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn get_slack_install_url() -> Result<String, ServerFnError> {
     Err(ServerFnError::new("Slack integration not available"))
 }
@@ -442,7 +449,7 @@ pub async fn get_slack_install_url() -> Result<String, ServerFnError> {
 ///
 /// Removes the workspace integration record from the database.
 /// Requires workspace admin role.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn uninstall_workspace_slack(team_id: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
     ac.require(Permission::ManageIntegrations, "Workspace admin access required")?;
@@ -471,7 +478,7 @@ pub async fn uninstall_workspace_slack(team_id: String) -> Result<(), ServerFnEr
 
 // Helpers — delegate to shared extractors in parent module
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, AuthenticatedContext, IntoServerFnErrorCore};
+use super::{extract_auth_allow_lapsed, extract_context, AuthenticatedContext, IntoServerFnErrorCore};
 #[cfg(feature = "ssr")]
 use kyomi_types::Permission;
 

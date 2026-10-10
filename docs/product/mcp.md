@@ -108,6 +108,8 @@ The AI will use Kyomi's tools to answer your questions, with full access to your
 - **Automatic refresh** - Tokens refresh automatically, no need to reconnect
 - **Same permissions** - MCP uses your existing Kyomi credentials and datasource access
 
+OAuth access tokens issued for MCP can be used only at the MCP endpoint. They cannot be used as a Kyomi web session or for the ordinary REST API. Refreshing through the OAuth token endpoint keeps this restriction. Existing clients should continue using that endpoint for refresh; they do not need to change their request format. Access tokens issued before this restriction expire on their normal schedule. If a client has an older token that stops working, disconnect and reconnect to authorize again.
+
 ## Security
 
 - All queries use your credentials and respect datasource permissions

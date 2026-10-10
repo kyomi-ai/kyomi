@@ -24,7 +24,7 @@ use crate::server_fns::watches::{
     toggle_watch,
 };
 use crate::types::{WatchExecutionItem, WatchListItem};
-use crate::utils::cron::{describe_cron, get_tz_offset_minutes};
+use crate::utils::cron::{describe_schedule, format_schedule_execution};
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -102,7 +102,6 @@ fn status_badge_config(status: &str) -> (StatusBadgeVariant, &'static str) {
 #[component]
 fn WatchCard(
     watch: WatchListItem,
-    tz_offset: i32,
     /// Toggle enabled/disabled.
     on_toggle: Callback<String>,
     /// Run immediately.
@@ -131,7 +130,8 @@ fn WatchCard(
     let next_run_at = watch.next_run_at.clone();
     let has_last_run = watch.last_run_at.is_some();
 
-    let cron_desc = describe_cron(&watch_schedule, tz_offset);
+    let cron_desc = describe_schedule(&watch_schedule, watch.timezone.as_deref());
+    let schedule_timezone = watch.timezone.clone();
 
     // Clones for each handler closure.
     let wid_toggle = watch_id.clone();
@@ -215,7 +215,7 @@ fn WatchCard(
                     let next = next_run_at.as_deref().unwrap_or_default();
                     view! {
                         <div class="text-xs text-muted-foreground">
-                            {format!("Next run: {}", format_date(next))}
+                            {format!("Next run: {}", format_schedule_execution(next, schedule_timezone.as_deref()))}
                         </div>
                     }
                 })}
@@ -474,7 +474,6 @@ pub fn WatchesPage() -> impl IntoView {
     };
 
     // Timezone offset for cron descriptions.
-    let tz_offset = get_tz_offset_minutes();
 
     let handle_create_watch = move |_: leptos::ev::MouseEvent| {
         set_modal_watch.set(None);
@@ -627,7 +626,6 @@ pub fn WatchesPage() -> impl IntoView {
                                     view! {
                                         <WatchCard
                                             watch=watch
-                                            tz_offset=tz_offset
                                             on_toggle=handle_toggle_watch
                                             on_run=handle_run_now
                                             on_edit=handle_edit_watch

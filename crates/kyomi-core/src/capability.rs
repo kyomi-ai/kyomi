@@ -13,6 +13,7 @@
 //! - No `BillingService` integration — uses `workspace.ai_credits_used_usd`
 //!   directly with hardcoded credit budgets.
 
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use crate::enums::{SubscriptionStatus, SubscriptionTier};
@@ -162,6 +163,148 @@ pub fn get_credits_info(workspace: &Workspace, tier: SubscriptionTier) -> Capabi
 pub fn get_user_limit(workspace: &Workspace, tier: SubscriptionTier) -> i32 {
     let _ = tier;
     workspace.user_limit.unwrap_or(UNLIMITED_USER_LIMIT)
+}
+
+// ─── Billing lapse predicate ────────────────────────────────────────────────
+
+/// The ONE definition of "this SaaS workspace must pay before continuing to
+/// use the app."
+///
+/// **SaaS workspaces only.** Self-hosted / personal-mode callers use
+/// [`compute_capabilities_self_hosted`] and never call this — that mode has
+/// no billing at all, mirroring the existing `compute_capabilities` vs.
+/// `compute_capabilities_self_hosted` split above: callers pick the function
+/// for their deployment mode, they don't branch inside one function. This
+/// predicate does not itself gate anything yet — no caller is wired up in
+/// this change; follow-up work (server-side 402 enforcement, then a paywall)
+/// consumes it.
+///
+/// - `PastDue` → always lapsed: Stripe has already determined this
+///   workspace isn't paid up.
+/// - `Cancelled` **with** a live Stripe subscription (`stripe_subscription_id`
+///   is `Some`) **and** `subscription_period_end` in the future → **not**
+///   lapsed. This is a *scheduled* cancellation: the user cancelled but
+///   Stripe (and our billing page's "you'll retain access until the end of
+///   your billing period" copy) keeps them paid up through the period they
+///   already paid for. `StripeService::parse_subscription_data`
+///   (`kyomi-auth/src/stripe_service.rs`) writes `status = "cancelled"` the
+///   instant `cancel_at_period_end` is set — well before Stripe's own status
+///   moves — but in that same call it also sets `period_end` from the
+///   subscription item's `current_period_end` and keeps
+///   `stripe_subscription_id` populated, so a scheduled-cancellation row
+///   always carries both. `handle_subscription_deleted`
+///   (`apps/server/src/routes/billing.rs`) is the only writer that clears
+///   both fields to `NULL` when Stripe actually deletes the subscription —
+///   so "sub id present + period end present and future" reliably
+///   distinguishes "cancellation is scheduled" from "subscription is gone".
+/// - Every other `Cancelled` row is lapsed: no Stripe subscription id (never
+///   scheduled, or Stripe already deleted it), or the period end has passed,
+///   or `subscription_period_end` is `None`. The `None` case deliberately
+///   reads as lapsed rather than permissive: unlike `Trialing`'s
+///   `trial_ends_at` (see below), a scheduled cancellation's `period_end` is
+///   not optional at the writer — `parse_subscription_data` always populates
+///   it from Stripe's `current_period_end` whenever `cancel_at_period_end` is
+///   set, so a `Cancelled` row with `stripe_subscription_id` set but no
+///   `period_end` gives no evidence of any paid-up time remaining and there
+///   is nothing to honour.
+/// - `Trialing` **with** a Stripe subscription (`stripe_subscription_id` is
+///   `Some`) → **never** lapsed via this predicate, even if `trial_ends_at`
+///   itself is in the past. Once Stripe's own trial ends it moves the
+///   subscription to `active` (see the corrected comment on the client-side
+///   gate in `kyomi-ui/src/components/layout.rs`), so Stripe — not our
+///   locally cached `trial_ends_at` — governs this case, and this predicate
+///   must not race ahead of Stripe's webhook-driven status update.
+/// - `Trialing` **without** a Stripe subscription → this is the app-managed
+///   fallback trial written by `user_service::create_workspace_for_user`
+///   when Stripe customer/subscription creation failed at signup (nothing
+///   else in this codebase sets `subscription_status = 'trialing'`). Lapsed
+///   once `trial_ends_at` is in the past.
+///   - If `trial_ends_at` is `None`: **not** lapsed. Today's only writer of
+///     `trialing` status always sets `trial_ends_at` in the same insert, so
+///     a `None` here can only come from a row this predicate's author never
+///     saw — a legacy/manually-created workspace, or a future writer that
+///     didn't set a trial length. Reading "no trial end configured" as "pay
+///     now" would lock out exactly the rows that legitimately don't have an
+///     expiry, which is worse than the alternative: an operator who *does*
+///     intend a no-Stripe trial to expire has an explicit, checkable
+///     `trial_ends_at` available to set. This predicate stays permissive
+///     until that signal is actually present, rather than inferring intent
+///     from its absence.
+/// - `Active` → never lapsed.
+///
+/// Defined as `billing_lapse_reason(workspace, now).is_some()` (KYO-806) —
+/// see that function for the typed reason behind each lapsed case. Kept as
+/// its own named predicate (rather than inlining `.is_some()` at every call
+/// site) because most callers only need the boolean and `bool` reads better
+/// than `Option<_>.is_some()` at those sites.
+pub fn is_billing_lapsed(workspace: &Workspace, now: DateTime<Utc>) -> bool {
+    billing_lapse_reason(workspace, now).is_some()
+}
+
+/// The typed reason `workspace`'s billing is currently lapsed, or `None` if
+/// it isn't (KYO-806).
+///
+/// This is the ONE implementation of the lapsed rule — [`is_billing_lapsed`]
+/// is defined in terms of this function's `.is_some()`, never the reverse
+/// and never a second, independent match. See [`is_billing_lapsed`]'s doc
+/// comment (reproduced here only where the reason mapping needs its own
+/// note) for the full reasoning behind each branch:
+/// - `PastDue` → [`kyomi_types::BillingLapseReason::PaymentFailed`].
+/// - `Cancelled`, unless it's a scheduled cancellation still inside its
+///   paid-up grace period → [`kyomi_types::BillingLapseReason::SubscriptionEnded`].
+/// - `Trialing` with no live Stripe subscription and an expired
+///   `trial_ends_at` → [`kyomi_types::BillingLapseReason::TrialEnded`].
+/// - Everything else (including `Active`, and every "not actually lapsed"
+///   sub-case of `Cancelled`/`Trialing` documented on [`is_billing_lapsed`])
+///   → `None`.
+pub fn billing_lapse_reason(
+    workspace: &Workspace,
+    now: DateTime<Utc>,
+) -> Option<kyomi_types::BillingLapseReason> {
+    use kyomi_types::BillingLapseReason;
+
+    match workspace.subscription_status {
+        SubscriptionStatus::PastDue => Some(BillingLapseReason::PaymentFailed),
+        SubscriptionStatus::Cancelled => {
+            let scheduled_cancellation = workspace.stripe_subscription_id.is_some()
+                && workspace
+                    .subscription_period_end
+                    .is_some_and(|period_end| period_end > now);
+            if scheduled_cancellation {
+                None
+            } else {
+                Some(BillingLapseReason::SubscriptionEnded)
+            }
+        }
+        SubscriptionStatus::Active => None,
+        SubscriptionStatus::Trialing => {
+            let expired_no_stripe_trial = workspace.stripe_subscription_id.is_none()
+                && workspace.trial_ends_at.is_some_and(|trial_ends_at| trial_ends_at < now);
+            if expired_no_stripe_trial {
+                Some(BillingLapseReason::TrialEnded)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Whether the billing gate blocks `workspace` from being served right now.
+///
+/// The single function every enforcement point (the `AuthUser` axum
+/// extractor, the WebSocket sync handlers, the watch scheduler, the catalog
+/// scheduler) calls — combining "does this deployment mode enforce billing
+/// at all" with [`is_billing_lapsed`] in one place so none of those callers
+/// can drift from each other or re-derive either half independently
+/// (KYO-805).
+///
+/// `self_hosted` must come from `kyomi_core::Config::self_hosted`, which is
+/// `true` for **both** `KyomiMode::SelfHosted` and `KyomiMode::Personal`
+/// (see `Config::self_hosted`'s doc comment) — neither deployment mode has
+/// billing, so this always returns `false` for them regardless of whatever
+/// `subscription_status` happens to be sitting in the row.
+pub fn billing_gate_blocks(workspace: &Workspace, self_hosted: bool, now: DateTime<Utc>) -> bool {
+    !self_hosted && is_billing_lapsed(workspace, now)
 }
 
 // ─── Main entry point ────────────────────────────────────────────────────────
@@ -829,5 +972,253 @@ mod tests {
         assert!(!caps.slack_integration_enabled);
         assert!(caps.mcp_access_enabled);
         assert!(!caps.pdf_export_enabled);
+    }
+
+    // ─── is_billing_lapsed ───────────────────────────────────────────────
+
+    #[test]
+    fn past_due_is_lapsed() {
+        let mut ws = test_workspace(SubscriptionTier::Cloud, 0.0);
+        ws.subscription_status = SubscriptionStatus::PastDue;
+        assert!(is_billing_lapsed(&ws, Utc::now()));
+    }
+
+    #[test]
+    fn cancelled_scheduled_with_future_period_end_is_not_lapsed() {
+        // Scheduled cancellation (cancel_at_period_end): stripe_subscription_id
+        // still set, subscription_period_end still in the future. This is the
+        // exact KYO-811 case — the user cancelled but is still inside the
+        // period they already paid for.
+        let now = Utc::now();
+        let mut ws = test_workspace(SubscriptionTier::Cloud, 0.0);
+        ws.subscription_status = SubscriptionStatus::Cancelled;
+        ws.stripe_subscription_id = Some("sub_live_123".to_string());
+        ws.subscription_period_end = Some(now + chrono::Duration::days(5));
+        assert!(!is_billing_lapsed(&ws, now));
+    }
+
+    #[test]
+    fn cancelled_scheduled_with_past_period_end_is_lapsed() {
+        // Same shape as the scheduled-cancellation case above, but the paid
+        // period has actually elapsed — must be lapsed.
+        let now = Utc::now();
+        let mut ws = test_workspace(SubscriptionTier::Cloud, 0.0);
+        ws.subscription_status = SubscriptionStatus::Cancelled;
+        ws.stripe_subscription_id = Some("sub_live_123".to_string());
+        ws.subscription_period_end = Some(now - chrono::Duration::days(1));
+        assert!(is_billing_lapsed(&ws, now));
+    }
+
+    #[test]
+    fn cancelled_no_sub_with_future_period_end_is_lapsed() {
+        // Proves stripe_subscription_id is load-bearing, not just
+        // period_end: a future period_end alone (e.g. a stale value left
+        // over from before Stripe deleted the subscription) must not be
+        // enough to avoid the gate once the subscription id itself is gone.
+        let now = Utc::now();
+        let mut ws = test_workspace(SubscriptionTier::Cloud, 0.0);
+        ws.subscription_status = SubscriptionStatus::Cancelled;
+        ws.stripe_subscription_id = None;
+        ws.subscription_period_end = Some(now + chrono::Duration::days(5));
+        assert!(is_billing_lapsed(&ws, now));
+    }
+
+    #[test]
+    fn cancelled_sub_with_no_period_end_is_lapsed() {
+        // subscription_period_end = None with a live sub id: parse_subscription_data
+        // always sets period_end from Stripe's current_period_end whenever
+        // cancel_at_period_end is set, so a Cancelled row with a sub id but no
+        // period_end gives no evidence of paid-up time remaining — there is
+        // nothing to honour, so this reads as lapsed (see the doc comment
+        // above for the full justification).
+        let now = Utc::now();
+        let mut ws = test_workspace(SubscriptionTier::Cloud, 0.0);
+        ws.subscription_status = SubscriptionStatus::Cancelled;
+        ws.stripe_subscription_id = Some("sub_live_123".to_string());
+        ws.subscription_period_end = None;
+        assert!(is_billing_lapsed(&ws, now));
+    }
+
+    #[test]
+    fn cancelled_scheduled_with_period_end_exactly_now_is_lapsed() {
+        // Boundary: period_end == now is not "> now", so this must be
+        // lapsed, not the last instant of grace.
+        let now = Utc::now();
+        let mut ws = test_workspace(SubscriptionTier::Cloud, 0.0);
+        ws.subscription_status = SubscriptionStatus::Cancelled;
+        ws.stripe_subscription_id = Some("sub_live_123".to_string());
+        ws.subscription_period_end = Some(now);
+        assert!(is_billing_lapsed(&ws, now));
+    }
+
+    #[test]
+    fn active_is_never_lapsed() {
+        let mut ws = test_workspace(SubscriptionTier::Cloud, 0.0);
+        ws.subscription_status = SubscriptionStatus::Active;
+        // Active with no Stripe subscription and a long-past trial_ends_at
+        // (stale/irrelevant field on an already-paying workspace) must still
+        // read as not lapsed — Active never depends on trial_ends_at.
+        ws.stripe_subscription_id = None;
+        ws.trial_ends_at = Some(Utc::now() - chrono::Duration::days(400));
+        assert!(!is_billing_lapsed(&ws, Utc::now()));
+    }
+
+    #[test]
+    fn trialing_no_sub_expired_trial_is_lapsed() {
+        // The no-Stripe signup fallback (user_service::create_workspace_for_user
+        // when Stripe customer/subscription creation failed): trialing status,
+        // no stripe_subscription_id, trial_ends_at in the past. This is the
+        // exact "trial never expires" defect KYO-804 fixes.
+        let mut ws = test_workspace(SubscriptionTier::Cloud, 0.0);
+        ws.subscription_status = SubscriptionStatus::Trialing;
+        ws.stripe_subscription_id = None;
+        ws.trial_ends_at = Some(Utc::now() - chrono::Duration::days(1));
+        assert!(is_billing_lapsed(&ws, Utc::now()));
+    }
+
+    #[test]
+    fn trialing_no_sub_not_yet_expired_is_not_lapsed() {
+        let mut ws = test_workspace(SubscriptionTier::Cloud, 0.0);
+        ws.subscription_status = SubscriptionStatus::Trialing;
+        ws.stripe_subscription_id = None;
+        ws.trial_ends_at = Some(Utc::now() + chrono::Duration::days(1));
+        assert!(!is_billing_lapsed(&ws, Utc::now()));
+    }
+
+    #[test]
+    fn trialing_with_sub_expired_trial_is_not_lapsed() {
+        // The case that separates "Stripe governs" from a naive
+        // "just check trial_ends_at" implementation: a real Stripe
+        // subscription is attached, and our cached trial_ends_at is in the
+        // past, but Stripe (not us) owns this trial's lifecycle — Stripe
+        // moves it to `active` on trial end, and our webhook handler hasn't
+        // necessarily caught up yet. Must NOT be lapsed.
+        let mut ws = test_workspace(SubscriptionTier::Cloud, 0.0);
+        ws.subscription_status = SubscriptionStatus::Trialing;
+        ws.stripe_subscription_id = Some("sub_live_123".to_string());
+        ws.trial_ends_at = Some(Utc::now() - chrono::Duration::days(1));
+        assert!(!is_billing_lapsed(&ws, Utc::now()));
+    }
+
+    #[test]
+    fn trialing_no_sub_no_trial_end_is_not_lapsed() {
+        // trial_ends_at == None decision (see the doc comment on
+        // is_billing_lapsed): a trialing, no-Stripe-subscription workspace
+        // with no trial_ends_at at all must NOT be treated as lapsed —
+        // absence of a configured expiry is not itself a "must pay" signal,
+        // and today's only writer of `trialing` always sets trial_ends_at,
+        // so a None here can only be a row this predicate's author never
+        // anticipated (legacy/manual). Failing open here, rather than
+        // locking such a workspace out, is the deliberate choice.
+        let mut ws = test_workspace(SubscriptionTier::Cloud, 0.0);
+        ws.subscription_status = SubscriptionStatus::Trialing;
+        ws.stripe_subscription_id = None;
+        ws.trial_ends_at = None;
+        assert!(!is_billing_lapsed(&ws, Utc::now()));
+    }
+
+    // ─── billing_lapse_reason (KYO-806) ────────────────────────────────
+    //
+    // is_billing_lapsed is now `billing_lapse_reason(..).is_some()`, so its
+    // tests above already cover the lapsed/not-lapsed boundary. These tests
+    // cover the one thing they can't: which reason each lapsed case maps to.
+
+    use kyomi_types::BillingLapseReason;
+
+    #[test]
+    fn billing_lapse_reason_past_due_is_payment_failed() {
+        let mut ws = test_workspace(SubscriptionTier::Cloud, 0.0);
+        ws.subscription_status = SubscriptionStatus::PastDue;
+        assert_eq!(
+            billing_lapse_reason(&ws, Utc::now()),
+            Some(BillingLapseReason::PaymentFailed)
+        );
+    }
+
+    #[test]
+    fn billing_lapse_reason_cancelled_not_scheduled_is_subscription_ended() {
+        let ws = test_workspace(SubscriptionTier::Cloud, 0.0);
+        let mut ws = ws;
+        ws.subscription_status = SubscriptionStatus::Cancelled;
+        ws.stripe_subscription_id = None;
+        assert_eq!(
+            billing_lapse_reason(&ws, Utc::now()),
+            Some(BillingLapseReason::SubscriptionEnded)
+        );
+    }
+
+    #[test]
+    fn billing_lapse_reason_cancelled_scheduled_grace_period_is_none() {
+        let now = Utc::now();
+        let mut ws = test_workspace(SubscriptionTier::Cloud, 0.0);
+        ws.subscription_status = SubscriptionStatus::Cancelled;
+        ws.stripe_subscription_id = Some("sub_live_123".to_string());
+        ws.subscription_period_end = Some(now + chrono::Duration::days(5));
+        assert_eq!(billing_lapse_reason(&ws, now), None);
+    }
+
+    #[test]
+    fn billing_lapse_reason_trialing_no_sub_expired_is_trial_ended() {
+        let now = Utc::now();
+        let mut ws = test_workspace(SubscriptionTier::Cloud, 0.0);
+        ws.subscription_status = SubscriptionStatus::Trialing;
+        ws.stripe_subscription_id = None;
+        ws.trial_ends_at = Some(now - chrono::Duration::days(1));
+        assert_eq!(
+            billing_lapse_reason(&ws, now),
+            Some(BillingLapseReason::TrialEnded)
+        );
+    }
+
+    #[test]
+    fn billing_lapse_reason_active_is_none() {
+        let ws = test_workspace(SubscriptionTier::Cloud, 0.0);
+        assert_eq!(billing_lapse_reason(&ws, Utc::now()), None);
+    }
+
+    #[test]
+    fn billing_lapse_reason_trialing_with_sub_is_none_even_if_trial_end_passed() {
+        let now = Utc::now();
+        let mut ws = test_workspace(SubscriptionTier::Cloud, 0.0);
+        ws.subscription_status = SubscriptionStatus::Trialing;
+        ws.stripe_subscription_id = Some("sub_live_123".to_string());
+        ws.trial_ends_at = Some(now - chrono::Duration::days(1));
+        assert_eq!(billing_lapse_reason(&ws, now), None);
+    }
+
+    // ─── billing_gate_blocks ────────────────────────────────────────────
+
+    #[test]
+    fn billing_gate_blocks_lapsed_saas_workspace() {
+        let mut ws = test_workspace(SubscriptionTier::Cloud, 0.0);
+        ws.subscription_status = SubscriptionStatus::PastDue;
+        assert!(billing_gate_blocks(&ws, false, Utc::now()));
+    }
+
+    #[test]
+    fn billing_gate_blocks_never_blocks_self_hosted_even_when_past_due() {
+        // self_hosted=true must short-circuit regardless of subscription
+        // status — self-hosted/personal deployments have no billing at all,
+        // so a stray past_due row (e.g. leftover test data, a manually
+        // edited row) must never gate them.
+        let mut ws = test_workspace(SubscriptionTier::Cloud, 0.0);
+        ws.subscription_status = SubscriptionStatus::PastDue;
+        assert!(!billing_gate_blocks(&ws, true, Utc::now()));
+    }
+
+    #[test]
+    fn billing_gate_blocks_does_not_block_active_saas_workspace() {
+        let ws = test_workspace(SubscriptionTier::Cloud, 0.0);
+        assert!(!billing_gate_blocks(&ws, false, Utc::now()));
+    }
+
+    #[test]
+    fn billing_gate_blocks_does_not_block_scheduled_cancellation_in_grace_period() {
+        let now = Utc::now();
+        let mut ws = test_workspace(SubscriptionTier::Cloud, 0.0);
+        ws.subscription_status = SubscriptionStatus::Cancelled;
+        ws.stripe_subscription_id = Some("sub_live_123".to_string());
+        ws.subscription_period_end = Some(now + chrono::Duration::days(5));
+        assert!(!billing_gate_blocks(&ws, false, now));
     }
 }

@@ -172,6 +172,7 @@ pub fn build_router(state: state::AppState, _extras: ServerExtras) -> Router {
                 mcp_sessions: Some(state.mcp_sessions.clone()),
                 #[cfg(feature = "slack")]
                 slack_client: _extras.slack_client.clone(),
+                process_instance: state.process_instance.clone(),
             };
             leptos_frontend::login_ssr_handler(server_ctx)
         }))
@@ -179,7 +180,6 @@ pub fn build_router(state: state::AppState, _extras: ServerExtras) -> Router {
         .route("/auth/google/callback", axum::routing::get(leptos_frontend::serve_leptos_shell))
         .route("/account/recover", axum::routing::get(leptos_frontend::serve_leptos_shell))
         .route("/account/recover/complete", axum::routing::get(leptos_frontend::serve_leptos_shell))
-        .route("/auth/passkey-signup", axum::routing::get(leptos_frontend::serve_leptos_shell))
         .route("/auth/recover-passkey", axum::routing::get(leptos_frontend::serve_leptos_shell))
         .route("/auth/recover-passkey/complete", axum::routing::get(leptos_frontend::serve_leptos_shell))
         // Billing portal return — public bounce page for SameSite=Strict cookie flow.
@@ -220,6 +220,7 @@ pub fn build_router(state: state::AppState, _extras: ServerExtras) -> Router {
                 mcp_sessions: Some(state.mcp_sessions.clone()),
                 #[cfg(feature = "slack")]
                 slack_client: _extras.slack_client,
+                process_instance: state.process_instance.clone(),
             };
             move |req: axum::http::Request<axum::body::Body>| {
                 let ctx = server_ctx.clone();

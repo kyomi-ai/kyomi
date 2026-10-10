@@ -1,7 +1,7 @@
 ALTER TABLE dashboards ADD COLUMN write_revision INTEGER NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS copilot_mutation_receipts (
-    receipt_id TEXT PRIMARY KEY,
+    receipt_id TEXT NOT NULL PRIMARY KEY,
     dashboard_id TEXT NOT NULL REFERENCES dashboards(dashboard_id) ON DELETE CASCADE,
     workspace_id TEXT NOT NULL,
     user_id TEXT NOT NULL,

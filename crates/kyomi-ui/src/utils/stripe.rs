@@ -122,6 +122,36 @@ mod inner {
 
         Ok(EmbeddedCheckoutHandle { instance: checkout })
     }
+
+    /// Fetch the Stripe publishable key, wait for the mount target to exist
+    /// in the DOM, then mount an embedded checkout form there.
+    ///
+    /// This is the mechanics `pages/settings/billing.rs`'s
+    /// `open_embedded_checkout` and `components/billing_paywall.rs`
+    /// (KYO-806) both need identically — only what happens in
+    /// `on_complete` differs between the two callers (the settings page
+    /// polls `get_checkout_session_status`; the paywall calls
+    /// `sync_checkout_subscription`/`complete_payment_recovery`), so that
+    /// stays the caller's own closure rather than being baked in here.
+    ///
+    /// The 50ms wait exists because the mount target (`mount_selector`) is
+    /// rendered by the same reactive update that triggers this call — the
+    /// DOM node isn't guaranteed to exist yet on the same tick.
+    pub async fn fetch_key_and_mount_embedded_checkout(
+        client_secret: &str,
+        mount_selector: &str,
+        on_complete: impl Fn() + 'static,
+    ) -> Result<EmbeddedCheckoutHandle, String> {
+        let pk = match crate::server_fns::billing::get_stripe_publishable_key().await {
+            Ok(Some(pk)) => pk,
+            Ok(None) => return Err("Stripe is not configured.".to_string()),
+            Err(e) => return Err(format!("Failed to load Stripe config: {e}")),
+        };
+
+        gloo_timers::future::TimeoutFuture::new(50).await;
+
+        mount_embedded_checkout(&pk, client_secret, mount_selector, on_complete).await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -137,6 +167,14 @@ mod inner {
 
     pub async fn mount_embedded_checkout(
         _publishable_key: &str,
+        _client_secret: &str,
+        _mount_selector: &str,
+        _on_complete: impl Fn() + 'static,
+    ) -> Result<EmbeddedCheckoutHandle, String> {
+        Err("Embedded checkout is only available in the browser".into())
+    }
+
+    pub async fn fetch_key_and_mount_embedded_checkout(
         _client_secret: &str,
         _mount_selector: &str,
         _on_complete: impl Fn() + 'static,

@@ -29,6 +29,10 @@ pub struct User {
     /// Last login timestamp.
     pub last_login: Option<DateTime<Utc>>,
 
+    /// Session revocation cutoff, as Unix microseconds. Null preserves legacy sessions.
+    #[serde(default)]
+    pub sessions_valid_from: Option<i64>,
+
     /// Whether the account is active.
     pub active: bool,
 

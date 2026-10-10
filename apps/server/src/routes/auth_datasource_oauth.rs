@@ -213,8 +213,13 @@ async fn start_connect(
         }
     }
 
-    // Extract provider config from connection_config
-    let provider_config = ProviderConfig::from_connection_config(provider, &ds.connection_config)?;
+    // Extract provider config from connection_config — decrypts
+    // oauth_client_secret internally (KYO-786).
+    let provider_config = ProviderConfig::from_connection_config(
+        provider,
+        &ds.connection_config,
+        &state.encryption_key,
+    )?;
 
     // Generate CSRF state
     let csrf_state = redis_ops::generate_token();

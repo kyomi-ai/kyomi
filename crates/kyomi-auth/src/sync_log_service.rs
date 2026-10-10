@@ -301,7 +301,7 @@ pub async fn write_sync_entries_in_transaction(
 /// No `RETURNING` / `last_insert_rowid()` here — this batched form never
 /// hands back `sync_id`s (see the doc comment above), so there is nothing
 /// backend-specific left to branch on beyond the JSON cast.
-fn build_insert_sql_and_data(
+pub(crate) fn build_insert_sql_and_data(
     is_pg: bool,
     now_expr: &str,
     params: &SyncEntryParams<'_>,

@@ -125,12 +125,13 @@ right*. It also says that when a supporting fact turns out to be false you must 
 than quietly delete it — that instruction applies to the document you are fixing; this rule
 extends the same obligation to every other file that was leaning on the fact.
 
-Distinct from `a-clean-build-is-not-a-comment-sweep.md` (in flight on
-`jason/kyo-727-qa-sweep`, KYO-727 — not on `main` as of 2026-09-11): that rule is triggered by
-a **deletion** and has a mechanical handle, the removed identifier, which `git grep` finds in
-prose the compiler cannot see. This rule is triggered by a **correction**, often in a
-docs-only diff where no identifier changed at all and no grep term exists — the stale sites
-are found by following what cited the claim, not by searching for a name.
+Distinct from
+[sweep-for-the-comments-your-change-made-false.md](sweep-for-the-comments-your-change-made-false.md):
+that rule is triggered by a **deletion** and has a mechanical handle, the removed identifier,
+which `git grep` finds in prose the compiler cannot see. This rule is triggered by a
+**correction**, often in a docs-only diff where no identifier changed at all and no grep term
+exists — the stale sites are found by following what cited the claim, not by searching for a
+name.
 
 See also
 [cite-what-has-landed-not-an-open-pr-or-a-stranded-branch.md](cite-what-has-landed-not-an-open-pr-or-a-stranded-branch.md):

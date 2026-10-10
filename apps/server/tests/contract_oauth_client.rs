@@ -21,9 +21,12 @@
 //! - Section 3: `oauth_token` (oauth.rs:438)
 //! - Section 4: `register_client` (oauth.rs:761)
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use kyomi_test_harness::base_url;
+use kyomi_test_harness::{AuthContext, base_url, setup_auth_context};
+
+const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+const CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
 
 // ===========================================================================
 // Test infrastructure
@@ -33,7 +36,7 @@ fn client() -> reqwest::Client {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .unwrap()
+        .expect("OAuth contract value")
 }
 
 /// Register a real OAuth client via the public `/register` endpoint (RFC
@@ -112,6 +115,8 @@ async fn oauth_authorize_rejects_unknown_client_id() {
             ("client_id", "unknown-client-does-not-exist"),
             ("redirect_uri", "https://example.com/callback"),
             ("response_type", "code"),
+            ("code_challenge", CHALLENGE),
+            ("code_challenge_method", "S256"),
         ])
         .send()
         .await
@@ -137,6 +142,8 @@ async fn oauth_authorize_rejects_invalid_redirect_uri() {
             ("client_id", client_id.as_str()),
             ("redirect_uri", "https://evil.example/steal"),
             ("response_type", "code"),
+            ("code_challenge", CHALLENGE),
+            ("code_challenge_method", "S256"),
         ])
         .send()
         .await
@@ -215,7 +222,10 @@ async fn oauth_token_rejects_unsupported_grant_type() {
 
     let resp = client()
         .post(format!("{base}/api/v1/oauth/token"))
-        .form(&[("grant_type", "client_credentials"), ("client_id", &client_id)])
+        .form(&[
+            ("grant_type", "client_credentials"),
+            ("client_id", &client_id),
+        ])
         .send()
         .await
         .expect("request should succeed at the transport level");
@@ -273,15 +283,836 @@ async fn register_client_rejects_empty_redirect_uris() {
         .await
         .expect("request should succeed at the transport level");
 
-    assert_eq!(
-        resp.status(),
-        400,
-        "empty redirect_uris should return 400"
-    );
+    assert_eq!(resp.status(), 400, "empty redirect_uris should return 400");
     let body: Value = resp.json().await.expect("should return JSON");
     assert_eq!(
         body,
         json!({"error": "redirect_uris is required and must not be empty"}),
         "body must match the exact pre-KYO-401 error shape"
+    );
+}
+
+fn hidden_value(page: &str, name: &str) -> String {
+    let marker = format!("name=\"{name}\" value=\"");
+    page.split(&marker)
+        .nth(1)
+        .expect("consent form field")
+        .split('"')
+        .next()
+        .expect("OAuth contract value")
+        .to_owned()
+}
+
+async fn consent_page(ctx: &AuthContext, client_id: &str) -> (String, String, String) {
+    let resp = client()
+        .get(format!("{}/api/v1/oauth/authorize", ctx.base_url))
+        .header("cookie", format!("access_token={}", ctx.access_token))
+        .query(&[
+            ("client_id", client_id),
+            ("redirect_uri", "https://example.com/callback?existing=1"),
+            ("response_type", "code"),
+            ("code_challenge", CHALLENGE),
+            ("code_challenge_method", "S256"),
+            ("state", "client state & more"),
+        ])
+        .send()
+        .await
+        .expect("OAuth contract value");
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.headers()["cache-control"], "no-store");
+    let csp = resp.headers()["content-security-policy"]
+        .to_str()
+        .expect("consent CSP");
+    assert!(csp.contains("style-src 'self'"));
+    assert!(csp.contains("frame-ancestors 'none'"));
+    let consent_cookie = resp.headers()["set-cookie"]
+        .to_str()
+        .expect("consent cookie")
+        .split(';')
+        .next()
+        .expect("consent cookie pair")
+        .to_owned();
+    let page = resp.text().await.expect("OAuth contract value");
+    assert!(page.contains("Allow MCP access?"));
+    assert!(page.contains("kyomi_full_logo_white.svg"));
+    assert!(!page.contains("code="));
+    (
+        hidden_value(&page, "transaction"),
+        hidden_value(&page, "csrf"),
+        consent_cookie,
+    )
+}
+
+async fn oauth_context(suffix: &str) -> Option<(AuthContext, String)> {
+    let ctx = setup_auth_context("OAuth Test User", "oauth", suffix).await?;
+    let id =
+        register_test_client(&ctx.base_url, &["https://example.com/callback?existing=1"]).await;
+    Some((ctx, id))
+}
+
+#[tokio::test]
+async fn logged_in_get_requires_post_consent_and_pkce_to_issue_code() {
+    let Some((ctx, id)) = oauth_context("consent-allow").await else {
+        return;
+    };
+    let (transaction, csrf, consent_cookie) = consent_page(&ctx, &id).await;
+    let resp = client()
+        .post(format!("{}/api/v1/oauth/authorize", ctx.base_url))
+        .header(
+            "cookie",
+            format!("access_token={}; {consent_cookie}", ctx.access_token),
+        )
+        .form(&[
+            ("transaction", transaction.as_str()),
+            ("csrf", csrf.as_str()),
+            ("decision", "allow"),
+        ])
+        .send()
+        .await
+        .expect("OAuth contract value");
+    assert_eq!(resp.status(), 303);
+    let location = resp.headers()["location"]
+        .to_str()
+        .expect("OAuth contract value");
+    let url = url::Url::parse(location).expect("OAuth contract value");
+    assert_eq!(
+        url.query_pairs()
+            .find(|(key, _)| key == "existing")
+            .expect("OAuth contract value")
+            .1,
+        "1"
+    );
+    assert_eq!(
+        url.query_pairs()
+            .find(|(key, _)| key == "state")
+            .expect("OAuth contract value")
+            .1,
+        "client state & more"
+    );
+    let code = url
+        .query_pairs()
+        .find(|(key, _)| key == "code")
+        .expect("OAuth contract value")
+        .1
+        .to_string();
+    let replay = client()
+        .post(format!("{}/api/v1/oauth/authorize", ctx.base_url))
+        .header(
+            "cookie",
+            format!("access_token={}; {consent_cookie}", ctx.access_token),
+        )
+        .form(&[
+            ("transaction", transaction.as_str()),
+            ("csrf", csrf.as_str()),
+            ("decision", "allow"),
+        ])
+        .send()
+        .await
+        .expect("OAuth contract value");
+    assert_eq!(replay.status(), 400);
+    let wrong_pkce = client()
+        .post(format!("{}/api/v1/oauth/token", ctx.base_url))
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("client_id", id.as_str()),
+            ("redirect_uri", "https://example.com/callback?existing=1"),
+            ("code", code.as_str()),
+            (
+                "code_verifier",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+        ])
+        .send()
+        .await
+        .expect("OAuth contract value");
+    assert_eq!(wrong_pkce.status(), 400);
+    assert_eq!(
+        wrong_pkce
+            .json::<Value>()
+            .await
+            .expect("OAuth contract value")["error"],
+        "invalid_grant: PKCE verification failed"
+    );
+}
+
+#[tokio::test]
+async fn consent_denial_csrf_and_browser_binding() {
+    let Some((ctx, id)) = oauth_context("consent-deny").await else {
+        return;
+    };
+    let (transaction, csrf, consent_cookie) = consent_page(&ctx, &id).await;
+    let denied = client()
+        .post(format!("{}/api/v1/oauth/authorize", ctx.base_url))
+        .header(
+            "cookie",
+            format!("access_token={}; {consent_cookie}", ctx.access_token),
+        )
+        .form(&[
+            ("transaction", transaction.as_str()),
+            ("csrf", csrf.as_str()),
+            ("decision", "deny"),
+        ])
+        .send()
+        .await
+        .expect("OAuth contract value");
+    assert_eq!(denied.status(), 303);
+    let location = denied.headers()["location"]
+        .to_str()
+        .expect("OAuth contract value");
+    assert!(location.contains("error=access_denied"));
+    assert!(!location.contains("code="));
+
+    let (transaction, _, consent_cookie) = consent_page(&ctx, &id).await;
+    let csrf_failure = client()
+        .post(format!("{}/api/v1/oauth/authorize", ctx.base_url))
+        .header(
+            "cookie",
+            format!("access_token={}; {consent_cookie}", ctx.access_token),
+        )
+        .form(&[
+            ("transaction", transaction.as_str()),
+            ("csrf", "bad"),
+            ("decision", "allow"),
+        ])
+        .send()
+        .await
+        .expect("OAuth contract value");
+    assert_eq!(csrf_failure.status(), 403);
+
+    let (transaction, csrf, consent_cookie) = consent_page(&ctx, &id).await;
+    // A pending page must survive the middleware rotating the access JWT.
+    let refresh_token = kyomi_auth::jwt::create_refresh_token();
+    let refresh_hash = kyomi_auth::token_service::hash_refresh_token(&refresh_token);
+    let device = kyomi_auth::token_service::DeviceInfo {
+        user_agent: None,
+        ip_address: None,
+        country_code: None,
+        oauth_client_id: None,
+    };
+    kyomi_auth::token_service::store_refresh_token(
+        &ctx.db,
+        &ctx.user_id,
+        &refresh_hash,
+        chrono::Utc::now() + chrono::Duration::days(1),
+        &device,
+        &kyomi_auth::token_service::generate_family_id(),
+    )
+    .await
+    .expect("store refresh fixture");
+    let expired_access = kyomi_auth::jwt::create_access_token_str(
+        &ctx.user_id,
+        &ctx.jwt_secret,
+        -5,
+        Default::default(),
+    )
+    .expect("expired access fixture");
+    assert!(
+        kyomi_auth::jwt::validate_token(&expired_access, &ctx.jwt_secret).is_err(),
+        "refresh regression fixture must be expired beyond JWT clock-skew leeway"
+    );
+    let refreshed_session = client()
+        .post(format!("{}/api/v1/oauth/authorize", ctx.base_url))
+        .header(
+            "cookie",
+            format!(
+                "access_token={expired_access}; refresh_token={refresh_token}; {consent_cookie}"
+            ),
+        )
+        .form(&[
+            ("transaction", transaction.as_str()),
+            ("csrf", csrf.as_str()),
+            ("decision", "allow"),
+        ])
+        .send()
+        .await
+        .expect("consent after access refresh");
+    assert_eq!(
+        refreshed_session.status(),
+        303,
+        "a refreshed access JWT preserves consent"
+    );
+    assert!(
+        refreshed_session
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .any(|value| {
+                value
+                    .to_str()
+                    .is_ok_and(|cookie| cookie.starts_with("access_token="))
+            })
+    );
+
+    let (transaction, csrf, _) = consent_page(&ctx, &id).await;
+    let wrong_browser = client()
+        .post(format!("{}/api/v1/oauth/authorize", ctx.base_url))
+        .header("cookie", format!("access_token={}", ctx.access_token))
+        .form(&[
+            ("transaction", transaction.as_str()),
+            ("csrf", csrf.as_str()),
+            ("decision", "allow"),
+        ])
+        .send()
+        .await
+        .expect("wrong-browser request");
+    assert_eq!(wrong_browser.status(), 403);
+}
+
+#[tokio::test]
+async fn login_continuation_only_renders_consent() {
+    let Some((ctx, id)) = oauth_context("consent-login").await else {
+        return;
+    };
+    let initial = client()
+        .get(format!("{}/api/v1/oauth/authorize", ctx.base_url))
+        .query(&[
+            ("client_id", id.as_str()),
+            ("redirect_uri", "https://example.com/callback?existing=1"),
+            ("code_challenge", CHALLENGE),
+            ("code_challenge_method", "S256"),
+        ])
+        .send()
+        .await
+        .expect("OAuth contract value");
+    assert_eq!(initial.status(), 303);
+    let login = url::Url::parse(
+        initial.headers()["location"]
+            .to_str()
+            .expect("OAuth contract value"),
+    )
+    .expect("OAuth contract value");
+    let state = login
+        .query_pairs()
+        .find(|(key, _)| key == "oauth_continue")
+        .expect("OAuth contract value")
+        .1
+        .to_string();
+    let continued = client()
+        .get(format!("{}/api/v1/oauth/authorize/continue", ctx.base_url))
+        .header("cookie", format!("access_token={}", ctx.access_token))
+        .query(&[("state", state.as_str())])
+        .send()
+        .await
+        .expect("OAuth contract value");
+    assert_eq!(continued.status(), 200);
+    assert_eq!(continued.headers()["cache-control"], "no-store");
+    let csp = continued.headers()["content-security-policy"]
+        .to_str()
+        .expect("continuation consent CSP");
+    assert!(csp.contains("style-src 'self'"));
+    assert!(csp.contains("img-src 'self'"));
+    assert!(csp.contains("frame-ancestors 'none'"));
+    let page = continued.text().await.expect("OAuth contract value");
+    assert!(page.contains("Allow MCP access?"));
+    assert!(page.contains("kyomi_full_logo_white.svg"));
+    assert!(page.contains("fonts.googleapis.com"));
+    assert!(!page.contains("code="));
+}
+
+#[tokio::test]
+async fn registration_rejects_unsafe_callbacks_and_authorize_requires_s256() {
+    let base = base_url().await;
+    for uri in [
+        "javascript:alert(1)",
+        "https://user:pass@example.com/callback",
+        "https://example.com/callback#fragment",
+        "http://example.com/callback",
+    ] {
+        let resp = client()
+            .post(format!("{base}/api/v1/oauth/register"))
+            .json(&json!({"redirect_uris": [uri]}))
+            .send()
+            .await
+            .expect("OAuth contract value");
+        assert_eq!(resp.status(), 400, "{uri}");
+    }
+    let id = register_test_client(&base, &["http://127.0.0.1:8000/callback"]).await;
+    let resp = client()
+        .get(format!("{base}/api/v1/oauth/authorize"))
+        .query(&[
+            ("client_id", id.as_str()),
+            ("redirect_uri", "http://127.0.0.1:8000/callback"),
+        ])
+        .send()
+        .await
+        .expect("OAuth contract value");
+    assert_eq!(resp.status(), 400);
+    assert_eq!(
+        resp.json::<Value>().await.expect("OAuth contract value")["error"],
+        "PKCE S256 code_challenge required"
+    );
+}
+
+#[tokio::test]
+async fn code_exchange_requires_exact_redirect_and_correct_pkce() {
+    let Some((ctx, id)) = oauth_context("token-valid").await else {
+        return;
+    };
+    let (transaction, csrf, consent_cookie) = consent_page(&ctx, &id).await;
+    let approved = client()
+        .post(format!("{}/api/v1/oauth/authorize", ctx.base_url))
+        .header(
+            "cookie",
+            format!("access_token={}; {consent_cookie}", ctx.access_token),
+        )
+        .form(&[
+            ("transaction", transaction.as_str()),
+            ("csrf", csrf.as_str()),
+            ("decision", "allow"),
+        ])
+        .send()
+        .await
+        .expect("OAuth contract value");
+    assert_eq!(approved.status(), 303);
+    let location = url::Url::parse(
+        approved.headers()["location"]
+            .to_str()
+            .expect("OAuth contract value"),
+    )
+    .expect("OAuth contract value");
+    let code = location
+        .query_pairs()
+        .find(|(key, _)| key == "code")
+        .expect("OAuth contract value")
+        .1
+        .to_string();
+    let missing_redirect = client()
+        .post(format!("{}/api/v1/oauth/token", ctx.base_url))
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("client_id", id.as_str()),
+            ("code", code.as_str()),
+            ("code_verifier", VERIFIER),
+        ])
+        .send()
+        .await
+        .expect("OAuth contract value");
+    assert_eq!(missing_redirect.status(), 400);
+    assert_eq!(
+        missing_redirect
+            .json::<Value>()
+            .await
+            .expect("OAuth contract value")["error"],
+        "redirect_uri required"
+    );
+    let exchanged = client()
+        .post(format!("{}/api/v1/oauth/token", ctx.base_url))
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("client_id", id.as_str()),
+            ("redirect_uri", "https://example.com/callback?existing=1"),
+            ("code", code.as_str()),
+            ("code_verifier", VERIFIER),
+        ])
+        .send()
+        .await
+        .expect("OAuth contract value");
+    assert_eq!(exchanged.status(), 200);
+    let tokens: Value = exchanged.json().await.expect("OAuth contract value");
+    assert!(tokens["access_token"].as_str().is_some());
+    assert!(tokens["refresh_token"].as_str().is_some());
+
+    let refresh = tokens["refresh_token"].as_str().expect("refresh token");
+    let other_id = register_test_client(&ctx.base_url, &["https://example.com/other"]).await;
+    let cross_client = client()
+        .post(format!("{}/api/v1/oauth/token", ctx.base_url))
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("client_id", other_id.as_str()),
+            ("refresh_token", refresh),
+        ])
+        .send()
+        .await
+        .expect("cross-client refresh of exchanged token");
+    assert_eq!(cross_client.status(), 400);
+    assert_eq!(
+        cross_client.json::<Value>().await.expect("error JSON"),
+        json!({"error": "invalid_grant: client_id mismatch"})
+    );
+    let same_client = client()
+        .post(format!("{}/api/v1/oauth/token", ctx.base_url))
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("client_id", id.as_str()),
+            ("refresh_token", refresh),
+        ])
+        .send()
+        .await
+        .expect("same-client refresh of exchanged token");
+    assert_eq!(same_client.status(), 200);
+    let refreshed: Value = same_client.json().await.expect("refreshed token JSON");
+    assert!(refreshed["access_token"].as_str().is_some());
+    assert_eq!(refreshed["refresh_token"], refresh);
+}
+
+#[tokio::test]
+async fn refresh_grant_is_bound_to_issuing_client() {
+    let Some((ctx, client_a)) = oauth_context("refresh-client-binding").await else {
+        return;
+    };
+    let client_b = register_test_client(&ctx.base_url, &["https://example.com/other"]).await;
+    let refresh = kyomi_auth::jwt::create_refresh_token();
+    let device = kyomi_auth::token_service::DeviceInfo {
+        user_agent: None,
+        ip_address: None,
+        country_code: None,
+        oauth_client_id: Some(client_a.clone()),
+    };
+    kyomi_auth::token_service::store_refresh_token(
+        &ctx.db,
+        &ctx.user_id,
+        &kyomi_auth::token_service::hash_refresh_token(&refresh),
+        chrono::Utc::now() + chrono::Duration::days(1),
+        &device,
+        &kyomi_auth::token_service::generate_family_id(),
+    )
+    .await
+    .expect("store client-bound refresh token");
+
+    let token_url = format!("{}/api/v1/oauth/token", ctx.base_url);
+    let wrong_client = client()
+        .post(&token_url)
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("client_id", client_b.as_str()),
+            ("refresh_token", refresh.as_str()),
+        ])
+        .send()
+        .await
+        .expect("cross-client refresh request");
+    assert_eq!(wrong_client.status(), 400);
+    assert_eq!(
+        wrong_client.json::<Value>().await.expect("error JSON"),
+        json!({"error": "invalid_grant: client_id mismatch"})
+    );
+
+    // A rejected cross-client attempt must leave A's grant usable. Cursor
+    // requires the same refresh token on every successful OAuth refresh.
+    for _ in 0..2 {
+        let same_client = client()
+            .post(&token_url)
+            .form(&[
+                ("grant_type", "refresh_token"),
+                ("client_id", client_a.as_str()),
+                ("refresh_token", refresh.as_str()),
+            ])
+            .send()
+            .await
+            .expect("same-client refresh request");
+        assert_eq!(same_client.status(), 200);
+        let body: Value = same_client.json().await.expect("token JSON");
+        assert!(body["access_token"].as_str().is_some());
+        assert_eq!(body["refresh_token"], refresh);
+    }
+
+    kyomi_core::db_execute!(
+        &ctx.db,
+        "UPDATE oauth_clients SET active = false WHERE client_id = $1",
+        &client_a
+    )
+    .expect("deactivate issuing client");
+    let inactive_client = client()
+        .post(&token_url)
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("client_id", client_a.as_str()),
+            ("refresh_token", refresh.as_str()),
+        ])
+        .send()
+        .await
+        .expect("inactive-client refresh request");
+    assert_eq!(inactive_client.status(), 400);
+    assert!(
+        inactive_client
+            .json::<Value>()
+            .await
+            .expect("error JSON")["error"]
+            .as_str()
+            .is_some_and(|error| error.starts_with("Unknown client_id:"))
+    );
+}
+
+#[tokio::test]
+async fn oauth_refresh_rejects_unbound_token_but_browser_refresh_succeeds() {
+    let Some((ctx, client_id)) = oauth_context("refresh-unbound").await else {
+        return;
+    };
+    let refresh = kyomi_auth::jwt::create_refresh_token();
+    let device = kyomi_auth::token_service::DeviceInfo {
+        user_agent: None,
+        ip_address: None,
+        country_code: None,
+        oauth_client_id: None,
+    };
+    kyomi_auth::token_service::store_refresh_token(
+        &ctx.db,
+        &ctx.user_id,
+        &kyomi_auth::token_service::hash_refresh_token(&refresh),
+        chrono::Utc::now() + chrono::Duration::days(1),
+        &device,
+        &kyomi_auth::token_service::generate_family_id(),
+    )
+    .await
+    .expect("store unbound refresh token");
+
+    let oauth = client()
+        .post(format!("{}/api/v1/oauth/token", ctx.base_url))
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("client_id", client_id.as_str()),
+            ("refresh_token", refresh.as_str()),
+        ])
+        .send()
+        .await
+        .expect("unbound OAuth refresh request");
+    assert_eq!(oauth.status(), 400);
+    // #571 added an is_none() guard ahead of the client_id comparison in
+    // oauth.rs, so an unbound token now short-circuits there rather than
+    // reaching the mismatch check #619 added. The assertion's intent is
+    // unchanged — an unbound token must not mint an MCP token — only which
+    // rejection fires first. The browser-refresh half below is unaffected:
+    // /api/v1/auth/refresh rejects tokens that ARE OAuth-bound, so this
+    // unbound one proceeds through it.
+    assert_eq!(
+        oauth.json::<Value>().await.expect("error JSON"),
+        json!({"error": "invalid_grant: refresh token is not an OAuth client token"})
+    );
+
+    let browser = client()
+        .post(format!("{}/api/v1/auth/refresh", ctx.base_url))
+        .header("cookie", format!("refresh_token={refresh}"))
+        .send()
+        .await
+        .expect("browser refresh request");
+    assert_eq!(browser.status(), 200);
+    let body: Value = browser.json().await.expect("browser token JSON");
+    assert!(body["access_token"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn different_user_cannot_approve_another_users_transaction() {
+    let Some((ctx, id)) = oauth_context("wrong-user-owner").await else {
+        return;
+    };
+    let Some(other) = setup_auth_context("Other User", "oauth", "wrong-user-other").await else {
+        return;
+    };
+    let (transaction, csrf, consent_cookie) = consent_page(&ctx, &id).await;
+    let response = client()
+        .post(format!("{}/api/v1/oauth/authorize", ctx.base_url))
+        .header(
+            "cookie",
+            format!("access_token={}; {consent_cookie}", other.access_token),
+        )
+        .form(&[
+            ("transaction", transaction.as_str()),
+            ("csrf", csrf.as_str()),
+            ("decision", "allow"),
+        ])
+        .send()
+        .await
+        .expect("OAuth contract value");
+    assert_eq!(response.status(), 403);
+}
+
+#[tokio::test]
+async fn session_cutoff_logout_all_clears_cookies_and_revokes_browser_oauth_authority() {
+    let suffix = format!("cutoff-logout-all-{}", uuid::Uuid::new_v4());
+    let email = format!("oauth-test-{suffix}@contract-test.local");
+    let Some((ctx, client_id)) = oauth_context(&suffix).await else {
+        assert_ne!(
+            std::env::var("KYOMI_REQUIRE_POSTGRES_TESTS").as_deref(),
+            Ok("1"),
+            "required Postgres contract must execute"
+        );
+        return;
+    };
+    let user = kyomi_auth::user_service::get_user_by_id(&ctx.db, &ctx.user_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let device = kyomi_auth::token_service::DeviceInfo {
+        user_agent: None,
+        ip_address: None,
+        country_code: None,
+        oauth_client_id: None,
+    };
+    let initiating = kyomi_auth::session::create_authenticated_session(
+        &ctx.db,
+        &ctx.kv,
+        &ctx.jwt_secret,
+        &user,
+        &device,
+    )
+    .await
+    .unwrap();
+    let other = kyomi_auth::session::create_authenticated_session(
+        &ctx.db,
+        &ctx.kv,
+        &ctx.jwt_secret,
+        &user,
+        &device,
+    )
+    .await
+    .unwrap();
+    let (transaction, csrf, consent_cookie) = consent_page(&ctx, &client_id).await;
+    let path =
+        <kyomi_ui::server_fns::security::LogoutAllSessions as leptos::server_fn::ServerFn>::PATH;
+    let logout = client()
+        .post(format!("{}{path}", ctx.base_url))
+        .header("origin", "http://localhost:5173")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header(
+            "cookie",
+            format!(
+                "access_token={}; refresh_token={}",
+                initiating.access_token, initiating.refresh_token
+            ),
+        )
+        .body("")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        logout.status(),
+        200,
+        "actual logout-all server function succeeds"
+    );
+    let cookies: Vec<_> = logout
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .map(|header| header.to_str().unwrap())
+        .collect();
+    for name in ["access_token=", "refresh_token="] {
+        assert!(
+            cookies
+                .iter()
+                .any(|cookie| cookie.starts_with(name) && cookie.contains("Max-Age=0")),
+            "logout-all clears {name}: {cookies:?}"
+        );
+    }
+    for token in [
+        &ctx.access_token,
+        &initiating.access_token,
+        &other.access_token,
+    ] {
+        let response = client()
+            .get(format!("{}/api/v1/push/subscriptions", ctx.base_url))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            401,
+            "all pre-event signed browser access tokens must fail"
+        );
+    }
+    for refresh in [&initiating.refresh_token, &other.refresh_token] {
+        assert!(
+            kyomi_auth::token_refresh::refresh_tokens(&ctx.db, &ctx.jwt_secret, refresh, &device)
+                .await
+                .is_err()
+        );
+    }
+    let authorize = client()
+        .get(format!("{}/api/v1/oauth/authorize", ctx.base_url))
+        .header("cookie", format!("access_token={}", ctx.access_token))
+        .query(&[
+            ("client_id", client_id.as_str()),
+            ("redirect_uri", "https://example.com/callback?existing=1"),
+            ("response_type", "code"),
+            ("code_challenge", CHALLENGE),
+            ("code_challenge_method", "S256"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        authorize.status(),
+        303,
+        "revoked cookie must return to login rather than consent"
+    );
+    assert!(
+        authorize.headers()["location"]
+            .to_str()
+            .unwrap()
+            .contains("/login")
+    );
+    let continuation = client()
+        .get(format!(
+            "{}/api/v1/oauth/authorize/continue?state=unused",
+            ctx.base_url
+        ))
+        .header("cookie", format!("access_token={}", ctx.access_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        continuation.status(),
+        401,
+        "revoked browser cookie cannot resume OAuth"
+    );
+    let consent = client()
+        .post(format!("{}/api/v1/oauth/authorize", ctx.base_url))
+        .header(
+            "cookie",
+            format!("access_token={}; {consent_cookie}", ctx.access_token),
+        )
+        .form(&[
+            ("transaction", transaction.as_str()),
+            ("csrf", csrf.as_str()),
+            ("decision", "allow"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        consent.status(),
+        401,
+        "pre-event consent cannot grant OAuth access after logout-all"
+    );
+    let fresh = kyomi_auth::session::create_authenticated_session(
+        &ctx.db,
+        &ctx.kv,
+        &ctx.jwt_secret,
+        &user,
+        &device,
+    )
+    .await
+    .unwrap();
+    let response = client()
+        .get(format!("{}/api/v1/push/subscriptions", ctx.base_url))
+        .bearer_auth(&fresh.access_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        200,
+        "fresh login works immediately after logout-all"
+    );
+    kyomi_auth::token_refresh::refresh_tokens(
+        &ctx.db,
+        &ctx.jwt_secret,
+        &fresh.refresh_token,
+        &device,
+    )
+    .await
+    .unwrap();
+    kyomi_core::db_execute!(
+        &ctx.db,
+        "DELETE FROM refresh_tokens WHERE user_id = $1",
+        &ctx.user_id
+    )
+    .unwrap();
+    kyomi_test_harness::cleanup_test_user(&ctx.db, &email).await;
+    assert!(
+        kyomi_auth::user_service::get_user_by_id(&ctx.db, &ctx.user_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "cutoff contract must remove its user and related session fixtures"
     );
 }
