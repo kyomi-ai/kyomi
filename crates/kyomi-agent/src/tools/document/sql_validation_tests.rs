@@ -72,7 +72,7 @@ pub(crate) async fn finish(ctx: &ToolContext, handler: tokio::task::JoinHandle<(
 fn retry(result: &str) -> serde_json::Value {
     let value: serde_json::Value = serde_json::from_str(result).expect("JSON");
     assert_eq!(value["success"], false, "{result}");
-    assert!(value["error"].as_str().expect("error").starts_with("Document contains invalid SQL: "), "{result}");
+    assert!(value["error"].as_str().unwrap_or_else(|| panic!("SQL retry must contain a string error, got: {result}")).starts_with("Document contains invalid SQL: "), "{result}");
     assert!(value["validation_errors"][0].as_str().expect("SQL error").contains("syntax error"), "{result}");
     value
 }

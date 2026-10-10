@@ -300,7 +300,7 @@ pub(crate) fn sql_validation_failure_result(errors: &str) -> String {
 
 /// Plain prose never reaches datasource dry-run validation. Reuse the
 /// agent's detector so document writes follow the same ChartML contract.
-async fn validate_content_sql(ctx: &super::QueryContext, content: &str) -> Option<String> {
+pub(crate) async fn validate_content_sql(ctx: &super::QueryContext, content: &str) -> Option<String> {
     if crate::agent::has_chartml_blocks(content) {
         super::query_utils::validate_chartml_sql(ctx, content).await
     } else {

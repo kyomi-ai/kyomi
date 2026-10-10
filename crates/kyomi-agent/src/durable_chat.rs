@@ -336,24 +336,34 @@ where
     let mut lease = owned.lease.clone();
     let mut heartbeat = tokio::time::interval(timing.heartbeat);
     loop {
-        // Poll the entire renewal alongside execution. Awaiting SQL inside a
-        // selected timer branch can pause an executor that holds the only
-        // SQLite connection, preventing either future from progressing.
-        let renewal = async {
-            heartbeat.tick().await;
-            store
-                .heartbeat(
-                    &owned.conversation_id,
-                    &owned.run_id,
-                    &lease,
-                    now(),
-                    timing.ttl_ms,
-                )
-                .await
-        };
-        let renewed = tokio::select! {
-            result = &mut execution => return Ok((result, lease.clone())),
-            renewed = renewal => renewed,
+        // Poll execution while waiting for the timer and while renewing SQL.
+        // The executor may hold the only SQLite connection; it must keep
+        // progressing until renewal can acquire it.
+        tokio::select! {
+            result = &mut execution => return Ok((result, lease)),
+            _ = heartbeat.tick() => {},
+        }
+        let (renewed, execution_result) = {
+            let renewal = store.heartbeat(
+                &owned.conversation_id,
+                &owned.run_id,
+                &lease,
+                now(),
+                timing.ttl_ms,
+            );
+            tokio::pin!(renewal);
+            let mut execution_result = None;
+            let renewed = tokio::select! {
+                result = &mut execution => {
+                    execution_result = Some(result);
+                    // Complete an already-started transaction before finalization.
+                    // Dropping it mid-SQL can leave SQLite's queued rollback racing
+                    // the next transaction on the same connection.
+                    renewal.await
+                },
+                renewed = &mut renewal => renewed,
+            };
+            (renewed, execution_result)
         };
         let snapshot = match renewed {
             Ok(snapshot) => snapshot,
@@ -373,6 +383,9 @@ where
                 Err(kyomi_core::Error::BadRequest("Request cancelled".into())),
                 lease,
             ));
+        }
+        if let Some(result) = execution_result {
+            return Ok((result, lease));
         }
     }
 }
@@ -519,6 +532,71 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(assistants.len(), 1);
         assert_eq!(assistants[0].status, "cancelled");
+    }
+
+    #[tokio::test]
+    async fn completion_drains_an_in_flight_heartbeat_before_finalization() {
+        let db = crate::test_support::test_pool().await;
+        crate::test_support::seed_user_and_workspace(&db).await;
+        let key = [7u8; 32];
+        let owned = claimed(&db, &key).await;
+        let store = ConversationStore::new(&db, &key, "user-a", "ws-1");
+        let DbPool::Sqlite(pool) = &db else {
+            panic!("SQLite fixture");
+        };
+        // claim() returns its connection asynchronously. Wait for that return
+        // before observing the heartbeat's idle-to-busy transition, otherwise
+        // the executor can mistake fixture cleanup for an in-flight renewal.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while pool.num_idle() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("claim connection returned before heartbeat observation");
+        let execution = async {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                // The executor completes precisely while renewal owns the sole
+                // connection, instead of relying on a sleep to hit the race.
+                loop {
+                    if pool.num_idle() == 0 {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("heartbeat acquired the SQLite connection");
+            Ok("complete")
+        };
+        let (result, lease) = drive_execution(
+            &store,
+            &owned,
+            &CancellationToken::new(),
+            execution,
+            LeaseTiming {
+                ttl_ms: 2_000,
+                heartbeat: Duration::from_secs(10),
+            },
+        )
+        .await
+        .expect("completion drains renewal");
+        assert_eq!(result.unwrap(), "complete");
+        assert!(
+            lease.expires_at > owned.lease.expires_at,
+            "in-flight renewal was discarded"
+        );
+        store
+            .finish(
+                &owned.conversation_id,
+                &owned.run_id,
+                &lease,
+                now(),
+                RunState::Completed,
+                "complete",
+            )
+            .await
+            .expect("finalization follows the completed heartbeat transaction");
     }
 
     #[tokio::test]

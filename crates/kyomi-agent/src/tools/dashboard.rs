@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use kyomi_auth::websocket::helpers as ws_helpers;
 
 use crate::tools::document::{
-    apply_create, apply_update, sql_validation_failure_result, ApplyCreateOutcome,
+    apply_create, apply_update, sql_validation_failure_result, validate_content_sql, ApplyCreateOutcome,
     ApplyCreateParams, ApplyUpdateOutcome, ApplyUpdateParams,
     DocumentDeleteTool, DocumentReadTool,
 };
@@ -507,6 +507,12 @@ impl AgentTool for ModifyDashboardTool {
             && title.map(str::trim).unwrap_or(&dash.title) == dash.title
             && content.unwrap_or(&dash.content) == dash.content
         {
+            // A no-op still validates stored ChartML so invalid SQL gets the
+            // same correctable retry as a content or title change. Changed
+            // writes validate once in apply_update instead.
+            if let Some(errors) = validate_content_sql(&ctx.query_context(), &dash.content).await {
+                return Ok(sql_validation_failure_result(&errors));
+            }
             return Ok(serde_json::json!({
                 "success": false,
                 "dashboard_id": dashboard_id,
