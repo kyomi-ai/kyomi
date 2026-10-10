@@ -45,11 +45,54 @@ use crate::utils::permissions::{use_analytics_access, use_permissions, Analytics
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Published `kyomi-datasource` 1.6.0 `src/factory.rs`'s
+/// `resolve_shared_credentials` reads this connection-config string and copies
+/// it to the driver's `username`; an absent/empty value is not copied.
+const SHARED_USERNAME_CONFIG_KEY: &str = "shared_username";
+
+/// Published `kyomi-datasource` 1.6.0 `src/factory.rs`'s
+/// `resolve_shared_credentials` reads this connection-config string and copies
+/// it to the driver's `password`; an absent/empty value is not copied.
+const SHARED_PASSWORD_CONFIG_KEY: &str = "shared_password";
+
+/// Connection-config masking sentinel from `kyomi-auth::credential_service`.
+/// That server-only dependency is unavailable to the client WASM build.
+const MASKED_SHARED_PASSWORD: &str = "********";
+
+fn shared_identity_from_config(config: &serde_json::Value) -> (String, String) {
+    let field = |key: &str| {
+        config.get(key).and_then(|value| value.as_str()).unwrap_or("").to_string()
+    };
+    (field(SHARED_USERNAME_CONFIG_KEY), field(SHARED_PASSWORD_CONFIG_KEY))
+}
+
+fn write_shared_credentials_config(
+    config: &mut serde_json::Map<String, serde_json::Value>,
+    enabled: bool,
+    supported: bool,
+    username: String,
+    password: String,
+) {
+    config.insert("shared_credentials".to_string(), serde_json::json!(enabled && supported));
+    // Retain the identity while disabled; the server restores masked passwords.
+    if !username.is_empty() {
+        config.insert(SHARED_USERNAME_CONFIG_KEY.to_string(), serde_json::json!(username));
+    }
+    if !password.is_empty() {
+        config.insert(SHARED_PASSWORD_CONFIG_KEY.to_string(), serde_json::json!(password));
+    }
+}
+
+fn shared_mode_deactivates(loading: bool, changed: bool, registry_loaded: bool, supported: bool) -> bool {
+    !loading && (changed || (registry_loaded && !supported))
+}
+
 /// Credential status badge text, or None if no badge needed.
 fn credential_badge(ds: &DatasourceInfo) -> Option<(&'static str, BadgeVariant)> {
     match ds.credential_status.as_str() {
         "missing" => Some(("Needs Setup", BadgeVariant::Warning)),
         "expired" => Some(("Expired", BadgeVariant::Warning)),
+        "invalid" => Some(("Needs Repair", BadgeVariant::Warning)),
         _ => None,
     }
 }
@@ -956,6 +999,8 @@ fn DatasourceRow(
 
     let can_enable = ds.can_enable;
     let ds_credential_status = ds.credential_status.clone();
+    let shared_needs_repair = ds.auth_method == "shared"
+        && matches!(ds.credential_status.as_str(), "missing" | "invalid");
 
     let toggle_action = Action::new(|(ds_id, new_val): &(String, bool)| {
         let ds_id = ds_id.clone();
@@ -1664,6 +1709,11 @@ fn DatasourceRow(
                             {ds.slug.clone()}
                         </p>
                     })}
+                    <Show when=move || shared_needs_repair && !is_admin.get()>
+                        <p class="text-xs text-warning-foreground mt-1">
+                            "Shared credentials need repair. Ask a workspace admin to update them."
+                        </p>
+                    </Show>
                 </div>
             </div>
 
@@ -1962,6 +2012,10 @@ pub fn DatasourceModal(
     let (cfg_encrypt, set_cfg_encrypt) = signal(true);
     let (cfg_trust_cert, set_cfg_trust_cert) = signal(false);
     let (cfg_shared_credentials, set_cfg_shared_credentials) = signal(false);
+    let (cfg_shared_username, set_cfg_shared_username) = signal(String::new());
+    let (cfg_shared_password, set_cfg_shared_password) = signal(String::new());
+    let (shared_needs_repair, set_shared_needs_repair) = signal(false);
+    let shared_mode_identity = StoredValue::new(("bigquery".to_string(), "service_account".to_string()));
 
     // Indexing credentials — dedicated credentials for catalog indexing,
     // separate from the user's primary OAuth/password credentials. Required
@@ -2168,6 +2222,7 @@ pub fn DatasourceModal(
 
     // ── Reset form ───────────────────────────────────────────────────────
     let reset_form = move || {
+        shared_mode_identity.set_value(("bigquery".to_string(), "service_account".to_string()));
         set_name.set(String::new());
         set_slug.set(String::new());
         set_slug_manually_edited.set(false);
@@ -2187,6 +2242,9 @@ pub fn DatasourceModal(
         set_cfg_encrypt.set(true);
         set_cfg_trust_cert.set(false);
         set_cfg_shared_credentials.set(false);
+        set_cfg_shared_username.set(String::new());
+        set_cfg_shared_password.set(String::new());
+        set_shared_needs_repair.set(false);
         set_cfg_ssh_enabled.set(false);
         set_cfg_ssh_host.set(String::new());
         set_cfg_ssh_port.set("22".to_string());
@@ -2354,6 +2412,13 @@ pub fn DatasourceModal(
                             set_cfg_trust_cert.try_set(bool_val("trust_server_certificate"));
                             set_is_sample.try_set(bool_val("is_sample"));
                             set_cfg_shared_credentials.try_set(settings.shared_credentials);
+                            let (shared_username, shared_password) = shared_identity_from_config(cfg);
+                            set_cfg_shared_username.try_set(shared_username);
+                            set_cfg_shared_password.try_set(shared_password);
+                            set_shared_needs_repair.try_set(
+                                settings.shared_credentials
+                                    && matches!(settings.credential_status.as_str(), "missing" | "invalid")
+                            );
 
                             // SSH tunnel — `ssh_private_key` and `ssh_passphrase`
                             // are force-masked server-side (COMMON_SENSITIVE) so
@@ -2418,6 +2483,17 @@ pub fn DatasourceModal(
                                     _ => {}
                                 }
                             }
+
+                            shared_mode_identity.try_set_value((
+                                settings.datasource_type.clone(),
+                                match settings.datasource_type.as_str() {
+                                    "bigquery" => settings.auth_mode.clone().unwrap_or_else(|| BIGQUERY_DEFAULT_AUTH_MODE.to_string()),
+                                    "snowflake" => settings.auth_mode.clone().unwrap_or_else(|| "password".to_string()),
+                                    "databricks" => settings.auth_mode.clone().unwrap_or_else(|| "token".to_string()),
+                                    "synapse" => settings.auth_mode.clone().unwrap_or_else(|| "sql".to_string()),
+                                    _ => String::new(),
+                                },
+                            ));
 
                             // Service account
                             if let Some(ref email) = settings.service_account_email {
@@ -2736,6 +2812,81 @@ pub fn DatasourceModal(
         set_name.set(new_name);
     };
 
+    // ── Datasource-type registry data (KYO-274) ─────────────────────────────
+    // Which auth modes the four Authentication Mode selectors below offer —
+    // and their labels/descriptions — is registry-owned
+    // (`DatasourceTypeMetadata::auth_modes`), not hardcoded per component.
+    // `use_query` is the shared list-query cache keyed by "datasource-types";
+    // `EditModeCatalogTab` already calls it for `indexing_auth_modes` (KYO-187),
+    // so this reuses the same cached fetch rather than adding a second one.
+    let datasource_types = use_query("datasource-types", || (), |_: ()| get_datasource_types());
+
+    // Observe the registry fetch's error state via `connection_auth_modes_unavailable_from`
+    // (defined above `DatasourceModal`) — never inline inside `connection_auth_modes`
+    // below. That derive also reads `ds_type`, and `Signal::derive` re-runs
+    // its *entire* body on every dependency change, not just its own
+    // (docs/CODING_STANDARDS.md: "Signal::derive is not memoized"); a
+    // `warn!` living there would re-fire the same stale failure every time
+    // the user switches provider — the exact KYO-240 shape this document
+    // warns about. Wrapping the pure fn in a `Memo` scoped ONLY to
+    // `datasource_types` means it only recomputes — and therefore only
+    // re-logs — when the fetch outcome itself changes.
+    let connection_auth_modes_unavailable: Memo<bool> =
+        Memo::new(move |_| connection_auth_modes_unavailable_from(&datasource_types.get()));
+
+    // Per-type option list. A cheap, pure projection — the `.ok()` here is
+    // safe because the error case is already observed above, on its own
+    // Memo keyed on the query result alone; this derive re-running per
+    // `ds_type` switch has no side effect of its own.
+    let connection_auth_modes: Signal<Vec<AuthModeOption>> = Signal::derive(move || {
+        let ds_type_val = ds_type.get();
+        datasource_types
+            .get()
+            .and_then(|r| r.ok())
+            .into_iter()
+            .flatten()
+            .find(|t| t.type_id == ds_type_val)
+            .map(|t| t.connection_auth_modes)
+            .unwrap_or_default()
+    });
+
+    let shared_credentials_supported = Memo::new(move |_| {
+        let Some(t) = ds_type.try_get() else { return false; };
+        let modes = connection_auth_modes.try_get().unwrap_or_default();
+        let selected = match t.as_str() {
+            "bigquery" => Some(bq_auth_mode.try_get().unwrap_or_default()),
+            "snowflake" => Some(sf_auth_mode.try_get().unwrap_or_default()),
+            "databricks" => Some(db_auth_mode.try_get().unwrap_or_default()),
+            "synapse" => Some(synapse_auth_mode.try_get().unwrap_or_default()),
+            _ => None,
+        };
+        modes.iter().find(|mode| {
+            selected.as_ref().map_or(mode.is_default, |selected| mode.mode_id == *selected)
+        }).is_some_and(|mode| mode.supports_shared_credentials)
+    });
+
+    // Mode changes deactivate shared access without deleting the saved identity.
+    // Settings loading seeds the identity instead of treating it as a user change.
+    Effect::new(move |_| {
+        let t = ds_type.get();
+        let mode = match t.as_str() {
+            "bigquery" => bq_auth_mode.get(),
+            "snowflake" => sf_auth_mode.get(),
+            "databricks" => db_auth_mode.get(),
+            "synapse" => synapse_auth_mode.get(),
+            _ => String::new(),
+        };
+        let identity = (t, mode);
+        let changed = shared_mode_identity.get_value() != identity;
+        shared_mode_identity.set_value(identity);
+        let loading = settings_loading.get();
+        let registry_loaded = datasource_types.get().is_some_and(|result| result.is_ok());
+        let supported = shared_credentials_supported.get();
+        if shared_mode_deactivates(loading, changed, registry_loaded, supported) {
+            set_cfg_shared_credentials.set(false);
+        }
+    });
+
     // ── Build connection_config JSON ─────────────────────────────────────
     let build_connection_config = move || -> serde_json::Value {
         let t = ds_type.get_untracked();
@@ -2988,9 +3139,13 @@ pub fn DatasourceModal(
             }
         }
 
-        if cfg_shared_credentials.get_untracked() {
-            map.insert("shared_credentials".to_string(), serde_json::json!(true));
-        }
+        write_shared_credentials_config(
+            &mut map,
+            cfg_shared_credentials.get_untracked(),
+            shared_credentials_supported.get_untracked(),
+            cfg_shared_username.get_untracked(),
+            cfg_shared_password.get_untracked(),
+        );
 
         // Catalog scope — edit mode vs create mode are kept separate so the two
         // sets of signals never conflict.
@@ -3111,6 +3266,10 @@ pub fn DatasourceModal(
     let build_credentials = move || -> serde_json::Value {
         let t = ds_type.get_untracked();
         let mut map = serde_json::Map::new();
+
+        if cfg_shared_credentials.get_untracked() && shared_credentials_supported.get_untracked() {
+            return serde_json::Value::Object(map);
+        }
 
         match t.as_str() {
             "databricks" => {
@@ -3599,6 +3758,14 @@ pub fn DatasourceModal(
             return;
         }
 
+        if cfg_shared_credentials.get_untracked() && shared_credentials_supported.get_untracked()
+            && (cfg_shared_username.get_untracked().trim().is_empty()
+                || cfg_shared_password.get_untracked().is_empty())
+        {
+            set_error_msg.set(Some("Shared username and password are required.".to_string()));
+            return;
+        }
+
         // Validate indexing credentials completeness when enabled
         if use_indexing_credentials.get_untracked() && !indexing_creds_unchanged.get_untracked() {
             let ic_type = indexing_creds_type.get_untracked();
@@ -3871,44 +4038,6 @@ pub fn DatasourceModal(
             modal_oauth_connected.get(),
             test_result.get().map(|r| r.success).unwrap_or(false),
         )
-    });
-
-    // ── Datasource-type registry data (KYO-274) ─────────────────────────────
-    // Which auth modes the four Authentication Mode selectors below offer —
-    // and their labels/descriptions — is registry-owned
-    // (`DatasourceTypeMetadata::auth_modes`), not hardcoded per component.
-    // `use_query` is the shared list-query cache keyed by "datasource-types";
-    // `EditModeCatalogTab` already calls it for `indexing_auth_modes` (KYO-187),
-    // so this reuses the same cached fetch rather than adding a second one.
-    let datasource_types = use_query("datasource-types", || (), |_: ()| get_datasource_types());
-
-    // Observe the registry fetch's error state via `connection_auth_modes_unavailable_from`
-    // (defined above `DatasourceModal`) — never inline inside `connection_auth_modes`
-    // below. That derive also reads `ds_type`, and `Signal::derive` re-runs
-    // its *entire* body on every dependency change, not just its own
-    // (docs/CODING_STANDARDS.md: "Signal::derive is not memoized"); a
-    // `warn!` living there would re-fire the same stale failure every time
-    // the user switches provider — the exact KYO-240 shape this document
-    // warns about. Wrapping the pure fn in a `Memo` scoped ONLY to
-    // `datasource_types` means it only recomputes — and therefore only
-    // re-logs — when the fetch outcome itself changes.
-    let connection_auth_modes_unavailable: Memo<bool> =
-        Memo::new(move |_| connection_auth_modes_unavailable_from(&datasource_types.get()));
-
-    // Per-type option list. A cheap, pure projection — the `.ok()` here is
-    // safe because the error case is already observed above, on its own
-    // Memo keyed on the query result alone; this derive re-running per
-    // `ds_type` switch has no side effect of its own.
-    let connection_auth_modes: Signal<Vec<AuthModeOption>> = Signal::derive(move || {
-        let ds_type_val = ds_type.get();
-        datasource_types
-            .get()
-            .and_then(|r| r.ok())
-            .into_iter()
-            .flatten()
-            .find(|t| t.type_id == ds_type_val)
-            .map(|t| t.connection_auth_modes)
-            .unwrap_or_default()
     });
 
     // Footer must be Arc<dyn Fn() -> AnyView + Send + Sync> (Leptos ChildrenFn).
@@ -4792,6 +4921,12 @@ pub fn DatasourceModal(
                                             set_cred_sp_client_secret,
                                             cfg_shared_credentials,
                                             set_cfg_shared_credentials,
+                                            cfg_shared_username,
+                                            set_cfg_shared_username,
+                                            cfg_shared_password,
+                                            set_cfg_shared_password,
+                                            shared_credentials_supported,
+                                            shared_needs_repair,
                                             is_admin,
                                         }
                                     />
@@ -7813,6 +7948,12 @@ struct CredentialsFieldsSignals {
     set_cred_sp_client_secret: WriteSignal<String>,
     cfg_shared_credentials: ReadSignal<bool>,
     set_cfg_shared_credentials: WriteSignal<bool>,
+    cfg_shared_username: ReadSignal<String>,
+    set_cfg_shared_username: WriteSignal<String>,
+    cfg_shared_password: ReadSignal<String>,
+    set_cfg_shared_password: WriteSignal<String>,
+    shared_credentials_supported: Memo<bool>,
+    shared_needs_repair: ReadSignal<bool>,
     /// Gates the "Shared credentials (all users)" toggle — enabling/rotating
     /// shared credentials is workspace-admin-only (KYO-184; see
     /// `docs/DATASOURCE_ARCHITECTURE.md` §5.2). Does not affect the personal
@@ -7845,6 +7986,12 @@ fn ProviderCredentialsFields(signals: CredentialsFieldsSignals) -> impl IntoView
         set_cred_sp_client_secret,
         cfg_shared_credentials,
         set_cfg_shared_credentials,
+        cfg_shared_username,
+        set_cfg_shared_username,
+        cfg_shared_password,
+        set_cfg_shared_password,
+        shared_credentials_supported,
+        shared_needs_repair,
         is_admin,
     } = signals;
     view! {
@@ -7920,7 +8067,7 @@ fn ProviderCredentialsFields(signals: CredentialsFieldsSignals) -> impl IntoView
                         // access under this identity (DATASOURCE_ARCHITECTURE.md
                         // §5.2/§5.3) — not something a member should be able to
                         // toggle even cosmetically.
-                        <Show when=move || is_admin.get()>
+                        <Show when=move || is_admin.get() && shared_credentials_supported.get()>
                             <label class="flex items-center gap-2 cursor-pointer text-xs text-muted-foreground">
                                 <input
                                     type="checkbox"
@@ -7935,7 +8082,7 @@ fn ProviderCredentialsFields(signals: CredentialsFieldsSignals) -> impl IntoView
                         </Show>
                     </div>
 
-                    <Show when=move || !cfg_shared_credentials.get()>
+                    <Show when=move || !cfg_shared_credentials.get() || !shared_credentials_supported.get()>
                         {move || {
                             let t2 = ds_type.get();
                             let sf2 = sf_auth_mode.get();
@@ -8037,7 +8184,43 @@ fn ProviderCredentialsFields(signals: CredentialsFieldsSignals) -> impl IntoView
                         }}
                     </Show>
 
-                    <Show when=move || cfg_shared_credentials.get()>
+                    <Show when=move || cfg_shared_credentials.get() && shared_credentials_supported.get()>
+                        <Show when=move || shared_needs_repair.get() && !is_admin.get()>
+                            <Alert variant=AlertVariant::Warning>
+                                <AlertTitle>"Shared credentials need repair"</AlertTitle>
+                                <AlertDescription>"Ask a workspace admin to update the shared credentials."</AlertDescription>
+                            </Alert>
+                        </Show>
+                        <Show when=move || is_admin.get()>
+                            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                <div>
+                                    <label class="block text-sm font-medium mb-1">"Shared Username " <span class="text-error-foreground">"*"</span></label>
+                                    <input type="text" class=MODAL_INPUT_CLASS
+                                        placeholder="Database username"
+                                        prop:value=move || cfg_shared_username.get()
+                                        on:input=move |ev| set_cfg_shared_username.set(event_target_value(&ev))
+                                    />
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium mb-1">"Shared Password " <span class="text-error-foreground">"*"</span></label>
+                                    <input type="password" class=MODAL_INPUT_CLASS
+                                        prop:placeholder=move || if cfg_shared_password.get() == MASKED_SHARED_PASSWORD { "•••••••• (stored)" } else { "••••••••" }
+                                        prop:value=move || {
+                                            let password = cfg_shared_password.get();
+                                            if password == MASKED_SHARED_PASSWORD { String::new() } else { password }
+                                        }
+                                        on:input=move |ev| {
+                                            let password = event_target_value(&ev);
+                                            // Blank input keeps an existing masked password.
+                                            if !password.is_empty() || cfg_shared_password.get_untracked() != MASKED_SHARED_PASSWORD {
+                                                set_cfg_shared_password.set(password);
+                                            }
+                                        }
+                                    />
+                                    <p class="text-xs text-muted-foreground mt-1">"Credentials are encrypted at rest"</p>
+                                </div>
+                            </div>
+                        </Show>
                         <div class="flex items-center gap-2 p-3 bg-muted/50 rounded-lg">
                             <Icon icon=phosphor_leptos::LOCK attr:class="h-4 w-4 text-muted-foreground"/>
                             <span class="text-sm text-muted-foreground">

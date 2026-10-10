@@ -50,6 +50,7 @@ pub struct AuthModeOption {
     pub display_name: String,
     pub description: String,
     pub is_default: bool,
+    pub supports_shared_credentials: bool,
 }
 
 /// A datasource type from the registry.
@@ -119,6 +120,7 @@ pub async fn get_datasource_types() -> Result<Vec<DatasourceTypeInfo>, ServerFnE
                     display_name: m.display_name.clone(),
                     description: m.description.clone(),
                     is_default: m.is_default,
+                    supports_shared_credentials: m.supports_shared_credentials,
                 })
                 .collect(),
             connection_auth_modes: meta
@@ -129,6 +131,7 @@ pub async fn get_datasource_types() -> Result<Vec<DatasourceTypeInfo>, ServerFnE
                     display_name: m.display_name.clone(),
                     description: m.description.clone(),
                     is_default: m.is_default,
+                    supports_shared_credentials: m.supports_shared_credentials,
                 })
                 .collect(),
         })
@@ -658,6 +661,7 @@ pub async fn discover_datasource_resources(
         ac.db(),
         DiscoveryConnectionRequest {
             user_id: &ac.auth.user_id,
+            is_admin: ac.has(Permission::ManageDatasources),
             ws_id: &ac.ws_id,
             datasource_slug: datasource_slug.as_deref(),
             connection_config: &connection_config,
