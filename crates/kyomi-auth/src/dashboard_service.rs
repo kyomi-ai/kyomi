@@ -16,7 +16,7 @@ use chrono::{DateTime, Duration, Utc};
 use kyomi_core::embedding_compat::{bytes_to_pg_vector, embedding_to_bytes};
 use kyomi_core::sql_compat;
 use kyomi_core::{db_execute, db_fetch_optional, db_fetch_scalar};
-use kyomi_core::models::DocType;
+use kyomi_core::models::{Dashboard, DocType};
 use kyomi_core::{DbPool, Result};
 use kyomi_embed::EmbeddingService;
 use regex::Regex;
@@ -599,6 +599,15 @@ pub async fn update_dashboard_with_context(
     params: UpdateDashboardParams<'_>,
     validation_context: Option<&crate::chartml_validation::QueryContext>,
 ) -> Result<bool> {
+    update_dashboard_with_snapshot(params, validation_context).await.map(|(updated, _)| updated)
+}
+
+/// Return the snapshot written by this call, rather than a subsequent read
+/// that could already contain a different writer's changes.
+pub async fn update_dashboard_with_snapshot(
+    params: UpdateDashboardParams<'_>,
+    validation_context: Option<&crate::chartml_validation::QueryContext>,
+) -> Result<(bool, Dashboard)> {
     let UpdateDashboardParams {
         db,
         embed,
@@ -612,9 +621,9 @@ pub async fn update_dashboard_with_context(
         copilot_receipt,
     } = params;
     // Read the revision *before* the snapshot. If another writer lands
-    // between these reads, the conditional copilot UPDATE will still fail;
+    // between these reads, the conditional guarded UPDATE will still fail;
     // reversing them could pair a stale snapshot with a new revision.
-    let current_revision = if copilot_receipt.is_some() {
+    let current_revision = if copilot_receipt.is_some() || expected_content_hash.is_some() {
         let revision: Option<i64> = kyomi_core::db_with_pool!(db, |pool| {
             sqlx::query_scalar("SELECT write_revision FROM dashboards WHERE dashboard_id = $1 AND workspace_id = $2")
                 .bind(dashboard_id).bind(workspace_id).fetch_optional(pool).await
@@ -682,16 +691,8 @@ pub async fn update_dashboard_with_context(
         }
     };
 
-    if copilot_receipt.is_none() {
-        create_version(
-            db,
-            dashboard_id,
-            &current.content,
-            &current.title,
-            user_id,
-            Some(&auto_summary),
-        )
-        .await?;
+    if copilot_receipt.is_none() && expected_content_hash.is_none() {
+        create_version(db, dashboard_id, &current.content, &current.title, user_id, Some(&auto_summary)).await?;
     }
 
     // Compute new content_hash for all document types
@@ -725,10 +726,7 @@ pub async fn update_dashboard_with_context(
     set_parts.push(format!("updated_at = ${param_idx}"));
     set_parts.push("write_revision = write_revision + 1".into());
 
-    let sql = format!(
-        "UPDATE dashboards SET {} WHERE dashboard_id = $1 AND workspace_id = $2",
-        set_parts.join(", ")
-    );
+    let sql = dashboard_update_sql(&set_parts, param_idx, expected_content_hash.is_some() && copilot_receipt.is_none());
 
     let now = Utc::now();
     // Dynamic SQL with variable bind count — identical logic for both backends.
@@ -737,14 +735,21 @@ pub async fn update_dashboard_with_context(
             "{sql} AND write_revision = ${}",
             param_idx + 1,
         );
-        update_copilot_with_receipt(
-            CopilotUpdateParams {
+        update_with_version(
+            GuardedUpdateParams {
                 db, current: &current, guarded_sql: &guarded_sql,
                 dashboard_id, workspace_id, user_id, title, content,
                 summary: &auto_summary, new_content_hash: new_content_hash.as_deref(),
-                now, current_revision, receipt,
+                now, current_revision: Some(current_revision), receipt: Some(receipt), expected_content_hash: None,
             },
         ).await?
+    } else if expected_content_hash.is_some() {
+        update_with_version(GuardedUpdateParams {
+            db, current: &current, guarded_sql: &sql,
+            dashboard_id, workspace_id, user_id, title, content,
+            summary: &auto_summary, new_content_hash: new_content_hash.as_deref(),
+            now, current_revision: Some(current_revision), receipt: None, expected_content_hash,
+        }).await?
     } else {
         kyomi_core::db_with_pool!(db, |p| {
             let mut query = sqlx::query(&sql).bind(dashboard_id).bind(workspace_id);
@@ -848,13 +853,28 @@ pub async fn update_dashboard_with_context(
         }
     }
 
-    Ok(rows_affected > 0)
+    let mut saved = current;
+    if let Some(title) = title { saved.title = title.trim().to_string(); }
+    if let Some(content) = content { saved.content = content.to_string(); }
+    if let Some(hash) = new_content_hash { saved.content_hash = Some(hash); }
+    saved.last_change_summary = Some(auto_summary);
+    saved.updated_by = Some(user_id.to_string());
+    saved.updated_at = now;
+    Ok((rows_affected > 0, saved))
 }
 
-/// Save, version, and record a copilot change in one transaction. The guarded
-/// UPDATE is the concurrency seam: a change after the pre-read causes the
-/// transaction to roll back without a version or receipt.
-struct CopilotUpdateParams<'a> {
+fn dashboard_update_sql(set_parts: &[String], timestamp_parameter: u32, guard_hash: bool) -> String {
+    let mut sql = format!(
+        "UPDATE dashboards SET {} WHERE dashboard_id = $1 AND workspace_id = $2",
+        set_parts.join(", "),
+    );
+    if guard_hash {
+        sql.push_str(&format!(" AND COALESCE(content_hash, '') = ${} AND write_revision = ${}", timestamp_parameter + 1, timestamp_parameter + 2));
+    }
+    sql
+}
+
+struct GuardedUpdateParams<'a> {
     db: &'a DbPool,
     current: &'a kyomi_core::models::Dashboard,
     guarded_sql: &'a str,
@@ -866,18 +886,21 @@ struct CopilotUpdateParams<'a> {
     summary: &'a str,
     new_content_hash: Option<&'a str>,
     now: DateTime<Utc>,
-    current_revision: i64,
-    receipt: CopilotReceiptInput<'a>,
+    current_revision: Option<i64>,
+    receipt: Option<CopilotReceiptInput<'a>>,
+    expected_content_hash: Option<&'a str>,
 }
 
-async fn update_copilot_with_receipt(params: CopilotUpdateParams<'_>) -> Result<u64> {
-    let CopilotUpdateParams {
+/// Save and version a guarded change in one transaction, optionally recording
+/// a copilot receipt. A failed guard rolls back without a version or receipt.
+async fn update_with_version(params: GuardedUpdateParams<'_>) -> Result<u64> {
+    let GuardedUpdateParams {
         db, current, guarded_sql, dashboard_id, workspace_id, user_id,
-        title, content, summary, new_content_hash, now, current_revision, receipt,
+        title, content, summary, new_content_hash, now, current_revision, receipt, expected_content_hash,
     } = params;
     let saved_title = title.map(str::trim).unwrap_or(&current.title);
     let saved_content = content.unwrap_or(&current.content);
-    let saved_revision = current_revision + 1;
+    let saved_revision = current_revision.map(|revision| revision + 1);
     let pre_hash = format!("{:x}", Sha256::digest(current.content.as_bytes()));
     let version_sql = format!(
         "INSERT INTO dashboard_versions (dashboard_id, version_number, content, title, \
@@ -892,12 +915,10 @@ async fn update_copilot_with_receipt(params: CopilotUpdateParams<'_>) -> Result<
         if let Some(c) = content { update = update.bind(c); }
         update = update.bind(summary).bind(user_id);
         if let Some(hash) = new_content_hash { update = update.bind(hash); }
-        let changed = update
-            .bind(now)
-            .bind(current_revision)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
+        update = update.bind(now);
+        if let Some(expected) = expected_content_hash { update = update.bind(expected); }
+        if let Some(revision) = current_revision { update = update.bind(revision); }
+        let changed = update.execute(&mut *tx).await?.rows_affected();
         if changed == 0 {
             tx.rollback().await?;
             return Ok(0u64);
@@ -908,11 +929,20 @@ async fn update_copilot_with_receipt(params: CopilotUpdateParams<'_>) -> Result<
         .bind(dashboard_id)
         .fetch_one(&mut *tx)
         .await?;
-        sqlx::query(&version_sql)
-            .bind(dashboard_id).bind(version).bind(&current.content)
-            .bind(&current.title).bind(summary).bind(user_id)
-            .bind(&pre_hash).bind(current.content.len() as i32)
-            .execute(&mut *tx).await?;
+        let already_versioned = if receipt.is_none() {
+            let latest: Option<(Option<String>, String)> = sqlx::query_as(
+                "SELECT content_hash, title FROM dashboard_versions WHERE dashboard_id = $1 AND version_number = $2"
+            ).bind(dashboard_id).bind(version - 1).fetch_optional(&mut *tx).await?;
+            latest.as_ref().is_some_and(|(hash, title)| hash.as_deref() == Some(pre_hash.as_str()) && title == &current.title)
+        } else { false };
+        if !already_versioned {
+            sqlx::query(&version_sql)
+                .bind(dashboard_id).bind(version).bind(&current.content)
+                .bind(&current.title).bind(summary).bind(user_id)
+                .bind(&pre_hash).bind(current.content.len() as i32)
+                .execute(&mut *tx).await?;
+        }
+        if let Some(receipt) = receipt {
         sqlx::query(
             "INSERT INTO copilot_mutation_receipts
              (receipt_id, dashboard_id, workspace_id, user_id, session_id,
@@ -926,6 +956,7 @@ async fn update_copilot_with_receipt(params: CopilotUpdateParams<'_>) -> Result<
         .bind(saved_title).bind(saved_content).bind(now).bind(saved_revision)
         .bind(summary)
         .execute(&mut *tx).await?;
+        }
         tx.commit().await?;
         Ok(changed)
     }.await);
@@ -935,7 +966,7 @@ async fn update_copilot_with_receipt(params: CopilotUpdateParams<'_>) -> Result<
         )),
         Ok(n) => Ok(n),
         Err(e) => Err(kyomi_core::Error::Internal(format!(
-            "failed to save copilot change: {e}"
+            "failed to save dashboard change: {e}"
         ))),
     }
 }
@@ -2189,10 +2220,11 @@ pub async fn restore_version(
     let is_pg = db.is_postgres();
     let now_expr = sql_compat::now(is_pg);
     let sql = format!(
-        "UPDATE dashboards SET content = $1, title = $2, updated_at = {now_expr}, write_revision = write_revision + 1 WHERE dashboard_id = $3 AND workspace_id = $4"
+        "UPDATE dashboards SET content = $1, title = $2, content_hash = $3, updated_at = {now_expr}, write_revision = write_revision + 1 WHERE dashboard_id = $4 AND workspace_id = $5"
     );
 
-    db_execute!(db, &sql, &old_version.content, &old_version.title, dashboard_id, workspace_id)
+    let restored_hash = hash_content(&old_version.content);
+    db_execute!(db, &sql, &old_version.content, &old_version.title, &restored_hash, dashboard_id, workspace_id)
         .map_err(|e| kyomi_core::Error::Internal(format!("failed to restore dashboard: {e}")))?;
 
     // Create new version for the restore
@@ -3991,5 +4023,123 @@ visualize:
             .await.expect("read live").expect("dashboard exists");
         assert_eq!(live.title, "Later title");
         assert_eq!(live.content, "copilot content");
+    }
+}
+
+#[cfg(test)]
+mod cas_tests {
+    use super::*;
+    use crate::test_support::{seed_user, seed_workspace, sqlite_pool, test_pool};
+
+    async fn fixture() -> (DbPool, Dashboard, i64) {
+        let db = test_pool().await;
+        seed_user(sqlite_pool(&db), "owner", "owner@test.local").await;
+        seed_workspace(sqlite_pool(&db), "workspace", "owner").await;
+        let id = create_dashboard(&db, "owner", "workspace", "Original title", "original content", DocType::Knowledge, None)
+            .await.expect("create document");
+        let current = get_dashboard_unchecked(&db, &id, "workspace").await.expect("read").expect("exists");
+        let revision = sqlx::query_scalar("SELECT write_revision FROM dashboards WHERE dashboard_id = $1")
+            .bind(&id).fetch_one(sqlite_pool(&db)).await.expect("revision");
+        (db, current, revision)
+    }
+
+    async fn guarded_write(db: &DbPool, current: &Dashboard, revision: i64) -> Result<u64> {
+        let sql = dashboard_update_sql(&[
+            "content = $3".into(), "last_change_summary = $4".into(), "updated_by = $5".into(),
+            "content_hash = $6".into(), "updated_at = $7".into(), "write_revision = write_revision + 1".into(),
+        ], 7, true);
+        let hash = hash_content("local edit");
+        update_with_version(GuardedUpdateParams {
+            db, current, guarded_sql: &sql, dashboard_id: &current.dashboard_id,
+            workspace_id: "workspace", user_id: "owner", title: None, content: Some("local edit"),
+            summary: "Local change", new_content_hash: Some(&hash), now: Utc::now(),
+            current_revision: Some(revision), receipt: None, expected_content_hash: current.content_hash.as_deref(),
+        }).await
+    }
+
+    #[tokio::test]
+    async fn writer_after_snapshot_read_is_rejected_by_atomic_hash_guard() {
+        let (db, current, revision) = fixture().await;
+        // This snapshot has already passed the service precheck. Land another
+        // writer before executing the production guarded UPDATE/transaction.
+        update_dashboard(UpdateDashboardParams {
+            db: &db, embed: None, dashboard_id: &current.dashboard_id, workspace_id: "workspace", user_id: "owner",
+            title: None, content: Some("remote edit"), change_summary: None,
+            expected_content_hash: current.content_hash.as_deref(), copilot_receipt: None,
+        }).await.expect("remote save");
+        assert!(matches!(guarded_write(&db, &current, revision).await, Err(kyomi_core::Error::Conflict(_))));
+        let stored = get_dashboard_unchecked(&db, &current.dashboard_id, "workspace").await.expect("read").expect("exists");
+        assert_eq!(stored.content, "remote edit");
+        let versions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM dashboard_versions WHERE dashboard_id = $1")
+            .bind(&current.dashboard_id).fetch_one(sqlite_pool(&db)).await.expect("history");
+        assert_eq!(versions, 1, "rejected late writer creates no history");
+    }
+
+    #[tokio::test]
+    async fn title_only_writer_after_snapshot_read_rejects_content_only_save() {
+        let (db, current, revision) = fixture().await;
+        update_dashboard(UpdateDashboardParams {
+            db: &db, embed: None, dashboard_id: &current.dashboard_id, workspace_id: "workspace", user_id: "owner",
+            title: Some("Remote renamed title"), content: None, change_summary: None,
+            expected_content_hash: current.content_hash.as_deref(), copilot_receipt: None,
+        }).await.expect("remote rename");
+        assert!(matches!(guarded_write(&db, &current, revision).await, Err(kyomi_core::Error::Conflict(_))));
+        let renamed = get_dashboard_unchecked(&db, &current.dashboard_id, "workspace").await.expect("read").expect("exists");
+        assert_eq!(renamed.title, "Remote renamed title");
+        assert_eq!(renamed.content, current.content);
+        assert_eq!(renamed.content_hash, current.content_hash, "rename leaves hash unchanged");
+        let versions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM dashboard_versions WHERE dashboard_id = $1")
+            .bind(&current.dashboard_id).fetch_one(sqlite_pool(&db)).await.expect("history");
+        assert_eq!(versions, 1, "rejected content-only write creates no stale-title history");
+        let (_, saved) = update_dashboard_with_snapshot(UpdateDashboardParams {
+            db: &db, embed: None, dashboard_id: &current.dashboard_id, workspace_id: "workspace", user_id: "owner",
+            title: None, content: Some("local edit"), change_summary: None,
+            expected_content_hash: renamed.content_hash.as_deref(), copilot_receipt: None,
+        }, None).await.expect("explicit save with fresh snapshot");
+        assert_eq!(saved.title, renamed.title, "content-only save returns actual pre-write title");
+        let history = get_version(&db, &current.dashboard_id, 2).await.expect("history").expect("version");
+        assert_eq!(history.title, renamed.title);
+        assert_eq!(history.content, renamed.content);
+    }
+
+    #[tokio::test]
+    async fn restore_advances_hash_and_rejects_stale_editor_save() {
+        let (db, current, _) = fixture().await;
+        update_dashboard(UpdateDashboardParams {
+            db: &db, embed: None, dashboard_id: &current.dashboard_id, workspace_id: "workspace", user_id: "owner",
+            title: Some("Before restore title"), content: Some("before restore content"), change_summary: None,
+            expected_content_hash: current.content_hash.as_deref(), copilot_receipt: None,
+        }).await.expect("save edited version");
+        let stale = get_dashboard_unchecked(&db, &current.dashboard_id, "workspace").await.expect("read").expect("exists");
+        let embed = EmbeddingService::new().expect("load embedding model");
+        restore_version(&db, &embed, &current.dashboard_id, "workspace", "owner", 1).await.expect("restore");
+        let restored = get_dashboard_unchecked(&db, &current.dashboard_id, "workspace").await.expect("read").expect("exists");
+        assert_eq!(restored.content, current.content);
+        assert_eq!(restored.title, current.title);
+        assert_eq!(restored.content_hash.as_deref(), Some(hash_content(&current.content).as_str()));
+        assert_ne!(restored.content_hash, stale.content_hash);
+        let result = update_dashboard_with_snapshot(UpdateDashboardParams {
+            db: &db, embed: None, dashboard_id: &current.dashboard_id, workspace_id: "workspace", user_id: "owner",
+            title: Some("Stale editor title"), content: Some("stale editor content"), change_summary: None,
+            expected_content_hash: stale.content_hash.as_deref(), copilot_receipt: None,
+        }, None).await;
+        assert!(matches!(result, Err(kyomi_core::Error::Conflict(_))));
+        let stored = get_dashboard_unchecked(&db, &current.dashboard_id, "workspace").await.expect("read").expect("exists");
+        assert_eq!(stored.content, restored.content);
+        assert_eq!(stored.title, restored.title);
+        let versions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM dashboard_versions WHERE dashboard_id = $1")
+            .bind(&current.dashboard_id).fetch_one(sqlite_pool(&db)).await.expect("history");
+        assert_eq!(versions, 3, "stale editor adds no history after restore");
+    }
+
+    #[tokio::test]
+    async fn history_failure_rolls_back_guarded_save() {
+        let (db, current, revision) = fixture().await;
+        sqlx::query("CREATE TRIGGER reject_history BEFORE INSERT ON dashboard_versions BEGIN SELECT RAISE(ABORT, 'history failure'); END")
+            .execute(sqlite_pool(&db)).await.expect("force history failure");
+        assert!(guarded_write(&db, &current, revision).await.is_err());
+        let stored = get_dashboard_unchecked(&db, &current.dashboard_id, "workspace").await.expect("read").expect("exists");
+        assert_eq!(stored.content, current.content);
+        assert_eq!(stored.content_hash, current.content_hash);
     }
 }

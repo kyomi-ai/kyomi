@@ -25,7 +25,6 @@ use crate::components::dashboard::{
     ChartInfoModal, CopilotSidebar, DashboardParameters, HistoryPanel, MarkdownRenderer,
     SaveDashboardModal,
 };
-#[cfg(target_arch = "wasm32")]
 use crate::components::toast::toast_error;
 use crate::components::{
     Button, ButtonLink, ButtonSize, ButtonVariant, DetailPageSkeleton, Skeleton, ToggleButton,
@@ -169,6 +168,86 @@ fn reconcile_parameters(
     values
 }
 
+// A failed rename rolls back the displayed saved title, while keeping the
+// exact submitted title separately so the editable draft survives refetches.
+fn finish_title_save(
+    succeeded: bool,
+    submitted_title: Option<String>,
+    set_title_override: WriteSignal<Option<String>>,
+    set_rejected_title: WriteSignal<Option<String>>,
+) {
+    if succeeded {
+        set_rejected_title.set(None);
+    } else {
+        set_title_override.set(None);
+        set_rejected_title.set(submitted_title);
+    }
+}
+
+fn confirm_title_edit(
+    draft: String,
+    saved_title: String,
+    rejected: bool,
+    explicit_confirmation: bool,
+    on_save: Callback<String>,
+) -> bool {
+    // Reopening a rejection is not permission to retry when focus leaves it.
+    if rejected && !explicit_confirmation { return false; }
+    let trimmed = draft.trim().to_string();
+    if !trimmed.is_empty() && trimmed != saved_title { on_save.run(trimmed); }
+    true
+}
+
+fn reopen_rejected_title(
+    rejected_title: Option<String>,
+    set_draft: WriteSignal<String>,
+    set_editing: WriteSignal<bool>,
+) {
+    if let Some(title) = rejected_title {
+        set_draft.set(title);
+        set_editing.set(true);
+    }
+}
+
+#[cfg(test)]
+mod title_save_tests {
+    use super::*;
+
+    #[test]
+    fn rejected_rename_rolls_back_saved_title_and_reopens_exact_submitted_draft() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let (title_override, set_title_override) = signal(Some("Submitted title".to_string()));
+            let (rejected_title, set_rejected_title) = signal(None);
+            let (draft, set_draft) = signal("Hidden previous draft".to_string());
+            let (editing, set_editing) = signal(false);
+            // A resource update may clear the optimistic override before failure.
+            set_title_override.set(None);
+            finish_title_save(false, Some("Submitted title".into()), set_title_override, set_rejected_title);
+            assert!(title_override.get_untracked().is_none(), "header reflects saved title");
+            reopen_rejected_title(rejected_title.get_untracked(), set_draft, set_editing);
+            assert_eq!(draft.get_untracked(), "Submitted title");
+            assert!(editing.get_untracked(), "rejected text is visibly editable without redispatch");
+            let submissions = RwSignal::new(Vec::<String>::new());
+            let save = Callback::new(move |title| submissions.update(|sent| sent.push(title)));
+            assert!(!confirm_title_edit(draft.get_untracked(), "Saved title".into(), true, false, save),
+                "blur keeps rejected draft open");
+            assert!(submissions.get_untracked().is_empty(), "blur never retries rejected text");
+            assert!(confirm_title_edit(draft.get_untracked(), "Saved title".into(), true, true, save));
+            assert_eq!(submissions.get_untracked(), vec!["Submitted title"], "Enter explicitly submits retained text");
+            set_rejected_title.set(Some("Corrected unsaved title".into()));
+            // Recreated inputs after a resource refetch recover the edited draft.
+            let (remounted_draft, set_remounted_draft) = signal(String::new());
+            let (remounted_editing, set_remounted_editing) = signal(false);
+            reopen_rejected_title(rejected_title.get_untracked(), set_remounted_draft, set_remounted_editing);
+            assert_eq!(remounted_draft.get_untracked(), "Corrected unsaved title");
+            assert!(remounted_editing.get_untracked());
+            finish_title_save(true, None, set_title_override, set_rejected_title);
+            assert!(rejected_title.get_untracked().is_none());
+        });
+    }
+}
+
 // ─── Inline Editable Title ──────────────────────────────────────────────────
 
 /// Inline editable title matching React `InlineEditableTitle`.
@@ -181,14 +260,20 @@ fn InlineEditableTitle(
     value: Signal<String>,
     /// Called with the new title when the user confirms the edit.
     on_save: Callback<String>,
+    /// A rejected submitted title remains visible in the editing input.
+    rejected_title: ReadSignal<Option<String>>,
+    pending: Signal<bool>,
+    on_discard: Callback<()>,
+    on_draft_change: Callback<String>,
 ) -> impl IntoView {
     let (editing, set_editing) = signal(false);
     let (draft, set_draft) = signal(String::new());
     let input_ref = NodeRef::<leptos::html::Input>::new();
+    Effect::new(move |_| reopen_rejected_title(rejected_title.get(), set_draft, set_editing));
 
     // When entering edit mode, populate the draft and focus
     let start_editing = move |_: leptos::ev::MouseEvent| {
-        set_draft.set(value.get());
+        set_draft.set(rejected_title.get_untracked().unwrap_or_else(|| value.get()));
         set_editing.set(true);
 
         // Focus the input on next tick (after it renders)
@@ -206,57 +291,60 @@ fn InlineEditableTitle(
         }
     };
 
-    let finish_editing = move || {
-        let new_title = draft.get();
-        let trimmed = new_title.trim().to_string();
-        if !trimmed.is_empty() && trimmed != value.get() {
-            on_save.run(trimmed);
+    let finish_editing = move |explicit_confirmation| {
+        if pending.get_untracked() { return; }
+        if confirm_title_edit(draft.get(), value.get(), rejected_title.get_untracked().is_some(), explicit_confirmation, on_save) {
+            set_editing.set(false);
         }
-        set_editing.set(false);
     };
 
     let on_blur = move |_: leptos::ev::FocusEvent| {
-        finish_editing();
+        finish_editing(false);
     };
 
     let on_keydown = move |ev: leptos::ev::KeyboardEvent| {
         if ev.key() == "Enter" {
             ev.prevent_default();
-            finish_editing();
+            finish_editing(true);
         } else if ev.key() == "Escape" {
+            on_discard.run(());
             set_editing.set(false);
         }
     };
 
     view! {
         <div class="min-w-0 flex-1">
-            {move || {
-                if editing.get() {
-                    view! {
-                        <input
-                            node_ref=input_ref
-                            type="text"
-                            class="text-3xl font-display text-foreground bg-transparent border-b-2 border-primary outline-none w-full"
-                            prop:value=move || draft.get()
-                            on:input=move |ev| set_draft.set(event_target_value(&ev))
-                            on:blur=on_blur
-                            on:keydown=on_keydown
-                        />
-                    }.into_any()
-                } else {
-                    // h1 is the page-level landmark per DESIGN.md §Accessibility
-                    // landmark rules. Click behavior is preserved.
-                    view! {
-                        <h1
-                            class="text-3xl font-display text-foreground truncate cursor-pointer hover:text-primary transition-colors block m-0"
-                            on:click=start_editing
-                            title="Click to edit title"
-                        >
-                            {move || value.get()}
-                        </h1>
-                    }.into_any()
+            <Show
+                when=move || editing.get()
+                fallback=move || view! {
+                    <h1
+                        class="text-3xl font-display text-foreground truncate cursor-pointer hover:text-primary transition-colors block m-0"
+                        on:click=start_editing
+                        title="Click to edit title"
+                    >
+                        {move || value.get()}
+                    </h1>
                 }
-            }}
+            >
+                <input
+                    node_ref=input_ref
+                    type="text"
+                    aria-label="Dashboard title draft"
+                    class="text-3xl font-display text-foreground bg-transparent border-b-2 border-primary outline-none w-full"
+                    prop:value=move || draft.get()
+                    disabled=move || pending.get()
+                    on:input=move |ev| {
+                        let next = event_target_value(&ev);
+                        set_draft.set(next.clone());
+                        if rejected_title.get_untracked().is_some() { on_draft_change.run(next); }
+                    }
+                    on:blur=on_blur
+                    on:keydown=on_keydown
+                />
+                <Show when=move || rejected_title.get().is_some()>
+                    <span class="text-xs text-destructive">"Unsaved title — Enter to save, Escape to discard"</span>
+                </Show>
+            </Show>
         </div>
     }
 }
@@ -531,6 +619,8 @@ pub fn DashboardViewerPage() -> impl IntoView {
     let (param_values, set_param_values) = signal(HashMap::<String, String>::new());
     let (params_initialized, set_params_initialized) = signal(false);
     let (title_override, set_title_override) = signal(Option::<String>::None);
+    let (rejected_title, set_rejected_title) = signal(Option::<String>::None);
+    let submitted_title = RwSignal::new(None::<String>);
     let last_parameter_content = RwSignal::new(None::<String>);
 
     // Keep this state above the resource-rendered subtree. A dashboard update
@@ -568,6 +658,8 @@ pub fn DashboardViewerPage() -> impl IntoView {
         set_history_open.set(false);
         set_copilot_open.set(false);
         set_title_override.set(None);
+        set_rejected_title.set(None);
+        submitted_title.set(None);
     });
     Effect::new(move |_| {
         let dashboard = match dashboard_resource.get() {
@@ -670,17 +762,23 @@ pub fn DashboardViewerPage() -> impl IntoView {
     // ── Title update Action ─────────────────────────────────────────────
     // Created at component scope so its lifecycle matches the component.
     // Dispatched from the on_title_save callback with (dashboard_id, new_title).
-    // On error, reverts the optimistic title override.
-    let update_title_action = Action::new(|(did, new_title): &(String, String)| {
+    // On error, reverts the saved-title display and retains the submitted draft.
+    let update_title_action = Action::new(|(did, new_title, expected_hash): &(String, String, String)| {
         let did = did.clone();
         let new_title = new_title.clone();
-        async move { update_dashboard(did, Some(new_title), None, None).await }
+        let expected_hash = expected_hash.clone();
+        async move {
+            let result = update_dashboard(did.clone(), Some(new_title), None, None, expected_hash).await;
+            (did, result)
+        }
     });
 
     Effect::new(move |_| {
-        if let Some(Err(e)) = update_title_action.value().get() {
-            set_title_override.set(None);
-            leptos::logging::error!("Failed to update title: {}", e);
+        if let Some((saved_id, result)) = update_title_action.value().get() {
+            if saved_id != dashboard_id.get_untracked() || submitted_title.get_untracked().is_none() { return; }
+            finish_title_save(result.is_ok(), submitted_title.get_untracked(), set_title_override, set_rejected_title);
+            submitted_title.set(None);
+            if let Err(error) = result { toast_error(error.to_string()); }
         }
     });
 
@@ -957,10 +1055,14 @@ pub fn DashboardViewerPage() -> impl IntoView {
                         let on_title_save = Callback::new({
                             let did_for_title = did_for_title.clone();
                             move |new_title: String| {
+                                if update_title_action.pending().get_untracked() { return; }
                                 let did = did_for_title.clone();
+                                let Some(current) = current_dashboard.get_untracked() else { return; };
                                 // Optimistic update — revert in the Effect above if the server call fails.
+                                submitted_title.set(Some(new_title.clone()));
+                                set_rejected_title.set(None);
                                 set_title_override.set(Some(new_title.clone()));
-                                update_title_action.dispatch((did, new_title));
+                                update_title_action.dispatch((did, new_title, current.content_hash.unwrap_or_default()));
                             }
                         });
 
@@ -1224,6 +1326,10 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                         <InlineEditableTitle
                                             value=title_signal
                                             on_save=on_title_save
+                                            rejected_title=rejected_title
+                                            pending=Signal::derive(move || update_title_action.pending().try_get().unwrap_or(false))
+                                            on_discard=Callback::new(move |()| set_rejected_title.set(None))
+                                            on_draft_change=Callback::new(move |title| set_rejected_title.set(Some(title)))
                                         />
                                     </div>
 

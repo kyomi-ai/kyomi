@@ -117,9 +117,10 @@ pub fn SaveDashboardModal(
                             None,
                             Some(new_content),
                             Some("Added chart".to_string()),
+                            dashboard.content_hash.unwrap_or_default(),
                         )
                         .await
-                        .map(|()| (dashboard_id, false))
+                        .map(|_| (dashboard_id, false))
                     }
                     Err(e) => Err(e),
                 }
