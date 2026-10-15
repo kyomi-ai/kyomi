@@ -95,9 +95,15 @@ pub struct QueryDatasourceTool;
 
 #[async_trait]
 impl AgentTool for QueryDatasourceTool {
-    /// Provider query errors can follow a committed mutation (including timeout).
-    /// A returned error envelope establishes no rollback guarantee.
+    /// Definite parse/analysis failures can be corrected by the model. Other
+    /// provider errors may follow a committed mutation, including timeouts.
     fn result_domain_outcome(&self, text: &str) -> agent_runtime::DomainOutcome {
+        if serde_json::from_str::<serde_json::Value>(text).is_ok_and(|value| {
+            value.get("error").is_some_and(serde_json::Value::is_string)
+                && value.get("query_rejected_before_execution").and_then(serde_json::Value::as_bool) == Some(true)
+        }) {
+            return agent_runtime::DomainOutcome::Rejected;
+        }
         super::query_utils::sql_result_domain_outcome(text)
     }
 
@@ -221,11 +227,9 @@ impl AgentTool for QueryDatasourceTool {
             kyomi_datasource_server::provider::QueryStatus::Error => {
                 let raw_err = result.error.unwrap_or_else(|| "Unknown query error".to_string());
                 tracing::warn!(raw_error = %raw_err, datasource = %ds.slug, "datasource query error (sanitized for agent)");
-                Ok(serde_json::json!({
-                    "error": kyomi_core::sanitize_error(&raw_err),
-                    "datasource": ds.slug,
-                })
-                .to_string())
+                Ok(super::query_utils::query_error_response(
+                    ds.datasource_type.as_ref(), &ds.slug, sql, &raw_err,
+                ))
             }
         }
     }

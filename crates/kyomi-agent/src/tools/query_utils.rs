@@ -30,6 +30,90 @@ pub(super) fn sql_result_domain_outcome(text: &str) -> agent_runtime::DomainOutc
     }
 }
 
+/// Preserve the provider error for model repair, marking only known ClickHouse
+/// SELECT parse/analysis rejections as definite failures. QueryStatus::Error also covers
+/// network loss and response decoding failures, so it alone cannot establish this.
+pub(crate) fn query_error_response(
+    datasource_type: &str,
+    datasource_slug: &str,
+    sql: &str,
+    raw_error: &str,
+) -> String {
+    // Conservatively exclude batches. Semicolons inside strings/comments may
+    // exclude a safe query too; they must never authorize retrying a batch that
+    // could have committed an earlier statement.
+    let trimmed = sql.trim();
+    let single_statement = !trimmed.strip_suffix(';').unwrap_or(trimmed).contains(';');
+    // A mutation can raise an analysis error later (e.g. in a materialized
+    // view) after writing rows. Only recover plain SELECT requests here.
+    let select = trimmed
+        .split_whitespace()
+        .next()
+        .is_some_and(|keyword| keyword.eq_ignore_ascii_case("SELECT"));
+    let rejected = datasource_type == "clickhouse"
+        && single_statement
+        && select
+        && [
+            "Code: 47. DB::Exception: ", // UNKNOWN_IDENTIFIER
+            "Code: 62. DB::Exception: ", // SYNTAX_ERROR
+        ]
+        .iter()
+        .any(|prefix| raw_error.starts_with(prefix));
+    serde_json::json!({
+        "error": kyomi_core::sanitize_error(raw_error),
+        "datasource": datasource_slug,
+        "query_rejected_before_execution": rejected,
+    })
+    .to_string()
+}
+
+#[cfg(test)]
+mod query_recovery_tests {
+    use super::query_error_response;
+    use crate::tools::{AgentTool, datasource::QueryDatasourceTool};
+    use agent_runtime::DomainOutcome;
+
+    #[test]
+    fn query_recovery_returns_known_clickhouse_rejections_to_model() {
+        for error in [
+            "Code: 47. DB::Exception: Unknown expression identifier page_url (UNKNOWN_IDENTIFIER)",
+            "Code: 62. DB::Exception: Syntax error: failed at position 8 (SYNTAX_ERROR)",
+        ] {
+            for sql in [
+                "SELECT page_url FROM events",
+                "SELECT page_url FROM events;",
+                "SELECT FROM events",
+                " \nselect\tpage_url FROM events;  ",
+            ] {
+                let text = query_error_response("clickhouse", "analytics", sql, error);
+                assert_eq!(QueryDatasourceTool.result_domain_outcome(&text), DomainOutcome::Rejected);
+                let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(value["error"], error);
+                assert_eq!(value["datasource"], "analytics");
+            }
+        }
+    }
+
+    #[test]
+    fn query_recovery_preserves_uncertainty_for_unproven_errors_and_batches() {
+        let identifier = "Code: 47. DB::Exception: Unknown expression identifier page_url (UNKNOWN_IDENTIFIER)";
+        for (kind, sql, error) in [
+            ("clickhouse", "SELECT 1", "timeout after possible commit"),
+            ("clickhouse", "SELECT 1", "Failed to parse ClickHouse response"),
+            ("clickhouse", "SELECT 1", "Code: 159. DB::Exception: Timeout exceeded"),
+            ("clickhouse", "SELECT 1", "wrapped: Code: 47. DB::Exception: unknown"),
+            ("postgres", "SELECT 1", identifier),
+            ("clickhouse", "INSERT INTO t VALUES (1)", identifier),
+            ("clickhouse", "SELECTED page_url", identifier),
+            ("clickhouse", "INSERT INTO t VALUES (1); SELECT page_url FROM events", identifier),
+            ("clickhouse", "INSERT INTO t VALUES (1); SELECT page_url FROM events;", identifier),
+        ] {
+            let text = query_error_response(kind, "analytics", sql, error);
+            assert_eq!(QueryDatasourceTool.result_domain_outcome(&text), DomainOutcome::Unknown, "{sql}: {error}");
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Arrow → JSON conversion
 // ---------------------------------------------------------------------------
