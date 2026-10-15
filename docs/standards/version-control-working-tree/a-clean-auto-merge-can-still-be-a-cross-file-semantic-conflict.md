@@ -33,8 +33,9 @@ exercises the union:
   feature flags that actually compile the test modules**. In this workspace some of
   `kyomi-ui`'s test modules — including `chat_engine`'s `tests_disposal_safety` — sit behind
   `#[cfg(all(test, feature = "ssr"))]`, and a default-features check silently skips them
-  while still returning green. A plain `#[cfg(test)]` module is not safe either: without
-  `--all-targets` no test target is compiled at all.
+  while still returning green. A plain `#[cfg(test)]` module is not safe either: a bare
+  `cargo check` compiles no test target at all, so nothing warns you that the test module
+  does not build.
 - Run the tests in files only one side of the merge wrote, against the definitions the other
   side changed. A branch-only test file is exactly where shapes 1–3 hide: nothing on the other
   side of the merge ever compiled or ran it.
@@ -51,17 +52,23 @@ git merge --continue
 cargo check --locked --workspace            # green — and compiled no test modules
 git diff --check                            # green — text only
 
-# RIGHT — compile the union's tests, with the features that reach them, then run
-# the ones only one side authored.
+# RIGHT — compile the union's tests, with the features that reach them, then RUN
+# the ones only one side authored. A check that compiles is not a verdict.
 cargo check --locked --all-targets
 cargo check --locked -p kyomi-ui --all-targets --features ssr
 
 # Files only one side touched are where the drift lives. Run their tests, not
 # just the files with conflict markers.
+# (During a conflicted `git merge` — before `git merge --continue`. For a merge
+# that already committed, use `HEAD^1`/`HEAD^2`; for a rebase or cherry-pick,
+# diff against the pre-image ref instead — `MERGE_HEAD` will not exist.)
 git diff --name-only <merge-base>...MERGE_HEAD   # main-side changes
 git diff --name-only <merge-base>...HEAD          # your-side changes
-# Then: for each definition the two sets disagree about (signature, struct field,
-# guard, error string), compile and run the test files that consume it.
+# Then, for each definition the two sets disagree about (signature, struct field,
+# guard, error string), RUN the test files that consume it — the same
+# --features/--all-targets flags as above, or the test module is not compiled:
+cargo test --locked -p kyomi-auth --all-targets watch_service::duplicate_names_tests
+cargo test --locked -p kyomi-ui --features ssr chat_engine::tests_disposal_safety
 ```
 
 Real precedent — six critical findings across three independent PRs in two days, none of
