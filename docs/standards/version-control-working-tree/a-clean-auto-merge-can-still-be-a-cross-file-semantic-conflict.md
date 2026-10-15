@@ -59,14 +59,19 @@ cargo check --locked -p kyomi-ui --all-targets --features ssr
 
 # Files only one side touched are where the drift lives. Run their tests, not
 # just the files with conflict markers.
-# (During a conflicted `git merge` — before `git merge --continue`. For a merge
-# that already committed, use `HEAD^1`/`HEAD^2`; for a rebase or cherry-pick,
-# diff against the pre-image ref instead — `MERGE_HEAD` will not exist.)
+# (During a conflicted `git merge` — before `git merge --continue`, where
+# `MERGE_HEAD` exists. For a merge that already committed, `MERGE_HEAD` →
+# `HEAD^2` and `HEAD` → `HEAD^1`. For a rebase, diff against the commit the
+# rebase started from (`ORIG_HEAD` if it has not moved); for a conflicted
+# cherry-pick use `CHERRY_PICK_HEAD`, or the commit before the pick otherwise.)
 git diff --name-only <merge-base>...MERGE_HEAD   # main-side changes
 git diff --name-only <merge-base>...HEAD          # your-side changes
 # Then, for each definition the two sets disagree about (signature, struct field,
-# guard, error string), RUN the test files that consume it — the same
-# --features/--all-targets flags as above, or the test module is not compiled:
+# guard, error string), RUN the test files that consume it. Without `--features
+# ssr` the second module is cfg'd out and the filter matches nothing; `--all-targets`
+# on `cargo test` is belt-and-braces, not load-bearing. Confirm the run reports a
+# non-zero test count — libtest exits 0 on a filter that matches nothing, which is
+# the same "green that proves nothing" this rule is about.
 cargo test --locked -p kyomi-auth --all-targets watch_service::duplicate_names_tests
 cargo test --locked -p kyomi-ui --features ssr chat_engine::tests_disposal_safety
 ```
