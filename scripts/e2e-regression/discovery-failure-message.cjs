@@ -106,13 +106,17 @@ async function selectByLabel(page, scope, labelText, optionText) {
   return false;
 }
 
-/** Open the "Authentication Mode" <Select> and choose an option by visible text. */
+/** Open the "Authentication Mode" <Select> and choose an option by visible text.
+ *  Matches the label as a prefix so "Service Account" also selects the
+ *  default-mode rendering "Service Account (Recommended)" — the "(Recommended)"
+ *  suffix is appended by `auth_mode_select_options` (datasources.rs) to the
+ *  default mode's display_name and is not part of the registry's label. */
 async function pickAuthMode(page, scope, label) {
   const trigger = scope.locator('label:text-is("Authentication Mode")')
     .locator('xpath=following-sibling::*[1]')
     .locator('button[aria-haspopup="listbox"]');
   await trigger.click({ timeout: 10000 });
-  await page.getByRole('option', { name: label, exact: true }).click({ timeout: 10000 });
+  await page.getByRole('option', { name: new RegExp('^' + label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '( \\(Recommended\\))?$') }).click({ timeout: 10000 });
   await page.waitForTimeout(800);
 }
 
