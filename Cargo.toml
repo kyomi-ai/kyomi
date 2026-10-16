@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/agent-runtime",
+    "crates/kyomi-mcp-client",
     "crates/kyomi-core",
     "crates/kyomi-auth",
     "crates/kyomi-chart-theme",
@@ -130,6 +131,7 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Internal crates
 agent-runtime = { path = "crates/agent-runtime" }
+kyomi-mcp-client = { path = "crates/kyomi-mcp-client" }
 kyomi-core = { path = "crates/kyomi-core" }
 kyomi-auth = { path = "crates/kyomi-auth" }
 kyomi-embed = { path = "crates/kyomi-embed" }
