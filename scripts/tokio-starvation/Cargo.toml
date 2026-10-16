@@ -1,0 +1,12 @@
+[package]
+name = "tokio-starvation-repro"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Keep this diagnostic independent of the application and its build graph.
+[workspace]
+
+[dependencies]
+axum = { version = "=0.8.9", default-features = false, features = ["http1", "tokio"] }
+tokio = { version = "=1.53.1", features = ["rt-multi-thread", "net", "time", "sync"] }
