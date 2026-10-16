@@ -60,3 +60,5 @@ pub use verification_token::VerificationToken;
 pub use watch::{Watch, WatchExecution};
 pub use workspace::{Workspace, WorkspaceUser};
 pub use workspace_invitation::WorkspaceInvitation;
+
+pub mod personal_mcp;
