@@ -62,7 +62,7 @@ fn google_error_translation_is_not_applied_to_other_providers_error_arms() {
 
     let modal_level = extract_between(
         SRC,
-        "OAuthMessage::GoogleError { error } => {\n                    set_modal_oauth_connecting",
+        "OAuthMessage::GoogleError { error } => {\n                    state.set_modal_oauth_connecting",
         "OAuthMessage::SnowflakeError { error }",
     );
     assert!(
