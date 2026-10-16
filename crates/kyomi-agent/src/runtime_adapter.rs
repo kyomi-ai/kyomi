@@ -20,7 +20,10 @@ pub(crate) struct RuntimeSink {
     pub tools: tokio::sync::Mutex<HashMap<String, (String, serde_json::Value)>>,
 }
 impl RuntimeSink {
-    async fn progress(&self, command: &AppendCommand) -> Option<AgentThinkingEvent> {
+    async fn progress(
+        tools: &tokio::sync::Mutex<HashMap<String, (String, serde_json::Value)>>,
+        command: &AppendCommand,
+    ) -> Option<AgentThinkingEvent> {
         let Payload::Public(payload) = &command.payload else {
             return None;
         };
@@ -37,15 +40,14 @@ impl RuntimeSink {
                 name,
                 arguments,
             } => {
-                self.tools
+                tools
                     .lock()
                     .await
                     .insert(tool_call_id.0.clone(), (name.clone(), arguments.clone()));
                 return None;
             }
             PublicPayload::ToolStarted { tool_call_id } => {
-                let (name, input) = self
-                    .tools
+                let (name, input) = tools
                     .lock()
                     .await
                     .get(tool_call_id.as_str())
@@ -67,13 +69,25 @@ impl RuntimeSink {
                 transport,
                 domain,
             } => {
-                let name = self
-                    .tools
+                let (name, input) = tools
                     .lock()
                     .await
                     .get(tool_call_id.as_str())
-                    .map(|(name, _)| name.clone())
-                    .unwrap_or_default();
+                    .cloned()
+                    .unwrap_or_else(|| (String::new(), serde_json::json!({})));
+                // Completion is a standalone persisted event: keep the original
+                // arguments alongside the result for tool renderers and replay.
+                let mut schema = crate::thinking::format_tool_schema(&name, &input, true);
+                let output = serde_json::from_str::<serde_json::Value>(
+                    command.detail.as_deref().unwrap_or(&text.preview),
+                )
+                .unwrap_or_else(|_| serde_json::json!({}));
+                if let (Some(schema), Some(output)) = (
+                    schema.as_object_mut(),
+                    crate::thinking::format_tool_schema(&name, &output, false).as_object(),
+                ) {
+                    schema.extend(output.clone());
+                }
                 let success = *transport == TransportOutcome::Completed
                     && *domain == DomainOutcome::Succeeded;
                 (
@@ -87,7 +101,7 @@ impl RuntimeSink {
                     Some(
                         serde_json::json!({"tool_name":name,"tool_call_id":tool_call_id,"status":"completed","success":success,
                         "transport":transport,"domain":domain,"result":text.preview,
-                        "schema":crate::thinking::format_tool_schema(&name, &serde_json::from_str::<serde_json::Value>(command.detail.as_deref().unwrap_or(&text.preview)).unwrap_or_else(|_| serde_json::json!({})), false)}),
+                        "schema":schema}),
                     ),
                     text.detail.is_some(),
                 )
@@ -127,7 +141,7 @@ impl EventSink for RuntimeSink {
         {
             return Err(ExecutionError::Persistence("runtime scope mismatch".into()));
         }
-        let progress = self.progress(command).await;
+        let progress = Self::progress(&self.tools, command).await;
         let projection = progress
             .as_ref()
             .map(serde_json::to_value)
@@ -193,5 +207,68 @@ impl EventSink for RuntimeSink {
             receipt,
             notification_error,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_runtime::{Text, ToolCallId};
+    use serde_json::json;
+
+    fn command(payload: PublicPayload) -> AppendCommand {
+        AppendCommand {
+            version: 1,
+            conversation_id: agent_runtime::ConversationId("conversation".into()),
+            run_id: agent_runtime::RunId("run".into()),
+            event_id: agent_runtime::EventId("event".into()),
+            idempotency_key: agent_runtime::IdempotencyKey("key".into()),
+            payload: Payload::Public(payload),
+            detail: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_validation_retains_input_and_output_by_call_id() {
+        let tools = tokio::sync::Mutex::new(HashMap::new());
+        for (id, block) in [("first", "first chart"), ("second", "second chart")] {
+            let intent = command(PublicPayload::ToolIntent {
+                tool_call_id: ToolCallId(id.into()),
+                name: "validate_chartml".into(),
+                arguments: json!({"blocks": [block]}),
+            });
+            assert!(RuntimeSink::progress(&tools, &intent).await.is_none());
+        }
+        for (id, block) in [("second", "second chart"), ("first", "first chart")] {
+            let mut outcome = command(PublicPayload::ToolOutcome {
+                tool_call_id: ToolCallId(id.into()),
+                text: Text {
+                    preview: "Validation completed".into(),
+                    detail: Some(agent_runtime::DetailId("detail".into())),
+                },
+                transport: TransportOutcome::Completed,
+                domain: DomainOutcome::Succeeded,
+            });
+            outcome.detail = Some(json!({"valid": true, "blocks_checked": 1}).to_string());
+            if id == "first" {
+                outcome.detail = None;
+                if let Payload::Public(PublicPayload::ToolOutcome { text, .. }) =
+                    &mut outcome.payload
+                {
+                    text.preview = json!({"valid": true, "blocks_checked": 1}).to_string();
+                    text.detail = None;
+                }
+            }
+            let event = RuntimeSink::progress(&tools, &outcome).await.unwrap();
+            assert_eq!(event.event_type, ThinkingEventType::ToolExecutionEnd);
+            assert_eq!(
+                event.data.unwrap()["schema"],
+                json!({
+                    "tool": "validate_chartml",
+                    "input": {"blocks": [block]},
+                    "output": {"valid": true, "blocks_checked": 1},
+                })
+            );
+        }
     }
 }
