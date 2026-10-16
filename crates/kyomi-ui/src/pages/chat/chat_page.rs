@@ -35,6 +35,7 @@
 //!   watch creation context (Phase 11)
 //! - Empty states: no datasources, personal mode without LLM (Phase 12)
 
+use crate::components::chat::thinking::thinking_event_is_terminal;
 use leptos::prelude::*;
 use phosphor_leptos::{Icon, IconWeight};
 use leptos_router::components::Outlet;
@@ -369,12 +370,6 @@ fn merge_run_history(
         }
     }
     stored
-}
-
-fn thinking_event_is_terminal(event: &ThinkingEvent) -> bool {
-    event.duration_ms.is_some() || event.data.as_ref()
-        .and_then(|data| data.get("status"))
-        .and_then(|status| status.as_str()) == Some("completed")
 }
 
 /// Replay persisted reasoning without replacing a newer live answer. On a
@@ -2727,6 +2722,78 @@ mod tests {
         row.thinking_events = vec![event("processing")];
         restore_stored_thinking(&thinking, std::slice::from_ref(&row), Some(std::slice::from_ref(&row)));
         assert_eq!(thinking.get_for_message("a").events[0].title, "completed");
+        owner.cleanup();
+    }
+
+    #[test]
+    fn stored_thinking_equal_time_revision_matches_live_order() {
+        let owner = Owner::new();
+        owner.set();
+        let thinking = ThinkingManager::new();
+        let event = |id: &str, kind: &str| serde_json::json!({
+            "event_id": id, "event_type": kind,
+            "timestamp": "2026-10-16T05:00:00Z", "title": id,
+        });
+        let start = event("a", "tool_execution_start");
+        let peer = event("b", "agent_thought");
+        let mut completion = event("a", "tool_execution_end");
+        completion["data"] = serde_json::json!({"status": "completed"});
+        for event in [&start, &peer, &completion] {
+            thinking.handle_thinking_event("a", serde_json::from_value(event.clone()).expect("event"), None);
+        }
+        let live_ids = thinking.get_for_message("a").events.into_iter().map(|event| event.event_id).collect::<Vec<_>>();
+        let mut stored = ChatMessageItem {
+            message_id: "a".into(), message_type: "assistant".into(),
+            content: "answer".into(), status: "complete".into(), timestamp: String::new(),
+            pinned: false, sent_by: None, thinking_events: vec![completion, peer], token_usage: None,
+        };
+        for _ in 0..2 {
+            restore_stored_thinking(&thinking, std::slice::from_ref(&stored), None);
+            assert_eq!(thinking.get_for_message("a").events.into_iter().map(|event| event.event_id).collect::<Vec<_>>(), live_ids);
+            stored.thinking_events.reverse();
+        }
+        owner.cleanup();
+    }
+
+    #[test]
+    fn stored_thinking_hash_chronology_matches_live_and_stale_merge() {
+        let owner = Owner::new();
+        owner.set();
+        let thinking = ThinkingManager::new();
+        let event = |id: &str, second: u8, kind: &str| serde_json::json!({
+            "event_id": id, "event_type": kind,
+            "timestamp": format!("2026-10-16T05:00:0{second}Z"), "title": id,
+        });
+        let all = vec![
+            event("1770000-001", 0, "agent_start"),
+            event("ffffhash", 1, "agent_thought"),
+            event("eeeehash", 2, "tool_execution_start"),
+            event("aaaahash", 3, "tool_execution_end"),
+            event("1770000-002", 4, "agent_complete"),
+        ];
+        let mut stored = ChatMessageItem {
+            message_id: "a".into(), message_type: "assistant".into(),
+            content: "answer".into(), status: "complete".into(), timestamp: String::new(),
+            pinned: false, sent_by: None, thinking_events: all.clone(), token_usage: None,
+        };
+        stored.thinking_events.reverse();
+        restore_stored_thinking(&thinking, std::slice::from_ref(&stored), None);
+        let expected = all.iter().map(|event| event["event_id"].as_str().expect("id")).collect::<Vec<_>>();
+        assert_eq!(thinking.get_for_message("a").events.iter().map(|event| event.event_id.as_str()).collect::<Vec<_>>(), expected);
+        thinking.clear_all();
+        for event in &all[2..] {
+            thinking.handle_thinking_event("a", serde_json::from_value(event.clone()).expect("live event"), None);
+        }
+        thinking.complete_thinking("a");
+        let live = stored.clone();
+        stored.status = "in_progress".into();
+        stored.thinking_events = all[..3].to_vec();
+        for _ in 0..2 {
+            restore_stored_thinking(&thinking, std::slice::from_ref(&stored), Some(std::slice::from_ref(&live)));
+            let state = thinking.get_for_message("a");
+            assert_eq!(state.events.iter().map(|event| event.event_id.as_str()).collect::<Vec<_>>(), expected);
+            assert!(!state.is_active);
+        }
         owner.cleanup();
     }
 
