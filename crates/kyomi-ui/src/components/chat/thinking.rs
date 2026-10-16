@@ -8,8 +8,7 @@
 //! Features:
 //! - Deduplicates events by `event_id`
 //! - Handles in-place updates when an event with the same ID arrives
-//! - Maintains chronological sort order using lexicographic `event_id` comparison
-//!   (event_id format: `{unix_millis}-{counter}` ensures sort order)
+//! - Orders events by occurrence time, independently of opaque event identity
 //! - Manages token usage tracking per message
 //! - Tracks active/cancelled state per message
 //!
@@ -27,7 +26,7 @@ use std::collections::HashMap;
 /// inside `agent_thinking` messages.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ThinkingEvent {
-    /// Unique event identifier (format: `{unix_millis}-{counter}`).
+    /// Opaque event identity; runtime hashes and legacy timestamp IDs are both valid.
     pub event_id: String,
     /// Event type: `agent_start`, `agent_thought`, `tool_execution_start`, etc.
     pub event_type: String,
@@ -87,35 +86,51 @@ pub struct ThinkingState {
     pub token_usage: Option<TokenUsage>,
 }
 
-/// Process a thinking event into an existing events list.
+/// Process an event by occurrence time, independently of its opaque ID.
 ///
-/// Deduplicates by `event_id` (all events have unique IDs).
-/// Maintains chronological sort order using lexicographic comparison
-/// (event_id format: `{unix_millis}-{counter}` ensures sort order).
-///
-/// Matches React's `processThinkingEvent()` exactly:
-/// - If event_id exists: update in place
-/// - If new: append and re-sort by event_id
+/// Equal instants have no recoverable execution order in stored records. Break
+/// ties by opaque ID. Invalid legacy timestamps sort before valid ones, by
+/// their raw value. IDs break ties deterministically, not by execution order.
+/// Same-ID revisions retain their original occurrence time and card position.
+/// Inserting a new event never reorders existing cards, including revised ones.
 pub fn process_thinking_event(
     existing: &[ThinkingEvent],
-    new_event: ThinkingEvent,
+    mut new_event: ThinkingEvent,
 ) -> Vec<ThinkingEvent> {
-    // Check if this event_id already exists
+    let mut updated = existing.to_vec();
     if let Some(idx) = existing
         .iter()
         .position(|e| e.event_id == new_event.event_id)
     {
-        // Event exists — update it in place
-        let mut updated = existing.to_vec();
+        if thinking_event_is_terminal(&existing[idx]) && !thinking_event_is_terminal(&new_event) {
+            return updated;
+        }
+        new_event.timestamp.clone_from(&existing[idx].timestamp);
         updated[idx] = new_event;
-        updated
     } else {
-        // New event — add and maintain sort order
-        let mut updated = existing.to_vec();
-        updated.push(new_event);
-        updated.sort_by(|a, b| a.event_id.cmp(&b.event_id));
-        updated
+        let key = |event: &ThinkingEvent| {
+            let instant = chrono::DateTime::parse_from_rfc3339(&event.timestamp).ok();
+            let invalid = instant.is_none().then(|| event.timestamp.clone());
+            (instant, invalid, event.event_id.clone())
+        };
+        let new_key = key(&new_event);
+        let index = updated
+            .iter()
+            .position(|event| key(event) > new_key)
+            .unwrap_or(updated.len());
+        updated.insert(index, new_event);
     }
+    updated
+}
+
+pub(crate) fn thinking_event_is_terminal(event: &ThinkingEvent) -> bool {
+    event.duration_ms.is_some()
+        || event
+            .data
+            .as_ref()
+            .and_then(|data| data.get("status"))
+            .and_then(|status| status.as_str())
+            == Some("completed")
 }
 
 /// Reference-counted reasoning state owned by a chat run.
@@ -305,5 +320,114 @@ impl ThinkingManager {
 
     pub fn get_for_message(&self, message_id: &str) -> ThinkingState {
         self.data.get_untracked().get_for_message(message_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(id: &str, time: &str, kind: &str) -> ThinkingEvent {
+        serde_json::from_value(serde_json::json!({
+            "event_id": id, "timestamp": time, "event_type": kind, "title": id,
+        }))
+        .expect("legacy event without optional fields")
+    }
+
+    fn ids(events: &[ThinkingEvent]) -> Vec<&str> {
+        events.iter().map(|event| event.event_id.as_str()).collect()
+    }
+
+    #[test]
+    fn thinking_hash_chronology_survives_out_of_order_delivery() {
+        // SHA-256 of compact [conversation-demo, run-demo, event, key] JSON,
+        // using the runtime identity format and the five KYO-926 keys.
+        let hashes = [
+            "674d51b2e97cacd48d9047afecb783fdbd4270ab1de1816a7b4e90cabd41ea43",
+            "94b545c768bfca608f621c1c8d8e35c1d690f8c3182a136e096d061f1bf430b0",
+            "4e9f0098c7c247c57e61b7c90c99a1990f65a8aff3ef32bb17787285aa5c2753",
+            "5c9c08330f4adc14e9f4417d47ec96611a21c8d5f2e4baf475f09781efccdcca",
+            "4345b7e436800e36ce7f52c6c645b9dfa4fe4465a20f791effb48d6abd18d682",
+        ];
+        let kinds = [
+            "agent_thought",
+            "tool_execution_start",
+            "tool_execution_end",
+            "agent_thought",
+            "agent_thought",
+        ];
+        for order in [[0, 1, 2, 3, 4], [4, 2, 3, 0, 1]] {
+            let mut events = Vec::new();
+            for i in order {
+                events = process_thinking_event(
+                    &events,
+                    event(hashes[i], &format!("2026-10-16T05:00:0{i}Z"), kinds[i]),
+                );
+            }
+            assert_eq!(ids(&events), hashes);
+            assert_eq!(events.last().expect("preparing").event_id, hashes[4]);
+        }
+    }
+
+    #[test]
+    fn thinking_mixed_legacy_ids_and_offsets_use_occurrence_time() {
+        let mut events = Vec::new();
+        for (id, time, kind) in [
+            ("1000-002", "2026-10-16T05:00:03Z", "agent_complete"),
+            (
+                "0000hash",
+                "2026-10-16T16:00:02+11:00",
+                "tool_execution_end",
+            ),
+            ("9999hash", "2026-10-16T05:00:01Z", "tool_execution_start"),
+            ("1000-001", "2026-10-16T05:00:00Z", "agent_start"),
+        ] {
+            events = process_thinking_event(&events, event(id, time, kind));
+        }
+        assert_eq!(
+            ids(&events),
+            ["1000-001", "9999hash", "0000hash", "1000-002"]
+        );
+    }
+
+    #[test]
+    fn thinking_equal_instants_and_invalid_legacy_times_are_deterministic() {
+        let input = [
+            event("b", "2026-10-16T16:00:00+11:00", "agent_thought"),
+            event("a", "2026-10-16T05:00:00Z", "agent_thought"),
+            event("0", "2026-10-16T05:00:00Z", "tool_execution_end"),
+            event("z", "2026-10-16T05:00:00Z", "agent_start"),
+            event("old", "unknown", "agent_thought"),
+        ];
+        for order in [vec![0, 1, 2, 3, 4], vec![4, 3, 2, 1, 0]] {
+            let events = order.into_iter().fold(Vec::new(), |events, i| {
+                process_thinking_event(&events, input[i].clone())
+            });
+            assert_eq!(ids(&events), ["old", "0", "a", "b", "z"]);
+        }
+    }
+
+    #[test]
+    fn thinking_same_id_completion_keeps_card_placement_and_rejects_stale_start() {
+        let start = event("tool", "2026-10-16T05:00:00Z", "tool_execution_start");
+        let mut events = process_thinking_event(&[], start.clone());
+        events = process_thinking_event(
+            &events,
+            event("z-peer", "2026-10-16T05:00:00Z", "agent_thought"),
+        );
+        let mut completion = start.clone();
+        completion.timestamp = "2026-10-16T05:00:03Z".into();
+        completion.event_type = "tool_execution_end".into();
+        completion.data = Some(serde_json::json!({"status": "completed"}));
+        events = process_thinking_event(&events, completion.clone());
+        events = process_thinking_event(
+            &events,
+            event("later", "2026-10-16T05:00:01Z", "agent_thought"),
+        );
+        events = process_thinking_event(&events, start);
+        events = process_thinking_event(&events, completion);
+        assert_eq!(ids(&events), ["tool", "z-peer", "later"]);
+        assert_eq!(events[0].timestamp, "2026-10-16T05:00:00Z");
+        assert!(thinking_event_is_terminal(&events[0]));
     }
 }
