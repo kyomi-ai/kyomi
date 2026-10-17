@@ -38,7 +38,7 @@ git branch -a --list '*<ticket>*'                                # or is it stra
 
 ```markdown
 <!-- WRONG — presents an open PR and an abandoned branch as settled precedent. -->
-See a-check-in-one-arm-does-not-guard-the-others.md (landing via PR #455) for the
+See the guard-coverage rule (landing via PR #455) for the
 worked example, and a-failure-path-must-emit-what-its-siblings-emit.md on
 origin/stranded/jason/kyo-463-spec-green6 for a second instance.
 
@@ -51,8 +51,8 @@ Two blocking findings in one review, plus the accepted form from the week before
 
 - **KYO-463** (`2026-09-03`, `12:35`) — two of the four 🟡 that blocked signing
   `quote-a-wrong-block-from-the-pre-fix-commit.md` were this exact shape. The flagship
-  citation pointed at `a-check-in-one-arm-does-not-guard-the-others.md` "(landing via
-  PR #455)": `gh pr view 455` showed OPEN, the file was not on `origin/main`, and the live
+  citation pointed at the rule then named "a check in one arm does not guard the
+  others", with the marker "(landing via PR #455)": `gh pr view 455` showed OPEN, the file was not on `origin/main`, and the live
   branch had already retitled it — so the quoted title was stale before the citing document
   merged. (The rule did eventually land, under the different slug
   [a-guard-in-one-branch-does-not-cover-the-others.md](../error-handling/a-guard-in-one-branch-does-not-cover-the-others.md),
