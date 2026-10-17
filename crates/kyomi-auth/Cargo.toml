@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 agent-runtime = { workspace = true }
 kyomi-core = { workspace = true }
+kyomi-mcp-client = { workspace = true }
 kyomi-connect-protocol = { workspace = true }
 kyomi-embed = { workspace = true }
 kyomi-types = { workspace = true }

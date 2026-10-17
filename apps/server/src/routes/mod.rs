@@ -21,6 +21,7 @@ pub mod system_config;
 pub mod billing;
 pub mod mcp;
 pub mod oauth;
+pub mod personal_mcp_oauth;
 pub mod push;
 pub mod query_arrow;
 // Shared `RouteError` type used by oauth.rs and mcp.rs — not a route module itself.
