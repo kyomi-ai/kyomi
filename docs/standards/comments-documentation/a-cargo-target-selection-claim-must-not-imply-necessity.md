@@ -46,12 +46,12 @@ reviewer tallying the pattern across that file's earlier review history:
   *"without `--all-targets` no test target is compiled at all" is false as
   written — `cargo check --tests` compiles test targets without
   `--all-targets`. True for a bare check (the intent); scope it to "a plain
-  `cargo check`."*
+  `cargo check`".*
 - **KYO-432 cycle 4** (review log `2026-10-16`, `06:06`, finding 1, 🟢): the
   cycle-3 fix landed in prose and the same claim family reappeared inside the
   newly added RIGHT block — *"the same `--features`/`--all-targets` flags as
   above, or the test module is not compiled" implies `--all-targets` is
-  load-bearing on `cargo test`. It is not."* The reviewer's tally note:
+  load-bearing on `cargo test`. It is not…"* The reviewer's tally note:
   *"Recurring pattern confirmed a third cycle running: overabsolute claims about
   cargo target-selection flags — each cycle one gets scoped and an adjacent one
   appears."*

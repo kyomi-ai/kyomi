@@ -69,8 +69,8 @@ applied to a review log. Counts in this document are recomputed from source.
 
 Substring matching cuts the other way too. The filter this block first used —
 `chat_engine::tests_disposal` — *looks* like a truncated path and is instead a
-**live** prefix of every test in the module, so it would run all 12 and print a
-green that means something different from what the reader intended. Confirming
+**live** substring of every test in the module, so it would run all 12 and print
+a green that means something different from what the reader intended. Confirming
 `running N tests` with `N > 0` catches both directions: a filter that selects
 nothing, and a filter that silently selects more than you thought.
 
