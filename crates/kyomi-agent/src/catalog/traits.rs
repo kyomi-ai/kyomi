@@ -22,9 +22,9 @@ use tracing::{info, warn};
 
 use kyomi_auth::catalog::helpers::{
     apply_container_coverage, archive_missing_tables, cache_table, check_container_coverage,
-    log_container_table_summary, log_run_enumeration_summary, reconcile_container_liveness,
+    log_container_table_summary, log_run_enumeration_summary, reconcile_container_liveness_with_evidence,
     resolve_run_outcome, update_datasource_last_refresh, update_datasource_status, ArchiveScope,
-    CacheTableParams, ContainerKey, IndexerContext,
+    CacheTableParams, ContainerKey, ContainerLivenessEvidence, IndexerContext,
 };
 use kyomi_auth::catalog::types::{CatalogIndexResult, ColumnEntry, TableEntry};
 
@@ -63,6 +63,26 @@ pub trait CatalogIndexer: Send + Sync {
     }
 }
 
+/// Structured top-level discovery. `complete` asserts that no unnamed container
+/// could have been omitted. Known failures must be named in `failed`; those
+/// names protect existing cache rows without parsing the diagnostic messages.
+#[derive(Default)]
+pub struct ContainerDiscovery {
+    pub containers: Vec<String>,
+    pub failed: Vec<String>,
+    pub complete: bool,
+}
+
+impl ContainerDiscovery {
+    /// A successful atomic container query has no partial-failure channel.
+    pub fn complete(containers: Vec<String>) -> Self {
+        Self {
+            containers,
+            failed: Vec::new(),
+            complete: true,
+        }
+    }
+}
 // ─── SQLCatalogIndexer trait ───────────────────────────────────────────────────
 
 /// SQL-specific catalog indexer trait.
@@ -94,7 +114,7 @@ pub trait SQLCatalogIndexer: Send + Sync {
     async fn discover_all_containers(
         &self,
         provider: &dyn DatasourceProvider,
-    ) -> Result<Vec<String>>;
+    ) -> Result<ContainerDiscovery>;
 
     /// Get all tables in a container.
     ///
@@ -191,6 +211,8 @@ pub trait SQLCatalogIndexer: Send + Sync {
 pub struct CatalogContainers {
     /// Containers this run will actually enumerate.
     pub valid: Vec<String>,
+    /// Unfiltered source presence; selection and table errors cannot erase it.
+    pub discovery: ContainerDiscovery,
     /// Containers the user configured that `discover_all_containers` did
     /// not return this run — never enumerated, so never eligible for
     /// archiving either.
@@ -228,18 +250,22 @@ pub async fn get_catalog_containers(
                 config_key,
                 "no catalog containers configured, discovering all"
             );
-            let valid = indexer.discover_all_containers(provider).await?;
+            let discovery = indexer.discover_all_containers(provider).await?;
+            let valid = discovery.containers.clone();
             Ok(CatalogContainers {
                 valid,
+                discovery,
                 missing: Vec::new(),
                 deliberately_empty: false,
             })
         }
         Some(Value::Null) => {
             // Explicitly null -> discover all
-            let valid = indexer.discover_all_containers(provider).await?;
+            let discovery = indexer.discover_all_containers(provider).await?;
+            let valid = discovery.containers.clone();
             Ok(CatalogContainers {
                 valid,
+                discovery,
                 missing: Vec::new(),
                 deliberately_empty: false,
             })
@@ -253,6 +279,7 @@ pub async fn get_catalog_containers(
             );
             Ok(CatalogContainers {
                 valid: Vec::new(),
+                discovery: ContainerDiscovery::default(),
                 missing: Vec::new(),
                 deliberately_empty: true,
             })
@@ -268,7 +295,7 @@ pub async fn get_catalog_containers(
             let mut valid = Vec::new();
             let mut missing = Vec::new();
             for c in configured {
-                let exists = available.iter().any(|a| a.eq_ignore_ascii_case(&c));
+                let exists = available.containers.iter().any(|a| a.eq_ignore_ascii_case(&c));
                 if exists {
                     valid.push(c);
                 } else {
@@ -290,6 +317,7 @@ pub async fn get_catalog_containers(
             // `deliberately_empty` exists to flag.
             Ok(CatalogContainers {
                 valid,
+                discovery: available,
                 missing,
                 deliberately_empty: false,
             })
@@ -301,9 +329,11 @@ pub async fn get_catalog_containers(
                 config_key,
                 "unexpected type for catalog config key, discovering all"
             );
-            let valid = indexer.discover_all_containers(provider).await?;
+            let discovery = indexer.discover_all_containers(provider).await?;
+            let valid = discovery.containers.clone();
             Ok(CatalogContainers {
                 valid,
+                discovery,
                 missing: Vec::new(),
                 deliberately_empty: false,
             })
@@ -552,6 +582,7 @@ pub async fn index_catalog_sql(
         valid: containers,
         missing: missing_containers,
         deliberately_empty,
+        discovery,
     } = match get_catalog_containers(ctx, indexer, provider.as_ref()).await {
         Ok(c) => c,
         Err(e) => {
@@ -592,6 +623,18 @@ pub async fn index_catalog_sql(
     let mut seen_table_ids = std::collections::HashSet::new();
     let mut any_container_succeeded = false;
     let project_id = indexer.get_project_id(ctx);
+    let mut liveness = ContainerLivenessEvidence::default();
+    for name in discovery.containers.iter().chain(&discovery.failed) {
+        liveness.present.insert((project_id.clone(), name.clone()));
+        liveness.protected_subtrees.insert((project_id.clone(), name.clone()));
+    }
+    for failed in &discovery.failed {
+        errors.push(format!("Failed to discover {} '{failed}' — its cached tables were left untouched", indexer.container_label()));
+    }
+    if !discovery.complete {
+        errors.push("Container discovery was incomplete — missing containers were left untouched".to_string());
+    }
+
 
     // KYO-614: `(project_id, dataset_id)` pairs this run actually
     // enumerated — see `ArchiveScope::Containers`'s / `ContainerKey`'s doc
@@ -622,6 +665,10 @@ pub async fn index_catalog_sql(
         .and_then(|v| v.as_str())
         .is_some();
 
+    if is_analytics && !liveness.present.is_empty() {
+        liveness.present.insert((project_id.clone(), String::new()));
+    }
+
     for container in &containers {
         // Get tables in container. `_with_partial_failures` also surfaces
         // any sub-container errors the indexer tolerated internally (e.g.
@@ -645,14 +692,21 @@ pub async fn index_catalog_sql(
                 // `dataset_id`, so a container that is now completely empty
                 // (every table deleted) still archives correctly even
                 // though the table loop below never runs for it.
-                enumerated_containers.insert((
-                    project_id.clone(),
-                    if is_analytics {
-                        String::new()
-                    } else {
-                        container.clone()
-                    },
-                ));
+                if partial_failures.is_empty() {
+                    // Configured names are validated case-insensitively;
+                    // remove the matching discovered spelling as well.
+                    liveness.protected_subtrees.retain(|(project, name)| {
+                        project != &project_id || !name.eq_ignore_ascii_case(container)
+                    });
+                    enumerated_containers.insert((
+                        project_id.clone(),
+                        if is_analytics {
+                            String::new()
+                        } else {
+                            container.clone()
+                        },
+                    ));
+                }
                 (t, partial_failures)
             }
             Err(e) => {
@@ -670,6 +724,7 @@ pub async fn index_catalog_sql(
         // Already logged by the indexer at the point of failure (it has
         // richer context — e.g. which sub-schema) — fold straight into the
         // shared accumulator without a second log line.
+        let listing_complete = partial_failures.is_empty();
         errors.extend(partial_failures);
 
         // KYO-616: per-container tables listed/cached/errored, logged once
@@ -721,7 +776,13 @@ pub async fn index_catalog_sql(
             // `container` name already inserted above. A no-op duplicate
             // insert for every other provider, where `cache_dataset ==
             // container` already.
-            enumerated_containers.insert((project_id.clone(), cache_dataset.clone()));
+            // A partial parent listing cannot authorize deletion of unseen
+            // parent rows. Databricks' concrete successful schema listings still
+            // have their own dataset_override and retain their table scope.
+            if listing_complete || effective_dataset != container {
+                enumerated_containers.insert((project_id.clone(), cache_dataset.clone()));
+            }
+            liveness.present.insert((project_id.clone(), cache_dataset.clone()));
 
             // Get columns — use effective_dataset (real database name) so the
             // indexer can query system.columns correctly.
@@ -846,54 +907,20 @@ pub async fn index_catalog_sql(
         ArchiveScope::Containers(enumerated_containers.clone())
     };
 
-    // KYO-622: reclaim any container that has genuinely stopped existing at
-    // the source — see `reconcile_container_liveness`'s doc comment. Run
-    // immediately before `check_container_coverage` so reclaimed rows drop
-    // out of that function's live-container denominator in this same run.
-    // Skipped for a deliberately emptied selection, same reasoning as the
-    // coverage check below: that path already sweeps the whole datasource
-    // via `ArchiveScope::EntireDatasource`, so there is nothing for the
-    // liveness GC to reclaim.
-    //
-    // `run_complete` is deliberately conservative: only a run whose `errors`
-    // is empty counts. A table-level error does not strictly mean a
-    // container's own listing was incomplete, but per the asymmetry this
-    // whole mechanism exists to respect (preserving a genuinely-deleted
-    // table costs one stale row; archiving wrongly costs the customer their
-    // catalog with no error surfaced), treating any error as "this run's
-    // completeness cannot be trusted" is the only safe default. This
-    // function's own `Err` is swallowed with a `warn!`, matching every
-    // other best-effort call in this run — the liveness GC must never fail
-    // a refresh.
-    //
-    // `&& outcome.archive` closes the gap `resolve_run_outcome` was already
-    // built to answer: a run that enumerated zero containers with zero
-    // errors is exactly the "untrustworthy zero" `outcome.archive` (KYO-385/
-    // KYO-614) refuses to let `archive_missing_tables` act on — an
-    // `errors.is_empty()` check alone can't see that, because "found
-    // nothing" and "erred" are different signals. Without this, three
-    // ordinary reachable-but-empty refreshes (the exact
-    // `nothing_found_reports_idle_not_failed` shape) would silently
-    // archive a datasource's entire live catalog through this GC. Reuses
-    // `outcome.archive` rather than re-deriving the same predicate a
-    // second time.
-    if !deliberately_empty {
-        let run_complete = errors.is_empty() && outcome.archive;
-        if let Err(e) = reconcile_container_liveness(
-            db,
-            &ctx.workspace_id,
-            &ctx.datasource_config_id,
-            &enumerated_containers,
-            run_complete,
-        )
-        .await
-        {
-            warn!(
-                workspace_id = ctx.workspace_id,
-                datasource_config_id = ctx.datasource_config_id,
-                error = %e,
-                "failed to reconcile container liveness — skipping the liveness GC for this run"
-            );
+    // KYO-673: container presence comes from top-level discovery, before
+    // table listing. A denied sibling or a column/cache failure cannot hide a
+    // genuinely deleted container. A discovered parent also protects its cached
+    // `database.schema` descendants when a nested listing is partial (KYO-941).
+    // Complete parent listings retain the existing healthy child cleanup.
+    // Retain outcome.archive: a wholly empty refresh is untrustworthy (KYO-622).
+    if !deliberately_empty && outcome.archive {
+        if discovery.complete {
+            liveness.complete_projects.insert(project_id.clone());
+        }
+        if let Err(e) = reconcile_container_liveness_with_evidence(
+            db, &ctx.workspace_id, &ctx.datasource_config_id, &liveness,
+        ).await {
+            warn!(error = %e, "failed to reconcile container liveness — skipping the liveness GC for this run");
         }
     }
 
@@ -1385,8 +1412,8 @@ mod tests {
         async fn discover_all_containers(
             &self,
             _provider: &dyn DatasourceProvider,
-        ) -> Result<Vec<String>> {
-            Ok(vec!["public".to_string()])
+        ) -> Result<ContainerDiscovery> {
+            Ok(ContainerDiscovery::complete(vec!["public".to_string()]))
         }
 
         async fn get_tables_in_container(
@@ -1744,8 +1771,8 @@ mod tests {
         async fn discover_all_containers(
             &self,
             _provider: &dyn DatasourceProvider,
-        ) -> Result<Vec<String>> {
-            Ok(vec!["main".to_string()])
+        ) -> Result<ContainerDiscovery> {
+            Ok(ContainerDiscovery::complete(vec!["main".to_string()]))
         }
 
         async fn get_tables_in_container(
@@ -2129,8 +2156,8 @@ mod tests {
         async fn discover_all_containers(
             &self,
             _provider: &dyn DatasourceProvider,
-        ) -> Result<Vec<String>> {
-            Ok(vec![self.container.clone()])
+        ) -> Result<ContainerDiscovery> {
+            Ok(ContainerDiscovery::complete(vec![self.container.clone()]))
         }
 
         async fn get_tables_in_container(
@@ -2336,8 +2363,8 @@ mod tests {
         async fn discover_all_containers(
             &self,
             _provider: &dyn DatasourceProvider,
-        ) -> Result<Vec<String>> {
-            Ok(Vec::new())
+        ) -> Result<ContainerDiscovery> {
+            Ok(ContainerDiscovery::complete(Vec::new()))
         }
 
         async fn get_tables_in_container(
@@ -2452,4 +2479,185 @@ mod tests {
              confirmed absence"
         );
     }
+    /// Both denied and deleted start as cached rows absent from the table
+    /// enumeration scope. Only structured source discovery separates them.
+    struct LivenessIndexer {
+        complete: bool,
+        named_failure: bool,
+        partial_failure: bool,
+        uppercase_healthy: bool,
+    }
+
+    #[async_trait]
+    impl SQLCatalogIndexer for LivenessIndexer {
+        fn container_label(&self) -> &str {
+            "catalog"
+        }
+        fn container_config_key(&self) -> &str {
+            "catalog_catalogs"
+        }
+        async fn create_provider(
+            &self,
+            _: &Value,
+            _: &Value,
+        ) -> Result<Box<dyn DatasourceProvider>> {
+            Ok(Box::new(MockProvider))
+        }
+        async fn discover_all_containers(
+            &self,
+            _: &dyn DatasourceProvider,
+        ) -> Result<ContainerDiscovery> {
+            let healthy = if self.uppercase_healthy { "HEALTHY" } else { "healthy" };
+            Ok(ContainerDiscovery {
+                containers: if self.named_failure {
+                    vec![healthy.into()]
+                } else {
+                    vec![healthy.into(), "denied".into()]
+                },
+                failed: if self.named_failure {
+                    vec!["denied".into()]
+                } else {
+                    Vec::new()
+                },
+                complete: self.complete,
+            })
+        }
+        async fn get_tables_in_container(
+            &self,
+            _: &dyn DatasourceProvider,
+            container: &str,
+            _: Option<usize>,
+        ) -> Result<Vec<TableEntry>> {
+            if container == "denied" {
+                return Err(kyomi_core::Error::Internal("opaque failure".into()));
+            }
+            Ok(vec![TableEntry {
+                name: "current".into(),
+                table_type: None,
+                dataset_override: None,
+            }])
+        }
+        async fn get_tables_in_container_with_partial_failures(
+            &self,
+            provider: &dyn DatasourceProvider,
+            container: &str,
+            limit: Option<usize>,
+        ) -> Result<(Vec<TableEntry>, Vec<String>)> {
+            if container == "denied" && self.partial_failure {
+                return Ok((Vec::new(), vec!["opaque partial failure".into()]));
+            }
+            Ok((
+                self.get_tables_in_container(provider, container, limit)
+                    .await?,
+                Vec::new(),
+            ))
+        }
+        async fn get_table_columns(
+            &self,
+            _: &dyn DatasourceProvider,
+            _: &str,
+            _: &str,
+        ) -> Result<Vec<ColumnEntry>> {
+            Ok(Vec::new())
+        }
+    }
+
+    async fn assert_sql_liveness(complete: bool, named_failure: bool, partial_failure: bool, case_mismatch: bool) {
+        let db = DbPool::connect("sqlite::memory:").await.expect("sqlite");
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!()
+        };
+        let mut ctx = seed_partial_failure_fixture(sq, "liveness").await;
+        if case_mismatch {
+            ctx.connection_config = json!({"catalog_catalogs": ["healthy", "denied"]});
+        }
+        let healthy_child = if case_mismatch { "HEALTHY.deleted" } else { "healthy.deleted" };
+        for dataset in [
+            "denied",
+            "denied.private",
+            "DENIED",
+            "DENIED.private",
+            "deleted",
+            "deleted.private",
+            healthy_child,
+            "denied_extra.private",
+        ] {
+            sqlx::query("INSERT INTO datasource_table_cache (workspace_id, datasource_config_id, project_id, dataset_id, table_id, table_metadata, is_archived) VALUES (?, ?, '', ?, 'old', '{}', 0)")
+                .bind(&ctx.workspace_id).bind(&ctx.datasource_config_id).bind(dataset)
+                .execute(sq).await.expect("seed cached container");
+        }
+        let embedding = EmbeddingService::new().expect("embedding model");
+        let credentials = json!({"user": "x"});
+        for run in 0..9 {
+            let result = index_catalog_sql(
+                &LivenessIndexer {
+                    complete,
+                    named_failure,
+                    partial_failure,
+                    uppercase_healthy: case_mismatch,
+                },
+                &ctx,
+                &db,
+                &embedding,
+                None,
+                Some(&credentials),
+                None,
+            )
+            .await;
+            assert!(
+                result.errors.as_ref().is_some_and(|e| !e.is_empty()),
+                "the sibling must persistently fail"
+            );
+            for dataset in [
+                "denied",
+                "denied.private",
+                "DENIED",
+                "DENIED.private",
+                "deleted",
+                "deleted.private",
+                healthy_child,
+                "denied_extra.private",
+            ] {
+                let archived: i64 = sqlx::query_scalar("SELECT is_archived FROM datasource_table_cache WHERE datasource_config_id = ? AND dataset_id = ?")
+                    .bind(&ctx.datasource_config_id).bind(dataset).fetch_one(sq).await.expect("read cache");
+                let expected = i64::from(
+                    complete
+                        && (dataset.starts_with("deleted")
+                            || dataset == healthy_child
+                            || dataset == "denied_extra.private")
+                        && run >= 2,
+                );
+                assert_eq!(archived, expected, "run {run}, dataset {dataset}");
+            }
+            let live: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM datasource_table_cache WHERE datasource_config_id = ? AND is_archived = 0")
+                .bind(&ctx.datasource_config_id).fetch_one(sq).await.expect("live count");
+            assert_eq!(live, if complete && run >= 2 { 5 } else { 9 }, "run {run}: exact live catalog size");
+        }
+    }
+
+    #[tokio::test]
+    async fn sql_liveness_reclaims_deleted_while_table_listing_sibling_fails() {
+        assert_sql_liveness(true, false, false, false).await;
+    }
+
+    #[tokio::test]
+    async fn sql_liveness_named_discovery_failure_protects_parent_and_descendants() {
+        assert_sql_liveness(true, true, false, false).await;
+    }
+
+    #[tokio::test]
+    async fn sql_liveness_unknown_discovery_failure_never_advances_deleted_lookalike() {
+        assert_sql_liveness(false, true, false, false).await;
+    }
+
+    #[tokio::test]
+    async fn sql_liveness_partial_parent_listing_never_archives_parent_or_children() {
+        assert_sql_liveness(true, false, true, false).await;
+    }
+
+    #[tokio::test]
+    async fn sql_liveness_case_mismatch_reclaims_deleted_child_after_successful_listing() {
+        assert_sql_liveness(true, false, false, true).await;
+    }
+
 }

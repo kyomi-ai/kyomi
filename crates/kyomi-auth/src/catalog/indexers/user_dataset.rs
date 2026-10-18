@@ -25,8 +25,8 @@ use tracing::{info, warn};
 use crate::catalog::helpers::{
     apply_container_coverage, archive_missing_tables, cache_table, check_container_coverage,
     fold_table_outcomes, log_container_table_summary, log_run_enumeration_summary,
-    reconcile_container_liveness, update_datasource_last_refresh, update_datasource_status,
-    ArchiveScope, ContainerKey, DatasetOutcome, IndexerContext, TableOutcome,
+    reconcile_container_liveness_with_evidence, update_datasource_last_refresh, update_datasource_status,
+    ArchiveScope, ContainerKey, ContainerLivenessEvidence, DatasetOutcome, IndexerContext, TableOutcome,
 };
 use crate::catalog::types::{CatalogIndexResult, ColumnEntry};
 
@@ -106,6 +106,7 @@ impl UserDatasetIndexer {
         // and `enumerated_datasets.len()` is exactly "discovered but not
         // enumerated", the per-run enumeration summary logged below.
         let mut total_datasets_discovered = 0usize;
+        let mut liveness = ContainerLivenessEvidence::default();
 
         for (i, project_id) in project_ids.iter().enumerate() {
             info!(
@@ -126,6 +127,7 @@ impl UserDatasetIndexer {
                 max_tables_per_dataset,
                 seen_table_ids: &mut seen_table_ids,
                 enumerated_datasets: &mut enumerated_datasets,
+                liveness: &mut liveness,
             })
             .await
             {
@@ -210,41 +212,16 @@ impl UserDatasetIndexer {
         // point) — always `Containers`, never `EntireDatasource`.
         let archive_scope = ArchiveScope::Containers(enumerated_datasets.clone());
 
-        // KYO-622: reclaim any dataset that has genuinely stopped existing
-        // at the source — see `reconcile_container_liveness`'s doc comment.
-        // Run immediately before `check_container_coverage` so reclaimed
-        // rows drop out of that function's live-container denominator in
-        // this same run. Unlike the SQL-template and Connect paths, this
-        // module has no "user deliberately emptied the scope" state at this
-        // layer (an empty `project_ids` returns `skipped(..)` above, before
-        // this point), so `ArchiveScope::EntireDatasource` is unreachable
-        // here and the liveness GC always runs.
-        //
-        // `run_complete` is deliberately conservative — see the SQL-template
-        // path for the identical reasoning: only a run whose `errors` is
-        // empty counts, even though a table-level error does not strictly
-        // mean a dataset's own listing was incomplete.
-        //
-        // `&& outcome.archive` is the same closure as the SQL-template and
-        // Connect paths: a run that enumerated zero datasets with zero errors
-        // is the "untrustworthy zero" `outcome.archive` already refuses to
-        // archive on. `errors.is_empty()` alone can't see that.
-        let run_complete = errors.is_empty() && outcome.archive;
-        if let Err(e) = reconcile_container_liveness(
-            db,
-            workspace_id,
-            datasource_config_id,
-            &enumerated_datasets,
-            run_complete,
-        )
-        .await
+        // KYO-673: each fully paginated datasets.list proves presence/absence
+        // only within its project. A dataset tables.list failure protects that
+        // known dataset; a project listing failure cannot authorize any misses
+        // in that project. Keep the KYO-622 untrustworthy-zero guard.
+        if outcome.archive
+            && let Err(e) = reconcile_container_liveness_with_evidence(
+                db, workspace_id, datasource_config_id, &liveness,
+            ).await
         {
-            warn!(
-                workspace_id,
-                datasource_config_id,
-                error = %e,
-                "failed to reconcile container liveness — skipping the liveness GC for this run"
-            );
+            warn!(error = %e, "failed to reconcile container liveness — skipping the liveness GC for this run");
         }
 
         // KYO-614: did this run enumerate enough of the datasource's
@@ -455,6 +432,7 @@ struct IndexProjectParams<'a> {
     /// `ContainerKey`'s doc comments for why the bare dataset id is not
     /// enough once a datasource can span multiple GCP projects.
     enumerated_datasets: &'a mut HashSet<ContainerKey>,
+    liveness: &'a mut ContainerLivenessEvidence,
 }
 
 /// Parameters for [`index_dataset_tables`].
@@ -504,6 +482,7 @@ async fn index_project_datasets(
         max_tables_per_dataset,
         seen_table_ids,
         enumerated_datasets,
+        liveness,
     } = params;
     // List all datasets in the project. An `Err` here (propagated via `?`)
     // means no datasets are inserted into `enumerated_datasets` for this
@@ -511,6 +490,8 @@ async fn index_project_datasets(
     // enumerated.
     let datasets = list_bigquery_datasets(client, base_url, access_token, project_id).await?;
     let datasets_discovered = datasets.len();
+    liveness.complete_projects.insert(project_id.to_string());
+    liveness.present.extend(datasets.iter().map(|dataset| (project_id.to_string(), dataset.clone())));
 
     let mut outcomes = Vec::with_capacity(datasets.len());
 
@@ -2206,4 +2187,98 @@ mod http_boundary {
              this is the exact KYO-614 accumulator invariant"
         );
     }
+    #[tokio::test]
+    async fn project_discovery_liveness_preserves_denied_dataset_and_failed_project() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/bigquery/v2/projects/good/datasets"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"datasets": [{"datasetReference": {"datasetId": "denied"}}]}),
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/bigquery/v2/projects/good/datasets/denied/tables"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/bigquery/v2/projects/unknown/datasets"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+        let db = DbPool::connect("sqlite::memory:").await.expect("sqlite");
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!()
+        };
+        let ctx = seed_ctx(sq, "liveness").await;
+        for (project, dataset) in [
+            ("good", "denied"),
+            ("good", "deleted"),
+            ("unknown", "deleted"),
+        ] {
+            sqlx::query("INSERT INTO datasource_table_cache (workspace_id, datasource_config_id, project_id, dataset_id, table_id, table_metadata, is_archived) VALUES (?, ?, ?, ?, 'old', '{}', 0)")
+                .bind(&ctx.workspace_id).bind(&ctx.datasource_config_id).bind(project).bind(dataset)
+                .execute(sq).await.expect("seed cache");
+        }
+        let embedding = EmbeddingService::new().expect("embedding model");
+        let client = reqwest::Client::new();
+        for run in 0..9 {
+            let mut liveness = ContainerLivenessEvidence::default();
+            let mut seen = HashSet::new();
+            let mut enumerated = HashSet::new();
+            for project in ["good", "unknown"] {
+                let result = index_project_datasets(IndexProjectParams {
+                    client: &client,
+                    db: &db,
+                    embedding: &embedding,
+                    ctx: &ctx,
+                    base_url: &server.uri(),
+                    access_token: "token",
+                    project_id: project,
+                    max_tables_per_dataset: None,
+                    seen_table_ids: &mut seen,
+                    enumerated_datasets: &mut enumerated,
+                    liveness: &mut liveness,
+                })
+                .await;
+                if project == "good" {
+                    let (discovered, indexed, errors) = result.expect("project listing succeeds");
+                    assert_eq!((discovered, indexed, errors.len()), (1, 0, 1));
+                } else {
+                    assert!(result.is_err());
+                }
+            }
+            assert!(
+                enumerated.is_empty(),
+                "denied and deleted must look identical to table archiving"
+            );
+            // The real run also requires outcome.archive (tested by the existing
+            // empty-run regressions); exercise its liveness evidence here directly.
+            reconcile_container_liveness_with_evidence(
+                &db,
+                &ctx.workspace_id,
+                &ctx.datasource_config_id,
+                &liveness,
+            )
+            .await
+            .expect("reconcile");
+            let live: Vec<(String, String)> = sqlx::query_as("SELECT project_id, dataset_id FROM datasource_table_cache WHERE datasource_config_id = ? AND is_archived = 0 ORDER BY project_id, dataset_id")
+                .bind(&ctx.datasource_config_id).fetch_all(sq).await.expect("live rows");
+            let expected = if run < 2 {
+                vec![
+                    ("good".into(), "deleted".into()),
+                    ("good".into(), "denied".into()),
+                    ("unknown".into(), "deleted".into()),
+                ]
+            } else {
+                vec![
+                    ("good".into(), "denied".into()),
+                    ("unknown".into(), "deleted".into()),
+                ]
+            };
+            assert_eq!(live, expected, "run {run}");
+        }
+    }
+
 }

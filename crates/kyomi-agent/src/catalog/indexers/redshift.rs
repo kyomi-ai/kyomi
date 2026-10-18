@@ -18,7 +18,7 @@ use serde_json::Value;
 
 use super::{ensure_query_ok, extract_rows_from_batch, extract_string_column, sql_escape};
 use crate::catalog::traits::{
-    index_catalog_sql, CatalogIndexer, SQLCatalogIndexer,
+    index_catalog_sql, CatalogIndexer, ContainerDiscovery, SQLCatalogIndexer,
 };
 use kyomi_auth::catalog::helpers::IndexerContext;
 use kyomi_auth::catalog::types::{CatalogIndexResult, ColumnEntry, TableEntry};
@@ -92,7 +92,7 @@ impl SQLCatalogIndexer for RedshiftIndexer {
     async fn discover_all_containers(
         &self,
         provider: &dyn DatasourceProvider,
-    ) -> Result<Vec<String>> {
+    ) -> Result<ContainerDiscovery> {
         let result = provider
             .execute_query(
                 "SELECT schema_name \
@@ -110,7 +110,7 @@ impl SQLCatalogIndexer for RedshiftIndexer {
         ensure_query_ok(&result, "discovering schemas")?;
 
         let names = extract_string_column(&result, 0);
-        Ok(names.into_iter().filter(|n| !is_system_schema(n)).collect())
+        Ok(ContainerDiscovery::complete(names.into_iter().filter(|n| !is_system_schema(n)).collect()))
     }
 
     async fn get_tables_in_container(

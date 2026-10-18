@@ -22,7 +22,7 @@ use super::{
     TSQL_SYSTEM_SCHEMAS,
 };
 use crate::catalog::traits::{
-    index_catalog_sql, CatalogIndexer, SQLCatalogIndexer,
+    index_catalog_sql, CatalogIndexer, ContainerDiscovery, SQLCatalogIndexer,
 };
 use kyomi_auth::catalog::helpers::IndexerContext;
 use kyomi_auth::catalog::types::{CatalogIndexResult, ColumnEntry, TableEntry};
@@ -73,7 +73,7 @@ impl SQLCatalogIndexer for SynapseIndexer {
     async fn discover_all_containers(
         &self,
         provider: &dyn DatasourceProvider,
-    ) -> Result<Vec<String>> {
+    ) -> Result<ContainerDiscovery> {
         let exclusions = TSQL_SYSTEM_SCHEMAS
             .iter()
             .map(|s| format!("'{s}'"))
@@ -91,7 +91,7 @@ impl SQLCatalogIndexer for SynapseIndexer {
         ensure_query_ok(&result, "discovering schemas")?;
         let rows = extract_rows_from_batch(&result);
 
-        Ok(rows
+        Ok(ContainerDiscovery::complete(rows
             .iter()
             .filter_map(|row| {
                 let name = row.first()?.as_str()?.to_string();
@@ -101,7 +101,7 @@ impl SQLCatalogIndexer for SynapseIndexer {
                     Some(name)
                 }
             })
-            .collect())
+            .collect()))
     }
 
     async fn get_tables_in_container(
