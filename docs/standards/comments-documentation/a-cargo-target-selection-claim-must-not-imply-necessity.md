@@ -39,7 +39,8 @@ cargo test -p kyomi-ui --locked --features ssr --all-targets \
 #  test's default selection already compiles the lib test target."
 ```
 
-Real precedent — three consecutive review cycles on one file, 2026-10-16:
+Real precedent — two review cycles of one file on 2026-10-16, with the cycle-4
+reviewer tallying the pattern across that file's earlier review history:
 
 - **KYO-432 cycle 3** (review log `2026-10-16`, `05:52`, finding 3, 🟢):
   *"without `--all-targets` no test target is compiled at all" is false as
@@ -54,6 +55,12 @@ Real precedent — three consecutive review cycles on one file, 2026-10-16:
   *"Recurring pattern confirmed a third cycle running: overabsolute claims about
   cargo target-selection flags — each cycle one gets scoped and an adjacent one
   appears."*
+
+The tally's "third cycle" counts instances across the file's history rather
+than three cycles on 2026-10-16: an earlier cycle 1 left *"compiles none of
+them"* in the same file, still visible as a stale staged-blob line in the
+`04:03` staging-hygiene review that day. Counting only the cycles whose *finding*
+is this claim family, 2026-10-16 has two.
 
 Sibling of
 [no-guarantee-stronger-than-code-enforces.md](no-guarantee-stronger-than-code-enforces.md):
