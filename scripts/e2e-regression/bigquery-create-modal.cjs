@@ -67,11 +67,69 @@ async function pickAuthMode(page, label) {
   const browser = await chromium.launch({ headless: true });
   const ctx = await browser.newContext({ viewport: { width: 1920, height: 1080 } });
   const page = await ctx.newPage();
+
+  // ── Console / pageerror collectors for the final "no hydration panics" check ──
+  // pageerror (uncaught JS exception, e.g. a hydration panic) and console
+  // type=error are tracked SEPARATELY: a pageerror always fails the final
+  // check and is never allowlisted.
+  const pageErrors = [];
+  // Console entries keep their location().url so the final check can match a
+  // failed-subresource-load message against the designed-401 allowlist by
+  // exact URL — Chromium's msg.text() carries no URL, but msg.location()
+  // reports the failed resource's URL (verified empirically: text is
+  // "Failed to load resource: the server responded with a status of 401
+  // (Unauthorized)", location().url is the subresource's absolute URL).
   const consoleErrors = [];
-  page.on('console', m => { if (m.type() === 'error') consoleErrors.push(m.text()); });
+  page.on('console', m => {
+    if (m.type() !== 'error') return;
+    let url = '';
+    try { url = (m.location() && m.location().url) || ''; } catch (_) { /* location unavailable */ }
+    consoleErrors.push({ text: m.text(), url });
+  });
+  page.on('pageerror', e => pageErrors.push(e.message));
+
+  // ── Designed pre-auth 401 allowlist — recorded from the RESPONSE layer ──
+  // (exact URL + status 401; never inferred from console text). The login
+  // page fires two pre-auth requests that are DESIGNED to 401 for an
+  // unauthenticated visitor; Chromium logs each as a console type=error, so
+  // without this the final check is red on every run:
+  // 1. POST ${BASE}/api/v1/auth/refresh — page-load token pre-warm from
+  //    crates/kyomi-ui/index.html before WASM boots; with no refresh-token
+  //    cookie, apps/server/src/routes/auth_token.rs correctly answers
+  //    401 Unauthorized. Only exactly 401 is allowlisted: a 500 on this path
+  //    is a regression and must still fail the final check.
+  // 2. ${BASE}/leptos-api/get_sidebar_user<hash> — the login page's
+  //    "already authenticated?" probe (crates/kyomi-ui/src/pages/auth/login.rs);
+  //    with no session it is designed to fail. The server-fn URL is
+  //    prefix + fn name + numeric-hash-suffix with no separator
+  //    (see the registered-path comment in crates/kyomi-ui/src/lib.rs), so
+  //    match exactly this one fn's URL shape — not a blanket /leptos-api/*
+  //    pattern (which would swallow a 401 from any other server fn, and a
+  //    naive starts_with would also match e.g. get_sidebar_user_admin).
+  const designed401Urls = new Set();
+  const SIDEBAR_USER_FN_PATH = '/leptos-api/get_sidebar_user';
   const failedReqs = [];
-  page.on('response', r => { if (r.status() >= 400) failedReqs.push(`${r.status()} ${r.url()} @ ${page.url()}`); });
-  page.on('pageerror', e => consoleErrors.push('PAGEERROR: ' + e.message));
+  page.on('response', r => {
+    if (r.status() >= 400) failedReqs.push(`${r.status()} ${r.url()} @ ${page.url()}`);
+    if (r.status() !== 401) return;
+    if (r.url() === `${BASE}/api/v1/auth/refresh`) {
+      designed401Urls.add(r.url());
+    } else {
+      try {
+        const { pathname } = new URL(r.url());
+        if (pathname.startsWith(SIDEBAR_USER_FN_PATH)) {
+          const hashSuffix = pathname.slice(SIDEBAR_USER_FN_PATH.length);
+          // Non-empty + leading ASCII digit = this fn's numeric hash suffix
+          // (same discrimination rule as has_registered_path_for in
+          // crates/kyomi-ui/src/lib.rs), so other server fns and
+          // get_sidebar_user_<something> names are never allowlisted.
+          if (hashSuffix.length > 0 && /^\d/.test(hashSuffix)) {
+            designed401Urls.add(r.url());
+          }
+        }
+      } catch (_) { /* unparseable URL — not the server-fn probe */ }
+    }
+  });
 
   try {
     await page.goto(`${BASE}/login`, { waitUntil: 'domcontentloaded', timeout: 30000 });
@@ -210,8 +268,31 @@ async function pickAuthMode(page, label) {
       await nextBtn().isVisible() && d === true, `disabled=${d}`);
     await page.screenshot({ path: `${SHOT}-C2-back-to-sa.png`, fullPage: true });
 
-    check('no hydration panics / console errors', consoleErrors.length === 0,
-      consoleErrors.slice(0, 3).join(' | '));
+    // Single final assertion (the total stays 29), narrowed so designed
+    // pre-auth 401 noise no longer fails it:
+    // - pageErrors (uncaught JS exceptions / hydration panics) fail
+    //   unconditionally and are reported first, so console noise can never
+    //   push one out of the detail.
+    // - consoleErrors fail unless the entry is a Chromium
+    //   failed-subresource-load 401 message whose location().url is an exact
+    //   member of designed401Urls (recorded above from the response layer).
+    //   A real console.error, a 500 subresource, a 401 on any other
+    //   endpoint, and any pageerror still fail.
+    const unexpectedConsole = consoleErrors.filter(e =>
+      !(e.text.startsWith('Failed to load resource') &&
+        e.text.includes('status of 401') &&
+        designed401Urls.has(e.url)));
+    check('no hydration panics / console errors',
+      pageErrors.length === 0 && unexpectedConsole.length === 0,
+      [
+        pageErrors.length
+          ? `pageErrors=${pageErrors.length}: ${pageErrors.slice(0, 5).join(' | ')}`
+          : '',
+        unexpectedConsole.length
+          ? `consoleErrors=${unexpectedConsole.length}: ${unexpectedConsole.slice(0, 5)
+              .map(e => `${e.text}${e.url ? ' @ ' + e.url : ''}`).join(' | ')}`
+          : '',
+      ].filter(Boolean).join('  ;;  '));
 
   } catch (e) {
     check('script completed without throwing', false, e.message.split('\n')[0]);
