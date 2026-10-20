@@ -523,9 +523,10 @@ fn google_oauth_success_arm_sets_test_result_and_discovery_status() {
     assert!(
         arm.contains("set_test_result.try_set(Some(TestConnectionResult {"),
         "the GoogleSuccess | BigqueryEnterpriseSuccess arm must set test_result to \
-         Some(...) on success — without it, test_result stays None forever for \
-         BigQuery kyomi_oauth, which never runs Test & Discover, permanently \
-         disabling the create-mode Next button (KYO-404)"
+         Some(...) on success to record the OAuth result for UI that renders \
+         test_result; this source guard pins result recording, not the create-mode \
+         Next gate, which accepts Datasource(_) modes before save or an already \
+         connected GoogleAccount (KYO-916)"
     );
     assert!(
         arm.contains("set_discovery_status.try_set(\"success\""),
