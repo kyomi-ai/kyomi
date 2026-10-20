@@ -19,13 +19,31 @@ Two shapes, and the second is the one no git command will catch:
   one tree, or a `docs/` file that this repo's `.gitignore` keeps out of git entirely, can
   carry completely different content in each directory, indefinitely.
 
-**Rule:** run every check that resolves a path from inside the tree the diff is against, and
-say at the top of the review which tree that is and which revision it was cut from. Before
-asserting that a cited `file:line` or fixture value is wrong, re-resolve it against the
-revision the branch was cut from (`git show origin/main:<path>`), not against whatever
-`main` your shell happens to be sitting on. When a check genuinely needs a file that only
-exists in another clone — `docs/review-logs/` is gitignored here and lives only in the
-canonical clone — name that clone, say why you went there, and say what class of claim it
+**Rule:** bind the review to its source before resolving any path. At the top of the
+review, record the absolute workspace path, its `HEAD` SHA, the pinned base SHA supplied
+at dispatch, and whether the review covers committed, staged, or working-tree content.
+Use `git -C <absolute-workspace>` for git commands and an explicit working directory or
+absolute path for source reads; do not rely on a terminal's inherited cwd.
+
+Resolve current `file:line` and fixture claims in the actual source under review:
+
+- For a working-tree review, read the file on disk in that workspace.
+- For a staged review, read the index (`git -C <workspace> show :<path>`). Check
+  `git -C <workspace> diff -- <path>` before using disk line numbers: unstaged edits may
+  make them differ from the staged file.
+- For a committed review, read the bound commit (`git -C <workspace> show <HEAD-SHA>:<path>`).
+
+A historical claim about the branch's starting revision needs a separate read of
+`git -C <workspace> show <pinned-base-SHA>:<path>`. That read establishes the historical
+claim only: the base contains neither staged nor uncommitted changes and cannot replace
+reading the source under review. `origin/main` is a moving ref, so capture the fetched
+base SHA when creating the worktree and pass that immutable value to the reviewer; do not
+infer the original base from whatever `origin/main` points to later. Before calling a
+citation false, establish which source it claims to describe and check that source.
+
+When a check genuinely needs a file that only exists in another clone —
+`docs/review-logs/` is gitignored here and lives only in the canonical clone — name that
+clone, say why you went there, and say what class of claim it
 is being used for, so the reader can tell it apart from a code `file:line` check that should
 never have left the worktree. The same applies to running a script: a repo-relative tool
 copied to `/tmp` resolves its own root somewhere else and can pass on an empty target set.
@@ -37,13 +55,17 @@ $ grep -n 'fn reset_bq_projects_signals' crates/kyomi-ui/src/pages/settings/data
 1897:fn reset_bq_projects_signals(...)
 # → filed as CRITICAL: "the cited :1971 is false, the numbers were never right"
 
-# RIGHT — resolve it where the diff lives, and against the revision it was cut from.
-$ cd ~/repos/kyomi-wt-kyo-658-column-embed-fk    # the worktree under review
-$ git merge-base --is-ancestor origin/main HEAD; git rev-parse --short origin/main
-$ git show origin/main:crates/kyomi-ui/src/pages/settings/datasources.rs \
+# RIGHT — this historical citation names the immutable revision it describes.
+$ cd /home/jason/repos/kyomi-wt-kyo-658-column-embed-fk
+# Review receipt also records this workspace's actual HEAD and the review scope.
+$ git rev-parse --show-toplevel
+$ git rev-parse HEAD
+$ git rev-parse a4ce98e7bd1fbe22c33d3e8156b9e90b5790bc8c
+$ git show a4ce98e7bd1fbe22c33d3e8156b9e90b5790bc8c:crates/kyomi-ui/src/pages/settings/datasources.rs \
     | grep -n 'fn reset_bq_projects_signals'
 1971:fn reset_bq_projects_signals(...)
-# → the citation is correct; nothing to file
+# → the historical citation is correct; current-source claims still require the
+#   staged file, working-tree file, or bound commit selected for this review.
 ```
 
 Real precedent — three reviews, three different ways of reading the wrong directory:
