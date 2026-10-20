@@ -1,11 +1,10 @@
 //! OAuth status re-fetch wiring: the shared `use_oauth_status_refetch`
 //! hook and its per-provider source-mapping functions (KYO-197, fixing
 //! Synapse's missing re-fetch), the create-mode fetch-guard predicate
-//! `oauth_status_source_to_fetch` (KYO-411/KYO-426/KYO-443), and the two
-//! places that predicate's effect has to be visible end-to-end: the
+//! `oauth_status_source_to_fetch` (KYO-411/KYO-426/KYO-443), the
 //! Connection-step gate accepting an already-established connection
-//! (KYO-411) and the BigQuery OAuth success arm writing `test_result` so
-//! create mode's Next button can ever enable at all (KYO-404).
+//! (KYO-411) and the BigQuery OAuth success arm recording successful
+//! `test_result` and `discovery_status` values (KYO-404).
 //!
 //! Split out of `oauth.rs` by KYO-475 — see
 //! `docs/standards/code-organization/one-test-topic-per-file-not-one-big-mod-tests.md`.
@@ -476,26 +475,21 @@ fn connection_step_satisfied_from_accepts_an_already_connected_kyomi_oauth_accou
 
 // ── KYO-404: BigQuery create-mode OAuth deadlock ────────────────────
 //
-// BigQuery datasources could not be created at all. The create-mode
-// "Next" button gates on `test_result.success`, but BigQuery's OAuth
-// success arm never wrote `test_result` — BigQuery has no Test &
-// Discover step; the OAuth handshake itself is the verification — so
-// `test_result` stayed `None` forever and "Next" never enabled. The fix
-// has three independent parts, each guarded by one test below: the
-// OAuth success arm now writes `test_result`/`discovery_status` itself;
-// the kyomi_oauth connect panel is no longer hidden in create mode (so
-// there is something to click that produces the write above); and the
-// create-mode `can_next` gate gained a narrow bigquery-enterprise_oauth
-// exception for the one mode that still cannot produce a `test_result`
-// before save.
+// KYO-404 added successful `test_result`/`discovery_status` writes to the
+// BigQuery OAuth success arm. This test pins those writes, not their
+// necessity for the current create-mode Connection-step gate:
+// `connection_step_satisfied_from` accepts Datasource(_) modes before
+// save, while the retired GoogleAccount/kyomi_oauth path accepts either
+// `oauth_connected` or `test_succeeded`. The success arm sets the former
+// alongside `test_result`. None/service_account requires `test_succeeded`;
+// this OAuth write can reach that mode through the cross-mode defect
+// tracked by KYO-921, which this source test does not cover.
 
 /// The `GoogleSuccess | BigqueryEnterpriseSuccess` arm of the modal-level
-/// OAuth `postMessage` listener must itself write `test_result` and
-/// `discovery_status` to a success state. Before KYO-404 this arm only
-/// updated the OAuth connected/email/expired/connecting signals, so
-/// nothing in the BigQuery kyomi_oauth flow (which never calls
-/// `do_test_and_discover`) ever produced a `test_result`, permanently
-/// disabling the create-mode "Next" button.
+/// OAuth `postMessage` listener records successful `test_result` and
+/// `discovery_status` values without calling `do_test_and_discover`.
+/// This source test preserves those writes; it does not establish that
+/// either is required to enable the current create-mode "Next" button.
 ///
 /// Bounds: the extraction runs from the exact arm pattern
 /// `OAuthMessage::GoogleSuccess { email }` up to the next arm's pattern,
