@@ -17,7 +17,7 @@ use serde_json::Value;
 
 use super::{ensure_query_ok, extract_rows_from_batch, sql_escape};
 use crate::catalog::traits::{
-    index_catalog_sql, CatalogIndexer, SQLCatalogIndexer,
+    index_catalog_sql, CatalogIndexer, ContainerDiscovery, SQLCatalogIndexer,
 };
 use kyomi_auth::catalog::helpers::IndexerContext;
 use kyomi_auth::catalog::types::{CatalogIndexResult, ColumnEntry, TableEntry};
@@ -89,7 +89,7 @@ impl SQLCatalogIndexer for SnowflakeIndexer {
     async fn discover_all_containers(
         &self,
         provider: &dyn DatasourceProvider,
-    ) -> Result<Vec<String>> {
+    ) -> Result<ContainerDiscovery> {
         let result = provider
             .execute_query("SHOW DATABASES", None, None, false, None)
             .await?;
@@ -114,7 +114,7 @@ impl SQLCatalogIndexer for SnowflakeIndexer {
             .collect();
 
         databases.sort();
-        Ok(databases)
+        Ok(ContainerDiscovery::complete(databases))
     }
 
     async fn get_tables_in_container(
