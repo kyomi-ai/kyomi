@@ -38,6 +38,7 @@ use send_wrapper::SendWrapper;
 
 use crate::cache::reconcile::RepairGuard;
 use crate::cache::store::SyncStore;
+use crate::cache::sync_action::{apply_sync_action, parse_workspace_settings, SyncPersistence};
 use crate::components::chat::websocket_client::{ConnectionState, WebSocketContext};
 use kyomi_types::sync::entity_types;
 
@@ -94,9 +95,7 @@ pub fn start_sync_engine(
     let unsub_action = ws.subscribe("sync_action", {
         let workspace_id = workspace_id.clone();
         move |msg| {
-            if let Some(data) = &msg.data {
-                apply_sync_action(&store, &workspace_id, data);
-            }
+            apply_sync_action(&store, &workspace_id, &msg, &IndexedDbPersistence);
         }
     });
 
@@ -470,45 +469,6 @@ fn billing_status_changed_workspace_id(data: Option<&serde_json::Value>) -> Opti
     data.and_then(|d| d.get("workspace_id")).and_then(|v| v.as_str())
 }
 
-/// Extract `WorkspaceSettingsData` from the raw sync entity JSON.
-///
-/// Missing or null fields fall back to defaults — always returns a populated struct.
-/// Mirrors the extraction logic in `server_fns::workspace::get_workspace_settings`.
-fn parse_workspace_settings(data: &serde_json::Value) -> crate::types::WorkspaceSettingsData {
-    let settings = data.get("settings");
-    let custom = settings.and_then(|s| s.get("custom_settings"));
-
-    let workspace_name = data
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
-
-    let default_model = custom
-        .and_then(|cs| cs.get("default_model"))
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-
-    let chart_palette = custom
-        .and_then(|cs| cs.get("chartml_config"))
-        .and_then(|cfg| cfg.get("style"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("kyomi")
-        .to_string();
-
-    let title_model = custom
-        .and_then(|cs| cs.get("title_model"))
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-
-    crate::types::WorkspaceSettingsData {
-        workspace_name,
-        default_model,
-        chart_palette,
-        title_model,
-    }
-}
-
 /// Read all entity types from IndexedDB and populate the store.
 pub async fn hydrate_store_from_db(
     db: &crate::cache::db::CacheDb,
@@ -567,280 +527,61 @@ pub async fn hydrate_store_from_db(
     }
 }
 
-/// Apply a single `sync_action` message to the reactive store and IndexedDB.
-///
-/// Actions arrive as raw `serde_json::Value`s (the `data` field of the WS
-/// message). This function extracts the action type, entity type, and entity
-/// data, then dispatches to the appropriate store mutator and IDB writer.
-fn apply_sync_action(
-    store: &SyncStore,
-    workspace_id: &str,
-    data: &serde_json::Value,
-) {
-    use crate::server_fns::chat::ChatSessionItem;
-    use crate::server_fns::dashboards::DashboardListItem;
-    use crate::types::WatchListItem;
 
-    let action_str = data.get("action").and_then(|v| v.as_str()).unwrap_or("");
-    let entity_type = data.get("entity_type").and_then(|v| v.as_str()).unwrap_or("");
-    let entity_id = data
-        .get("entity_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let timestamp = data
-        .get("timestamp")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let entity_data = data.get("data");
+struct IndexedDbPersistence;
 
-    match action_str {
-        "insert" | "update" => {
-            let Some(entity_data) = entity_data else {
-                tracing::warn!(
-                    action = action_str,
-                    entity_type,
-                    entity_id = %entity_id,
-                    "sync_action insert/update: missing data field — skipping"
-                );
-                return;
-            };
-
-            // Persist to IndexedDB (best-effort async write).
-            let json_str = match serde_json::to_string(entity_data) {
-                Ok(s) => s,
+impl SyncPersistence for IndexedDbPersistence {
+    fn upsert(
+        &self,
+        entity_type: &str,
+        entity_id: &str,
+        workspace_id: &str,
+        json: &str,
+        timestamp: &str,
+    ) {
+        let et = entity_type.to_string();
+        let eid = entity_id.to_string();
+        let wid = workspace_id.to_string();
+        let json_str = json.to_string();
+        let ts = timestamp.to_string();
+        spawn_local(async move {
+            match crate::cache::db::init_cache_db(&wid).await {
+                Ok(db) => {
+                    if let Err(e) =
+                        crate::cache::db::upsert(&db, &et, &eid, &wid, &json_str, &ts).await
+                    {
+                        tracing::warn!(
+                            entity_type = %et,
+                            entity_id = %eid,
+                            "sync_action upsert to IDB failed: {e}"
+                        );
+                    }
+                }
                 Err(e) => {
-                    tracing::warn!(entity_type, entity_id = %entity_id, "sync_action: failed to re-serialize entity data: {e}");
-                    return;
-                }
-            };
-            let et = entity_type.to_string();
-            let eid = entity_id.clone();
-            let wid = workspace_id.to_string();
-            let ts = timestamp.clone();
-            spawn_local(async move {
-                match crate::cache::db::init_cache_db(&wid).await {
-                    Ok(db) => {
-                        if let Err(e) =
-                            crate::cache::db::upsert(&db, &et, &eid, &wid, &json_str, &ts).await
-                        {
-                            tracing::warn!(
-                                entity_type = %et,
-                                entity_id = %eid,
-                                "sync_action upsert to IDB failed: {e}"
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("sync_action: failed to open cache db: {e}");
-                    }
-                }
-            });
-
-            // Update the reactive store.
-            match entity_type {
-                et if et == entity_types::DASHBOARD => {
-                    match serde_json::from_value::<DashboardListItem>(entity_data.clone()) {
-                        Ok(item) => store.upsert_dashboard(item),
-                        Err(e) => tracing::warn!(
-                            entity_type,
-                            entity_id = %entity_id,
-                            "sync_action: failed to deserialize dashboard: {e}"
-                        ),
-                    }
-                    // Tier 2 invalidation (KYO-215): any mutation to the dashboard
-                    // list entry means the cached detail may be stale.  Evict it so
-                    // the next visit re-fetches from the server.
-                    {
-                        let wid_inv = workspace_id.to_string();
-                        let eid_inv = entity_id.clone();
-                        spawn_local(async move {
-                            if let Ok(db) = crate::cache::db::init_cache_db(&wid_inv).await
-                                && let Err(e) = crate::cache::db::delete(
-                                    &db,
-                                    entity_types::DASHBOARD_DETAIL,
-                                    &eid_inv,
-                                    &wid_inv,
-                                )
-                                .await
-                                {
-                                    tracing::warn!(
-                                        entity_id = %eid_inv,
-                                        "sync_action: dashboard_detail cache invalidation failed: {e}"
-                                    );
-                                }
-                        });
-                    }
-                }
-                et if et == entity_types::KNOWLEDGE => {
-                    match serde_json::from_value::<DashboardListItem>(entity_data.clone()) {
-                        Ok(item) => store.upsert_knowledge_doc(item),
-                        Err(e) => tracing::warn!(
-                            entity_type,
-                            entity_id = %entity_id,
-                            "sync_action: failed to deserialize knowledge doc: {e}"
-                        ),
-                    }
-                    // Tier 2 invalidation (KYO-215): knowledge docs share the
-                    // DASHBOARD_DETAIL cache store (same viewer page).
-                    {
-                        let wid_inv = workspace_id.to_string();
-                        let eid_inv = entity_id.clone();
-                        spawn_local(async move {
-                            if let Ok(db) = crate::cache::db::init_cache_db(&wid_inv).await
-                                && let Err(e) = crate::cache::db::delete(
-                                    &db,
-                                    entity_types::DASHBOARD_DETAIL,
-                                    &eid_inv,
-                                    &wid_inv,
-                                )
-                                .await
-                                {
-                                    tracing::warn!(
-                                        entity_id = %eid_inv,
-                                        "sync_action: dashboard_detail cache invalidation (knowledge) failed: {e}"
-                                    );
-                                }
-                        });
-                    }
-                }
-                et if et == entity_types::CHAT_SESSION => {
-                    match serde_json::from_value::<ChatSessionItem>(entity_data.clone()) {
-                        Ok(item) => {
-                            if item.session_type.as_deref() != Some("chat") && item.session_type.is_some() {
-                                tracing::debug!(
-                                    entity_id = %entity_id,
-                                    session_type = ?item.session_type,
-                                    "sync_action: skipping non-chat session"
-                                );
-                            } else {
-                                store.upsert_chat_session(item);
-                            }
-                        }
-                        Err(e) => tracing::warn!(
-                            entity_type,
-                            entity_id = %entity_id,
-                            "sync_action: failed to deserialize chat session: {e}"
-                        ),
-                    }
-                    // Tier 2 invalidation (KYO-215): a session metadata change
-                    // (rename, share/unshare, etc.) means the cached messages may
-                    // be out of date.  Evict so next visit is fresh.
-                    {
-                        let wid_inv = workspace_id.to_string();
-                        let eid_inv = entity_id.clone();
-                        spawn_local(async move {
-                            if let Ok(db) = crate::cache::db::init_cache_db(&wid_inv).await
-                                && let Err(e) = crate::cache::db::delete(
-                                    &db,
-                                    entity_types::CHAT_MESSAGES,
-                                    &eid_inv,
-                                    &wid_inv,
-                                )
-                                .await
-                                {
-                                    tracing::warn!(
-                                        entity_id = %eid_inv,
-                                        "sync_action: chat_messages cache invalidation failed: {e}"
-                                    );
-                                }
-                        });
-                    }
-                }
-                et if et == entity_types::WATCH => {
-                    match serde_json::from_value::<WatchListItem>(entity_data.clone()) {
-                        Ok(item) => store.upsert_watch(item),
-                        Err(e) => tracing::warn!(
-                            entity_type,
-                            entity_id = %entity_id,
-                            "sync_action: failed to deserialize watch: {e}"
-                        ),
-                    }
-                }
-                et if et == entity_types::WORKSPACE_SETTINGS => {
-                    store.upsert_workspace_settings(parse_workspace_settings(entity_data));
-                }
-                other => {
-                    tracing::debug!(entity_type = other, "sync_action: unhandled entity type — ignoring");
+                    tracing::warn!("sync_action: failed to open cache db: {e}");
                 }
             }
-        }
-        "delete" => {
-            // Remove from IndexedDB (best-effort async).
-            let et = entity_type.to_string();
-            let eid = entity_id.clone();
-            let wid = workspace_id.to_string();
-            spawn_local(async move {
-                match crate::cache::db::init_cache_db(&wid).await {
-                    Ok(db) => {
-                        if let Err(e) =
-                            crate::cache::db::delete(&db, &et, &eid, &wid).await
-                        {
-                            tracing::warn!(
-                                entity_type = %et,
-                                entity_id = %eid,
-                                "sync_action delete from IDB failed: {e}"
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("sync_action delete: failed to open cache db: {e}");
+        });
+    }
+    fn delete(&self, entity_type: &str, entity_id: &str, workspace_id: &str) {
+        let et = entity_type.to_string();
+        let eid = entity_id.to_string();
+        let wid = workspace_id.to_string();
+        spawn_local(async move {
+            match crate::cache::db::init_cache_db(&wid).await {
+                Ok(db) => {
+                    if let Err(e) = crate::cache::db::delete(&db, &et, &eid, &wid).await {
+                        tracing::warn!(
+                            entity_type = %et,
+                            entity_id = %eid,
+                            "sync_action delete from IDB failed: {e}"
+                        );
                     }
                 }
-            });
-
-            // Tier 2 invalidation on delete (KYO-215): when the Tier 1 entity is
-            // deleted, also remove any Tier 2 detail cache entries so stale content
-            // doesn't survive a later recreate-with-the-same-id scenario.
-            match entity_type {
-                et if et == entity_types::DASHBOARD || et == entity_types::KNOWLEDGE => {
-                    let wid_inv = workspace_id.to_string();
-                    let eid_inv = entity_id.clone();
-                    spawn_local(async move {
-                        if let Ok(db) = crate::cache::db::init_cache_db(&wid_inv).await {
-                            let _ = crate::cache::db::delete(
-                                &db,
-                                entity_types::DASHBOARD_DETAIL,
-                                &eid_inv,
-                                &wid_inv,
-                            )
-                            .await;
-                        }
-                    });
-                }
-                et if et == entity_types::CHAT_SESSION => {
-                    let wid_inv = workspace_id.to_string();
-                    let eid_inv = entity_id.clone();
-                    spawn_local(async move {
-                        if let Ok(db) = crate::cache::db::init_cache_db(&wid_inv).await {
-                            let _ = crate::cache::db::delete(
-                                &db,
-                                entity_types::CHAT_MESSAGES,
-                                &eid_inv,
-                                &wid_inv,
-                            )
-                            .await;
-                        }
-                    });
-                }
-                _ => {}
-            }
-
-            // Remove from the reactive store.
-            match entity_type {
-                et if et == entity_types::DASHBOARD => store.remove_dashboard(&entity_id),
-                et if et == entity_types::KNOWLEDGE => store.remove_knowledge_doc(&entity_id),
-                et if et == entity_types::CHAT_SESSION => store.remove_chat_session(&entity_id),
-                et if et == entity_types::WATCH => store.remove_watch(&entity_id),
-                et if et == entity_types::WORKSPACE_SETTINGS => store.remove_workspace_settings(),
-                other => {
-                    tracing::debug!(entity_type = other, "sync_action delete: unhandled entity type — ignoring");
+                Err(e) => {
+                    tracing::warn!("sync_action delete: failed to open cache db: {e}");
                 }
             }
-        }
-        other => {
-            tracing::debug!(action = other, "sync_action: unhandled action type — ignoring");
-        }
+        });
     }
 }
