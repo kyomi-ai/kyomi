@@ -12,9 +12,7 @@
 //! the Tailwind JIT scanner runs at build time; ad-hoc classes injected after a
 //! panic would have no corresponding CSS rules.
 
-use crate::utils::feedback_context::{
-    escape_json_string, extract_browser, extract_os, get_console_errors,
-};
+use crate::utils::feedback_context::collect_context_with_panic;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
@@ -402,50 +400,10 @@ fn try_show_panic_recovery_overlay(panic_message: &str) -> Result<(), JsValue> {
 
 /// Build the context JSON for the panic report, matching the shape produced by
 /// `utils::feedback_context::collect_context()`.
+/// The panic hook logs through `console_error_panic_hook::hook(info)` before
+/// building this overlay, so the shared collector includes the panic's stack.
 fn build_panic_context(window: &web_sys::Window, panic_message: &str) -> String {
-    let url = window
-        .location()
-        .pathname()
-        .unwrap_or_else(|_| String::from("/"));
-
-    let ua = window
-        .navigator()
-        .user_agent()
-        .unwrap_or_default();
-
-    let browser = extract_browser(&ua);
-    let os = extract_os(&ua);
-
-    let screen_width = window
-        .inner_width()
-        .ok()
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0) as u32;
-
-    let screen_height = window
-        .inner_height()
-        .ok()
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0) as u32;
-
-    // Pre-serialised JSON array from the console interceptor — interpolated
-    // unescaped, exactly as `collect_context()` does. Escaping it would
-    // double-encode the array into a JSON string (KYO-682). The panic hook in
-    // `main.rs` runs `console_error_panic_hook::hook(info)` before this
-    // overlay is built, so the panic's own stack has already been captured by
-    // the interceptor by the time a report is submitted.
-    let console_errors = get_console_errors();
-
-    format!(
-        r#"{{"url":"{}","browser":"{}","os":"{}","screen_width":{},"screen_height":{},"panic_message":"{}","console_errors":{}}}"#,
-        escape_json_string(&url),
-        escape_json_string(&browser),
-        escape_json_string(&os),
-        screen_width,
-        screen_height,
-        escape_json_string(panic_message),
-        console_errors,
-    )
+    collect_context_with_panic(window, Some(panic_message))
 }
 
 /// Apply the report button's success state: confirmation text, full opacity.
