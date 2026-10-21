@@ -43,6 +43,8 @@
 pub mod reconcile;
 pub mod schema_hash;
 pub mod store;
+#[cfg(any(target_arch = "wasm32", test))]
+mod sync_action;
 pub mod sync_engine_lifecycle;
 
 #[cfg(target_arch = "wasm32")]
