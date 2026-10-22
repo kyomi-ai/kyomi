@@ -563,6 +563,19 @@ pub async fn list_active_auth_types(
 /// like `totp` that only ever supplements one of these (leave it out).
 const SIGN_IN_AUTH_TYPES: [&str; 3] = ["password", "webauthn", "google_oauth"];
 
+/// Whether Google is the user's only active sign-in-capable method.
+/// This is an affordance hint; disconnect must still enforce its server guard.
+pub async fn google_is_only_sign_in_method(
+    pool: &DbPool,
+    user_id: &str,
+) -> kyomi_core::Result<bool> {
+    let active_types = list_active_auth_types(pool, user_id).await?;
+    Ok(active_types.iter().any(|t| t == "google_oauth")
+        && !active_types
+            .iter()
+            .any(|t| t != "google_oauth" && SIGN_IN_AUTH_TYPES.contains(&t.as_str())))
+}
+
 /// Count of a user's active sign-in-capable auth methods — active rows in
 /// `user_auth_methods` whose `auth_type` is in [`SIGN_IN_AUTH_TYPES`].
 /// Inactive rows and non-sign-in types (`totp`) are never counted.
@@ -1252,6 +1265,28 @@ mod remove_auth_method_tests {
         .execute(sq)
         .await
         .expect("seed auth method");
+    }
+
+    #[tokio::test]
+    async fn google_only_hint_uses_active_sign_in_methods() {
+        let db = test_pool().await;
+        let sq = sqlite_pool(&db);
+        seed_user(sq, "hint-user", "hint@example.com").await;
+        seed_user(sq, "other-user", "other@example.com").await;
+        assert!(!google_is_only_sign_in_method(&db, "hint-user").await.unwrap());
+        seed_auth_method(sq, "hint-user", "google_oauth", true).await;
+        seed_auth_method(sq, "hint-user", "totp", true).await;
+        seed_auth_method(sq, "hint-user", "password", false).await;
+        seed_auth_method(sq, "other-user", "password", true).await;
+        assert!(google_is_only_sign_in_method(&db, "hint-user").await.unwrap());
+        for auth_type in ["password", "webauthn"] {
+            upsert_auth_method(&db, "hint-user", auth_type, &serde_json::json!({}))
+                .await
+                .unwrap();
+            assert!(!google_is_only_sign_in_method(&db, "hint-user").await.unwrap());
+            remove_auth_method(&db, "hint-user", auth_type).await.unwrap();
+            assert!(google_is_only_sign_in_method(&db, "hint-user").await.unwrap());
+        }
     }
 
     #[tokio::test]
