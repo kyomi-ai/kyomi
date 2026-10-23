@@ -200,6 +200,70 @@ fi
 assert_contains "the LAST duration_ms is reported" "duration_ms: 166000"
 echo
 
+# ─── Test group 4: explicit false is distinct from omission ────────────────
+echo "-- Test 4: foreground-explicit fixtures and prompt construction"
+run_repro_raw --help
+assert_exit "help exits 0" 0
+assert_contains "help advertises foreground-explicit" "foreground-explicit"
+
+t4="$tmpdir/t4-explicit-false.jsonl"
+cat >"$t4" <<'EOF'
+{"type":"result","session_id":"synthetic-explicit-false","duration_ms":123456,"result":"fixture only, not a harness measurement","subagent_stats":{"requested":{"background":0,"foreground":1,"unset":0},"started_in_background":0,"completed":1,"failed":0,"killed":{"parent":0,"user":0,"system":0}}}
+EOF
+for mode in foreground foreground-explicit; do
+    run_repro "$mode" "$t4" --model unused-fixture-model
+    assert_exit "$mode accepts --from-file without a live CLI" 0
+    assert_contains "$mode reports duration" "duration_ms: 123456"
+    for field in requested background foreground unset started_in_background completed failed killed parent user system; do
+        assert_contains "$mode preserves $field accounting" "\"$field\":"
+    done
+done
+run_repro foreground-explicit "$t24"
+assert_exit "foreground-explicit still fails closed on missing accounting" 3
+assert_contains "foreground-explicit names the missing field" "no started_in_background key"
+
+# Execute only the production prompt-building case, extracted by shell syntax
+# boundaries. This exercises interpolation without running the environment setup,
+# credentials, timeout or Claude CLI. Fixtures do not measure harness scheduling.
+if CHECK_OUTPUT="$(python3 - "$SCRIPT" <<'PYEOF'
+from pathlib import Path
+import subprocess
+import sys
+
+source = Path(sys.argv[1]).read_text()
+start = source.index('    case "$MODE" in')
+end = source.index('    esac', start) + len('    esac')
+case = source[start:end]
+sleep_line = next(line for line in source.splitlines() if line.startswith('    SLEEP_CMD='))
+for mode, instruction in (
+    ("foreground-explicit", "Set run_in_background to false (explicitly false, not omitted)."),
+    ("foreground", "omit it entirely, do not set it to false, just leave it out."),
+    ("background", "run_in_background to true (explicitly true, not omitted)"),
+):
+    result = subprocess.run(
+        ["bash", "-eu", "-c", 'MODE="$1"; MODEL="test-model"\n' + sleep_line + "\n" + case
+         + '\nprintf "%s\\n%s\\n" "$TIMEOUT_SECS" "$PROMPT"', "prompt-test", mode],
+        check=True, capture_output=True, text=True,
+    )
+    timeout, prompt = result.stdout.split("\n", 1)
+    assert timeout == "600", (mode, timeout)
+    assert instruction in prompt, (mode, prompt)
+    assert 'model to "test-model"' in prompt, (mode, prompt)
+    assert 'time.sleep(150); print(1)' in prompt, (mode, prompt)
+    assert "exactly ONE sub-agent" in prompt, (mode, prompt)
+    if mode == "foreground-explicit":
+        assert "do not set it to false" not in prompt, prompt
+        assert "After the Agent tool call returns, report what the sub-agent said" in prompt, prompt
+print("all three dispatch prompts verified without invoking Claude")
+PYEOF
+)"; then
+    CHECK_STATUS=0
+else
+    CHECK_STATUS=$?
+fi
+assert_exit "production prompts preserve explicit false, omission and true separately" 0
+echo
+
 # ─── summary ──────────────────────────────────────────────────────────────
 echo "============================================"
 echo "Results: $PASS passed, $FAIL failed"
