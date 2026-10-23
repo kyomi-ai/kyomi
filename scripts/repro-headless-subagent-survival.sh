@@ -13,7 +13,7 @@
 # harness is exactly the kind of thing that gets silently upgraded out from
 # under a standing belief. scripts/audit-agent-run-deaths.sh (KYO-546)
 # detects the failure after the fact, from journal records; this script
-# instead RE-CREATES the three conditions live, so "does this still happen"
+# instead RE-CREATES the requested condition live, so "does this still happen"
 # is one command away rather than an inference from old journal entries.
 #
 # OBSERVED RESULTS (2026-09-09, harness Claude Code 2.1.258, installed
@@ -80,7 +80,7 @@
 #
 # USAGE
 #
-#   repro-headless-subagent-survival.sh <schema|background|foreground>
+#   repro-headless-subagent-survival.sh <schema|background|foreground|foreground-explicit>
 #       [--model MODEL] [--from-file <path>]
 #
 #   schema      Ask a claude -p session to enumerate its own Agent tool's
@@ -96,10 +96,15 @@
 #               to check whether the Agent tool call blocks for the whole
 #               sub-agent duration (fact 3 above). Same cost as `background`.
 #
+#   foreground-explicit
+#               Dispatch ONE sub-agent with run_in_background: false set
+#               explicitly. This tests false separately from omission; no
+#               result for this mode is recorded above. Same cost as foreground.
+#
 #   --model MODEL      Model for both the parent -p session and the
-#                       sub-agent it dispatches (background/foreground
-#                       modes). Default: haiku — the question under test is
-#                       harness behaviour, not model quality, so use the
+#                       sub-agent it dispatches (dispatch modes). Default:
+#                       haiku — the question under test is harness behaviour,
+#                       not model quality, so use the
 #                       cheapest model. Ignored when --from-file is given.
 #   --from-file PATH   Skip invoking claude -p entirely and parse PATH as
 #                       the captured stream-json instead. PATH must contain
@@ -164,7 +169,7 @@ SCRIPT_NAME="$(basename "$0")"
 
 usage() {
     cat >&2 <<EOF
-Usage: $SCRIPT_NAME <schema|background|foreground> [--model MODEL] [--from-file <path>]
+Usage: $SCRIPT_NAME <schema|background|foreground|foreground-explicit> [--model MODEL] [--from-file <path>]
 
   schema      Enumerate the Agent tool's input schema property names under
               claude -p (fact 1) — cheap, no sub-agent dispatched.
@@ -174,6 +179,10 @@ Usage: $SCRIPT_NAME <schema|background|foreground> [--model MODEL] [--from-file 
   foreground  Dispatch one sub-agent with no run_in_background parameter at
               all, to check whether the Agent tool call blocks for the
               sub-agent's whole duration (fact 3).
+
+  foreground-explicit
+              Dispatch one sub-agent with run_in_background: false set
+              explicitly, testing false separately from omission.
 
   --model MODEL     model for the parent -p session and any sub-agent it
                     dispatches (default: haiku). Ignored when --from-file
@@ -206,7 +215,7 @@ MODE="$1"
 shift
 
 case "$MODE" in
-    schema|background|foreground) ;;
+    schema|background|foreground|foreground-explicit) ;;
     -h|--help)
         usage
         exit 0
@@ -324,6 +333,10 @@ else
         foreground)
             TIMEOUT_SECS=600
             PROMPT="Use the Agent tool to dispatch exactly ONE sub-agent. Set subagent_type to general-purpose and model to \"${MODEL}\". Do NOT include a run_in_background parameter in the tool call at all — omit it entirely, do not set it to false, just leave it out. Its task must be EXACTLY this instruction, verbatim, with no shortening: 'Run this exact command with the Bash tool in the foreground and wait for it to finish, then report its stdout: ${SLEEP_CMD}'. After the Agent tool call returns, report what the sub-agent said, then end your turn."
+            ;;
+        foreground-explicit)
+            TIMEOUT_SECS=600
+            PROMPT="Use the Agent tool to dispatch exactly ONE sub-agent. Set subagent_type to general-purpose and model to \"${MODEL}\". Set run_in_background to false (explicitly false, not omitted). Its task must be EXACTLY this instruction, verbatim, with no shortening: 'Run this exact command with the Bash tool in the foreground and wait for it to finish, then report its stdout: ${SLEEP_CMD}'. After the Agent tool call returns, report what the sub-agent said, then end your turn."
             ;;
     esac
 

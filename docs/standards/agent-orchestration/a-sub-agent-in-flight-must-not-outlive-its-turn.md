@@ -34,12 +34,15 @@ the wrong thing:
 |---|---|---|---|
 | 2026-09-09 | 2.1.258 | `claude -p` parent (`scripts/repro-headless-subagent-survival.sh schema`) | Present (`description, isolation, model, prompt, run_in_background, subagent_type`) |
 | 2026-09-09 | 2.1.258 | Interactive session, same harness build | Absent (`description, isolation, model, prompt, subagent_type`) |
-| 2026-09-11 | 2.1.267 | Sub-agent dispatched by a `claude -p` parent | Present |
+| 2026-09-11 | 2.1.267 | Sub-agent dispatched by a `claude -p` parent (original ad-hoc observation; reproduce with `scripts/repro-headless-subagent-survival.sh foreground-explicit`) | Present; explicit `false` accepted and blocked for 418 s |
 
-Where the parameter *is* offered it controls real scheduling: on 2026-09-11, harness 2.1.267,
+Where the parameter *is* offered it controls real scheduling: in the original ad-hoc
+observation on 2026-09-11, harness 2.1.267,
 a `claude -p` parent passed `run_in_background: false`, the call was accepted with no
 `InputValidationError`, and the Agent tool blocked for 418 seconds until the sub-agent
-returned.
+returned. That observation has no tracked capture and has not been re-measured with
+`foreground-explicit`; the mode provides a way to measure explicit `false` on a named
+harness build, not evidence of its behavior on an unmeasured build.
 
 Two consequences. First, this is why the previous version of this rule's RIGHT example —
 pass `run_in_background: false` — cannot stand alone as "the fix": where the field is not
@@ -178,10 +181,11 @@ Agent({
                                  // the tool call to block; where it is not offered this
                                  // key is not itself "the fix" — see the observations
 })
-// Measured under claude -p on 2.1.267 with an explicit false: the tool call did not
-// return for 418 seconds, until the sub-agent had finished. On 2.1.258 the same
-// blocking was measured with the parameter omitted rather than set to false, so that
-// build's number is evidence about omission, not about this line. Either way nothing
+// Original ad-hoc observation, 2026-09-11, claude -p harness 2.1.267: explicit false
+// blocked for 418 seconds until completion. No tracked capture or re-measurement;
+// reproduce with scripts/repro-headless-subagent-survival.sh foreground-explicit.
+// On 2.1.258 blocking was measured with the parameter omitted rather than set to
+// false, so that build's number is evidence about omission, not about this line. Either way nothing
 // is left "in flight" when the turn ends. Where the parameter is not offered, achieve
 // the same outcome by not ending the turn — i.e. not sending a final message that
 // implies completion — until this call has returned and its report is read.
