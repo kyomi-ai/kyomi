@@ -618,6 +618,20 @@ fn row_is_deleting(datasource_to_delete_id: Option<&str>, row_id: &str, delete_p
     delete_pending && datasource_to_delete_id == Some(row_id)
 }
 
+/// Enable eligibility must not prevent turning off an enabled datasource.
+/// Deletion still blocks both directions, including for retired auth modes.
+/// Read the optimistic local state so turning it off immediately blocks re-enabling.
+fn datasource_switch_disabled(
+    can_enable: bool,
+    local_enabled: ReadSignal<bool>,
+    is_deleting: Signal<bool>,
+) -> Signal<bool> {
+    Signal::derive(move || {
+        is_deleting.try_get().unwrap_or(true)
+            || (!can_enable && !local_enabled.try_get().unwrap_or(false))
+    })
+}
+
 /// Loading skeleton shown while data is being fetched.
 #[component]
 fn DatasourcesLoadingSkeleton() -> impl IntoView {
@@ -1028,22 +1042,14 @@ fn DatasourceRow(
         }
     });
 
-    let switch_disabled = !can_enable;
-    // Reactive disabled state for the Switch itself (KYO-487): true whenever
-    // this datasource can't be enabled at all (`switch_disabled`, static per
-    // row) OR this row is currently being deleted (`is_deleting`, reactive).
-    // `Switch::disabled` is a real `Signal`/`MaybeProp` now, so this is the
-    // control's actual disabled state — not just a handler-side guard — and
-    // subsumes the `on_toggle` bail that used to stand in for it.
-    let switch_disabled_signal = Signal::derive(move || switch_disabled || is_deleting.get());
+    let switch_disabled_signal =
+        datasource_switch_disabled(can_enable, local_enabled, is_deleting);
 
     let on_toggle = Callback::new(move |new_val: bool| {
         if toggle_action.pending().get_untracked() {
             return;
         }
         // Gate: cannot enable a datasource with missing credentials.
-        // The switch is already visually disabled (switch_disabled), but we
-        // add a toast so the user understands why clicking elsewhere doesn't work.
         if new_val && ds_credential_status == "missing" {
             toast_error("Connect your credentials first to enable this datasource");
             return;
@@ -1743,7 +1749,6 @@ fn DatasourceRow(
                         checked=Signal::from(local_enabled)
                         on_change=on_toggle
                         disabled=switch_disabled_signal
-                        class=if !can_enable { "opacity-50 cursor-not-allowed".to_string() } else { String::new() }
                     />
                 </div>
 
