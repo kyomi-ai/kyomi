@@ -60,13 +60,13 @@ cited, not by trusting its description:
   literally by `finalize_connection_config_secrets`' `COMMON_SENSITIVE`-only restore loop
   — not cleared — because that function's gap (documented separately as KYO-780) already
   treats anything outside its three hardcoded field names as pass-through. The review
-  (`docs/review-logs/2026-09-15.md`, the `02:10` re-review — the signed one; the `01:25`
+  (`docs/review-logs/2026-09-15.md` (private/local review log; not tracked in this repository), the `02:10` re-review — the signed one; the `01:25`
   initial review was **unsigned**, having found two unrelated pre-existing criticals)
   independently re-checked the registry-driven `connection_config_fields` design that was
   built instead, caller-by-caller against `build_connection_config`'s real per-type arms,
   and confirmed it — the deviation from the ticket's prescribed mechanism was the correct
   call, not a shortcut.
-- **KYO-725** (`docs/review-logs/2026-09-10.md`, `09:56` entry, "chart-builder SQL editor
+- **KYO-725** (`docs/review-logs/2026-09-10.md` (private/local review log; not tracked in this repository), `09:56` entry, "chart-builder SQL editor
   cursor-reversal fix"). The diff added a `provide_context` shadowing fix for
   `EditorHandle` that the ticket didn't ask for. The reviewer didn't take the addition on
   the implementer's say-so: it traced the actual component tree — `ChartBuilderModal` is

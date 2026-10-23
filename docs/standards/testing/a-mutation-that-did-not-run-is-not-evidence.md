@@ -62,14 +62,14 @@ $ DISPOSAL_LINT_DIR=/tmp/fixtures \
 
 Four instances in four days, across three unrelated harness families:
 
-- **KYO-414** (review log `2026-08-24`, `03:27`) — the canonical case. The
+- **KYO-414** (review log (private/local; not tracked in this repository) `2026-08-24`, `03:27`) — the canonical case. The
   reviewer's first pass "gave a false `0 failures` reading because copying the
   old script out to scratch broke its `REPO_ROOT`-relative `LINT_DIR` default";
   overriding `DISPOSAL_LINT_DIR` explicitly turned the same mutation into **7 of
   9 fixtures failing**. The entry's own note is the rule in one line: copying a
   script out of its own repo tree "silently breaks its own `REPO_ROOT`-relative
   defaults, which nearly produced a false `no real detection` finding here."
-- **KYO-460** (review log `2026-08-23`, `14:00` initial and `18:30` cycle 2) —
+- **KYO-460** (review log (private/local; not tracked in this repository) `2026-08-23`, `14:00` initial and `18:30` cycle 2) —
   a two-engine contract test where one engine killed and the other never ran the
   mutated SQL: SQLite "failed exactly as predicted … `left: String("true") right:
   Bool(true)`", while "Postgres hit the (correct, harmless) sqlx
@@ -78,15 +78,17 @@ Four instances in four days, across three unrelated harness families:
   the harness's own safety net." Reported as a harness artefact, not as
   Postgres-side weakness — which is only defensible because the discriminator was
   identified.
-- **KYO-480** (review log `2026-08-23`, `22:09`, cycle 2) — the incomplete-run
+- **KYO-480** (review log (private/local; not tracked in this repository) `2026-08-23`, `22:09`, cycle 2) — the incomplete-run
   case, handled correctly: the mutated file was restored before the build reached
   the crate under test, "so the in-flight run is not meaningful and was not waited
   on further"; the reviewer fell back to hand-tracing a deterministic pure
   function and said so, rather than quoting the aborted run.
-- **KYO-314** (review log `2026-08-21`, `12:05`) — same shape on a shared box:
+- **KYO-314** (review log (private/local; not tracked in this repository) `2026-08-21`, `12:05`) — same shape on a shared box:
   "the rebuild ran into heavy contention from concurrent builds elsewhere … and
   did not finish before the code-path tracing above already gave a dispositive
   answer." Mutation reverted, no result claimed from it.
+
+(private/local review log; not tracked in this repository)
 
 And the contrast that makes the distinction worth drawing — **KYO-444** (review
 log `2026-08-22`, `08:10`, 🟡): collapsing `ConfiguredProjectScope`'s two

@@ -42,7 +42,7 @@ Interval::new(200, move || {
 });
 ```
 
-Flagged in KYO-437 (review log `2026-08-22`, entry `11:55 — KYO-437: OAuth connect
+Flagged in KYO-437 (review log (private/local; not tracked in this repository) `2026-08-22`, entry `11:55 — KYO-437: OAuth connect
 popup recovery`), where a popup monitor took its own `Interval` and `Timeout` slots
 and then continued reading `on_outcome` and the sibling slot from the same freed
 environment, at three separate sites in one function. KYO-440 adds a second monitor of

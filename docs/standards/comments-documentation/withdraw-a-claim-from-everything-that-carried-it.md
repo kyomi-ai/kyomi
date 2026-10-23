@@ -72,7 +72,7 @@ Both blocks are quotes, not reconstructions.)
 
 Real precedent — two tickets, and the flagship cost three of five review cycles:
 
-- **KYO-692 / KYO-713 (PR #505), `2026-09-11` log, the *cycle 2* entry under "rename and
+- (private/local review log; not tracked in this repository) **KYO-692 / KYO-713 (PR #505), `2026-09-11` log, the *cycle 2* entry under "rename and
   correct the headless sub-agent standard"** — 🟡. After the standard withdrew "the mechanism
   appears to have been fixed upstream", *both* tracked scripts still concluded it: the
   reviewer found "appears to have been fixed upstream since" surviving in
@@ -80,13 +80,13 @@ Real precedent — two tickets, and the flagship cost three of five review cycle
   noting "the standard names `repro-headless-subagent-survival.sh` as the post-upgrade
   re-check entrypoint, so a future agent following that pointer lands on the refuted
   conclusion." The repro script's surrounding paragraph *was* edited by that same diff.
-- **Same ticket, the *cycle 3* entry** — 🟡, the scaffolding shape. The claim that rows
+- (private/local review log; not tracked in this repository) **Same ticket, the *cycle 3* entry** — 🟡, the scaffolding shape. The claim that rows
   stratify by session type was withdrawn; the sentence justifying it ("because they do not
   agree along session type") was left behind, now contradicted by the very table beneath it.
   Two 🟢 in the same chain are the heading version of it: a section still titled "What's
   changed since KYO-546" over a body whose conclusion had become a bound, and a
   `DID NOT REPRODUCE` banner fifty lines above the qualification that bounded it.
-- **Same ticket, the *cycle 4* entry** — 🟡, and the citation-inversion shape stated exactly.
+- (private/local review log; not tracked in this repository) **Same ticket, the *cycle 4* entry** — 🟡, and the citation-inversion shape stated exactly.
   Cycle 3 had cited the repro script's "mode-dependent" line as an *ally* — evidence the rows
   really do stratify by session type. The fix then withdrew mode-keying as the mechanism,
   which converted that ally into a contradiction 25 lines from a hunk the same diff was
@@ -95,7 +95,7 @@ Real precedent — two tickets, and the flagship cost three of five review cycle
   cited in support of it — a citation made for a claim becomes a citation against its
   replacement."* That chain — each cycle's finding created by the previous cycle's fix — broke
   only at cycle 5, when both re-reads finally came back clean. **KYO-742** owns this rule.
-- **KYO-687, `2026-09-09` log, the *initial* review entry under "restate the Agent-tool
+- (private/local review log; not tracked in this repository) **KYO-687, `2026-09-09` log, the *initial* review entry under "restate the Agent-tool
   `run_in_background` rule as an invariant"** — the cross-repository version, twice in one
   diff. 🟢: three docs were corrected and a "**fourth site**, tracked + public, still teaches
   the false rule" — a public standards file, out of that PR's repo, which had to become its

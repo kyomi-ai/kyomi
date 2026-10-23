@@ -67,7 +67,7 @@ required-features = ["ssr", "slack"]
 ```
 
 Real precedent — one incident, caught before the guard landed: KYO-275's
-`LTO-profile server_fn registry smoke test` review (`docs/review-logs/2026-09-02.md`, and its
+`LTO-profile server_fn registry smoke test` review (`docs/review-logs/2026-09-02.md` (private/local review log; not tracked in this repository), and its
 re-review under the same heading) opened `0 🔴, 1 🟡, 1 🟢`, the 🟡 being *"feature-flag build
 mismatch"* — the smoke check "builds `kyomi-ui` with `--features ssr` only", while production
 "always ships with the `slack` feature enabled, which changes which `#[server]`

@@ -70,7 +70,7 @@ grep -o '20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]' "$f" | sort -u     # distinct log d
 Real precedent — three instances across two standards-mining commits, and the third happened
 *after* the pattern had been named:
 
-- **The KYO-705 branch's standards-mining commit, `2026-09-10` log, the
+- (private/local review log; not tracked in this repository) **The KYO-705 branch's standards-mining commit, `2026-09-10` log, the
   `two new rules from KYO-683 Phase 1 review` entry and the `— re-review` entry under the same
   title** — 🟡, blocked signing.
   `a-dml-migration-needs-its-own-regression-test.md` listed three precedents. The first two
@@ -81,7 +81,7 @@ Real precedent — three instances across two standards-mining commits, and the 
   earlier. The reviewer's summary — *"the citation is 2-for-3, not fabricated wholesale"* — is
   the distribution this rule is about. The re-review entry records the disposition as deletion
   rather than a caveat; the landed file in `../testing/` carries two precedents today.
-- **The KYO-697 branch's standards-mining commit, `2026-09-14` log, the
+- (private/local review log; not tracked in this repository) **The KYO-697 branch's standards-mining commit, `2026-09-14` log, the
   `an-acceptance-criterion-can-be-false-deviate-on-the-record` entry** — 🟡 on the final
   precedent item and 🟢 on the header count, in the same review. The reviewer verified the
   bullet against the ticket and the log and found its two numbers reversed, and then found the
@@ -93,7 +93,7 @@ Real precedent — three instances across two standards-mining commits, and the 
   shape outright — *"the flagship citations get verified and the last one appended does not"* —
   and prescribe the remedy this rule carries: *"re-verify the bullet added last, and re-derive
   any count in the header after the list stops changing."*
-- **The same commit's cycle-2 entry, `2026-09-14` log** — the prediction held on the next pass,
+- (private/local review log; not tracked in this repository) **The same commit's cycle-2 entry, `2026-09-14` log** — the prediction held on the next pass,
   which is the strongest evidence available that the position and not the author is the
   variable. The bad bullet was deleted, the header recounted correctly, and the single residual
   finding landed *again* on the now-last-listed bullet: an inference about a PR body that its
@@ -102,6 +102,8 @@ Real precedent — three instances across two standards-mining commits, and the 
   that was verbatim three times, and a *"turned out to conflict with"* whose own cited source
   says the opposite. The difference cycle 2 made was not fewer defects in the tail; it was that
   the author looked there and disclosed what they found.
+
+(private/local review log; not tracked in this repository)
 
 The same position one granularity up is on record and is deliberately **not** counted as an
 instance here, because the unverified artefact is a file rather than a bullet: KYO-664's

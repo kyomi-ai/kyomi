@@ -25,4 +25,6 @@ Mechanical check before staging any docs change carrying a code block:
 grep -rn "DiscoveryStatus" crates/ || echo "FABRICATED — do not ship"
 ```
 
+(private/local review log; not tracked in this repository)
+
 Flagged three times in three consecutive review cycles on one 68-line file, `docs/standards/data-state-management/teardown-clears-the-whole-derived-state-group.md` (KYO-433, 2026-08-23). Cycle 1 caught two misquoted prose citations — a signal named `connection_test_result` that is really `test_result`, and a site count of "four" that is really five. Cycle 2, after both prose fixes landed, found the fabricated `DiscoveryStatus::Idle` in *both* the WRONG and RIGHT blocks — untouched by cycle 1 because cycle 1's findings were about prose. The reviewer's own note: *"verify every identifier in an illustrative code block actually resolves in the codebase, not just the prose citations."* Three cycles on a documentation file that contained no code.

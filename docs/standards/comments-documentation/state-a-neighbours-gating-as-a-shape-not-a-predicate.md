@@ -36,6 +36,8 @@ is *not* guaranteed (see
 [no-guarantee-stronger-than-code-enforces.md](no-guarantee-stronger-than-code-enforces.md)),
 or change the code so the claim holds and the comment no longer has to carry it.
 
+(private/local review log; not tracked in this repository)
+
 ```rust
 // WRONG — reconstructions, not quotes: both forms were corrected during review and
 // never committed, so there is no `<sha>^` to quote. Text as the review log records it.
@@ -61,7 +63,7 @@ or change the code so the claim holds and the comment no longer has to carry it.
 Real precedent — one paragraph over three cycles, and one landed comment that took the other
 way out:
 
-- **KYO-728 phase A** — review log `2026-09-12`, headings *"KYO-728 phase A: collapse
+- **KYO-728 phase A** — review log (private/local; not tracked in this repository) `2026-09-12`, headings *"KYO-728 phase A: collapse
   passkey-vs-email signup fork"* cycles 2, 3 and 4. Cycle 1's own 🟢 asked for `SignupView`'s
   leftover divider to be deleted; doing so falsified the sibling doc comment on
   `GoogleSignInSection`, which still said each view kept its own `<AuthDivider>` call (cycle 2,
@@ -88,7 +90,7 @@ way out:
   `ac4a1a55` (PR #519), the squash-merge of branch `origin/jason/kyo-728-confirm-credentials`
   (`ab70a330`) — unmerged at authoring time, merged by the time this rule was rescued.
   Conditions above were confirmed directly against `main`, not the review log.
-- **KYO-704 phase A** — landed in `686c9a91` (PR #513), review log `2026-09-11`, headings
+- **KYO-704 phase A** — landed in `686c9a91` (PR #513), review log (private/local; not tracked in this repository) `2026-09-11`, headings
   *"KYO-704 Phase A: retire BigQuery kyomi_oauth, default to service_account"* cycles 1 to 3.
   `check_credential_status`'s doc comment (`crates/kyomi-auth/src/datasource_auth_service.rs`)
   claimed its call sites all deny a `"retired_auth_mode"` row because each allows only

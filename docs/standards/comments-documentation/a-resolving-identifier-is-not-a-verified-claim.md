@@ -47,6 +47,7 @@ it; an unsourced sentence is worth more than a confidently wrong reference.
 The same move for a review-log citation — grep the log for the claim, not just for the file:
 
 ```sh
+# Private/local review logs; not tracked in this repository. Requires local access.
 # Don't stop at "the log exists". Confirm the finding is in the entry you named.
 grep -in "exactly once\|guard test" docs/review-logs/2026-08-22.md || \
   echo "NOT IN THIS LOG — cite the one that has it"
@@ -54,14 +55,14 @@ grep -in "exactly once\|guard test" docs/review-logs/2026-08-22.md || \
 
 Three diffs in three days, none of them caught by an existence check:
 
-- **KYO-440** (review log `2026-08-24`, cycle 1 at `13:19`, finding #2) —
+- **KYO-440** (review log (private/local; not tracked in this repository) `2026-08-24`, cycle 1 at `13:19`, finding #2) —
   `docs/standards/code-organization/enumerate-consumers-from-the-type-not-from-the-diff.md`
   stated that `TestConnectionResult` "gained a `resource_errors` map". Both structs are
   declared in the same file a few lines apart; `resource_errors` belongs to
   `DiscoverResourcesResult`. The wrong one was cited in a rule whose own subject is
   enumerating consumers *from the type*. Corrected on `main`.
 
-- **KYO-429** (review log `2026-08-22`, cycles 1 at `05:06` and 2 at `05:45`) — one paragraph
+- **KYO-429** (review log (private/local; not tracked in this repository) `2026-08-22`, cycles 1 at `05:06` and 2 at `05:45`) — one paragraph
   in `docs/CODING_STANDARDS.md`, flagged twice. Cycle 1: three cited incident locations, none
   of which corresponded to real content — the reviewer read line 9999 and found an unrelated
   test. Cycle 2: the *rewrite* replaced the file:line pointers with a log-date citation and
@@ -71,7 +72,7 @@ Three diffs in three days, none of them caught by an existence check:
   re-review cycles at `21:40` and `21:25`). Both logs existed; the attribution did not
   survive being opened. Cycle 2's own note: *"the same failure mode one level up."*
 
-- **KYO-433** (review log `2026-08-23`, cycles at `12:27` / `12:31` / `12:34`) —
+- **KYO-433** (review log (private/local; not tracked in this repository) `2026-08-23`, cycles at `12:27` / `12:31` / `12:34`) —
   [verify-every-identifier-in-a-doc-code-example.md](verify-every-identifier-in-a-doc-code-example.md)'s
   motivating case, and the reason to treat these as one family. Cycle 1 found two
   prose citations naming the wrong signal and the wrong count; cycle 2, after both prose

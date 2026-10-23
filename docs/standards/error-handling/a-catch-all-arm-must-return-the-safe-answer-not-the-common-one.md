@@ -83,7 +83,7 @@ match status {
 
 Real precedent:
 
-- **KYO-804** (review log `2026-09-23`, `19:06` entry). The `_ => "active"` above meant that
+- **KYO-804** (review log (private/local; not tracked in this repository) `2026-09-23`, `19:06` entry). The `_ => "active"` above meant that
   `paused`, `incomplete` and `incomplete_expired` subscriptions were all read as paid. The
   ticket asked for "no wildcard arm". The reviewer confirmed from the vendored
   `async-stripe-shared` source at the locked version that `SubscriptionStatus` is
@@ -91,7 +91,7 @@ Real precedent:
   unsatisfiable from outside that crate"*. It accepted an explicit arm per known variant
   with `Unknown` and `_` both failing closed to `Cancelled` under `tracing::error!`. When
   this rule was written, the fix was still on an open PR and had not landed on `main`.
-- **KYO-544, folded into KYO-474** (review log `2026-08-29`, `15:05` entry). In
+- **KYO-544, folded into KYO-474** (review log (private/local; not tracked in this repository) `2026-08-29`, `15:05` entry). In
   `crates/kyomi-ui/src/pages/settings/datasources.rs`, `discovery_resource_key_for_type`
   ends in `_ => "databases"`, which is the key most providers use. BigQuery fell through to
   it, but BigQuery only ever populates `"projects"`. As a result, a real permission denial

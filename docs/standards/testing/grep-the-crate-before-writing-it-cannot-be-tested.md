@@ -80,7 +80,7 @@ async fn save_agent_error_logs_the_fallback_insert_failure() {
 Both refutations come from one ticket, in consecutive cycles — the second written *after* a
 reviewer had already disproved the first:
 
-- **KYO-579 cycle 1** (review log `2026-09-01`, `20:35`, 🟡) — the stated reason for shipping
+- **KYO-579 cycle 1** (review log (private/local; not tracked in this repository) `2026-09-01`, `20:35`, 🟡) — the stated reason for shipping
   `save_agent_error`'s new error branch untested was "no seam to inject without mocking". The
   reviewer: *"The implementer's stated reason ... is incorrect"* — `chat_messages.session_id`
   has a real FK to `chat_sessions`, enforced on both engines, and this file's own `test_pool`
@@ -89,7 +89,7 @@ reviewer had already disproved the first:
   scaffolding was already sitting in the same `mod tests` — `test_pool`, `seed_user`, and a
   mock-free `WebSocketManager::new(None, db.clone())` used that way in `collection_service.rs`
   and `watch_service.rs`.
-- **KYO-579 cycle 2** (`2026-09-01`, `20:50`, 🟡) — the FK test landed, but the log assertion
+- (private/local review log; not tracked in this repository) **KYO-579 cycle 2** (`2026-09-01`, `20:50`, 🟡) — the FK test landed, but the log assertion
   did not, because "no tracing-capture dev-dependency [is] available, told not to add one."
   The reviewer: *"factually incorrect: `kyomi-test-tracing` is already a `[dev-dependencies]`
   entry in `crates/kyomi-auth/Cargo.toml` and is already used twice in this exact crate for
@@ -97,6 +97,8 @@ reviewer had already disproved the first:
   `validate_session_absent_does_not_log_error` and `auth_service.rs`. No new dependency was
   needed; cycle 3 (`21:00`) closed clean by wrapping the test already written in
   `capture_tracing()`.
+
+(private/local review log; not tracked in this repository)
 
 The rule is not "never say it can't be tested" — it is "check first, then say what you
 checked." The same week has the honest version, and it was explicitly not a finding:

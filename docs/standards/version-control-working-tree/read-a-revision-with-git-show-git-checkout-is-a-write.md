@@ -78,14 +78,14 @@ git show "$BASE":scripts/foo.txt > "$scratch"
 
 Real precedent — two tickets in two days, recovered and corrected before final approval:
 
-- **KYO-722, `2026-09-10` log, the entry headed "repoint the panic-context end marker + new
+- (private/local review log; not tracked in this repository) **KYO-722, `2026-09-10` log, the entry headed "repoint the panic-context end marker + new
   standards rule"** — shape 1, self-disclosed at the end of an otherwise-clean review:
   *"mid-review, a `git checkout c964db91 -- .` used to pull the pre-diff file for the
   historical marker sweep briefly reverted the staged `feedback_context.rs` change in this
   worktree. Caught immediately via `git diff --cached --stat`, reapplied by hand, and
   confirmed byte-identical … before final tests/clippy were run."* The purpose was a read —
   a historical sweep for how many markers pinned a full signature.
-- **KYO-712, `2026-09-11` log, the three entries headed "bind review signature to the diff it
+- (private/local review log; not tracked in this repository) **KYO-712, `2026-09-11` log, the three entries headed "bind review signature to the diff it
   approved"** — shape 2, and the reason the ticket's fix is built the way it is. The reviewer
   ran the `--work-tree` form during *cycle 1* of the review of the very ticket that exists to
   detect a narrowed index; the cycle-2 entry records *"no repeat of the cycle-1 `--work-tree`

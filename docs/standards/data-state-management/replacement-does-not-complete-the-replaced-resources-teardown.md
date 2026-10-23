@@ -48,7 +48,7 @@ failure separately so a failed remote operation cannot discard the identity need
 for retry.
 
 Two distinct findings in **KYO-841's `Connect session revocation` re-reviews**
-(`docs/review-logs/2026-09-27.md`) motivated this rule:
+(`docs/review-logs/2026-09-27.md` (private/local review log; not tracked in this repository)) motivated this rule:
 
 - Cycle 2, State Management: stale unregister returned before removing a superseded
   connection's remote active-set membership. The replacement was protected, but the

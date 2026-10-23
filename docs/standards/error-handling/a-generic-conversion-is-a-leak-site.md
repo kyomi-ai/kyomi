@@ -67,21 +67,25 @@ impl From<kyomi_connect_protocol::Error> for Error {
 }
 ```
 
+(private/local review log; not tracked in this repository)
+
 Two review entries, two days, two different mechanisms, both on KYO-448:
 
-- **2026-08-24, `09:15` entry** (🟢, "Other: latent double-tag via blanket `From`
+- (private/local review log; not tracked in this repository) **2026-08-24, `09:15` entry** (🟢, "Other: latent double-tag via blanket `From`
   conversion") — the `From<kyomi_connect_protocol::Error>` case above. The reviewer
   confirmed it dormant today (`Error::Connection` is never constructed in `kyomi-connect`,
   and `Error::NotSupported` only fires from the driver factory when a provider feature is
   compiled out, which kyomi's `features = ["all"]` never does) and still flagged it, because
   the leak is latent in the type, not in any call site anyone will audit.
-- **2026-08-25, `13:32` entry** (🟡, deferred with ticket) — the `into_sfn()` blanket impl.
+- (private/local review log; not tracked in this repository) **2026-08-25, `13:32` entry** (🟡, deferred with ticket) — the `into_sfn()` blanket impl.
   The diff under review had just swept the whole of `server_fns/` and the reviewer's own
   verification found `list_datasources_with_status` and `delete_datasource` still routing
   `kyomi_core::Result<T>` through `.into_sfn()` unchanged. Deferred only because KYO-523
   already existed, `agent-ready` and linked both directions, and explains why the fix is not
   small: hundreds of call sites across dozens of files, and Rust's coherence rules forbid a
   second blanket impl specialised on `kyomi_core::Error`.
+
+(private/local review log; not tracked in this repository)
 
 The standing recommendation predates both. The KYO-397 review (2026-08-21, `04:44`), landing
 the sixth per-call-site fix of this species, wrote: *"manual review catches are working but a

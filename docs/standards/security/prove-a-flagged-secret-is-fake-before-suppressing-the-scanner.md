@@ -80,6 +80,6 @@ new instance needs its own reproducible check rather than inheriting the precede
 
 The correction that produced this rule is itself the point. The first standard mined from
 KYO-602's review misattributed *where* the marker text was visible, claiming it appeared "once
-decoded" — a re-review caught it by actually running the decode and observing it fail (review log
+decoded" — a re-review caught it by actually running the decode and observing it fail (review log (private/local; not tracked in this repository)
 `2026-09-02`, cycle-2 entry). A standard about verifying scanner suppressions is only credible if
 its own evidence was independently run rather than paraphrased from the PR that added the rule.

@@ -81,7 +81,7 @@ and a false green is not.
 
 Real precedent — three tickets, two log days, and the flagship cost three review cycles:
 
-- **KYO-691**, review log `2026-09-14`, heading *"KYO-691: reconcile build-backgrounding
+- **KYO-691**, review log (private/local; not tracked in this repository) `2026-09-14`, heading *"KYO-691: reconcile build-backgrounding
   contradiction (build-test.md / backlog-fast/SKILL.md)"* — two 🟡 on one diff. The first:
   the diff asserted `TaskOutput`'s `block`/`timeout` shape as fact *"read from its own tool
   description"*, when the standard it cited had **declined** to assert that shape because
@@ -99,7 +99,7 @@ Real precedent — three tickets, two log days, and the flagship cost three revi
   away, leaving *"three passages within ~40 lines of the same section"* taking three
   different stances on the same fact. Cycle 3 closed it by naming PR #38's actual finding
   and hedging the instruction to best-effort.
-- **KYO-769**, `2026-09-14`, heading *"KYO-769 Step 5c: fix orchestrator stalling on
+- (private/local review log; not tracked in this repository) **KYO-769**, `2026-09-14`, heading *"KYO-769 Step 5c: fix orchestrator stalling on
   backgrounded builds under `claude -p` (re-review after nits)"* — 🟢, the unnamed-basis
   shape: the `TaskOutput` claims were *"exactly correct (verified twice, independently,
   against the installed binary) but the doc itself carries no citation of how/when this was
@@ -114,7 +114,7 @@ Real precedent — three tickets, two log days, and the flagship cost three revi
   whenever a diff makes a specific, falsifiable claim about a tool's parameters or limits"*,
   and it is *"worth considering as a standard step for review of `.claude/`/`skills/` docs
   specifically."*
-- **KYO-692 / KYO-713**, `2026-09-11`, headings *"KYO-692 (+KYO-713) rename and correct the
+- (private/local review log; not tracked in this repository) **KYO-692 / KYO-713**, `2026-09-11`, headings *"KYO-692 (+KYO-713) rename and correct the
   headless sub-agent standard (PR #505)"* cycles 3 and 4 — 🟢 twice, both filed as
   *unattributed-mechanism-claim*, against the standard that now lives at
   [../agent-orchestration/a-sub-agent-in-flight-must-not-outlive-its-turn.md](../agent-orchestration/a-sub-agent-in-flight-must-not-outlive-its-turn.md).

@@ -82,7 +82,7 @@ Both halves of one payload, two tickets, three reviews — cited by symbol and l
 because most were logged against in-flight branch state (see
 [anchor a citation to a symbol, not a line number](../comments-documentation/anchor-a-citation-to-a-symbol-not-a-line-number.md)):
 
-- **KYO-501** (review log `2026-08-29`, `08:33`) — the depth half, plus the discovery of the
+- **KYO-501** (review log (private/local; not tracked in this repository) `2026-08-29`, `08:33`) — the depth half, plus the discovery of the
   key half. The fix pulled `error_event_context_type` out of the subscription closure
   specifically so the top-level-vs-nested read became host-testable, and the reviewer
   verified it by opening `send_error` rather than trusting the doc comment: *"`send_error()`
@@ -94,14 +94,14 @@ because most were logged against in-flight branch state (see
   chat error likely displays the generic `"An error occurred"` fallback instead of the real
   message."* That review also proved the handler's untestability empirically — reverting the
   fix left all 508 tests green, disclosed and ticketed as KYO-549 rather than papered over.
-- **KYO-550** (review log `2026-08-30`, `02:55` initial and `21:15` rework; shipped
+- **KYO-550** (review log (private/local; not tracked in this repository) `2026-08-30`, `02:55` initial and `21:15` rework; shipped
   `e566f252`) — the key half, fixed, with the no-dual-key discipline pinned by a test rather
   than left to a comment. The reviewer's mutation is the rule in one line: *"reintroducing
   `.get("error").or_else(|| d.get("message"))` causes
   `error_event_message_does_not_fall_back_to_the_message_key` to fail exactly as expected
   (`left: "should not be read", right: "An error occurred"`)."* The emit site was re-read
   from source in both the initial review and the rework, not carried over.
-- **KYO-559**, filed out of the `02:55` review, is the same family one step further: a
+- (private/local review log; not tracked in this repository) **KYO-559**, filed out of the `02:55` review, is the same family one step further: a
   `chat_page.rs` handler that ignores its payload entirely and carries no session filter.
 
 Sibling of

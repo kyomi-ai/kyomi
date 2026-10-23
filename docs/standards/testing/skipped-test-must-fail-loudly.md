@@ -16,4 +16,6 @@ $ cargo test -p kyomi-auth --locked --lib -- postgres_   # var unset, local dev
 #   → SKIP: lines, run still green
 ```
 
+(private/local review log; not tracked in this repository)
+
 Flagged as 🟡 in KYO-292 (2026-08-09): `crates/kyomi-auth/src/test_pg.rs`'s module doc claimed the skip was made "visible … rather than silent, because a Postgres-arm test that always reports success without ever running the Postgres arm is worse than no test" — the intent was right and the mechanism did not deliver it, since `ci.yml`'s `cargo test --locked --workspace --lib --bins --tests …` passes neither capture flag. Fixed by having `postgres_test_pool_or_skip` panic under `KYOMI_REQUIRE_POSTGRES_TESTS=1`, which the CI job now sets alongside its `pgvector` service; both branches were then reproduced against a dead `DATABASE_URL`. The feature-gate half was flagged in KYO-278 (2026-08-08): the new `#[cfg(all(test, feature = "ssr"))]` regression tests are invisible without `--features ssr` while `kyomi-ui` still runs 161 other tests green — and the reviewer's own first pass mis-read a truncated log as "the crate compiles zero tests without ssr," a stronger claim than the evidence supported.

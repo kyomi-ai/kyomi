@@ -1,6 +1,6 @@
 # Quote the artefact, not the log that quotes it
 
-Almost every rule in this corpus is mined out of `docs/review-logs/`, and a review-log
+Almost every rule in this corpus is mined out of `docs/review-logs/` (private/local review log; not tracked in this repository), and a review-log
 finding is a **composite document**. One sentence routinely carries two kinds of text at
 once: an excerpt the reviewer quoted out of some file, and the reviewer's own commentary
 about that excerpt — its ticket status, its line number, what it proves. Both sit inside
@@ -42,6 +42,8 @@ framing is not part of the file. If a span is introduced as verbatim, it must by
 re-mark nothing, and mark every cut with an explicit elision rather than silently
 normalising emphasis.
 
+(private/local review log; not tracked in this repository)
+
 ```markdown
 <!-- WRONG — reconstructed from the reviewer's own excerpt; the file itself was
      deleted from the commit rather than patched a fourth time, so no `<sha>^`
@@ -59,6 +61,8 @@ pre-fix wording *"(KYO-687 is In Review, unmerged)"*
 *"Pass `run_in_background: false` on every `Agent` call"*. That ticket was in
 review and unmerged when the finding was written.
 ```
+
+(private/local review log; not tracked in this repository)
 
 The log sentence both blocks were mined from, quoted verbatim from the **KYO-682** entry
 `panic reports ship an empty console_errors array` (re-review cycle 2, `2026-09-09` log) —
@@ -81,7 +85,7 @@ grep -Fn -B3 -A3 'either direction' path/to/artefact
 Real precedent — one file, two consecutive blocking cycles, and it was ultimately deleted
 rather than fixed:
 
-- **KYO-705**, `2026-09-10` log, the `Standards-mining commit (KYO-705 branch): three new
+- (private/local review log; not tracked in this repository) **KYO-705**, `2026-09-10` log, the `Standards-mining commit (KYO-705 branch): three new
   coding-standard rules (re-review)` entry — 🟡, blocked signing. The wrong-speaker shape,
   verbatim. The document presented `"(KYO-687 is In Review, unmerged)"` in its own
   italic-plus-quotes convention as wording `kyomi-private/skills/build-test.md` carries.
@@ -101,18 +105,20 @@ rather than fixed:
   `grep -n "either direction"` finds the phrase exactly once in that file, attached to the
   Bash-tool sentence. Verdict: *"Same defect class as cycles 1 and 2: real quotes, real line
   numbers, wrong claim about what they demonstrate."*
-- **Same ticket, the `… (re-review, cycle 4)` entry** — the file was dropped from the commit
+- (private/local review log; not tracked in this repository) **Same ticket, the `… (re-review, cycle 4)` entry** — the file was dropped from the commit
   entirely rather than patched a fourth time, and its content filed as **KYO-738**. The
   reviewer's accounting: *"Four review cycles on this diff, three of them against a defect
   class (real quotes attached to claims they don't support) confined entirely to the file
   that's now gone."* Two surviving files in the same commit never carried the defect. That
   is the cost of the check nobody ran: not a wrong sentence, a discarded rule.
-- **KYO-692 / KYO-713**, `2026-09-11` log, the `rename and correct the headless sub-agent
+- (private/local review log; not tracked in this repository) **KYO-692 / KYO-713**, `2026-09-11` log, the `rename and correct the headless sub-agent
   standard (PR #505, cycle 2)` entry — 🟢, the re-marking form. A passage introduced as
   "verbatim" injected markdown backticks around `--max-budget-usd` and `-p` that the harness
   binary's own string does not carry, while an adjacent "verbatim" passage left the same
   class of identifier unmarked. Resolved in cycle 3 by dropping them: *"both 'verbatim'
   passages now byte-match the binary."*
+
+(private/local review log; not tracked in this repository)
 
 The safe direction, for calibration — **KYO-682**, `2026-09-09` log, the initial
 `panic reports ship an empty console_errors array` entry, 🟢: a WRONG block composited two
@@ -120,6 +126,8 @@ near-verbatim lines from two different sources, and was *not* presented as a quo
 reviewer recorded it as *"the safe direction of the reconstruction hazard: near-verbatim
 text presented as illustration understates its provenance rather than overstating it."*
 Under-claiming provenance costs a parenthetical; over-claiming it costs review cycles.
+
+(private/local review log; not tracked in this repository)
 
 One nearby finding is deliberately **not** counted here, per
 [count-only-the-incidents-that-instantiate-the-rule.md](count-only-the-incidents-that-instantiate-the-rule.md).

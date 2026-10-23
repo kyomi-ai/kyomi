@@ -5,6 +5,8 @@ Unlike text `color`, structural elements (`<tr>`, `<td>` containers, content car
 - Inline `background-color` provides the light-mode fallback for clients that strip `<style>` (Gmail)
 - `@media (prefers-color-scheme: dark) { tr { background-color: #1A1715 !important; } }` overrides it in clients that support dark mode (Apple Mail, iOS Mail)
 
+(private/local review log; not tracked in this repository)
+
 Per the CSS Cascading and Inheritance spec, `!important` author stylesheet declarations outrank normal inline `style=""` attributes. This was confirmed in the KYO-8 review dispute (2026-05-17).
 
 ```html

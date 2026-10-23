@@ -60,31 +60,31 @@ grep -c '^<<<<<<<\|^=======\|^>>>>>>>' "$F"   # 0 — no leftover markers
 
 Real precedent — six reviews across two days, all on the same class of seam:
 
-- **KYO-446 (2026-08-22, cycles 2 and 3 at `11:40` / `12:05`)** — 🔴. The rebase's own hand
+- (private/local review log; not tracked in this repository) **KYO-446 (2026-08-22, cycles 2 and 3 at `11:40` / `12:05`)** — 🔴. The rebase's own hand
   resolution spliced the KYO-446 comment block into the *middle* of the KYO-429 test's final
   unclosed `assert!(...)`, dropping its `);` and `}`. `git show HEAD:<path>` did not parse.
   Every green check on that branch — the reviewer's included — had run against a working tree
   carrying an uncommitted repair.
-- **KYO-407 (2026-08-22 `20:47`)** — a cherry-pick lost the closing brace of KYO-413's
+- (private/local review log; not tracked in this repository) **KYO-407 (2026-08-22 `20:47`)** — a cherry-pick lost the closing brace of KYO-413's
   `bigquery_service_account_next_disables_after_validate_then_remove`. The repair was proven by
   `diff`ing the first 10,576 lines of `origin/main`'s copy against the new file's, not by
   re-running the suite.
-- **KYO-407 (2026-08-23 `00:49`)** — the second rebase of the same branch, reviewed on the
+- (private/local review log; not tracked in this repository) **KYO-407 (2026-08-23 `00:49`)** — the second rebase of the same branch, reviewed on the
   explicit basis that *"a prior rebase of this same branch left a pre-existing test unclosed
   via this exact hazard."* Proof was numstat zero-deletions (valid here — a pure append),
   zero conflict markers, and both target tests present *and* passing, neither having replaced
   the other.
-- **KYO-452 (2026-08-23 `13:52` addendum)** — the brace-counting trap, discovered live:
+- (private/local review log; not tracked in this repository) **KYO-452 (2026-08-23 `13:52` addendum)** — the brace-counting trap, discovered live:
   *"Naive whole-file brace-counting is unreliable here — two of the three test bodies contain
   literal `{`/`}` characters inside string literals being searched for … which permanently
   desyncs a naive depth counter for the rest of the file."* Resolved by extracting all eight
   tests by indentation boundary on both sides and diffing each.
-- **KYO-455 (2026-08-23 `14:58`)** — the 2,978-line `mod tests` split, verified by exactly the
+- (private/local review log; not tracked in this repository) **KYO-455 (2026-08-23 `14:58`)** — the 2,978-line `mod tests` split, verified by exactly the
   technique this rule prescribes: sorted `#[test] fn` name sets extracted independently from
   both sides and confirmed byte-identical at 74/74 with no duplicates either side, plus an
   `md5sum` of lines 1-8923 (everything above the old `mod tests {`) proving the production
   region did not move.
-- **KYO-491 (2026-08-23 `23:52`)** — a "brace-hoist" conflict in `cache/store.rs` where two
+- (private/local review log; not tracked in this repository) **KYO-491 (2026-08-23 `23:52`)** — a "brace-hoist" conflict in `cache/store.rs` where two
   sibling test modules could have collapsed into one; conservation shown by confirming both
   `mod reconciliation_tests` (4 tests) and `mod tests` (3 tests) were present and passing.
 

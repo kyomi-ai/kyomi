@@ -46,11 +46,11 @@ pub async fn create_datasource_modal(
 
 Real precedent, three tickets and one migration:
 
-- **KYO-428** (review log `2026-08-23`, `05:20`) — `crates/kyomi-ui/src/server_fns/datasources.rs`.
+- **KYO-428** (review log (private/local; not tracked in this repository) `2026-08-23`, `05:20`) — `crates/kyomi-ui/src/server_fns/datasources.rs`.
   `build_connection_config` genuinely emits `Value::Number` for `port` and `Value::Bool` for
   `secure`/`encrypt`/`trust_server_certificate`; all four affected server fns now carry the
   codec. The same review filed the sibling instance rather than fixing it inline.
-- **KYO-459** (review log `2026-08-23`, `15:57`) — that sibling:
+- **KYO-459** (review log (private/local; not tracked in this repository) `2026-08-23`, `15:57`) — that sibling:
   `generate_chart_from_results` in `crates/kyomi-ui/src/server_fns/sql_editor.rs`, taking
   `sample_rows: Vec<Vec<serde_json::Value>>`. Its caller
   (`pages/sql_editor/results_container.rs`) builds real `Value::Number` leaves via
@@ -59,7 +59,7 @@ Real precedent, three tickets and one migration:
   whose entire job is picking a chart type. The guard test
   (`generate_chart_from_results_uses_the_json_input_codec`) is what makes the fix durable;
   the reviewer's own mutation confirmed removing the attribute kills it.
-- **KYO-460** (review log `2026-08-23`, `14:00`) — the bill for the window before KYO-428:
+- **KYO-460** (review log (private/local; not tracked in this repository) `2026-08-23`, `14:00`) — the bill for the window before KYO-428:
   `apps/server/migrations/20260823000000_retype_connection_config_scalars.sql`, an
   irreversible repair migration over `datasource_configs.connection_config` for every row the
   modal wrote with flattened scalars. Fixing the cause did not repair anything already

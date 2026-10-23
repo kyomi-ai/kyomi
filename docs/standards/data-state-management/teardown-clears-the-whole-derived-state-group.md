@@ -51,6 +51,8 @@ on:click=move |_| {
 }
 ```
 
+(private/local review log; not tracked in this repository)
+
 Flagged in KYO-413 (2026-08-21), which produced two findings of this exact shape in a single
 review — a PR whose whole purpose was fixing one instance of it:
 
@@ -63,6 +65,8 @@ review — a PR whose whole purpose was fixing one instance of it:
   validating under `kyomi_oauth` and then switching to `service_account` left
   `test_result.success == true` and held the Next/Catalog gate open for a mode that
   had never been validated.
+
+(private/local review log; not tracked in this repository)
 
 The same group discipline appears from the other direction in KYO-469 (2026-08-23): removing
 the `discovery_error` signal required finding and deleting all of its setters, its resets, and

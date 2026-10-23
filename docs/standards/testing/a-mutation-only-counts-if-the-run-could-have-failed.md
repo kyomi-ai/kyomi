@@ -51,26 +51,28 @@ $ cargo clippy --locked -p kyomi-ui --target wasm32-unknown-unknown --features h
 
 Real precedent — four reviews, four mechanisms, one shape:
 
-- **KYO-501 (`08:33`, 2026-08-29)** — the reviewer reverted the `error` handler to its pre-fix
+- (private/local review log; not tracked in this repository) **KYO-501 (`08:33`, 2026-08-29)** — the reviewer reverted the `error` handler to its pre-fix
   form and got *"all 13 `chat_engine` tests (and the full 508-test suite) stayed green."* Read
   correctly, that green is the finding: it proves `setup_ws_subscriptions` — the wasm32-only
   function containing both the bug and the fix — never compiles into the host test binary, so
   AC2 genuinely cannot be met by a host test in this workspace today. The gap was disclosed and
   ticketed (KYO-549) rather than papered over with the adjacent unit test.
-- **KYO-427 (`14:20`, 2026-08-22)** — the wasm32/hydrate clippy pass *"finished in 0.75s off a
+- (private/local review log; not tracked in this repository) **KYO-427 (`14:20`, 2026-08-22)** — the wasm32/hydrate clippy pass *"finished in 0.75s off a
   stale cache, which would have been a false green."* The reviewer touched `datasources.rs` to
   force a genuine recompile and re-ran; only the second run is evidence that the new
   `#[cfg(target_arch = "wasm32")]` `on:click` bodies compile under the CI target.
-- **KYO-414 (`03:27`, 2026-08-24)** — the first mutation attempt against the pre-fix lint script
+- (private/local review log; not tracked in this repository) **KYO-414 (`03:27`, 2026-08-24)** — the first mutation attempt against the pre-fix lint script
   *"gave a false '0 failures' reading because copying the old script out to scratch broke its
   `REPO_ROOT`-relative `LINT_DIR` default."* Corrected by overriding `DISPOSAL_LINT_DIR`
   explicitly; the real result is 7 of 9 fixtures failing against the true pre-fix script. The
   review's own note: this *"nearly produced a false 'no real detection' finding."*
-- **KYO-460 (`14:00` and `18:30`, 2026-08-23)** — the same mutation was run against both engines.
+- (private/local review log; not tracked in this repository) **KYO-460 (`14:00` and `18:30`, 2026-08-23)** — the same mutation was run against both engines.
   SQLite failed at the documented assertion (`left: String("true") right: Bool(true)`); Postgres
   *"hit a (correct, harmless) `sqlx` migration-checksum guard on the shared dev DB instead of the
   same assertion, because the dev DB already had this exact migration applied."* Both cycles
   recorded that distinction rather than counting two engines' worth of red as two proofs.
+
+(private/local review log; not tracked in this repository)
 
 A fifth instance is the discipline stated as a refusal: in **KYO-480 (`22:09`, 2026-08-23)** the
 reviewer's `cargo test -p kyomi-server --lib` was still compiling when the file was restored, and
