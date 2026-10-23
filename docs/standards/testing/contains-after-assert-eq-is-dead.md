@@ -4,4 +4,6 @@ If a test already asserts `assert_eq!(actual, "the exact expected string")`, eve
 
 **Rule:** Don't stack a substring guard behind an exact-equality assertion on the same value. Either assert equality alone, or — if the substring is the real invariant and the exact string is incidental — assert the substring against something the equality does not already pin, such as a *different* value (`assert!(!other_field.contains(X))`) or a compile-time property of the constant itself (`assert!(!WRAP_UP_FAILED_MESSAGE.contains("cancelled"))`, which pins a constant a future reword could silently break). When reviewing, evaluate the pair, not each line in isolation.
 
+(private/local review log; not tracked in this repository)
+
 Flagged in the KYO-344 cycle-2 review (2026-08-10): the pair at `crates/kyomi-agent/src/agent.rs:1920` was mutation-tested three ways and the `!contains` guard was proven dead both before and after the change under review — reasoning alone had concluded the opposite.

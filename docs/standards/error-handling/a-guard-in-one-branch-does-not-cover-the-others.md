@@ -50,6 +50,8 @@ esac
 }
 ```
 
+(private/local review log; not tracked in this repository)
+
 Flagged in KYO-584 (2026-09-02) on `scripts/link-agent-skills.sh:154-160` in `kyomi-private`,
 and reproduced live rather than argued from reading. All ten tests in the accompanying suite
 `mkdir -p`'d the repo directory before invoking, so the gap was untested as well as unhandled —

@@ -7,7 +7,7 @@ moment you looked*. That proof has a shelf life, and standards branches routinel
 A mined-standards commit is written in an hour, reviewed the same day, and then sits on a
 branch for two or three days while the ticket it rode in on gets reworked — and the corpus it
 was checked against keeps moving underneath it, because every other `/backlog-fast` run is
-mining the same fortnight of `docs/review-logs/` and converging on the same loud incidents.
+mining the same fortnight of `docs/review-logs/` (private/local review log; not tracked in this repository) and converging on the same loud incidents.
 
 Rebase does not tell you. The KYO-375 one-file-per-rule layout exists so two concurrent rule
 additions never collide, and it works exactly as designed: a new file at a new slug is a
@@ -51,7 +51,7 @@ git rm docs/standards/<section>/<your-slug>.md
 Real precedent — four documented instances of one race, and the two most recent were both
 resolved by deleting the file:
 
-- **KYO-558's `rebase onto origin/main (PR #478, trivy-secret conflict merge)` review** is
+- (private/local review log; not tracked in this repository) **KYO-558's `rebase onto origin/main (PR #478, trivy-secret conflict merge)` review** is
   the case that names the gap. The branch's `a-guard-fixed-for-one-branch-does-not-protect-its-siblings.md`
   had already passed its own clean review under KYO-558's
   `coding standards: disposal-cfg-test-module docs` entry, which "explicitly swept
@@ -68,7 +68,7 @@ resolved by deleting the file:
   exists in the tree at review time, not one that lands on `main` later on a still-open
   branch." KYO-665 was filed for a mechanical duplicate check; this is the manual step until
   one exists.
-- **KYO-658's `pre-work: new standard "a review finding names a sample, not the population"`
+- (private/local review log; not tracked in this repository) **KYO-658's `pre-work: new standard "a review finding names a sample, not the population"`
   review** — 🟡, same fortnight, same outcome. The proposed file overlapped
   `../code-organization/close-the-class-by-making-the-wrong-call-uncallable.md` and
   `../data-state-management/teardown-clears-the-whole-derived-state-group.md`, both already
@@ -76,12 +76,12 @@ resolved by deleting the file:
   axis was "a real axis in principle" but not demonstrated, since the file "reuses the same
   incident and the same code example as both siblings" — and the file was dropped rather
   than annotated.
-- **KYO-534's `New standard: a-tool-claim-needs-a-reproduction-not-a-citation.md` review**
+- (private/local review log; not tracked in this repository) **KYO-534's `New standard: a-tool-claim-needs-a-reproduction-not-a-citation.md` review**
   is the authoring-time half the sibling rule already covers, included here because it shows
   how narrow the visible surface is: the nearest sibling existed only on unmerged PR #439 and
   was "invisible to a plain `ls`". That file was fixable with one sentence *because* the
   sibling had not landed yet. Once it lands, the same overlap costs a deletion.
-- **KYO-533's `land six orphaned standards files` review** is the first instance and the
+- (private/local review log; not tracked in this repository) **KYO-533's `land six orphaned standards files` review** is the first instance and the
   sibling rule's own flagship — a duplicate that was already in the tree, caught by the
   authoring-time sweep working correctly.
 

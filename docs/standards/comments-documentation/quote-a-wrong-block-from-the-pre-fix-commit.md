@@ -75,7 +75,7 @@ name what was cut instead, per
 [name-the-invariant-not-a-count.md](name-the-invariant-not-a-count.md).
 
 Precedent — **KYO-590**, mined standard *"a check that lives inside one branch guards only
-that branch"* (review log `2026-09-02`). Its PR, **#455, is still open at the time of
+that branch"* (review log (private/local; not tracked in this repository) `2026-09-02`). Its PR, **#455, is still open at the time of
 writing** — this precedent is in flight, not settled, and the file is not on `main`; check
 its state before relying on it. The rule's own subject matter is on display here: between
 the review cycles quoted below and this writing, that document was retitled from *"a check
@@ -92,6 +92,8 @@ and updated the framing sentence to say which blocks are quoted and which are
 reconstructions. The nit was acted on rather than deferred, which invalidated the review
 signature and cost a full re-review — cheaper than shipping it, and cheaper still if the
 block had been quoted the first time.
+
+(private/local review log; not tracked in this repository)
 
 A second instance in the same window: the review of
 [../security/prove-a-flagged-secret-is-fake-before-suppressing-the-scanner.md](../security/prove-a-flagged-secret-is-fake-before-suppressing-the-scanner.md)

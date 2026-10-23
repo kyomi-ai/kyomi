@@ -58,7 +58,7 @@ $ diff /tmp/before.rs /tmp/after.rs   # logic, strings, and call ordering, not v
 Real precedent — four reviews in four days where the mechanical diff *was* the evidence, and
 two where the thing it would have caught was found only because someone went looking:
 
-- **KYO-537** (review log `2026-08-29`, `13:28`) — a tests-only stage whose central constraint
+- **KYO-537** (review log (private/local; not tracked in this repository) `2026-08-29`, `13:28`) — a tests-only stage whose central constraint
   was that production code not change at all. The reviewer did not read the diff for that:
   > Extracted everything above the first `#[cfg(test)]` from `origin/main` and `HEAD` for all
   > five touched production files and diffed — byte-identical in all five.
@@ -74,7 +74,7 @@ two where the thing it would have caught was found only because someone went loo
   a difference between two merged copies that nobody enumerated, found by a reviewer reading
   for it rather than by anything the build ran.
 
-- **KYO-538** (review log `2026-08-29`, `19:49`) — the collapse of four per-family tool impls
+- **KYO-538** (review log (private/local; not tracked in this repository) `2026-08-29`, `19:49`) — the collapse of four per-family tool impls
   into `crates/kyomi-agent/src/tools/document/{read,edit,delete}.rs`. Verified by extraction
   and diff, down to the ordering:
   > Byte-diffed the four pre-refactor `AgentTool::execute`/`name`/`description`/
@@ -92,19 +92,19 @@ two where the thing it would have caught was found only because someone went loo
   The four known differences each carried a `NOTE:`/doc comment naming the deferring ticket.
   That is the shape: a listed difference with a decision, not a difference that dissolved.
 
-- **KYO-550 rework** (review log `2026-08-30`, `21:15`) — a conflict rework of an
+- **KYO-550 rework** (review log (private/local; not tracked in this repository) `2026-08-30`, `21:15`) — a conflict rework of an
   already-approved fix, where the claim is "same change, new base":
   > diffed `edaa0300..f3dceaa6` (original PR #439 commit, pre-conflict) against
   > `origin/main..HEAD` (this rework) with line numbers stripped — the `+`/`-` content is
   > byte-identical between the two.
 
-- **KYO-568** (review log `2026-08-31`, `16:37`) — tracked copies of files that live outside
+- **KYO-568** (review log (private/local; not tracked in this repository) `2026-08-31`, `16:37`) — tracked copies of files that live outside
   the repo, where "identical apart from a provenance header" is the entire contract:
   > Byte-identity of tracked copies vs live originals, re-derived myself by locating the
   > provenance-header line offset in each file ... and diffing the stripped tracked copy
   > against the live file directly — all three IDENTICAL.
 
-- **KYO-474** (review log `2026-08-29`, `15:05`) — the unification that did change behaviour,
+- **KYO-474** (review log (private/local; not tracked in this repository) `2026-08-29`, `15:05`) — the unification that did change behaviour,
   correctly and unavoidably, but was described in the diff only along the axis the ticket
   named. Routing both the create-mode picker and `EditModeCatalogTab` through the single
   `catalog_denial_key_for_type` (`crates/kyomi-ui/src/pages/settings/datasources.rs`) rather
@@ -118,7 +118,7 @@ two where the thing it would have caught was found only because someone went loo
   > specifically, since a future `git blame` reader tracing "why do BigQuery projects suddenly
   > show as checkboxes in edit mode" would otherwise have to reconstruct it from the diff.
 
-- **KYO-468 cycle 1** (review log `2026-08-29`, `21:20`) — the `CatalogItemCheckboxList`
+- **KYO-468 cycle 1** (review log (private/local; not tracked in this repository) `2026-08-29`, `21:20`) — the `CatalogItemCheckboxList`
   extraction was accepted on a *read*, not a diff: "verified behavior-preserving for every
   non-BigQuery type ... a pure wrapping transform ... unchanged in substance." That judgement
   held. It is cited here because it is the common case, and because "unchanged in substance"

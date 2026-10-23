@@ -57,11 +57,11 @@ assert_eq!(
 );
 ```
 
-Real precedent, all four from the `2026-08-20` → `2026-08-24` review logs; cited
+Real precedent, all four from the `2026-08-20` → `2026-08-24` review logs (private/local; not tracked in this repository); cited
 by log entry and symbol rather than file:line because most were logged against
 in-flight branch state.
 
-- **KYO-421 (`07:52` entry, 2026-08-24)** — 🟢. Both new `extract_between` guard
+- (private/local review log; not tracked in this repository) **KYO-421 (`07:52` entry, 2026-08-24)** — 🟢. Both new `extract_between` guard
   tests, in `datasource_onboarding.rs` and on `translate_google_oauth_error`,
   fail via a `marker not found` panic on the exact regression they exist to
   catch. Confirmed by hand-mutating both the Google-arm-split and the
@@ -70,18 +70,18 @@ in-flight branch state.
   end marker on something structural, or assert a
   `translate_google_oauth_error(` occurrence count instead of extracting a
   substring.
-- **KYO-407 (`00:49` entry, 2026-08-23)** — the same shape accepted as a
+- (private/local review log; not tracked in this repository) **KYO-407 (`00:49` entry, 2026-08-23)** — the same shape accepted as a
   mutation proof: renaming only the production-side marker comment, leaving the
   test's search string untouched, makes `assert_route_has_production_evidence`
   fail with "end marker not found". Red for the right reason, reported in the
   wrong words.
-- **KYO-407 (`20:57` and `21:40` entries, 2026-08-21)** — cycle 1 flagged the
+- (private/local review log; not tracked in this repository) **KYO-407 (`20:57` and `21:40` entries, 2026-08-21)** — cycle 1 flagged the
   `GenericTestAndDiscover` UI-copy end marker as a durability risk; the risk
   "did materialize within the hour via #370," and the repair was explicitly
   judged "a genuine improvement in anchor durability, not a relocation of the
   same fragility." Anchor choice, not assertion strength, was the whole
   difference.
-- **KYO-429 (`05:06` entry, 2026-08-22)** — the leftmost-match half: verifying
+- (private/local review log; not tracked in this repository) **KYO-429 (`05:06` entry, 2026-08-22)** — the leftmost-match half: verifying
   the guard test required extracting `DatasourcesPage`'s real body by hand,
   because the marker pair false-matched on `extract_between`'s *own* string
   literal arguments further down the file.

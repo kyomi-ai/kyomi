@@ -56,7 +56,7 @@ user_message_persistence: kyomi_agent::UserMessagePersistence::CallerPersisted(
 
 Real precedent — one split, four surfaces, six days, three follow-up tickets:
 
-- **KYO-492** (review log `2026-08-24`, `04:55`, Clean/approved) created
+- **KYO-492** (review log (private/local; not tracked in this repository) `2026-08-24`, `04:55`, Clean/approved) created
   `UserMessagePersistence` (`crates/kyomi-agent/src/adapter.rs`) precisely
   because the old `AgentExecutionConfig` field answered two questions at once
   (see [split-a-value-that-answers-two-questions.md](split-a-value-that-answers-two-questions.md)).
@@ -66,19 +66,19 @@ Real precedent — one split, four surfaces, six days, three follow-up tickets:
   `AdapterPersists(Some(id))`) converted correctly."* Every site was found;
   each site's variant was checked against the value it replaced, and against
   Slack's flow specifically — but not against copilot's or watch's own writes.
-- **KYO-506** (`2026-08-29`, `21:10`) is where the cost showed up, as a
+- (private/local review log; not tracked in this repository) **KYO-506** (`2026-08-29`, `21:10`) is where the cost showed up, as a
   cross-check made while reviewing an unrelated ticket:
   *"`copilot_service::prepare_copilot_message` writes the user row up front,
   then `copilot.rs` sets `UserMessagePersistence::AdapterPersists(None)`
   instead of `CallerPersisted`, so `drop_pre_persisted_message` never filters
   it out, and `CustomAgent::chat()` pushes a second copy that
   `persist_after_chat` then persists."*
-- **KYO-554** (`2026-08-31`, `12:00`, Clean/approved) fixed copilot. The
+- (private/local review log; not tracked in this repository) **KYO-554** (`2026-08-31`, `12:00`, Clean/approved) fixed copilot. The
   reviewer's mutation — reverting the test's `persistence` local to
   `AdapterPersists(None)` — reproduced the pre-fix state exactly: *"2 rows:
   `"what was Q4 revenue"` and `"[source: web, user_local_time: ...] what was
   Q4 revenue"`."* Two user rows for one turn, in production, for six days.
-- **KYO-572** (`2026-08-31`, `08:57`, Clean/approved) is the assistant-side
+- (private/local review log; not tracked in this repository) **KYO-572** (`2026-08-31`, `08:57`, Clean/approved) is the assistant-side
   instance of the same unreconciled write path: copilot INSERTed an empty
   placeholder assistant row that then collided with the one
   `persist_after_chat` wrote, so the reply was never durably persisted. The fix

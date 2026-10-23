@@ -49,20 +49,20 @@ CURL_ARGS=(--retry 3 --retry-all-errors --max-time 120 --retry-max-time 600)
 
 Real precedent, `2026-08-29` and `2026-08-30`:
 
-- **KYO-510 (`21:21`, 2026-08-29)** — 🟡, and a functional gap rather than a wording one.
+- (private/local review log; not tracked in this repository) **KYO-510 (`21:21`, 2026-08-29)** — 🟡, and a functional gap rather than a wording one.
   `CURL_MAX_TIME_SECS`'s doc comment called `--max-time` "an overall time budget ...
   including all of its retries"; `man curl` says the counter is reset on each retry, so the
   real worst case was "1 initial + 3 retries × up to 300s each", "~3600s for all three
   files" — undermining the stated design goal of bounding CI hang time. The fix was a flag
   the inference had hidden entirely: `--retry-max-time`.
-- **KYO-510 cycle 2 (`21:29`, 2026-08-29)** — 🟢, same ticket, the other half of the failure.
+- (private/local review log; not tracked in this repository) **KYO-510 cycle 2 (`21:29`, 2026-08-29)** — 🟢, same ticket, the other half of the failure.
   This time the man-page text in the comment was "verbatim-accurate" and only the comment's
   "own downstream arithmetic conclusion" was off: it called the bound "approximate, not a
   hard one" at ~30 minutes, when `--retry-max-time` plus `--max-time` give a deterministic
   720s per file, ~36 minutes for three. The review's own note is the rule in one sentence —
   "cycle 1 had the mechanism backwards ... cycle 2 has the mechanism right but the
   residual-overrun arithmetic is off by one `--max-time` term."
-- **`a-diff-comparison-is-not-evidence-of-mergeability.md` (`20:35`, 2026-08-30)** — 🟡 on a
+- (private/local review log; not tracked in this repository) **`a-diff-comparison-is-not-evidence-of-mergeability.md` (`20:35`, 2026-08-30)** — 🟡 on a
   standards doc, which is where this stings most. Its rationale explained git's three-way
   merge as patch-context matching: "`git diff`'s default is ±3 ... must match exactly for
   the hunk to apply." The reviewer disproved it in an isolated repo — two single-line edits
@@ -72,7 +72,7 @@ Real precedent, `2026-08-29` and `2026-08-30`:
   up under test." Cycle 2 rewrote the mechanism and re-verified it with a fresh repro, and
   the `21:15` KYO-550 rework review reproduced all three mechanisms *again* in a new scratch
   repo rather than reusing either earlier one.
-- **KYO-546 (`16:52` cycle 2, fixed at `16:48` cycle 3, 2026-08-29)** — 🟢, the trivial end
+- (private/local review log; not tracked in this repository) **KYO-546 (`16:52` cycle 2, fixed at `16:48` cycle 3, 2026-08-29)** — 🟢, the trivial end
   of the same class, and it still cost a review cycle: two comments described
   `kyomi-merge-sweeper-cron.sh` as "28 chars" when `python3 -c "print(len(...))"` returns
   27. A comment-only third cycle, for a fact that was one command away when it was written.
@@ -80,12 +80,12 @@ Real precedent, `2026-08-29` and `2026-08-30`:
 The habit that would have prevented all four shows up in the same window, applied to
 questions where the plausible answer was the wrong one:
 
-- **KYO-500 (`17:22`, 2026-08-29)** — the reviewer wrote a throwaway test (never staged) to
+- (private/local review log; not tracked in this repository) **KYO-500 (`17:22`, 2026-08-29)** — the reviewer wrote a throwaway test (never staged) to
   probe whether a `Signal::derive`'s *own* registration owner, rather than only the signals
   it reads, decides disposal safety. It panicked, showing that 55 `lint-allow`
   justifications resting on "single-source ⇒ no disposal hazard" were "not a *rigorous
   proof*." No amount of re-reading the diff produces that answer.
-- **KYO-567 (`15:40`, 2026-08-30)** — the "died between push and delete" retry path had no
+- (private/local review log; not tracked in this repository) **KYO-567 (`15:40`, 2026-08-30)** — the "died between push and delete" retry path had no
   individually-named test, so the reviewer reproduced it "against a throwaway bare remote
   not used by the test suite" and confirmed idempotency directly. In cycle 2 (`16:51`) the
   "different-shas" safety claim was likewise re-derived from git's own fast-forward

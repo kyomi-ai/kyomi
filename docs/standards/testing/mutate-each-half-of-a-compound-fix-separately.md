@@ -51,7 +51,7 @@ assert_eq!(user_rows[0].message_source.as_deref(), Some("Kyomi Watch"), /* ... *
 
 Two tickets, five review entries, one day:
 
-- **KYO-573** (review log `2026-09-01`, cycles at `00:47` / `01:35` / `01:20`) — the fix set
+- **KYO-573** (review log (private/local; not tracked in this repository) `2026-09-01`, cycles at `00:47` / `01:35` / `01:20`) — the fix set
   `UserMessagePersistence::CallerPersisted` *and* threaded `message_source` through
   `prepare_watch_dispatch` (`crates/kyomi-agent/src/watch_execution.rs`). Cycle 2 ran the
   combined mutation and got both `watch_turn_via_adapter_persists_*` tests red, then ran the
@@ -62,7 +62,7 @@ Two tickets, five review entries, one day:
   that half of the fix has its own independent, correctly-targeted guard."* Under the combined
   mutation alone that second test had failed on `sanity: exactly one user row` — the shared
   assertion, not its own.
-- **KYO-579** (review log `2026-09-01`, `20:50` cycle 2 and `21:00` cycle 3) — the same
+- **KYO-579** (review log (private/local; not tracked in this repository) `2026-09-01`, `20:50` cycle 2 and `21:00` cycle 3) — the same
   distinction, one cycle apart, on `save_agent_error` (`crates/kyomi-auth/src/chat_service.rs`).
   Cycle 2's test proved the fallback-insert branch was reachable via a real FK violation and
   asserted the row was absent; the reviewer reverted the fix to `let _ = add_message(...).await;`

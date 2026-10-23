@@ -45,6 +45,8 @@ than a value the code generates at run time, derive it from that value rather th
 a literal beside it. Then mutate: if the mutation is green, the fixture is the first thing to
 suspect, not the last.
 
+(private/local review log; not tracked in this repository)
+
 ```rust
 // WRONG — a reconstruction, not a quote. The pre-fix form was corrected during
 // review and PR #520 squash-merged, so there is no `<sha>^` that carries it;
@@ -88,7 +90,7 @@ assert_eq!(
 
 Real precedent — two tickets, one 🔴 that blocked signing:
 
-- **KYO-498, the `chat session live-insert regression coverage` review and its cycle-2
+- (private/local review log; not tracked in this repository) **KYO-498, the `chat session live-insert regression coverage` review and its cycle-2
   re-review** (`2026-09-12` log) — 🔴, *Test Manipulation / False Success Claim*. The reviewer
   reverted `sort_sessions_by_recency` (`crates/kyomi-ui/src/pages/chat/chat_list.rs`) to
   `Reverse(s.updated_at.clone())` — the pre-KYO-490 bug — and **both tests
@@ -103,7 +105,7 @@ Real precedent — two tickets, one 🔴 that blocked signing:
   the same mutation and confirmed the new assertion is the one that goes red. Landed on `main`
   in `9acc7a87` (PR #520, squash-merge of branch `origin/jason/kyo-498-chat-session-live-insert`
   at `eb39e875`) — unmerged at authoring time, merged by the time this rule was rescued.
-- **KYO-701, the `last-auth-method guard on Google disconnect` review** (`2026-09-10` log) —
+- (private/local review log; not tracked in this repository) **KYO-701, the `last-auth-method guard on Google disconnect` review** (`2026-09-10` log) —
   the second shape, found while checking an untouched pre-existing test
   (`disconnect_preserves_local_state_when_revocation_fails`,
   `crates/kyomi-auth/src/google_oauth.rs`). The reviewer
@@ -124,7 +126,7 @@ the three are the same instinct on the three parts of a test. That rule asks *wh
 point* you drive; the other asks *what the assertion looks at* once you are there; this one
 asks *which inputs you hand it* — because a correct entry point and a correct assertion still
 prove nothing about an axis the data never varies along on its own. The same vacuity can also
-arrive through the assertion instead of the fixture: **KYO-716** (review log `2026-09-12`,
+arrive through the assertion instead of the fixture: **KYO-716** (review log (private/local; not tracked in this repository) `2026-09-12`,
 heading *"KYO-716: migration schema drift detection"*, a 🟡 fixed in the re-review) is that
 shape, not this one — `assert!(status == "healthy" || status == "degraded")` in
 `apps/server/tests/contract_health.rs` enumerated every value the field can hold by

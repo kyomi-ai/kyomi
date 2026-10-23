@@ -58,16 +58,16 @@ $ cargo clippy -p kyomi-ui --locked --features ssr -- -D warnings
 
 Real precedent — four runs, two tickets, two days:
 
-- **KYO-468 cycle 2** (review log `2026-08-29`, `21:49`): the reviewer re-ran
+- **KYO-468 cycle 2** (review log (private/local; not tracked in this repository) `2026-08-29`, `21:49`): the reviewer re-ran
   `cargo clippy -p kyomi-ui --locked -- -D warnings` "after a forced `touch` to
   defeat a suspiciously-fast 0.54s cached run (real recompile: 45s, exit 0)".
   The forced run was also clean — the point is not that it caught a defect, but
   that until it ran there was nothing to be clean *about*.
-- **KYO-468 cycle 3** (`2026-08-29`, `22:20`): same command, "after a forced
+- (private/local review log; not tracked in this repository) **KYO-468 cycle 3** (`2026-08-29`, `22:20`): same command, "after a forced
   `touch` (49.85s real recompile, exit 0)".
-- **KYO-468 cycle 4** (`2026-08-29`, `23:40`): `cargo check`/`cargo clippy` on
+- (private/local review log; not tracked in this repository) **KYO-468 cycle 4** (`2026-08-29`, `23:40`): `cargo check`/`cargo clippy` on
   `kyomi-ui` both clean with "forced recompile via `touch`, ~35s real".
-- **KYO-526 rebase review** (review log `2026-08-30`, `12:56`, PR #435): the
+- **KYO-526 rebase review** (review log (private/local; not tracked in this repository) `2026-08-30`, `12:56`, PR #435): the
   habit had spread to a different reviewer on a different ticket —
   "`cargo check -p kyomi-ui --features ssr`: clean (real recompile, not cache
   hit — verified via `touch` + re-run)".

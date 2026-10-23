@@ -39,7 +39,7 @@ operation: deny without mutating when authorization was revoked
 operation: otherwise retain the lock through the write and commit
 ```
 
-Two initial security findings in `docs/review-logs/2026-09-27.md` instantiate this
+Two initial security findings in `docs/review-logs/2026-09-27.md` (private/local review log; not tracked in this repository) instantiate this
 pattern, and both fixes have landed:
 
 - **KYO-847**, `private collection mutation authorization, initial review`: a

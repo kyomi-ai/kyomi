@@ -57,7 +57,7 @@ let can_transfer_ownership = Memo::new(move |_| perms.can(Permission::TransferOw
 Real precedent — three tickets in four days, each one a second implementation that was
 narrower than the helper it shadowed:
 
-- **KYO-231's `permission gates (billing.rs, settings_shell.rs, team.rs)` review** — 🟡
+- (private/local review log; not tracked in this repository) **KYO-231's `permission gates (billing.rs, settings_shell.rs, team.rs)` review** — 🟡
   Copy-Paste, refused signing. `can_transfer_ownership_from` in `team.rs` reimplemented
   `crate::utils::permissions`' `permissions_from` + `Permissions::can`, described by the
   reviewer as "the crate's own documented 'single lookup helper every UI gate should use'",
@@ -69,7 +69,7 @@ narrower than the helper it shadowed:
   deleted and the gate became a two-line `use_permissions()` call, with the reviewer
   confirming the deleted tests "were redundant with this, not a net coverage loss" — the
   coverage had been pinning the copy, not the behaviour.
-- **KYO-615's `canonical table-count accessor (list_datasources vs browse_catalog)` review**
+- (private/local review log; not tracked in this repository) **KYO-615's `canonical table-count accessor (list_datasources vs browse_catalog)` review**
   shows both directions in one diff. Routing `get_public_table_count` and
   `get_sample_table_count` through the canonical `datasource_service::count_tables_for_workspace`
   made them "pick up the `is_archived` filter they were missing too", and replaced bare
@@ -78,7 +78,7 @@ narrower than the helper it shadowed:
   `COUNT(*) … WHERE datasource_config_id = $1 AND is_archived = …` in
   `kyomi-ui/src/server_fns/datasources.rs`, correct today but "a second hand-written copy of
   the same predicate the ticket set out to eliminate."
-- **KYO-658's `column-embedding FK-violation race` review** — 🟡, the same failure applied to
+- (private/local review log; not tracked in this repository) **KYO-658's `column-embedding FK-violation race` review** — 🟡, the same failure applied to
   a reporting channel rather than a predicate. The diff folded a column-embedding shortfall
   into `result.errors`, which the reviewer traced end to end and found "write-only": none of
   the four real callers read it. The project already had "a purpose-built, already-wired,
@@ -86,7 +86,7 @@ narrower than the helper it shadowed:
   `catalog::helpers::update_datasource_status`'s `warnings` parameter, which the Settings
   page's poller already reads — so a user watching a refresh still saw a clean "completed",
   which is the exact failure the ticket existed to fix.
-- **KYO-616's `Instrument catalog enumeration and archive decisions` review** is the same
+- (private/local review log; not tracked in this repository) **KYO-616's `Instrument catalog enumeration and archive decisions` review** is the same
   shape caught early, at 🟢: a `capture_tracing_for_test()` wrapper duplicated verbatim
   across two test modules, where "the fix belongs conceptually inside
   `kyomi_test_tracing::capture_tracing()` itself so every current/future caller gets it for

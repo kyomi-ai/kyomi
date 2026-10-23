@@ -60,7 +60,7 @@ git push "$REMOTE" ":refs/heads/${BRANCH}"
 
 Real precedent — three scripts in one week, each one reviewed on this axis specifically:
 
-- **KYO-567** (review log `2026-08-30`, `15:40`, `16:51`, `16:57`) —
+- **KYO-567** (review log (private/local; not tracked in this repository) `2026-08-30`, `15:40`, `16:51`, `16:57`) —
   `scripts/mark-branch-stranded.sh`, which renames an abandoned pushed branch to
   `stranded/<branch>` so `check-ticket-in-flight.sh` stops reading it as a live claim. The
   branch being renamed is often the *only* copy of a dead run's commits. The reviewer traced
@@ -72,14 +72,14 @@ Real precedent — three scripts in one week, each one reviewed on this axis spe
   the push can only succeed as a fast-forward. If `stranded/<branch>` already points at a
   different, non-ancestor sha, git's own push protection rejects it — no code path can
   silently discard the original branch's commits."*
-- **KYO-568** (review log `2026-08-31`, `16:37`, `kyomi-private`) —
+- **KYO-568** (review log (private/local; not tracked in this repository) `2026-08-31`, `16:37`, `kyomi-private`) —
   `scripts/link-agent-skills.sh`, which replaces live skill files with symlinks into the
   tracked copies and can therefore clobber unpushed edits. Refusal path leaves the live file
   untouched; `--force` always `cp -p`s a backup first. The reviewer proved the backup was
   load-bearing rather than decorative by removing it: *"Deleted the backup step (`cp -p --
   "$live" "$backup"`) → correctly went 31 passed / 2 failed (Test 5, Test 7 — the exact tests
   guarding the 'unpushed content must be backed up before any clobber' property)."*
-- **KYO-529** (review log `2026-08-25`, `00:00`) — the reading side of the same discipline,
+- **KYO-529** (review log (private/local; not tracked in this repository) `2026-08-25`, `00:00`) — the reading side of the same discipline,
   in `scripts/check-ticket-in-flight.sh`. A tombstone marker *suppresses* evidence, so a
   misread suppression is destructive in effect: *"Checked every fail path in
   `tombstone_names_ticket`: missing file (`-f` false → return 1), non-regular file, and

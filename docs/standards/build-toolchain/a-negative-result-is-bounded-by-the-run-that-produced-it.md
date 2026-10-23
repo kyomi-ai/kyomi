@@ -57,7 +57,7 @@ gap between the sample's duration and the failures' durations:
 Real precedent — one ticket, three review cycles, three artefacts, and the same root every
 time:
 
-- **KYO-692 / KYO-713**, `2026-09-11`, heading *"KYO-692 (+KYO-713) rename and correct the
+- (private/local review log; not tracked in this repository) **KYO-692 / KYO-713**, `2026-09-11`, heading *"KYO-692 (+KYO-713) rename and correct the
   headless sub-agent standard (PR #505, rework 2)"* — 🟡: *"That specific kill mechanism is
   now historical — it does not reproduce on the current harness"* generalises "a single
   ~150 s sample", against a `killed.system` field doc that is byte-identical in 2.1.245,
@@ -80,11 +80,15 @@ time:
   ~50 lines above the paragraph that bounds it; the suggested repair was a trailing
   *"WITHIN A ~150s BOUND"* on the header itself.
 
+(private/local review log; not tracked in this repository)
+
 The habit done right, in an unrelated domain, the day before: **KYO-710**, `2026-09-10`,
 heading *"KYO-710 cron auth-failure detection (re-review, cycle 2)"* — a signal was argued
 redundant by checking "all six real incident logs", and the conclusion was scoped to exactly
 that sample: removing it *"would not lose any real-world detection already proven"*, rather
 than that it would lose nothing.
+
+(private/local review log; not tracked in this repository)
 
 Distinct from [name-the-check-you-could-not-run.md](name-the-check-you-could-not-run.md):
 there no check ran at all — the binary is missing, the credential does not exist — and the
@@ -114,7 +118,7 @@ rule's; this one governs the conclusion drawn from a negative run, number or no 
 
 See also
 [../comments-documentation/withdraw-a-claim-from-everything-that-carried-it.md](../comments-documentation/withdraw-a-claim-from-everything-that-carried-it.md)
-— it mines nearly the same KYO-692/713 review-log cycles for an adjacent but distinct
+— it mines nearly the same KYO-692/713 review-log cycles (private/local; not tracked in this repository) for an adjacent but distinct
 failure: propagating a withdrawal to every tracked file that still carries the discredited
 claim, once the claim is already known wrong, versus this rule's discipline of stating the
 bound at authoring time so the claim is never overreached to begin with.

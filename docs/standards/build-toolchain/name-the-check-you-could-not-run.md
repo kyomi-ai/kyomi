@@ -51,7 +51,7 @@ RIGHT — the substitute is labelled, and the gap is stated as a gap:
 Real precedent — four tickets across three review-log days, all of them the disclosed
 (passing) form, which is why the practice is worth pinning before it erodes:
 
-- **KYO-703**, review log `2026-09-09`, heading *"KYO-703: remove the PR-listing ceiling
+- **KYO-703**, review log (private/local; not tracked in this repository) `2026-09-09`, heading *"KYO-703: remove the PR-listing ceiling
   from check-ticket-in-flight.sh"* — the disclosure survives all three cycles verbatim
   rather than being dropped once it has been said:
   > **Not verified — stated plainly:** `shellcheck` is **not installed on this box**, so the
@@ -61,7 +61,7 @@ Real precedent — four tickets across three review-log days, all of them the di
   Cycle 2 repeats it as "unchanged from cycle 1"; cycle 3 as "unchanged across all three
   cycles… No shell lint pass has happened at any point."
 
-- **KYO-677**, review log `2026-09-09`, heading *"KYO-677 enable `--cfg=leptos_debuginfo`
+- **KYO-677**, review log (private/local; not tracked in this repository) `2026-09-09`, heading *"KYO-677 enable `--cfg=leptos_debuginfo`
   for dev wasm builds only"* — the labelled-proxy case: the PowerShell strip was checked by
   "a Python emulation of the chained pwsh `-replace` (pwsh is NOT installed on this box —
   regex assessed by emulation + reasoning …, not by execution)", and cycle 2 restates it in
@@ -69,18 +69,20 @@ Real precedent — four tickets across three review-log days, all of them the di
   imply an execution: "(`pwsh` is still not installed on this box — emulation, not
   execution.)"
 
-- **KYO-632**, review log `2026-09-04`, heading *"KYO-632 stale-tooling-guard (PR #486,
+- **KYO-632**, review log (private/local; not tracked in this repository) `2026-09-04`, heading *"KYO-632 stale-tooling-guard (PR #486,
   post-rebase re-review, cycle 2)"* — states the rule in one clause, and adds the fact that
   makes the gap tolerable rather than leaving the reader to guess at it:
   > shellcheck not installed on this machine — could not run it; noting as unverified rather
   > than assuming clean. No shellcheck step exists in CI either.
 
-- **KYO-607**, review log `2026-09-03`, heading *"KYO-607: recycled pre-restart ticket keys
+- **KYO-607**, review log (private/local; not tracked in this repository) `2026-09-03`, heading *"KYO-607: recycled pre-restart ticket keys
   in check-ticket-in-flight.sh"* (cycle 3) — the same discipline for a data source rather
   than a binary, and it names where the evidence *did* come from instead:
   > Could not re-verify KYO-299's Trakkt `created_at` this cycle — every Trakkt MCP server is
   > unauthenticated in this session; cycle 2 verified it at source … and it is a README-only
   > claim with no bearing on the executable behaviour.
+
+(private/local review log; not tracked in this repository)
 
 The reviewer of the KYO-644 pre-work standard (`2026-09-05`, heading *"Standards-mining
 commit: redirection-probe-in-bare-if rule (KYO-644 pre-work)"*) went looking for a
@@ -88,6 +90,8 @@ commit: redirection-probe-in-bare-if rule (KYO-644 pre-work)"*) went looking for
 found neither installed, and concluded that "the residual gap the file discloses is real and
 its caveat is stated honestly, not glossed over" — closing with "a good pattern to hold other
 mined standards to." This rule is that.
+
+(private/local review log; not tracked in this repository)
 
 The one MAJOR finding in this window shows the cost of the opposite habit, and where the
 boundary with the sibling rule sits. In **KYO-644** (`2026-09-05`, heading *"KYO-644: chunk

@@ -60,7 +60,7 @@ RIGHT — split on cost, not on convenience:
 
 Four review-log entries, three tickets, five days:
 
-- **KYO-466**, review log `2026-08-23`, `17:22` (initial, 🟡 MAJOR, "incomplete fix / second
+- **KYO-466**, review log (private/local; not tracked in this repository) `2026-08-23`, `17:22` (initial, 🟡 MAJOR, "incomplete fix / second
   consumer left blind"). The implementer had already found the second consumer and filed a
   ticket. The reviewer refused it anyway:
   > The implementer correctly identified this and filed KYO-483, but I judge the deferral
@@ -70,17 +70,19 @@ Four review-log entries, three tickets, five days:
   > also not linked to KYO-466 (`has_relations: false`), failing the ticket-and-verify
   > carve-out's discoverability criterion on its own terms.
 
+(private/local review log; not tracked in this repository)
+
   Cycle 2 (`17:45`) is the resolved shape: the BigQuery half was fixed in-diff, and KYO-483 was
   "confirmed narrowed to the remaining other-providers scope with a `relates_to` link to
   KYO-466." Both halves of the rule, in one ticket.
 
-- **KYO-440**, review log `2026-08-24`, `13:49` (cycle 2) — the cost test stated as a
+- **KYO-440**, review log (private/local; not tracked in this repository) `2026-08-24`, `13:49` (cycle 2) — the cost test stated as a
   recommendation rather than a finding:
   > Recommend the implementer address the fix suggested above in the same PR before the next
   > review pass, since it's the same file/function already open and is squarely a "trivially
   > fixable" scope, not a defer-worthy one.
 
-- **KYO-440**, review log `2026-08-24`, `06:15` (cycle 4) — the provenance test, applied to a
+- **KYO-440**, review log (private/local; not tracked in this repository) `2026-08-24`, `06:15` (cycle 4) — the provenance test, applied to a
   regression the fix itself introduced. Implementing the recommended split meant a row-private
   token could no longer observe a `postMessage`, so a duplicate "connection cancelled." toast
   appeared over an accurate one:
@@ -91,12 +93,12 @@ Four review-log entries, three tickets, five days:
   afterwards — and the reviewer re-fetched it to confirm its title and description had been
   rewritten to describe that narrower gap rather than the fixed one.
 
-- **KYO-386**, review log `2026-08-20`, `20:29` (cycle 2) — the same call on a one-line shell
+- **KYO-386**, review log (private/local; not tracked in this repository) `2026-08-20`, `20:29` (cycle 2) — the same call on a one-line shell
   fix, made before any ticket was written:
   > This is a small, mechanical fix — recommend applying it and re-requesting review rather than
   > deferring; not worth a ticket for a one-line change in an unmerged diff.
 
-The contrasting case, so the rule is not read as "never defer": KYO-441 (review log
+The contrasting case, so the rule is not read as "never defer": KYO-441 (review log (private/local; not tracked in this repository)
 `2026-08-22`, `12:45`) was a real `z-50` gap in two components the KYO-434 diff did not touch.
 The reviewer verified it via `mcp__trakkt__get_issue` — "real, `agent-ready`+`bug` (not
 `deferred`), accurately specced with file:line, a concrete failure scenario … and acceptance

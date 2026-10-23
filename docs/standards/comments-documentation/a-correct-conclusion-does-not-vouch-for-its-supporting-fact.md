@@ -28,6 +28,8 @@ the tool's own verdict as well as the column you liked. And when a supporting fa
 be false, do not quietly delete it — state in the comment that it does not hold and why, or the
 next author will rediscover the same plausible-looking evidence and put it back.
 
+(private/local review log; not tracked in this repository)
+
 ```sh
 # WRONG — a reconstruction. The pre-fix paragraph exists in no commit (it was
 # repaired during review, before efb3d62e was written); only the fragment the
@@ -76,37 +78,39 @@ repair:
 # clean one rather than guessing which way it would have gone.
 ```
 
-Four findings across four tickets in the `2026-09-03` and `2026-09-09` review logs. Only one was
+Four findings across four tickets in the `2026-09-03` and `2026-09-09` review logs (private/local; not tracked in this repository). Only one was
 🟡; the other three were 🟢 and none blocked signing, which is exactly why this shape ships.
 Three of the four are shell-script headers — two of them the same file — so the sample is
 narrower than the rule, but the fourth is a markdown rule file, and nothing about the failure is
 specific to shell:
 
-- **KYO-703** — `remove the PR-listing ceiling from check-ticket-in-flight.sh`. Three entries in
+- (private/local review log; not tracked in this repository) **KYO-703** — `remove the PR-listing ceiling from check-ticket-in-flight.sh`. Three entries in
   the `2026-09-09` log share that heading; the finding is in the one whose table carries a
   `technical-accuracy-in-comment` row, and the repair is described in the one whose Notes open
   *"Worth recording the shape of the 🟢 #2 fix."* The `stranded/jason/kyo-*` refs above. Both
   code blocks in this file come from it.
-- **KYO-688** — `cron sub-agent survival re-test (audit comment + repro script + standard)` and
+- (private/local review log; not tracked in this repository) **KYO-688** — `cron sub-agent survival re-test (audit comment + repro script + standard)` and
   its cycle-2 entry, same log. The one 🟡. The header claimed a re-run *"reports ZERO runs with
   `killed.system > 0` across 64 cron runs"*; reproduced live, the count was right and the
   script's own bottom line was `RESULT: COULD NOT COMPLETE`, exit 3, because two runs were
   indeterminate. The reviewer's framing: *"A future reader who trusts the comment (the entire
   premise of these standards) walks away believing the audit is clean; running the exact cited
   command shows it is not."* The RIGHT block above is what shipped.
-- **KYO-607** — `recycled pre-restart ticket keys in check-ticket-in-flight.sh`, cycle 3 (three
+- (private/local review log; not tracked in this repository) **KYO-607** — `recycled pre-restart ticket keys in check-ticket-in-flight.sh`, cycle 3 (three
   entries share that heading in the `2026-09-03` log; this is the one with a single 🟢). The
   header justified keeping the conceptual check numbering because the numbers are *"used
   everywhere in this file, in `scripts/README.md`, and in both skill files"* — neither skill file
   numbers them, and `backlog-fast` uses "check 1 / 1b / 2 / 3" for an unrelated sequence of its
   own. *"The don't-renumber argument survives intact … only the word 'used' overreaches."*
-- **KYO-682** — `panic reports ship an empty console_errors array`, cycle 2 (the entry with one
+- (private/local review log; not tracked in this repository) **KYO-682** — `panic reports ship an empty console_errors array`, cycle 2 (the entry with one
   🟢). Not a script: a sibling-disambiguation paragraph in
   [../agent-orchestration/an-instruction-must-name-a-mechanism-that-exists.md](../agent-orchestration/an-instruction-must-name-a-mechanism-that-exists.md).
   *"The new fourth-sibling paragraph's conclusion is true, but the reason given for instance 2 is
   under-tight"* — it argued the instance was out of a sibling rule's reach because it was prose,
   when that rule explicitly covers prose. The real reason is that the instance names no
   identifier at all, which is what the file says today.
+
+(private/local review log; not tracked in this repository)
 
 Counted against
 [count-only-the-incidents-that-instantiate-the-rule.md](count-only-the-incidents-that-instantiate-the-rule.md),

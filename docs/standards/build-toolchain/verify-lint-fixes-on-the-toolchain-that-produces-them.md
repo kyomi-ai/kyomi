@@ -28,4 +28,6 @@ $ cargo clippy --locked -p kyomi-core -- -D warnings
 # Same command, now capable of producing the failure it's supposed to catch.
 ```
 
+(private/local review log; not tracked in this repository)
+
 Real precedent: KYO-400 (2026-08-21) fixed `clippy::chunks_exact_to_as_chunks` in `crates/kyomi-core/src/embedding_compat.rs`. The reviewing pass confirmed `rustc/cargo 1.98.0` on the reviewer's own shell before trusting the clean `clippy` result, and the KYO-401 re-review explicitly re-stated the toolchain version — "clean, on `rustc 1.98.0` (the toolchain the new lint requires to even fire)" — as part of the verification record rather than as incidental detail.

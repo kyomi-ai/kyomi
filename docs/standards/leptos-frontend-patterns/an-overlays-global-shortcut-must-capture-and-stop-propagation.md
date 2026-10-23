@@ -97,7 +97,7 @@ let _ = document_clone.remove_event_listener_with_callback_and_bool(
 [enforcement-status.md](enforcement-status.md) predates this rule, so it is not listed
 there.
 
-Flagged in **KYO-725** (reopened), `2026-09-11` review log, the *cycle 2* entry under
+Flagged in **KYO-725** (reopened), `2026-09-11` review log (private/local; not tracked in this repository), the *cycle 2* entry under
 "chart builder modal remount / typing reversal" — the sole 🟡, and the only finding in that
 cycle. `ChartBuilderModal` is mounted as an overlay directly inside `SqlEditorPage`
 (`crates/kyomi-ui/src/pages/sql_editor/results_container.rs`), which already installed the

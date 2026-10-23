@@ -96,7 +96,7 @@ fi
 Four findings, four tickets, two languages, three days — three of them filed by the
 reviewer under the same anti-pattern category, *Missing Error Context*:
 
-- **KYO-557** (review log `2026-08-31`, `00:00`, 🟢) — the consolidation case, and the one
+- **KYO-557** (review log (private/local; not tracked in this repository) `2026-08-31`, `00:00`, 🟢) — the consolidation case, and the one
   still live in `crates/kyomi-ui/src/server_fns/mod.rs` today. Routing `into_sfn_sqlx`
   through `into_sfn_core` was right, and the doc comment correctly argues the sqlx `Display`
   detail survives (`Error::Sqlx` is `#[error(transparent)]`). What did not survive was the
@@ -104,19 +104,19 @@ reviewer under the same anti-pattern category, *Missing Error Context*:
   error\"` for sqlx failures … the distinct string that let ops grep/alert on DB errors
   specifically is gone."* The reviewer's own framing is why this class stays open — *"not a
   regression today, just a minor loss of log filterability."*
-- **KYO-231** (`2026-09-02`, `12:56`, 🟡, filed as *Copy-Paste*) — the re-implementation
+- (private/local review log; not tracked in this repository) **KYO-231** (`2026-09-02`, `12:56`, 🟡, filed as *Copy-Paste*) — the re-implementation
   case, the WRONG block above. `can_transfer_ownership_from` in
   `crates/kyomi-ui/src/pages/settings/team.rs` re-derived
   `crate::utils::permissions::permissions_from`, and *"also silently drops the
   `tracing::warn!` on fetch failure that `permissions_from` has — a real (if minor)
   observability regression for this specific gate."* Cycle 2 (`13:05`) deleted the
   re-implementation outright and read the shared helper instead.
-- **KYO-584** (`2026-09-02`, `00:45`, 🟢, `scripts/link-agent-skills.sh` in
+- (private/local review log; not tracked in this repository) **KYO-584** (`2026-09-02`, `00:45`, 🟢, `scripts/link-agent-skills.sh` in
   `kyomi-private`) — the implicit-failure case. The `mkdir -p … && cd … && pwd` resolution
   *"relies on bare `set -e` to fail closed … every other failure path in the script prints a
   descriptive `ERROR:` message first; this one exits silently with whatever raw status
   `mkdir`/`cd` produced."* Fails closed, verified; just mute among announcers.
-- **KYO-567** (`2026-08-30`, `16:51`, 🟡, the `Local:` summary block in
+- (private/local review log; not tracked in this repository) **KYO-567** (`2026-08-30`, `16:51`, 🟡, the `Local:` summary block in
   `scripts/mark-branch-stranded.sh`) — the
   wrong-channel case, and the most expensive, because the missing line was the actionable
   one: *"The one piece of information a release operator most needs to act on later … is

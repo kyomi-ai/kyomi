@@ -54,6 +54,8 @@ for raw_line in body.splitlines():
     m = CLOSES_RE.match(raw_line.strip())
 ```
 
+(private/local review log; not tracked in this repository)
+
 Flagged in **KYO-617** (`2026-09-03`, `13:01`) — the sole 🟡 on `reconcile-merged-tickets.sh`,
 reproduced live by the reviewer: a body containing a fenced `Closes KYO-99` and a body
 containing a 4-space-indented `Closes KYO-97` both produced real candidate rows, in a script

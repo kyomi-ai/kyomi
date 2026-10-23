@@ -66,7 +66,7 @@ if [ "${#pr_fields[@]}" -ne 4 ] || [ -z "${pr_fields[3]}" ]; then
 fi
 ```
 
-Real precedent — **KYO-607** (`2026-09-03` review log, the three
+Real precedent — **KYO-607** (`2026-09-03` review log (private/local; not tracked in this repository), the three
 `KYO-607: recycled pre-restart ticket keys in check-ticket-in-flight.sh` entries). Adding
 `createdAt` to the `gh pr list --jq '… | @tsv'` query turned a safe three-field read into a
 four-field one. A PR with an empty `createdAt` collapsed to three fields, `pr_branch` came out

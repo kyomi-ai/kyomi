@@ -71,7 +71,7 @@ RIGHT — same diff, the consequence named and decided:
 
 Five entries, five tickets, three days — one silent, four declared:
 
-- **KYO-492** (review log `2026-08-23`, `00:58`, finding #3 of four: 🟡, category "Quick &
+- **KYO-492** (review log (private/local; not tracked in this repository) `2026-08-23`, `00:58`, finding #3 of four: 🟡, category "Quick &
   Dirty / undocumented scope") — the silent one. Beyond the durability fix in
   `prepare_chat_dispatch` (`crates/kyomi-auth/src/chat_service.rs`), the diff changed what
   the web chat path stores, and therefore what `get_agent_messages` hands back to the model
@@ -83,10 +83,10 @@ Five entries, five tickets, three days — one silent, four declared:
   The remedy asked for was disclosure or a decision, not a revert. That entry was not signed,
   but for the two 🔴 blockers alongside it ("primarily the workspace does not build as
   staged") — this 🟡 did not cost the cycle on its own. It was resolved by decision rather
-  than disclosure: the version that shipped (review log `2026-08-24`, `04:55`, clean) has
+  than disclosure: the version that shipped (review log (private/local; not tracked in this repository) `2026-08-24`, `04:55`, clean) has
   "both `skip_ai` and AI paths now agree on storing the raw message," with the residual
   LLM-context gap filed as KYO-506 and confirmed out of scope in the review.
-- **KYO-517** (`2026-08-24`, `11:20`, Clean/approved on the initial pass, no cycle) —
+- (private/local review log; not tracked in this repository) **KYO-517** (`2026-08-24`, `11:20`, Clean/approved on the initial pass, no cycle) —
   accepted. `connection_step_satisfied_from`
   (`crates/kyomi-ui/src/pages/settings/datasources.rs`) was generalized from the three
   provider/auth-mode pairs the ticket named to a registry-derived dispatch over the existing
@@ -96,7 +96,7 @@ Five entries, five tickets, three days — one silent, four declared:
   > Well-executed generalization beyond the literal brief, with the risk of that
   > generalization pre-empted by an accurate doc comment rather than requiring reviewer
   > pushback — a good pattern for future "I generalized your ask" diffs to follow.
-- **KYO-440** (`2026-08-24`, `13:19`, cycle 1: 0 🔴, 3 🟡, not signed) — the *extension* was
+- (private/local review log; not tracked in this repository) **KYO-440** (`2026-08-24`, `13:19`, cycle 1: 0 🔴, 3 🟡, not signed) — the *extension* was
   accepted; none of the three findings was about it. A new `oauth_recovered` signal, outside
   the literal brief, was justified in the diff by a claim about `<For>` not re-invoking a
   retained key's view function. The reviewer checked that claim against the `tachys` version
@@ -106,20 +106,22 @@ Five entries, five tickets, three days — one silent, four declared:
 
   Declaring an extension invites the check; it does not exempt you from it, and it does not
   immunise the rest of the diff.
-- **KYO-428** (`2026-08-23`, `05:20`, Clean/approved) — accepted.
+- (private/local review log; not tracked in this repository) **KYO-428** (`2026-08-23`, `05:20`, Clean/approved) — accepted.
   `save_datasource_credentials` (`crates/kyomi-ui/src/server_fns/datasources.rs`) was moved
   to the JSON input codec although only its sibling `create_datasource_modal` was named, and
   was *"judged justified, not scope creep"* because leaving it behind
   > would make decoded shape path-dependent on which of two call sites sent the map
 
   — an asymmetry the diff's own comment on that function already described.
-- **KYO-435** (`2026-08-22`, `13:35`, Clean/approved — 0 🔴, 0 🟡, 2 🟢) — the
+- (private/local review log; not tracked in this repository) **KYO-435** (`2026-08-22`, `13:35`, Clean/approved — 0 🔴, 0 🟡, 2 🟢) — the
   explicit-constraint case, adjudicated both ways in one review. The ticket said do not change
   the copy. Moving paragraph boundaries to promote "Request access" to a button label was
   judged presentation and *"inherent to the ticket's own ask, not scope creep"*; capitalizing
   a caption's first word — a smaller and more obviously correct edit — was flagged 🟢 as
   > technically a copy change per the ticket's own "do not change copy" constraint — flag for
   > explicit sign-off rather than apply silently.
+
+(private/local review log; not tracked in this repository)
 
   Cycle 2 (`14:05`) records the right response to that flag, and it is not "apply it anyway":
   the nit was *"deliberately left unactioned, correctly … Surfaced as an open question in the
