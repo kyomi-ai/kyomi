@@ -168,19 +168,11 @@
  *       modes left, per the "already enabled by design" and "needs a real
  *       test" entries above and below respectively) — with it gone, no
  *       create-mode auth mode can reach "Next enabled" from a simulated
- *       message any more. This is a finding, not a gap papered over: the
- *       modal-level listener still sets `test_result`/`modal_oauth_connected`
- *       off `GoogleSuccess`/`BigqueryEnterpriseSuccess` unconditionally,
- *       regardless of which auth mode is currently selected (`datasources.rs`
- *       ~L3707-3726) — which means dispatching either message while
- *       `service_account` (the current default) is selected would flip
- *       `test_succeeded` to `true` and enable Next for a mode with no
- *       actual validated credential. That cross-mode leakage was
- *       deliberately NOT used to manufacture a transition here — asserting
- *       against it would test an incidental side effect instead of a
- *       designed gate, exactly the kind of fake result this suite must not
- *       produce. Flagged out of scope in the KYO-473 report as a possible
- *       latent bug worth its own ticket.
+ *       message any more. KYO-921 fixes the previously observed cross-mode
+ *       leakage: modal callbacks now read the current provider and auth mode
+ *       at dispatch time and ignore mismatched OAuth messages. Host regression
+ *       tests exercise that production callback after switching modes/providers;
+ *       service_account still requires a real validated credential.
  *     - Snowflake oauth (SNOWFLAKE_OAUTH_SUCCESS)
  *     - Databricks oauth (DATABRICKS_OAUTH_SUCCESS)
  *     - Synapse enterprise_oauth (MICROSOFT_ENTERPRISE_OAUTH_SUCCESS)
