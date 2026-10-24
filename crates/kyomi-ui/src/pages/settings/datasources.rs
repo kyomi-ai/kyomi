@@ -5944,8 +5944,8 @@ fn synapse_oauth_source(mode: &str) -> Option<OAuthStatusSource> {
 /// mapping every `*AuthModeSection` already wires into
 /// `use_oauth_status_refetch`, rather than hand-rolling a second,
 /// independent (ds_type, auth_mode) → [`OAuthStatusSource`] mapping that
-/// could silently drift from it. Added for KYO-517 —
-/// [`connection_step_satisfied_from`] is its only caller today.
+/// could silently drift from it. Both [`connection_step_satisfied_from`]
+/// and the modal OAuth listener use this mapping.
 fn oauth_source_for_ds_type(ds_type: &str, auth_mode: &str) -> Option<OAuthStatusSource> {
     match ds_type {
         "bigquery" => bigquery_oauth_source(auth_mode),
