@@ -18,6 +18,7 @@ use kyomi_core::{Config, Error, Result};
 use kyomi_types::personal_mcp_oauth::{
     McpOAuthCallback, McpOAuthDiscovery, McpOAuthStarted, StartMcpOAuth,
 };
+use kyomi_ui::{components::Button, pages::auth::auth_layout::AuthLayout};
 use leptos::prelude::*;
 use std::sync::Arc;
 
@@ -44,6 +45,12 @@ pub fn production(state: &crate::state::AppState) -> Router<crate::state::AppSta
     let service = if state.config.personal_mcp_enabled {
         OAuthSettings::from_deployment(&state.config.frontend_url)
             .and_then(OAuthService::production)
+            .map_err(|_| {
+                tracing::warn!(
+                    category = "personal_mcp_oauth_initialization",
+                    "Personal MCP OAuth unavailable: check HTTPS public origin, operator client configuration and safe transport settings"
+                );
+            })
             .ok()
             .map(Arc::new)
     } else {
@@ -134,17 +141,23 @@ async fn callback_landing(
     }
     let owner = Owner::new();
     let body=owner.with(|| view! {
-        <html><head><title>"Complete MCP connection"</title><meta name="referrer" content="no-referrer"/></head>
-        <body><h1>"Complete your MCP connection"</h1>
-        <p>"Continue with your current Kyomi account to finish connecting."</p>
-        <form method="post" action="/api/v1/personal-mcp/oauth/callback/complete" autocomplete="off">
-        <input type="hidden" name="state" value=query.state/>
-        {query.code.map(|value| view! {<input type="hidden" name="code" value=value/>})}
-        {query.iss.map(|value| view! {<input type="hidden" name="iss" value=value/>})}
-        {query.error.map(|_| view! {<input type="hidden" name="error" value="access_denied"/>})}
-        <button type="submit">"Complete connection"</button></form></body></html>
+        <AuthLayout
+            title=Signal::derive(|| "Complete your MCP connection".to_string())
+            subtitle=Signal::derive(|| "Continue with your current Kyomi account to finish connecting.".to_string())
+        >
+            <form method="post" action="/api/v1/personal-mcp/oauth/callback/complete" autocomplete="off">
+                <input type="hidden" name="state" value=query.state/>
+                {query.code.map(|value| view! {<input type="hidden" name="code" value=value/>})}
+                {query.iss.map(|value| view! {<input type="hidden" name="iss" value=value/>})}
+                {query.error.map(|_| view! {<input type="hidden" name="error" value="access_denied"/>})}
+                <Button button_type="submit" class="w-full">"Complete connection"</Button>
+            </form>
+        </AuthLayout>
     }.to_html());
-    Ok(Html(format!("<!doctype html>{body}")))
+    Ok(Html(crate::leptos_frontend::scriptless_auth_document(
+        "Complete MCP connection · Kyomi",
+        &body,
+    )))
 }
 async fn callback(
     State(state): State<OAuthRouteState>,

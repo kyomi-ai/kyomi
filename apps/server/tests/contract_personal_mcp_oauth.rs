@@ -277,6 +277,7 @@ async fn matrix(pool: DbPool) {
         .unwrap();
     assert_eq!(landing.status(), StatusCode::OK);
     assert_eq!(landing.headers()["cache-control"], "no-store");
+    assert_eq!(landing.headers()["referrer-policy"], "no-referrer");
     let csp = landing.headers()["content-security-policy"]
         .to_str()
         .unwrap();
@@ -286,6 +287,11 @@ async fn matrix(pool: DbPool) {
         String::from_utf8(to_bytes(landing.into_body(), 65536).await.unwrap().to_vec()).unwrap();
     assert!(html.contains("/api/v1/personal-mcp/oauth/callback/complete"));
     assert!(html.contains("method=\"post\""));
+    assert!(html.contains("<title>Complete MCP connection · Kyomi</title>"));
+    assert!(html.contains("auth-brand-panel"));
+    assert!(html.contains("Complete connection"));
+    assert!(html.contains("type=\"submit\""));
+    assert!(!html.contains("data-ssr"));
     assert!(!html.contains("<script"));
     assert_eq!(provider.token_calls.load(Ordering::SeqCst), 0);
     let escaped_query = url::form_urlencoded::Serializer::new(String::new())
