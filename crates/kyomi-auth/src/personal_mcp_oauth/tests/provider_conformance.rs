@@ -48,7 +48,7 @@ impl HttpTransport for TrakktShape {
 }
 
 async fn matrix(pool: DbPool) {
-    let actor = format!("oauth-conformance-{}", uuid::Uuid::new_v4());
+    let actor = format!("oauth-conf-{}", uuid::Uuid::new_v4());
     db_execute!(
         &pool,
         "INSERT INTO users (user_id,email) VALUES ($1,$2)",
