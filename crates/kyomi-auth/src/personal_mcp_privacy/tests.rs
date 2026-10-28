@@ -512,6 +512,17 @@ async fn matrix(db: DbPool) {
     let document_manager = crate::websocket::WebSocketManager::new(None, f.db.clone());
     let (_, mut document_owner_frames) = document_manager.connect(&f.a).unwrap();
     let (_, mut document_other_frames) = document_manager.connect(&f.b).unwrap();
+    // connect() sends exactly one immediate transport heartbeat, independently
+    // of document delivery. Verify that frame before testing publication output.
+    for frames in [&mut document_owner_frames, &mut document_other_frames] {
+        let initial = frames.try_recv().expect("new connection heartbeat");
+        let heartbeat: kyomi_core::WebSocketMessage = serde_json::from_str(&initial).unwrap();
+        assert_eq!(
+            heartbeat.message_type,
+            kyomi_core::MessageType::Heartbeat,
+            "{initial}"
+        );
+    }
     crate::websocket::helpers::send_dashboard_update(
         &document_manager,
         &f.ws,
@@ -522,8 +533,16 @@ async fn matrix(db: DbPool) {
         None,
     )
     .await;
-    assert!(document_other_frames.try_recv().is_err());
-    assert!(document_owner_frames.try_recv().unwrap().contains(&doc));
+    let unexpected = document_other_frames.try_recv();
+    assert!(
+        unexpected.is_err(),
+        "nonowner received private document notification: {unexpected:?}"
+    );
+    let owner_frame = document_owner_frames.try_recv().unwrap();
+    assert!(
+        owner_frame.contains(&doc),
+        "owner document notification missing: {owner_frame}"
+    );
     for message in [
         kyomi_core::WebSocketMessage::new(kyomi_core::MessageType::DashboardUpdate)
             .with_workspace(&f.ws).with_data(serde_json::json!({"dashboard_id":doc,"action":"updated"})),
@@ -532,9 +551,11 @@ async fn matrix(db: DbPool) {
     ] {
         let json = serde_json::to_string(&message).unwrap();
         document_manager.deliver_redis_payload(&f.b, &json).await.unwrap();
-        assert!(document_other_frames.try_recv().is_err());
+        let unexpected = document_other_frames.try_recv();
+        assert!(unexpected.is_err(), "nonowner received private Redis document notification: {unexpected:?}");
         document_manager.deliver_redis_payload(&f.a, &json).await.unwrap();
-        assert!(document_owner_frames.try_recv().unwrap().contains(&doc));
+        let owner_frame = document_owner_frames.try_recv().unwrap();
+        assert!(owner_frame.contains(&doc), "owner Redis document notification missing: {owner_frame}");
     }
     let second_doc = f.doc().await;
     assert!(
