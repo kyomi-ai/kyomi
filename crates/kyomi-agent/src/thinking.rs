@@ -996,6 +996,46 @@ pub(crate) fn format_tool_schema(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn personal_mcp_cached_shared_recipients_do_not_receive_inherited_private_thinking_or_completion() {
+        let db=crate::test_support::test_pool().await;
+        for user in ["privacy-a","privacy-b"] {
+            kyomi_core::db_execute!(&db,"INSERT INTO users (user_id,email) VALUES ($1,$2)",user,format!("{user}@example.com")).unwrap();
+        }
+        kyomi_core::db_execute!(&db,"INSERT INTO workspaces (workspace_id,name,owner_user_id) VALUES ('privacy-w','fixture','privacy-a')").unwrap();
+        for user in ["privacy-a","privacy-b"] {
+            kyomi_core::db_execute!(&db,"INSERT INTO workspace_users (workspace_id,user_id,role,active) VALUES ('privacy-w',$1,'workspace_user',TRUE)",user).unwrap();
+        }
+        kyomi_core::db_execute!(&db,"INSERT INTO chat_sessions (session_id,user_id,workspace_id,shared) VALUES ('privacy-s','privacy-a','privacy-w',TRUE)").unwrap();
+        let manager=WebSocketManager::new(None,db.clone());
+        let (_,mut owner)=manager.connect("privacy-a").unwrap();let (_,mut other)=manager.connect("privacy-b").unwrap();
+        let recipients=vec!["privacy-a".to_string(),"privacy-b".to_string()];
+        let mut tracker=AgentThinkingTracker::new(AgentThinkingTrackerConfig {
+            workspace_id:"privacy-w".into(),session_id:"privacy-s".into(),user_id:"privacy-a".into(),message_id:"privacy-message".into(),ws_manager:manager.clone(),workspace_user_ids:Some(recipients.clone()),context_type:Some("chat".into()),context_window:0,incremental_flush:None,
+        });
+        tracker.agent_started("Shared control","Visible before the owner unshares").await;
+        let mut shared_frames=0;
+        while let Ok(frame)=other.try_recv() { if frame.contains("agent_thinking") {shared_frames+=1;} }
+        assert_eq!(shared_frames,1,"ordinary shared native execution remains visible");
+        while owner.try_recv().is_ok() {}
+        kyomi_auth::chat_service::set_session_shared(&db,"privacy-s",false).await.unwrap();
+        kyomi_core::db_execute!(&db,"INSERT INTO personal_mcp_private_contexts (owner_user_id,workspace_id) VALUES ('privacy-a','privacy-w')").unwrap();
+        kyomi_auth::personal_mcp_privacy::inherit_private_document_context(&db,"privacy-a","privacy-w",Some("privacy-s"),None).await.unwrap();
+        let secret="personal external result sentinel only for the owner";
+        tracker.tool_execution_started("read_knowledge_file",&serde_json::json!({"path":secret})).await;
+        tracker.tool_execution_completed("read_knowledge_file",secret,true).await;
+        tracker.agent_thought(secret).await;
+        tracker.agent_completed(secret).await;
+        tracker.update_token_usage(13,7,None).await;
+        crate::execution::deliver_response(&manager,"privacy-a","privacy-s","privacy-message",secret,"fixture-model",None,"chat","privacy-w",Some(&recipients)).await;
+        kyomi_auth::websocket::helpers::send_error(manager.for_workspace("privacy-w"),"privacy-b",Some("privacy-s"),secret,None,None).await;
+        let mut owner_frames=Vec::new();while let Ok(frame)=owner.try_recv() {owner_frames.push(frame);}
+        assert!(owner_frames.iter().any(|frame|frame.contains(secret)),"owner receives the private output");
+        assert!(owner_frames.iter().any(|frame|frame.contains("chat_complete")));
+        assert!(owner_frames.iter().any(|frame|frame.contains("token_usage_update")));
+        assert!(other.try_recv().is_err(),"cached shared recipients receive no thoughts, tool metadata/results, usage, errors or completion after taint");
+    }
+
     // -- clean_thought tests ------------------------------------------------
 
     #[test]

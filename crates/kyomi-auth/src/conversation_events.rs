@@ -49,6 +49,7 @@ struct AccessRow {
     user_id: String,
     shared: bool,
     event_sequence: i64,
+    personal_data_owner_id: Option<String>,
 }
 #[derive(sqlx::FromRow)]
 struct EventRow {
@@ -101,7 +102,7 @@ macro_rules! authorize {
     ($store:expr, $tx:ident, $session:expr, $write:expr) => {{
         // Updating an unchanged value locks the session on both databases. Reads lock too:
         // sharing revocation and deletion cannot race an authorized journal snapshot.
-        let session = sqlx::query_as::<_, AccessRow>("UPDATE chat_sessions SET event_sequence = event_sequence WHERE session_id = $1 AND workspace_id = $2 RETURNING user_id, COALESCE(shared, false) AS shared, event_sequence")
+        let session = sqlx::query_as::<_, AccessRow>("UPDATE chat_sessions SET event_sequence = event_sequence WHERE session_id = $1 AND workspace_id = $2 RETURNING user_id, COALESCE(shared, false) AS shared, event_sequence, personal_data_owner_id")
             .bind($session).bind($store.workspace_id).fetch_optional(&mut *$tx).await?.ok_or(EventStoreError::Unauthorized)?;
         let membership_sql = if $store.db.is_postgres() {
             "SELECT wu.role FROM workspace_users wu JOIN users u ON u.user_id = wu.user_id WHERE wu.workspace_id = $1 AND wu.user_id = $2 AND wu.active = true AND u.active = true FOR SHARE OF wu, u"
@@ -110,6 +111,9 @@ macro_rules! authorize {
         };
         let membership: Option<(String,)> = sqlx::query_as(membership_sql).bind($store.workspace_id).bind($store.actor_id).fetch_optional(&mut *$tx).await?;
         if !$store.reconcile_expired && (membership.is_none() || (session.user_id != $store.actor_id && (!session.shared || ($write && !$store.lifecycle_scope)))) {
+            return Err(EventStoreError::Unauthorized);
+        }
+        if session.personal_data_owner_id.as_deref().is_some_and(|owner| owner != $store.actor_id) && !$store.reconcile_expired {
             return Err(EventStoreError::Unauthorized);
         }
         session

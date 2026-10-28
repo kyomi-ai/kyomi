@@ -368,6 +368,8 @@ pub async fn get_entries_since(
         FROM sync_log
         WHERE workspace_id = $1 AND sync_id > $2
           AND (is_workspace_visible = {visible_literal} OR owner_user_id = $3)
+          AND NOT EXISTS (SELECT 1 FROM chat_sessions cs WHERE entity_type='chat_session' AND cs.session_id=sync_log.entity_id AND cs.personal_data_owner_id IS NOT NULL AND cs.personal_data_owner_id<>$3)
+          AND NOT EXISTS (SELECT 1 FROM personal_mcp_private_documents p WHERE entity_type IN ('dashboard','knowledge') AND p.dashboard_id=sync_log.entity_id AND p.owner_user_id<>$3)
         ORDER BY sync_id ASC
         LIMIT $4
         "#

@@ -96,6 +96,19 @@ pub async fn prepare_scoped_copilot_message(
         db, encryption_key, config, workspace_id, user_id, session_id,
         message, content, current_time_user_tz, message_source,
     } = message;
+    crate::personal_mcp_privacy::authorize_private_read(db, user_id, session_id).await?;
+    if let Some(id) = document_id {
+        let restricted = kyomi_core::db_fetch_optional!(db, (String,), "SELECT dashboard_id FROM personal_mcp_private_documents WHERE dashboard_id=$1", id)?.is_some();
+        if restricted {
+            crate::personal_mcp_privacy::inherit_private_document_context(db, user_id, workspace_id, Some(session_id), Some(id)).await?;
+        }
+    }
+    if let Some(owner) = crate::personal_mcp_privacy::restricted_owner(db, session_id).await? {
+        let allowed = if let Some(id) = document_id {
+            owner == user_id && crate::personal_mcp_privacy::is_private_copilot_destination(db, user_id, session_id, id).await?
+        } else { false };
+        if !allowed { return Err(kyomi_core::Error::Forbidden("Personal external data cannot change copilot destination".into())); }
+    }
     let mut authoritative_content = content.map(str::to_owned);
     let mut dashboard_read_only = false;
     if matches!(context_type, "dashboard_copilot" | "knowledge_copilot") {
@@ -105,6 +118,10 @@ pub async fn prepare_scoped_copilot_message(
         let dashboard = crate::dashboard_service::get_dashboard(db, id, workspace_id, user_id)
             .await?
             .ok_or_else(|| kyomi_core::Error::NotFound("Document not found or access denied".into()))?;
+        let personal = kyomi_core::db_fetch_optional!(db, (String,), "SELECT dashboard_id FROM personal_mcp_private_documents WHERE dashboard_id=$1", id)?.is_some();
+        if personal {
+            crate::personal_mcp_privacy::inherit_private_document_context(db, user_id, workspace_id, Some(session_id), Some(id)).await?;
+        }
         let expected_dashboard = context_type == "dashboard_copilot";
         if dashboard.doc_type().is_dashboard() != expected_dashboard {
             return Err(kyomi_core::Error::BadRequest("Document type does not match copilot".into()));
