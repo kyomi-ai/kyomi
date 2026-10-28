@@ -52,6 +52,32 @@ impl RpcOutcome {
         }
     }
 }
+/// Bounded diagnostics contain the exact untrusted remote name and a static reason,
+/// never credentials, headers, URLs or arbitrary server error text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RejectedTool {
+    pub name: String,
+    pub reason: ToolRejectionReason,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolRejectionReason {
+    InvalidHeaderAnnotations,
+}
+impl ToolRejectionReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidHeaderAnnotations => {
+                "invalid x-mcp-header annotations; fix the server tool definition"
+            }
+        }
+    }
+}
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolCatalog {
+    pub tools: Vec<Value>,
+    pub rejected: Vec<RejectedTool>,
+}
+
 #[derive(Default)]
 struct LegacyState {
     initialized: bool,
@@ -113,7 +139,7 @@ impl McpClient {
         if state.initialized {
             return Err(Error::new(K::Protocol, D::NotSent));
         }
-        let (outcome, session) = self.exchange("initialize", json!({"protocolVersion":self.revision.as_str(), "capabilities":{}, "clientInfo":{"name":"kyomi-mcp-client","version":env!("CARGO_PKG_VERSION")}}), None, Vec::new()).await?;
+        let (outcome, session) = self.exchange_cancellable("initialize", json!({"protocolVersion":self.revision.as_str(), "capabilities":{}, "clientInfo":{"name":"kyomi-mcp-client","version":env!("CARGO_PKG_VERSION")}}), None, Vec::new(), None, Some(&mut state.session)).await?;
         if let RpcOutcome::Result(value) = &outcome {
             if value.get("protocolVersion").and_then(Value::as_str) != Some(self.revision.as_str())
             {
@@ -149,19 +175,28 @@ impl McpClient {
     }
     /// Only bounded discovery reads receive retries. Tools/call never retries, regardless of annotations.
     pub async fn list_tools(&self) -> Result<Vec<Value>, Error> {
+        self.list_tools_catalog().await.map(|catalog| catalog.tools)
+    }
+    /// Use this catalog port when exclusions must be visible to a user. Invalid
+    /// modern header definitions are excluded without losing valid siblings.
+    pub async fn list_tools_catalog(&self) -> Result<ToolCatalog, Error> {
         self.bounded(self.catalog("tools/list", "tools")).await
     }
     pub async fn list_resources(&self) -> Result<Vec<Value>, Error> {
         self.bounded(self.catalog("resources/list", "resources"))
             .await
+            .map(|catalog| catalog.tools)
     }
-    async fn catalog(&self, method: &str, key: &str) -> Result<Vec<Value>, Error> {
+    async fn catalog(&self, method: &str, key: &str) -> Result<ToolCatalog, Error> {
         let session = self.session().await?;
         let mut cursor = None;
         let mut cursors = BTreeSet::new();
         let mut all = Vec::new();
         let mut bytes = 0usize;
         let mut schemas = BTreeMap::new();
+        let mut names = BTreeSet::new();
+        let mut rejected = Vec::new();
+        let mut count = 0usize;
         for _ in 0..self.limits.pages {
             let params = cursor
                 .as_ref()
@@ -208,15 +243,21 @@ impl McpClient {
                 .and_then(Value::as_array)
                 .ok_or_else(|| Error::new(K::Protocol, D::ResponseReceived))?;
             for value in values {
-                if all.len() >= self.limits.tools {
+                count = count.saturating_add(1);
+                if count > self.limits.tools {
                     return Err(Error::new(K::Limit, D::ResponseReceived));
                 }
                 if key == "tools" {
                     let name = value
                         .get("name")
                         .and_then(Value::as_str)
-                        .filter(|s| !s.is_empty())
+                        .filter(|s| {
+                            !s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control)
+                        })
                         .ok_or_else(|| Error::new(K::Protocol, D::ResponseReceived))?;
+                    if !names.insert(name.to_owned()) {
+                        return Err(Error::new(K::Protocol, D::ResponseReceived));
+                    }
                     let input = value
                         .get("inputSchema")
                         .filter(|v| v.is_object())
@@ -243,6 +284,10 @@ impl McpClient {
                     if self.revision == Revision::Modern20260728
                         && schema::annotations(input).is_err()
                     {
+                        rejected.push(RejectedTool {
+                            name: name.to_owned(),
+                            reason: ToolRejectionReason::InvalidHeaderAnnotations,
+                        });
                         continue;
                     }
                     if schemas.insert(name.to_owned(), input.clone()).is_some() {
@@ -256,7 +301,10 @@ impl McpClient {
                     if key == "tools" {
                         *self.schemas.lock().await = schemas;
                     }
-                    return Ok(all);
+                    return Ok(ToolCatalog {
+                        tools: all,
+                        rejected,
+                    });
                 }
                 Some(Value::String(next))
                     if !next.is_empty()
@@ -308,6 +356,7 @@ impl McpClient {
             session,
             headers,
             cancellation,
+            None,
         )
         .await
         .map(|v| v.0)
@@ -385,7 +434,7 @@ impl McpClient {
         session: Option<String>,
         headers: Vec<(String, String)>,
     ) -> Result<(RpcOutcome, Option<String>), Error> {
-        self.exchange_cancellable(method, params, session, headers, None)
+        self.exchange_cancellable(method, params, session, headers, None, None)
             .await
     }
     async fn exchange_cancellable(
@@ -395,6 +444,7 @@ impl McpClient {
         session: Option<String>,
         mut headers: Vec<(String, String)>,
         mut cancellation: Option<oneshot::Receiver<()>>,
+        initialization_session: Option<&mut Option<String>>,
     ) -> Result<(RpcOutcome, Option<String>), Error> {
         match cancellation.as_mut().map(|signal| signal.try_recv()) {
             Some(Ok(())) => return Err(Error::new(K::Cancelled, D::NotSent)),
@@ -451,6 +501,13 @@ impl McpClient {
             return Err(Error::new(K::Cancelled, D::MayHaveBeenSent));
         };
         let response = response?;
+        // Retain an assigned legacy initialization session before decoding/status
+        // checks so callers can close it even after a malformed initialization.
+        if let Some(slot) = initialization_session
+            && let Some(session) = &response.session_id
+        {
+            *slot = Some(session.clone());
+        }
         if response.body.len() > self.limits.body_bytes {
             return Err(Error::new(K::Limit, D::ResponseReceived));
         }

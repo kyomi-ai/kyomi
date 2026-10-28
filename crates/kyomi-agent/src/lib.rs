@@ -75,3 +75,5 @@ pub use types::*;
 pub use catalog_scheduler::CatalogRefreshScheduler;
 pub use scheduler::{WatchScheduler, WatchSchedulerDeps};
 pub use watch_execution::execute_watch;
+
+pub mod external_tool_policy;

@@ -5,7 +5,7 @@ mod http;
 mod schema;
 mod sse;
 
-pub use client::{McpClient, Revision, RpcOutcome};
+pub use client::{McpClient, RejectedTool, Revision, RpcOutcome, ToolCatalog, ToolRejectionReason};
 pub use http::{
     DeploymentPolicy, HttpRequest, HttpResponse, HttpTransport, Resolver, SafeHttpClient,
     SystemResolver, is_public_address,

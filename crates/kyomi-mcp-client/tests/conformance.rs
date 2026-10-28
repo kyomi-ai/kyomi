@@ -330,31 +330,85 @@ async fn schema_catalog_tool_count_and_body_limits_are_enforced() {
     );
 }
 #[tokio::test]
-async fn invalid_schema_header_locations_are_excluded() {
+async fn invalid_schema_header_tools_have_diagnostics_and_preserve_valid_siblings() {
     for schema in [
         json!({"type":"object","items":{"type":"string","x-mcp-header":"Bad"}}),
         json!({"type":"object","properties":{"a":{"type":"number","x-mcp-header":"A"}}}),
         json!({"type":"object","properties":{"a":{"type":"string","x-mcp-header":"A"},"b":{"type":"string","x-mcp-header":"a"}}}),
     ] {
-        let (client, _) = fixture(
-            vec![Ok(response(
-                1,
-                json!({"tools":[{"name":"bad","inputSchema":schema},tool()]}),
-            ))],
+        let name = "bad / untrusted original-name";
+        let (client, wire) = fixture(
+            vec![
+                Ok(response(
+                    1,
+                    json!({"tools":[{"name":name,"inputSchema":schema},tool()]}),
+                )),
+                Ok(response(2, json!({"ok":true}))),
+            ],
             Revision::Modern20260728,
             Limits::default(),
         );
-        assert_eq!(client.list_tools().await.unwrap().len(), 1);
+        let catalog = client.list_tools_catalog().await.unwrap();
+        assert_eq!(catalog.tools, vec![tool()]);
+        assert_eq!(
+            catalog.rejected,
+            vec![RejectedTool {
+                name: name.into(),
+                reason: ToolRejectionReason::InvalidHeaderAnnotations
+            }]
+        );
+        assert!(catalog.rejected[0].reason.as_str().contains("x-mcp-header"));
         assert_eq!(
             client
-                .call_tool("bad", json!({}))
+                .call_tool(name, json!({}))
                 .await
                 .err()
                 .unwrap()
                 .dispatch,
             DispatchCertainty::NotSent
         );
+        assert_eq!(
+            client
+                .call_tool("write_issue", json!({"title":"allowed"}))
+                .await
+                .unwrap(),
+            RpcOutcome::Result(json!({"ok":true}))
+        );
+        assert_eq!(
+            wire.requests.lock().unwrap().len(),
+            2,
+            "rejected tool never dispatched; valid sibling remains callable"
+        );
     }
+}
+
+#[tokio::test]
+async fn rejected_tools_count_toward_catalog_limits_and_duplicate_identity_checks() {
+    let rejected = json!({"name":"bad","inputSchema":{"type":"object","properties":{"a":{"type":"number","x-mcp-header":"A"}}}});
+    let (client, _) = fixture(
+        vec![Ok(response(1, json!({"tools":[rejected.clone(),tool()]})))],
+        Revision::Modern20260728,
+        Limits {
+            tools: 1,
+            ..Limits::default()
+        },
+    );
+    assert_eq!(
+        client.list_tools_catalog().await.err().unwrap().kind,
+        ErrorKind::Limit
+    );
+    let (client, _) = fixture(
+        vec![Ok(response(
+            1,
+            json!({"tools":[rejected.clone(),rejected]}),
+        ))],
+        Revision::Modern20260728,
+        Limits::default(),
+    );
+    assert_eq!(
+        client.list_tools_catalog().await.err().unwrap().kind,
+        ErrorKind::Protocol
+    );
 }
 
 #[tokio::test]
