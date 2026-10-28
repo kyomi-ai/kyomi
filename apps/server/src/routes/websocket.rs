@@ -215,7 +215,13 @@ async fn handle_authenticated_ws(
                                 Err(_) => continue,
                             };
                             if let Some(session) = message.session_id.as_deref() {
-                                if super::conversation_read::send_legacy_session_message(&mut ws_sender,&store,session,json).await.is_err() { break; }
+                                // User-wide notifications may originate in another
+                                // authorized workspace. Keep durable subscriptions
+                                // socket-scoped, but lock the legacy conversation
+                                // in its already-authorized event origin.
+                                let Some(origin) = message.workspace_id.as_deref() else { continue; };
+                                let legacy_store = kyomi_auth::conversation_events::ConversationStore::new(&db_for_send, &key_for_send, &user_id_for_send, origin);
+                                if super::conversation_read::send_legacy_session_message(&mut ws_sender,&legacy_store,session,json).await.is_err() { break; }
                             } else if ws_sender.send(ws::Message::text(json)).await.is_err() {
                                 break;
                             }

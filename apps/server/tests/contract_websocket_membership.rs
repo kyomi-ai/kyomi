@@ -566,22 +566,32 @@ async fn user_wide_push_preserves_another_active_workspace() {
     assert!(matches!(frame, Message::Text(body) if body.contains(&other_workspace)));
 }
 
+// Legacy conversation pushes retain authoritative owner/workspace authorization
+// through socket flush. Opaque IDs test the envelope without inventing sessions.
+async fn legacy_chat_session(ctx: &Context, workspace: &str) -> String {
+    let session = uuid::Uuid::new_v4().to_string();
+    kyomi_auth::chat_service::create_session_with_id(
+        &ctx.db, &ctx.user_id, workspace, &session, None, "chat", None,
+    ).await.unwrap();
+    session
+}
+
 /// Exercise the real emitters that formerly had no workspace origin, including
 /// errors and thinking events whose data fields are arbitrary display content.
 async fn push_workspace_events(
     manager: &kyomi_auth::websocket::WebSocketManager,
     user_id: &str,
     workspace_id: &str,
+    session_id: &str,
 ) -> Vec<kyomi_types::websocket::MessageType> {
     use kyomi_auth::websocket::helpers as h;
     use kyomi_types::websocket::{MessageType, WebSocketMessage};
     let target = manager.for_workspace(workspace_id);
-    // Deliberately opaque session IDs: authorization cannot be reconstructed
-    // from session naming, content, or display context.
+    // Session identity is opaque; its authoritative row binds it to this origin.
     h::send_chat_stream(
         target,
         user_id,
-        "opaque-session",
+        session_id,
         "opaque-message",
         "private chunk",
         0,
@@ -591,7 +601,7 @@ async fn push_workspace_events(
     h::send_chat_complete(h::ChatCompleteParams {
         manager: target,
         user_id,
-        session_id: "opaque-session",
+        session_id,
         message_id: "opaque-message",
         full_content: "private completion",
         model: "test",
@@ -602,7 +612,7 @@ async fn push_workspace_events(
     h::send_agent_thinking(
         target,
         user_id,
-        "opaque-session",
+        session_id,
         json!({"event": "private thought"}),
         None,
     )
@@ -610,29 +620,29 @@ async fn push_workspace_events(
     h::send_token_usage_update(
         target,
         user_id,
-        "opaque-session",
+        session_id,
         json!({"tokens": 12}),
         None,
     )
     .await;
-    h::send_title_update(target, user_id, "opaque-session", "private title").await;
+    h::send_title_update(target, user_id, session_id, "private title").await;
     h::send_session_created(
         target,
         user_id,
-        "opaque-session",
+        session_id,
         json!({"title": "private session"}),
     )
     .await;
     h::send_error(
         target,
         user_id,
-        Some("opaque-session"),
+        Some(session_id),
         "private error",
         None,
         None,
     )
     .await;
-    h::send_request_cancelled(target, user_id, "opaque-session", "opaque-message", None).await;
+    h::send_request_cancelled(target, user_id, session_id, "opaque-message", None).await;
     h::send_watch_alert(
         target,
         user_id,
@@ -728,10 +738,12 @@ async fn concurrent_origin_revocation(
         .await
         .expect("receiver subscriber must be ready");
     }
+    let primary_session = legacy_chat_session(ctx, &ctx.workspace_id).await;
+    let other_session = legacy_chat_session(ctx, &other).await;
     // Both active origins must normally fan out to both sockets. The envelope
     // must survive either the local queue or cross-manager Redis pub/sub.
-    for workspace in [&ctx.workspace_id, &other] {
-        let types = push_workspace_events(publisher, &ctx.user_id, workspace).await;
+    for (workspace, session) in [(&ctx.workspace_id, &primary_session), (&other, &other_session)] {
+        let types = push_workspace_events(publisher, &ctx.user_id, workspace, session).await;
         for socket in [&mut socket_a, &mut socket_b] {
             assert_workspace_events(socket, workspace, &types).await;
         }
@@ -743,11 +755,11 @@ async fn concurrent_origin_revocation(
         &ctx.user_id
     )
     .unwrap();
-    push_workspace_events(publisher, &ctx.user_id, &other).await;
+    push_workspace_events(publisher, &ctx.user_id, &other, &other_session).await;
     assert_forbidden(&mut socket_b).await;
     // The ordered A marker proves every preceding B event was rejected and
     // that A remains useful, rather than merely timing out on a dead socket.
-    let types = push_workspace_events(publisher, &ctx.user_id, &ctx.workspace_id).await;
+    let types = push_workspace_events(publisher, &ctx.user_id, &ctx.workspace_id, &primary_session).await;
     assert_workspace_events(&mut socket_a, &ctx.workspace_id, &types).await;
 }
 
@@ -774,11 +786,12 @@ async fn missing_or_conflicting_origin_is_dropped_on_active_socket() {
     use kyomi_types::websocket::{MessageType, WebSocketMessage};
     let ctx = context("invalid-origin").await;
     let mut socket = member_socket(&ctx, &ctx.user_id, &ctx.access_token).await;
+    let session = legacy_chat_session(&ctx, &ctx.workspace_id).await;
     ctx.manager
         .send_to_user(
             &ctx.user_id,
             WebSocketMessage::new(MessageType::ChatStream)
-                .with_session("opaque")
+                .with_session(&session)
                 .with_data(json!({"content": "must not arrive"})),
         )
         .await;
@@ -809,6 +822,7 @@ async fn origin_database_decode_error_drops_event_but_keeps_active_socket() {
     .await
     .unwrap();
     let mut socket = member_socket(&ctx, &ctx.user_id, &ctx.access_token).await;
+    let session = legacy_chat_session(&ctx, &other).await;
     // A real SQLite decode failure only for B's membership: A's row still
     // authorizes normally, so an A marker can prove fail-closed origin handling.
     kyomi_core::db_execute!(&ctx.db,
@@ -819,7 +833,7 @@ async fn origin_database_decode_error_drops_event_but_keeps_active_socket() {
             .await
             .is_err()
     );
-    push_workspace_events(&ctx.manager, &ctx.user_id, &other).await;
+    push_workspace_events(&ctx.manager, &ctx.user_id, &other, &session).await;
     push_sync(&ctx, &ctx.workspace_id).await;
     assert!(
         matches!(next_frame(&mut socket).await, Message::Text(body) if body.contains("private-live-data"))
@@ -1137,4 +1151,32 @@ async fn durable_ws_live_revocation_denies_periodic_reads_without_run_disclosure
             frame => panic!("expected fail-closed revocation, got {frame:?}"),
         }
     }
+}
+
+#[tokio::test]
+async fn missing_or_mismatched_legacy_conversation_is_dropped_without_losing_authorized_chat() {
+    let ctx = context("unknown-legacy-session").await;
+    let mut socket = member_socket(&ctx, &ctx.user_id, &ctx.access_token).await;
+    let session = legacy_chat_session(&ctx, &ctx.workspace_id).await;
+    let other_workspace = user_service::create_workspace_for_user(
+        &ctx.db, &ctx.user_id, Some("Other"), "other@example.com", None,
+    ).await.unwrap();
+    // Even another active origin cannot relabel a conversation from this one.
+    kyomi_auth::websocket::helpers::send_chat_stream(
+        ctx.manager.for_workspace(&other_workspace), &ctx.user_id, &session,
+        "message", "wrong conversation workspace must not arrive", 0, None,
+    ).await;
+    let target = ctx.manager.for_workspace(&ctx.workspace_id);
+    for (id, content) in [("missing-conversation", "must not arrive"), (session.as_str(), "authorized chat marker")] {
+        kyomi_auth::websocket::helpers::send_chat_stream(
+            target, &ctx.user_id, id, "message", content, 0, None,
+        ).await;
+    }
+    let frame = next_frame(&mut socket).await;
+    let Message::Text(text) = frame else { panic!("expected authorized chat: {frame:?}") };
+    let message: kyomi_types::websocket::WebSocketMessage = serde_json::from_str(&text).unwrap();
+    assert_eq!(message.message_type, kyomi_types::websocket::MessageType::ChatStream);
+    assert_eq!(message.session_id.as_deref(), Some(session.as_str()));
+    assert!(text.contains("authorized chat marker"), "{text}");
+    assert!(!text.contains("must not arrive"), "{text}");
 }
