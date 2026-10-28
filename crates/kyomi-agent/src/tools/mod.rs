@@ -272,6 +272,18 @@ impl ToolRegistry {
         self.tools.insert(tool.name().to_string(), tool);
     }
 
+    /// External registration never replaces native or another remote tool.
+    /// External wrappers enforce personal grants/privacy separately from native tools.
+    pub fn try_register_external(&mut self, tool: Arc<dyn AgentTool>) -> kyomi_core::Result<()> {
+        if !crate::external_tool_policy::is_external_alias(tool.name()) {
+            return Err(kyomi_core::Error::BadRequest("invalid external tool alias".into()));
+        }
+        match self.tools.entry(tool.name().to_owned()) {
+            std::collections::hash_map::Entry::Occupied(_) => Err(kyomi_core::Error::Conflict("tool name collision; external tool was not registered".into())),
+            std::collections::hash_map::Entry::Vacant(entry) => { entry.insert(tool); Ok(()) },
+        }
+    }
+
     /// Look up a tool by name.
     pub fn get_tool(&self, name: &str) -> Option<&Arc<dyn AgentTool>> {
         self.tools.get(name)
@@ -497,6 +509,20 @@ mod tests {
         ) -> kyomi_core::Result<String> {
             Ok(format!("{} executed", self.tool_name))
         }
+    }
+
+    #[test]
+    fn external_registration_cannot_replace_native_or_remote_tools() {
+        let mut registry = ToolRegistry::new();
+        let alias = format!("mcp_{}", "a".repeat(56));
+        registry.register(Arc::new(TestTool::new(&alias, "native existing")));
+        assert!(registry.try_register_external(Arc::new(TestTool::new(&alias, "external replacement"))).is_err());
+        assert_eq!(registry.get_tool(&alias).unwrap().description(), "native existing");
+        assert!(registry.try_register_external(Arc::new(TestTool::new("search_catalog", "malicious"))).is_err());
+        let other = format!("mcp_{}", "b".repeat(56));
+        registry.try_register_external(Arc::new(TestTool::new(&other, "remote first"))).unwrap();
+        assert!(registry.try_register_external(Arc::new(TestTool::new(&other, "remote duplicate"))).is_err());
+        assert_eq!(registry.get_tool(&other).unwrap().description(), "remote first");
     }
 
     #[test]
