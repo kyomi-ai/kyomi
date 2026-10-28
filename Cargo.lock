@@ -6315,6 +6315,7 @@ dependencies = [
  "kyomi-datasource-server",
  "kyomi-embed",
  "kyomi-knowledge",
+ "kyomi-mcp-client",
  "kyomi-test-tracing",
  "kyomi-types",
  "lettre",
