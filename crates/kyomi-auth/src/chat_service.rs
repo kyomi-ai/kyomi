@@ -4497,11 +4497,30 @@ mod tests {
     // `owned_ids` query in `bulk_delete_sessions` are unaffected -- a pass
     // here isolates the fix under test rather than a broader outage.
     //
-    // SQLite refuses to drop a column that a partial index still references
-    // (`idx_chat_sessions_shared`, `00001_baseline.sql:608`), so the index
-    // has to go first -- verified empirically: the bare `DROP COLUMN`
-    // failed with "error in index idx_chat_sessions_shared after drop
-    // column: no such column: shared" until the index drop was added.
+    // SQLite refuses to drop a column referenced by an index or trigger.
+    // Remove those prerequisites only in this isolated fixture so dropping
+    // `shared` still injects a failure in the production visibility SELECT.
+    // The privacy triggers reference NEW.shared on INSERT/UPDATE; neither
+    // trigger protects DELETE or substitutes for the error propagation tested.
+    async fn break_session_visibility_read(sq: &sqlx::SqlitePool) {
+        sqlx::query("DROP INDEX idx_chat_sessions_shared")
+            .execute(sq)
+            .await
+            .expect("drop shared index");
+        for trigger in [
+            "personal_mcp_private_session",
+            "personal_mcp_private_session_insert",
+        ] {
+            sqlx::query(&format!("DROP TRIGGER {trigger}"))
+                .execute(sq)
+                .await
+                .expect("drop fixture privacy trigger referencing shared");
+        }
+        sqlx::query("ALTER TABLE chat_sessions DROP COLUMN shared")
+            .execute(sq)
+            .await
+            .expect("drop shared column");
+    }
 
     #[tokio::test]
     async fn delete_session_propagates_visibility_read_failure_instead_of_writing_wrong_delete()
@@ -4516,14 +4535,7 @@ mod tests {
         .await;
         seed_chat_message(sq, "msg-1", "sess-shared", false, None).await;
 
-        sqlx::query("DROP INDEX idx_chat_sessions_shared")
-            .execute(sq)
-            .await
-            .expect("drop shared index");
-        sqlx::query("ALTER TABLE chat_sessions DROP COLUMN shared")
-            .execute(sq)
-            .await
-            .expect("drop shared column");
+        break_session_visibility_read(sq).await;
 
         let result = delete_session(&db, "user-a", "sess-shared", Some("ws-1")).await;
         assert!(
@@ -4762,14 +4774,7 @@ mod tests {
         seed_chat_message(sq, "msg-private", "sess-private", false, None).await;
         seed_chat_message(sq, "msg-shared", "sess-shared", false, None).await;
 
-        sqlx::query("DROP INDEX idx_chat_sessions_shared")
-            .execute(sq)
-            .await
-            .expect("drop shared index");
-        sqlx::query("ALTER TABLE chat_sessions DROP COLUMN shared")
-            .execute(sq)
-            .await
-            .expect("drop shared column");
+        break_session_visibility_read(sq).await;
 
         let result = bulk_delete_sessions(
             &db,
