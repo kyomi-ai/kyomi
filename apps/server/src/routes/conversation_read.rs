@@ -326,6 +326,38 @@ where
     }
 }
 
+/// Final legacy push boundary, including messages queued by old/shared workers.
+/// Retain the same session/membership locks through actual bounded socket flush.
+/// A denied frame is silently discarded; it must not disclose content via an
+/// error payload. Once sending starts, timeout/rollback failure makes the sink
+/// unusable, just like durable page delivery (no later fallback flush).
+pub(super) async fn send_legacy_session_message<S>(
+    sink: &mut S,
+    store: &ConversationStore<'_>,
+    session: &str,
+    json: String,
+) -> Result<(), ()>
+where
+    S: futures_util::Sink<axum::extract::ws::Message> + Unpin,
+{
+    use futures_util::SinkExt;
+    let mut attempted=false;
+    let result=store.deliver_authorized(&ConversationId(session.to_owned()),async {
+        attempted=true;
+        tokio::time::timeout(DELIVERY_TIMEOUT,sink.send(axum::extract::ws::Message::text(json)))
+            .await.map_err(|_|EventStoreError::DeliveryTimedOut)?
+            .map_err(|_|EventStoreError::DeliveryFailed)
+    }).await;
+    match result {
+        Ok(()) => Ok(()),
+        Err(EventStoreError::Unauthorized) if !attempted => Ok(()),
+        Err(error) => {
+            tracing::warn!(%error,"Legacy conversation delivery failed; dropping sink");
+            Err(())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,6 +426,78 @@ mod tests {
             through_cursor: through,
         }
     }
+    #[tokio::test]
+    async fn personal_mcp_legacy_socket_drops_frames_queued_before_taint_and_preserves_owner_delivery() {
+        let db=fixture().await;
+        let message=kyomi_core::WebSocketMessage::new(kyomi_core::MessageType::ChatComplete)
+            .with_workspace("read-workspace").with_session("conversation")
+            .with_data(serde_json::json!({"full_content":"queued private external sentinel"}));
+        let queued=serde_json::to_string(&message).unwrap();
+        kyomi_core::db_execute!(&db,"UPDATE chat_sessions SET shared=FALSE,personal_data_owner_id='reader' WHERE session_id='conversation'").unwrap();
+        let other=ConversationStore::new(&db,&KEY,"shared-reader","read-workspace");
+        let owner=ConversationStore::new(&db,&KEY,"reader","read-workspace");
+        let captured=std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let mut sink=Box::pin(futures_util::sink::unfold(captured.clone(),|captured,message:axum::extract::ws::Message| async move {
+            if let axum::extract::ws::Message::Text(text)=message {captured.lock().unwrap().push(text.to_string());}
+            Ok::<_,std::convert::Infallible>(captured)
+        }));
+        send_legacy_session_message(&mut sink,&other,"conversation",queued.clone()).await.unwrap();
+        assert!(captured.lock().unwrap().is_empty(),"queued frames cannot bypass final socket authorization");
+        send_legacy_session_message(&mut sink,&owner,"conversation",queued).await.unwrap();
+        assert_eq!(captured.lock().unwrap().len(),1);
+        assert!(captured.lock().unwrap()[0].contains("queued private external sentinel"));
+    }
+
+    #[tokio::test]
+    async fn personal_mcp_legacy_socket_flush_serializes_with_unshare_and_private_inheritance() {
+        let db=fixture().await;
+        let viewer=ConversationStore::new(&db,&KEY,"shared-reader","read-workspace");
+        let started=std::sync::Arc::new(tokio::sync::Notify::new());
+        let release=std::sync::Arc::new(tokio::sync::Notify::new());
+        let gate=(started.clone(),release.clone());
+        let mut sink=Box::pin(futures_util::sink::unfold(gate,|(started,release),_:axum::extract::ws::Message|async move {
+            started.notify_one();release.notified().await;
+            Ok::<_,std::convert::Infallible>((started,release))
+        }));
+        let transition=async {
+            started.notified().await;
+            let unshare=kyomi_auth::chat_service::set_session_shared(&db,"conversation",false);
+            tokio::pin!(unshare);
+            assert!(tokio::time::timeout(std::time::Duration::from_millis(50),&mut unshare).await.is_err(),"unshare cannot complete while an authorized socket flush is held");
+            release.notify_one();
+            unshare.await.unwrap();
+            kyomi_core::db_execute!(&db,"INSERT INTO personal_mcp_private_contexts (owner_user_id,workspace_id) VALUES ('reader','read-workspace')").unwrap();
+            kyomi_auth::personal_mcp_privacy::inherit_private_document_context(&db,"reader","read-workspace",Some("conversation"),None).await.unwrap();
+        };
+        let (sent,())=tokio::join!(send_legacy_session_message(&mut sink,&viewer,"conversation","previous shared content".into()),transition);
+        sent.unwrap();
+        let delivered=std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut denied=Box::pin(futures_util::sink::unfold(delivered.clone(),|delivered,_:axum::extract::ws::Message|async move {
+            delivered.fetch_add(1,std::sync::atomic::Ordering::SeqCst);Ok::<_,std::convert::Infallible>(delivered)
+        }));
+        send_legacy_session_message(&mut denied,&viewer,"conversation","new private content".into()).await.unwrap();
+        assert_eq!(delivered.load(std::sync::atomic::Ordering::SeqCst),0);
+    }
+
+    #[tokio::test]
+    async fn personal_mcp_privacy_actual_live_replay_and_detail_authorization() {
+        let db=fixture().await;
+        kyomi_core::db_execute!(&db,"UPDATE chat_sessions SET shared=FALSE, personal_data_owner_id='reader' WHERE session_id='conversation'").unwrap();
+        let owner=ConversationStore::new(&db,&KEY,"reader","read-workspace");
+        owner.append(&command(PublicPayload::Submitted {message_id:MessageId("personal-question".into()),text:Text {preview:"owner private output".into(),detail:None}})).await.unwrap();
+        let other=ConversationStore::new(&db,&KEY,"shared-reader","read-workspace");
+        for command in [ReadCommand::Subscribe {request:request(1)},ReadCommand::Replay {request:request(2)},ReadCommand::Detail {session_id:"conversation".into(),run_id:Some(RunId("old-run".into())),detail_id:DetailId("private-detail".into()),request_generation:3}] {
+            let mut reads=ConnectionReads::new("other-socket".into());
+            let (_, response)=reads.command(command,&other).await.unwrap();
+            assert!(matches!(response,Response::Error {code:ReadErrorCode::Unauthorized,..}));
+            assert!(!serde_json::to_string(&response).unwrap().contains("owner private output"));
+        }
+        let mut reads=ConnectionReads::new("owner-socket".into());
+        let (_, response)=reads.command(ReadCommand::Subscribe {request:request(1)},&owner).await.unwrap();
+        assert!(matches!(response,Response::Snapshot {..}));
+        assert!(serde_json::to_string(&response).unwrap().contains("owner private output"));
+    }
+
     #[tokio::test]
     async fn durable_subscription_ack_snapshot_race_lost_wakeup_and_generations() {
         let db = fixture().await;

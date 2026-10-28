@@ -313,10 +313,12 @@ pub async fn get_session_messages(
 
     let encryption_key = ac.encryption_key()?;
 
-    let messages = kyomi_auth::chat_service::get_session_messages(
+    let messages = kyomi_auth::chat_service::get_authorized_session_messages(
         ac.db(),
         &encryption_key,
         &session_id,
+        &ac.auth.user_id,
+        &ac.ws_id,
         200, // limit
     )
     .await

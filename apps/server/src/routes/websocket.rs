@@ -210,7 +210,13 @@ async fn handle_authenticated_ws(
                             }
                             let response = reads.catch_up(&store).await;
                             if super::conversation_read::send_response(&mut ws_sender, &store, &workspace_id_for_send, response).await.is_err() { break; }
-                            if ws_sender.send(ws::Message::text(json)).await.is_err() {
+                            let message: kyomi_types::websocket::WebSocketMessage = match serde_json::from_str(&json) {
+                                Ok(message) => message,
+                                Err(_) => continue,
+                            };
+                            if let Some(session) = message.session_id.as_deref() {
+                                if super::conversation_read::send_legacy_session_message(&mut ws_sender,&store,session,json).await.is_err() { break; }
+                            } else if ws_sender.send(ws::Message::text(json)).await.is_err() {
                                 break;
                             }
                         }
