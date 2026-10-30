@@ -119,4 +119,5 @@ pub fn http_client() -> kyomi_core::Result<reqwest::Client> {
         .map_err(|e| kyomi_core::Error::Internal(format!("Failed to build HTTP client: {e}")))
 }
 
+pub mod personal_mcp_oauth;
 pub mod personal_mcp_service;

@@ -109,6 +109,12 @@ pub async fn serve_leptos_shell() -> Response {
 /// Trunk. This document has no client script: the consent forms work without
 /// hydration, and the browser displays the exact view reviewed by the user.
 pub fn consent_document(body: &str) -> String {
+    scriptless_auth_document("Allow MCP access · Kyomi", body)
+}
+
+/// Shared scriptless auth shell. Titles are trusted static copy, never request
+/// values; callers render and escape dynamic body content with Leptos.
+pub fn scriptless_auth_document(title: &'static str, body: &str) -> String {
     let stylesheet = LeptosAssets::get("index.html")
         .and_then(|file| {
             let html = String::from_utf8_lossy(&file.data);
@@ -119,7 +125,7 @@ pub fn consent_document(body: &str) -> String {
         })
         .unwrap_or_default();
     format!(
-        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="referrer" content="no-referrer"><title>Allow MCP access · Kyomi</title><link rel="icon" href="/kyomi_small_logo.svg"><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=Instrument+Serif:ital@0;1&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">{stylesheet}</head><body>{body}</body></html>"#
+        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="referrer" content="no-referrer"><title>{title}</title><link rel="icon" href="/kyomi_small_logo.svg"><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=Instrument+Serif:ital@0;1&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">{stylesheet}</head><body>{body}</body></html>"#
     )
 }
 

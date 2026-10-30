@@ -79,7 +79,9 @@ pub async fn security_headers(
     let is_consent_get = request.method() == Method::GET
         && matches!(
             request.uri().path(),
-            "/api/v1/oauth/authorize" | "/api/v1/oauth/authorize/continue"
+            "/api/v1/oauth/authorize"
+                | "/api/v1/oauth/authorize/continue"
+                | "/api/v1/personal-mcp/oauth/callback"
         );
     let is_api = request.uri().path().starts_with("/api/")
         || request.uri().path().starts_with("/ws/")
