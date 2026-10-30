@@ -363,6 +363,9 @@ impl OAuthService {
         key: &[u8; 32],
     ) -> Result<McpOAuthStarted> {
         self.bounded(async {
+            let generation = input.generation.checked_add(1).ok_or_else(|| {
+                Error::Conflict("MCP connection generation exhausted; recreate the connection".into())
+            })?;
             if !input.consent {
                 return Err(invalid("Explicit OAuth consent is required"));
             }
@@ -402,6 +405,14 @@ impl OAuthService {
                 key,
             )
             .await?;
+            // The store rereads after its CAS commits. A concurrent edit may
+            // already be visible there; never adopt its generation for metadata
+            // discovered against this start's original endpoint.
+            if connection.generation != generation {
+                return Err(Error::Conflict(
+                    "MCP connection changed; reload before authorizing".into(),
+                ));
+            }
             let state = random_secret();
             let verifier = random_secret();
             let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
@@ -446,7 +457,7 @@ impl OAuthService {
                 pool,
                 actor,
                 id,
-                connection.generation,
+                generation,
                 McpAuthTransaction {
                     state: &state,
                     issuer: &discovered.server.issuer,
@@ -460,7 +471,7 @@ impl OAuthService {
             .await?;
             Ok(McpOAuthStarted {
                 authorization_url: authorization.to_string(),
-                generation: connection.generation,
+                generation,
             })
         })
         .await

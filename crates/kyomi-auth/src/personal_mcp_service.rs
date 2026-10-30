@@ -10,6 +10,12 @@ use sha2::{Digest, Sha256};
 
 const COLUMNS: &str = "connection_id, owner_user_id, name, endpoint, auth_kind, status, generation";
 
+#[cfg(test)]
+tokio::task_local! {
+    // Only the scoped update pauses; concurrent edits and other tests proceed.
+    pub(crate) static UPDATE_COMMITTED: (std::sync::Arc<tokio::sync::Notify>, std::sync::Arc<tokio::sync::Notify>);
+}
+
 fn not_found() -> Error {
     Error::NotFound("personal MCP connection".into())
 }
@@ -216,6 +222,13 @@ pub async fn update_connection(
         }
         tx.commit().await?;
     });
+    #[cfg(test)]
+    if let Ok((committed, resume)) = UPDATE_COMMITTED.try_with(Clone::clone) {
+        committed.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(10), resume.notified())
+            .await
+            .expect("test must release the committed MCP update");
+    }
     get_connection(pool, actor, id).await
 }
 

@@ -3,6 +3,7 @@ use super::*;
 mod flows;
 mod metadata;
 mod provider_conformance;
+mod start_races;
 use kyomi_core::{db_execute, db_fetch_scalar};
 use std::sync::{
     Mutex,
