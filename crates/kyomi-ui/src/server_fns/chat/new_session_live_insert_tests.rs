@@ -50,103 +50,14 @@ use chrono::TimeZone;
 use kyomi_auth::chat_service::{ChatDispatchOutcome, ChatDispatchParams, prepare_chat_dispatch};
 use kyomi_auth::websocket::WebSocketManager;
 use kyomi_core::{DbPool, MessageType, WebSocketMessage};
+use kyomi_test_db::{seed_membership, seed_user, seed_workspace, sqlite_pool, test_pool};
 use kyomi_types::sync::{SyncAction, SyncActionType, entity_types};
 use leptos::prelude::*;
-use sqlx::sqlite::SqlitePoolOptions;
 use tokio::sync::mpsc;
 
 use crate::cache::store::SyncStore;
 use crate::pages::chat::chat_list::sort_sessions_by_recency;
 use crate::server_fns::chat::ChatSessionItem;
-
-// ── Fixture scaffolding ─────────────────────────────────────────────────────
-//
-// This is the THIRD independent copy of this scaffolding, not the second.
-// `kyomi_auth::test_support::{test_pool, seed_user, seed_workspace,
-// seed_membership}` (KYO-271/KYO-368 consolidated it there specifically so
-// *kyomi-auth's own* test modules stop hand-rolling it) and
-// `kyomi_agent::test_support::test_pool` (KYO-537) already match this
-// byte-for-byte in shape — `max_connections(1)`, `PRAGMA foreign_keys=ON`,
-// `sqlx::migrate!("../../apps/server/migrations-sqlite")` — and both are
-// `pub(crate)` to their own crates, so neither can be imported from here.
-// Per
-// docs/standards/code-organization/third-copy-of-test-helper-is-extraction-trigger.md
-// a third copy is the trigger to extract a shared test-support crate — that
-// trigger condition is met by this file. Extracting one spanning
-// kyomi-auth, kyomi-agent and kyomi-ui is a real three-crate refactor,
-// well outside a test-coverage ticket, so it is declined here as
-// out of scope for KYO-498 and tracked separately as KYO-751 ("Third copy
-// of the sqlite `test_pool` fixture — kyomi-auth, kyomi-agent and now
-// kyomi-ui each hand-roll the identical scaffolding").
-
-/// Build an in-memory SQLite pool with the full server migration chain
-/// applied and foreign-key enforcement on. A single connection
-/// (`max_connections(1)`) is used because SQLite `:memory:` databases are
-/// per-connection — every query in a test must hit the same pool.
-async fn test_pool() -> DbPool {
-    let _ = kyomi_core::constants::load_with_fallback();
-
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .expect("connect in-memory sqlite");
-
-    sqlx::query("PRAGMA foreign_keys=ON")
-        .execute(&pool)
-        .await
-        .expect("enable foreign keys");
-
-    // sqlx::migrate! resolves its path relative to CARGO_MANIFEST_DIR
-    // (crates/kyomi-ui), not to this source file, so this resolves to
-    // apps/server/migrations-sqlite at the repo root.
-    sqlx::migrate!("../../apps/server/migrations-sqlite")
-        .run(&pool)
-        .await
-        .expect("run sqlite migrations");
-
-    DbPool::Sqlite(pool)
-}
-
-/// Extract the inner `SqlitePool` from a `DbPool` built by [`test_pool`].
-fn sqlite_pool(db: &DbPool) -> &sqlx::SqlitePool {
-    match db {
-        DbPool::Sqlite(sq) => sq,
-        DbPool::Postgres(_) => panic!("test requires sqlite pool"),
-    }
-}
-
-async fn seed_user(sq: &sqlx::SqlitePool, user_id: &str, email: &str) {
-    sqlx::query("INSERT INTO users (user_id, email, active) VALUES ($1, $2, 1)")
-        .bind(user_id)
-        .bind(email)
-        .execute(sq)
-        .await
-        .expect("insert user");
-}
-
-async fn seed_workspace(sq: &sqlx::SqlitePool, workspace_id: &str, owner_user_id: &str) {
-    sqlx::query("INSERT INTO workspaces (workspace_id, name, owner_user_id) VALUES ($1, $2, $3)")
-        .bind(workspace_id)
-        .bind(format!("Workspace {workspace_id}"))
-        .bind(owner_user_id)
-        .execute(sq)
-        .await
-        .expect("insert workspace");
-}
-
-async fn seed_membership(sq: &sqlx::SqlitePool, workspace_id: &str, user_id: &str, role: &str) {
-    sqlx::query(
-        "INSERT INTO workspace_users (workspace_id, user_id, role, active) \
-         VALUES ($1, $2, $3, 1)",
-    )
-    .bind(workspace_id)
-    .bind(user_id)
-    .bind(role)
-    .execute(sq)
-    .await
-    .expect("insert membership");
-}
 
 /// A fixed AES-256 test key — deliberately not random so encryption is
 /// reproducible byte-for-byte. `prepare_chat_dispatch`'s `skip_ai` path
@@ -303,8 +214,8 @@ async fn new_session_broadcasts_a_complete_insert_snapshot_to_its_creator_only()
     seed_user(sq, "creator", "creator@test.local").await;
     seed_user(sq, "other", "other@test.local").await;
     seed_workspace(sq, "ws-1", "creator").await;
-    seed_membership(sq, "ws-1", "creator", "workspace_admin").await;
-    seed_membership(sq, "ws-1", "other", "user").await;
+    seed_membership(sq, "ws-1", "creator", "workspace_admin", true).await;
+    seed_membership(sq, "ws-1", "other", "user", true).await;
 
     let manager = WebSocketManager::new(None, db.clone());
     let mut rx_creator = connect_and_drain_heartbeat(&manager, "creator");
@@ -439,7 +350,7 @@ async fn new_session_insert_snapshot_sorts_to_top_of_a_populated_store() {
     let key = test_key();
     seed_user(sq, "creator", "creator@test.local").await;
     seed_workspace(sq, "ws-1", "creator").await;
-    seed_membership(sq, "ws-1", "creator", "workspace_admin").await;
+    seed_membership(sq, "ws-1", "creator", "workspace_admin", true).await;
 
     let manager = WebSocketManager::new(None, db.clone());
     let mut rx_creator = connect_and_drain_heartbeat(&manager, "creator");
