@@ -6261,6 +6261,7 @@ dependencies = [
  "kyomi-datasource-server",
  "kyomi-embed",
  "kyomi-knowledge",
+ "kyomi-test-db",
  "kyomi-types",
  "pgvector",
  "rand 0.9.5",
@@ -6315,6 +6316,7 @@ dependencies = [
  "kyomi-datasource-server",
  "kyomi-embed",
  "kyomi-knowledge",
+ "kyomi-test-db",
  "kyomi-test-tracing",
  "kyomi-types",
  "lettre",
@@ -6635,6 +6637,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kyomi-test-db"
+version = "0.1.0"
+dependencies = [
+ "kyomi-core",
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
 name = "kyomi-test-harness"
 version = "0.1.0"
 dependencies = [
@@ -6708,6 +6719,7 @@ dependencies = [
  "kyomi-embed",
  "kyomi-knowledge",
  "kyomi-slack",
+ "kyomi-test-db",
  "kyomi-test-tracing",
  "kyomi-types",
  "kyomi-ui-components",

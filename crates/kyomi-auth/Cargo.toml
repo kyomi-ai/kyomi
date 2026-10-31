@@ -60,6 +60,7 @@ thiserror = { workspace = true }
 ssh-key = { version = "0.6", features = ["ed25519", "alloc", "std"] }
 
 [dev-dependencies]
+kyomi-test-db = { workspace = true }
 # Exercise provider selection with both backends, as datasource 1.6.2 enables.
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
 kyomi-test-tracing = { workspace = true }

@@ -52,6 +52,7 @@ chartml-datafusion = { workspace = true }
 kyomi-chart-theme = { workspace = true }
 
 [dev-dependencies]
+kyomi-test-db = { workspace = true }
 # HTML tokenizer checks attributes after entity decoding in email regressions.
 html5ever = "0.38"
 kyomi-core = { workspace = true, features = ["test-helpers"] }
