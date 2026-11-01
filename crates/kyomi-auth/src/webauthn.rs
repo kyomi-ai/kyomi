@@ -92,11 +92,21 @@ pub fn finish_discoverable_authentication(
     authentication_state: DiscoverableAuthentication,
     passkeys: &[Passkey],
 ) -> kyomi_core::Result<AuthenticationResult> {
-    let discoverable_keys: Vec<DiscoverableKey> =
-        passkeys.iter().map(DiscoverableKey::from).collect();
+    let passkey = find_passkey(passkeys, credential.raw_id.as_ref()).ok_or_else(|| {
+        kyomi_core::Error::BadRequest("WebAuthn discoverable auth failed: unknown credential".into())
+    })?;
     webauthn
-        .finish_discoverable_authentication(credential, authentication_state, &discoverable_keys)
+        .finish_discoverable_authentication_v2(credential, authentication_state, passkey)
         .map_err(|e| kyomi_core::Error::BadRequest(format!("WebAuthn discoverable auth failed: {e}")))
+}
+
+fn find_passkey<'a>(passkeys: &'a [Passkey], credential_id: &[u8]) -> Option<&'a Passkey> {
+    passkeys
+        .iter()
+        .find(|passkey| {
+            let passkey_id: &[u8] = passkey.cred_id().as_ref();
+            passkey_id == credential_id
+        })
 }
 
 #[cfg(test)]
@@ -160,6 +170,11 @@ mod tests {
             .expect("migration-format JSON must deserialize into webauthn-rs Passkey");
 
         assert_eq!(passkey.cred_id().len(), 32);
+        let credential_id = passkey.cred_id().to_vec();
+        let passkeys = vec![passkey.clone()];
+        assert!(find_passkey(&passkeys, &credential_id).is_some());
+        assert!(find_passkey(&passkeys, &[0; 32]).is_none());
+        assert!(find_passkey(&[], &credential_id).is_none());
         assert_eq!(
             *passkey.cred_algorithm(),
             webauthn_rs::prelude::COSEAlgorithm::ES256
