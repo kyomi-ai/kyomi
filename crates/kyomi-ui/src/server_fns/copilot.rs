@@ -188,11 +188,11 @@ pub async fn create_copilot_session(
 /// system prompt and tool subset the agent uses.
 ///
 /// The `content` parameter carries context-specific data:
-/// - Dashboard copilot: the dashboard markdown (prefixed with `[Dashboard Content]`)
 /// - Chart copilot: the chart YAML (prefixed with `[Chart Content]`)
 /// - Watch copilot: the watch config JSON (prefixed with `[Watch Configuration]`)
 ///
-/// The component is responsible for prefixing content appropriately.
+/// The component prefixes chart and watch content. Dashboard and knowledge
+/// content is loaded from the authorized saved document on the server.
 ///
 /// `document_id` is the id of the dashboard/knowledge document the
 /// dashboard or knowledge copilot is open against (`None` for chart/watch
@@ -202,7 +202,7 @@ pub async fn create_copilot_session(
 /// this is an additional restriction layered on top of each tool's own
 /// ownership checks, not a substitute for them, so a client sending an
 /// id it doesn't actually have access to gains nothing.
-#[server(prefix = "/leptos-api", client = crate::server_fns::paywall_client::PaywallAwareClient)]
+#[server(prefix = "/leptos-api", input = server_fn::codec::Json, client = crate::server_fns::paywall_client::PaywallAwareClient)]
 pub async fn send_copilot_message(
     request: CopilotMessageRequest,
 ) -> Result<CopilotResponse, ServerFnError> {
@@ -455,4 +455,15 @@ pub async fn delete_copilot_session(session_id: String) -> Result<(), ServerFnEr
     }
 
     Ok(())
+}
+
+#[cfg(all(test, feature = "ssr"))]
+mod tests {
+    use super::*;
+    use crate::server_fns::test_support::assert_json_input_codec;
+
+    #[test]
+    fn send_copilot_message_uses_json_input_codec() {
+        assert_json_input_codec::<SendCopilotMessage>("Copilot request must retain its JSON transport contract");
+    }
 }
