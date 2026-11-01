@@ -31,6 +31,8 @@ pub mod validate_chartml;
 pub mod watch;
 pub mod workspace;
 
+mod personal_privacy;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -269,7 +271,7 @@ impl ToolRegistry {
     /// Register a tool. If a tool with the same name already exists,
     /// it will be replaced.
     pub fn register(&mut self, tool: Arc<dyn AgentTool>) {
-        self.tools.insert(tool.name().to_string(), tool);
+        self.tools.insert(tool.name().to_string(), Arc::new(personal_privacy::NativePrivacyTool(tool)));
     }
 
     /// Look up a tool by name.

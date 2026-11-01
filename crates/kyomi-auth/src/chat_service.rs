@@ -921,6 +921,11 @@ pub async fn get_session_info(
         None => return Ok(None),
     };
 
+    match crate::personal_mcp_privacy::authorize_private_read(db, user_id, session_id).await {
+        Ok(()) => {},
+        Err(kyomi_core::Error::Forbidden(_)) => return Ok(None),
+        Err(error) => return Err(error),
+    }
     let is_owner = detail.user_id == user_id;
     let is_shared_in_workspace = workspace_id
         .map(|wid| detail.workspace_id == wid && detail.shared)
@@ -964,6 +969,27 @@ pub async fn get_session_messages(
         limit
     )?;
 
+    decode_session_messages(rows, encryption_key)
+}
+
+/// Server history/export read: permission and content share one statement snapshot.
+/// A previously authorized shared reader cannot observe later private output after
+/// unsharing/admission. The browser path must not use the trusted-worker reader.
+pub async fn get_authorized_session_messages(
+    db: &DbPool,
+    encryption_key: &[u8; 32],
+    session_id: &str,
+    actor: &str,
+    workspace: &str,
+    limit: i64,
+) -> kyomi_core::Result<Vec<MessageItem>> {
+    let rows = kyomi_core::db_fetch_all!(db, MessageWithSenderRow,
+        "SELECT cm.message_id,cm.role,cm.content,cm.pinned,cm.created_at,cm.current_time_user_tz,cm.extra_metadata,cm.sent_by_user_id,cm.status,u.name AS sender_name,u.email AS sender_email FROM chat_messages cm LEFT JOIN users u ON u.user_id=cm.sent_by_user_id JOIN chat_sessions cs ON cs.session_id=cm.session_id WHERE cm.session_id=$1 AND cs.workspace_id=$3 AND (cs.user_id=$2 OR (COALESCE(cs.shared,FALSE) AND cs.personal_data_owner_id IS NULL)) AND EXISTS (SELECT 1 FROM workspace_users wu JOIN users actor ON actor.user_id=wu.user_id WHERE wu.workspace_id=$3 AND wu.user_id=$2 AND wu.active=TRUE AND actor.active=TRUE) AND (cm.role='user' OR (cm.role='assistant' AND cm.tool_calls IS NULL)) ORDER BY cm.created_at ASC LIMIT $4",
+        session_id,actor,workspace,limit)?;
+    decode_session_messages(rows, encryption_key)
+}
+
+fn decode_session_messages(rows: Vec<MessageWithSenderRow>, encryption_key: &[u8; 32]) -> kyomi_core::Result<Vec<MessageItem>> {
     let mut result = Vec::with_capacity(rows.len());
 
     for row in rows {
@@ -1471,7 +1497,7 @@ pub async fn set_session_shared(
         let true_lit = kyomi_core::sql_compat::bool_true(is_pg);
         let now = Utc::now();
         let sql = format!(
-            "UPDATE chat_sessions SET shared = {true_lit}, shared_at = $1 WHERE session_id = $2"
+            "UPDATE chat_sessions SET shared = {true_lit}, shared_at = $1 WHERE session_id = $2 AND personal_data_owner_id IS NULL"
         );
         kyomi_core::db_execute!(db, &sql, now, session_id)
             .map_err(|e| kyomi_core::Error::Internal(format!("failed to share session: {e}")))?
@@ -4471,11 +4497,30 @@ mod tests {
     // `owned_ids` query in `bulk_delete_sessions` are unaffected -- a pass
     // here isolates the fix under test rather than a broader outage.
     //
-    // SQLite refuses to drop a column that a partial index still references
-    // (`idx_chat_sessions_shared`, `00001_baseline.sql:608`), so the index
-    // has to go first -- verified empirically: the bare `DROP COLUMN`
-    // failed with "error in index idx_chat_sessions_shared after drop
-    // column: no such column: shared" until the index drop was added.
+    // SQLite refuses to drop a column referenced by an index or trigger.
+    // Remove those prerequisites only in this isolated fixture so dropping
+    // `shared` still injects a failure in the production visibility SELECT.
+    // The privacy triggers reference NEW.shared on INSERT/UPDATE; neither
+    // trigger protects DELETE or substitutes for the error propagation tested.
+    async fn break_session_visibility_read(sq: &sqlx::SqlitePool) {
+        sqlx::query("DROP INDEX idx_chat_sessions_shared")
+            .execute(sq)
+            .await
+            .expect("drop shared index");
+        for trigger in [
+            "personal_mcp_private_session",
+            "personal_mcp_private_session_insert",
+        ] {
+            sqlx::query(&format!("DROP TRIGGER {trigger}"))
+                .execute(sq)
+                .await
+                .expect("drop fixture privacy trigger referencing shared");
+        }
+        sqlx::query("ALTER TABLE chat_sessions DROP COLUMN shared")
+            .execute(sq)
+            .await
+            .expect("drop shared column");
+    }
 
     #[tokio::test]
     async fn delete_session_propagates_visibility_read_failure_instead_of_writing_wrong_delete()
@@ -4490,14 +4535,7 @@ mod tests {
         .await;
         seed_chat_message(sq, "msg-1", "sess-shared", false, None).await;
 
-        sqlx::query("DROP INDEX idx_chat_sessions_shared")
-            .execute(sq)
-            .await
-            .expect("drop shared index");
-        sqlx::query("ALTER TABLE chat_sessions DROP COLUMN shared")
-            .execute(sq)
-            .await
-            .expect("drop shared column");
+        break_session_visibility_read(sq).await;
 
         let result = delete_session(&db, "user-a", "sess-shared", Some("ws-1")).await;
         assert!(
@@ -4736,14 +4774,7 @@ mod tests {
         seed_chat_message(sq, "msg-private", "sess-private", false, None).await;
         seed_chat_message(sq, "msg-shared", "sess-shared", false, None).await;
 
-        sqlx::query("DROP INDEX idx_chat_sessions_shared")
-            .execute(sq)
-            .await
-            .expect("drop shared index");
-        sqlx::query("ALTER TABLE chat_sessions DROP COLUMN shared")
-            .execute(sq)
-            .await
-            .expect("drop shared column");
+        break_session_visibility_read(sq).await;
 
         let result = bulk_delete_sessions(
             &db,

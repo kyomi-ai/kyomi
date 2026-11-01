@@ -296,6 +296,7 @@ async fn build_documents_text(
          LEFT JOIN collections oc ON oc.id = ocd.collection_id \
              AND (oc.created_by = $2 OR oc.is_public = {collection_bool_true}) \
          WHERE d.workspace_id = $1 \
+         AND NOT EXISTS (SELECT 1 FROM personal_mcp_private_documents p WHERE p.dashboard_id=d.dashboard_id) \
          {vis_pred} \
          ORDER BY d.doc_type, oc.name NULLS LAST, d.title"
     );
