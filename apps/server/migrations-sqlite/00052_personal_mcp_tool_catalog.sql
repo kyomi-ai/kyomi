@@ -1,5 +1,7 @@
 -- Catalogs are owner/connection/workspace scoped and die with enablement.
--- Existing grants default to no destination consent and cannot authorize execution.
+-- Legacy grants have no destination consent and may contain plaintext names.
+-- Remove them; users must explicitly grant fresh discoveries.
+DELETE FROM user_mcp_tool_grants;
 ALTER TABLE user_mcp_tool_grants ADD COLUMN catalog_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE user_mcp_tool_grants ADD COLUMN destination_consent BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE TABLE user_mcp_tool_catalogs (

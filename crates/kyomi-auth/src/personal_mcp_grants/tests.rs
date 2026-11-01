@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 use super::*;
+use base64::{Engine, engine::general_purpose::URL_SAFE};
 use connections::{create_connection, set_workspace_enabled};
 use kyomi_core::db_execute;
 use kyomi_types::personal_mcp::SavePersonalMcpConnection;
@@ -16,8 +17,10 @@ async fn require_fresh_grant(
     require_tool_grant(config, pool, scope, &selection, alias, revision).await
 }
 
+const CATALOG_MARKER: &str = "PRIVATE CATALOG MARKER 7d3a87e2-ae8d-41fa-8b3d-77ccb430cc2e";
+
 fn remote(name: &str) -> Value {
-    json!({"name":name,"description":"Untrusted remote description","inputSchema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]},"annotations":{"readOnlyHint":true,"destructiveHint":false}})
+    json!({"name":name,"description":CATALOG_MARKER,"inputSchema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]},"annotations":{"readOnlyHint":true,"destructiveHint":false}})
 }
 fn request(catalog: &PersonalMcpCatalog, i: usize) -> GrantPersonalMcpTool {
     GrantPersonalMcpTool {
@@ -34,6 +37,7 @@ fn scope<'a>(actor: &'a str, connection_id: &'a str, workspace_id: &'a str) -> M
         connection_id,
         workspace_id,
         generation: 1,
+        encryption_key: &[13; 32],
     }
 }
 async fn publish(
@@ -317,6 +321,44 @@ async fn matrix(pool: DbPool) {
     grant_tool(&config, &pool, sa, request(&catalog, 1))
         .await
         .unwrap();
+    // Both database backends run this matrix. Remote names, descriptions,
+    // schema and annotations must never appear in stored catalog/grant rows.
+    let stored: (String,) = kyomi_core::db_fetch_one!(
+        &pool, (String,),
+        "SELECT catalog_json FROM user_mcp_tool_catalogs WHERE connection_id = $1 AND workspace_id = $2",
+        sa.connection_id, sa.workspace_id
+    ).unwrap();
+    assert!(!stored.0.contains(CATALOG_MARKER));
+    let envelope = URL_SAFE.decode(&stored.0).unwrap();
+    assert_eq!(envelope[0], 0x02, "AES-256-GCM envelope version");
+    assert!(
+        envelope.len() >= 1 + 12 + 16,
+        "nonce and authentication tag"
+    );
+    let plaintext = crate::encryption::decrypt(&stored.0, sa.encryption_key).unwrap();
+    assert_eq!(
+        serde_json::from_str::<PersonalMcpCatalog>(&plaintext).unwrap(),
+        catalog
+    );
+    let keys: Vec<(String,)> = kyomi_core::db_fetch_all!(
+        &pool,
+        (String,),
+        "SELECT tool_name FROM user_mcp_tool_grants WHERE connection_id = $1 AND workspace_id = $2",
+        sa.connection_id,
+        sa.workspace_id
+    )
+    .unwrap();
+    assert_eq!(keys.len(), 2);
+    assert!(
+        keys.iter()
+            .all(|(key,)| key.len() == 64 && key != "read" && key != "write")
+    );
+    assert_ne!(keys[0], keys[1]);
+    assert!(crate::encryption::decrypt(&stored.0, &[99; 32]).is_err());
+    assert_eq!(
+        get_catalog(&config, &pool, sa).await.unwrap().tools.len(),
+        2
+    );
     assert_eq!(
         select_granted_tools(&config, &pool, sa, None, 32768)
             .await
@@ -617,7 +659,6 @@ async fn matrix(pool: DbPool) {
             sa,
             safe,
             Revision::Modern20260728,
-            &[13; 32],
             personal_credentials
         )
         .await,
@@ -776,7 +817,6 @@ async fn personal_mcp_discovery_gates_io_and_rejects_revoke_during_network() {
             scope,
             wire.clone(),
             Revision::Modern20260728,
-            &[13; 32],
             personal_credentials
         )
         .await
@@ -790,7 +830,6 @@ async fn personal_mcp_discovery_gates_io_and_rejects_revoke_during_network() {
             scope,
             wire.clone(),
             Revision::Modern20260728,
-            &[13; 32],
             personal_credentials
         )
         .await
@@ -810,7 +849,6 @@ async fn personal_mcp_discovery_gates_io_and_rejects_revoke_during_network() {
         scope,
         wire.clone(),
         Revision::Modern20260728,
-        &[13; 32],
         personal_credentials,
     )
     .await
@@ -860,7 +898,6 @@ async fn personal_mcp_discovery_gates_io_and_rejects_revoke_during_network() {
             scope,
             failing,
             Revision::Modern20260728,
-            &[13; 32],
             personal_credentials
         )
         .await
@@ -882,7 +919,6 @@ async fn personal_mcp_discovery_gates_io_and_rejects_revoke_during_network() {
             scope,
             revoking,
             Revision::Modern20260728,
-            &[13; 32],
             personal_credentials
         )
         .await
@@ -1025,7 +1061,6 @@ async fn personal_mcp_legacy_discovery_always_closes_assigned_sessions() {
             scope,
             wire.clone(),
             Revision::Legacy20250326,
-            &[13; 32],
             personal_credentials,
         )
         .await;

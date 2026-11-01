@@ -17,6 +17,8 @@ pub struct McpScope<'a> {
     pub connection_id: &'a str,
     pub workspace_id: &'a str,
     pub generation: i64,
+    /// Server-held encryption key; never derived from request or model input.
+    pub encryption_key: &'a [u8; 32],
 }
 
 /// Trusted credential-adapter output. Never logged, serialized or returned to UI.
@@ -64,6 +66,14 @@ fn stale() -> Error {
 fn remote_error() -> Error {
     Error::BadRequest("MCP discovery failed; check connection authentication, supported schemas and catalog limits".into())
 }
+fn grant_key(scope: McpScope<'_>, alias: &str) -> String {
+    crate::encryption::opaque_storage_key(
+        "personal-mcp-grant-v1",
+        &json!([scope.actor, scope.connection_id, scope.workspace_id, alias]).to_string(),
+        scope.encryption_key,
+    )
+}
+
 fn digest(value: &Value) -> String {
     hex::encode(Sha256::digest(value.to_string().as_bytes()))
 }
@@ -201,10 +211,9 @@ pub async fn refresh_discovery(
     scope: McpScope<'_>,
     transport: Arc<SafeHttpClient>,
     revision: Revision,
-    key: &[u8; 32],
     resolver: CredentialResolver,
 ) -> Result<PersonalMcpCatalog> {
-    refresh_discovery_inner(config, pool, scope, transport, revision, key, resolver).await
+    refresh_discovery_inner(config, pool, scope, transport, revision, resolver).await
 }
 
 // Only the public SafeHttpClient entry point can reach this in production.
@@ -215,7 +224,6 @@ async fn refresh_discovery_inner(
     scope: McpScope<'_>,
     transport: Arc<dyn kyomi_mcp_client::HttpTransport>,
     revision: Revision,
-    key: &[u8; 32],
     resolver: CredentialResolver,
 ) -> Result<PersonalMcpCatalog> {
     connections::require_feature(config)?;
@@ -233,7 +241,7 @@ async fn refresh_discovery_inner(
         scope.connection_id,
         scope.generation,
         scope.workspace_id,
-        key,
+        scope.encryption_key,
     )
     .await?;
     let credentials = resolver(&connection, secret.as_ref())?;
@@ -320,6 +328,7 @@ async fn save_catalog(
     connections::require_feature(config)?;
     let serialized =
         serde_json::to_string(catalog).map_err(|_| invalid("invalid external catalog"))?;
+    let encrypted = crate::encryption::encrypt(&serialized, scope.encryption_key)?;
     db_with_pool!(pool, |p| {
         let mut tx = p.begin().await?;
         lock_scope!(tx, scope);
@@ -335,7 +344,7 @@ async fn save_catalog(
             if catalog
                 .tools
                 .iter()
-                .any(|t| t.remote_name == name && t.revision == hash)
+                .any(|t| grant_key(scope, &t.alias) == name && t.revision == hash)
             {
                 sqlx::query("UPDATE user_mcp_tool_grants SET catalog_id = $3 WHERE connection_id = $1 AND workspace_id = $2 AND tool_name = $4")
                     .bind(scope.connection_id).bind(scope.workspace_id).bind(&catalog.catalog_id).bind(name).execute(&mut *tx).await?;
@@ -345,7 +354,7 @@ async fn save_catalog(
             }
         }
         let changed = sqlx::query("UPDATE user_mcp_tool_catalogs SET expires_at = $5, catalog_json = $6 WHERE connection_id = $1 AND workspace_id = $2 AND generation = $3 AND catalog_id = $4")
-            .bind(scope.connection_id).bind(scope.workspace_id).bind(scope.generation).bind(&catalog.catalog_id).bind(catalog.expires_at).bind(&serialized).execute(&mut *tx).await?.rows_affected();
+            .bind(scope.connection_id).bind(scope.workspace_id).bind(scope.generation).bind(&catalog.catalog_id).bind(catalog.expires_at).bind(&encrypted).execute(&mut *tx).await?.rows_affected();
         if changed != 1 {
             return Err(stale());
         }
@@ -379,7 +388,9 @@ pub async fn get_catalog(
         scope.generation,
         chrono::Utc::now().timestamp()
     )?;
-    serde_json::from_str(&row.ok_or_else(stale)?.0)
+    let encrypted = row.ok_or_else(stale)?.0;
+    let plaintext = crate::encryption::decrypt(&encrypted, scope.encryption_key)?;
+    serde_json::from_str(&plaintext)
         .map_err(|_| Error::Internal("invalid stored MCP catalog".into()))
 }
 
@@ -408,7 +419,7 @@ pub async fn grant_tool(
         let mut tx = p.begin().await?;
         lock_scope!(tx, scope);
         let changed = sqlx::query("INSERT INTO user_mcp_tool_grants (connection_id,workspace_id,tool_name,revision,schema_hash,generation,allow_automation,catalog_id,destination_consent) SELECT $1,$2,$3,$4,$5,$6,TRUE,$7,TRUE WHERE EXISTS (SELECT 1 FROM user_mcp_tool_catalogs WHERE connection_id = $1 AND workspace_id = $2 AND generation = $6 AND catalog_id = $7 AND expires_at > $8) ON CONFLICT (connection_id,workspace_id,tool_name) DO UPDATE SET revision = excluded.revision, schema_hash = excluded.schema_hash, generation = excluded.generation, allow_automation = TRUE, catalog_id = excluded.catalog_id, destination_consent = TRUE")
-            .bind(scope.connection_id).bind(scope.workspace_id).bind(&tool.remote_name).bind(&catalog.protocol_revision).bind(&tool.revision).bind(scope.generation).bind(&catalog.catalog_id).bind(chrono::Utc::now().timestamp()).execute(&mut *tx).await?.rows_affected();
+            .bind(scope.connection_id).bind(scope.workspace_id).bind(grant_key(scope, &tool.alias)).bind(&catalog.protocol_revision).bind(&tool.revision).bind(scope.generation).bind(&catalog.catalog_id).bind(chrono::Utc::now().timestamp()).execute(&mut *tx).await?.rows_affected();
         if changed != 1 {
             return Err(stale());
         }
@@ -428,14 +439,8 @@ pub async fn revoke_tool(
     db_with_pool!(pool, |p| {
         let mut tx = p.begin().await?;
         lock_scope!(tx, scope);
-        let names: Vec<(String,)> = sqlx::query_as("SELECT tool_name FROM user_mcp_tool_grants WHERE connection_id = $1 AND workspace_id = $2")
-            .bind(scope.connection_id).bind(scope.workspace_id).fetch_all(&mut *tx).await?;
-        for (name,) in names {
-            if tool_alias(scope.actor, scope.connection_id, &name) == alias {
-                sqlx::query("DELETE FROM user_mcp_tool_grants WHERE connection_id = $1 AND workspace_id = $2 AND tool_name = $3")
-                    .bind(scope.connection_id).bind(scope.workspace_id).bind(name).execute(&mut *tx).await?;
-            }
-        }
+        sqlx::query("DELETE FROM user_mcp_tool_grants WHERE connection_id = $1 AND workspace_id = $2 AND tool_name = $3")
+            .bind(scope.connection_id).bind(scope.workspace_id).bind(grant_key(scope, alias)).execute(&mut *tx).await?;
         tx.commit().await?;
     });
     Ok(())
@@ -518,7 +523,7 @@ async fn check_current_grant(
         let mut tx = p.begin().await?;
         lock_scope!(tx, scope);
         let grant: Option<(String,)> = sqlx::query_as("SELECT g.tool_name FROM user_mcp_tool_grants g JOIN user_mcp_tool_catalogs t ON t.connection_id = g.connection_id AND t.workspace_id = g.workspace_id AND t.catalog_id = g.catalog_id WHERE g.connection_id = $1 AND g.workspace_id = $2 AND g.tool_name = $3 AND g.schema_hash = $4 AND g.generation = $5 AND g.revision = $6 AND g.catalog_id = $7 AND g.allow_automation = TRUE AND g.destination_consent = TRUE AND t.expires_at > $8")
-            .bind(scope.connection_id).bind(scope.workspace_id).bind(&tool.remote_name).bind(revision).bind(scope.generation).bind(&catalog.protocol_revision).bind(&catalog.catalog_id).bind(chrono::Utc::now().timestamp()).fetch_optional(&mut *tx).await?;
+            .bind(scope.connection_id).bind(scope.workspace_id).bind(grant_key(scope, &tool.alias)).bind(revision).bind(scope.generation).bind(&catalog.protocol_revision).bind(&catalog.catalog_id).bind(chrono::Utc::now().timestamp()).fetch_optional(&mut *tx).await?;
         if grant.is_none() {
             return Err(Error::Forbidden("external tool is disabled or its exact grant was revoked; enable it in personal connection settings".into()));
         }
@@ -555,9 +560,9 @@ pub async fn select_granted_tools(
     let mut bytes = 0usize;
     for tool in &catalog.tools {
         if tools_subset.is_some_and(|names| !names.contains(&tool.alias))
-            || !grants
-                .iter()
-                .any(|(name, hash)| name == &tool.remote_name && hash == &tool.revision)
+            || !grants.iter().any(|(name, hash)| {
+                name == &grant_key(scope, &tool.alias) && hash == &tool.revision
+            })
         {
             continue;
         }
