@@ -1443,6 +1443,52 @@ mod description_tests {
         assert!(!text.contains("axes"), "{text}");
     }
 
+    /// KYO-951 makes the tool's schema enum the single source of truth for the
+    /// section names. The description is the other place those names appear,
+    /// so it must name exactly the enum values — no stale key and no omission.
+    #[test]
+    fn get_chartml_spec_description_names_exactly_the_section_enum() {
+        let registry = create_default_registry();
+        let tool = registry
+            .get_tool("get_chartml_spec")
+            .expect("get_chartml_spec is registered");
+
+        let mut enum_values: Vec<String> = tool.parameters_schema()["properties"]["section"]["enum"]
+            .as_array()
+            .expect("section enum is an array")
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .expect("section enum values are strings")
+                    .to_string()
+            })
+            .collect();
+        enum_values.sort();
+
+        let description = tool.description();
+        let listed = description
+            .split_once("one part: ")
+            .expect("description lists the section values")
+            .1
+            .split_once(". `mode=")
+            .expect("section list ends before the next mode sentence")
+            .0;
+        let mut described: Vec<String> = listed
+            .replace(", or ", ", ")
+            .split(", ")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .collect();
+        described.sort();
+
+        assert_eq!(
+            described, enum_values,
+            "description must name exactly the section enum values"
+        );
+    }
+
     #[test]
     fn validate_chartml_requires_passing_blocks_and_correct_orientation() {
         let registry = create_default_registry();
