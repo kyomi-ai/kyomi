@@ -5,7 +5,7 @@
 
 **Related Documents:**
 - **JSON Schema**: [`chartml_schema.json`](./chartml_schema.json) - Machine-readable validation rules
-- **Examples**: [`EXAMPLES.md`](./EXAMPLES.md) (also available via `get_chartml_spec` with `section: "examples"`) - Real-world usage patterns
+- **Examples**: request `get_chartml_spec` with `mode: "full"` and `section: "examples"` for real-world usage patterns
 - **Overview**: [`README.md`](./README.md) - Directory index and guidelines
 
 ---
