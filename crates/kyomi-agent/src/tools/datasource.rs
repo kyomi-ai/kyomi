@@ -25,9 +25,9 @@ impl AgentTool for ListDatasourcesTool {
          datasource's slug, name, `type`, and number of indexed tables. The `type` \
          determines the SQL dialect and table-name syntax to use with \
          query_datasource, validate_sql and get_table_info: for example BigQuery \
-         uses GoogleSQL and backticked `project.dataset.table` names, while Postgres \
-         uses PostgreSQL syntax. Call this first when you don't know which datasource \
-         to query."
+         uses GoogleSQL and backticked `project.dataset.table` names, Postgres uses \
+         PostgreSQL syntax, and ClickHouse uses ClickHouse SQL. Call this first when \
+         you don't know which datasource to query."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -118,12 +118,13 @@ impl AgentTool for QueryDatasourceTool {
 
     fn description(&self) -> &str {
         "Execute a SQL query against one datasource. HARD LIMIT: returns at most 20 \
-         rows — use it to check SQL and inspect results, not to present a full dataset; \
-         for the complete result set, put the query in a ChartML block. Pass the \
-         datasource slug from list_datasources or search_knowledge, use fully qualified \
-         table names, and write SQL in the dialect of that datasource's `type`. Returns \
-         `cols`, columnar `data`, `rows`, `truncated`, and the datasource slug and type. \
-         On failure returns a sanitized error message with guidance."
+         rows — use it to check SQL and inspect results, not to present a full dataset. \
+         For larger results, build a visualization instead: chat renders a ChartML \
+         block, and MCP clients use render_chart. Pass the datasource slug from \
+         list_datasources or search_knowledge, use fully qualified table names, and \
+         write SQL in the dialect of that datasource's `type`. Returns `cols`, columnar \
+         `data`, `rows`, `truncated`, and the datasource slug and type. On failure \
+         returns a sanitized error message."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -264,7 +265,9 @@ impl AgentTool for ValidateSqlTool {
          calling query_datasource — especially when a query would be expensive, or when \
          query_datasource returned an error and you need to isolate whether the SQL \
          itself is wrong. Returns `success` and a message, plus `error_message`, `line` \
-         and `column` when invalid. It never returns rows."
+         and `column` when invalid. If the provider cannot dry-run, the message says the \
+         dry run is not available and the statement was not validated. It never returns \
+         rows."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

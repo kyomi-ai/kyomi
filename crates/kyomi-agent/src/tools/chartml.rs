@@ -124,7 +124,8 @@ impl AgentTool for GetChartMLSpecTool {
          reference — use it for clients that don't already carry the ChartML basics. \
          Reach for `mode=\"full\"` only when you need advanced features the basics don't \
          cover, such as layered transforms, annotations, variables, custom styling, or a \
-         multi-chart dashboard. Validate every block with validate_chartml before using it."
+         multi-chart dashboard. ChartML blocks are validated before they are saved or \
+         rendered."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

@@ -100,10 +100,11 @@ impl AgentTool for SearchKnowledgeTool {
          if you already know the warehouse's table or column names, include them, \
          because schema vocabulary ranks matches more confidently. If the first search \
          misses, retry with different wording or table and column names. Returns ranked \
-         matches with `type`, `id`, `text` and `score`; table matches also include the \
-         datasource slug and any matched columns. Pass `datasource` to restrict table \
-         results to one datasource, or `doc_type` to return only dashboards or only \
-         knowledge documents (tables and metrics are then excluded)."
+         matches with `type`, `id`, `text` and `score`; table matches also include any \
+         matched columns and, when known, their datasource slug. Pass `datasource` to \
+         restrict table results to one datasource (the slug must resolve in this \
+         workspace), or `doc_type` to return only dashboards or only knowledge documents \
+         (tables and metrics are then excluded)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -116,7 +117,7 @@ impl AgentTool for SearchKnowledgeTool {
                 },
                 "datasource": {
                     "type": "string",
-                    "description": "Optional datasource slug. Restricts table results to that datasource; documents and metrics are not filtered."
+                    "description": "Optional datasource slug; it must resolve in this workspace. Restricts table results to that datasource. Documents and metrics are not filtered by it, but an unknown slug still fails the call."
                 },
                 "doc_type": {
                     "type": "string",
@@ -572,8 +573,10 @@ impl AgentTool for WriteDocumentTool {
          metric definitions (name, formula, unit), and user corrections. Record only \
          facts a tool result confirmed — never one-off query results, business insights, \
          or explanations of your own errors. Pass doc_type=\"knowledge\" (default) for \
-         reference material, or doc_type=\"dashboard\" for a chart-bearing dashboard. \
-         Overwriting requires the content_hash from read_knowledge_file."
+         reference material. doc_type=\"dashboard\" writes a dashboard document directly, \
+         without create_dashboard's duplicate check, so prefer create_dashboard when a \
+         saved dashboard is requested. Pass the content_hash from read_knowledge_file \
+         when overwriting to detect concurrent edits."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

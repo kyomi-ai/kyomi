@@ -1314,9 +1314,9 @@ mod contract_tests {
 
 /// KYO-950: the usage guidance the system prompt used to carry now lives in
 /// the tool descriptions themselves. These tests pin the load-bearing phrase
-/// for each core tool so KYO-949 can delete the prompt copy without silently
-/// dropping a rule, and so an MCP client (which never sees Kyomi's prompt)
-/// still receives the same guidance.
+/// for each core tool so KYO-949 can delete the corresponding prompt copy for
+/// these tools, and so an MCP client (which never sees Kyomi's prompt) still
+/// receives the same guidance.
 #[cfg(test)]
 mod description_tests {
     use super::*;
@@ -1476,6 +1476,18 @@ mod description_tests {
         assert!(text.contains("prefer edit_knowledge_file"), "{text}");
         assert!(text.contains("join keys"), "{text}");
         assert!(text.contains("null semantics"), "{text}");
+        // content_hash is optional; it enables CAS rather than being required.
+        assert!(!text.contains("requires the content_hash"), "{text}");
+        assert!(text.contains("detect concurrent edits"), "{text}");
+    }
+
+    #[test]
+    fn get_dashboard_info_description_matches_the_dashboard_response() {
+        let registry = create_default_registry();
+        let text = description(&registry, "get_dashboard_info");
+        assert!(text.contains("markdown content"), "{text}");
+        assert!(!text.contains("content_hash"), "{text}");
+        assert!(!text.contains("doc_type"), "{text}");
     }
 
     #[test]

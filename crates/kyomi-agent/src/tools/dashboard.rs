@@ -41,7 +41,7 @@ impl AgentTool for SearchDashboardsTool {
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Search query to filter dashboards by title or content"
+                    "description": "Search query to filter dashboards and knowledge documents by title or content"
                 },
                 "sort_by": {
                     "type": "string",
@@ -56,7 +56,7 @@ impl AgentTool for SearchDashboardsTool {
                 },
                 "top_popular": {
                     "type": "boolean",
-                    "description": "If true, returns top 10 most popular dashboards (ignores limit)",
+                    "description": "If true, returns the top 10 most popular documents (ignores limit)",
                     "default": false
                 },
                 "doc_type": {
@@ -428,9 +428,9 @@ impl AgentTool for ModifyDashboardTool {
         "Update an existing dashboard's title and/or content. You must be the owner to \
          update. Important: to add or change dashboard content (charts, text, markdown), \
          you MUST include the 'content' parameter with the complete markdown. Omitting \
-         'content' only updates the title — it does not add any content. Call \
-         validate_chartml before updating so every ChartML block passes; ChartML is \
-         validated again before saving and invalid blocks return detailed errors."
+         'content' only updates the title — it does not add any content. Use \
+         get_chartml_spec for advanced syntax; ChartML is validated before saving and \
+         invalid blocks return detailed errors."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
