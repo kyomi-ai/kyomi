@@ -34,8 +34,13 @@ impl AgentTool for GetTableInfoTool {
     }
 
     fn description(&self) -> &str {
-        "Get detailed information about a table from any datasource. Returns \
-         schema, column names, types, descriptions, and metadata."
+        "Get the exact column names, types and descriptions for one table from the \
+         indexed catalog. Call it before writing SQL against a table whose columns you \
+         haven't seen in this conversation, and never infer columns from similarly named \
+         tables. Requires the datasource slug and the fully qualified table name (as \
+         returned by search_knowledge or browse_catalog). Returns the table description \
+         and its columns; if the table is not in the index it returns an error rather \
+         than querying the datasource."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -48,7 +53,7 @@ impl AgentTool for GetTableInfoTool {
                 },
                 "datasource": {
                     "type": "string",
-                    "description": "Datasource slug"
+                    "description": "Datasource slug from list_datasources"
                 }
             },
             "required": ["table_name", "datasource"]
@@ -205,9 +210,9 @@ impl AgentTool for BrowseCatalogTool {
 
     fn description(&self) -> &str {
         "Browse tables in a datasource, grouped by schema/dataset. Without a schema \
-         filter, returns a compact listing of table names. With a schema filter, returns \
-         descriptions and row counts. Use get_table_info for detailed column info on \
-         specific tables."
+         filter, returns a compact listing of table names (up to 100). With a schema \
+         filter, returns descriptions and row counts. Use it to discover table names, \
+         then call get_table_info for exact column names and types before writing SQL."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

@@ -93,11 +93,17 @@ impl AgentTool for SearchKnowledgeTool {
     }
 
     fn description(&self) -> &str {
-        "Search the workspace's knowledge base for relevant tables, dashboards, \
-         knowledge documents, and metrics using semantic search. \
-         Use this to discover what is available before querying. Pass `doc_type` \
-         to restrict results to only dashboards or only knowledge documents \
-         (omit for everything including tables and metrics)."
+        "Search the workspace's knowledge base for tables, metrics, dashboards and \
+         knowledge documents. Use it first when you need to discover which tables can \
+         answer a question, or to find an existing dashboard or note about a topic. \
+         Phrase `query` the way the user asked the question — natural language works; \
+         if you already know the warehouse's table or column names, include them, \
+         because schema vocabulary ranks matches more confidently. If the first search \
+         misses, retry with different wording or table and column names. Returns ranked \
+         matches with `type`, `id`, `text` and `score`; table matches also include the \
+         datasource slug and any matched columns. Pass `datasource` to restrict table \
+         results to one datasource, or `doc_type` to return only dashboards or only \
+         knowledge documents (tables and metrics are then excluded)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -106,11 +112,11 @@ impl AgentTool for SearchKnowledgeTool {
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Natural language search query"
+                    "description": "What to search for. Natural language (the user's question) works; add table or column names when you know them to sharpen the ranking. If results are weak, retry with different wording or schema vocabulary."
                 },
                 "datasource": {
                     "type": "string",
-                    "description": "Optional datasource slug to filter"
+                    "description": "Optional datasource slug. Restricts table results to that datasource; documents and metrics are not filtered."
                 },
                 "doc_type": {
                     "type": "string",
@@ -559,8 +565,15 @@ impl AgentTool for WriteDocumentTool {
     }
 
     fn description(&self) -> &str {
-        "Create a new document or overwrite an existing one. Use for creating new markdown \
-         documents in the knowledge base. For updating existing documents, prefer edit_knowledge_file."
+        "Create a knowledge document, or overwrite an existing one by title (prefer \
+         edit_knowledge_file for changes). Knowledge documents are durable workspace \
+         memory: record how to navigate the warehouse (which tables to use, field \
+         meanings, join keys, date coverage, NULL semantics, field encodings), canonical \
+         metric definitions (name, formula, unit), and user corrections. Record only \
+         facts a tool result confirmed — never one-off query results, business insights, \
+         or explanations of your own errors. Pass doc_type=\"knowledge\" (default) for \
+         reference material, or doc_type=\"dashboard\" for a chart-bearing dashboard. \
+         Overwriting requires the content_hash from read_knowledge_file."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -796,8 +809,11 @@ impl AgentTool for ListDocumentsTool {
     }
 
     fn description(&self) -> &str {
-        "List all documents in the workspace. Returns titles, types, and metadata. \
-         Optionally filter by document type (dashboard or knowledge)."
+        "List the workspace's documents, newest first. Returns each document's id, \
+         title, doc_type, updated_at and a content preview. Use it to enumerate \
+         knowledge documents or dashboards when you don't know their titles; filter \
+         with doc_type to return only dashboards or only knowledge documents. For \
+         topic search use search_knowledge instead."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

@@ -39,8 +39,10 @@ impl AgentTool for GetWorkspaceInfoTool {
     }
 
     fn description(&self) -> &str {
-        "Get information about the current workspace including all members \
-         and their emails."
+        "Get the current workspace's name and members. Returns `workspace_id`, \
+         `workspace_name`, a member list (name, email, role, is_current_user), \
+         `member_count`, and `current_user_email`. Use it when the user asks who is in \
+         the workspace or which workspace they are in."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

@@ -28,10 +28,11 @@ impl AgentTool for SearchDashboardsTool {
     }
 
     fn description(&self) -> &str {
-        "Search for dashboards in the current workspace. Supports sorting by \
-         popularity, recency, or creation date. Use this to find existing \
-         dashboards, check for duplicates before creating, or help users locate \
-         specific dashboards. Can return top 10 most popular dashboards."
+        "Search dashboards and knowledge documents in the current workspace. Supports \
+         sorting by popularity, recency or creation date. Use it to find an existing \
+         dashboard, check for duplicates before create_dashboard, or locate a document \
+         to read or modify. Returns matching documents with dashboard_id, title, doc_type, \
+         content preview, timestamps and view counts."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -226,11 +227,13 @@ impl AgentTool for CreateDashboardTool {
     }
 
     fn description(&self) -> &str {
-        "Create a new dashboard. You MUST search for existing dashboards first \
-         using search_dashboards to avoid duplicates. Use get_chartml_spec to \
-         check ChartML syntax before creating dashboards with charts. ChartML \
-         blocks are validated before saving - invalid syntax will return \
-         detailed errors."
+        "Create a saved dashboard in the workspace. Use it only when the user asks for \
+         a saved, persistent or shareable dashboard — for ad-hoc questions, answer \
+         directly instead. You MUST call search_dashboards first to check for \
+         duplicates, then pass verified_no_duplicates=true. Content is markdown with \
+         optional ChartML blocks; ChartML is validated before saving and invalid blocks \
+         return detailed errors, so call validate_chartml before adding charts. Returns \
+         the new dashboard's id."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -422,13 +425,12 @@ impl AgentTool for ModifyDashboardTool {
     }
 
     fn description(&self) -> &str {
-        "Update an existing dashboard's title and/or content. You must be the \
-         owner to update. Important: to add or change dashboard content (charts, \
-         text, markdown), you MUST include the 'content' parameter with the \
-         complete markdown. Omitting 'content' only updates the title — it does \
-         not add any content. Use get_chartml_spec to verify ChartML syntax \
-         before updating. ChartML blocks are validated before saving — invalid \
-         syntax will return detailed errors."
+        "Update an existing dashboard's title and/or content. You must be the owner to \
+         update. Important: to add or change dashboard content (charts, text, markdown), \
+         you MUST include the 'content' parameter with the complete markdown. Omitting \
+         'content' only updates the title — it does not add any content. Call \
+         validate_chartml before updating so every ChartML block passes; ChartML is \
+         validated again before saving and invalid blocks return detailed errors."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

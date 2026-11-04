@@ -41,11 +41,16 @@ impl DocumentReadTool {
     pub(crate) fn description_for(doc_type: DocType) -> &'static str {
         match doc_type {
             DocType::Knowledge => {
-                "Read a specific document by title or ID. Returns the full markdown content. \
-                 Use this when you know which document to look at (from search results)."
+                "Read a knowledge document by title or ID. Returns the full markdown \
+                 content and its content_hash. Read the documents covering a table before \
+                 querying it, and read a document before editing it so old_text matches \
+                 exactly. Use search_knowledge or list_knowledge_files when you don't \
+                 know which document to read."
             }
             DocType::Dashboard => {
-                "Get detailed information about a specific dashboard including full content."
+                "Get a dashboard's full content and metadata by ID. Returns the title, \
+                 markdown content with any ChartML blocks, doc_type and content_hash. \
+                 Use search_dashboards to find the ID first."
             }
         }
     }

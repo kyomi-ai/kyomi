@@ -116,7 +116,15 @@ impl AgentTool for GetChartMLSpecTool {
     }
 
     fn description(&self) -> &str {
-        "Get ChartML specification documentation for creating visualizations."
+        "Get the advanced ChartML reference for charts that go beyond everyday bar, \
+         line, pie, table and metric charts. `mode=\"full\"` returns the complete \
+         specification; add `section` to fetch one part: overview, source, params, \
+         chart, data, transform, visualize, annotations, style, config, variables, \
+         formatting, layout, or dashboard-example. `mode=\"essential\"` returns the core \
+         reference — use it for clients that don't already carry the ChartML basics. \
+         Reach for `mode=\"full\"` only when you need advanced features the basics don't \
+         cover, such as layered transforms, annotations, variables, custom styling, or a \
+         multi-chart dashboard. Validate every block with validate_chartml before using it."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

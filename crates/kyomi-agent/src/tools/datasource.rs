@@ -21,8 +21,13 @@ impl AgentTool for ListDatasourcesTool {
     }
 
     fn description(&self) -> &str {
-        "List all available datasources in the current workspace. Returns each \
-         datasource's slug, name, type, and number of indexed tables."
+        "List every datasource connected to the current workspace. Returns each \
+         datasource's slug, name, `type`, and number of indexed tables. The `type` \
+         determines the SQL dialect and table-name syntax to use with \
+         query_datasource, validate_sql and get_table_info: for example BigQuery \
+         uses GoogleSQL and backticked `project.dataset.table` names, while Postgres \
+         uses PostgreSQL syntax. Call this first when you don't know which datasource \
+         to query."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -112,8 +117,13 @@ impl AgentTool for QueryDatasourceTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a SQL query against any datasource and return results. \
-         HARD LIMIT: 20 rows maximum. Use fully qualified table names."
+        "Execute a SQL query against one datasource. HARD LIMIT: returns at most 20 \
+         rows — use it to check SQL and inspect results, not to present a full dataset; \
+         for the complete result set, put the query in a ChartML block. Pass the \
+         datasource slug from list_datasources or search_knowledge, use fully qualified \
+         table names, and write SQL in the dialect of that datasource's `type`. Returns \
+         `cols`, columnar `data`, `rows`, `truncated`, and the datasource slug and type. \
+         On failure returns a sanitized error message with guidance."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -126,10 +136,10 @@ impl AgentTool for QueryDatasourceTool {
                 },
                 "datasource": {
                     "type": "string",
-                    "description": "Datasource slug (e.g., 'production-postgres'). Required for non-BigQuery."
+                    "description": "Datasource slug from list_datasources (e.g. 'production-postgres'). Required."
                 }
             },
-            "required": ["sql_query"]
+            "required": ["sql_query", "datasource"]
         })
     }
 
@@ -249,8 +259,12 @@ impl AgentTool for ValidateSqlTool {
     }
 
     fn description(&self) -> &str {
-        "Validate SQL query syntax without executing. Returns validation status, \
-         error message with line/column if invalid."
+        "Dry-run a SQL statement against a datasource without executing it. Use it to \
+         catch syntax errors, wrong table or column names, and dialect mistakes before \
+         calling query_datasource — especially when a query would be expensive, or when \
+         query_datasource returned an error and you need to isolate whether the SQL \
+         itself is wrong. Returns `success` and a message, plus `error_message`, `line` \
+         and `column` when invalid. It never returns rows."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -259,11 +273,11 @@ impl AgentTool for ValidateSqlTool {
             "properties": {
                 "sql": {
                     "type": "string",
-                    "description": "SQL query to validate"
+                    "description": "SQL statement to validate"
                 },
                 "datasource": {
                     "type": "string",
-                    "description": "Datasource slug"
+                    "description": "Datasource slug from list_datasources"
                 }
             },
             "required": ["sql", "datasource"]
@@ -400,6 +414,24 @@ mod tests {
             .unwrap_or_else(|| panic!("datasource '{slug}' present in response: {parsed}"))["tables_indexed"]
             .as_i64()
             .expect("tables_indexed is a number")
+    }
+
+    /// `execute()` rejects a missing `datasource` for every datasource type
+    /// (KYO-950): the parameter is not just non-BigQuery, it is required, so
+    /// the schema declares it required too.
+    #[tokio::test]
+    async fn query_datasource_requires_datasource_slug() {
+        let ctx = build_ctx(test_pool().await);
+        let err = QueryDatasourceTool
+            .execute(serde_json::json!({"sql_query": "SELECT 1"}), &ctx)
+            .await
+            .expect_err("omitting datasource must be rejected");
+        match err {
+            kyomi_core::Error::BadRequest(message) => {
+                assert!(message.contains("datasource"), "{message}");
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
     }
 
     #[tokio::test]
