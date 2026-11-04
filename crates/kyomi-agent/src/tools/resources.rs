@@ -24,9 +24,10 @@ impl AgentTool for BrowseResourcesTool {
     }
 
     fn description(&self) -> &str {
-        "List available Kyomi documentation resources. Returns a catalog of \
-         docs:// URIs with titles and descriptions. Use this to discover what \
-         documentation is available, then use read_resource to read specific docs."
+        "List Kyomi's product documentation resources. Use it for questions about Kyomi \
+         itself — setup, datasources, features, configuration, or how a Kyomi capability \
+         works. Returns docs:// URIs with titles and descriptions; pass one to \
+         read_resource."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -84,9 +85,10 @@ impl AgentTool for ReadResourceTool {
     }
 
     fn description(&self) -> &str {
-        "Read a specific Kyomi documentation resource by its docs:// URI. \
-         Returns the full markdown content of the document. Use browse_resources \
-         first to discover available URIs."
+        "Read one Kyomi product documentation document by its docs:// URI. Use it for \
+         questions about Kyomi itself — setup, features, configuration, or how a Kyomi \
+         capability works. Call browse_resources first if you don't know the URI. Returns \
+         the full markdown content."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

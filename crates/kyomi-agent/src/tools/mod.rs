@@ -1311,3 +1311,290 @@ mod contract_tests {
         }
     }
 }
+
+/// KYO-950: the usage guidance the system prompt used to carry now lives in
+/// the tool descriptions themselves. These tests pin the load-bearing phrase
+/// for each core tool so KYO-949 can delete the corresponding prompt copy for
+/// these tools, and so an MCP client (which never sees Kyomi's prompt) still
+/// receives the same guidance.
+#[cfg(test)]
+mod description_tests {
+    use super::*;
+
+    fn description(registry: &ToolRegistry, tool: &str) -> String {
+        registry
+            .get_tool(tool)
+            .unwrap_or_else(|| panic!("tool '{tool}' is not registered"))
+            .description()
+            .to_lowercase()
+    }
+
+    fn param_description(registry: &ToolRegistry, tool: &str, param: &str) -> String {
+        let definition = registry
+            .get_tool(tool)
+            .unwrap_or_else(|| panic!("tool '{tool}' is not registered"));
+        definition.parameters_schema()["properties"][param]["description"]
+            .as_str()
+            .unwrap_or_else(|| panic!("tool '{tool}' param '{param}' has no description"))
+            .to_lowercase()
+    }
+
+    fn required(registry: &ToolRegistry, tool: &str) -> Vec<String> {
+        let tool = registry
+            .get_tool(tool)
+            .unwrap_or_else(|| panic!("tool '{tool}' is not registered"));
+        tool.parameters_schema()["required"]
+            .as_array()
+            .expect("required is an array")
+            .iter()
+            .filter_map(|value| value.as_str().map(str::to_string))
+            .collect()
+    }
+
+    #[test]
+    fn get_table_info_requires_column_inspection_before_sql() {
+        let registry = create_default_registry();
+        let text = description(&registry, "get_table_info");
+        assert!(text.contains("exact column names"), "{text}");
+        assert!(text.contains("before writing sql"), "{text}");
+        assert!(text.contains("never infer columns"), "{text}");
+    }
+
+    #[test]
+    fn search_knowledge_description_and_query_param_agree() {
+        let registry = create_default_registry();
+        let text = description(&registry, "search_knowledge");
+        let query = param_description(&registry, "search_knowledge", "query");
+
+        assert!(text.contains("natural language"), "{text}");
+        assert!(query.contains("natural language"), "{query}");
+        assert!(text.contains("table or column names"), "{text}");
+        assert!(query.contains("table or column names"), "{query}");
+        // The old prompt claim must not survive in either string.
+        assert!(!text.contains("technical database terms"), "{text}");
+        assert!(!query.contains("technical database terms"), "{query}");
+        // The datasource filter has to be discoverable from the description.
+        assert!(text.contains("datasource"), "{text}");
+        assert!(text.contains("doc_type"), "{text}");
+    }
+
+    #[test]
+    fn query_datasource_states_row_limit_and_dialect() {
+        let registry = create_default_registry();
+        let text = description(&registry, "query_datasource");
+        let datasource = param_description(&registry, "query_datasource", "datasource");
+
+        assert!(text.contains("at most 20 rows"), "{text}");
+        assert!(text.contains("not to present a full dataset"), "{text}");
+        assert!(text.contains("fully qualified table names"), "{text}");
+        assert!(text.contains("dialect"), "{text}");
+        // The parameter is required by execute(); the schema must say so too,
+        // and the stale BigQuery-default caveat must be gone.
+        assert!(required(&registry, "query_datasource").iter().any(|name| name == "datasource"));
+        assert!(!datasource.contains("non-bigquery"), "{datasource}");
+        assert!(datasource.contains("required"), "{datasource}");
+    }
+
+    #[test]
+    fn list_datasources_explains_that_type_selects_the_dialect() {
+        let registry = create_default_registry();
+        let text = description(&registry, "list_datasources");
+        assert!(text.contains("sql dialect"), "{text}");
+        assert!(text.contains("type"), "{text}");
+    }
+
+    #[test]
+    fn validate_sql_says_when_to_prefer_it_over_querying() {
+        let registry = create_default_registry();
+        let text = description(&registry, "validate_sql");
+        assert!(text.contains("without executing"), "{text}");
+        assert!(text.contains("before calling query_datasource"), "{text}");
+        assert!(text.contains("never returns rows"), "{text}");
+    }
+
+    #[test]
+    fn get_chartml_spec_is_the_advanced_reference_with_final_sections() {
+        let registry = create_default_registry();
+        let text = description(&registry, "get_chartml_spec");
+        assert!(text.contains("advanced"), "{text}");
+        assert!(text.contains("mode=\"essential\""), "{text}");
+        assert!(text.contains("mode=\"full\""), "{text}");
+        for section in [
+            "overview",
+            "source",
+            "params",
+            "chart",
+            "data",
+            "transform",
+            "visualize",
+            "annotations",
+            "style",
+            "config",
+            "variables",
+            "formatting",
+            "layout",
+            "dashboard-example",
+        ] {
+            assert!(text.contains(section), "section '{section}' missing: {text}");
+        }
+        // These were merged into `visualize` by KYO-951 and must not reappear
+        // as section names.
+        assert!(!text.contains("marks"), "{text}");
+        assert!(!text.contains("axes"), "{text}");
+    }
+
+    /// KYO-951 makes the tool's schema enum the single source of truth for the
+    /// section names. The description is the other place those names appear,
+    /// so it must name exactly the enum values — no stale key and no omission.
+    #[test]
+    fn get_chartml_spec_description_names_exactly_the_section_enum() {
+        let registry = create_default_registry();
+        let tool = registry
+            .get_tool("get_chartml_spec")
+            .expect("get_chartml_spec is registered");
+
+        let mut enum_values: Vec<String> = tool.parameters_schema()["properties"]["section"]["enum"]
+            .as_array()
+            .expect("section enum is an array")
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .expect("section enum values are strings")
+                    .to_string()
+            })
+            .collect();
+        enum_values.sort();
+
+        let description = tool.description();
+        let listed = description
+            .split_once("one part: ")
+            .expect("description lists the section values")
+            .1
+            .split_once(". `mode=")
+            .expect("section list ends before the next mode sentence")
+            .0;
+        let mut described: Vec<String> = listed
+            .replace(", or ", ", ")
+            .split(", ")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .collect();
+        described.sort();
+
+        assert_eq!(
+            described, enum_values,
+            "description must name exactly the section enum values"
+        );
+    }
+
+    #[test]
+    fn validate_chartml_requires_passing_blocks_and_correct_orientation() {
+        let registry = create_default_registry();
+        let text = description(&registry, "validate_chartml");
+        assert!(text.contains("must pass validation"), "{text}");
+        assert!(text.contains("fix the reported errors"), "{text}");
+        assert!(text.contains("include only blocks that pass"), "{text}");
+        assert!(text.contains("columns are categories"), "{text}");
+        assert!(text.contains("rows are values"), "{text}");
+        assert!(text.contains("exact column names"), "{text}");
+    }
+
+    #[test]
+    fn create_dashboard_is_only_for_a_saved_artifact_and_requires_search_first() {
+        let registry = create_default_registry();
+        let text = description(&registry, "create_dashboard");
+        assert!(text.contains("saved, persistent or shareable"), "{text}");
+        assert!(text.contains("answer directly"), "{text}");
+        assert!(text.contains("search_dashboards"), "{text}");
+        assert!(text.contains("verified_no_duplicates"), "{text}");
+        assert!(text.contains("validate_chartml"), "{text}");
+    }
+
+    #[test]
+    fn write_knowledge_file_carries_the_memory_rules() {
+        let registry = create_default_registry();
+        let text = description(&registry, "write_knowledge_file");
+        assert!(text.contains("durable workspace memory"), "{text}");
+        assert!(text.contains("only facts a tool result confirmed"), "{text}");
+        assert!(text.contains("one-off query results"), "{text}");
+        assert!(text.contains("prefer edit_knowledge_file"), "{text}");
+        assert!(text.contains("join keys"), "{text}");
+        assert!(text.contains("null semantics"), "{text}");
+        // content_hash is optional; it enables CAS rather than being required.
+        assert!(!text.contains("requires the content_hash"), "{text}");
+        assert!(text.contains("detect concurrent edits"), "{text}");
+        let content_hash =
+            param_description(&registry, "write_knowledge_file", "content_hash");
+        assert!(
+            !content_hash.contains("required when overwriting"),
+            "content_hash param must not claim to be required: {content_hash}"
+        );
+        assert!(content_hash.contains("concurrent edits"), "{content_hash}");
+    }
+
+    #[test]
+    fn get_dashboard_info_description_matches_the_dashboard_response() {
+        let registry = create_default_registry();
+        let text = description(&registry, "get_dashboard_info");
+        assert!(text.contains("markdown content"), "{text}");
+        assert!(!text.contains("content_hash"), "{text}");
+        assert!(!text.contains("doc_type"), "{text}");
+    }
+
+    #[test]
+    fn edit_knowledge_file_prefers_targeted_edits() {
+        let registry = create_default_registry();
+        let text = description(&registry, "edit_knowledge_file");
+        assert!(text.contains("old_text"), "{text}");
+        assert!(text.contains("not the whole document"), "{text}");
+        assert!(text.contains("appears more than once"), "{text}");
+        assert!(text.contains("only facts a tool result confirmed"), "{text}");
+    }
+
+    #[test]
+    fn read_knowledge_file_says_to_read_docs_before_querying() {
+        let registry = create_default_registry();
+        let text = description(&registry, "read_knowledge_file");
+        assert!(text.contains("before querying"), "{text}");
+        assert!(text.contains("content_hash"), "{text}");
+    }
+
+    #[test]
+    fn list_knowledge_files_is_for_enumeration() {
+        let registry = create_default_registry();
+        let text = description(&registry, "list_knowledge_files");
+        assert!(text.contains("newest first"), "{text}");
+        assert!(text.contains("search_knowledge"), "{text}");
+    }
+
+    #[test]
+    fn documentation_tools_are_for_questions_about_kyomi_itself() {
+        let registry = create_default_registry();
+        let browse = description(&registry, "browse_resources");
+        let read = description(&registry, "read_resource");
+        assert!(browse.contains("questions about kyomi itself"), "{browse}");
+        assert!(read.contains("questions about kyomi itself"), "{read}");
+        assert!(read.contains("browse_resources"), "{read}");
+    }
+
+    #[test]
+    fn no_mcp_visible_description_refers_to_a_chat_reply_or_ui() {
+        let registry = create_default_registry();
+        let filter = ToolFilter {
+            exclude_copilot_only: true,
+            ..Default::default()
+        };
+        for tool in registry.get_tools(&filter) {
+            let text = tool.description().to_lowercase();
+            for forbidden in ["chat reply", "your reply", "your response", "the user's open"] {
+                assert!(
+                    !text.contains(forbidden),
+                    "tool '{}' description refers to '{forbidden}': {text}",
+                    tool.name()
+                );
+            }
+        }
+    }
+}
