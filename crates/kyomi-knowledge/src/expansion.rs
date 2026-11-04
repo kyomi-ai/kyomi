@@ -105,15 +105,15 @@ struct MetricTableExpansionRow {
 /// candidate entries with expansion scores. Entries already in `already_injected`
 /// are excluded from results.
 ///
-/// Unlike the FalkorDB version which takes a `ConversationContext`, this version
-/// takes the individual sets directly to avoid circular dependencies.
+/// Unlike the original FalkorDB version, this version takes the individual
+/// sets directly to avoid circular dependencies.
 ///
 /// # Error policy: propagate, don't degrade
 ///
 /// A broken query (e.g. a column that was renamed or never existed) and a
 /// genuine "no matching edges" both produce an empty result set, so keeping
 /// only the empty vec loses the distinction. Every leaf here queries the same
-/// database as the retrieval step `retrieve_and_inject` runs before calling
+/// database as the retrieval step that runs before calling
 /// this function, and that step already propagates its own errors with `?`;
 /// each leaf's error now bubbles out the same way, via `?`, with no
 /// swallowing in between. Whether context enrichment should be best-effort

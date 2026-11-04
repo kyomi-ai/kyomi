@@ -80,15 +80,9 @@ pub struct Workspace {
     pub stripe_customer_id: Option<String>,
     pub stripe_subscription_id: Option<String>,
 
-    // ── Settings / knowledge ────────────────────────────────────────
+    // ── Settings ───────────────────────────────────────────────────
     /// JSON settings blob (WorkspaceSettings in Python).
     pub settings: Option<serde_json::Value>,
-
-    /// Free-text business knowledge about this workspace's data.
-    pub business_knowledge: Option<String>,
-
-    /// When business_knowledge was last updated.
-    pub knowledge_updated_at: Option<DateTime<Utc>>,
 
     // ── Catalog ─────────────────────────────────────────────────────
     /// Last time the schema catalog was refreshed.
