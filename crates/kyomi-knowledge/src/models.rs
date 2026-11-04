@@ -11,11 +11,15 @@ use serde::{Deserialize, Serialize};
 // -- Retrieval result types ------------------------------------------------
 
 /// The kind of context entry returned from retrieval.
+///
+/// Retrieval now sources only warehouse tables from the vector indexes.
+/// Dashboards and knowledge documents come from the separate knowledge-chunk
+/// search (`tools::knowledge::search_knowledge_chunks`) and are not
+/// `ContextEntry`s; the legacy `agent_learnings` learning/metric kinds were
+/// removed in KYO-952.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ContextEntryKind {
     Table,
-    Learning,
-    Metric,
 }
 
 impl ContextEntryKind {
@@ -23,17 +27,13 @@ impl ContextEntryKind {
     pub fn section_header(&self) -> &'static str {
         match self {
             Self::Table => "## Tables",
-            Self::Learning => "## Learnings",
-            Self::Metric => "## Metrics",
         }
     }
 
-    /// Sort order -- tables first, then metrics, then learnings.
+    /// Sort order for context block formatting.
     pub fn sort_order(&self) -> u8 {
         match self {
             Self::Table => 0,
-            Self::Metric => 1,
-            Self::Learning => 2,
         }
     }
 }
@@ -75,7 +75,7 @@ pub struct ContextEntry {
     /// How this entry was discovered.
     pub source: RetrievalSource,
     /// For Table entries: columns that matched the query (search proxies).
-    /// Empty for Learning and Metric entries.
+    /// Empty when no column matched.
     pub matched_columns: Vec<MatchedColumn>,
 }
 
