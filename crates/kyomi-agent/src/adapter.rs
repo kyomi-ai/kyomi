@@ -3393,7 +3393,6 @@ mod tests {
         uncertain_failure: bool,
         uncertain_result: bool,
         query_rejected: bool,
-        query_sql: &'static str,
         query_error: &'static str,
     }
     #[async_trait::async_trait]
@@ -3433,8 +3432,8 @@ mod tests {
                 if index > 0 {
                     return Ok(serde_json::json!({"cols":[{"name":"views","type":"integer"}],"data":{"views":[42]},"rows":1}).to_string());
                 }
-                return Ok(crate::tools::query_utils::query_error_response(
-                    "clickhouse", "kyomi-analytics", self.query_sql, self.query_error,
+                return Ok(crate::tools::query_utils::query_error_response_with_rejection(
+                    "kyomi-analytics", self.query_error, self.query_rejected,
                 ));
             }
             kyomi_core::db_execute!(&self.db, "UPDATE workspaces SET name='883 side effect committed' WHERE workspace_id='ws-1'").unwrap();
@@ -3454,14 +3453,12 @@ mod tests {
         let run=assistant.durable_run().unwrap().clone();
         let calls=Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let script=vec![crate::test_support::Reply::ToolCall,crate::test_support::Reply::ToolCall,crate::test_support::Reply::Text("Revenue checked".into())];
-        let (query_sql, query_error, query_error_marker) = match fail_writer {
+        let (query_error, query_error_marker) = match fail_writer {
             "query_rejected_184" => (
-                "WITH v AS (SELECT visitor_id, any(screen_width) AS sw FROM events GROUP BY visitor_id) SELECT sw FROM v",
                 "Code: 184. DB::Exception: Aggregate function any(sw) is found in GROUP BY in query. (ILLEGAL_AGGREGATION)",
                 "ILLEGAL_AGGREGATION",
             ),
             _ => (
-                "SELECT page_url FROM events",
                 "Code: 47. DB::Exception: Unknown expression identifier page_url (UNKNOWN_IDENTIFIER)",
                 "UNKNOWN_IDENTIFIER",
             ),
@@ -3469,7 +3466,7 @@ mod tests {
         let query_rejected = matches!(fail_writer, "query_rejected" | "query_rejected_184");
         let provider=AwaitedProvider {inner:crate::test_support::ScriptedProvider {script:std::sync::Mutex::new(script.into()),after_script:crate::test_support::Reply::Text("unexpected".into()),calls:Arc::new(std::sync::Mutex::new(Vec::new()))},index:std::sync::atomic::AtomicUsize::new(0),invalid_chart,query_rejected,query_error_marker};
         let mut registry=crate::tools::ToolRegistry::new();
-        registry.register(Arc::new(AwaitedTool {db:db.clone(),key:key.clone(),run:run.clone(),message:assistant.tag_id().unwrap().into(),calls:calls.clone(),invalid_chart,uncertain_failure:fail_writer == "uncertain",uncertain_result:fail_writer == "uncertain_result",query_rejected,query_sql,query_error}));
+        registry.register(Arc::new(AwaitedTool {db:db.clone(),key:key.clone(),run:run.clone(),message:assistant.tag_id().unwrap().into(),calls:calls.clone(),invalid_chart,uncertain_failure:fail_writer == "uncertain",uncertain_result:fail_writer == "uncertain_result",query_rejected,query_error}));
         let mut context=crate::test_support::build_ctx(db.clone());
         context.session_id=Some(session.clone());
         let agent=CustomAgent::new(Box::new(provider),crate::agent::AgentConfig::default(),Arc::new(registry),context,std::collections::HashMap::new());

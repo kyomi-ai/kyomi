@@ -30,21 +30,157 @@ pub(super) fn sql_result_domain_outcome(text: &str) -> agent_runtime::DomainOutc
     }
 }
 
-/// A single read-only ClickHouse statement: `SELECT`, or `WITH ... SELECT`.
-/// ClickHouse treats a leading `WITH` as a SELECT query (the driver's
-/// pagination does too), so a CTE query can be retried for the same reason as
-/// a plain SELECT. Batches and other statement kinds stay uncertain because an
-/// earlier statement may have committed.
+/// Skip a quoted string/identifier, honouring doubled-quote and backslash
+/// escapes. Returns the index just past the closing quote (or the end).
+fn skip_clickhouse_quoted(bytes: &[u8], mut i: usize, quote: u8) -> usize {
+    i += 1;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            i += 2;
+        } else if bytes[i] == quote {
+            if bytes.get(i + 1) == Some(&quote) {
+                i += 2;
+            } else {
+                return i + 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    i
+}
+
+/// Skip a (possibly nested) block comment. `i` points at the opening `/`.
+fn skip_clickhouse_block_comment(bytes: &[u8], mut i: usize) -> usize {
+    i += 2;
+    let mut depth = 1;
+    while i + 1 < bytes.len() && depth > 0 {
+        if bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            depth += 1;
+            i += 2;
+        } else if bytes[i] == b'*' && bytes[i + 1] == b'/' {
+            depth -= 1;
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    i
+}
+
+fn skip_clickhouse_line_comment(bytes: &[u8], mut i: usize) -> usize {
+    while i < bytes.len() && bytes[i] != b'\n' {
+        i += 1;
+    }
+    i
+}
+
+fn is_clickhouse_statement_starter(word: &str) -> bool {
+    matches!(
+        word,
+        "SELECT"
+            | "INSERT"
+            | "CREATE"
+            | "ALTER"
+            | "DROP"
+            | "TRUNCATE"
+            | "RENAME"
+            | "UPDATE"
+            | "DELETE"
+            | "OPTIMIZE"
+            | "ATTACH"
+            | "DETACH"
+            | "USE"
+            | "SET"
+            | "KILL"
+            | "SYSTEM"
+            | "GRANT"
+            | "REVOKE"
+            | "EXPLAIN"
+            | "SHOW"
+            | "DESCRIBE"
+            | "DESC"
+            | "EXISTS"
+            | "CHECK"
+            | "WATCH"
+            | "BACKUP"
+            | "RESTORE"
+            | "MOVE"
+            | "EXCHANGE"
+            | "UNDROP"
+            | "REFRESH"
+            | "LIGHTWEIGHT"
+    )
+}
+
+/// Return the top-level statement keyword, skipping strings, quoted
+/// identifiers and comments. A leading `WITH` is a CTE prefix: the first
+/// top-level statement keyword after it decides whether this is a `SELECT` or
+/// a mutation such as `WITH ... INSERT`.
+fn clickhouse_statement_keyword(sql: &str) -> Option<String> {
+    let bytes = sql.as_bytes();
+    let mut i = 0;
+    let mut depth = 0usize;
+    let mut first_word: Option<String> = None;
+    let mut after_with = false;
+    while i < bytes.len() {
+        match bytes[i] {
+            quote @ (b'\'' | b'"' | b'`') => {
+                i = skip_clickhouse_quoted(bytes, i, quote);
+            }
+            b'-' if bytes.get(i + 1) == Some(&b'-') => {
+                i = skip_clickhouse_line_comment(bytes, i);
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                i = skip_clickhouse_block_comment(bytes, i);
+            }
+            b'(' => {
+                depth += 1;
+                i += 1;
+            }
+            b')' => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+            }
+            byte if byte.is_ascii_alphabetic() || byte == b'_' => {
+                let start = i;
+                i += 1;
+                while i < bytes.len()
+                    && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_')
+                {
+                    i += 1;
+                }
+                if depth == 0 {
+                    let word = sql[start..i].to_ascii_uppercase();
+                    if first_word.is_none() {
+                        first_word = Some(word.clone());
+                        if word == "WITH" {
+                            after_with = true;
+                        } else {
+                            return Some(word);
+                        }
+                    } else if after_with && is_clickhouse_statement_starter(&word) {
+                        return Some(word);
+                    }
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    first_word
+}
+
+/// A single read-only ClickHouse statement. `WITH ... SELECT` is accepted;
+/// `WITH ... INSERT` and every other top-level mutation are not. Batches and
+/// ambiguous statements stay uncertain because an earlier statement can have
+/// committed.
 fn clickhouse_read_only_query(sql: &str) -> bool {
     // Conservatively exclude batches. Semicolons inside strings/comments may
     // exclude a safe query too; they must never authorize retrying a batch that
     // could have committed an earlier statement.
     let trimmed = sql.trim();
     let single_statement = !trimmed.strip_suffix(';').unwrap_or(trimmed).contains(';');
-    let first_keyword = trimmed.split_whitespace().next().unwrap_or_default();
-    single_statement
-        && (first_keyword.eq_ignore_ascii_case("SELECT")
-            || first_keyword.eq_ignore_ascii_case("WITH"))
+    single_statement && clickhouse_statement_keyword(trimmed).as_deref() == Some("SELECT")
 }
 
 /// ClickHouse renders server-side exceptions as `Code: N. DB::Exception: ...`.
@@ -54,16 +190,36 @@ fn clickhouse_server_error(error: &str) -> bool {
     error.starts_with("Code: ") && error.contains(" DB::Exception: ")
 }
 
-/// Analysis errors we can recognize without a second round trip. `dry_run`
-/// confirms every other server error, so this list is only a latency fast path.
+fn clickhouse_error_code(error: &str) -> Option<u16> {
+    error
+        .strip_prefix("Code: ")?
+        .split('.')
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// Errors that a ClickHouse `EXPLAIN` can raise during parsing or analysis.
+/// Execution, admission and resource codes (notably 159 timeout, 202 too many
+/// simultaneous queries, 209 socket timeout and 241 memory limit) are
+/// deliberately absent: a dry run failing with one of those does not prove the
+/// original statement was rejected before execution.
+const CLICKHOUSE_ANALYSIS_ERROR_CODES: &[u16] = &[
+    6, 8, 15, 16, 20, 25, 26, 27, 34, 35, 36, 37, 38, 41, 42, 43, 44, 46, 47, 48, 50, 51, 52, 53,
+    59, 60, 62, 63, 70, 72, 73, 78, 81, 115, 133, 134, 174, 179, 181, 182, 183, 184, 206, 207,
+    215, 223, 258, 264, 352, 376, 377, 378, 403, 406, 417, 440, 441, 467, 475, 476, 498, 544,
+    545, 557, 558, 596, 628, 675, 676, 704, 719, 731, 756,
+];
+
+fn clickhouse_analysis_error(error: &str) -> bool {
+    clickhouse_error_code(error)
+        .is_some_and(|code| CLICKHOUSE_ANALYSIS_ERROR_CODES.contains(&code))
+}
+
+/// Definitely analysis-only errors we can recognize without a second round
+/// trip. The dry-run fallback handles every other unknown server error.
 fn known_clickhouse_rejection(raw_error: &str) -> bool {
-    [
-        "Code: 47. DB::Exception: ",  // UNKNOWN_IDENTIFIER
-        "Code: 62. DB::Exception: ",  // SYNTAX_ERROR
-        "Code: 184. DB::Exception: ", // ILLEGAL_AGGREGATION
-    ]
-    .iter()
-    .any(|prefix| raw_error.starts_with(prefix))
+    matches!(clickhouse_error_code(raw_error), Some(47 | 62 | 184))
 }
 
 /// Only a single read-only ClickHouse statement can be retried after a
@@ -74,23 +230,42 @@ fn clickhouse_recoverable_error(datasource_type: &str, sql: &str, raw_error: &st
         && clickhouse_server_error(raw_error)
 }
 
-/// A ClickHouse dry-run failure is a server-side `DB::Exception`, which means
-/// analysis itself was rejected; transport/decoding failures are not proof.
-pub(crate) fn dry_run_confirms_rejection(
+/// Best-effort bound for the exploratory `EXPLAIN`. The canonical validation
+/// dry run uses 30s; this path runs only after a failed query and must not hold
+/// the turn open. A timeout keeps the outcome uncertain.
+const QUERY_RECOVERY_DRY_RUN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A ClickHouse dry-run failure confirms a pre-execution rejection only when it
+/// is a parse/analysis error. A successful dry run, a transport failure, or an
+/// execution/admission/resource error leaves the outcome uncertain.
+fn dry_run_confirms_rejection(
     dry_run: &kyomi_connect_protocol::Result<kyomi_datasource_server::DryRunResult>,
 ) -> bool {
-    dry_run
-        .as_ref()
-        .is_ok_and(|result| !result.valid && clickhouse_server_error(&result.message))
+    match dry_run {
+        Ok(result) if !result.valid => {
+            let confirmed = clickhouse_analysis_error(&result.message);
+            tracing::debug!(
+                confirmed,
+                message = %result.message,
+                "ClickHouse dry run classified for query recovery"
+            );
+            confirmed
+        }
+        Ok(_) => false,
+        Err(error) => {
+            tracing::debug!(%error, "ClickHouse dry run failed; keeping query outcome uncertain");
+            false
+        }
+    }
 }
 
 /// Decide whether a model-visible query failure is safe to return to the model.
 ///
 /// For analysis errors not in `known_clickhouse_rejection`, ask the provider
 /// for a dry run (`EXPLAIN`): it repeats query analysis without executing
-/// anything, so a server-side dry-run error proves the original statement
-/// never started. A successful dry run means the original failure happened
-/// during execution (timeout, memory limit, etc.) and remains uncertain.
+/// anything. A dry-run failure carrying a parse/analysis error proves the
+/// original statement never started; a successful dry run or an
+/// execution/admission/resource error remains uncertain.
 pub(crate) async fn query_error_is_recoverable(
     provider: &dyn kyomi_datasource_server::DatasourceProvider,
     datasource_type: &str,
@@ -104,11 +279,17 @@ pub(crate) async fn query_error_is_recoverable(
         return true;
     }
     let dry_run = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
+        QUERY_RECOVERY_DRY_RUN_TIMEOUT,
         provider.dry_run(sql),
     )
     .await;
-    dry_run.is_ok_and(|result| dry_run_confirms_rejection(&result))
+    match dry_run {
+        Ok(result) => dry_run_confirms_rejection(&result),
+        Err(_) => {
+            tracing::debug!("ClickHouse dry run timed out; keeping query outcome uncertain");
+            false
+        }
+    }
 }
 
 /// Build the model-visible error envelope with an explicit recovery decision.
@@ -128,40 +309,41 @@ pub(crate) fn query_error_response_with_rejection(
     .to_string()
 }
 
-/// Preserve the provider error for model repair, marking only known ClickHouse
-/// read-only parse/analysis rejections as definite failures. `QueryStatus::Error`
-/// also covers network loss and response decoding failures, so it alone cannot
-/// establish this; `query_error_is_recoverable` confirms the rest with a dry run.
-///
-/// Test-only: production uses `query_error_is_recoverable` for the analysis
-/// errors that need a dry-run confirmation.
-#[cfg(test)]
-pub(crate) fn query_error_response(
-    datasource_type: &str,
-    datasource_slug: &str,
-    sql: &str,
-    raw_error: &str,
-) -> String {
-    query_error_response_with_rejection(
-        datasource_slug,
-        raw_error,
-        clickhouse_recoverable_error(datasource_type, sql, raw_error)
-            && known_clickhouse_rejection(raw_error),
-    )
-}
-
 #[cfg(test)]
 mod query_recovery_tests {
-    use super::{dry_run_confirms_rejection, query_error_is_recoverable, query_error_response};
-    use crate::tools::{AgentTool, datasource::QueryDatasourceTool};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use super::{query_error_is_recoverable, query_error_response_with_rejection};
+    use crate::test_support::{build_ctx, seed_user_and_workspace, test_pool};
+    use crate::tools::{AgentTool, ToolContext, datasource::QueryDatasourceTool};
     use agent_runtime::DomainOutcome;
-    use kyomi_datasource_server::{DatasourceProvider, DryRunResult, QueryResult};
+    use kyomi_core::connect_protocol::{ConnectOp, ConnectResponse, ConnectResponseBody};
+    use kyomi_datasource_server::connect::registry::CommandPayload;
+    use kyomi_datasource_server::{
+        ConnectRegistry, DatasourceProvider, DryRunResult, QueryResult, QueryStatus,
+    };
 
     type DryRunSlot = std::sync::Mutex<Option<kyomi_connect_protocol::Result<DryRunResult>>>;
 
     struct DryRunProbe {
         result: DryRunSlot,
-        calls: std::sync::atomic::AtomicUsize,
+        calls: AtomicUsize,
+    }
+
+    impl DryRunProbe {
+        fn new(result: Option<kyomi_connect_protocol::Result<DryRunResult>>) -> Self {
+            Self {
+                result: std::sync::Mutex::new(result),
+                calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
     }
 
     #[async_trait::async_trait]
@@ -182,27 +364,161 @@ mod query_recovery_tests {
         }
 
         async fn dry_run(&self, _sql: &str) -> kyomi_connect_protocol::Result<DryRunResult> {
-            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.calls.fetch_add(1, Ordering::SeqCst);
             self.result.lock().unwrap().take().expect("one dry run")
         }
 
         async fn close(&self) {}
     }
 
-    #[test]
-    fn query_recovery_returns_known_clickhouse_rejections_to_model() {
-        for error in [
-            "Code: 47. DB::Exception: Unknown expression identifier page_url (UNKNOWN_IDENTIFIER)",
-            "Code: 62. DB::Exception: Syntax error: failed at position 8 (SYNTAX_ERROR)",
-        ] {
+    struct HangingProbe;
+
+    #[async_trait::async_trait]
+    impl DatasourceProvider for HangingProbe {
+        async fn test_connection(&self) -> kyomi_connect_protocol::Result<bool> {
+            Ok(true)
+        }
+
+        async fn execute_query(
+            &self,
+            _sql: &str,
+            _limit: Option<u32>,
+            _offset: Option<u32>,
+            _include_total: bool,
+            _job_id: Option<&str>,
+        ) -> kyomi_connect_protocol::Result<QueryResult> {
+            unreachable!("only dry_run is exercised")
+        }
+
+        async fn dry_run(&self, _sql: &str) -> kyomi_connect_protocol::Result<DryRunResult> {
+            std::future::pending::<kyomi_connect_protocol::Result<DryRunResult>>().await
+        }
+
+        async fn close(&self) {}
+    }
+
+    struct ConnectFixture {
+        query_calls: Arc<AtomicUsize>,
+        dry_run_calls: Arc<AtomicUsize>,
+        handler: tokio::task::JoinHandle<()>,
+        connection_id: u64,
+    }
+
+    async fn attach_clickhouse_connect(
+        ctx: &mut ToolContext,
+        query_error: String,
+        dry_run: DryRunResult,
+    ) -> ConnectFixture {
+        let kyomi_core::DbPool::Sqlite(pool) = &ctx.db else {
+            unreachable!("SQLite fixture")
+        };
+        sqlx::query(
+            "INSERT INTO datasource_configs \
+             (id, workspace_id, name, datasource_type, connection_config, active, slug, connection_type) \
+             VALUES ('ds-clickhouse', 'ws-1', 'Analytics', 'clickhouse', '{}', 1, 'analytics', 'connect')",
+        )
+        .execute(pool)
+        .await
+        .expect("seed datasource");
+        let registry = ConnectRegistry::new_local();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel::<CommandPayload>(16);
+        let connection_id = registry.register("ds-clickhouse", sender).await;
+        let query_calls = Arc::new(AtomicUsize::new(0));
+        let dry_run_calls = Arc::new(AtomicUsize::new(0));
+        let observed_query = query_calls.clone();
+        let observed_dry_run = dry_run_calls.clone();
+        let dry_run_json = serde_json::to_value(dry_run).expect("serialize dry run");
+        let handler = tokio::spawn(async move {
+            while let Some((request, response)) = receiver.recv().await {
+                let body = match &request.op {
+                    ConnectOp::ExecuteQuery => {
+                        observed_query.fetch_add(1, Ordering::SeqCst);
+                        let result = QueryResult {
+                            status: QueryStatus::Error,
+                            columns: None,
+                            total_rows: None,
+                            has_more: false,
+                            bytes_processed: None,
+                            execution_time_ms: Some(1),
+                            error: Some(query_error.clone()),
+                            record_batch: None,
+                            job_id: None,
+                        };
+                        ConnectResponseBody::Result {
+                            result: serde_json::to_value(result).expect("serialize query result"),
+                        }
+                    }
+                    ConnectOp::DryRun => {
+                        observed_dry_run.fetch_add(1, Ordering::SeqCst);
+                        ConnectResponseBody::Result {
+                            result: dry_run_json.clone(),
+                        }
+                    }
+                    _ => panic!("unexpected Connect op"),
+                };
+                response
+                    .send(ConnectResponse { id: request.id, body })
+                    .expect("deliver result");
+            }
+        });
+        ctx.connect_registry = Some(registry);
+        ConnectFixture {
+            query_calls,
+            dry_run_calls,
+            handler,
+            connection_id,
+        }
+    }
+
+    async fn finish_connect(ctx: &ToolContext, fixture: ConnectFixture) {
+        ctx.connect_registry
+            .as_ref()
+            .expect("registry")
+            .unregister("ds-clickhouse", fixture.connection_id)
+            .await;
+        fixture.handler.await.expect("connect handler");
+    }
+
+    async fn query_context() -> ToolContext {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        build_ctx(db)
+    }
+
+    fn analysis_error(code: u16) -> String {
+        format!("Code: {code}. DB::Exception: analysis failure (test)")
+    }
+
+    fn execution_error(code: u16) -> String {
+        format!("Code: {code}. DB::Exception: execution failure (test)")
+    }
+
+    fn envelope(error: &str, rejected: bool) -> String {
+        query_error_response_with_rejection("analytics", error, rejected)
+    }
+
+    fn domain(text: &str) -> DomainOutcome {
+        QueryDatasourceTool.result_domain_outcome(text)
+    }
+
+    #[tokio::test]
+    async fn known_clickhouse_rejections_reach_model_without_a_dry_run() {
+        for code in [47u16, 62, 184] {
+            let error = analysis_error(code);
             for sql in [
                 "SELECT page_url FROM events",
+                "WITH v AS (SELECT 1) SELECT * FROM v",
                 "SELECT page_url FROM events;",
-                "SELECT FROM events",
                 " \nselect\tpage_url FROM events;  ",
             ] {
-                let text = query_error_response("clickhouse", "analytics", sql, error);
-                assert_eq!(QueryDatasourceTool.result_domain_outcome(&text), DomainOutcome::Rejected);
+                let probe = DryRunProbe::new(None);
+                assert!(
+                    query_error_is_recoverable(&probe, "clickhouse", sql, &error).await,
+                    "{sql}"
+                );
+                assert_eq!(probe.calls(), 0, "known rejection must not dry-run: {sql}");
+                let text = envelope(&error, true);
+                assert_eq!(domain(&text), DomainOutcome::Rejected);
                 let value: serde_json::Value = serde_json::from_str(&text).unwrap();
                 assert_eq!(value["error"], error);
                 assert_eq!(value["datasource"], "analytics");
@@ -210,113 +526,311 @@ mod query_recovery_tests {
         }
     }
 
-    #[test]
-    fn query_recovery_returns_illegal_aggregation_and_cte_rejections_to_model() {
+    #[tokio::test]
+    async fn query_recovery_returns_illegal_aggregation_and_cte_rejections_to_model() {
         let error = "Code: 184. DB::Exception: Aggregate function any(sw) is found in GROUP BY in query. (ILLEGAL_AGGREGATION)";
         for sql in [
             "SELECT any(sw) FROM events GROUP BY screen",
             "WITH v AS (SELECT visitor_id, any(screen_width) AS sw FROM events GROUP BY visitor_id)\nSELECT sw FROM v",
             " \nwith v as (select 1) select * from v;  ",
         ] {
-            let text = query_error_response("clickhouse", "analytics", sql, error);
-            assert_eq!(
-                QueryDatasourceTool.result_domain_outcome(&text),
-                DomainOutcome::Rejected,
+            let probe = DryRunProbe::new(None);
+            assert!(
+                query_error_is_recoverable(&probe, "clickhouse", sql, error).await,
                 "{sql}"
             );
+            assert_eq!(probe.calls(), 0);
+            let text = envelope(error, true);
+            assert_eq!(domain(&text), DomainOutcome::Rejected, "{sql}");
         }
-    }
-
-    #[test]
-    fn query_recovery_preserves_uncertainty_for_unproven_errors_and_batches() {
-        let identifier = "Code: 47. DB::Exception: Unknown expression identifier page_url (UNKNOWN_IDENTIFIER)";
-        for (kind, sql, error) in [
-            ("clickhouse", "SELECT 1", "timeout after possible commit"),
-            ("clickhouse", "SELECT 1", "Failed to parse ClickHouse response"),
-            ("clickhouse", "SELECT 1", "Code: 159. DB::Exception: Timeout exceeded"),
-            ("clickhouse", "WITH v AS (SELECT 1) SELECT * FROM v", "Code: 159. DB::Exception: Timeout exceeded"),
-            ("clickhouse", "SELECT 1", "wrapped: Code: 47. DB::Exception: unknown"),
-            ("postgres", "SELECT 1", identifier),
-            ("clickhouse", "INSERT INTO t VALUES (1)", identifier),
-            ("clickhouse", "SELECTED page_url", identifier),
-            ("clickhouse", "INSERT INTO t VALUES (1); SELECT page_url FROM events", identifier),
-            ("clickhouse", "INSERT INTO t VALUES (1); SELECT page_url FROM events;", identifier),
-            ("clickhouse", "WITH v AS (SELECT 1) SELECT * FROM v; INSERT INTO t VALUES (1)", identifier),
-        ] {
-            let text = query_error_response(kind, "analytics", sql, error);
-            assert_eq!(QueryDatasourceTool.result_domain_outcome(&text), DomainOutcome::Unknown, "{sql}: {error}");
-        }
-    }
-
-    #[test]
-    fn dry_run_confirms_only_server_side_analysis_failures() {
-        assert!(dry_run_confirms_rejection(&Ok(DryRunResult::failure(
-            "Code: 43. DB::Exception: Illegal type of argument (ILLEGAL_TYPE_OF_ARGUMENT)",
-            None,
-            None,
-        ))));
-        assert!(!dry_run_confirms_rejection(&Ok(DryRunResult::success("Query valid"))));
-        assert!(!dry_run_confirms_rejection(&Ok(DryRunResult::failure(
-            "ClickHouse query timed out after 120s",
-            None,
-            None,
-        ))));
-        assert!(!dry_run_confirms_rejection(&Err(
-            kyomi_connect_protocol::Error::Internal("connection reset".into())
-        )));
     }
 
     #[tokio::test]
-    async fn dry_run_proves_unrecognized_clickhouse_analysis_errors() {
-        let error =
-            "Code: 43. DB::Exception: Illegal type of argument (ILLEGAL_TYPE_OF_ARGUMENT)";
-        let probe = DryRunProbe {
-            result: std::sync::Mutex::new(Some(Ok(DryRunResult::failure(error, None, None)))),
-            calls: std::sync::atomic::AtomicUsize::new(0),
-        };
-        assert!(query_error_is_recoverable(&probe, "clickhouse", "SELECT 1", error).await);
-        assert_eq!(probe.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-
-        // A valid dry run means the original failure happened after analysis.
-        let probe = DryRunProbe {
-            result: std::sync::Mutex::new(Some(Ok(DryRunResult::success("Query valid")))),
-            calls: std::sync::atomic::AtomicUsize::new(0),
-        };
-        assert!(
-            !query_error_is_recoverable(
-                &probe,
+    async fn query_recovery_preserves_uncertainty_for_batches_and_mutations() {
+        let identifier = analysis_error(47);
+        for (kind, sql, error) in [
+            (
                 "clickhouse",
                 "SELECT 1",
-                "Code: 159. DB::Exception: Timeout exceeded"
-            )
-            .await
-        );
-        assert_eq!(probe.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-
-        // Transport failures and mutating statements never reach the dry run.
-        let probe = DryRunProbe {
-            result: std::sync::Mutex::new(None),
-            calls: std::sync::atomic::AtomicUsize::new(0),
-        };
-        assert!(
-            !query_error_is_recoverable(
-                &probe,
+                "timeout after possible commit".to_string(),
+            ),
+            (
                 "clickhouse",
                 "SELECT 1",
-                "ClickHouse HTTP request failed: reset"
-            )
-            .await
-        );
-        assert!(
-            !query_error_is_recoverable(
-                &probe,
+                "Failed to parse ClickHouse response".to_string(),
+            ),
+            (
+                "clickhouse",
+                "SELECT 1",
+                "wrapped: Code: 47. DB::Exception: unknown".to_string(),
+            ),
+            ("postgres", "SELECT 1", identifier.clone()),
+            (
                 "clickhouse",
                 "INSERT INTO t VALUES (1)",
-                error
+                identifier.clone(),
+            ),
+            (
+                "clickhouse",
+                "WITH x AS (SELECT 1) INSERT INTO t SELECT * FROM x",
+                identifier.clone(),
+            ),
+            ("clickhouse", "SELECTED page_url", identifier.clone()),
+            (
+                "clickhouse",
+                "INSERT INTO t VALUES (1); SELECT page_url FROM events",
+                identifier.clone(),
+            ),
+            (
+                "clickhouse",
+                "INSERT INTO t VALUES (1); SELECT page_url FROM events;",
+                identifier.clone(),
+            ),
+            (
+                "clickhouse",
+                "WITH v AS (SELECT 1) SELECT * FROM v; INSERT INTO t VALUES (1)",
+                identifier.clone(),
+            ),
+        ] {
+            let probe = DryRunProbe::new(None);
+            assert!(
+                !query_error_is_recoverable(&probe, kind, sql, &error).await,
+                "{sql}: {error}"
+            );
+            assert_eq!(probe.calls(), 0, "must not dry-run {sql}: {error}");
+            assert_eq!(
+                domain(&envelope(&error, false)),
+                DomainOutcome::Unknown
+            );
+        }
+
+        // A mutation that starts with WITH must be rejected even when its
+        // error is the 184 fast-path analysis code.
+        let illegal_aggregation = analysis_error(184);
+        let probe = DryRunProbe::new(None);
+        assert!(
+            !query_error_is_recoverable(
+                &probe,
+                "clickhouse",
+                "WITH x AS (SELECT 1) INSERT INTO t SELECT * FROM x",
+                &illegal_aggregation,
             )
             .await
         );
-        assert_eq!(probe.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(probe.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn dry_run_confirms_only_analysis_errors() {
+        // An unknown analysis code is confirmed by a dry run that repeats it.
+        let original = analysis_error(43);
+        let probe =
+            DryRunProbe::new(Some(Ok(DryRunResult::failure(original.as_str(), None, None))));
+        assert!(
+            query_error_is_recoverable(&probe, "clickhouse", "SELECT 1", &original).await
+        );
+        assert_eq!(probe.calls(), 1);
+
+        // The dry run may discover a different analysis error.
+        let probe = DryRunProbe::new(Some(Ok(DryRunResult::failure(
+            analysis_error(47),
+            None,
+            None,
+        ))));
+        assert!(
+            query_error_is_recoverable(
+                &probe,
+                "clickhouse",
+                "SELECT 1",
+                &analysis_error(43)
+            )
+            .await
+        );
+        assert_eq!(probe.calls(), 1);
+
+        // A successful dry run means the original failure was execution-phase.
+        let probe = DryRunProbe::new(Some(Ok(DryRunResult::success("Query valid"))));
+        assert!(
+            !query_error_is_recoverable(
+                &probe,
+                "clickhouse",
+                "SELECT 1",
+                &execution_error(159)
+            )
+            .await
+        );
+        assert_eq!(probe.calls(), 1);
+
+        // Server-shaped execution, admission and resource dry-run failures are
+        // not proof that the original query was rejected before execution.
+        for dry_run_code in [159u16, 202, 209, 241, 80] {
+            let probe = DryRunProbe::new(Some(Ok(DryRunResult::failure(
+                execution_error(dry_run_code),
+                None,
+                None,
+            ))));
+            assert!(
+                !query_error_is_recoverable(
+                    &probe,
+                    "clickhouse",
+                    "SELECT 1",
+                    &execution_error(159)
+                )
+                .await,
+                "dry-run code {dry_run_code} must stay uncertain"
+            );
+            assert_eq!(probe.calls(), 1);
+        }
+
+        // A dry run that discovers an analysis error is still proof even when
+        // the original failure looked execution-phase.
+        let probe = DryRunProbe::new(Some(Ok(DryRunResult::failure(
+            analysis_error(43),
+            None,
+            None,
+        ))));
+        assert!(
+            query_error_is_recoverable(
+                &probe,
+                "clickhouse",
+                "SELECT 1",
+                &execution_error(159)
+            )
+            .await
+        );
+        assert_eq!(probe.calls(), 1);
+
+        // A dry-run transport failure is not proof.
+        let probe = DryRunProbe::new(Some(Err(
+            kyomi_connect_protocol::Error::Internal("connection reset".into())
+        )));
+        assert!(
+            !query_error_is_recoverable(
+                &probe,
+                "clickhouse",
+                "SELECT 1",
+                &analysis_error(43)
+            )
+            .await
+        );
+        assert_eq!(probe.calls(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dry_run_timeout_stays_uncertain() {
+        assert!(
+            !query_error_is_recoverable(
+                &HangingProbe,
+                "clickhouse",
+                "SELECT 1",
+                &analysis_error(43)
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn query_datasource_real_tool_rejects_illegal_aggregation_cte() {
+        let mut ctx = query_context().await;
+        let error = analysis_error(184);
+        let fixture = attach_clickhouse_connect(
+            &mut ctx,
+            error.clone(),
+            DryRunResult::failure(error.as_str(), None, None),
+        )
+        .await;
+        let sql = "WITH v AS (SELECT visitor_id, any(screen_width) AS sw FROM events GROUP BY visitor_id) SELECT sw FROM v";
+        let text = QueryDatasourceTool
+            .execute(
+                serde_json::json!({"sql_query": sql, "datasource": "analytics"}),
+                &ctx,
+            )
+            .await
+            .expect("tool result");
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["query_rejected_before_execution"], true);
+        assert_eq!(domain(&text), DomainOutcome::Rejected);
+        assert_eq!(fixture.query_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.dry_run_calls.load(Ordering::SeqCst), 0);
+        finish_connect(&ctx, fixture).await;
+    }
+
+    #[tokio::test]
+    async fn query_datasource_real_tool_confirms_unknown_analysis_error() {
+        let mut ctx = query_context().await;
+        let error = analysis_error(43);
+        let fixture = attach_clickhouse_connect(
+            &mut ctx,
+            error.clone(),
+            DryRunResult::failure(error.as_str(), None, None),
+        )
+        .await;
+        let text = QueryDatasourceTool
+            .execute(
+                serde_json::json!({"sql_query": "SELECT 1", "datasource": "analytics"}),
+                &ctx,
+            )
+            .await
+            .expect("tool result");
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["query_rejected_before_execution"], true);
+        assert_eq!(domain(&text), DomainOutcome::Rejected);
+        assert_eq!(fixture.query_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.dry_run_calls.load(Ordering::SeqCst), 1);
+        finish_connect(&ctx, fixture).await;
+    }
+
+    #[tokio::test]
+    async fn query_datasource_real_tool_keeps_execution_failure_uncertain() {
+        let mut ctx = query_context().await;
+        let error = execution_error(159);
+        let fixture = attach_clickhouse_connect(
+            &mut ctx,
+            error,
+            DryRunResult::success("Query valid"),
+        )
+        .await;
+        let text = QueryDatasourceTool
+            .execute(
+                serde_json::json!({"sql_query": "SELECT 1", "datasource": "analytics"}),
+                &ctx,
+            )
+            .await
+            .expect("tool result");
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["query_rejected_before_execution"], false);
+        assert_eq!(domain(&text), DomainOutcome::Unknown);
+        assert_eq!(fixture.query_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.dry_run_calls.load(Ordering::SeqCst), 1);
+        finish_connect(&ctx, fixture).await;
+    }
+
+    #[tokio::test]
+    async fn query_datasource_real_tool_keeps_with_insert_uncertain() {
+        let mut ctx = query_context().await;
+        let error = analysis_error(184);
+        let fixture = attach_clickhouse_connect(
+            &mut ctx,
+            error.clone(),
+            DryRunResult::failure(error.as_str(), None, None),
+        )
+        .await;
+        let text = QueryDatasourceTool
+            .execute(
+                serde_json::json!({
+                    "sql_query": "WITH x AS (SELECT 1) INSERT INTO t SELECT * FROM x",
+                    "datasource": "analytics",
+                }),
+                &ctx,
+            )
+            .await
+            .expect("tool result");
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["query_rejected_before_execution"], false);
+        assert_eq!(domain(&text), DomainOutcome::Unknown);
+        assert_eq!(fixture.query_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.dry_run_calls.load(Ordering::SeqCst), 0);
+        finish_connect(&ctx, fixture).await;
     }
 }
 
