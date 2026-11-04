@@ -24,8 +24,9 @@
 //!
 //! The fix replaces `is_superseded = {false}` with the codebase's canonical "not
 //! superseded" predicate, `superseded_by IS NULL` (already used by
-//! `learning_service.rs` and `watch_execution.rs`; `vector_search.rs`'s copies
-//! were removed with the `agent_learnings` search source in KYO-952).
+//! `learning_service.rs`, `references.rs`, `populate.rs` and `expansion.rs`;
+//! `vector_search.rs`'s copies were removed with the `agent_learnings` search
+//! source in KYO-952).
 //!
 //! Each test below creates its own scratch Postgres database (KYO-242 pattern,
 //! matching `crates/kyomi-core/tests/agent_learnings_superseded_by_on_delete.rs` and
