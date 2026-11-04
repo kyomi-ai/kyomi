@@ -38,7 +38,7 @@ impl AgentTool for GetTableInfoTool {
          indexed catalog. Call it before writing SQL against a table whose columns you \
          haven't seen in this conversation, and never infer columns from similarly named \
          tables. Requires the datasource slug and the fully qualified table name (as \
-         returned by search_knowledge or browse_catalog). Returns the table description \
+         returned by search results or catalog browsing). Returns the table description \
          and its columns; if the table is not in the index it returns an error rather \
          than querying the datasource."
     }

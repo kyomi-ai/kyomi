@@ -1479,6 +1479,13 @@ mod description_tests {
         // content_hash is optional; it enables CAS rather than being required.
         assert!(!text.contains("requires the content_hash"), "{text}");
         assert!(text.contains("detect concurrent edits"), "{text}");
+        let content_hash =
+            param_description(&registry, "write_knowledge_file", "content_hash");
+        assert!(
+            !content_hash.contains("required when overwriting"),
+            "content_hash param must not claim to be required: {content_hash}"
+        );
+        assert!(content_hash.contains("concurrent edits"), "{content_hash}");
     }
 
     #[test]

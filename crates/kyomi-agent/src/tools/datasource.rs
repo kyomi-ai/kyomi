@@ -24,10 +24,10 @@ impl AgentTool for ListDatasourcesTool {
         "List every datasource connected to the current workspace. Returns each \
          datasource's slug, name, `type`, and number of indexed tables. The `type` \
          determines the SQL dialect and table-name syntax to use with \
-         query_datasource, validate_sql and get_table_info: for example BigQuery \
-         uses GoogleSQL and backticked `project.dataset.table` names, Postgres uses \
-         PostgreSQL syntax, and ClickHouse uses ClickHouse SQL. Call this first when \
-         you don't know which datasource to query."
+         query_datasource and get_table_info: for example BigQuery uses GoogleSQL and \
+         backticked `project.dataset.table` names, Postgres uses PostgreSQL syntax, and \
+         ClickHouse uses ClickHouse SQL. Call this first when you don't know which \
+         datasource to query."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

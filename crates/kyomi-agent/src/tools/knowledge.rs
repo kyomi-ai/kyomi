@@ -573,9 +573,10 @@ impl AgentTool for WriteDocumentTool {
          metric definitions (name, formula, unit), and user corrections. Record only \
          facts a tool result confirmed — never one-off query results, business insights, \
          or explanations of your own errors. Pass doc_type=\"knowledge\" (default) for \
-         reference material. doc_type=\"dashboard\" writes a dashboard document directly, \
-         without create_dashboard's duplicate check, so prefer create_dashboard when a \
-         saved dashboard is requested. Pass the content_hash from read_knowledge_file \
+         reference material. doc_type=\"dashboard\" requests a dashboard document, but a \
+         matching title updates the existing document without changing its type and \
+         there is no duplicate check; prefer the dedicated dashboard-creation tool when \
+         a saved dashboard is requested. Pass the content_hash from read_knowledge_file \
          when overwriting to detect concurrent edits."
     }
 
@@ -593,7 +594,7 @@ impl AgentTool for WriteDocumentTool {
                 },
                 "content_hash": {
                     "type": "string",
-                    "description": "Hash from a prior read_knowledge_file response. Required when overwriting an existing document."
+                    "description": "Hash from a prior read_knowledge_file response. Pass it when overwriting to detect concurrent edits."
                 },
                 "doc_type": {
                     "type": "string",

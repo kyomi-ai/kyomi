@@ -50,7 +50,7 @@ impl DocumentReadTool {
                 "Get a dashboard's full content and metadata by ID. Returns the \
                  dashboard_id, title, markdown content with any ChartML blocks, URL, \
                  timestamps, and last change summary. Use a dashboard ID from search \
-                 results or the open document."
+                 results or one already in the current context."
             }
         }
     }
