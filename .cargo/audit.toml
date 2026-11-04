@@ -16,7 +16,7 @@
 #   3. Re-check the whole list whenever `cargo update` runs. Entries whose
 #      blocker has cleared must be removed in the same PR that clears them.
 #
-# Last full review: 2026-09-24
+# Last full review: 2026-11-05
 # =============================================================================
 
 [advisories]
@@ -75,6 +75,85 @@ ignore = [
     # kyomi-datasource republished, `cargo update -p kyomi-datasource` here).
     "RUSTSEC-2026-0154", # russh: unbounded 32-bit allocation
     "RUSTSEC-2026-0153", # russh-cryptovec: unchecked CryptoVec allocation and growth handling
+
+    # -------------------------------------------------------------------------
+    # crypto-bigint 0.5.5 — held by the RustCrypto 0.13 ECC generation (KYO-955)
+    # -------------------------------------------------------------------------
+    # Path (verified 2026-11-05 with `cargo tree --locked -i
+    # crypto-bigint@0.5.5 --target all`; the audit tree prints only the first
+    # path):
+    #   crypto-bigint 0.5.5 <- elliptic-curve 0.13.8
+    #     <- ecdsa 0.16.9 <- internal-russh-forked-ssh-key 0.6.11
+    #        <- russh 0.54.5 <- kyomi-datasource 1.6.2 (SSH tunnel)
+    #     <- p256 0.13.2 / p384 0.13.1 / p521 0.13.3 / k256 0.13.4
+    #        <- russh 0.54.5, jsonwebtoken 10.4.0 (kyomi-auth),
+    #           web-push-native 0.4.0 -> jwt-simple 0.12.15 (kyomi-agent),
+    #           kyomi-auth and kyomi-server (direct p256 0.13)
+    #
+    # Patched in crypto-bigint >= 0.7.6; 0.7.6 itself is yanked and 0.7.10 is
+    # already in this lockfile via crypto-glue 0.2.2. The 0.13-generation
+    # RustCrypto crates require crypto-bigint ^0.5, so the fix is a
+    # semver-incompatible major change, not something `cargo update` can take.
+    #
+    # A fix is unreachable today, verified 2026-11-05:
+    #   cargo update -p crypto-bigint@0.5.5 --precise 0.7.6 -> fails
+    #     (elliptic-curve 0.13.8 requires crypto-bigint ^0.5; 0.7.6 yanked)
+    #   cargo update -p elliptic-curve@0.13.8 --precise 0.14.3 -> fails
+    #     (p256 0.13.2 requires ^0.13.1)
+    #   cargo update -p ecdsa@0.16.9 --precise 0.17.0 -> fails (^0.16)
+    #   cargo update -p p256@0.13.2 --precise 0.14.0 -> fails (kyomi-auth ^0.13)
+    #   cargo update -p p384@0.13.1 --precise 0.14.0 -> fails
+    #     (jsonwebtoken ^0.13)
+    #   cargo update -p p521@0.13.3 --precise 0.14.0 -> fails
+    #     (ssh-key ^0.13.3; russh and internal-russh-forked-ssh-key too)
+    #   cargo update -p internal-russh-forked-ssh-key@0.6.11 --precise
+    #     0.6.18+upstream-0.6.7 -> fails (russh pins =0.6.11)
+    #   cargo update -p jwt-simple@0.12.15 --precise 0.15.0 -> fails
+    #     (web-push-native requires ^0.12.6)
+    #   plain `cargo update -p <crate>` for each of the above locks 0 packages.
+    # The newest upstream releases still keep the old generation (crates.io
+    # API, 2026-11-05): jsonwebtoken 11.1.0 requires p256 ^0.13.2 and
+    # p384 ^0.13.0; web-push-native 0.5.0 requires p256 ^0.13.2 and
+    # jwt-simple ^0.12.17 (jwt-simple 0.15.0 is on 0.14, but is unreachable
+    # through web-push-native). Kyomi's own direct p256 0.13 uses could be
+    # bumped to 0.14 (a code change), but cannot clear the graph alone.
+    #
+    # The decisive holder is russh 0.54.5: it requires ecdsa ^0.16,
+    # elliptic-curve ^0.13 and p256/p384/p521 ^0.13 itself, so even if every
+    # other holder moved, crypto-bigint 0.5.5 would remain. russh is the
+    # deliberate pin tracked by KYO-212 (kyomi-connect + republish), out of
+    # scope for this ticket. Clearing that pin alone is also not sufficient:
+    # jsonwebtoken and web-push-native would then be the blockers.
+    #
+    # Impact — checked against the call sites, 2026-11-05. crypto-bigint
+    # 0.5.5 backs scalar/field arithmetic for the 0.13-generation ECC crates,
+    # and secret-key operations are reachable:
+    #   * ES256 signing of Kyomi Connect tokens with a long-lived P-256 key
+    #     (crates/kyomi-auth/src/connect_token.rs, jsonwebtoken rust_crypto).
+    #   * VAPID ES256 signing with the long-lived VAPID key plus P-256 ECE
+    #     key agreement for Web Push (crates/kyomi-agent/src/web_push.rs,
+    #     web-push-native + jwt-simple/k256). apps/server/src/routes/push.rs
+    #     also derives the VAPID public key from the raw secret scalar.
+    #   * SSH tunnel client: ECDSA host-key verification (public inputs) and
+    #     ECDSA user-key signing when a user supplies an ECDSA key
+    #     (kyomi-connect ssh_tunnel.rs, russh). Kyomi-generated tunnel keys
+    #     are Ed25519 and russh's default KEX list has no nistp ECDH, so the
+    #     ECDH paths are not exercised by the default tunnel configuration.
+    #   * ES256 verification of Connect tokens (public inputs only).
+    # Exploitation requires an attacker able to observe operation timing or
+    # microarchitectural state (co-located process/VM or shared CPU); the
+    # advisory's branches are compiler/target dependent and request content
+    # alone does not expose them. We cannot show the affected operations are
+    # unreachable, so this is accepted residual risk, not a false positive.
+    #
+    # Remove when: no package in Cargo.lock requires the RustCrypto 0.13 ECC
+    # generation — `cargo tree --locked -i elliptic-curve@0.13.8 --target
+    # all` prints nothing and `cargo audit` no longer reports this ID without
+    # the ignore. Blocked on KYO-212 (russh), a jsonwebtoken release on
+    # p256/p384 0.14 (or dropping its rust_crypto backend), a web-push-native
+    # release on p256 0.14 + jwt-simple 0.15, and bumping kyomi-auth's and
+    # kyomi-server's direct p256 to 0.14.
+    "RUSTSEC-2026-0387", # timing variability in operations intended to be constant-time
 
     # -------------------------------------------------------------------------
     # rustls-webpki 0.101.7 — upstream dead end
