@@ -22,6 +22,11 @@ pub static CHARTML_QUICK_REFERENCE: &str =
 pub static CHARTML_SPECIFICATION: &str =
     include_str!("../../../data/chartml-spec/SPECIFICATION.md");
 
+/// ChartML worked examples — embedded at compile time and served by
+/// `get_chartml_spec` as the `examples` section. Kept as a separate document
+/// because it is a large example library rather than a specification heading.
+pub static CHARTML_EXAMPLES: &str = include_str!("../../../data/chartml-spec/EXAMPLES.md");
+
 // ---------------------------------------------------------------------------
 // System prompt building
 // ---------------------------------------------------------------------------

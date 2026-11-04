@@ -18,8 +18,8 @@ struct Section {
     heading: &'static str,
 }
 
-/// Every section the tool can return. Keep this table as the single source of
-/// truth: the parameter schema and the lookup both derive from it.
+/// Every `SPECIFICATION.md` heading the tool can return. Keep this table as
+/// the single source of truth for heading lookups.
 const SECTIONS: &[Section] = &[
     Section {
         name: "overview",
@@ -93,6 +93,40 @@ const SECTIONS: &[Section] = &[
     },
 ];
 
+/// A whole document exposed as a `section` value.
+///
+/// These documents are not part of `SPECIFICATION.md` and are too large to
+/// merge into it, so they are served as-is rather than through
+/// [`extract_section`]. The schema enum derives from this table; a test keeps
+/// the tool description in sync with it. Documents take precedence over
+/// specification headings, so names must stay disjoint.
+struct Document {
+    name: &'static str,
+    content: &'static str,
+}
+
+/// Every whole-document section the tool can return.
+const DOCUMENTS: &[Document] = &[Document {
+    name: "examples",
+    content: crate::prompt::CHARTML_EXAMPLES,
+}];
+
+/// Every accepted `section` value, in schema order.
+fn section_names() -> impl Iterator<Item = &'static str> {
+    SECTIONS
+        .iter()
+        .map(|section| section.name)
+        .chain(DOCUMENTS.iter().map(|document| document.name))
+}
+
+/// Resolve a `section` parameter value to an entire document.
+fn document_content(section_name: &str) -> Option<&'static str> {
+    DOCUMENTS
+        .iter()
+        .find(|document| document.name == section_name)
+        .map(|document| document.content)
+}
+
 /// Resolve a `section` parameter value to its heading level and text in the
 /// specification.
 fn section_heading(section_name: &str) -> Option<(usize, &'static str)> {
@@ -120,7 +154,7 @@ impl AgentTool for GetChartMLSpecTool {
          line, pie, table and metric charts. `mode=\"full\"` returns the complete \
          specification; add `section` to fetch one part: overview, source, params, \
          chart, data, transform, visualize, annotations, style, config, variables, \
-         formatting, layout, or dashboard-example. `mode=\"essential\"` returns the core \
+         formatting, layout, dashboard-example, or examples. `mode=\"essential\"` returns the core \
          reference — use it for clients that don't already carry the ChartML basics. \
          Reach for `mode=\"full\"` only when you need advanced features the basics don't \
          cover, such as layered transforms, annotations, variables, custom styling, or a \
@@ -129,7 +163,7 @@ impl AgentTool for GetChartMLSpecTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        let sections: Vec<&str> = SECTIONS.iter().map(|section| section.name).collect();
+        let sections: Vec<&str> = section_names().collect();
 
         serde_json::json!({
             "type": "object",
@@ -174,14 +208,14 @@ impl AgentTool for GetChartMLSpecTool {
             .to_string())
         } else {
             // Full mode: return SPECIFICATION.md and optionally extract section
-            let content = crate::prompt::CHARTML_SPECIFICATION;
+            let specification = crate::prompt::CHARTML_SPECIFICATION;
             if let Some(section_name) = section {
-                let section_content = extract_section(content, section_name);
+                let resolved = section_content(section_name);
                 Ok(serde_json::json!({
                     "success": true,
                     "mode": "full",
                     "section": section_name,
-                    "content": section_content.unwrap_or_else(|| {
+                    "content": resolved.unwrap_or_else(|| {
                         format!("Section '{section_name}' not found in specification.")
                     }),
                 })
@@ -190,7 +224,7 @@ impl AgentTool for GetChartMLSpecTool {
                 Ok(serde_json::json!({
                     "success": true,
                     "mode": "full",
-                    "content": content,
+                    "content": specification,
                     "note": "Full specification returned. For specific sections, use the 'section' parameter.",
                 })
                 .to_string())
@@ -203,6 +237,16 @@ impl AgentTool for GetChartMLSpecTool {
 fn extract_section(content: &str, section_name: &str) -> Option<String> {
     let (level, heading) = section_heading(section_name)?;
     extract_heading(content, level, heading)
+}
+
+/// Resolve a `section` parameter value to its returned content.
+///
+/// Whole documents take precedence, then headings in `SPECIFICATION.md`. This
+/// is the single routing point shared by the tool and its tests.
+fn section_content(section_name: &str) -> Option<String> {
+    document_content(section_name)
+        .map(str::to_string)
+        .or_else(|| extract_section(crate::prompt::CHARTML_SPECIFICATION, section_name))
 }
 
 /// Extract a section from markdown content by heading.
@@ -342,7 +386,7 @@ mod tests {
             3,
             "Annotations (Reference Lines & Bands)",
             43,
-            "See EXAMPLES.md for complete annotation examples with goals, targets, and event markers.",
+            "See the `examples` section of `get_chartml_spec` for complete annotation examples with goals, targets, and event markers.",
         ),
         ("style", 2, "Component 4: Style", 163, "---"),
         ("config", 2, "Component 5: Config", 131, "---"),
@@ -422,8 +466,14 @@ mod tests {
             .iter()
             .map(|value| value.as_str().expect("section value is a string"))
             .collect();
-        let names: Vec<&str> = SECTIONS.iter().map(|section| section.name).collect();
+        let names: Vec<&str> = section_names().collect();
         assert_eq!(enum_values, names);
+        for (index, name) in names.iter().enumerate() {
+            assert!(
+                !names[..index].contains(name),
+                "section name '{name}' is duplicated"
+            );
+        }
 
         let lookup: Vec<(&str, usize, &str)> = SECTIONS
             .iter()
@@ -434,6 +484,54 @@ mod tests {
             .map(|(name, level, heading, ..)| (*name, *level, *heading))
             .collect();
         assert_eq!(lookup, expected);
+    }
+
+    /// Independent oracle for whole-document sections: name, total line count
+    /// and last line. Deliberately not derived from `DOCUMENTS`, so a dropped
+    /// document or a silently truncated body fails here.
+    const EXPECTED_DOCUMENTS: &[(&str, usize, &str)] = &[(
+        "examples",
+        2656,
+        "- **Data Labels on Marks** - Display values on bars, lines, and areas with positioning and formatting",
+    )];
+
+    /// Whole-document sections are embedded verbatim, so they need their own
+    /// presence and shape check rather than a heading lookup in SPECIFICATION.md.
+    /// This is also the record of why `EXAMPLES.md` is kept: it is a large,
+    /// non-empty document that the served specification points readers at.
+    #[test]
+    fn document_sections_return_their_whole_document() {
+        let names: Vec<&str> = DOCUMENTS.iter().map(|document| document.name).collect();
+        let expected: Vec<&str> = EXPECTED_DOCUMENTS.iter().map(|(name, ..)| *name).collect();
+        assert_eq!(names, expected);
+
+        for &(name, line_count, last_line) in EXPECTED_DOCUMENTS {
+            let content =
+                section_content(name).unwrap_or_else(|| panic!("document '{name}' not found"));
+            assert_eq!(
+                content.lines().count(),
+                line_count,
+                "document '{name}' has the wrong length"
+            );
+            assert_eq!(
+                content.lines().last(),
+                Some(last_line),
+                "document '{name}' ends at the wrong line"
+            );
+            assert!(
+                content.starts_with("# "),
+                "document '{name}' must start with a top-level heading"
+            );
+        }
+
+        let examples = section_content("examples").expect("examples section is routed");
+        assert!(examples.contains("## Dashboard 1: Q1 2025 Sales Performance"));
+        assert!(
+            section_content("overview")
+                .expect("specification sections still route")
+                .starts_with("## Overview")
+        );
+        assert!(section_content("not-a-document").is_none());
     }
 
     #[test]
