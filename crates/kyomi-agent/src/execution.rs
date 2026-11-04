@@ -220,7 +220,7 @@ pub(crate) fn classify_agent_failure(error: &kyomi_core::Error) -> (&'static str
     }
 }
 
-/// Map an execution outcome to the `content`/`status` step 15 of
+/// Map an execution outcome to the `content`/`status` step 14 of
 /// [`execute_agent_chat`] should write to the assistant row (KYO-493).
 ///
 /// Pure — no I/O — so the terminal-state mapping can be unit-tested without
@@ -301,6 +301,30 @@ fn build_tool_context(config: &AgentExecutionConfig, env: &AgentExecutionEnv<'_>
         user_display_name: config.user_display_name.clone(),
         document_id: config.document_id.clone(),
     }
+}
+
+/// Resolve the sender's display name for message attribution.
+///
+/// `AgentExecutionConfig::user_display_name` is a surface label ("Kyomi
+/// Watch", "Kyomi Slack"), not necessarily a person's name, so read the
+/// message sender's real `users.name` instead. Returns an empty map when the
+/// user has no name; [`crate::provider::format_user_message`] then falls back
+/// to `[User (id)]:`.
+async fn sender_display_names(
+    db: &DbPool,
+    user_id: &str,
+) -> kyomi_core::Result<HashMap<String, String>> {
+    let mut names = HashMap::new();
+    if let Some(user) = kyomi_auth::user_service::get_user_by_id(db, user_id).await?
+        && let Some(name) = user
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+    {
+        names.insert(user_id.to_string(), name.to_string());
+    }
+    Ok(names)
 }
 
 /// Build the [`AgentConfig`] used to construct the [`CustomAgent`] for this
@@ -448,7 +472,11 @@ pub async fn execute_agent_chat(
     // `build_tool_context`) — nothing to do here.
 
     // 6. Create agent and inject system prompt as the first message.
-    let user_names: HashMap<String, String> = HashMap::new();
+    //
+    // Attribute the sender's messages with their real name so
+    // `format_user_message` renders `[Name (userid)]:`, matching the prompt's
+    // message-format contract.
+    let user_names = sender_display_names(db, &config.user_id).await?;
     let mut agent = CustomAgent::new(client, agent_config, registry, tool_context, user_names);
 
     // The system prompt must be the first message in the agent's state.
@@ -588,10 +616,10 @@ pub async fn execute_agent_chat(
     // 13. Get thinking events and token usage from tracker, and finalize it
     // (KYO-493 review fix). `finalize()` must run inside this same locked
     // critical section, before the events below are read, so that no
-    // incremental flush can land after step 15's terminal `extra_metadata` write below and
+    // incremental flush can land after step 14's terminal `extra_metadata` write below and
     // clobber it back down to just `{"thinking_events": [...]}`. See
     // `AgentThinkingTracker::finalize`'s doc for why the ordering
-    // (finalize while holding the lock, release, then step 15 writes) is
+    // (finalize while holding the lock, release, then step 14 writes) is
     // what makes the terminal write strictly win.
     let (thinking_events, full_texts, token_usage, input_tokens, output_tokens, total_cost) = {
         let mut t = tracker.lock().await;
@@ -1929,7 +1957,7 @@ mod tests {
     // -- Contract: finalize_terminal_write (KYO-493) -------------------------
     //
     // The three terminal-status tests the ticket asks for, as unit tests of
-    // the pure mapping `execute_agent_chat`'s step 15 uses — see that
+    // the pure mapping `execute_agent_chat`'s step 14 uses — see that
     // function's doc for why the full loop can't be driven directly here.
 
     #[test]
@@ -2125,6 +2153,43 @@ mod tests {
         let ctx = test_tool_context_for_roles(vec![]).await;
         assert!(!ctx.is_workspace_admin());
         assert!(ctx.workspace_roles.is_empty());
+    }
+
+    // -- sender_display_names (KYO-949) --------------------------------------
+
+    #[tokio::test]
+    async fn sender_display_names_reads_the_users_real_name() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("test pool is always sqlite");
+        };
+        sqlx::query("UPDATE users SET name = 'Ada Lovelace' WHERE user_id = 'user-a'")
+            .execute(sq)
+            .await
+            .expect("set user name");
+
+        let names = sender_display_names(&db, "user-a")
+            .await
+            .expect("load sender display names");
+        assert_eq!(
+            names.get("user-a").map(String::as_str),
+            Some("Ada Lovelace")
+        );
+    }
+
+    #[tokio::test]
+    async fn sender_display_names_omits_missing_or_empty_names() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+
+        let names = sender_display_names(&db, "user-a")
+            .await
+            .expect("load sender display names");
+        assert!(
+            names.is_empty(),
+            "a user with no name must fall back to the id, not render a blank name"
+        );
     }
 
     /// KYO-536: chat, MCP, Slack, and watch execution must never be scoped

@@ -484,6 +484,50 @@ pub fn build_watch_system_prompt(
     parts.join("")
 }
 
+/// Build the retry turn's config after a watch response fails validation.
+///
+/// The retry must keep the watch's own system prompt — the JSON schema, mode
+/// context, recent alerts and queries the first attempt used. Falling back to
+/// the chat prompt (`system_prompt: None`) would drop the schema the retry is
+/// being asked to satisfy and point the agent at tools this subset excludes.
+fn build_watch_retry_config(
+    session_id: &str,
+    user_id: &str,
+    workspace_id: &str,
+    system_prompt: String,
+    creator_workspace_roles: Vec<kyomi_core::enums::WorkspaceRole>,
+    correction_prompt: String,
+) -> AgentExecutionConfig {
+    AgentExecutionConfig {
+        session_id: session_id.to_string(),
+        user_id: user_id.to_string(),
+        workspace_id: workspace_id.to_string(),
+        message: correction_prompt,
+        model_name: None,
+        temperature: 0.7,
+        is_shared_conversation: false,
+        context_type: "kyomi_watch".into(),
+        workspace_user_ids: None,
+        cancel_token: CancellationToken::new(),
+        current_time_user_tz: None,
+        message_source: Some("Kyomi Watch".into()),
+        system_prompt: Some(system_prompt),
+        tools_subset: Some(WATCH_TOOLS.iter().map(|s| s.to_string()).collect()),
+        max_iterations: MAX_WATCH_ITERATIONS,
+        max_duration: Some(MAX_WATCH_DURATION),
+        max_total_tokens: Some(MAX_WATCH_TOTAL_TOKENS),
+        max_tokens: MAX_WATCH_OUTPUT_TOKENS,
+        component: "kyomi_watch".into(),
+        user_message_persistence: UserMessagePersistence::AdapterPersists(None),
+        assistant_message_persistence: AssistantMessagePersistence::AdapterInserts(None),
+        conversation_history: None,
+        user_display_name: "Kyomi Watch".to_string(),
+        context_window: 0,
+        workspace_roles: creator_workspace_roles,
+        document_id: None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Recent alerts context
 // ---------------------------------------------------------------------------
@@ -1076,7 +1120,7 @@ async fn execute_watch_inner(
         session_id: session_id.clone(),
         user_id: watch.created_by.clone(),
         workspace_id: watch.workspace_id.clone(),
-        message: watch_prompt.clone(),
+        message: watch.prompt.clone(),
         model_name: None, // use default model
         temperature: 0.7,
         is_shared_conversation: false,
@@ -1085,7 +1129,7 @@ async fn execute_watch_inner(
         cancel_token: CancellationToken::new(),
         current_time_user_tz: None,
         message_source: Some("Kyomi Watch".into()),
-        system_prompt: Some(enhanced_system_prompt),
+        system_prompt: Some(enhanced_system_prompt.clone()),
         tools_subset: Some(tools_subset),
         max_iterations: MAX_WATCH_ITERATIONS,
         max_duration: Some(MAX_WATCH_DURATION),
@@ -1094,7 +1138,7 @@ async fn execute_watch_inner(
         component: "kyomi_watch".into(),
         // CallerPersisted, not AdapterPersists(None): `prepare_watch_dispatch`
         // above already made the pre-written row durable. The LLM still
-        // receives `watch_prompt` for this turn — `CustomAgent::chat()` pushes
+        // receives the watch prompt for this turn — `CustomAgent::chat()` pushes
         // `message` into the in-flight message list regardless of the persistence
         // variant — but `caller_persisted_id()` returns `Some(user_message_id)`
         // for `CallerPersisted` (unlike `AdapterPersists`, which returns `None`
@@ -1194,34 +1238,14 @@ async fn execute_watch_inner(
                          {{\"should_alert\": false, \"reason\": \"...\"}}"
                     );
 
-                    let retry_config = AgentExecutionConfig {
-                        session_id: session_id.clone(),
-                        user_id: watch.created_by.clone(),
-                        workspace_id: watch.workspace_id.clone(),
-                        message: correction_prompt,
-                        model_name: None,
-                        temperature: 0.7,
-                        is_shared_conversation: false,
-                        context_type: "kyomi_watch".into(),
-                        workspace_user_ids: None,
-                        cancel_token: CancellationToken::new(),
-                        current_time_user_tz: None,
-                        message_source: Some("Kyomi Watch".into()),
-                        system_prompt: None, // reuse existing context
-                        tools_subset: Some(WATCH_TOOLS.iter().map(|s| s.to_string()).collect()),
-                        max_iterations: MAX_WATCH_ITERATIONS,
-                        max_duration: Some(MAX_WATCH_DURATION),
-                        max_total_tokens: Some(MAX_WATCH_TOTAL_TOKENS),
-                        max_tokens: MAX_WATCH_OUTPUT_TOKENS,
-                        component: "kyomi_watch".into(),
-                        user_message_persistence: UserMessagePersistence::AdapterPersists(None),
-                        assistant_message_persistence: AssistantMessagePersistence::AdapterInserts(None),
-                        conversation_history: None,
-                        user_display_name: "Kyomi Watch".to_string(),
-                        context_window: 0,
-                        workspace_roles: creator_workspace_roles.clone(),
-                        document_id: None,
-                    };
+                    let retry_config = build_watch_retry_config(
+                        &session_id,
+                        &watch.created_by,
+                        &watch.workspace_id,
+                        enhanced_system_prompt.clone(),
+                        creator_workspace_roles.clone(),
+                        correction_prompt,
+                    );
 
                     let lazy_embedding_retry = kyomi_embed::LazyEmbedding::loaded(embedding.clone());
                     match execute_agent_chat(
@@ -1755,6 +1779,43 @@ mod tests {
     fn relative_time_days() {
         assert_eq!(format_relative_time(172800), "2 days ago");
         assert_eq!(format_relative_time(86400), "1 day ago");
+    }
+
+    // -- build_watch_retry_config --
+
+    #[test]
+    fn watch_retry_config_keeps_the_watch_system_prompt() {
+        let now = Utc::now();
+        let system_prompt = build_watch_system_prompt(
+            "Revenue Monitor",
+            "0 9 * * *",
+            &now,
+            None,
+            WatchMode::Alert,
+            "",
+            "",
+        );
+
+        let config = build_watch_retry_config(
+            "sess-1",
+            "user-a",
+            "ws-1",
+            system_prompt.clone(),
+            Vec::new(),
+            "fix the JSON".to_string(),
+        );
+
+        assert_eq!(config.system_prompt.as_deref(), Some(system_prompt.as_str()));
+        assert!(
+            config
+                .system_prompt
+                .as_deref()
+                .unwrap()
+                .contains("should_alert"),
+            "the retry must keep the watch JSON schema, not fall back to the chat prompt"
+        );
+        assert_eq!(config.context_type, "kyomi_watch");
+        assert_eq!(config.message, "fix the JSON");
     }
 
     // -- WATCH_TOOLS constant --

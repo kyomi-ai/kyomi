@@ -180,19 +180,37 @@ mod tests {
         }
     }
 
-    /// The prompt is cacheable: it takes no user or workspace input, so two
-    /// different users in two different workspaces get byte-identical output
-    /// for the same conversation mode.
+    /// The prompt is cacheable: the signature cannot vary by user or
+    /// workspace, and the rendered bytes are pinned per conversation mode.
     #[test]
     fn system_prompt_is_byte_identical_across_users_and_workspaces() {
-        assert_eq!(
-            build_system_prompt(false).as_bytes(),
-            build_system_prompt(false).as_bytes()
-        );
-        assert_eq!(
-            build_system_prompt(true).as_bytes(),
-            build_system_prompt(true).as_bytes()
-        );
+        // Structural proof: the only input is the conversation mode. If a
+        // user/workspace parameter is ever added, this assignment stops
+        // compiling.
+        let render: fn(bool) -> String = build_system_prompt;
+        let _ = render;
+
+        // Byte pin: if per-user or per-workspace content ever appears in the
+        // prompt, or the static content changes unintentionally, this fails.
+        let unshared = build_system_prompt(false);
+        assert_eq!(unshared.len(), 12_546);
+        assert_eq!(fnv1a_64(unshared.as_bytes()), 0xd120_023a_4cfa_7ca4);
+
+        let shared = build_system_prompt(true);
+        assert_eq!(shared.len(), 13_618);
+        assert_eq!(fnv1a_64(shared.as_bytes()), 0xd5dd_60fb_5cb4_8d24);
+    }
+
+    /// 64-bit FNV-1a, used to pin the rendered bytes without adding a
+    /// crypto dependency to this crate. The input is fixed, so collision
+    /// risk is irrelevant here.
+    fn fnv1a_64(bytes: &[u8]) -> u64 {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        hash
     }
 
     #[test]

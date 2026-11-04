@@ -2178,7 +2178,7 @@ mod tests {
     // INSERT would fail these exactly as the collision failed KYO-572's.
     //
     // The last two compose the same finalization steps
-    // `kyomi_agent::execution::execute_agent_chat`'s step 13/15 perform
+    // `kyomi_agent::execution::execute_agent_chat`'s step 12/14 perform
     // (`classify_agent_failure` + `finalize_terminal_write` +
     // `chat_service::update_message`) around a real `adapter.chat()` call —
     // `execute_agent_chat` itself resolves a real, network-calling LLM
@@ -2540,7 +2540,7 @@ mod tests {
             .await;
         let err = result.expect_err("FailingProvider must make chat() return Err");
 
-        // Exactly what execute_agent_chat's step 13/15 do with that Err.
+        // Exactly what execute_agent_chat's step 12/14 do with that Err.
         let (exec_status, response_text) = crate::execution::classify_agent_failure(&err);
         assert_eq!(exec_status, "error");
         let (content, message_status) =
@@ -2700,10 +2700,9 @@ mod tests {
         // Exactly the persistence choice execute_watch_inner configures
         // post-fix: the `UserMessagePersistence::CallerPersisted` value
         // `prepare_watch_dispatch` returned, over the row it already wrote
-        // above. The LLM turn itself still uses the *enhanced* prompt
-        // (workspace-learnings prefix + watch.prompt) — distinct text from
-        // the pre-written row — exactly as the exec config's `message`
-        // field does.
+        // above. The turn deliberately uses text distinct from the durable
+        // row (production differs by the `Monitor: {name}` header) so this
+        // test proves the de-duplication is id-based, not text-based.
         let enhanced_watch_prompt = format!("Workspace learnings: none.\n{watch_prompt}");
         adapter
             .chat(ChatParams {

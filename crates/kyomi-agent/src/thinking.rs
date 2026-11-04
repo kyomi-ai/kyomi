@@ -179,7 +179,7 @@ pub struct AgentThinkingTracker {
     /// [`Self::maybe_flush_thinking_events`] applies to non-forced calls.
     last_flush_at: Option<Instant>,
     /// Set by [`Self::finalize`], under this tracker's own lock, in the
-    /// same critical section `execute_agent_chat`'s step 14 reads events
+    /// same critical section `execute_agent_chat`'s step 13 reads events
     /// from for the terminal `extra_metadata` write — see that method's
     /// doc for why this is what makes the terminal write strictly win over
     /// every incremental flush, including ones whose spawned task hadn't
@@ -636,7 +636,7 @@ impl AgentThinkingTracker {
     /// Callers MUST call this from inside the *same* locked critical
     /// section they read final event/usage data from for the terminal
     /// `extra_metadata` write, immediately before performing that write —
-    /// `execute_agent_chat`'s step 14/15 is the one production caller. That
+    /// `execute_agent_chat`'s step 13/14 is the one production caller. That
     /// ordering (finalize while holding the lock, release the lock, *then*
     /// write) is what makes the terminal write strictly win: this tracker's
     /// own mutex already serializes every flush against every other flush
@@ -662,13 +662,13 @@ impl AgentThinkingTracker {
     ///
     /// This writes only `{"thinking_events": [...]}`, not the full
     /// `{model, thinking_events, token_usage, component}` shape
-    /// `execute_agent_chat`'s step 15 writes at turn completion —
+    /// `execute_agent_chat`'s step 14 writes at turn completion —
     /// `chat_service::update_message` replaces `extra_metadata` wholesale.
     /// A mid-run reader only needs `thinking_events` to replay completed
     /// steps (see `kyomi_ui`'s `chat_page.rs`), so the narrower interim
     /// shape is sufficient — but *only* while the row is still mid-run:
     /// see [`Self::finalize`] for why this method must never win a race
-    /// against step 15's write once the turn has actually finished.
+    /// against step 14's write once the turn has actually finished.
     ///
     /// Every caller of a tracker method holds this tracker's own
     /// `tokio::sync::Mutex` for the whole call (see
@@ -679,7 +679,7 @@ impl AgentThinkingTracker {
     /// from it), so whichever call happens to acquire the lock last is
     /// always looking at a superset of what any earlier call saw — a flush
     /// can never regress the persisted event list. None of that orders a
-    /// flush against `execute_agent_chat`'s own step 15 write, though —
+    /// flush against `execute_agent_chat`'s own step 14 write, though —
     /// that write doesn't go through this tracker at all — which is why the
     /// `finalized` check below exists.
     async fn maybe_flush_thinking_events(&mut self, force: bool) {
@@ -690,7 +690,7 @@ impl AgentThinkingTracker {
         // by the agent loop's very last iteration can still be sitting
         // unscheduled when `agent.chat()` returns; nothing awaits it. If it
         // finally runs (and acquires this tracker's lock) *after*
-        // `execute_agent_chat`'s step 15 has already written the terminal
+        // `execute_agent_chat`'s step 14 has already written the terminal
         // `{model, thinking_events, token_usage, component}` metadata —
         // which does not go through this tracker, so the tracker's own
         // mutex cannot order against it — an unguarded forced flush (tool
@@ -698,7 +698,7 @@ impl AgentThinkingTracker {
         // that terminal write with just `{"thinking_events": [...]}`,
         // silently dropping `model`/`token_usage`/`component`. `finalized`
         // closes that: `finalize()` is called from the same locked critical
-        // section step 14 reads events from, immediately before step 15's
+        // section step 13 reads events from, immediately before step 14's
         // write, so every flush attempted from then on — no matter how late
         // its spawned task finally runs — sees `finalized` and no-ops.
         if self.finalized {
@@ -736,7 +736,7 @@ impl AgentThinkingTracker {
                 self.last_flush_at = Some(Instant::now());
             }
             Err(e) => {
-                // Logged loudly, never fatal: execute_agent_chat's step 15
+                // Logged loudly, never fatal: execute_agent_chat's step 14
                 // still writes the complete, correct thinking_events list
                 // once the turn finishes, regardless of any interim flush
                 // failing here.
@@ -2128,12 +2128,12 @@ mod tests {
     // The five `AgentCallbacks` closures each fire a detached
     // `tokio::task::spawn` (see `set_thinking_tracker`'s doc). One from the
     // loop's last iteration can still be unscheduled when `agent.chat()`
-    // returns; nothing awaits it. `execute_agent_chat`'s step 15 writes the
+    // returns; nothing awaits it. `execute_agent_chat`'s step 14 writes the
     // terminal `{model, thinking_events, token_usage, component}` metadata
     // directly — not through the tracker — so the tracker's own mutex
     // cannot order a flush against that write on its own. Before
     // `AgentThinkingTracker::finalize` existed, a late callback's forced
-    // flush (tool start/end always force) landing after step 15 would
+    // flush (tool start/end always force) landing after step 14 would
     // clobber the terminal metadata back down to bare
     // `{"thinking_events": [...]}`, silently dropping model/token_usage/
     // component. This test drives exactly that sequence — an interim
@@ -2160,7 +2160,7 @@ mod tests {
         // An interim flush during the run, same as any other mid-run event.
         tracker.agent_thought("Checking the revenue table for anomalies in Q4").await;
 
-        // Exactly execution.rs step 14/15's sequence: finalize while still
+        // Exactly execution.rs step 13/14's sequence: finalize while still
         // holding (conceptually) the tracker, then perform the terminal
         // write the tracker itself never makes — the full
         // {model, thinking_events, token_usage, component} shape, plus a

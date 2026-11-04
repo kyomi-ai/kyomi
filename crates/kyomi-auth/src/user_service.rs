@@ -910,7 +910,7 @@ pub async fn update_extra_metadata(
 }
 
 // ---------------------------------------------------------------------------
-// ChartML config + knowledge (Phase 4B — user endpoints)
+// ChartML config (Phase 4B — user endpoints)
 // ---------------------------------------------------------------------------
 
 /// Update user's ChartML config JSON.
