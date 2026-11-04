@@ -1,18 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Retrieval pipeline -- vector search + SQL anchor expansion
-//! + column-to-table propagation.
+//! Retrieval pipeline -- vector search + column-to-table propagation.
 //!
 //! Entry point: `retrieve(vsearch, embed, workspace_id, query, already_injected, token_budget)`
 //!
 //! Pipeline:
 //! 1. Embed query using `embed_query()` (BGE asymmetric)
 //! 2. Search all vector indexes in parallel via VectorSearch trait
-//! 3. SQL anchor expansion from previously injected nodes
-//! 4. Merge results: deduplicate by node ID, best score wins per node
-//! 5. Column->Table score propagation (BEFORE score floor)
-//! 6. Quality gates: MIN_SIMILARITY floor, then budget ceiling
-//! 7. Return ranked results
+//! 3. Merge results: deduplicate by node ID, best score wins per node
+//! 4. Column->Table score propagation (BEFORE score floor)
+//! 5. Quality gates: MIN_SIMILARITY floor, then budget ceiling
+//! 6. Return ranked results
 
 use crate::models::{
     ContextEntry, ContextEntryKind, MatchedColumn, RetrievalResult, RetrievalSource,
@@ -28,7 +26,7 @@ const MAX_RESULTS_PER_INDEX: usize = 10;
 /// Below this, results are noise -- not relevant to the query.
 const MIN_SIMILARITY: f64 = 0.25;
 
-/// Per-turn token budget for new context injection.
+/// Per-turn token budget for retrieval results.
 pub const PER_TURN_TOKEN_BUDGET: usize = 512;
 
 /// Approximate characters per token (conservative for English text).

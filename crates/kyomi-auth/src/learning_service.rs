@@ -1252,13 +1252,13 @@ pub fn format_learning_with_queries(
 // ─── Session dedup via Redis ──────────────────────────────────────────────────
 //
 // DEPRECATED: These session dedup functions use `learning_dedup:{session_id}` Redis keys.
-// They are superseded by `ConversationContext` in kyomi-knowledge, which tracks
-// injected entries via `kg:ctx:{session_id}` Redis keys and provides richer
-// per-entity-kind tracking (tables, columns, learnings, metrics).
-// These functions are still called by the system prompt learning injection path
-// and can be removed once that path is migrated to kyomi-knowledge.
+// The per-session conversation context that superseded them was itself deleted
+// in KYO-949, along with the system-prompt learning injection path they served.
+// They have no production callers; remove them with the `agent_learnings`
+// cleanup (KYO-952 / KYO-953).
 
-/// DEPRECATED: Superseded by `ConversationContext::all_injected()` in kyomi-knowledge.
+/// DEPRECATED: No production callers after KYO-949 removed the learning
+/// injection path.
 ///
 /// Check if a learning was already injected in this session.
 pub async fn is_learning_seen_in_session(
@@ -1271,7 +1271,8 @@ pub async fn is_learning_seen_in_session(
     members.contains(&learning_id.to_string())
 }
 
-/// DEPRECATED: Superseded by `ConversationContext::record_injection()` in kyomi-knowledge.
+/// DEPRECATED: No production callers after KYO-949 removed the learning
+/// injection path.
 ///
 /// Mark a learning as seen in this session (with TTL matching session lifetime).
 pub async fn mark_learning_seen_in_session(
