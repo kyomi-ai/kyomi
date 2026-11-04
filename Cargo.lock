@@ -2723,7 +2723,7 @@ dependencies = [
  "parking_lot",
  "rand 0.9.5",
  "regex",
- "sqlparser 0.59.0",
+ "sqlparser",
  "tempfile",
  "tokio",
  "url",
@@ -2795,7 +2795,7 @@ dependencies = [
  "log",
  "object_store",
  "paste",
- "sqlparser 0.59.0",
+ "sqlparser",
  "tokio",
  "web-time",
 ]
@@ -2955,7 +2955,7 @@ dependencies = [
  "itertools",
  "paste",
  "serde_json",
- "sqlparser 0.59.0",
+ "sqlparser",
 ]
 
 [[package]]
@@ -3278,7 +3278,7 @@ dependencies = [
  "indexmap 2.14.0",
  "log",
  "regex",
- "sqlparser 0.59.0",
+ "sqlparser",
 ]
 
 [[package]]
@@ -6680,7 +6680,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "sqlparser 0.55.0",
  "sqlx",
  "tokio",
  "tracing",
@@ -9563,26 +9562,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03251193000f4bd3b042892be858ee50e8b3719f2b08e5833ac4353724632430"
 
 [[package]]
-name = "recursive"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0786a43debb760f491b1bc0269fe5e84155353c67482b9e60d0cfb596054b43e"
-dependencies = [
- "recursive-proc-macro-impl",
- "stacker",
-]
-
-[[package]]
-name = "recursive-proc-macro-impl"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76009fbe0614077fc1a2ce255e3a1881a2e3a3527097d5dc6d8212c585e7e38b"
-dependencies = [
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "redis"
 version = "0.29.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11121,17 +11100,6 @@ dependencies = [
  "nom 7.1.3",
  "serde",
  "unicode-segmentation",
-]
-
-[[package]]
-name = "sqlparser"
-version = "0.55.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c4521174166bac1ff04fe16ef4524c70144cd29682a45978978ca3d7f4e0be11"
-dependencies = [
- "log",
- "recursive",
- "sqlparser_derive",
 ]
 
 [[package]]

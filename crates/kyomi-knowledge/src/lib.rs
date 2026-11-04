@@ -11,18 +11,12 @@
 //! - [`models`] -- Shared types (ContextEntry, RetrievalResult, etc.)
 //! - [`vector_search`] -- VectorSearch trait + Postgres/SQLite implementations
 //! - [`populate`] -- Embedding generation and storage
-//! - [`references`] -- Learning-to-entity reference materialization
-//! - [`sql_references`] -- SQL parsing to extract table names
 //! - [`retrieval`] -- Vector search pipeline
-//! - [`expansion`] -- Graph-style expansion via SQL JOINs
 
-pub mod expansion;
 pub mod knowledge_files;
 pub mod models;
 pub mod populate;
-pub mod references;
 pub mod retrieval;
-pub mod sql_references;
 pub mod unify;
 pub mod vector_search;
 

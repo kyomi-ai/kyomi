@@ -156,9 +156,9 @@ fn classify_postgres_type(data_type: &str) -> Option<TypeClass> {
         | "timestamp without time zone" | "date" | "json" | "jsonb" => Some(TypeClass::Text),
         "smallint" | "integer" | "bigint" | "boolean" => Some(TypeClass::Integer),
         "double precision" | "real" | "numeric" => Some(TypeClass::Real),
-        // ARRAY (e.g. text[]) and USER-DEFINED (pgvector's `vector(384)`,
-        // enum types like `learning_scope`) have no unambiguous SQLite
-        // counterpart — left unclassified rather than guessed at.
+        // ARRAY (e.g. text[]) and USER-DEFINED (e.g. pgvector's `vector(384)`)
+        // have no unambiguous SQLite counterpart — left unclassified rather
+        // than guessed at.
         _ => None,
     }
 }
