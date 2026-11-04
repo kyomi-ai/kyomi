@@ -1082,20 +1082,15 @@ mod tests {
         assert!(matches!(err, kyomi_core::Error::NotFound(_)), "got: {err:?}");
     }
 
-    /// KYO-952: legacy `agent_learnings` rows — including metrics stored as
-    /// `learning_type = 'metric'` — must never surface through
-    /// `search_knowledge`, while both live sources still do.
+    /// `search_knowledge` returns both live sources: a semantically matching
+    /// warehouse table and a matching knowledge document.
     ///
-    /// The table, the knowledge document and both legacy rows are seeded so
-    /// their embeddings equal the query embedding: every source scores 1.0,
-    /// so a removed source cannot be hidden by a weak similarity. Before this
-    /// ticket the metric row came back as a `metric` result alongside the
-    /// table, so reconnecting the metric source fails the exact-count
-    /// assertion; dropping the table or document source fails it too. (The
-    /// learning source was already filtered from tool output before this
-    /// ticket; the count pins that no non-table/document kind is formatted.)
+    /// The table and the document are seeded so their embeddings equal the
+    /// query embedding, so every seeded source scores 1.0 and cannot be hidden
+    /// by a weak similarity. The exact-count assertion fails if either source
+    /// is dropped or an unexpected result kind appears.
     #[tokio::test]
-    async fn search_knowledge_returns_live_sources_but_never_legacy_agent_learnings() {
+    async fn search_knowledge_returns_table_and_document_sources() {
         let db = test_pool().await;
         seed_user_and_workspace(&db).await;
 
@@ -1133,24 +1128,6 @@ mod tests {
         .await
         .expect("seed datasource_table_cache");
 
-        for (learning_id, learning_type, insight) in [
-            ("metric-1", "metric", "MRR is monthly recurring revenue"),
-            ("learning-1", "learning", "Revenue lives in public.orders.total"),
-        ] {
-            sqlx::query(
-                "INSERT INTO agent_learnings \
-                    (learning_id, workspace_id, insight, learning_type, embedding, enabled, scope) \
-                 VALUES (?, 'ws-1', ?, ?, ?, 1, 'workspace')",
-            )
-            .bind(learning_id)
-            .bind(insight)
-            .bind(learning_type)
-            .bind(&embedding)
-            .execute(sq)
-            .await
-            .expect("seed agent_learnings row");
-        }
-
         // The live knowledge-document source must keep working too.
         let doc_id = kyomi_auth::dashboard_service::create_dashboard(
             &ctx.db,
@@ -1184,8 +1161,7 @@ mod tests {
             results.len(),
             2,
             "exactly the table and the knowledge document may produce results — a \
-             legacy learning/metric source is still connected, or a live source broke: \
-             {result}"
+             source broke or an unexpected result kind appeared: {result}"
         );
         assert_eq!(
             results

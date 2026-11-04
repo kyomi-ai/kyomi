@@ -15,8 +15,7 @@ use serde::{Deserialize, Serialize};
 /// Retrieval now sources only warehouse tables from the vector indexes.
 /// Dashboards and knowledge documents come from the separate knowledge-chunk
 /// search (`tools::knowledge::search_knowledge_chunks`) and are not
-/// `ContextEntry`s; the legacy `agent_learnings` learning/metric kinds were
-/// removed in KYO-952.
+/// `ContextEntry`s; the legacy learning/metric kinds were removed in KYO-952.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ContextEntryKind {
     Table,
