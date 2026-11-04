@@ -1434,6 +1434,7 @@ mod description_tests {
             "formatting",
             "layout",
             "dashboard-example",
+            "examples",
         ] {
             assert!(text.contains(section), "section '{section}' missing: {text}");
         }

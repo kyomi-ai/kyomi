@@ -5,7 +5,7 @@
 
 **Related Documents:**
 - **JSON Schema**: [`chartml_schema.json`](./chartml_schema.json) - Machine-readable validation rules
-- **Examples**: [`EXAMPLES.md`](./EXAMPLES.md) - Real-world usage patterns
+- **Examples**: [`EXAMPLES.md`](./EXAMPLES.md) (also available via `get_chartml_spec` with `section: "examples"`) - Real-world usage patterns
 - **Overview**: [`README.md`](./README.md) - Directory index and guidelines
 
 ---
@@ -1082,7 +1082,7 @@ annotations:
     color: "#4285f4"
 ```
 
-See EXAMPLES.md for complete annotation examples with goals, targets, and event markers.
+See the `examples` section of `get_chartml_spec` for complete annotation examples with goals, targets, and event markers.
 
 ### Complete Chart Examples
 
