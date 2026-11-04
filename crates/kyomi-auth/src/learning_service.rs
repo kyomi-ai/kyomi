@@ -13,9 +13,10 @@
 //!
 //! ## Migration Notice
 //!
-//! The pgvector-based retrieval functions in this module have been superseded by
-//! `kyomi-knowledge` which provides SQL-based knowledge retrieval with BGE-small-en-v1.5
-//! embeddings. The legacy pgvector functions remain as fallback during migration.
+//! The pgvector-based retrieval functions in this module are superseded by
+//! knowledge documents; `kyomi-knowledge`'s table/document retrieval no longer
+//! covers learnings (KYO-952). The legacy functions have no production callers
+//! and are removed with the `agent_learnings` table (KYO-953).
 
 use chrono::{DateTime, Utc};
 use kyomi_core::embedding_compat::{bytes_to_pg_vector, embedding_to_bytes};
@@ -68,9 +69,7 @@ pub struct LearningRecord {
 
 /// A learning record with search scores (hybrid search result).
 ///
-/// Flattens a whole `LearningRecord` plus four hybrid-search scores. The
-/// minimal vector-search hit this used to be contrasted with was removed
-/// from `kyomi_knowledge` in KYO-952.
+/// Flattens a whole `LearningRecord` plus four hybrid-search scores.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LearningSearchResult {
     #[serde(flatten)]

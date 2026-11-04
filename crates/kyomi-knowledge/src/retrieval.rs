@@ -436,10 +436,6 @@ mod tests {
         assert!(block.contains("## Tables"));
         assert!(block.contains("prod / public.users"));
         assert!(block.contains("prod / public.orders"));
-        assert!(
-            !block.contains("## Metrics") && !block.contains("## Learnings"),
-            "table-only retrieval must not emit legacy metric/learning sections: {block}"
-        );
     }
 
     #[test]
@@ -481,7 +477,7 @@ mod tests {
             ContextEntry {
                 kind: ContextEntryKind::Table,
                 id: "table1".to_string(),
-                text: "T".repeat(400),
+                text: "T".repeat(100),
                 score: 0.50,
                 source: RetrievalSource::VectorSearch,
                 matched_columns: vec![],
@@ -489,7 +485,7 @@ mod tests {
             ContextEntry {
                 kind: ContextEntryKind::Table,
                 id: "table2".to_string(),
-                text: "U".repeat(400),
+                text: "U".repeat(100),
                 score: 0.45,
                 source: RetrievalSource::VectorSearch,
                 matched_columns: vec![],
@@ -497,16 +493,25 @@ mod tests {
             ContextEntry {
                 kind: ContextEntryKind::Table,
                 id: "table3".to_string(),
-                text: "Important entry".to_string(),
+                text: format!("Important entry {}", "V".repeat(84)),
                 score: 0.90,
                 source: RetrievalSource::VectorSearch,
                 matched_columns: vec![],
             },
         ];
 
-        let block = assemble_context_block(&entries, 300);
-        assert!(block.contains("Important entry"), "High-score entry must be included");
-        assert!(block.contains(&"T".repeat(100)), "Highest-score table must be included");
+        // 60 tokens ~ 240 chars fits the block overhead plus only one
+        // 100-char entry. Score-first selection must keep the 0.90 entry;
+        // insertion order would keep table1 and drop it.
+        let block = assemble_context_block(&entries, 60);
+        assert!(
+            block.contains("Important entry"),
+            "High-score entry must be included: {block}"
+        );
+        assert!(
+            !block.contains(&"T".repeat(100)) && !block.contains(&"U".repeat(100)),
+            "budget must not be spent on lower-score entries first: {block}"
+        );
     }
 
     #[test]

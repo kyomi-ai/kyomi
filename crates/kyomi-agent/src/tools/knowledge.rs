@@ -211,8 +211,8 @@ impl AgentTool for SearchKnowledgeTool {
             &ctx.db, &ctx.workspace_id, &ctx.user_id, &query_embedding, limit, doc_type_filter,
         ).await;
 
-        // When doc_type filter is specified, exclude legacy table entries —
-        // the caller is asking specifically for documents of that type.
+        // When doc_type filter is specified, exclude table entries — the
+        // caller is asking specifically for documents of that type.
         let table_entries: Vec<_> = if doc_type_filter.is_some() {
             Vec::new()
         } else {
@@ -1090,8 +1090,10 @@ mod tests {
     /// their embeddings equal the query embedding: every source scores 1.0,
     /// so a removed source cannot be hidden by a weak similarity. Before this
     /// ticket the metric row came back as a `metric` result alongside the
-    /// table; a regression that reconnects either legacy source fails here,
-    /// as does dropping the table or document source.
+    /// table, so reconnecting the metric source fails the exact-count
+    /// assertion; dropping the table or document source fails it too. (The
+    /// learning source was already filtered from tool output before this
+    /// ticket; the count pins that no non-table/document kind is formatted.)
     #[tokio::test]
     async fn search_knowledge_returns_live_sources_but_never_legacy_agent_learnings() {
         let db = test_pool().await;
@@ -1202,13 +1204,6 @@ mod tests {
             "knowledge-document results must still work: {result}"
         );
         assert!(
-            results.iter().all(|row| matches!(
-                row["type"].as_str(),
-                Some("table" | "document")
-            )),
-            "no learning/metric result kinds may survive: {result}"
-        );
-        assert!(
             results
                 .iter()
                 .any(|row| row["id"] == serde_json::json!("public.orders")),
@@ -1219,6 +1214,122 @@ mod tests {
                 .iter()
                 .any(|row| row["id"] == serde_json::json!(doc_id)),
             "the seeded knowledge document must be returned: {result}"
+        );
+    }
+
+    /// KYO-952: the datasource filter's positive path scopes table results to
+    /// the resolved datasource and still leaves knowledge documents
+    /// unfiltered, as the tool description says.
+    #[tokio::test]
+    async fn search_knowledge_datasource_filter_scopes_tables_but_not_documents() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+
+        let mut ctx = build_ctx(db);
+        ctx.embedding = loaded_embedding();
+        let embed = ctx.embedding.wait_ready().await.expect("loaded embedding");
+        let query_vec = embed
+            .embed_query_offloaded("revenue")
+            .await
+            .expect("embed query");
+        let embedding = kyomi_core::embedding_compat::embedding_to_bytes(&query_vec);
+
+        let sq = match &ctx.db {
+            kyomi_core::DbPool::Sqlite(sq) => sq,
+            kyomi_core::DbPool::Postgres(_) => unreachable!("test pool is always sqlite"),
+        };
+
+        for (id, slug) in [("ds-1", "test-ds"), ("ds-2", "other-ds")] {
+            sqlx::query(
+                "INSERT INTO datasource_configs \
+                    (id, workspace_id, name, datasource_type, slug) \
+                 VALUES (?, 'ws-1', ?, 'postgres', ?)",
+            )
+            .bind(id)
+            .bind(format!("Datasource {id}"))
+            .bind(slug)
+            .execute(sq)
+            .await
+            .expect("seed datasource_configs");
+        }
+
+        for (datasource_id, table_id) in [("ds-1", "orders"), ("ds-2", "events")] {
+            sqlx::query(
+                "INSERT INTO datasource_table_cache \
+                    (workspace_id, datasource_config_id, project_id, dataset_id, table_id, \
+                     table_metadata, name_embedding) \
+                 VALUES ('ws-1', ?, '', 'public', ?, '{}', ?)",
+            )
+            .bind(datasource_id)
+            .bind(table_id)
+            .bind(&embedding)
+            .execute(sq)
+            .await
+            .expect("seed datasource_table_cache");
+        }
+
+        let doc_id = kyomi_auth::dashboard_service::create_dashboard(
+            &ctx.db,
+            "user-a",
+            "ws-1",
+            "Revenue Notes",
+            "revenue",
+            DocType::Knowledge,
+            None,
+        )
+        .await
+        .expect("seed knowledge document");
+        kyomi_auth::dashboard_service::rechunk_document(
+            &ctx.db,
+            embed,
+            &doc_id,
+            "revenue",
+            "ws-1",
+        )
+        .await
+        .expect("seed knowledge chunk");
+
+        let result = SearchKnowledgeTool
+            .execute(
+                serde_json::json!({"query": "revenue", "datasource": "test-ds"}),
+                &ctx,
+            )
+            .await
+            .expect("search_knowledge execute");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+        let results = parsed["results"].as_array().expect("results array");
+
+        assert_eq!(
+            results.len(),
+            2,
+            "the filtered table plus the unfiltered document must be returned: {result}"
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|row| row["type"] == serde_json::json!("table"))
+                .count(),
+            1,
+            "exactly one table (the resolved datasource's) must survive: {result}"
+        );
+        assert!(
+            results
+                .iter()
+                .any(|row| row["id"] == serde_json::json!("public.orders")),
+            "the matching datasource's table must be returned: {result}"
+        );
+        assert!(
+            results
+                .iter()
+                .all(|row| row["id"] != serde_json::json!("public.events")),
+            "the other datasource's table must be filtered out: {result}"
+        );
+        assert!(
+            results
+                .iter()
+                .any(|row| row["type"] == serde_json::json!("document")
+                    && row["id"] == serde_json::json!(doc_id)),
+            "knowledge documents must not be datasource-filtered: {result}"
         );
     }
 

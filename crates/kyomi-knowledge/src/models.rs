@@ -66,7 +66,7 @@ pub struct MatchedColumn {
 pub struct ContextEntry {
     /// What kind of node this came from.
     pub kind: ContextEntryKind,
-    /// Unique identifier for deduplication (e.g., table full_name, learning UUID).
+    /// Unique identifier for deduplication (a table full_name).
     pub id: String,
     /// The display text for this entry.
     pub text: String,
@@ -82,7 +82,7 @@ pub struct ContextEntry {
 /// The full context result from a retrieval query.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetrievalResult {
-    /// All context entries, sorted by section then score.
+    /// All context entries, sorted by score.
     pub entries: Vec<ContextEntry>,
     /// The formatted context block string.
     pub context_block: String,
