@@ -3358,6 +3358,7 @@ mod tests {
         index: std::sync::atomic::AtomicUsize,
         invalid_chart: bool,
         query_rejected: bool,
+        query_error_marker: &'static str,
     }
     #[async_trait::async_trait]
     impl crate::provider::LLMProvider for AwaitedProvider {
@@ -3367,8 +3368,7 @@ mod tests {
             let index = self.index.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if self.query_rejected && index > 0 {
                 assert!(messages.iter().any(|message| message.role == crate::types::MessageRole::Tool
-                    && message.content.contains("UNKNOWN_IDENTIFIER")
-                    && message.content.contains("page_url")), "database rejection must reach the model before it continues");
+                    && message.content.contains(self.query_error_marker)), "database rejection must reach the model before it continues");
                 if index > 1 {
                     assert!(messages.iter().any(|message| message.role == crate::types::MessageRole::Tool
                         && serde_json::from_str::<serde_json::Value>(&message.content).is_ok_and(|value| value["data"]["views"][0] == 42)), "retry results must reach the model before its final answer");
@@ -3393,6 +3393,8 @@ mod tests {
         uncertain_failure: bool,
         uncertain_result: bool,
         query_rejected: bool,
+        query_sql: &'static str,
+        query_error: &'static str,
     }
     #[async_trait::async_trait]
     impl crate::tools::AgentTool for AwaitedTool {
@@ -3432,8 +3434,7 @@ mod tests {
                     return Ok(serde_json::json!({"cols":[{"name":"views","type":"integer"}],"data":{"views":[42]},"rows":1}).to_string());
                 }
                 return Ok(crate::tools::query_utils::query_error_response(
-                    "clickhouse", "kyomi-analytics", "SELECT page_url FROM events",
-                    "Code: 47. DB::Exception: Unknown expression identifier page_url (UNKNOWN_IDENTIFIER)",
+                    "clickhouse", "kyomi-analytics", self.query_sql, self.query_error,
                 ));
             }
             kyomi_core::db_execute!(&self.db, "UPDATE workspaces SET name='883 side effect committed' WHERE workspace_id='ws-1'").unwrap();
@@ -3453,9 +3454,22 @@ mod tests {
         let run=assistant.durable_run().unwrap().clone();
         let calls=Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let script=vec![crate::test_support::Reply::ToolCall,crate::test_support::Reply::ToolCall,crate::test_support::Reply::Text("Revenue checked".into())];
-        let provider=AwaitedProvider {inner:crate::test_support::ScriptedProvider {script:std::sync::Mutex::new(script.into()),after_script:crate::test_support::Reply::Text("unexpected".into()),calls:Arc::new(std::sync::Mutex::new(Vec::new()))},index:std::sync::atomic::AtomicUsize::new(0),invalid_chart,query_rejected:fail_writer == "query_rejected"};
+        let (query_sql, query_error, query_error_marker) = match fail_writer {
+            "query_rejected_184" => (
+                "WITH v AS (SELECT visitor_id, any(screen_width) AS sw FROM events GROUP BY visitor_id) SELECT sw FROM v",
+                "Code: 184. DB::Exception: Aggregate function any(sw) is found in GROUP BY in query. (ILLEGAL_AGGREGATION)",
+                "ILLEGAL_AGGREGATION",
+            ),
+            _ => (
+                "SELECT page_url FROM events",
+                "Code: 47. DB::Exception: Unknown expression identifier page_url (UNKNOWN_IDENTIFIER)",
+                "UNKNOWN_IDENTIFIER",
+            ),
+        };
+        let query_rejected = matches!(fail_writer, "query_rejected" | "query_rejected_184");
+        let provider=AwaitedProvider {inner:crate::test_support::ScriptedProvider {script:std::sync::Mutex::new(script.into()),after_script:crate::test_support::Reply::Text("unexpected".into()),calls:Arc::new(std::sync::Mutex::new(Vec::new()))},index:std::sync::atomic::AtomicUsize::new(0),invalid_chart,query_rejected,query_error_marker};
         let mut registry=crate::tools::ToolRegistry::new();
-        registry.register(Arc::new(AwaitedTool {db:db.clone(),key:key.clone(),run:run.clone(),message:assistant.tag_id().unwrap().into(),calls:calls.clone(),invalid_chart,uncertain_failure:fail_writer == "uncertain",uncertain_result:fail_writer == "uncertain_result",query_rejected:fail_writer == "query_rejected"}));
+        registry.register(Arc::new(AwaitedTool {db:db.clone(),key:key.clone(),run:run.clone(),message:assistant.tag_id().unwrap().into(),calls:calls.clone(),invalid_chart,uncertain_failure:fail_writer == "uncertain",uncertain_result:fail_writer == "uncertain_result",query_rejected,query_sql,query_error}));
         let mut context=crate::test_support::build_ctx(db.clone());
         context.session_id=Some(session.clone());
         let agent=CustomAgent::new(Box::new(provider),crate::agent::AgentConfig::default(),Arc::new(registry),context,std::collections::HashMap::new());
@@ -3509,7 +3523,7 @@ mod tests {
         assert_eq!(outcomes.len(),2); assert_ne!(outcomes[0].0,outcomes[1].0);
         let projected=chat_service::get_session_messages(&db,&key,&session,100).await.unwrap();
         let thinking=&projected.iter().find(|message| message.message_id==assistant.tag_id().unwrap()).unwrap().thinking_events;
-        let query_rejected = fail_writer == "query_rejected";
+        let query_rejected = matches!(fail_writer, "query_rejected" | "query_rejected_184");
         assert_eq!(thinking.iter().filter(|event| event.get("data").and_then(|data| data.get("success")).and_then(serde_json::Value::as_bool)==Some(false)).count(),if query_rejected {1} else {2});
         assert!(outcomes.iter().all(|(_,transport,_)| **transport==agent_runtime::TransportOutcome::Completed));
         assert_eq!(*outcomes[0].2,agent_runtime::DomainOutcome::Rejected);
@@ -3525,6 +3539,10 @@ mod tests {
     #[tokio::test]
     async fn awaited_sink_query_unknown_identifier_reaches_model_and_continues() {
         awaited_adapter_fixture("query_rejected",false).await;
+    }
+    #[tokio::test]
+    async fn awaited_sink_illegal_aggregation_cte_reaches_model_and_continues() {
+        awaited_adapter_fixture("query_rejected_184",false).await;
     }
     #[tokio::test]
     async fn awaited_sink_writer_failure_calls_zero_tools_and_notifies_zero_progress() { awaited_adapter_fixture("response",false).await; }

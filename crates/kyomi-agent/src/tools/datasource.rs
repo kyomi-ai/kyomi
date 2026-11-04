@@ -186,9 +186,8 @@ impl AgentTool for QueryDatasourceTool {
             .execute_query(sql, Some(20), None, false, None)
             .await
             .map_err(super::query_utils::sanitize_query_transport_error)?;
-        provider.close().await;
 
-        match result.status {
+        let response = match result.status {
             kyomi_datasource_server::provider::QueryStatus::Success => {
                 let columns = result.columns.unwrap_or_default();
                 let mut rows = result
@@ -238,11 +237,22 @@ impl AgentTool for QueryDatasourceTool {
             kyomi_datasource_server::provider::QueryStatus::Error => {
                 let raw_err = result.error.unwrap_or_else(|| "Unknown query error".to_string());
                 tracing::warn!(raw_error = %raw_err, datasource = %ds.slug, "datasource query error (sanitized for agent)");
-                Ok(super::query_utils::query_error_response(
-                    ds.datasource_type.as_ref(), &ds.slug, sql, &raw_err,
+                // A dry run proves unrecognized analysis errors happened before
+                // execution; transport, timeout and decoding errors stay uncertain.
+                let rejected = super::query_utils::query_error_is_recoverable(
+                    provider.as_ref(),
+                    ds.datasource_type.as_ref(),
+                    sql,
+                    &raw_err,
+                )
+                .await;
+                Ok(super::query_utils::query_error_response_with_rejection(
+                    &ds.slug, &raw_err, rejected,
                 ))
             }
-        }
+        };
+        provider.close().await;
+        response
     }
 }
 
