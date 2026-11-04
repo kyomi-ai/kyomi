@@ -7,15 +7,18 @@
 //! The execution flow:
 //! 1. Load watch from DB (skip if disabled/deleted)
 //! 2. Create execution record
-//! 3. Verify creator is active + has workspace membership
-//! 4. Check capability and AI budget
-//! 5. Build enhanced system prompt (mode-specific, with recent alerts, queries)
-//! 6. Create hidden `watch_execution` session
-//! 7. Run agent via `execute_agent_chat()` with limited tool set
-//! 8. Validate JSON response (with retry loop)
-//! 9. Store execution trace and complete execution
-//! 10. Trigger alert delivery if notification should be sent
-//! 11. Update watch run status
+//! 3. Verify creator is still active
+//! 4. Verify creator still has active workspace membership
+//! 5. Check capability and AI budget
+//! 6. Build the mode-specific system prompt (recent alerts, queries, ChartML)
+//! 7. Create hidden `watch_execution` session
+//! 8. Pre-write the durable user message
+//! 9. Run agent via `execute_agent_chat()` with limited tool set
+//! 10. Validate JSON response (with retry loop)
+//! 11. Determine alert status
+//! 12. Build execution trace
+//! 13. Complete execution
+//! 14. Trigger alert delivery if notification should be sent
 
 use std::sync::Arc;
 
@@ -1071,8 +1074,6 @@ async fn execute_watch_inner(
         crate::prompt::CHARTML_QUICK_REFERENCE,
     );
 
-    let watch_prompt = watch.prompt.clone();
-
     // 7. Create watch_execution session (hidden from chat list)
     let session_id = uuid::Uuid::new_v4().to_string();
     chat_service::create_session_with_id(
@@ -1092,10 +1093,10 @@ async fn execute_watch_inner(
         "Created session for watch execution"
     );
 
-    // Store the watch prompt as the user message in the session, and build
-    // the persistence value that ties the agent turn below back to that
-    // row — see `prepare_watch_dispatch` for the full KYO-573 contract this
-    // exists to satisfy.
+    // 8. Store the watch prompt as the durable user message in the session,
+    // and build the persistence value that ties the agent turn below back to
+    // that row — see `prepare_watch_dispatch` for the full KYO-573 contract
+    // this exists to satisfy.
     let watch_dispatch = prepare_watch_dispatch(
         db,
         encryption_key,

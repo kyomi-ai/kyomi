@@ -845,7 +845,7 @@ impl CustomAgent {
             // the ChartML check below, which can return early with a
             // terminal assistant message of its own — that message must
             // never be visible to this callback (it isn't durable yet;
-            // `persist_after_chat`/`execute_agent_chat`'s step 15 own it).
+            // `persist_after_chat`/`execute_agent_chat`'s step 14 own it).
             if let Some(ref cb) = self.callbacks.on_iteration_boundary {
                 cb(&self.state.messages).await;
             }

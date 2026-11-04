@@ -26,7 +26,7 @@ const MAX_RESULTS_PER_INDEX: usize = 10;
 /// Below this, results are noise -- not relevant to the query.
 const MIN_SIMILARITY: f64 = 0.25;
 
-/// Per-turn token budget for new context injection.
+/// Per-turn token budget for retrieval results.
 pub const PER_TURN_TOKEN_BUDGET: usize = 512;
 
 /// Approximate characters per token (conservative for English text).

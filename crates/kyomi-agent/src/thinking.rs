@@ -2137,7 +2137,7 @@ mod tests {
     // clobber the terminal metadata back down to bare
     // `{"thinking_events": [...]}`, silently dropping model/token_usage/
     // component. This test drives exactly that sequence — an interim
-    // flush, `finalize()`, a simulated step-15 terminal write, then a late
+    // flush, `finalize()`, a simulated step-14 terminal write, then a late
     // flush attempt that must be a no-op — deterministically (no real
     // concurrency needed: `finalize()`'s contract is "no flush after this
     // point succeeds", which is testable directly in sequence).

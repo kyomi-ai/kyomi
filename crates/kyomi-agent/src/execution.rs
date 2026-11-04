@@ -2179,7 +2179,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sender_display_names_omits_missing_or_empty_names() {
+    async fn sender_display_names_omits_missing_name() {
         let db = test_pool().await;
         seed_user_and_workspace(&db).await;
 
@@ -2189,6 +2189,27 @@ mod tests {
         assert!(
             names.is_empty(),
             "a user with no name must fall back to the id, not render a blank name"
+        );
+    }
+
+    #[tokio::test]
+    async fn sender_display_names_omits_blank_name() {
+        let db = test_pool().await;
+        seed_user_and_workspace(&db).await;
+        let DbPool::Sqlite(sq) = &db else {
+            unreachable!("test pool is always sqlite");
+        };
+        sqlx::query("UPDATE users SET name = '   ' WHERE user_id = 'user-a'")
+            .execute(sq)
+            .await
+            .expect("set blank user name");
+
+        let names = sender_display_names(&db, "user-a")
+            .await
+            .expect("load sender display names");
+        assert!(
+            names.is_empty(),
+            "a whitespace-only name must fall back to the id"
         );
     }
 
