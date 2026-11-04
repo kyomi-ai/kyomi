@@ -50,9 +50,10 @@ ignore = [
     # affected as of 2026-09-12. The lockfile has 0.9.10 plus 0.10.0-rc.19 via
     # crypto-glue 0.2.2, so this ID-level ignore covers both.
     #
-    # Reaches us through six direct dependents, none of which we control:
+    # Reaches us through six direct dependents; none can move to a patched
+    # release until the advisory has one:
     #   sqlx-mysql, jsonwebtoken, russh and internal-russh-forked-ssh-key,
-    #   kyomi-datasource, and superboring (web-push-native).
+    #   kyomi-datasource (via kyomi-connect) and superboring (web-push-native).
     #
     # Remove when: the advisory lists a patched version and every rsa copy in
     # Cargo.lock (0.9.10 and crypto-glue's 0.10.0-rc.x) moves to it; confirm
@@ -75,9 +76,9 @@ ignore = [
     # have cleared. The isolation test has not been re-run and the pin is
     # unchanged; see KYO-212.
     #
-    # This is the only entry whose blocking pin is ours to change rather than
-    # upstream's. It needs a kyomi-connect change plus a republish, and the
-    # coexistence question has to be settled empirically first.
+    # This is the only entry whose sole blocker is a pin we control. It needs
+    # a kyomi-connect change plus a republish, and the coexistence question
+    # has to be settled empirically first.
     #
     # Remove when: KYO-212 lands (russh bumped in kyomi-connect,
     # kyomi-datasource republished, `cargo update -p kyomi-datasource` here).
