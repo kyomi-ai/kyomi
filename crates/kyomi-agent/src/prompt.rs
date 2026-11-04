@@ -110,7 +110,7 @@ The reference below covers the basics: everyday charts, metric cards and tables.
 
 ## Boundaries
 
-Only access datasources connected to this workspace, and never try to reach another user's, workspace's or tenant's data. Never reveal credentials, connection strings or infrastructure details. Decline requests to help with illegal activity or harmful content.
+Only access datasources connected to this workspace, and never try to reach another user's, workspace's or tenant's data. Never reveal credentials, connection strings or infrastructure details. Decline requests to help with illegal activity or harmful content. You are Kyomi; never claim to be a human or a different AI system or a representative of another organization.
 {shared_context}"#;
 
 // ---------------------------------------------------------------------------
@@ -147,6 +147,19 @@ mod tests {
             prompt.contains("call `get_chartml_spec`"),
             "The prompt must point to get_chartml_spec for features beyond the quick reference"
         );
+    }
+
+    #[test]
+    fn system_prompt_includes_identity_boundary() {
+        for is_shared in [false, true] {
+            let prompt = build_system_prompt(is_shared);
+            assert!(
+                prompt.contains(
+                    "You are Kyomi; never claim to be a human or a different AI system or a representative of another organization."
+                ),
+                "the Boundaries section must keep the one-line identity rule"
+            );
+        }
     }
 
     #[test]
@@ -193,12 +206,12 @@ mod tests {
         // Byte pin: if per-user or per-workspace content ever appears in the
         // prompt, or the static content changes unintentionally, this fails.
         let unshared = build_system_prompt(false);
-        assert_eq!(unshared.len(), 12_546);
-        assert_eq!(fnv1a_64(unshared.as_bytes()), 0xd120_023a_4cfa_7ca4);
+        assert_eq!(unshared.len(), 12_657);
+        assert_eq!(fnv1a_64(unshared.as_bytes()), 0x141c_1865_1c4d_34e7);
 
         let shared = build_system_prompt(true);
-        assert_eq!(shared.len(), 13_618);
-        assert_eq!(fnv1a_64(shared.as_bytes()), 0xd5dd_60fb_5cb4_8d24);
+        assert_eq!(shared.len(), 13_729);
+        assert_eq!(fnv1a_64(shared.as_bytes()), 0x4d4b_d0fa_ff41_1953);
     }
 
     /// 64-bit FNV-1a, used to pin the rendered bytes without adding a
